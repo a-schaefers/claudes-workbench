@@ -371,7 +371,8 @@ coding choice is the user's (`wb coding`), never changed by a check.
 - **question** — answer it briefly and decisively: `wb answer <name> --text "…"`. The agent is
   blocked until you do.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
-  it, or discard.
+  it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
+  the branch, and the report says how to accept them instead.
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
   corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).
   A one-task detail needs no call.
@@ -435,7 +436,8 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   rebased since), the commits it lists would come back with a plain merge: ask the user whether
   to rebase the task onto it or bring them back. An accept that was interrupted finishes when
   run again.
-- `wb discard <name> --reason "…"` drops it. `wb status` lists open tasks (e.g. after a context
+- `wb discard <name> --reason "…"` drops it (a branch holding steps `wb next` committed is kept;
+  `--drop-steps` deletes it too). `wb status` lists open tasks (e.g. after a context
   reset); `wb stats` compares the models on finished work.
 - **Keep the good ones as bench cases.** An accepted step whose spec pinned the names its tests
   call, and whose tests fail on its base and pass in the agent's lane (one that commits or writes

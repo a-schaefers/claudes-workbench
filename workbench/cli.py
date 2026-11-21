@@ -2130,9 +2130,25 @@ def cmd_discard(a):
     if warn := gitops.remove_worktree(repo, task.worktree):  # never stops a discard (the audit)
         print(f"wb: {warn}", file=sys.stderr)
     context.drop_runtime_dir(task)
-    kept = a.keep_branch or not repo.is_dir()
-    if not kept:
-        gitops.delete_branch(repo, a.name)
+    branch, said = spec["branch"], ""
+    if a.keep_branch:
+        pass
+    elif not repo.is_dir():
+        said = f"; {repo} is gone, so its branch with it"
+    elif tip := gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}",
+                           check=False).strip():
+        task.set_status(tip=tip)  # before any delete: the commits stay findable (#494)
+        # the steps wb next committed (or Claude's own, after a takeover) were approved: force-
+        # deleted with the step that stuck, they were reachable from no ref (#494, the audit)
+        past = gitops.git(repo, "rev-list", "--count", f"{spec['base']}..{tip}", check=False).strip()
+        if past.isdigit() and int(past) and not a.drop_steps:
+            git_c = f"git -C {shlex.quote(str(repo))}"
+            said = (f"; branch {branch} kept: its {past} commit(s) past the base are approved "
+                    f"steps. {git_c} merge {branch} lands them; {git_c} branch -D {branch} "
+                    "drops them (wb discard --drop-steps deletes it at once)")
+        else:
+            gitops.delete_branch(repo, a.name, at=tip)
+            said = f"; branch {branch} deleted (was {tip[:8]})"
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None,
                     unrecorded={"outcome": "discarded", "step": measured,
                                 "extra": {"reason": a.reason}})
@@ -2140,8 +2156,7 @@ def cmd_discard(a):
     task.set_status(unrecorded=None)
     _ack_all(task)
     _closed(task)
-    print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"
-                                   if not kept else f"; {repo} is gone, so its branch with it"))
+    print(f"discarded {a.name}{said}")
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(lessons.nudge(task, "discarded"))
 
@@ -4110,6 +4125,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--spec-gap", action="append", metavar="WHAT",
                    help="the spec's part in it: what it missed (repeatable)")
     s.add_argument("--keep-branch", action="store_true")
+    s.add_argument("--drop-steps", action="store_true",
+                   help="delete the branch even when it holds steps wb next committed")
     s.set_defaults(f=cmd_discard)
     s = sub.add_parser("models", help="the local models, and which the router picks per task size")
     s.add_argument("--set-default", action="store_true",

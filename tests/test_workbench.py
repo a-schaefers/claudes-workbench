@@ -2939,6 +2939,40 @@ class Context(Base):
         self.assertTrue(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "delegate/t-n"],
                                        capture_output=True).returncode == 0)
 
+    def test_discarding_a_stuck_later_step_keeps_the_steps_wb_next_committed(self):
+        # #494 (the audit of 1.90): steps landed with wb next, a later one stuck, and the
+        # discard the notice suggested force-deleted the branch, the approved steps on no ref
+        tip = lambda name: subprocess.run(  # noqa: E731
+            ["git", "-C", str(self.repo), "rev-parse", "--verify", "-q", f"refs/heads/delegate/{name}"],
+            capture_output=True, text=True).stdout.strip()
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also write the question to question.txt.\n")
+        step1 = {}
+        for name in ("t-dk", "t-dd"):
+            self.start(name, "ok", "--test", TEST_CMD, "--auto-fix", "0")
+            wait_phase(name, {"review"})
+            os.environ["FAKE_SCENARIO"] = "loop"       # step 2 sticks
+            run_wb("next", name, "--spec", str(step2), "-m", "feat: the answer")
+            step1[name] = tip(name)
+            st = wait_phase(name, {"stuck"})
+            os.environ["FAKE_SCENARIO"] = "ok"
+            report = store.Task(name).round_dir(st["round"]).joinpath("summary.md").read_text()
+            self.assertIn(f"step 1 committed on delegate/{name} (wb next): wb discard {name} drops "
+                          "this step and keeps that branch", report)
+            self.assertIn(f"wb accept {name} --force", report)
+        out = run_wb("discard", "t-dk", "--reason", "step 2 stuck")
+        self.assertIn("branch delegate/t-dk kept: its 1 commit(s) past the base are approved steps", out)
+        self.assertEqual(tip("t-dk"), step1["t-dk"])
+        self.assertEqual(store.Task("t-dk").status["tip"], step1["t-dk"])
+        out = run_wb("discard", "t-dd", "--drop-steps")  # asked for: deleted, the tip said and kept
+        self.assertRegex(out, r"branch delegate/t-dd deleted \(was [0-9a-f]{8}\)")
+        self.assertEqual(tip("t-dd"), "")
+        self.assertEqual(store.Task("t-dd").status["tip"], step1["t-dd"])
+        self.start("t-d1", "ok")                         # one step, nothing committed: deleted
+        wait_phase("t-d1", {"review"})
+        self.assertIn("branch delegate/t-d1 deleted", run_wb("discard", "t-d1"))
+        self.assertEqual(tip("t-d1"), "")
+
 
     def test_a_wb_next_interrupted_after_its_commit_advances_once_when_retried(self):
         # #85 (the 2026-11-18 audit): the step was committed before the next one was recorded,
