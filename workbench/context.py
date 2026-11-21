@@ -341,31 +341,41 @@ EXPERIMENTS = {
     "probe": "the agent's shell may run probe, and its handbook says how: a file's outline and "
              "one function, instead of the whole file",
 }
+# the file length from which the probe experiment's note and protocol line apply: its gain
+# showed only on a 2,700-line file, its cost on 1,500-line ones (#857)
+PROBE_FILE_LINES = 1500
+
+
 # what an experiment adds to the agent's copy of the handbook, after its own text. probe aborts
 # (SIGABRT, a core dump, a desktop crash dialog) when a pipe closes early: Rust's println! panics
 # on EPIPE. Agents piped it into `head` (the A/B of 2026-11-21), so the note steers them to its
 # own limits and to `grep`, which reads to the end (#857)
 EXPERIMENT_NOTES = {
-    "probe": "\n## Reading code: probe\nFiles here can be long, and every line you read costs time. "
-             "Before you read any file over 300 lines, run `probe symbols <file>` (add `--allow-tests` "
-             "in a test file, or its tests are left out): it lists each function and class with its "
-             "line range. Then read only what you need: `probe extract <file>#<name>` prints one "
-             "function, or read just its lines. To find where something is defined or used, `probe "
-             "search \"name1 OR name2\" <dir>` (its output is capped; narrow the query, or add "
-             "`ext:py`, when it is cut). After an edit, re-read only the function you changed. When "
-             "probe says \"File too large\" (over 1 MB), use `grep -n` for the names and read those "
-             "lines. Never pipe probe into `head`: it crashes when its output is cut off. Limit a "
-             "search with `--max-results 5`, and filter an outline with `grep` (`probe symbols <file> "
-             "| grep -i <word>`).\n",
+    "probe": "\n## Reading code: probe\nWhen you need one function from a file over "
+             "{probe_lines} lines, read just that function, not the whole file. You know its name: "
+             "`probe extract <file>#<name>`. You don't: `probe symbols <file>` lists each function "
+             "and class with its lines (add `--allow-tests` in a test file). To find where a name is "
+             "defined or used, `probe search \"name1 OR name2\" <dir> --dry-run -o plain` prints "
+             "only files and line ranges; then extract or read those lines. One search already "
+             "matches other spellings (case, snake_case, camelCase), so never repeat one or re-spell "
+             "it. \"No results\" doesn't mean the name is absent: check with `grep -n`. After two "
+             "searches that miss, use `grep -n`. Stop exploring once you know the function you will "
+             "change and what calls it. Never pipe probe into `head` (it crashes when its output is "
+             "cut off): filter with `grep`. When probe says \"File too large\" (over 1 MB), use "
+             "`grep -n` for the names and read those lines.\n",
 }
 # what an experiment adds to every round prompt's protocol, beside the acceptance line: the
-# handbook alone went unread (probe: 0 calls in 14 replays, 2026-11-21)
+# handbook alone went unread (probe: 0 calls in 14 replays, 2026-11-21). A condition, not an
+# order: "before you read a file over 300 lines, run probe symbols" made the agent outline and
+# search mid-sized files it didn't need to, filling a 40K window (the second A/B, 2026-11-21:
+# 2-3x the calls, a handover in every probe-on replay of big-compaction, #857)
 EXPERIMENT_PROTOCOL = {
-    "probe": "- Before you read a file over 300 lines, run `probe symbols <file>` (`--allow-tests` in "
-             "a test file) and read only the functions you need (`probe extract <file>#<name>`).\n",
+    "probe": "- When you need one function from a file over {probe_lines} lines, `probe extract "
+             "<file>#<name>` it instead of reading the whole file.\n",
 }
-
-
+EXPERIMENT_NOTES = {k: v.replace("{probe_lines}", str(PROBE_FILE_LINES)) for k, v in EXPERIMENT_NOTES.items()}
+EXPERIMENT_PROTOCOL = {k: v.replace("{probe_lines}", str(PROBE_FILE_LINES))
+                       for k, v in EXPERIMENT_PROTOCOL.items()}
 # The most a probe search prints, in tokens, unless the user's PROBE_MAX_TOKENS says otherwise
 # (runner.agent_env): it has no limit of its own, and one plain query printed 42K tokens (#857)
 PROBE_MAX_TOKENS = 2000

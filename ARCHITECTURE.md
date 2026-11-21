@@ -5459,15 +5459,25 @@ carries `EXPERIMENT_PROTOCOL["probe"]` beside the acceptance line (`context.expe
 the protocol's `{experiment_protocol}`). Its shell gets `PROBE_MAX_TOKENS` (the user's, else
 `context.PROBE_MAX_TOKENS` 2000, `runner.agent_env`): `probe search` has no output limit of its
 own, and one plain query on workbench printed 169 KB, about 42K tokens, more than a 40K window
-holds (#857). Both give a trigger, not a suggestion: before reading a
-file over 300 lines, `probe symbols` it. Both were added after the first measurement, in which
+holds (#857). The cap is on the matched code, not on what probe prints: in its default `outline`
+format a search capped at 2000 printed about 4,000 tokens, so the note's search is `--dry-run -o
+plain`, which prints only files and line ranges (156 tokens for the same query, measured
+2026-11-21). Both apply from `context.PROBE_FILE_LINES` (1500) lines, as a condition, not an
+order: "when you need one function from a file over 1500 lines, `probe extract` it instead of
+reading the whole file". The note adds `probe symbols` for a name not yet known and probe's own
+agent's stop rules (never repeat or re-spell a search, as one already matches case and
+snake/camel variants; after two misses, `grep -n`; "No results" doesn't mean absent; stop exploring
+once you know the function to change and its callers). Until the second A/B both were an order,
+"before you read a file over 300 lines, run `probe symbols`", with full-code searches: the agent
+outlined and searched mid-sized files it didn't need to and filled its window (below). The note
+and the protocol line were added after the first measurement, in which
 the agent never ran probe in 14 replays: the note was in the handbook only, said "read a whole file
 only when you need most of it" on cases whose largest file was 312 lines, didn't name
 `--allow-tests` (without it `probe symbols` leaves out a test file's tests), and didn't say what to
 do when probe refuses a file over 1 MB ("File too large"; it has no setting to raise that). It
 also says never to pipe probe into `head`: probe-code 0.6.0 aborts when a pipe closes early
 (Rust's println! panics on EPIPE: SIGABRT, a core dump, a desktop crash dialog each time, seen
-throughout the A/B of 2026-11-21), and points to `--max-results` and `grep` instead. The
+throughout the A/B of 2026-11-21), and to filter with `grep` instead. The
 protocol's line on refused writes said "don't probe it" until then. So it stays read-only: no index,
 no daemon, no network. The rule was `probe *` until 2026-11-21, when testing the experiment found
 that it let the agent run `probe lsp` (a daemon and language servers), `--lsp` on a read (the
@@ -5501,9 +5511,14 @@ big-gpu-power didn't fit the 3 hours. Tokens read are the prompt tokens the GPU 
   handovers 0 → 1, with passes 3/4 → 4/4 (one in four is noise).
 
 So it stays opt-in and off by default, with no "recommended" note in Settings (the user's call,
-2026-11-21: the A/B decides only that note). Next to measure: more pairs per case, and an arm with
-the note but not the protocol's trigger, to see whether the trigger itself drives the extra
-exploration. `wb bench report --label <arm>` prints the use line per arm (`bench.use_lines`).
+2026-11-21: the A/B decides only that note). The research that followed (#857: SWE-agent's and Agentless's
+ablations, probe's own agent, OpenCode's, Qwen Code's and Codex's output limits, prompting guides
+on over-triggering) pointed at three causes: each search printed twice its cap, the order fired on
+files where probe saves little, and OpenCode 2.x prunes no old tool output. The first two are what
+the note and protocol line above now change; the next A/B measures them against the arm above.
+Left for later, if that isn't enough: a `probe` shim (repeats answered in one line, empty searches
+stopped, output capped), the outline put in round 1's prompt, and a per-call output cap
+(`tool_output`) sized to the window for every task. `wb bench report --label <arm>` prints the use line per arm (`bench.use_lines`).
 
 ## Verifying a fix against the base
 

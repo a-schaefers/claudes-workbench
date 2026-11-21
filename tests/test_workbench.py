@@ -21807,7 +21807,17 @@ class ProbeExperiment(Base):
         self.assertIn("--allow-tests", context.EXPERIMENT_NOTES["probe"])
         # probe aborts with a core dump when a pipe closes early: steered to its own limits (#857)
         self.assertIn("Never pipe probe into `head`", context.EXPERIMENT_NOTES["probe"])
-        self.assertIn("--max-results", context.EXPERIMENT_NOTES["probe"])
+        # the second A/B (2026-11-21, #857): an order to outline every file over 300 lines and
+        # full-code searches (~4K tokens each) filled a 40K window; now a condition from
+        # PROBE_FILE_LINES, locations-only search first, and probe's own stop rules
+        note, rule = context.EXPERIMENT_NOTES["probe"], context.EXPERIMENT_PROTOCOL["probe"]
+        self.assertIn("--dry-run -o plain", note)
+        self.assertIn("never repeat one", note)
+        self.assertIn("After two searches that miss, use `grep -n`", note)
+        self.assertIn(f"over {context.PROBE_FILE_LINES} lines", note)
+        self.assertIn(f"When you need one function from a file over {context.PROBE_FILE_LINES} lines", rule)
+        self.assertNotIn("Before you read", rule)
+        self.assertNotIn("{probe_lines}", note + rule)
         self.assertNotIn("don't probe it", prompt)
 
     def test_what_the_agent_used_of_probe_is_counted_live_and_reported(self):
