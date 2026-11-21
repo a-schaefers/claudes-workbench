@@ -741,8 +741,10 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     interruption (a SIGTERM, raised by the caller) backs the checkout out to where it was: a
     pinentry nobody answered hung accept until it was killed, leaving MERGE_HEAD and the staged
     merge in the user's checkout, and --no-sign's merge still signed (#420, the audit of 1.8)."""
-    if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
-        raise GitError(f"{repo} has uncommitted changes; merge {branch_name(task)} by hand")
+    dirty, submodules = _uncommitted(repo)
+    if dirty:
+        raise GitError(f"{repo} has uncommitted changes ({_listed(dirty)}); merge "
+                       f"{branch_name(task)} by hand")
     have = current_branch(repo)
     if not have:
         raise GitError(detached(repo, branch_name(task)))
@@ -768,6 +770,12 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         raise GitError(f"the merge would overwrite {', '.join(in_the_way)} in {repo}, untracked "
                        f"there (yours, maybe ignored): move it aside, then merge "
                        f"{branch_name(task)} by hand")
+    written = set(_written(repo, source).split(b"\0")) if submodules else set()
+    if touched := [f"submodule {p.decode('utf-8', 'replace')} {why}"
+                   for p, why in submodules.items() if p in written]:
+        raise GitError(f"the merge would change what {', '.join(touched)} in {repo} points at: "
+                       f"bring it back (git submodule update), then merge {branch_name(task)} "
+                       "by hand")
     before = git(repo, "rev-parse", "HEAD").strip()
     signed = sign and signs(repo)
     unsigned = () if sign else ("-c", "commit.gpgsign=false")
@@ -823,6 +831,46 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         raise GitError(f"git didn't complete the merge of {branch_name(task)} (a merge setting "
                        "of yours?); it was backed out: merge it by hand")
     return git(repo, "rev-parse", "--short", "HEAD").strip()
+
+
+def _uncommitted(repo: Path) -> tuple[list[str], dict[bytes, str]]:
+    """(the checkout's uncommitted changes to tracked files, {submodule: how it differs} for
+    each submodule changed only in its own checkout). A submodule ahead of its gitlink (a pull
+    without submodule update) or edited inside stays as it is through a merge that doesn't
+    change its gitlink, and was refused as "uncommitted changes", naming nothing (#505, Claude's
+    audit of 1.90). --ignore-submodules=none: a setting of the user's that hides one mustn't hide
+    it from the merge's check."""
+    out = _run(repo, ("status", "--porcelain=v2", "-z", "--untracked-files=no",
+                      "--ignore-submodules=none")).stdout.split(b"\0")
+    dirty, subs, rows = [], {}, iter(out)
+    for row in rows:
+        if not row:
+            continue
+        kind, fields = row[:1], row.split(b" ")
+        n = {b"1": 8, b"2": 9, b"u": 10}.get(kind)
+        if n is None:
+            continue
+        path = b" ".join(fields[n:])
+        if kind == b"2":
+            next(rows, None)  # the rename's original path
+        xy, sub = fields[1].decode(), fields[2].decode()
+        if kind == b"1" and sub.startswith("S") and xy[0] == ".":
+            subs[path] = ("is at another commit" if sub[1] == "C" else "has local edits"
+                          if sub[2] == "M" else "has untracked files")
+        else:
+            dirty.append(path.decode("utf-8", "replace"))
+    return dirty, subs
+
+
+def _listed(paths: list[str], most: int = 5) -> str:
+    return ", ".join(sorted(paths)[:most]) + (f" and {len(paths) - most} more"
+                                               if len(paths) > most else "")
+
+
+def _written(repo: Path, branch: str) -> bytes:
+    """The paths merging ``branch`` would leave different from HEAD (NUL-separated)."""
+    written = _merge_tree(repo, branch)
+    return _trial_merge(repo, branch) if written is None else written
 
 
 def merge_message(repo: Path, task: str, tip: str) -> str:

@@ -1718,6 +1718,71 @@ class Lifecycle(Base):
                 self.assertEqual(g("log", "-1", "--format=%B"),
                                  b"Merge branch 'delegate/t' into dev\n\n* delegate/t:\n  task\n\n")
 
+    def _submodule_case(self):
+        """A repo with submodule lib, a task branch adding b.txt, and main moved on."""
+        top = Path(self.tmp.name) / f"s{len(os.listdir(self.tmp.name))}"
+        top.mkdir()
+        g = lambda r, *a: subprocess.run(["git", "-C", str(r), *a], check=True,  # noqa
+                                         capture_output=True, text=True).stdout
+        sub, repo = top / "sub", top / "app"
+        for r in (sub, repo):
+            g(top, "init", "-q", "-b", "main", r.name)
+        (sub / "x.txt").write_text("x\n")
+        g(sub, "add", "x.txt")
+        g(sub, "commit", "-qm", "s1")
+        (repo / "a.txt").write_text("a\n")
+        g(repo, "add", "a.txt")
+        g(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "lib")
+        g(repo, "commit", "-qm", "base")
+        g(repo, "switch", "-qc", "delegate/t")
+        (repo / "b.txt").write_text("b\n")
+        g(repo, "add", "b.txt")
+        g(repo, "commit", "-qm", "task")
+        g(repo, "switch", "-q", "main")
+        (repo / "c.txt").write_text("c\n")
+        g(repo, "add", "c.txt")
+        g(repo, "commit", "-qm", "main")
+        return repo, lambda *a: g(repo, *a)
+
+    def test_a_submodule_moved_or_edited_in_the_checkout_does_not_stop_the_merge(self):
+        # #505 (Claude's audit of 1.90, reproduced): lib one commit ahead of its gitlink (a git
+        # pull without submodule update) or edited inside: "app has uncommitted changes", naming
+        # no file, where `git merge --no-ff` in the same state succeeds
+        for state in ("moved", "edited"):
+            repo, g = self._submodule_case()
+            lib = repo / "lib"
+            if state == "moved":
+                (lib / "y.txt").write_text("y\n")
+                g("-C", "lib", "add", "y.txt")
+                g("-C", "lib", "commit", "-qm", "s2")
+            else:
+                (lib / "x.txt").write_text("edited\n")
+            at = g("-C", "lib", "rev-parse", "HEAD")
+            gitops.merge(repo, "t", "main")
+            self.assertEqual((repo / "b.txt").read_text(), "b\n", state)
+            self.assertEqual(g("-C", "lib", "rev-parse", "HEAD"), at, state)  # left as it was
+            if state == "edited":
+                self.assertEqual((lib / "x.txt").read_text(), "edited\n")
+
+    def test_the_merge_refuses_naming_what_is_uncommitted_and_a_moved_submodule_it_would_change(self):
+        # #505: a moved submodule whose gitlink the merge changes is in the way (named), and
+        # uncommitted changes are named too
+        repo, g = self._submodule_case()
+        g("switch", "-q", "delegate/t")
+        g("-C", "lib", "commit", "-q", "--allow-empty", "-m", "the task's")
+        g("add", "lib")
+        g("commit", "-qm", "the task moves lib")
+        g("switch", "-q", "main")  # lib stays at the task's commit: moved, here
+        g("-C", "lib", "commit", "-q", "--allow-empty", "-m", "mine")
+        head = g("rev-parse", "HEAD")
+        with self.assertRaisesRegex(gitops.GitError, "submodule lib is at another commit"):
+            gitops.merge(repo, "t", "main")
+        self.assertEqual(g("rev-parse", "HEAD"), head)
+        g("add", "lib")  # staged: an uncommitted change of the checkout's own
+        (repo / "a.txt").write_text("mine\n")
+        with self.assertRaisesRegex(gitops.GitError, r"uncommitted changes \(a\.txt, lib\)"):
+            gitops.merge(repo, "t", "main")
+
     def test_a_fast_forward_under_a_squash_merge_option_lands_or_is_backed_out_for_real(self):
         # #430 (the audit of 1.8, reproduced): with branch.main.mergeOptions=--squash, --ff-only
         # staged a squash and left HEAD; no MERGE_HEAD, so nothing was reset, and the checkout
