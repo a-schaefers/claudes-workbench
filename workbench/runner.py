@@ -901,6 +901,11 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
            "answered": False}
     window = st.get("window")
     fresh_at = tuning.value(task, "fresh_at")
+    # The last step's (session, context): a later step in it carrying under half of one that was
+    # near the handover point is OpenCode's compaction, which `run --format json` doesn't print.
+    # One tool result bigger than the margin before it (a long file, a test log) compacted the
+    # session between two steps, and the agent worked on from its summary (#774).
+    last_step: tuple = (None, 0)
     opened: dict = {}  # the questions open this round (ask_mcp.relay)
     while True:
         try:  # woken by the agent's output or a steer note; the timeout runs the clocks below
@@ -977,6 +982,22 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 # whose reading came to 16K of a 19K handover point handed over three times in
                 # four minutes, each fresh session getting 3K of work. It carries on instead.
                 changed = None
+                sid = raw.get("sessionID") or task.status.get("session")
+                if window and compacted_between(last_step, sid, used, fresh_at * window, window):
+                    changed = marks != {gitops.mark(task.worktree)}
+                    if changed and floor is None:  # it changed nothing by the step before
+                        floor = last_step[1]
+                        task.set_status(session_floor=floor)
+                    if changed and not keep and not out["full"] \
+                            and fresh_at * window - floor >= HANDOVER_ROOM * window:
+                        out["full"], out["compacted"] = last_step[1], True
+                    else:
+                        task.event({"ts": store.now(), "round": n, "kind": "compacted",
+                                    "text": f"OpenCode compacted the agent's session mid-round at "
+                                            f"{100 * last_step[1] // window}% of its window: it "
+                                            f"works on from its own summary"})
+                if used:
+                    last_step = (sid, used)
                 if floor is None and window:
                     changed = marks != {gitops.mark(task.worktree)}
                     if changed:
@@ -2132,8 +2153,8 @@ def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
         return None if first else "the last session ended before it began"
     if st.get("context") == "keep":
         return None
-    if st.get("context") == "full":
-        return f"the last session was {st.get('full_pct')}% full"
+    if st.get("context") == "full":  # handed over mid-round; after OpenCode compacted it (#774)
+        return COMPACTED if st.get("full_compacted") else f"the last session was {st.get('full_pct')}% full"
     c = context_state(task)
     if c.get("compactions"):
         return COMPACTED
@@ -2744,6 +2765,15 @@ def round_asks(task: store.Task, n: int) -> list[str]:
 HANDOVER_ROOM = 0.25
 
 
+def compacted_between(last: tuple, sid, used: int, point: float, window: int) -> bool:
+    """Whether OpenCode compacted the session between the last step (`last`: its session and
+    context) and this one: in the same session, this step carries under half of what the last
+    did, and the last was within one step's growth (fresh_ceiling's margin) of the handover
+    point, where only OpenCode's compaction shrinks a context (#774)."""
+    margin = max(STEP_GROWTH, tuning.CEILING_MARGIN * window)
+    return bool(sid) and last[0] == sid and 0 < used < last[1] / 2 and last[1] >= point - margin
+
+
 def _reading_full(task: store.Task, n: int, used: int, window: int,
                   floor: int | None = None) -> None:
     pct = 100 * used // window
@@ -2773,7 +2803,9 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
     window = task.status["window"]
     pct = 100 * rnd["full"] // window
     text = (f"the agent's session reached {pct}% of its window "
-            f"({rnd['full'] / 1000:.1f}K of {window // 1024}K): a fresh one takes over")
+            f"({rnd['full'] / 1000:.1f}K of {window // 1024}K)"
+            + (", then OpenCode compacted it" if rnd.get("compacted") else "")  # #774
+            + ": a fresh one takes over")
     task.event({"ts": store.now(), "round": n, "kind": "full", "text": text})
     if handed == HANDOVER_MAX - 1:
         files = gitops.changed(task.worktree)
@@ -2789,6 +2821,7 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
         last="> " + last.replace("\n", "\n> ") if last else "(none)")
         + (f"\n\n{folded_notes(task, n + 1, notes)}" if notes else ""))
     task.set_status(round=n + 1, context="full", full_pct=pct,
+                    full_compacted=True if rnd.get("compacted") else None,  # #774: fresh_reason
                     handovers=task.status.get("handovers", 0) + 1,
                     steer_taken=task.status.get("steer_taken", 0) + len(notes))
 

@@ -3600,6 +3600,38 @@ class Context(Base):
         self.assertIn("42", store.Task("t-c4").worktree.joinpath("answer.txt").read_text())
         self.assertIn("reached 76% of its window", run_wb("watch", "t-c4", "--once", "--no-color"))
 
+    def test_a_session_opencode_compacted_between_two_steps_hands_over_at_once(self):
+        # #774 (the second 2026-11-21 audit): one tool result past the margin before OpenCode's
+        # compaction compacted the session between two steps, which `run --format json` doesn't
+        # print; the next step's small context sat under the handover point, so the agent worked
+        # on from OpenCode's summary for the rest of the round
+        self.start("t-774", "compact", "--test", TEST_CMD)
+        st = wait_phase("t-774", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["handovers"]), ("review", 1))
+        second = self.runs()[1]
+        self.assertFalse(second["session"])
+        self.assertTrue(second["prompt"].startswith("You are picking this task up in a fresh "
+                                                    "session (OpenCode had to compact the last "
+                                                    "session"), second["prompt"][:200])
+        self.assertIn("+41", second["prompt"])                    # the work so far
+        fresh = [e for e in store.read_jsonl(store.Task("t-774").dir / "events.jsonl")[0]
+                 if e.get("kind") == "fresh"]
+        self.assertTrue(fresh[0]["compacted"])                    # the tuning's evidence
+        self.assertIn("reached 51% of its window (17.0K of 32K), then OpenCode compacted it",
+                      run_wb("watch", "t-774", "--once", "--no-color"))
+
+    def test_a_session_compacted_mid_round_with_no_room_for_a_successor_is_said_and_carries_on(self):
+        # #774: with its reading near the handover point, a successor would have no room: it
+        # carries on, and an event says it was compacted
+        os.environ["FAKE_COMPACT_READ"] = "1"
+        self.start("t-774b", "compact", "--test", TEST_CMD)
+        st = wait_phase("t-774b", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st.get("handovers", 0), len(self.runs())), ("review", 0, 1))
+        evs = [e for e in store.read_jsonl(store.Task("t-774b").dir / "events.jsonl")[0]
+               if e.get("kind") == "compacted"]
+        self.assertEqual(len(evs), 1)
+        self.assertIn("OpenCode compacted the agent's session mid-round at 51%", evs[0]["text"])
+
     def test_a_feedback_round_handed_over_mid_round_keeps_the_feedback(self):
         self.start("t-c6", "fill", "--test", TEST_CMD)
         wait_phase("t-c6", {"review"}, timeout=60)
