@@ -113,7 +113,9 @@ it that way; the agents never write either.
   built its "Next:" line instead of its spec). `wb start` refuses a repo without one (CLAUDE.md or
   `.claude/CLAUDE.md`; `--no-claude-md` only for throwaway repos). It also refuses an unknown
   `--base` and a repo with no git identity for the commits: fix those, don't work around them.
-- **Submodules** are filled read-only in the agent's worktree, at the commit the base records;
+- **Submodules** are filled read-only in the agent's worktree (and the scratch checkouts), at
+  the commit the base records, so a test command needs no `git submodule update --init` (one
+  there gets exit 0 and a note);
   `wb start` names any it couldn't fill (your checkout lacks it), which a build or test there
   can't use. A step must not edit inside one: the edit can't land in the commit (new files
   there, build output, are only noted: they are left out).

@@ -4879,7 +4879,14 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   <key>` was refused, #794); `stash` only `list`
   and `show`; `worktree` only `list`; `remote` without arguments, `get-url`, `show` (with or without `-v`); `reflog`,
   `notes`, `submodule` and `symbolic-ref` in their read forms; anything else (aliases and `lfs`
-  included) is a write. A read is exec'd with `GIT_OPTIONAL_LOCKS=0`, so the agent's `git status`
+  included) is a write. `git submodule update|init|sync` (any flags, any paths) in the task's
+  worktree or a scratch checkout of it (`filled_submodules`) is neither run nor refused when each
+  submodule it names is one workbench filled (files, no `.git`): it exits 0 with `FILLED`, a
+  line saying so; one left empty gets `UNFILLED`, exit 1, naming it (the reviewer's checkout
+  lacks it). A build that inits its own submodules (CMake's `GIT_SUBMODULE` snippet, a Makefile
+  prerequisite) was refused in the worktree, and in the base check's clone git failed on the
+  filled directories, so the base and every round went red (#885); a test command needs no
+  submodule init. A read is exec'd with `GIT_OPTIONAL_LOCKS=0`, so the agent's `git status`
   never refreshes the index while Claude diffs, and in the task's repository with the pins
   (`gitops.fs_pins`, #796). A write is refused, with `REFUSAL` (leave the
   change uncommitted for Claude; to undo an edit, edit it back or `git show HEAD:<path>`; ask if

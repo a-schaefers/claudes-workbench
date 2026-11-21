@@ -251,6 +251,72 @@ def protected(common: str | None, task_git: str, temps=(), lanes=()) -> bool:
                 or any(common.startswith(os.path.realpath(r) + os.sep) for r in lanes))
 
 
+# `git submodule update`'s options that take the next argument as their value
+SUBMODULE_VALUED = {"--reference", "--depth", "-j", "--jobs", "--filter", "--name", "-b",
+                    "--branch"}
+FILLED = ("workbench: submodules are filled already ({paths}), so `git submodule {op}` was not "
+          "run and has nothing to do.\n")
+UNFILLED = ("workbench: `git submodule {op}` was not run: workbench fills submodules itself, from "
+            "the reviewer's checkout, and {paths} couldn't be filled (that checkout lacks it). Say "
+            "so with ask_reviewer or in your summary.\n")
+
+
+def filled_submodules(real: str, task_git: str, opts: list[str], rest: list[str],
+                      lanes=()) -> tuple[int, str] | None:
+    """`git submodule update|init|sync` in the task's worktree or a scratch checkout of it
+    (``lanes[0]``), whose submodules workbench filled itself (gitops.fill_submodules: files, no
+    `.git`): (0, a note) when each one asked for is filled, else (1, why). None for any other
+    command or repository. A build that inits its own submodules (CMake's GIT_SUBMODULE
+    snippet, a Makefile prerequisite) was refused as a write in the worktree, and in the base
+    check's clone git failed on the filled directories ("already exists and is not an empty
+    directory"): the base and every round went red with the change not at fault (#885, the
+    third 2026-11-21 audit)."""
+    words = [a for a in rest if a not in ("-q", "--quiet")]
+    if not words or words[0] not in ("update", "init", "sync"):
+        return None
+    op, paths, skip, dashed = words[0], [], False, False
+    for a in words[1:]:
+        if skip:
+            skip = False
+        elif dashed or not a.startswith("-"):
+            paths.append(a)
+        elif a == "--":
+            dashed = True
+        else:
+            skip = a in SUBMODULE_VALUED
+    top = subprocess.run([real, *opts, "rev-parse", "--show-toplevel"], capture_output=True,
+                         text=True, encoding="utf-8", errors="surrogateescape")
+    if top.returncode or not top.stdout.strip():
+        return None
+    top = os.path.realpath(top.stdout.strip())
+    if not (common_dir(real, opts) == os.path.realpath(task_git)
+            or (lanes and top == os.path.realpath(lanes[0]))):
+        return None
+    listed = subprocess.run([real, "-C", top, "config", "-z", "-f", ".gitmodules",
+                             "--get-regexp", r"^submodule\..*\.path$"], capture_output=True)
+    subs = [os.fsdecode(r.split(b"\n", 1)[1]) for r in listed.stdout.split(b"\0") if b"\n" in r]
+    where = _where(opts)
+    asked = {os.path.relpath(os.path.realpath(os.path.join(where, p)), top).rstrip("/")
+             for p in paths}
+    subs = [p for p in subs if not asked or p.rstrip("/") in asked]
+    if not subs:
+        return None
+
+    def filled(path: str) -> bool:
+        d = os.path.join(top, path)
+        try:
+            return os.path.isdir(d) and not os.path.lexists(os.path.join(d, ".git")) \
+                and any(os.scandir(d))
+        except OSError:
+            return False
+    if any(os.path.lexists(os.path.join(top, p, ".git")) for p in subs):
+        return None  # a real submodule checkout: git's own business
+    empty = [p for p in subs if not filled(p)]
+    if empty:
+        return 1, UNFILLED.format(op=op, paths=", ".join(empty))
+    return 0, FILLED.format(op=op, paths=", ".join(subs))
+
+
 REFUSAL = """\
 workbench: git is read-only for you here, so `git {sub}` was not run.
 Leave your changes uncommitted: Claude reviews the diff and commits it, and handles branches,
@@ -271,6 +337,10 @@ def main(real: str, task_git: str, args: list[str], temps=(), lanes=(), pins=())
         pre = list(pins) if pins and common_dir(real, opts) == os.path.realpath(task_git) else []
         # no index refresh in the task's repo, which Claude may be diffing at the same moment
         os.execve(real, [real, *pre, *args], {**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    if sub == "submodule" and (said := filled_submodules(real, task_git, opts, rest, lanes)):
+        code, line = said
+        sys.stderr.write(line)
+        return code
     if sub == "config" and (files := config_files(rest, opts)) is not None:
         # a file of its own: refused only where it is the task's repository's (#794)
         # or a `.git` link, whose rewrite would point the worktree at a git dir of its own

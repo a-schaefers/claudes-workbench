@@ -15809,6 +15809,45 @@ class Projects(Base):
         self.assertTrue((wt / "app" / "f.txt").exists())
         self.assertEqual((wt / "vendor" / "lib" / "lib.c").read_text(), "int x;\n")
 
+    def test_a_test_command_that_inits_the_submodules_passes_on_the_filled_ones(self):
+        # #885 (the third 2026-11-21 audit, reproduced): `git submodule update --init` in a build
+        # (CMake's GIT_SUBMODULE snippet) was refused as a write in the worktree, and in the base
+        # check's clone git failed on the filled directory: red base, red rounds
+        lib = Path(self.tmp.name) / "lib"
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        (lib / "lib.c").write_text("int x;\n")
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
+        g("commit", "-qm", "a submodule")
+        init = ("git submodule update --init --recursive && git submodule sync -q && "
+                "git -C vendor submodule update --init -- lib && test -f vendor/lib/lib.c && ")
+        self.start("t-subinit", "ok", "--test", init + TEST_CMD)
+        st = wait_phase("t-subinit", {"review"})
+        self.assertEqual(st["base_check"]["exit"], 2)   # past the init: grep, no answer
+        self.assertIs(st["tests"]["ok"], True)
+        t = store.Task("t-subinit")
+        self.assertIn("submodules are filled already (vendor/lib)",
+                      (t.dir / "rounds" / "1" / "tests.txt").read_text())
+        self.assertFalse((t.worktree / "vendor" / "lib" / ".git").exists())
+        # one it couldn't fill is named, not left to git's own error
+        from workbench import gitguard
+        shutil.rmtree(t.worktree / "vendor" / "lib")
+        (t.worktree / "vendor" / "lib").mkdir()
+        env = runner.agent_env(t)
+        out = subprocess.run(["git", "submodule", "update", "--init"], cwd=t.worktree, env=env,
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("vendor/lib couldn't be filled", out.stderr)
+        # anything else stays git's: a status reads, a `submodule add` is refused
+        self.assertIsNone(gitguard.filled_submodules("git", "/x", [], ["status"]))
+        out = subprocess.run(["git", "submodule", "add", str(lib), "other"], cwd=t.worktree,
+                             env=env, capture_output=True, text=True)
+        self.assertIn("read-only", out.stderr)
+
     def test_a_submodule_at_a_path_with_a_space_is_filled_by_its_real_path(self):
         # #791 (the second 2026-11-21 audit): `submodule.my lib.path my lib` split at its first
         # space read as `lib.path my lib`: never filled, and wb start named a path not there
