@@ -18135,6 +18135,23 @@ class WebChat(Base):
             self.assertIsNone(state["push"]["key"])
             self.assertEqual(self.call("/api/send", {"text": "hi"}, token=tok)[0], 200)
 
+    def test_a_vapid_key_is_made_where_the_file_system_has_no_hard_links(self):
+        # the review of #924: linked into place, the key was never made on exFAT or a FUSE or SMB
+        # mount without hard links (EPERM, ENOTSUP), so push was off for good on such a home
+        import errno
+        from workbench import webpush as wp
+        path = wp.key_path(self.chat.token_path())
+        for code in (errno.EPERM, errno.ENOTSUP):
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+            with mock.patch.object(wp.os, "link", side_effect=OSError(code, os.strerror(code))):
+                d = wp.private_key(self.chat.token_path())
+            self.assertTrue(0 < d < wp.N)
+            self.assertEqual(path.read_text(), f"{d:064x}\n")             # renamed into place, whole
+            self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+            self.assertEqual(wp.private_key(self.chat.token_path()), d)  # and kept
+        self.assertEqual([p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")], [])
+
     def test_devices_subscribe_only_with_a_push_services_address_and_hear_of_news_once(self):
         chat, tok = self.chat, self.chat.token()
         from workbench import webpush as wp

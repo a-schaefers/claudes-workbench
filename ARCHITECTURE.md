@@ -5761,7 +5761,8 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   last test push. The VAPID key is beside the token (`<token file>-push`, mode 600, made on first
   use: written whole to a temp file beside it, fsynced, then linked into place, and an empty or
   unparsable one replaced the same way, `webpush.private_key`; created first and written after, a
-  full disk or a crash left it empty and every chat request failed, #924).
+  full disk or a crash left it empty and every chat request failed, #924; renamed into place where
+  the file system has no hard links, exFAT or some FUSE or SMB mounts, which left push off for good).
 
 **Settings.** The token: `$WB_CHAT_TOKEN`, else `~/.config/workbench/chat-token` (created on first
 use with `O_EXCL`, mode 600, `token_urlsafe(32)`; kept at 600; one under 16 characters is refused

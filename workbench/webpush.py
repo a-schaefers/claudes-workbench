@@ -115,7 +115,8 @@ def private_key(token_path: Path) -> int:
     temp file beside it, fsynced, then linked into place: created first and written after, a
     full disk or a crash left it empty, and every chat request failed on it, not only push (#924).
     An empty or unparsable one is replaced the same way; two handler threads on first use make
-    one (the lock), and another process's linked first is the key."""
+    one (the lock), and another process's linked first is the key. Where hard links aren't, it is
+    renamed into place instead."""
     path = key_path(token_path)
     if (d := _key_in(path)) is not None:
         return d
@@ -131,7 +132,10 @@ def private_key(token_path: Path) -> int:
                 os.fsync(f.fileno())
             try:
                 os.link(tmp, path)
-            except FileExistsError:  # a broken one (read above), or another process's just made
+            except OSError:  # FileExistsError: a broken one (read above), or another process's
+                # just made. Any other: a file system without hard links (exFAT, some FUSE or SMB
+                # mounts: EPERM, ENOTSUP), where the key was never made and push was off for good
+                # (the review of #924); a rename is atomic too, only a lost race's first writer loses
                 if _key_in(path) is None:
                     os.replace(tmp, path)
         finally:
