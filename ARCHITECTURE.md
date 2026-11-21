@@ -4427,8 +4427,16 @@ or directory", `FileNotFoundError`, `ENOENT`) names one the candidate adds and t
 `expect(`, a Go `panic:`) or a failed test's header. A bare "expected" once matched Python's
 `SyntaxError: expected ':'`, and a base that never ran an assertion was called proven (#193,
 the 2026-11-19 audit); and the setup error is checked first, since a SyntaxError's traceback
-quoting `assert 2 = 2` was proof too (#326, the audit of 1.4). `assertion` picks the line the report shows: the first assertion
-line, else a failed test's header. Each run is kept in `tasks/<task>/verify/<n>/`: `base.txt`,
+quoting `assert 2 = 2` was proof too (#326, the audit of 1.4). Nor is an API the candidate adds
+and the base lacks (`MISSING_API`: "has no attribute '", "is not a function", `NameError: name`,
+`ReferenceError: … is not defined`, an unexpected keyword argument, a wrong count of positional
+arguments, Ruby's undefined method or uninitialized constant) proof, nor pytest output whose first
+`E` line (`PYTEST_E`) isn't an assertion's (`assert`, `AssertionError`, `Failed: ` as in `DID NOT
+RAISE`: `PYTEST_PROOF`): pytest's quoted `>` source line `assert mod.slugify(…)` matched
+ASSERTION above `E AttributeError`, and jest's `is not a function` under a `✕` header was proof,
+while the same test through an import was inconclusive (#729, the 2026-11-21 audit). `assertion`
+picks the line the report shows: pytest's first `E` line, else the first assertion line (never a
+`>` line), else a failed test's header. Each run is kept in `tasks/<task>/verify/<n>/`: `base.txt`,
 `candidate.txt` and `result.json` `{cmd, files, tree, ts, base: {rev, exit, assertion}, candidate:
 {rev, exit, assertion}, verdict, dir, expect (when given), uncopied (the candidate's added files
 not copied to the base, when any), removed (the candidate's deleted tests, gone from the base too), missing (those the base's output said it couldn't find), left_out (when any)}`. `verify.last` reads the newest, with `stale` once the worktree

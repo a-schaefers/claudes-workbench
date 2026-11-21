@@ -10707,6 +10707,37 @@ class Verify(Base):
                      "--expect", "a failure it never prints")
         self.assertIn("inconclusive", out)
 
+    def test_a_test_calling_an_api_only_the_candidate_has_proves_nothing(self):
+        # #729 (the 2026-11-21 audit, reproduced): pytest quoted the failing source line, `>
+        # assert mod.slugify(…)`, which matched ASSERTION, and jest's `is not a function` came
+        # under a ✕ header: a test showing only that the API was missing was called proven
+        from workbench import verify
+        pytest = ("    def test_slug():\n>       assert mod.slugify('A B') == 'a-b'\n"
+                  "E       AttributeError: module 'mod' has no attribute 'slugify'\n\n"
+                  "tests/test_slug.py:4: AttributeError\n"
+                  "FAILED tests/test_slug.py::test_slug - AttributeError: module 'mod' has no attri…\n")
+        jest = ("FAIL src/slug.test.js\n  ✕ slugifies (2 ms)\n\n"
+                "    TypeError: (0 , _slug.slugify) is not a function\n")
+        cases = [pytest, jest,
+                 "E       TypeError: split() got an unexpected keyword argument 'sep'",
+                 "E       TypeError: parse() takes 1 positional argument but 2 were given",
+                 "E       NameError: name 'slugify' is not defined",
+                 "    expect(slugify('A B')).toBe('a-b')\n    ReferenceError: slugify is not defined",
+                 "  ✕ adds\n    NoMethodError: undefined method `slugify' for Slug:Class",
+                 # pytest's first error not an assertion's: the test never got to check the bug
+                 ">       assert parse(x) == 3\nE       KeyError: 'x'\n"]
+        for out in cases:
+            self.assertEqual(verify.verdict(1, out, 0), "inconclusive", out)
+        self.assertEqual(verify.assertion(pytest),
+                         "E       AttributeError: module 'mod' has no attribute 'slugify'")
+        # the positive controls: pytest's own assertion, and its pytest.raises
+        self.assertEqual(verify.verdict(1, ">       assert slug('A B') == 'a-b'\n"
+                                           "E       AssertionError: assert 'A B' == 'a-b'\n", 0), "proven")
+        self.assertEqual(verify.verdict(1, ">       with pytest.raises(ValueError):\n"
+                                           "E       Failed: DID NOT RAISE <class 'ValueError'>\n", 0), "proven")
+        self.assertEqual(verify.verdict(1, "FAIL src/slug.test.js\n  ✕ slugifies\n"
+                                           "    Expected: \"a-b\"\n    Received: \"A B\"\n", 0), "proven")
+
     def test_a_golden_file_the_candidate_adds_goes_to_the_base_and_one_left_out_proves_nothing(self):
         # #500 (the audit of 1.90): Go's testdata/ wasn't copied to the base, which failed on
         # `open testdata/case1.golden: no such file or directory`, and that was called proven

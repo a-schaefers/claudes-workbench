@@ -52,6 +52,21 @@ SETUP = re.compile(r"\b(SyntaxError|IndentationError|TabError|ImportError|Module
                    r"|errors? (during collection|collecting)|\bfixture '[^']*' not found"
                    r"|Cannot find module|\[(build|setup) failed\]|could not compile"
                    r"|error TS\d{4}:|^\S+\.go:\d+:\d+: ", re.M)
+# an error saying the base lacks what the test calls, not that it computes it wrong: the candidate
+# adds `mod.slugify` or a `sep=` keyword and the test calls it. pytest quoted the failing source
+# line (`>       assert mod.slugify(…)`) above `E  AttributeError: …`, which matched ASSERTION, and
+# jest's `TypeError: slugify is not a function` came under a ✕ header: both were called proven,
+# while the same test written `from mod import slugify` was inconclusive (#729, the 2026-11-21
+# audit)
+MISSING_API = re.compile(r"has no attribute '|\bis not a (function|constructor)\b|\bNameError: name '"
+                         r"|\bReferenceError: \S+ is not defined|unexpected keyword argument"
+                         r"|takes (from )?\d+ (to \d+ )?positional arguments? but"
+                         r"|missing \d+ required (positional|keyword-only) argument"
+                         r"|\bundefined method\b|\buninitialized constant\b")
+# pytest's own lines: `E   ` says what went wrong (the first one, what went wrong first); `>` quotes
+# the source line it went wrong on, which is no evidence of anything (#729)
+PYTEST_E = re.compile(r"^E\s{2,}(\S.*)$", re.M)
+PYTEST_PROOF = re.compile(r"^(assert\b|AssertionError\b|Failed: )")
 
 
 class _At(store.Task):
@@ -120,8 +135,11 @@ def missing(text: str, added: list[str]) -> list[str]:
 
 
 def assertion(text: str) -> str:
-    """The line that says what a failed assertion found, else a failed test's header; ''."""
-    lines = [x.strip() for x in text.splitlines()]
+    """The line that says what a failed assertion found, else a failed test's header; ''. pytest's
+    first `E` line when it printed one, and never a source line it quotes (`>`, #729)."""
+    if e := PYTEST_E.search(text):
+        return e.group(0).strip()[:300]
+    lines = [x.strip() for x in text.splitlines() if not x.startswith(">")]
     for pattern in (ASSERTION, FAILED_TEST):
         for line in lines:
             if pattern.search(line):
@@ -271,6 +289,12 @@ def verdict(base: int | str, base_out: str, cand: int | str, expect: str = "",
     # `assert 2 = 2` there matched ASSERTION, so a base that never ran a test was called proven
     # (#326, the audit of 1.4)
     if SETUP.search(base_out) or missing(base_out, list(added)):  # #500
+        return "inconclusive"
+    # an API the candidate adds, missing on the base; and pytest's first error not an assertion's
+    # (an AttributeError, a TypeError): the test never got to check the bug (#729)
+    if MISSING_API.search(base_out):
+        return "inconclusive"
+    if (e := PYTEST_E.search(base_out)) and not PYTEST_PROOF.match(e.group(1)):
         return "inconclusive"
     return "proven" if assertion(base_out) else "inconclusive"
 
