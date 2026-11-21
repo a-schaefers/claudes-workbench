@@ -355,6 +355,45 @@ def git_config_env(env: dict, pairs=NO_SIGNING) -> dict:
     return out
 
 
+# Per-user build daemons crossed the lane both ways (#669, the 2026-11-21 audit): Gradle reuses
+# any idle compatible daemon in ~/.gradle/daemon, whatever its environment, so the user's own
+# `./gradlew build` ran in the agent's daemon under Landlock (and failed writing its build/, then
+# lost the daemon to sweep), and the agent's could run in the user's, outside the lane; sccache
+# shares one server on 127.0.0.1:4226, MSBuild its nodes and build server, Roslyn its compiler
+# server. With the lane on, the agent gets its own: Gradle's registry in its runtime directory
+# (`org.gradle.daemon.registry.base`), the Kotlin compiler in Gradle's process, a port of its
+# own for sccache, and no MSBuild node reuse, build server or shared compilation.
+DAEMONS_OFF = {"MSBUILDDISABLENODEREUSE": "1", "DOTNET_CLI_USE_MSBUILD_SERVER": "0",
+               "UseSharedCompilation": "false"}
+SCCACHE_PORTS = (20000, 40000)  # where a task's sccache port is looked for
+
+
+def free_port(seed: str, lo: int = SCCACHE_PORTS[0], hi: int = SCCACHE_PORTS[1]) -> int:
+    """A loopback port in [lo, hi) picked from ``seed`` (the same each time while it is free), the
+    next free one when something holds it."""
+    import socket
+    start = int(hashlib.sha256(seed.encode()).hexdigest()[:8], 16) % (hi - lo)
+    for i in range(64):
+        port = lo + (start + i) % (hi - lo)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    return lo + start
+
+
+def daemon_env(task: store.Task, env: dict) -> dict:
+    """The variables that give the agent build daemons of its own (DAEMONS_OFF and the rest)."""
+    runtime = context.runtime_dir(task)
+    gradle = (f"-Dorg.gradle.daemon.registry.base={runtime / 'gradle'} "
+              "-Dkotlin.compiler.execution.strategy=in-process")
+    return {**DAEMONS_OFF,
+            "GRADLE_OPTS": f"{env['GRADLE_OPTS']} {gradle}" if env.get("GRADLE_OPTS") else gradle,
+            "SCCACHE_SERVER_PORT": str(free_port(str(runtime)))}
+
+
 def agent_env(task: store.Task, run: str = "") -> dict:
     """The agent's environment: its config layer, and git read-only (gitguard.py). ``run``: the
     one run it is for (WB_RUN), which sweep can then end alone."""
@@ -374,6 +413,7 @@ def agent_env(task: store.Task, run: str = "") -> dict:
         # ~/.local/share/jupyter/runtime, is outside the lane, and every notebook test
         # (nbmake, nbval, papermill) failed with PermissionError before a kernel started (#668)
         env.setdefault("JUPYTER_RUNTIME_DIR", str(context.runtime_dir(task) / "jupyter"))
+        env.update(daemon_env(task, env))  # its own build daemons, not the user's (#669)
         # On WSL, not the Windows PATH, whose programs run outside the lane (context.agent_path),
         # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
         env.pop("WSL_INTEROP", None)

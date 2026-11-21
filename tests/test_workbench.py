@@ -6353,6 +6353,26 @@ class Lane(Base):
         with mock.patch.dict(os.environ, {"JUPYTER_RUNTIME_DIR": "/srv/jupyter"}):
             self.assertEqual(runner.agent_env(task)["JUPYTER_RUNTIME_DIR"], "/srv/jupyter")
 
+    def test_the_agent_gets_build_daemons_of_its_own_not_the_users(self):
+        # #669 (the 2026-11-21 audit): Gradle, sccache and MSBuild share a per-user daemon, so
+        # the user's builds ran in the agent's, under Landlock, and the agent's in the user's
+        self.start("t-daemons", "ok")
+        wait_phase("t-daemons", {"review"})
+        task = store.Task("t-daemons")
+        with mock.patch.dict(os.environ, {"GRADLE_OPTS": "-Xmx2g", "SCCACHE_SERVER_PORT": "4226",
+                                          "MSBUILDDISABLENODEREUSE": "0"}):
+            env = runner.agent_env(task)
+            again = runner.agent_env(task)
+        runtime = context.runtime_dir(task)
+        self.assertEqual(env["GRADLE_OPTS"].split(),
+                         ["-Xmx2g", f"-Dorg.gradle.daemon.registry.base={runtime / 'gradle'}",
+                          "-Dkotlin.compiler.execution.strategy=in-process"])
+        self.assertNotEqual(env["SCCACHE_SERVER_PORT"], "4226")
+        self.assertEqual(env["SCCACHE_SERVER_PORT"], again["SCCACHE_SERVER_PORT"])  # per task
+        self.assertEqual({k: env[k] for k in runner.DAEMONS_OFF}, runner.DAEMONS_OFF)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))  # lane off
+        self.assertNotIn("SCCACHE_SERVER_PORT", runner.agent_env(task))
+
     def test_a_fresh_cargo_home_gets_its_caches_made_so_the_split_grants_them(self):
         # the 0.90 review: ~/.cargo split around bin/ and env granted only what existed, so a
         # fresh rustup install couldn't make registry/ and a git dependency couldn't make git/

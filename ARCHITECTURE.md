@@ -1510,8 +1510,18 @@ prefixes; `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_
 own `XDG_RUNTIME_DIR` (`context.runtime_dir`, with the lane on) and in it, unless the user set
 one, `JUPYTER_RUNTIME_DIR` (`<runtime dir>/jupyter`: Jupyter's default,
 `~/.local/share/jupyter/runtime`, is outside the lane, and every notebook test, nbmake, nbval,
-papermill, failed with PermissionError writing its kernel connection file, #668),
-`PYTHONDONTWRITEBYTECODE=1` (no
+papermill, failed with PermissionError writing its kernel connection file, #668), build
+daemons of its own (`daemon_env`, with the lane on: `GRADLE_OPTS` gets
+`-Dorg.gradle.daemon.registry.base=<runtime dir>/gradle` and
+`-Dkotlin.compiler.execution.strategy=in-process` after the user's own options;
+`SCCACHE_SERVER_PORT` a loopback port of the task's, `free_port`, picked from the runtime dir's
+name in `SCCACHE_PORTS` (20000 to 40000), the next free one when that is held; and `DAEMONS_OFF`:
+`MSBUILDDISABLENODEREUSE=1`, `DOTNET_CLI_USE_MSBUILD_SERVER=0`, `UseSharedCompilation=false`.
+Gradle reuses any idle compatible daemon whatever its environment, so the user's `./gradlew
+build` ran in the agent's daemon under Landlock, failed writing its `build/`, and lost the daemon
+to `sweep`, while the agent's builds could run in the user's daemon outside the lane; sccache's
+server on 127.0.0.1:4226 and MSBuild's nodes are shared alike: #669, not yet run against a real
+Gradle), `PYTHONDONTWRITEBYTECODE=1` (no
 `__pycache__` in the diff), signing off for its git (`NO_SIGNING`: `commit.gpgsign=false` and
 `tag.gpgsign=false` as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`, after any the
 user set, `git_config_env`: with `commit.gpgsign` in `~/.gitconfig`, every test that committed in
