@@ -1444,6 +1444,36 @@ class Real(unittest.TestCase):
             self.assertFalse(models._past(at(-60)))                  # this machine's own Ollama: excused
             self.assertFalse(models._past(at(-5), remote=True))      # within the clocks' skew
 
+    def test_a_model_loaded_on_a_box_keeps_its_stamp_readable_through_its_first_long_request(self):
+        # reviewing #899 (2026-11-21): make_resident loaded a box's model for 30 min, so its stamp
+        # stood 25 min past what box_quiet reads as its last finished request while the round's
+        # first request (the full prefill) ran; another client read it as quiet and loaded over it
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        loaded, posts = [], []
+        srv, port = fake_ollama(loaded, ["x", "y"], posts)
+        self.servers.append(srv)
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+                             "models": {"x": {}, "y": {}}}}, {"box": {"local": True}})
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "BOX_KEEP_ALIVE", 300):
+            models.make_resident(models.discover()["box/x"], say=lambda *_: None, warn=lambda *_: None)
+        keep = posts[-1]["keep_alive"]
+        secs = int(keep[:-1]) * {"s": 1, "m": 60}[keep[-1]]
+        # 200 s after that load, the first request still running: the stamp hasn't moved
+        loaded[:] = [{"name": "x", "size": 10, "size_vram": 10, "expires_at": at(secs - 200)}]
+        gone = []
+
+        def done():  # the request and its round end, and the keep-alive after: Ollama unloads it
+            loaded.clear()
+            gone.append(time.monotonic())
+        threading.Timer(2.5, done).start()
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "BOX_KEEP_ALIVE", 300), mock.patch.object(models, "BOX_QUIET", 1), \
+                mock.patch.object(models, "BOX_POLL", 0.1):
+            models.box_quiet(models.discover()["box/y"], ["x"], say=lambda *_: None, warn=lambda *_: None)
+            loaded_at = time.monotonic()
+        self.assertTrue(gone and loaded_at >= gone[0])           # waited for it, not loaded over it
+
     def test_a_model_this_machine_left_on_its_box_is_loaded_over_without_waiting(self):
         # reviewing #812 (2026-11-21): every model on the box that the task wasn't using read as
         # another client's, so one user with one box waited BOX_QUIET at every model switch for

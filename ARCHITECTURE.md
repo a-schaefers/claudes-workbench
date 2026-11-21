@@ -3028,7 +3028,10 @@ for like another's, #893) has had a request in the last
 `BOX_QUIET` (150 s, watched from then on: `/api/ps` says when a model expires, not when it was
 last used; a stamp stands still while a request runs, so one whose last move, its `expires_at`
 less `BOX_KEEP_ALIVE`, Ollama's default 300 s, is over `BOX_QUIET` ago may be a request still
-running and is waited for until it moves or the model goes: an idle one goes within
+running and is waited for until it moves or the model goes (so `make_resident` loads a box's
+model for `BOX_KEEP_ALIVE`, not 30 min: a 30 min load's stamp stood 25 min ahead while the round's
+first request, the full prefill, ran, and read as quiet; it loads again before every round anyway,
+reviewing #899): an idle one goes within
 `BOX_KEEP_ALIVE` − `BOX_QUIET` of that, sooner on a box keeping models longer, and a long
 request, a reasoning model's or a slow prefill, was loaded over, #899; a box's stamp is past by
 more than `BOX_SKEW` 10 s, this machine's own sleep no excuse, `_past(remote=True)`, #899), up to `BOX_WAIT` (40 min, a round's default limit); within a round the agent's
@@ -3038,8 +3041,8 @@ request at a time, and the waiting task's status says what it waits for (a `gpu`
 model was answering). A load then waits a `BOX_QUIET` once for an idle model another client left loaded there
 (the load is skipped altogether while the task's own model is still on the box). What it can't
 stop: a round that begins while the other's model is quiet (its tool running past `BOX_QUIET`),
-a long request on a box that keeps models longer than `BOX_KEEP_ALIVE` (its stamp then reads
-as recent), a wait cut off by `BOX_WAIT`, or a client of an older wb, Open WebUI or anything else that loads
+a long request on a box that keeps models longer than `BOX_KEEP_ALIVE`, or on a model loaded
+for longer (an older wb's 30 min load; its stamp then reads as recent), a wait cut off by `BOX_WAIT`, or a client of an older wb, Open WebUI or anything else that loads
 without looking, still swap their models on each request. A model the load evicted anyway is
 named in a `gpu` event, and so is the task's own model found gone from the box at its next round
 while another client's is loaded there (`GpuLease.load`, counting the models this machine once
@@ -3423,7 +3426,8 @@ directory; with it, a `--` line names it; one that exists and this account can't
 Still missed: one long request from outside wb that neither finishes during the watch nor runs
 past its keep-alive (Ollama has no queue API).
 Then Ollama loads the model (`POST
-/api/generate {prompt: "", keep_alive: "30m"}`, 20 min limit) or the server is started. An HTTP
+/api/generate {prompt: "", keep_alive: "30m"}`, on a wb remote box `BOX_KEEP_ALIVE` (`"300s"`,
+for `box_quiet`, above), 20 min limit) or the server is started. An HTTP
 error from Ollama raises with what Ollama said ("…answered HTTP 500: model requires more system
 memory…", `_post`), not urllib's bare "HTTP Error 500". A start command that exits non-zero while
 nothing answers fails after `START_GRACE` 10 s ("…'s start command exited N and nothing answers;

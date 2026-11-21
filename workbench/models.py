@@ -1328,7 +1328,12 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
             _unload(m)
             _RESPREAD.add(respread)
         say(f"loading {m.name} into ollama")
-        _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
+        # on a wb remote box, for BOX_KEEP_ALIVE only: another client's box_quiet reads a stamp
+        # less BOX_KEEP_ALIVE as the model's last finished request, and a 30 min load's stamp put
+        # that 25 min ahead while the round's first request (the full prefill) ran, read as quiet
+        # and loaded over (reviewing #899, 2026-11-21). This runs before every round anyway
+        _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "",
+                                         "keep_alive": f"{BOX_KEEP_ALIVE}s" if away else "30m"},
               timeout=START_TIMEOUT)
         if away:
             _note_mine(m)  # this machine's own, for its next task's box_others
