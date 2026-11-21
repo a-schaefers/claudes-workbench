@@ -7358,6 +7358,10 @@ request and answers each request that offers tools with the next scripted tool c
 read (default 1), so a test can fill the window without sending it; a request carrying OpenCode's
 compaction template (`<template>`, `## Objective`) gets the template's headings back, which
 OpenCode accepts as a summary (anything else fails the compaction: `compaction.failed`).
+`RealOpenCode` and `RealOpenCodeSkillFiles` cover the MCP shape, skills, denials, compound shell
+commands, rule order, git by path, the edit rule, PATH and the lane; `RealOpenCodeRun` the
+events, the export, `--session`, compaction and the header wait (CLAUDE.md's *OpenCode quirks*
+points here).
 With `CAPTURE_HEADER_DELAY=<seconds>` every POST waits that long before its headers: RealOpenCodeRun
 sets the user's `headerTimeout` to 2 s, below a 4 s delay, and the task still answers (#491). `run_calls(name, calls, *start_flags)` starts a task, points its config
 layer at the capture server, runs `opencode run --auto` in the worktree through `agent_env` and
