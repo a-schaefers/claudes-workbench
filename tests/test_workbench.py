@@ -14757,6 +14757,28 @@ class Hardware(unittest.TestCase):
         self.assertEqual(hw.container_mask({"DeviceRequests": [{**gpus, "Count": -1}]}), {})  # --gpus all
         self.assertEqual(hw.container_mask(["not", "a", "host config"]), {})
 
+    def test_an_ollama_containers_readable_process_still_gets_the_cards_its_container_was_given(self):
+        # the review of #463: rootless docker's processes are this user's, so /proc read first
+        # found the container's ollama serve, which gives its knobs only, and its HostConfig's
+        # --gpus device=1 was never asked: every card was budgeted
+        hw = self.fake("Linux", runs={
+            ("docker", "ps"): "beef ollama/ollama llm",
+            ("docker", "inspect", "--format", "{{json .Config.Env}}"): json.dumps(["OLLAMA_NUM_PARALLEL=2"]),
+            ("docker", "inspect", "--format", "{{json .HostConfig}}"): json.dumps(
+                {"DeviceRequests": [{"Driver": "", "Capabilities": [["gpu"]], "DeviceIDs": ["1"]}]})})
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "300", "ns").mkdir(parents=True)
+            Path(d, "300", "comm").write_text("ollama\n")
+            Path(d, "300", "cmdline").write_bytes(b"/bin/ollama\0serve\0")
+            Path(d, "300", "environ").write_bytes(b"OLLAMA_NUM_PARALLEL=2\0CUDA_VISIBLE_DEVICES=0\0")
+            os.symlink("mnt:[2]", Path(d, "300", "ns", "mnt"))   # another mount namespace
+            Path(d, "self", "ns").mkdir(parents=True)
+            os.symlink("mnt:[1]", Path(d, "self", "ns", "mnt"))
+            with mock.patch("workbench.hardware.PROC", Path(d)):
+                env, source = hw.ollama_settings()
+        self.assertEqual((env["CUDA_VISIBLE_DEVICES"], env["OLLAMA_NUM_PARALLEL"], source),
+                         ("1", "2", "the docker container llm"))
+
     def test_ollamas_settings_come_from_the_ollama_that_runs_a_process_or_a_container(self):
         # #379 (the audit of 1.6): an ollama serve started by hand, or one in Docker, had its
         # OLLAMA_NUM_PARALLEL and OLLAMA_MAX_LOADED_MODELS read from systemd or wb's environment

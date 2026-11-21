@@ -451,17 +451,12 @@ def _environ(raw: bytes, keys) -> dict:
     return {k: v for k, _, v in pairs if k in keys}
 
 
-def _ollama_process() -> tuple[dict, str] | None:
-    """The environment of an `ollama serve` running here that this user may read
-    (/proc/<pid>/environ: one started by hand in another terminal, a user unit's, anyone's as
-    root), and what it is. One in another mount namespace (a container) gives its knobs only.
-    A system unit's process (user ollama) can't be read: systemd says its environment."""
-    return next(((env, what) for env, what, _ in _ollama_processes()), None)
-
-
 def _ollama_processes() -> list[tuple[dict, str, bool]]:
-    """_ollama_process's answer for every `ollama serve` this user may read, lowest pid first,
-    and whether it runs in a container (another mount namespace)."""
+    """The environment of each `ollama serve` running here that this user may read
+    (/proc/<pid>/environ: one started by hand in another terminal, a user unit's, anyone's as
+    root), lowest pid first, what it is, and whether it runs in a container (another mount
+    namespace: its knobs only). A system unit's process (user ollama) can't be read: systemd
+    says its environment."""
     try:
         pids = sorted(int(d.name) for d in PROC.iterdir() if d.name.isdigit())
     except OSError:
@@ -587,7 +582,13 @@ def ollama_settings() -> tuple[dict, str]:
     from WSL had OLLAMA_NUM_PARALLEL and OLLAMA_MAX_LOADED_MODELS read as unset, so sharing was
     refused that fit or allowed where Ollama swaps (#379, the audit of 1.6). One source is the
     whole answer: wb's environment no longer fills in what a unit leaves unset."""
-    found, idle = _ollama_process(), None
+    first, idle = next(iter(_ollama_processes()), None), None
+    found = first[:2] if first else None
+    if first and first[2]:
+        # a container's process gives its knobs, not the cards it was given: its HostConfig says
+        # (container_mask). Read from the process alone (rootless docker or podman, whose
+        # processes are this user's; wb as root), it was budgeted every card (the review of #463)
+        found = _ollama_container() or found
     if not found and system() != "macos":
         for scope in ((), ("--user",)):
             raw = _run("systemctl", *scope, "show", "ollama", "-p", "LoadState", "-p", "ActiveState",

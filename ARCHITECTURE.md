@@ -3030,6 +3030,9 @@ card, #463, the audit of 1.8); on macOS launchctl (what the
 app reads); a unit that isn't running. A process in another mount namespace than wb's, and a
 container, give only `OLLAMA_KNOBS` (`OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`,
 `OLLAMA_MAX_LOADED_MODELS`): their paths, bind address and device numbers are the container's.
+A process in a container gives way to the container's own answer when `docker`/`podman` lists
+one, since only its `HostConfig` says which cards it has (rootless docker or podman, whose
+processes this user can read, and wb as root, were budgeted every card: the review of #463).
 With none, wb's own environment is the guess and the source is unknown; `cli.ollama_line` (`wb
 doctor`, `wb scout`, when a local Ollama model is configured) says so and points at models.json's
 `gpu_gb` and `vram_gb`, or names the source and the knobs set. Read from systemd, launchctl or
