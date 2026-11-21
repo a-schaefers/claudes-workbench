@@ -10732,6 +10732,24 @@ class ModelRename(Base):
             self.assertGreater(router.budgets(new, "ollama:0123456789abcdef")["silence"], 900)
             self.assertEqual(asked, [])
 
+    def test_an_optimize_variant_without_its_own_speed_takes_its_sources(self):
+        # #906 (the third audit of 2026-11-21): speed() followed no `variant_of`, so a variant's
+        # first round got the default budgets though it shares its source's record, and on a
+        # slow machine was nudged at 420 s and stopped as stuck into that record
+        from workbench import models, router
+        src, var = "ollama/qwen3.8-27b", self.NEW
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({var: {"variant_of": src}}))
+        router.record_read_bound(src, 40)
+        self.assertEqual(router.speed(var), {"read": 40})
+        self.assertGreater(router.budgets(models.resolve(var))["silence"], 900)
+        # a variant of a variant: the one it replaced (made for this GPU too) before the source
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({
+            var: {"variant_of": src, "replaces": "strata/strata"}, "strata/strata": {"variant_of": src}}))
+        router.record_read_bound("strata/strata", 400)
+        self.assertEqual(router.speed(var), {"read": 400})
+        router.record_read_bound(var, 4000)                               # its own, once measured
+        self.assertEqual(router.speed(var), {"read": 4000})
+
 
 class Routing(Base):
     def setUp(self):

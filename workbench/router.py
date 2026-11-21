@@ -550,7 +550,8 @@ def speed_samples(messages: list[dict]) -> dict:
 
 def speed(model_id: str, weights: str | None = None) -> dict:
     """{"write", "read"}: the model's median tokens per second on this machine, where measured;
-    unmeasured under this id, under the nearest id it had before (earlier, #818).
+    unmeasured under this id, under the nearest id it had before (earlier, #818), else the
+    `wb optimize apply` variant it replaced or the source it is a variant of (#906).
 
     No server is asked: `wb top` and the Stats tab's feed call this for every running task and
     rack row on their tick, and earlier()'s identity read cost 2.5 s an unreachable Ollama root,
@@ -561,9 +562,15 @@ def speed(model_id: str, weights: str | None = None) -> dict:
         data = store.read_json(path, {}) or {}
         row = data.get(model_id) or {}
         if not row and data:
-            ids = _up(models._overrides(), model_id, "renamed_from")
+            over = models._overrides()
+            ids = _up(over, model_id, "renamed_from")
             if weights and (m := models.discover().get(model_id)):
                 ids = earlier(m, probe=False, weights=weights)
+            # a variant's first round got the default budgets, though it shares its source's record:
+            # stopped as stuck on a slow machine, the step went into the shared slice as gone badly
+            # (#906). The variant it replaced first (made for this GPU too), then the source, whose
+            # speed is the variant's at worst: it spilled, so the budgets err long
+            ids += [i for key in ("replaces", "variant_of") for i in _up(over, model_id, key) if i not in ids]
             row = next((data[i] for i in ids if data.get(i)), {})
         return row
     row = row_in(_speed_path())

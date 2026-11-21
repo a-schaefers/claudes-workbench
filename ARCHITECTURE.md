@@ -3624,8 +3624,10 @@ machine's, in `store.machine_dir()`: on a network home a fast machine's samples 
 one's, whose rounds then ran on the fast one's limits, #901); `speed()` takes the medians, 
 from
 `$WB_HOME/speed.json` (every machine's, from before) until this machine has measured the model,
-and of the id it had before when neither has one (`renamed_from`, #818). It asks
-no server (#905). 
+and of the id it had before when neither has one (`renamed_from`, #818), else of
+the variant a `wb optimize apply` variant replaced (`replaces`), then its source (`variant_of`): a variant's
+first round got the default budgets and on a slow machine was stopped as stuck into the record it
+shares; the source's speed, measured spilling, errs long (#906). It asks no server (#905). 
 At `wb start`, `budgets(m)` sets think = `THINK_TOKENS` 13,500 / write + window
 / read (either term alone when only one speed is measured: a read bound may be all there is,
 #491), clamped to [420, `THINK_MAX` 1800] s, and scales silence (900) and round (2400) by
@@ -4155,7 +4157,8 @@ output cap, and an entry no request could fit refused before anything is made: a
 128K entry once wrote an input limit of -16384 and kept its 32K and 64K caps, #332, the audit of
 1.4; an alias's `id` dropped, since it would name the old model). The variant gets a copy of the
 source's models.json keys (`sizes`, `label`, `weights_gb`…) and `variant_of` the source's id (an
-apply on a variant: the first source's, with `replaces` the variant's); the
+apply on a variant: the first source's, with `replaces` the variant's), whose speed it has until
+its own is measured (`router.speed`, #906); the
 router scores them on one record (`router.lineage`: `variant_of` followed to the first source,
 then every model whose chain reaches it) and, when both can
 run, puts the variant before the models it stands in for (`router.replaced`: its `variant_of` and
