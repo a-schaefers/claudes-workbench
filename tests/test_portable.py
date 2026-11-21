@@ -1089,7 +1089,7 @@ class Real(unittest.TestCase):
                 mock.patch.object(cli.models, "servers_here", return_value=([], [])), redirect_stdout(out):
             cli.main(["scout"])
         self.assertNotIn("installed in ollama but not registered", out.getvalue())
-        self.assertIn("ollama/coder: 16.8 GB on disk · 64K context · Ollama serves 64K", out.getvalue())
+        self.assertIn("ollama/coder: 18.0 GB on disk · 64K context · Ollama serves 64K", out.getvalue())
         ipv6 = (["llama-server"], [{"root": "http://[::1]:8080", "usually": "llama-server", "models": ["m"]}])
         with mock.patch.object(cli.models, "servers_here", return_value=ipv6):
             lines = cli.server_lines({"ls": {"root": "http://127.0.0.1:8080", "url": "http://[::1]:8080/v1"}})

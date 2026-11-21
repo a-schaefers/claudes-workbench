@@ -831,7 +831,7 @@ def small_window_why(ctx: int) -> str:
 def _catalog(m: Model, catalog: dict | None):
     """A server's GET {openai_base}/models (a native Ollama SDK's `…/api` base asks <root>/v1,
     #585): the body (a dict, else None) or the HTTPError's code.
-    ``catalog``: one probe's answers by (base_url, api_key), shared by every entry on that server,
+    ``catalog``: one probe's answers by (openai_base, api_key), shared by every entry on that server,
     so its aliases ask it once: wb top sent 8 requests for 8 aliases each probe, one after
     another, 2 s each on a server that stalled (#561)."""
     key = (m.openai_base, m.api_key or "")

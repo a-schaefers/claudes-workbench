@@ -366,16 +366,23 @@ def _restart_notice(task: store.Task) -> None:
         _write_ack(t, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
 
 
-def _need_worktree(task: store.Task) -> None:
-    """A worktree removed by hand turned the next round into a runner crash (the 2026-11-16
-    audit). Its committed steps are on the branch; discard --keep-branch keeps them."""
-    if not task.worktree.is_dir() and not runner.checked_out(task):
-        die(f"{task.name} never got its worktree (its checkout didn't finish): wb discard "
-            f"{task.name}, then start the task again under a new name")
-    if not task.worktree.is_dir():
-        die(f"{task.name}'s worktree is gone ({task.worktree}): its committed work is on branch "
+def _worktree_problem(task: store.Task) -> str | None:
+    """Why the task can't go on where it stands, its worktree missing. A worktree removed by hand
+    turned the next round into a runner crash (the 2026-11-16 audit). Its committed steps are on
+    the branch; discard --keep-branch keeps them."""
+    if task.worktree.is_dir():
+        return None
+    if not runner.checked_out(task):
+        return (f"{task.name} never got its worktree (its checkout didn't finish): wb discard "
+                f"{task.name}, then start the task again under a new name")
+    return (f"{task.name}'s worktree is gone ({task.worktree}): its committed work is on branch "
             f"{task.spec.get('branch')}; wb discard {task.name} --keep-branch drops the task and "
             "keeps the branch")
+
+
+def _need_worktree(task: store.Task) -> None:
+    if why := _worktree_problem(task):
+        die(why)
 
 
 def _stale_notes(task: store.Task) -> list[dict]:
@@ -1592,13 +1599,24 @@ def cmd_resume(a):
         print("nothing to resume: no task in scope was interrupted (a restart, a kill or a signal)")
         return
     for t in tasks:  # all_tasks' order: the order they were started, which the GPU queue follows
-        if not t.worktree.is_dir():  # as _need_worktree says it, without ending the batch
-            print(f"{t.name}: never got its worktree (its checkout didn't finish): wb discard "
-                  f"{t.name}, then start it again under a new name" if not runner.checked_out(t)
-                  else f"{t.name}: its worktree is gone; wb discard {t.name} --keep-branch")
+        if not _rechecks_out(t) and (why := _worktree_problem(t)):
+            print(why)  # as _resume would say it, without ending the batch
             continue
         with store.locked(runner.lock_file(t.name, "cmd")):  # as one_at_a_time, task by task
             _resume(t)
+
+
+def _first_round(st: dict) -> bool:
+    """It never ran a round: queued behind the GPU, its model, its checkout or the base check."""
+    return st.get("round", 1) == 1 and not st.get("round_started_at") and not st.get("session")
+
+
+def _rechecks_out(task: store.Task) -> bool:
+    """A task interrupted from outside before its checkout finished: its runner makes the
+    checkout again from nothing (runner.checkout), so it resumes at round 1 (#529, #544). One
+    whose checkout failed still goes through wb discard."""
+    st = task.status
+    return _first_round(st) and not runner.checked_out(task) and st.get("last") in INTERRUPTED
 
 
 def _resume(task: store.Task) -> None:
@@ -1608,9 +1626,10 @@ def _resume(task: store.Task) -> None:
         die(f"{name} is {st.get('phase')}; wb resume continues a stopped task")
     if runner_alive(task):
         die(f"{name}'s runner is still running")
-    _need_worktree(task)
+    if not _rechecks_out(task):
+        _need_worktree(task)
     n = st.get("round", 1)
-    if n == 1 and not st.get("round_started_at") and not st.get("session"):
+    if _first_round(st):
         # it never ran a round (queued behind the GPU, its model or the base check): round 1
         # again, its prompt as wb start wrote it, not "Claude stopped your last session…"
         handled = store.now()

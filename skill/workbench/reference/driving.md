@@ -102,8 +102,8 @@ You are the driver, not a spectator. When something tells you the agent is headi
   traps (links, toolchains, `/dev/pts`): `reference/driving.md`.
 - `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
   review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a
-  reboot, a kill) or stuck with "stopped by a signal" resumes the same way, unless it never got
-  its worktree: then `wb discard` it and start it again under a new name. "Interrupted by a
+  reboot, a kill) or stuck with "stopped by a signal" resumes the same way, unless its checkout
+  failed and it never got its worktree: then `wb discard` it and start it again under a new name. "Interrupted by a
   restart", or a shutdown's signal to several runners, comes as one notice for the batch: `wb resume --all --repo <dir>` resumes them in the
   order they were started (`--backlog <name>` for one backlog's); one that never ran a round
   starts round 1 again. A task a guard stopped isn't in `--all`: read its report first.
