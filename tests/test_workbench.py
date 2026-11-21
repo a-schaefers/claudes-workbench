@@ -10151,6 +10151,26 @@ class Cleanup(Base):
         self.assertEqual(st.returncode, 0, st.stderr)
         self.assertIn("A  staged.txt", st.stdout)
 
+    def test_a_worktree_registered_with_a_relative_path_is_forgotten_once_deleted_by_hand(self):
+        # #793 (the second 2026-11-21 audit): with worktree.useRelativePaths the admin dir's
+        # `gitdir` is relative, read against wb's cwd it matched nothing, so a worktree removed
+        # by hand stayed registered and its delegate branch couldn't be deleted
+        if gitops.version() < (2, 48):
+            self.skipTest("worktree.useRelativePaths needs git 2.48+")
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a],  # noqa
+                                      capture_output=True, text=True)
+        wt = Path(self.tmp.name) / "w" / "t-rel"
+        add = g("-c", "worktree.useRelativePaths=true", "worktree", "add", "-q", "-b",
+                "delegate/t-rel", str(wt))
+        self.assertEqual(add.returncode, 0, add.stderr)
+        admin = Path(g("rev-parse", "--git-common-dir").stdout.strip())
+        admin = (self.repo / admin if not admin.is_absolute() else admin) / "worktrees"
+        self.assertFalse(next(admin.iterdir()).joinpath("gitdir").read_text().startswith("/"))
+        shutil.rmtree(wt)
+        gitops.drop_registration(self.repo, wt)
+        self.assertNotIn("t-rel", g("worktree", "list").stdout)
+        self.assertEqual(g("branch", "-D", "delegate/t-rel").returncode, 0)
+
     def test_wb_gc_deletes_branches_merged_before_and_keeps_the_rest(self):
         self.start("t-old", "ok")
         wait_phase("t-old", {"review"})

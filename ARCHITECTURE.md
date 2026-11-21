@@ -4760,7 +4760,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   read-only directory, an embedded repo, the repo moved or deleted) a task's own worktree is
   deleted by hand and `wb` warns: accept and discard once wedged there for good (the audit).
   Its registration then goes by itself (`gitops.drop_registration`: the admin dir under
-  `<common git dir>/worktrees/` whose `gitdir` names the gone directory, unless locked), as do a
+  `<common git dir>/worktrees/` whose `gitdir` names the gone directory, read against that admin
+  dir as git does, so a relative one, `worktree.useRelativePaths`, matches too (#793); unless
+  locked), as do a
   failed add's and the trial merge's scratch worktree's; nothing runs `git worktree prune`,
   which dropped an unrelated worktree on a drive unmounted for the moment, whose `git status`
   then exited 128 and whose staged index was gone (#641, Codex's audit of 1.90.6).

@@ -1302,7 +1302,10 @@ def drop_registration(repo: Path, worktree: Path) -> None:
             named = (d / "gitdir").read_text().strip()
         except OSError:
             continue
-        top = os.path.dirname(named)
+        # against the admin dir, as git reads it: with worktree.useRelativePaths (git 2.48+) the
+        # link is relative, read against wb's cwd it matched nothing, and the registration and
+        # its delegate branch stayed (#793, the second 2026-11-21 audit); an absolute one stays
+        top = os.path.dirname(d / named)
         if {os.path.abspath(top), os.path.realpath(top)} & at and not (d / "locked").exists():
             shutil.rmtree(d, ignore_errors=True)
 
