@@ -68,14 +68,31 @@ def not_merged(*argv) -> str:
     return buf.getvalue()
 
 
+# `probe search --help`'s --language, as probe-code 0.6.0 prints it (2026-11-21): where
+# context.probe_languages reads the languages probe reads (#857)
+SEARCH_HELP = ("  -l, --language <LANGUAGE>\n          Programming language to limit search to specific "
+               "file extensions\n\n          [possible values: rust, rs, javascript, js, jsx, typescript, "
+               "ts, tsx, python, py, go, c, h, cpp, cc, cxx, hpp, hxx, java, ruby, rb, php, swift, "
+               "solidity, sol, crystal, cr, haskell, hs, lhs, csharp, cs, yaml, yml, bash, sh, qml]\n")
+
+
 def fake_probe(tmp: Path) -> None:
     """A `probe` first on PATH, as its release binary installs one (*Experiments*)."""
     bin_ = tmp / "probe-bin"
     bin_.mkdir()
     (bin_ / "probe").write_text('#!/bin/sh\nif [ "$1" = --help ]; then printf "Commands:\\n  symbols  List symbols\\n"; '
+                                f'elif [ "$1 $2" = "search --help" ]; then printf %s {shlex.quote(SEARCH_HELP)}; '
                                 'else echo probe-code 0.6.0; fi\n')
     (bin_ / "probe").chmod(0o755)
     os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
+
+
+def long_code(repo: Path, name: str = "lib.py") -> None:
+    """A committed file over PROBE_FILE_LINES lines in a language probe reads, which no spec names:
+    probe is off for a task whose repo has none (#857, the owner, 2026-11-21)."""
+    (repo / name).write_text("".join(f"def g{i}():\n    return {i}\n" for i in range(context.PROBE_FILE_LINES)))
+    subprocess.run(["git", "-C", str(repo), "add", name], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "long code"], check=True)
 
 
 def wait_phase(name, phases, timeout=30):
@@ -7382,6 +7399,7 @@ class RealOpenCode(Base):
     def test_the_probe_experiment_lets_the_agent_run_probe_and_only_while_on(self):
         # *Experiments*: the rule and the PATH reach the agent's shell, in its lane
         fake_probe(Path(self.tmp.name))
+        long_code(self.repo)  # probe is on only where the repo has long code (#857)
         run_wb("experiment", "probe", "on")
         def shell(name):
             return [{"name": "shell", "arguments": {"command": "probe symbols README.md",
@@ -7397,6 +7415,7 @@ class RealOpenCode(Base):
         # and in OPENCODE_CONFIG_CONTENT (RESTATED). Measured on OpenCode 2.3.2: it cuts the
         # shell's output to its last lines; `read` keeps its own 2,000 lines or 50 KB
         fake_probe(Path(self.tmp.name))
+        long_code(self.repo)
         run_wb("experiment", "probe", "moderate")
         lines = 1000  # 42 KB for the shell, under a 32K window whole; 3000 for `read`, past its own limit
         def before(task):
@@ -21808,6 +21827,10 @@ class ProbeExperiment(Base):
     """The probe experiment (ARCHITECTURE.md, *Experiments*): off by default, recorded per task,
     and nothing at all where it is off or probe isn't installed."""
 
+    def setUp(self):
+        super().setUp()
+        long_code(self.repo)  # probe is on only where the repo has long code (#857)
+
     def fake_probe(self):
         fake_probe(Path(self.tmp.name))
         context.set_experiment("probe", True)
@@ -21948,7 +21971,9 @@ class ProbeExperiment(Base):
         context.set_experiment("probe", True)
         self.start("t-bytes", "ok")
         wait_phase("t-bytes", {"review"})
-        self.assertEqual(store.Task("t-bytes").spec["experiments"], {"probe": "moderate"})
+        # and its `search --help` lists no languages: off for the task, never on (#857)
+        self.assertEqual(store.Task("t-bytes").spec["experiments"], {"probe": False})
+        self.assertEqual(store.Task("t-bytes").spec["experiments_off"], {"probe": context.PROBE_OFF_HELP})
 
     def test_without_probe_installed_the_task_runs_as_main_does(self):
         context.set_experiment("probe", True)
@@ -22010,6 +22035,7 @@ class ProbeLevels(Base):
     def setUp(self):
         super().setUp()
         fake_probe(Path(self.tmp.name))
+        long_code(self.repo)  # probe is on only where the repo has long code (#857)
 
     def long_file(self, name="big.py", lines=None):
         """A committed file over PROBE_FILE_LINES lines, and a spec that names it."""
@@ -22184,6 +22210,8 @@ class ProbeLevels(Base):
         (bin_ / "probe").write_text(
             f"#!{sys.executable}\nimport json, sys, time\nopen({str(ran)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
             "if sys.argv[1:] == ['--help']:\n    print('Commands:\\n  symbols  List symbols'); sys.exit(0)\n"
+            f"if sys.argv[1:] == ['search', '--help']:\n    print({SEARCH_HELP!r}); sys.exit(0)\n"
+            "if sys.argv[1:] == ['--version']:\n    print('probe-code 0.6.0'); sys.exit(0)\n"
             + body + "\n")
         (bin_ / "probe").chmod(0o755)
         os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
@@ -22213,6 +22241,25 @@ class ProbeLevels(Base):
         self.assertNotIn("Outline of", task.round_dir(2).joinpath("prompt.md").read_text())
         self.assertEqual(prompt, task.round_dir(1).joinpath("prompt.md").read_text())  # once
         self.assertEqual(ran.read_text().count("symbols"), 1)
+
+    def test_the_outline_and_the_long_files_named_are_only_those_in_a_language_probe_reads(self):
+        # #857 (the owner, 2026-11-21): probe symbols of a CSV or a Nim file is its lines as text
+        ran = self.symbols_probe()
+        run_wb("experiment", "probe", "moderate")
+        self.long_file()
+        long = context.PROBE_FILE_LINES + 10
+        (self.repo / "data.csv").write_text("".join(f"{i},x\n" for i in range(long)))
+        (self.repo / "main.nim").write_text("".join(f"proc f{i}(): int = {i}\n" for i in range(long)))
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "data"], check=True)
+        self.spec.write_text("Change data.csv, main.nim and `big.py`.\n")
+        self.start("t-kinds", "ok")
+        wait_phase("t-kinds", {"review"})
+        task = store.Task("t-kinds")
+        self.assertEqual(task.spec["probe_files"], {"big.py": context.PROBE_FILE_LINES + 100})
+        self.assertEqual(task.status["outline"], ["big.py"])
+        self.assertNotIn("data.csv", ran.read_text())
+        self.assertNotIn("main.nim", ran.read_text())
 
     def test_a_probe_that_fails_or_hangs_adds_no_outline_and_the_round_runs(self):
         from workbench import runner
@@ -22337,6 +22384,257 @@ class ProbeLevels(Base):
         self.assertEqual(store.Task("t-fixed").spec["experiments"], {"probe": "moderate"})
         self.assertEqual(store.Task("t-fixed").status["tuned"]["probe_aggressive"], 0)
 
+
+
+class ProbeWhereItHelps(Base):
+    """Probe is off for a task whose repo has no file over PROBE_FILE_LINES in a language probe
+    reads (the owner, 2026-11-21, #857: "No sense in clogging up the subagents with irrelevant
+    information. Ensure we are robust about handling this."): the task runs as with probe off."""
+
+    LONG = context.PROBE_FILE_LINES + 10
+
+    def setUp(self):
+        super().setUp()
+        fake_probe(Path(self.tmp.name))
+        run_wb("experiment", "probe", "moderate")
+
+    @staticmethod
+    def code(lines: int, line: str = "def f{i}():\n    return {i}\n") -> str:
+        return "".join(line.format(i=i) for i in range(lines // line.count("\n") + 1))
+
+    def repo_with(self, files: dict, name: str = "r") -> Path:
+        """A new repo whose one commit holds ``files`` ({path: text or bytes}; none: empty)."""
+        repo = Path(self.tmp.name) / name
+        repo.mkdir()
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)  # noqa
+        g("init", "-q", "-b", "main")
+        for path, body in files.items():
+            (repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (repo / path).write_bytes(body if isinstance(body, bytes) else body.encode())
+        g("add", "-A")
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "one")
+        return repo
+
+    def off(self, repo: Path, spec: str = "Change it.", sub=None) -> str | None:
+        return context.probe_off(spec, repo, sub, "HEAD")[0]
+
+    def test_a_task_whose_repo_has_only_short_files_runs_byte_for_byte_as_with_probe_off(self):
+        self.start("t-cant", "ok")                        # README.md and CLAUDE.md: short
+        wait_phase("t-cant", {"review"})
+        run_wb("experiment", "probe", "off")
+        self.start("t-none", "ok")
+        wait_phase("t-none", {"review"})
+        cant, plain = store.Task("t-cant"), store.Task("t-none")
+        self.assertEqual(cant.spec["experiments"], {"probe": False})
+        self.assertEqual(cant.spec["experiments_off"], {"probe": context.PROBE_OFF_SHORT})
+        self.assertEqual(context.PROBE_OFF_SHORT, "no file over 1500 lines in a language probe reads")
+        self.assertNotIn("experiments_off", plain.spec)
+        self.assertFalse({k for k in cant.spec if k.startswith("probe_")})
+        same = lambda text: text.replace("t-cant", "t-none")  # noqa: E731: the names, equally long
+        prompt = lambda t: t.round_dir(1).joinpath("prompt.md").read_text()  # noqa: E731
+        self.assertEqual(same(prompt(cant)), prompt(plain))                          # the prompt
+        self.assertEqual((context.rules_dir(cant) / "HANDBOOK.md").read_bytes(),    # the handbook
+                         (context.rules_dir(plain) / "HANDBOOK.md").read_bytes())
+        self.assertEqual(same(json.dumps(context.shell_rules(cant))), json.dumps(context.shell_rules(plain)))
+        self.assertEqual(same(runner.write_config_layer(cant).read_text()),         # the layer, its cap
+                         runner.write_config_layer(plain).read_text())
+        self.assertEqual(set(runner.agent_env(cant)), set(runner.agent_env(plain)))  # no PROBE_MAX_TOKENS
+        for t in (cant, plain):
+            self.assertNotIn("outline", t.status)                                   # no probe symbols
+            self.assertNotIn("probe_aggressive", t.status["tuned"])                 # no level's evidence
+        self.assertIn("probe: off for this task (no file over 1500 lines in a language probe reads)",
+                      run_wb("status", "t-cant"))
+        self.assertNotIn("probe:", run_wb("status", "t-none"))
+        run_wb("discard", "t-cant")
+        row = [r for r in store.results(trials=True) if r["task"] == "t-cant"][-1]
+        self.assertFalse({k for k in row if k.startswith("probe") or k.startswith("experiment")})
+        from workbench import tuning
+        self.assertFalse(tuning.acted("probe_aggressive", row))
+
+    def test_a_mixed_repo_with_a_long_python_file_beside_nim_has_probe_on(self):
+        files = {"main.nim": self.code(self.LONG, "proc f{i}(): int = {i}\n"), "big.py": self.code(self.LONG)}
+        self.assertIsNone(self.off(self.repo_with(files)))
+        for path, body in files.items():                                           # and a task there
+            (self.repo / path).write_text(body)
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "mixed"], check=True)
+        self.spec.write_text("Change `main.nim`.\n")
+        self.start("t-mixed", "ok")
+        wait_phase("t-mixed", {"review"})
+        task = store.Task("t-mixed")
+        self.assertEqual(task.spec["experiments"], {"probe": "moderate"})
+        self.assertNotIn("experiments_off", task.spec)
+        self.assertEqual(task.spec["probe_files"], {})                             # nim: probe can't read it
+
+    def test_a_long_file_only_in_languages_probe_cant_read_leaves_it_off(self):
+        nim = self.code(self.LONG, "proc f{i}(): int = {i}\n")
+        # swift: probe-code 0.6.0 lists it but has no parser; .mjs: it reads it as text
+        repo = self.repo_with({"main.nim": nim, "App.swift": nim, "a.mjs": nim, "short.py": "x = 1\n"})
+        self.assertEqual(self.off(repo), context.PROBE_OFF_SHORT)
+        self.assertEqual(self.off(repo, "Change main.nim and App.swift."), context.PROBE_OFF_SHORT)
+
+    def test_only_short_files_leave_it_off(self):
+        repo = self.repo_with({f"m{i}.py": self.code(context.PROBE_FILE_LINES - 2) for i in range(30)})
+        self.assertEqual(self.off(repo), context.PROBE_OFF_SHORT)
+        self.assertIsNone(self.off(self.repo_with({"one.py": self.code(context.PROBE_FILE_LINES + 1)}, "r2")))
+
+    def test_an_empty_repo_leaves_it_off(self):
+        repo = self.repo_with({})
+        self.assertEqual(self.off(repo), context.PROBE_OFF_SHORT)
+        self.assertEqual(context.probe_off("Change big.py.", repo, None, None)[0], context.PROBE_OFF_SHORT)
+
+    def test_a_long_file_only_in_a_submodule_leaves_it_off(self):
+        # a submodule is another project's code, filled read-only in the worktree
+        # (gitops.fill_submodules): the task can't change it
+        inner = self.repo_with({"big.py": self.code(self.LONG)}, "inner")
+        outer = self.repo_with({"CLAUDE.md": "# outer\n"}, "outer")
+        subprocess.run(["git", "-C", str(outer), "-c", "protocol.file.allow=always", "submodule", "add",
+                        "-q", str(inner), "vendor"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(outer), "-c", "user.email=t@t", "-c", "user.name=t", "commit",
+                        "-qm", "vendor"], check=True)
+        self.assertTrue((outer / "vendor" / "big.py").is_file())
+        self.assertEqual(self.off(outer), context.PROBE_OFF_SHORT)
+        self.assertEqual(self.off(outer, "Change vendor/big.py."), context.PROBE_OFF_SHORT)
+
+    def test_long_data_files_leave_it_off(self):
+        rows = "".join(f'{{"id": {i}}},\n' for i in range(self.LONG))
+        repo = self.repo_with({"data.json": "[\n" + rows + "{}]\n",
+                               "table.csv": "".join(f"{i},x\n" for i in range(self.LONG)),
+                               "conf.yaml": "".join(f"k{i}: {i}\n" for i in range(self.LONG)),
+                               "conf.yml": "".join(f"k{i}: {i}\n" for i in range(self.LONG)),
+                               "notes.md": "line\n" * self.LONG, "log.txt": "line\n" * self.LONG,
+                               "art.svg": "<g/>\n" * self.LONG, "blob.bin": b"\0\n" * self.LONG})
+        self.assertEqual(self.off(repo, "See data.json, table.csv and conf.yaml."), context.PROBE_OFF_SHORT)
+        kinds = context.probe_languages(context.probe_bin())
+        self.assertIn(".py", kinds)
+        for data in (".json", ".csv", ".yaml", ".yml", ".md", ".txt", ".svg", ".toml", ".xml", ".lock"):
+            self.assertNotIn(data, kinds)    # yaml is in probe's list: left out on purpose
+
+    def test_without_probe_installed_nothing_changes(self):
+        long_code(self.repo)
+        with mock.patch.object(context, "probe_bin", return_value=None):
+            self.start("t-noprobe", "ok")
+        wait_phase("t-noprobe", {"review"})
+        task = store.Task("t-noprobe")
+        self.assertEqual(task.spec["experiments"], {"probe": False})
+        self.assertNotIn("experiments_off", task.spec)                            # off as before
+        self.assertNotIn("probe:", run_wb("status", "t-noprobe"))
+
+    def recording_probe(self, help_text: str, version: str = "probe-code 0.6.0") -> Path:
+        """A `probe` first on PATH answering --help, --version and `search --help`; its runs noted."""
+        bin_ = Path(self.tmp.name) / f"rec-probe-{len(list(Path(self.tmp.name).glob('rec-probe-*')))}"
+        bin_.mkdir()
+        ran = bin_ / "ran"
+        (bin_ / "probe").write_text(
+            f"#!{sys.executable}\nimport sys\nopen({str(ran)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "a = sys.argv[1:]\n"
+            "if a == ['--help']:\n    print('Commands:\\n  symbols  List symbols')\n"
+            f"elif a == ['--version']:\n    print({version!r})\n"
+            f"elif a == ['search', '--help']:\n    print({help_text!r})\n")
+        (bin_ / "probe").chmod(0o755)
+        os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
+        return ran
+
+    def test_the_languages_come_from_the_installed_probes_help_read_once_per_version(self):
+        ran = self.recording_probe(SEARCH_HELP)
+        exe = context.probe_bin()
+        first = context.probe_languages(exe)
+        self.assertEqual(context.probe_languages(exe), first)
+        self.assertEqual(ran.read_text().count("search --help"), 1)               # cached
+        saved = json.loads(context.probe_languages_path().read_text())
+        self.assertEqual((saved["version"], saved["probe"]), ("probe-code 0.6.0", os.path.realpath(exe)))
+        self.assertIn("python", saved["languages"])
+        # a newer probe that reads Nim: read again, and only the table needs its row
+        newer = SEARCH_HELP.replace(", qml]", ", qml, nim]")
+        ran = self.recording_probe(newer, "probe-code 0.7.0")
+        exe = context.probe_bin()
+        self.assertNotIn(".nim", context.probe_languages(exe))                     # no row yet
+        self.assertEqual(ran.read_text().count("search --help"), 1)
+        nim = self.repo_with({"main.nim": self.code(self.LONG, "proc f{i}(): int = {i}\n")})
+        self.assertEqual(self.off(nim), context.PROBE_OFF_SHORT)
+        with mock.patch.dict(context.PROBE_LANGUAGES, {"nim": (".nim",)}):
+            self.assertIn(".nim", context.probe_languages(exe))
+            self.assertIsNone(self.off(nim))
+
+    def test_a_probe_whose_help_cant_be_read_or_parsed_leaves_it_off_never_on(self):
+        long_code(self.repo)
+        for help_text in ("", "usage: probe search [OPTIONS]", "--language <L>\n[possible values: ]"):
+            context.probe_languages_path().unlink(missing_ok=True)
+            self.recording_probe(help_text, f"probe-code {len(help_text)}")
+            self.assertIsNone(context.probe_languages(context.probe_bin()), help_text)
+            self.assertEqual(self.off(self.repo, "Change lib.py."), context.PROBE_OFF_HELP)
+            self.assertFalse(context.probe_languages_path().exists())              # asked again next time
+        self.start("t-nohelp", "ok")
+        wait_phase("t-nohelp", {"review"})
+        task = store.Task("t-nohelp")
+        self.assertEqual((task.spec["experiments"], task.spec["experiments_off"]),
+                         ({"probe": False}, {"probe": context.PROBE_OFF_HELP}))
+        self.assertIn(f"probe: off for this task ({context.PROBE_OFF_HELP})", run_wb("status", "t-nohelp"))
+
+    def test_counting_a_repos_lines_stops_once_one_file_is_long_and_never_reads_one_whole(self):
+        big = self.code(self.LONG).encode() + b"x" * (8 << 20) + b"\n"            # 8 MB more after
+        repo = self.repo_with({"big.py": big, "small.py": "x = 1\n"})
+        fed = []
+        real = context._Lines.update
+        with mock.patch.object(context._Lines, "update", lambda s, c: (fed.append(len(c)), real(s, c))):
+            self.assertIsNone(self.off(repo))
+        self.assertLess(sum(fed), 1 << 20)
+        # and a repo of long-lined code only is counted no further than PROBE_SCAN_BYTES
+        wide = self.repo_with({f"min{i}.js": b"var a=1;" * (1 << 17) for i in range(4)}, "wide")
+        fed.clear()
+        with mock.patch.object(context, "PROBE_SCAN_BYTES", 2 << 20), \
+                mock.patch.object(context._Lines, "update", lambda s, c: (fed.append(len(c)), real(s, c))):
+            self.assertEqual(self.off(wide), context.PROBE_OFF_SHORT)
+        self.assertLessEqual(sum(fed), (2 << 20) + (1 << 16))
+
+    def test_a_package_task_counts_its_package_and_the_files_its_spec_names(self):
+        repo = self.repo_with({"pkg/CLAUDE.md": "# pkg\n", "pkg/a.py": "x = 1\n", "top.py": self.code(self.LONG)})
+        self.assertEqual(self.off(repo, "Change a.py.", "pkg"), context.PROBE_OFF_SHORT)
+        self.assertIsNone(self.off(repo, "Change a.py, using top.py.", "pkg"))      # named: counted
+        self.assertIsNone(self.off(repo, "Change a.py."))                           # the whole repo
+
+    def test_wb_image_and_wb_audio_never_start_an_agent_so_probe_cant_reach_them(self):
+        # #857: they call the local engines directly, never OpenCode or a runner, so nothing of
+        # the experiment (its note, protocol line, rules, cap) is in what they run
+        long_code(self.repo)
+        tmp = Path(self.tmp.name)
+        fake = tmp / "fake_image.py"
+        fake.write_text("import sys\na = sys.argv[1:]\n"
+                        "open(a[a.index('-o') + 1], 'wb').write(" + repr(image_png(64, 64)) + ")\n")
+        images_json, audio_json = tmp / "images.json", tmp / "audio.json"
+        images_json.write_text(json.dumps({"fake": {"command": f"{sys.executable} {fake} -p {{prompt}} "
+                                                                "-o {out} --seed {seed}"}}))
+        tone = tmp / "tone.py"
+        tone.write_text(TONE)
+        audio_json.write_text(json.dumps({"tts": {"command": f"{sys.executable} {tone} --text {{text}} "
+                                                             "--seed {seed} --out {out}", "gpu": False}}))
+        os.environ.update(WB_IMAGES=str(images_json), WB_AUDIO=str(audio_json))
+        seen = []
+        real = subprocess.Popen
+
+        class Spy(real):
+            def __init__(self, args, *a, **k):
+                seen.append((args if isinstance(args, (list, tuple)) else [args], k.get("env") or {}))
+                super().__init__(args, *a, **k)
+        no_runner = mock.patch.object(cli, "spawn_runner", side_effect=AssertionError("a runner"))
+        with mock.patch.object(subprocess, "Popen", Spy), no_runner:
+            self.assertIn("1 image(s)", run_wb("image", "a fox", "--n", "1", "--out", str(tmp / "img")))
+            self.assertIn("1 clip(s)", run_wb("audio", "a bell", "--n", "1", "--no-check",
+                                              "--out", str(tmp / "snd")))
+        self.assertTrue(seen)                                                       # the engines ran
+        said = context.EXPERIMENT_NOTES["probe"].strip()[:60]
+        for argv, env in seen:
+            words = " ".join(map(str, argv))
+            self.assertFalse({"opencode", "probe"} & {Path(str(x)).name for x in argv}, words)
+            self.assertNotIn("runner", words)
+            self.assertNotIn(said, words)
+            self.assertFalse({"OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "PROBE_MAX_TOKENS"} & set(env))
+        self.assertFalse((store.home() / "tasks").exists() and list((store.home() / "tasks").iterdir()))
+        for mod in ("images", "audio", "media"):                                    # nor could they
+            src = (ROOT / "workbench" / f"{mod}.py").read_text()
+            self.assertIsNone(re.search(r"from \. import [^\n]*\b(runner|context|cli)\b", src), mod)
+            for word in ("spawn_runner", "opencode_bin", "OPENCODE_CONFIG", "EXPERIMENT", "probe_"):
+                self.assertNotIn(word, src, f"{mod}: {word}")
 
 if __name__ == "__main__":
     unittest.main()

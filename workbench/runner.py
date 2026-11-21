@@ -817,14 +817,18 @@ def outline_section(task: store.Task, prompt: str) -> tuple[str, list[str]]:
     the spec names (context.long_files, in the worktree), `probe symbols`, its symbols longest
     first, all of them within PROBE_OUTLINE_TOKENS, shared evenly (what a file leaves goes to the
     next: a 5,900-line file took it all and two others named beside it got nothing, trying it on
-    workbench, 2026-11-21); a file cut short ends with OUTLINE_MORE."""
+    workbench, 2026-11-21); a file cut short ends with OUTLINE_MORE. Only files in a language
+    probe reads (context.probe_languages): probe symbols of a CSV or a Nim file prints its lines
+    as `"kind": "text"`, no outline at all (#857, 2026-11-21)."""
     exe = context.probe_bin()
-    if not exe:
+    kinds = context.probe_languages(exe) if exe else None
+    if not kinds:
         return "", []
     from .cli import PROTOCOL  # cli imports this module
     spec = prompt.split(PROTOCOL.split("{branch}")[0])[0]  # the spec, not the protocol's names
     left = context.PROBE_OUTLINE_TOKENS * context.CHARS_PER_TOKEN
-    found = [(rel, syms) for rel in context.long_files(spec, task.worktree, task.spec.get("subdir"))
+    found = [(rel, syms) for rel in context.long_files(spec, task.worktree, task.spec.get("subdir"),
+                                                       kinds=kinds)
              if (syms := probe_symbols(exe, task.worktree, rel))]
     parts, files = [], []
     for k, (rel, syms) in enumerate(found):

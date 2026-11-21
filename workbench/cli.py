@@ -1086,9 +1086,13 @@ def cmd_start(a):
     # round 1's prompt before task.json: a write that fails leaves a dead start for gc, not a
     # task with no status (#873)
     exps = context.task_experiments()  # what this task's agent has: the prompt says it too
-    probe = {}
-    if exps.get("probe"):  # its level, adaptable's through the knob, and whether it is evidence
-        files = context.long_files(spec_text, repo, sub, base)
+    probe, off = {}, {}
+    # off where it can't help: no file in a language probe reads over PROBE_FILE_LINES in the
+    # repo, so the task runs as with probe off, and is no level's evidence (the owner, #857)
+    if exps.get("probe") and (no_probe := context.probe_off(spec_text, repo, sub, base))[0]:
+        exps, off = {**exps, "probe": False}, {"probe": no_probe[0]}
+    elif exps.get("probe"):  # its level, adaptable's through the knob, and whether it is evidence
+        files = no_probe[1]  # the long files the spec names, in probe's languages
         level, explored = context.probe_start(exps["probe"], m.id, (m.config.get("limit") or {})
                                               .get("context"), a.name, bool(files))
         probe = {"probe_setting": exps["probe"], "probe_files": files,
@@ -1140,6 +1144,7 @@ def cmd_start(a):
         "checkin": a.checkin or 0, "self_review": a.self_review,
         "experiments": exps,  # what this task's agent has: wb experiment
         **probe,  # probe's setting, the long files its spec names, the knob's exploration
+        **({"experiments_off": off} if off else {}),  # set, but off for this task, and why
         "round_timeout": a.round_timeout or limits["round"],
         "silence_timeout": a.silence_timeout or limits["silence"],
         "think_timeout": a.think_timeout if a.think_timeout is not None else limits["think"],
@@ -2352,14 +2357,18 @@ def _coding_gate(task: store.Task, user: bool) -> None:
 
 
 def use_line(task: store.Task) -> str | None:
-    """What a task's agent has used of its experiments so far, live (#857), or None when none is on."""
+    """What a task's agent has used of its experiments so far, live (#857), and each one set but
+    off for this task with why (task.json `experiments_off`), or None when neither."""
     on = [k for k, v in (task.spec.get("experiments") or {}).items() if v]
-    if not on:
-        return None
-    st = task.status
-    used = st.get("experiment_use") or {}
-    return ("; ".join(f"{_level_said(task, k)}: {used.get(k, 0)} call(s)" for k in on)
-            + f"; whole reads of files over {context.LONG_FILE_LINES} lines: {st.get('long_reads', 0)}")
+    off = task.spec.get("experiments_off")
+    out = [f"{k}: off for this task ({why})" for k, why in (off if isinstance(off, dict) else {}).items()
+           if isinstance(why, str)]
+    if on:
+        st = task.status
+        used = st.get("experiment_use") or {}
+        out.append("; ".join(f"{_level_said(task, k)}: {used.get(k, 0)} call(s)" for k in on)
+                   + f"; whole reads of files over {context.LONG_FILE_LINES} lines: {st.get('long_reads', 0)}")
+    return "\n".join(out) or None
 
 
 def _level_said(task: store.Task, name: str) -> str:

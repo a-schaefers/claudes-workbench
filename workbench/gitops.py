@@ -241,6 +241,45 @@ def git_hash(cwd, h, *args) -> None:
             raise GitError(f"git {' '.join(args)}: {err.read().decode('utf-8', 'replace').strip()}")
 
 
+def feed_blobs(cwd, oids, h) -> None:
+    """Each blob in ``oids`` fed to ``h(oid, chunk)`` a chunk at a time, through one `git cat-file
+    --batch`, until ``h`` returns True: then git is stopped mid-blob. A blob missing is skipped.
+    Whether a repo has a long file probe reads (context.probe_off, #857, 2026-11-21) counts lines
+    of many blobs and needs only the first lines past the limit of one: a process per blob, read
+    to its end, cost a large repo seconds at wb start, inside Claude's Bash limit."""
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), "cat-file", "--batch"],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, env=_env())
+        try:
+            for oid in oids:
+                p.stdin.write(oid.encode() + b"\n")
+                p.stdin.flush()
+                head = p.stdout.readline().split()
+                if head[1:] == [b"missing"]:
+                    continue
+                if len(head) != 3 or not head[2].isdigit():
+                    return
+                left = int(head[2])
+                while left:
+                    chunk = p.stdout.read(min(left, 1 << 16))
+                    if not chunk:
+                        return
+                    left -= len(chunk)
+                    if h(oid, chunk):
+                        return
+                p.stdout.read(1)  # the newline after each object
+        except OSError:  # git gone: what it fed is all there is
+            return
+        finally:
+            p.kill()
+            p.wait()
+            for f in (p.stdin, p.stdout):
+                try:
+                    f.close()
+                except OSError:
+                    pass
+
+
 def toplevel(path) -> Path:
     """The repo's top directory; NotARepo when ``path`` is in none."""
     try:

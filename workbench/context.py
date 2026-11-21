@@ -513,6 +513,146 @@ def task_experiments() -> dict:
             for name, s in experiments().items()}
 
 
+# Probe is off where it can't help (the owner, 2026-11-21, #857: "No sense in clogging up the
+# subagents with irrelevant information"): a task's repo needs a file in a language probe reads
+# over PROBE_FILE_LINES (probe_off), else the task runs exactly as with probe off.
+#
+# The languages: `probe search --help`'s `--language` possible values, as probe-code 0.6.0 lists
+# them (2026-11-21), each to the file extensions `probe symbols` parses for it, tried on a
+# one-function file of each (one it has no parser for comes back as `"kind": "text"` lines, so
+# .mjs, .cjs, .mts, .cts, .pyi, .c++ and .cu are left out). The list itself is read from the
+# installed probe (probe_languages): a newer probe's new language needs only its row here, and a
+# value with no row counts for nothing. Mapped to nothing on purpose: yaml, data rather than code
+# (a long YAML, JSON or CSV file is no reason to turn probe on; JSON and CSV aren't in probe's
+# list), and swift, which 0.6.0 lists but has no parser for ("Failed to get parser for
+# extension: swift").
+PROBE_LANGUAGES = {
+    "rust": (".rs",), "rs": (".rs",),
+    "javascript": (".js",), "js": (".js",), "jsx": (".jsx",),
+    "typescript": (".ts",), "ts": (".ts",), "tsx": (".tsx",),
+    "python": (".py",), "py": (".py",),
+    "go": (".go",),
+    "c": (".c", ".h"), "h": (".h",),
+    "cpp": (".cpp", ".cc", ".cxx", ".hpp", ".hxx", ".hh"), "cc": (".cc",), "cxx": (".cxx",),
+    "hpp": (".hpp", ".hh"), "hxx": (".hxx",),
+    "java": (".java",),
+    "ruby": (".rb",), "rb": (".rb",),
+    "php": (".php",),
+    "swift": (),
+    "solidity": (".sol",), "sol": (".sol",),
+    "crystal": (".cr",), "cr": (".cr",),
+    "haskell": (".hs", ".lhs"), "hs": (".hs",), "lhs": (".lhs",),
+    "csharp": (".cs",), "cs": (".cs",),
+    "yaml": (), "yml": (),
+    "bash": (".sh", ".bash"), "sh": (".sh",),
+    "qml": (".qml",),
+}
+# wb status's words for a task where probe was set but is off (task.json `experiments_off`)
+PROBE_OFF_SHORT = f"no file over {PROBE_FILE_LINES} lines in a language probe reads"
+PROBE_OFF_HELP = "probe's languages couldn't be read from `probe search --help`"
+# the most of a repo's blobs probe_off counts, largest first, before it gives up: a repo whose
+# biggest code files are all long-lined (minified, generated) would be read whole otherwise
+PROBE_SCAN_BYTES = 64 << 20
+
+
+def probe_languages_path() -> Path:
+    return store.home() / "probe-languages.json"
+
+
+def probe_language_names(help_text: str) -> list[str] | None:
+    """--language's possible values in `probe search --help`, or None when it lists none."""
+    m = re.search(r"--language\b.*?\[possible values:([^\]]*)\]", help_text, re.S)
+    names = [n.strip() for n in m.group(1).split(",") if n.strip()] if m else []
+    return names or None
+
+
+def probe_languages(exe: str) -> frozenset[str] | None:
+    """The file extensions the probe ``exe`` reads (PROBE_LANGUAGES of the languages its help
+    lists), or None when its help can't be read or parsed: then probe counts as off, never on.
+    Read once per probe version (`probe --version`) and kept in probe-languages.json."""
+    def run(*args) -> str | None:
+        try:  # any bytes: a `probe` that isn't probelabs' may print anything (#518)
+            r = subprocess.run([exe, *args], capture_output=True, text=True, errors="replace",
+                               timeout=10, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return r.stdout if r.returncode == 0 else None
+    version = (run("--version") or "").strip()
+    key = {"probe": os.path.realpath(exe), "version": version}
+    saved = store.read_json(probe_languages_path(), {}) if version else {}
+    saved = saved if isinstance(saved, dict) else {}
+    names = saved.get("languages") if all(saved.get(k) == v for k, v in key.items()) else None
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        names = probe_language_names(run("search", "--help") or "")
+        if names is None:
+            return None
+        if version:  # a probe that names no version is asked each time
+            try:
+                store.write_json(probe_languages_path(), {**key, "languages": names, "at": store.now()})
+            except OSError:
+                pass
+    return frozenset(e for n in names for e in PROBE_LANGUAGES.get(n, ()))
+
+
+def probe_off(spec: str, repo: Path, sub: str | None, rev: str | None) -> tuple[str | None, dict[str, int]]:
+    """(why probe is off for this task, or None; the long files its spec names in probe's
+    languages, from long_files). On only when the repo at commit ``rev`` has a file in a language
+    probe reads (probe_languages) over PROBE_FILE_LINES: one the spec names anywhere in the repo,
+    or any in the task's package ``sub`` (the whole repo without one), where the agent works.
+    Counted from git's objects, largest first, lines a chunk at a time and only until one is past
+    the limit, never a file read whole (_Lines), at most PROBE_SCAN_BYTES. A submodule's files
+    don't count: its gitlink is no blob here, and its checkout in the worktree is read-only
+    (gitops.fill_submodules), another project's code the task can't change. Nor symbolic links.
+    (the owner, 2026-11-21, #857)"""
+    exe = probe_bin()
+    kinds = probe_languages(exe) if exe else None
+    if kinds is None:
+        return PROBE_OFF_HELP, {}
+    named = long_files(spec, repo, sub, rev, kinds)
+    if named:
+        return None, named
+    if not rev or not kinds:
+        return PROBE_OFF_SHORT, {}
+    try:
+        tree = gitops.git_bytes(repo, "ls-tree", "-r", "-l", "-z", "--full-tree", rev,
+                                *(["--", sub] if sub else []))
+    except gitops.GitError:
+        return PROBE_OFF_SHORT, {}
+    found = []
+    for entry in tree.split(b"\0"):
+        meta, _, path = entry.partition(b"\t")
+        meta = meta.split()
+        if len(meta) != 4 or meta[1] != b"blob" or meta[0] == b"120000" or not meta[3].isdigit():
+            continue
+        # a file of more than N lines has more than N bytes: the rest can't be long
+        if int(meta[3]) > PROBE_FILE_LINES and os.path.splitext(os.fsdecode(path))[1] in kinds:
+            found.append((int(meta[3]), meta[2].decode()))
+    found.sort(reverse=True)
+    now: dict[str, _Lines] = {}  # the blob being fed: one at a time, each once
+    read = [0, False]
+
+    def feed(oid: str, chunk: bytes) -> bool:
+        if oid not in now:
+            now.clear()
+            now[oid] = _Lines()
+        now[oid].update(chunk)
+        read[0] += len(chunk)
+        read[1] = now[oid].count() > PROBE_FILE_LINES
+        return read[1] or read[0] >= PROBE_SCAN_BYTES
+
+    picked, seen, total = [], set(), 0
+    for size, oid in found:  # the blobs within the budget, so git is asked only for those; two
+        if total >= PROBE_SCAN_BYTES:  # files alike are one blob, counted once
+            break
+        if oid not in seen:
+            seen.add(oid)
+            picked.append(oid)
+            total += size
+    if picked:
+        gitops.feed_blobs(repo, picked, feed)
+    return (None, {}) if read[1] else (PROBE_OFF_SHORT, {})
+
+
 def probe_start(level: str, model: str, window, task_name: str, long: bool) -> tuple[str, bool]:
     """(the level this task's agent gets, whether it is the knob's exploration): adaptable goes
     through the probe_aggressive knob (tuning.py), which explores only when the spec names a
@@ -560,14 +700,18 @@ def spec_paths(text: str) -> list[str]:
     return seen[:SPEC_PATHS_MAX]
 
 
-def long_files(text: str, root: Path, sub: str | None = None, rev: str | None = None) -> dict[str, int]:
+def long_files(text: str, root: Path, sub: str | None = None, rev: str | None = None,
+               kinds: frozenset[str] | None = None) -> dict[str, int]:
     """{path from ``root``: its lines} for each file the spec names with more than
     PROBE_FILE_LINES lines, in the order named: read in the checkout ``root`` (the worktree), or
     at commit ``rev`` of the repo ``root`` (wb start, before the worktree exists). A name is
-    tried in the package ``sub`` first, then at the top; one outside ``root`` is none."""
+    tried in the package ``sub`` first, then at the top; one outside ``root`` is none. With
+    ``kinds``, only names with one of those extensions (probe's languages: probe_languages)."""
     out: dict[str, int] = {}
     top = os.path.realpath(root)
     for p in spec_paths(text):
+        if kinds is not None and os.path.splitext(p)[1] not in kinds:
+            continue  # the outline only for files probe reads (#857, 2026-11-21)
         for rel in ([f"{sub}/{p}"] if sub else []) + [p]:
             # counted a chunk at a time: read whole, a spec naming a large data file loaded all
             # of it, at wb start inside Claude's Bash limit (review, 2026-11-21)
