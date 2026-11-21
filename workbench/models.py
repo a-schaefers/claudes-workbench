@@ -1281,6 +1281,8 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         say(f"loading {m.name} into ollama")
         _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
               timeout=START_TIMEOUT)
+        if away:
+            _note_mine(m)  # this machine's own, for its next task's box_others
         _placement(m, warn)
         if others and (gone := [n for n in others if not _matches(n, set(_ollama_loaded(m.root)))]):
             warn(f"loading {m.name} on {host} unloaded {', '.join(gone)}, which another client "
@@ -1719,10 +1721,40 @@ def box_others(m: Model, keep=()) -> list[str]:
     Another client's, or the box's own. [] when it doesn't answer, and for a local model."""
     if m.engine != "ollama" or not m.remote or same_gpu(m) or _fake():
         return []
-    held, found = keep_loaded(), discover()
+    held, found, mine = keep_loaded(), discover(), box_mine(m.root)
     ours = [m, *(o for o in (found.get(k) for k in keep) if o)]
     return [n for n in _ollama_loaded(m.root) if n and not _kept_name(n, held)
-            and not any(o.server == m.server and _matches(o.name, {n}) for o in ours)]
+            and not any(o.server == m.server and _matches(o.name, {n}) for o in ours)
+            and not any(_matches(x, {n}) for x in mine)]
+
+
+# What this machine loaded on each wb remote box, and when (boxes.json, {root: {name: ts}}): a
+# model there that this machine's own earlier task loaded isn't another client's. Without it,
+# one user with one box waited BOX_QUIET at every model switch for the model their own last
+# task had left loaded (2026-11-21, reviewing #812)
+BOX_MINE_S = 7 * 86400
+
+
+def _boxes_path() -> Path:
+    return store.home() / "boxes.json"
+
+
+def box_mine(root: str) -> set[str]:
+    """The models this machine loaded on the box at ``root`` in the last BOX_MINE_S."""
+    saved = store.read_json(_boxes_path(), {}) or {}
+    row = saved.get(root) if isinstance(saved, dict) else None
+    now = time.time()
+    return {n for n, t in (row if isinstance(row, dict) else {}).items()
+            if isinstance(t, (int, float)) and now - t < BOX_MINE_S}
+
+
+def _note_mine(m: Model) -> None:
+    """Record that this machine loaded ``m`` on its box (box_mine)."""
+    with store.locked(_boxes_path().with_suffix(".lock")):
+        saved = store.read_json(_boxes_path(), {}) or {}
+        saved = saved if isinstance(saved, dict) else {}
+        row = saved.get(m.root) if isinstance(saved.get(m.root), dict) else {}
+        store.write_json(_boxes_path(), {**saved, m.root: {**row, m.name: time.time()}})
 
 
 def unheld_loaded(skip=()) -> list[str]:

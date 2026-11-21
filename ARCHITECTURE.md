@@ -2894,13 +2894,15 @@ API is all a client can see of it, and it has no lock, no owner per model and no
 only `/api/ps` (what is loaded, and each model's `expires_at`, which a finished request moves and
 a running one lets pass). So the clients coordinate through that (`models.box_others`,
 `box_quiet`, `BOX_SHARED`, #812): before loading its model on the box, a client waits while a
-model loaded there that its task doesn't run (keep_loaded's aside) has had a request in the last
+model loaded there that its task doesn't run (keep_loaded's aside, and any this machine loaded
+there itself in the last week: `box_mine`, `$WB_HOME/boxes.json` `{root: {name: ts}}`, written by
+each load, so one user with one box never waits on their own last task's model) has had a request in the last
 `BOX_QUIET` (150 s, watched from then on: `/api/ps` says when a model expires, not when it was
 last used), up to `BOX_WAIT` (40 min, a round's default limit); within a round the agent's
 requests are seldom further apart, since OpenCode sends a shell command past 2 minutes to the
 background. Every client doing the same, they take the box a round at a time rather than a
 request at a time, and the waiting task's status says what it waits for (a `gpu` event when the
-model was answering). A load then waits a `BOX_QUIET` once for an idle model left loaded there
+model was answering). A load then waits a `BOX_QUIET` once for an idle model another client left loaded there
 (the load is skipped altogether while the task's own model is still on the box). What it can't
 stop: a round that begins while the other's model is quiet (its tool running past `BOX_QUIET`),
 a wait cut off by `BOX_WAIT`, or a client of an older wb, Open WebUI or anything else that loads
@@ -6439,6 +6441,7 @@ $WB_HOME (~/.local/state/workbench)
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
   update.json                    wb update: when origin was last asked, how far behind this copy was
+  boxes.json                     what this machine loaded on each wb remote box ({root: {name: ts}}, models.box_mine): its own models there aren't another client's (#812)
   wsl-gpus.json                  WSL only: Windows' display adapters ({ts, gpus: [{name, vram}], tried?}), re-read hourly (hardware.WINDOWS_FOR); a failed read keeps the last good one and stamps tried (retried after WINDOWS_RETRY)
   bench/cases/<case>/            case.json  spec.md  base.bundle  hidden/<path>…  reference.patch
   bench/runs/<run>/              plan.json  driver.log  <task>/{wb.log,diff.patch,grade.txt} (repo/ while it runs)

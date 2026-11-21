@@ -1382,6 +1382,29 @@ class Real(unittest.TestCase):
         self.assertEqual(warned, [])
         self.assertEqual([p["model"] for p in posts], ["x"])
 
+    def test_a_model_this_machine_left_on_its_box_is_loaded_over_without_waiting(self):
+        # reviewing #812 (2026-11-21): every model on the box that the task wasn't using read as
+        # another client's, so one user with one box waited BOX_QUIET at every model switch for
+        # the model their own last task had left loaded
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        loaded, posts = [], []
+        srv, port = fake_ollama(loaded, ["x", "y"], posts)
+        self.servers.append(srv)
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+                             "models": {"x": {}, "y": {}}}}, {"box": {"local": True}})
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "BOX_QUIET", 30), mock.patch.object(models, "BOX_POLL", 0.1):
+            found = models.discover()
+            models.make_resident(found["box/x"], say=lambda *_: None, warn=lambda *_: None)
+            self.assertIn("x", models.box_mine(found["box/x"].root))
+            loaded[:] = [{"name": "x", "size": 10, "size_vram": 10, "expires_at": at(300)}]
+            self.assertEqual(models.box_others(found["box/y"]), [])     # this machine's own
+            began = time.monotonic()
+            models.make_resident(found["box/y"], say=lambda *_: None, warn=lambda *_: None)
+            self.assertLess(time.monotonic() - began, 5)                # no BOX_QUIET wait
+            loaded[:] = [{"name": "theirs", "size": 10, "size_vram": 10, "expires_at": at(300)}]
+            self.assertEqual(models.box_others(found["box/y"]), ["theirs"])   # still another's
+
     def test_a_remote_task_hears_when_another_client_unloaded_its_model_between_rounds(self):
         # #812: the other client's load evicted this task's model, and nothing told this task why
         # its next round began with a reload
