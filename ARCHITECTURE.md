@@ -622,7 +622,21 @@ on the wall clock, which the files' timestamps use. Silence and the think budget
 - The think budget starts at the round's first output line: OpenCode prints nothing while the
   model reads its prompt, which on the CPU or a model spilled into RAM takes many minutes, and a
   round nudged for that was then stopped "even after a nudge". Silence before the first line
-  says so: "no first output in N minutes: the model may be reading its prompt slowly…".
+  says so: "no first output in N minutes: the model may be reading its prompt slowly…;
+  --silence-timeout gives a new task longer", and the round's read speed bound (*Speed*,
+  below) adds what a new task on the model now waits.
+- A `retry` line is not output (#491, the audit of 1.90). OpenCode 2.3 waits `headerTimeout` (300
+  s unless the provider sets it) for a response's headers and `chunkTimeout` (900 s) between
+  streamed chunks, then aborts the request and prints `retry {attempt, nextRetryAt, error:
+  {type, message}}`; after four attempts `error` ("Timed out waiting for response headers") and
+  exit 1. A server that sends its headers with the first token (Ollama reading a 10-20K-token
+  prompt on the CPU or partly in RAM: 8-30 minutes) failed every such round, and each retry line
+  reset the silence clock, so the no-first-output stop couldn't fire. Its `step_start` comes with
+  the response's headers, or just before a retry: so a retry line neither counts as heard nor
+  resets silence, and takes back the clocks its `step_start` moved. `events.normalize` keeps it
+  (`retry {text, attempt}`), status `last` says so, and the report adds `OpenCode resent N
+  request(s) to the model's server: <error>[; it cut the request at the provider's timeout]`.
+  The config layer lifts both waits for the task's provider (*What the agent knows*).
 - A `background_wait` line (OpenCode moved a shell command past 2 minutes to the background and
   the turn waits on it, printing nothing until it ends) pauses the think budget, and silence runs
   to the longer of `--silence-timeout` and `--test-timeout`, until the next event; the round's
@@ -830,7 +844,8 @@ again: that cost a whole restart in one task of two (the 2026-11-17 measurement)
 1. `task X · label · round n · M.m min · local tokens IN in / OUT out` (this round; input
    excludes cache reads).
 2. `agent context: U.UK of WK (P%)[, compacted Nx][; the next round starts a fresh session]`.
-3. `STOPPED: why` or `opencode exited N (see …/runner.log)`, when either.
+3. `STOPPED: why` or `opencode exited N (see …/runner.log)`, when either; `OpenCode resent N
+   request(s) to the model's server: …` when it retried any (#491).
 4. `tests: PASS|FAIL (`cmd`, exit N)`, the last 25 lines on a failure; `base check: …`
    (`base_check_line`) while the task is on its first step with no review round yet;
    `auto-fix rounds used: a/b`.
@@ -843,7 +858,17 @@ again: that cost a whole restart in one task of two (the 2026-11-17 measurement)
 **Speed** (`measure_speed`): after every round, the session export's messages created since the
 round began give write speed and read speed samples (`router.record_speed`). A request cut short
 (a nudge, a stop) still gives a read sample when it had its first token: on a slow machine the
-first request is often the one interrupted.
+first request is often the one interrupted. A round that ended before the model's first output
+(nothing but OpenCode's own lines, `NOT_THE_MODEL`: `step_start`, `retry`, `error`,
+`background_wait`) after `BOUND_MIN_S` (120 s) or more, stopped by the silence or round limit or
+by OpenCode giving up (not a nudge or an interruption: a model thinking silently behind a server
+that sent its headers at once would read as a slow reader), gives a bound instead (`read_bound`,
+`router.record_read_bound`):
+the prompt it was sent (the round's `prompt.md` and `instructions.md` and the layer's
+instruction files at 4 characters a token, plus `OPENCODE_PROMPT_TOKENS`, 3000, for OpenCode's own
+system prompt and tools) over the seconds it waited, the most it can have read per second, guessed
+low so the budgets come out long. Without it a first request that never finished left no
+`firstToken`, speed.json stayed empty, and the next task got the same 900 s (#491).
 
 **Prompt text other code depends on.** Each prompt opens with a head that something else matches
 by prefix; rewording one silently changes those:
@@ -874,6 +899,12 @@ would distract it. The per-task OpenCode config layer (`<state>/rules/<task>/ope
 written before every round by `runner.write_config_layer` from `context.layer`) gives it
 `instructions`, `permissions`, `skills`, the `compaction` setting, the `ask_reviewer` server, and
 the providers OpenCode wouldn't load by itself (`models.agent_providers`, *Found, loaded, chosen*).
+For the task's provider it also sets `options.headerTimeout: false` and `options.chunkTimeout` at
+the larger of 900 s and `--silence-timeout` + 60 s (`runner.provider_timeouts`, `PROVIDER_TIMEOUTS`):
+OpenCode 2.3's 300 s wait for the headers cut every request a slow reader hadn't answered in 5
+minutes (*The runner, inside*: a `retry` line); the runner's own silence and round limits decide
+how long a round waits (#491, the audit of 1.90). OpenCode merges provider options, so the user's
+entry keeps the rest, and their files stay as they are.
 Everything in `rules/<task>/` (the config, the instruction copies, the git shim) lives outside the
 agent's lane, so it can't rewrite its own rules for its next round.
 
@@ -1237,9 +1268,11 @@ could write one for its next round). `rules_env` passes the layer's permissions 
 instead, which also drops AGENTS.md and the project's skills. The user's own
 `OPENCODE_CONFIG_CONTENT` (`models.users_config_content`) goes under the rules, not away (#347,
 the audit of 1.4): its keys are kept but `mcp` (the user's MCP servers stay off) and any the
-layer sets itself (loaded last, the user's `compaction` would undo the handover's backstop), its
-`permissions` come before the layer's (the last match wins), and `share` is `disabled`; past
-the limit it goes alone, without its permissions. The layer's `edit` rule also denies
+layer sets itself (loaded last, the user's `compaction` would undo the handover's backstop), but
+`provider`, which the layer always sets now: the user's providers stay, with the layer's provider
+timeouts merged on top, so neither their content nor a project's `opencode.json` puts the 300 s
+header wait back (#491). Its `permissions` come before the layer's (the last match wins), and
+`share` is `disabled`; past the limit it goes alone, without its permissions. The layer's `edit` rule also denies
 `OPENCODE_FILES` (`*opencode.json`, `*opencode.jsonc`, `.opencode/*`, `*/.opencode/*`), and the
 round report flags them with Claude's files.
 
@@ -2329,7 +2362,8 @@ speed (input / (first token − created), ≥ 1000 tokens over > 0.5 s, also fro
 short before it completed), the last `SPEED_KEEP` 60 of
 each, in `speed.json` (`{"<id>": {"write": [...], "read": [...]}}`, under `speed.lock`); `speed()`
 takes the medians. At `wb start`, `budgets(m)` sets think = `THINK_TOKENS` 13,500 / write + window
-/ read, clamped to [420, `THINK_MAX` 1800] s, and scales silence (900) and round (2400) by
+/ read (either term alone when only one speed is measured: a read bound may be all there is,
+#491), clamped to [420, `THINK_MAX` 1800] s, and scales silence (900) and round (2400) by
 think / 420. No measured speed: the defaults. They are written into task.json once.
 
 **Managing the set.** `wb model add <provider/model> [--pull] [--context N]` (Ollama): pulls
@@ -4442,7 +4476,7 @@ check-ins off), not `wb start`'s.
 **events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode, normalized (`events.normalize`):
 `tool {tool, brief, ok, error?}` (`brief`: the input's command, path, pattern, url, query or
 description, 90 characters; a skill's id), `text {text}` (2000 characters), `step {in, out,
-cache}`, `error {text}`. From the runner: `round`, `stopped {text}`, `steer {now, by:
+cache}`, `error {text}`, `retry {text, attempt}` (OpenCode resending a request, #491). From the runner: `round`, `stopped {text}`, `steer {now, by:
 "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow,
 compacted}`,
 `autofix`, `self_review`, `reading_full`, `full`, `load` (the model reloaded before a round),
@@ -4684,7 +4718,8 @@ of 32K, then sleeps: the runner hands over mid-round; the handover prompt turns 
 `read` (25K tokens before any change: it carries on), `floor` (a re-read floor too high to hand
 over: `HANDOVER_ROOM`), `refill` (every session changes a file, then fills: `HANDOVER_MAX`),
 `bgwait` (a `background_wait` line, then `FAKE_BGWAIT` seconds, 6, of quiet, then `ok`),
-`toolhang` (one tool call, then silent). `session list` lists nothing. Both session commands fail
+`toolhang` (one tool call, then silent), `retry` (a `retry` line every `FAKE_RETRY_EVERY`
+seconds, 1, as OpenCode prints it cutting each request at the provider timeout). `session list` lists nothing. Both session commands fail
 without `--standalone`, as the real ones do when another service holds the managed port. Its
 live tool names are 1.x-style (`bash`, `filePath`); real OpenCode 2.x says `shell`, `path`
 (`events._brief` reads both).
@@ -4696,7 +4731,9 @@ request and answers each request that offers tools with the next scripted tool c
 "arguments"}`), so a test sees what OpenCode does with it. Every answer reports `prompt tokens`
 read (default 1), so a test can fill the window without sending it; a request carrying OpenCode's
 compaction template (`<template>`, `## Objective`) gets the template's headings back, which
-OpenCode accepts as a summary (anything else fails the compaction: `compaction.failed`). `run_calls(name, calls, *start_flags)` starts a task, points its config
+OpenCode accepts as a summary (anything else fails the compaction: `compaction.failed`).
+With `CAPTURE_HEADER_DELAY=<seconds>` every POST waits that long before its headers: RealOpenCodeRun
+sets the user's `headerTimeout` to 2 s, below a 4 s delay, and the task still answers (#491). `run_calls(name, calls, *start_flags)` starts a task, points its config
 layer at the capture server, runs `opencode run --auto` in the worktree through `agent_env` and
 `lane.wrap`, and returns the task and the tool results, in order. Refusals read `permission.rejected` (a
 rule), `external_directory` (the file tools, the workdir) or `Permission denied` (Landlock).

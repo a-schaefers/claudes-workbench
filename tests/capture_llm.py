@@ -7,8 +7,11 @@ gets the next call as its answer, so a test can see what OpenCode does with them
 after a call carries the tool's result). Given prompt tokens, every answer says it read that many,
 so a test can fill the context window without sending it (OpenCode then compacts: a request
 carrying its summary template gets the template's headings back, which it takes as a summary).
+With CAPTURE_HEADER_DELAY=<seconds>, every POST waits that long before its headers, as a slow
+reader's server does until its first token (#491).
 """
 import json
+import os
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -18,6 +21,7 @@ CALLS = json.loads(sys.argv[3]) if len(sys.argv) > 3 else []
 CALLS = CALLS if isinstance(CALLS, list) else [CALLS]
 made = []
 READ = int(sys.argv[4]) if len(sys.argv) > 4 else 1
+DELAY = float(os.environ.get("CAPTURE_HEADER_DELAY") or 0)
 USAGE = {"prompt_tokens": READ, "completion_tokens": 1, "total_tokens": READ + 1}
 SUMMARY = "\n\n".join(f"{h}\n- (none)" for h in (
     "## Objective", "## Requirements", "## Decisions", "## Work State\n### Completed",
@@ -33,6 +37,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def handle(self):
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError):  # a request the client gave up on
+            pass
+
     def reply(self, body: dict):
         data = json.dumps(body).encode()
         self.send_response(200)
@@ -47,6 +57,7 @@ class Handler(BaseHTTPRequestHandler):
         req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         with open(OUT, "a") as f:
             f.write(json.dumps(req) + "\n")
+        time.sleep(DELAY)
         if not req.get("stream"):
             self.reply({"id": "cap", "object": "chat.completion", "created": int(time.time()),
                         "model": "cap", "usage": USAGE, "choices": [{

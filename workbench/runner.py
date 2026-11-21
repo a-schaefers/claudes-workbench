@@ -114,9 +114,31 @@ def fresh_ceiling(cfg: dict) -> float | None:
     return (usable - buf) / window
 
 
+# OpenCode 2.3 gives every provider a 300 s wait for the response headers (`headerTimeout`) and
+# 900 s between streamed chunks (`chunkTimeout`). A server that sends its headers with the first
+# token (Ollama on the CPU, a model spilled into RAM) reads a 10-20K-token prompt for 8-30
+# minutes: at 300 s OpenCode aborted the request and retried it, four times, then failed the round
+# ("Timed out waiting for response headers"), and no read speed was learned to stretch the next
+# task's budgets (#491, the audit of 1.90). The runner's own guards (silence, the round's limit)
+# decide how long a round may wait, so the task's provider waits for its headers as long as they
+# allow, and between chunks at least as long as the silence budget. Provider options merge, so
+# the user's own entry keeps the rest; the user's files stay untouched.
+PROVIDER_TIMEOUTS = ("headerTimeout", "chunkTimeout")
+
+
+def provider_timeouts(task: store.Task) -> dict:
+    """{"provider": {<the task's provider>: {"options": {headerTimeout, chunkTimeout}}}}."""
+    pid = str(task.spec.get("model") or "").split("/", 1)[0]
+    if not pid:
+        return {}
+    chunk = max(900, int(float(task.spec.get("silence_timeout") or 900)) + 60) * 1000
+    return {"provider": {pid: {"options": {"headerTimeout": False, "chunkTimeout": chunk}}}}
+
+
 def write_config_layer(task: store.Task) -> Path:
     """The per-task OpenCode config: the providers OpenCode wouldn't load by itself
-    (models.agent_providers), the agent's context and the ask_reviewer server."""
+    (models.agent_providers), the task's provider's timeouts (provider_timeouts), the agent's
+    context and the ask_reviewer server."""
     path = context.rules_dir(task) / "opencode.json"
     wait_ms = int(task.spec.get("ask_timeout", 1200) + 60) * 1000
     try:
@@ -125,7 +147,7 @@ def write_config_layer(task: store.Task) -> Path:
         buffer = None
     store.write_json(path, {
         "$schema": "https://opencode.ai/config.json",
-        **models.agent_providers(),
+        **models._merge(models.agent_providers(), provider_timeouts(task)),
         **context.layer(task),
         "share": "disabled",  # a user's `share: "auto"` would publish every agent session
         # the user's global small_model (titles, summaries) could be a cloud model whose key
@@ -175,11 +197,22 @@ CONFIG_CONTENT_MAX = 120_000
 # permissions come first, so the rules' (the last match wins) still decide; its MCP servers stay
 # off like the global files' ones (the layer's `mcp`, which this would load after). A key the
 # layer sets too is left to the layer: loaded last, the user's `compaction` would undo the
-# handover's backstop, and their `skills` or `instructions` replace the task's.
+# handover's backstop, and their `skills` or `instructions` replace the task's. But `provider`,
+# which the layer always sets now (its timeouts, #491): the user's providers stay, and the
+# layer's timeouts go on top of them here too, so neither their content nor a project's
+# opencode.json puts the 300 s header wait back.
 def rules_env(layer: dict) -> dict:
     users = models.users_config_content()
     theirs = users.get("permissions")
-    users = {k: v for k, v in users.items() if k not in layer and k not in ("mcp", "permissions")}
+    users = {k: v for k, v in users.items()
+             if (k == "provider" or k not in layer) and k not in ("mcp", "permissions")}
+    timeouts = {pid: {"options": {k: v["options"][k] for k in PROVIDER_TIMEOUTS if k in v["options"]}}
+                for pid, v in (layer.get("provider") or {}).items()
+                if isinstance(v, dict) and isinstance(v.get("options"), dict)
+                and any(k in v["options"] for k in PROVIDER_TIMEOUTS)}
+    if timeouts:
+        users["provider"] = models._merge(users["provider"] if isinstance(users.get("provider"), dict)
+                                          else {}, timeouts)
     rules = {"permissions": [*(theirs if isinstance(theirs, list) else []),
                              *layer["permissions"]], "share": "disabled"}
     content = json.dumps({**users, **rules}, separators=(",", ":"))
@@ -570,6 +603,10 @@ class _Clock:
         return t - self.seen
 
 
+# OpenCode's own lines, not the model's output: what read_bound counts as no answer yet
+NOT_THE_MODEL = frozenset({"step_start", "retry", "error", "background_wait"})
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -630,9 +667,13 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # prompt, which on the CPU or a model spilled into RAM takes many minutes, and a round nudged
     # for it was then stopped "even after a nudge" (the 2026-11-16 audit). Silence still applies.
     heard = False
+    before_start = None  # the clocks before a step_start that a retry may take back
     waiting_bg = False
-    out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [],
-           "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None, "guard": None}
+    # answered: the model's own output came (not only OpenCode's lines); retries: the requests
+    # OpenCode sent again, each with why
+    out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [], "retries": [],
+           "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None, "guard": None,
+           "answered": False}
     window = st.get("window")
     fresh_at = tuning.value(task, "fresh_at")
     opened: dict = {}  # the questions open this round (ask_mcp.relay)
@@ -647,14 +688,28 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         ask_mcp.relay(task, opened)  # the agent's questions: checked, counted, raised
         asking = task.status.get("phase") == "asking"  # the agent is waiting on Claude: not silent
         clock.step(mono, asking)
-        if line:
+        got = _event(line)
+        kinds = {raw.get("type") for raw in got}
+        # A `retry` line is OpenCode giving up on a request and sending it again, not the model's
+        # output: it reset the silence clock, so a model that never answered was never stopped
+        # for it, and "no first output" could not be said (#491, the audit of 1.90). OpenCode
+        # prints the step's `step_start` as the response begins, or just before that retry: a
+        # retry takes back what its step_start counted.
+        if got and kinds <= {"retry"}:
+            if before_start is not None:
+                clock.seen, heard = before_start
+                before_start = None
+        elif line:
+            before_start = (clock.seen, heard) if kinds == {"step_start"} else None
             clock.seen, heard = mono, True
+        if not kinds <= NOT_THE_MODEL:  # its first token, or later ones (read_bound)
+            out["answered"] = True
         # The line's event, when it is one (0 or 1 of them): a line that isn't (a stray print, a
         # number or list) or an event normalize drops skips only this body, never the clocks and
         # the steer check below. Those `continue`d past them, and a stream of unknown progress
         # events ran past the round's limit, ignored `wb steer --now` and held the GPU lease
         # (#195, the 2026-11-19 audit).
-        for raw in _event(line):
+        for raw in got:
             if raw.get("type") == "background_wait":
                 waiting_bg = True
             if raw.get("sessionID") and not task.status.get("session"):
@@ -662,7 +717,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             row = normalize(raw, n)
             if row is None:
                 continue
-            waiting_bg = False  # the session moved on
+            if row["kind"] != "retry":
+                waiting_bg = False  # the session moved on
             sig = row.pop("sig", None)
             if row["kind"] == "tool":
                 out["tools"][row["tool"]] = out["tools"].get(row["tool"], 0) + 1
@@ -708,6 +764,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                         _reading_full(task, n, used, window, floor)
             elif row["kind"] == "error":
                 out["errors"].append(f"opencode: {row['text']}")
+            elif row["kind"] == "retry":
+                out["retries"].append(row["text"])
+                task.set_status(last=f"OpenCode retries a request: {row['text']}"[:200])
             task.event(row)
             why = detector.feed({**row, "sig": sig}) if sig else None
             if why and detector.since_edit >= detector.no_edit:
@@ -723,7 +782,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             out["guard"] = "silence"
             out["stuck"] = (f"no output for {int(hush // 60)} minutes" if heard else
                             f"no first output in {int(hush // 60)} minutes: the model may be "
-                            "reading its prompt slowly (on the CPU, or partly in RAM?)")
+                            "reading its prompt slowly (on the CPU, or partly in RAM?); "
+                            "--silence-timeout gives a new task longer")
             if waiting_bg:
                 out["stuck"] += ", waiting on a background job"
         # Generating with nothing to show past the budget: interrupt with a nudge (once a round)
@@ -808,6 +868,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                         gpu_w_n=(st.get("gpu_w_n") or 0) + power.n,
                         gpu_w_peak=max(st.get("gpu_w_peak") or 0, power.peak))
     out["secs"] = round(time.monotonic() - clock.t0, 1)
+    out["waited"] = round(clock.ran(time.monotonic()), 1)
     # the agent's own working time, less Claude's answers and a frozen machine (#95)
     task.set_status(active_s=round(prior + clock.ran(time.monotonic()), 1))
     return out
@@ -1295,6 +1356,10 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         lines.append(f"STOPPED: {rnd['stuck']}")
     elif rnd["exit"] not in (0, None):
         lines.append(f"opencode exited {rnd['exit']} (see {task.dir / 'runner.log'})")
+    if rnd.get("retries"):  # #491: a request cut at the provider's timeout, or refused, and resent
+        why = rnd["retries"][-1]
+        lines.append(f"OpenCode resent {len(rnd['retries'])} request(s) to the model's server: {why}"
+                     + ("; it cut the request at the provider's timeout" if "Timed out" in why else ""))
     if rnd["exit"] == 0 and not (ask_mcp.ask_dir(task) / ask_mcp.LISTED).exists():
         # an OpenCode that stopped loading the server would leave the agent no way to ask, and
         # nothing said so (the 2026-11-19 audit)
@@ -1555,6 +1620,38 @@ def measure_speed(task: store.Task, since: float) -> None:
 TASK_SPEED_KEEP = 200  # a task's own speed samples kept, per measure
 
 
+# A round that ended before its server answered still says how fast the model read, at most: the
+# prompt it was sent over the time it waited. On the machines the budgets stretch for, the first
+# request is the one that never finished, the export had no firstToken, and speed.json stayed
+# empty: the next wb start got the same 900 s and hit the same wall (#491, the audit of 1.90).
+# The prompt's tokens are guessed low (its text and instructions at 4 characters a token, and
+# OpenCode's own system prompt and tools), which guesses the speed low and the budgets long.
+BOUND_MIN_S = 120
+OPENCODE_PROMPT_TOKENS = 3000
+
+
+def read_bound(task: store.Task, n: int, rnd: dict) -> int | None:
+    """Record round ``n``'s read speed bound (tokens/s) when it ended before the model's first
+    output, after BOUND_MIN_S or more, by the silence or round limit or OpenCode giving up; and
+    return it; else None. Not after a nudge or Claude's interruption: a model thinking silently
+    behind a server that sent its headers at once would read as a slow reader."""
+    from . import router
+    waited = float(rnd.get("waited") or 0)
+    if rnd.get("answered") or rnd.get("interrupted") or waited < BOUND_MIN_S \
+            or rnd.get("guard") not in (None, "silence", "round"):
+        return None
+    try:
+        layer = json.loads((context.rules_dir(task) / "opencode.json").read_text())
+        files = [task.round_dir(n) / "prompt.md", task.round_dir(n) / "instructions.md",
+                 *map(Path, layer.get("instructions") or [])]
+        chars = sum(f.stat().st_size for f in files if f.is_file())
+        tok_s = max(1, int((chars / 4 + OPENCODE_PROMPT_TOKENS) / waited))
+        router.record_read_bound(task.spec["model"], tok_s)
+    except (OSError, ValueError, KeyError):
+        return None
+    return tok_s
+
+
 def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
     """How the round ended, for the Stats tab (#404): the guard that stopped it is counted in
     status `guards`, and a `round_end` event says how long it ran and how it ended. Only with
@@ -1708,6 +1805,10 @@ def drive(task: store.Task) -> None:
             finally:  # before the lease is released: the GPU's next task must not meet our agent
                 _end_agent(task)
             measure_speed(task, began)
+            if (bound := read_bound(task, n, rnd)) and rnd["guard"] == "silence":
+                from . import router
+                rnd["stuck"] += (f" (it read at most ~{bound} tokens/s here: a new task on this "
+                                 f"model now waits {router.budgets(m)['silence'] // 60} minutes)")
             if rnd["full"]:  # before notes: the handover carries them (_full_round)
                 handed += 1
                 if handed <= HANDOVER_MAX:

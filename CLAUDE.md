@@ -255,15 +255,15 @@ unset: unknown, so no sharing).
   `.claude/skills`, committed with it. Personal skills (`~/.claude/skills`, `~/.agents/skills`) are denied to agents.
 
 ## OpenCode quirks this code relies on
-Checked against OpenCode 2.3 with `tests/capture_llm.py` (a recording model server: it shows
-the system prompt, tools and tool results). The real-OpenCode tests cover the MCP shape, skills,
-denials, compound shell commands, rule order, git by path, the edit rule, PATH, the lane, and
-(RealOpenCodeRun) the events, the export, `--session` and compaction.
+Checked against OpenCode 2.3 with `tests/capture_llm.py`, a recording model server. The
+real-OpenCode tests cover the MCP shape, skills, denials, compound shell commands, rule order, git
+by path, the edit rule, PATH, the lane, and (RealOpenCodeRun) the events, the export, `--session`,
+compaction, the header wait.
 - It resolves the project from `$PWD`, not from the cwd.
 - The 2.x config shape is `mcp.servers.<name>`, with `timeout.{startup,execution}`;
   `codemode: false` exposes a plain tool (listed as `workbench_ask_reviewer`).
-- `--standalone` servers inherit the env and share session storage with the background service;
-  `session export`/`list` use it too, so no workbench call needs the service's fixed port.
+- `--standalone` servers inherit the env and share session storage with the background service,
+  as do `session export`/`list`: no workbench call needs the service's port.
 - Project config (`opencode.json` in the worktree, `.opencode/`, or any directory above it) loads
   after `OPENCODE_CONFIG` and its permissions come later, so it could lift every deny;
   `OPENCODE_CONFIG_CONTENT` loads last of all (`OPENCODE_DISABLE_PROJECT_CONFIG` also drops
@@ -279,24 +279,25 @@ denials, compound shell commands, rule order, git by path, the edit rule, PATH, 
 - `permissions: [{action, resource, effect}]`: a `deny` removes a tool or skill from the prompt.
   Patterns are anchored, `*` matches anything (spaces and `/` too), a trailing ` *` is optional,
   and the last matching rule wins; no match is "ask", which `--auto` allows. For `shell` the
-  resource is each simple command's raw text in a compound line (`cd x && sudo y` is caught; a
-  wrapper isn't unwrapped, so `DENIED_SHELL` lists `env sudo *` and the like itself). For `edit` it is the file path. For `external_directory` it is `<dir>/*` for each
+  resource is each simple command's raw text in a compound line (`cd x && sudo y` is caught; wrappers
+  aren't unwrapped: `DENIED_SHELL` lists `env sudo *` and the like). For `edit` it is the file path. For `external_directory` it is `<dir>/*` for each
   directory outside the session's, from the file tools' paths and the shell's workdir and `cd`
-  targets only (`touch ~/x` passes, which is what Landlock is for).
+  targets only (`touch ~/x` passes: Landlock's job).
 - Denying `execute` (code mode) turns the `opencode_*` tools into direct tools, so deny
-  `opencode_*` too. `opencode_worktree_remove` stays listed whatever you do; the rule still refuses
-  the call.
-- OpenCode's shell inherits the runner's `PATH`, which is how the git shim gets called first.
+  `opencode_*` too. `opencode_worktree_remove` stays listed; the rule still refuses the call.
+- OpenCode's shell inherits the agent's `PATH`, the git shim's directory first.
 - A session is bound to the directory it was created in: continued or `--fork`ed from another
   worktree, the model is still told the first one. So context carries over only within a task's
   own worktree (rounds, `wb next`), never to a new task.
 - `session export` lists compactions as messages `{type: "compaction", status, summary}`; an
   assistant message's `tokens` (input + cache read/write + output) is the context the next request
-  carries (the between-rounds check). The live `step_finish` tokens (input + cache read + cache
-  write + output) drive the mid-round check.
+  carries (the between-rounds check). The live `step_finish` tokens (the same sum) drive the
+  mid-round check.
 - `run` reads a message that starts with `-` as a flag (usage, exit 1): the prompt goes after `--`.
 - `run --format json` prints nothing while a tool runs or the model reads its prompt; a shell
   command past 2 minutes goes to the background and the turn ends with a `background_wait` line.
+- A provider's `options.headerTimeout` (300 s) and `chunkTimeout` (900 s) cut a slow request,
+  printing `retry`: the layer lifts both.
 
 ## Troubleshooting
 - `wb doctor`: what an install lacks, each with its fix.

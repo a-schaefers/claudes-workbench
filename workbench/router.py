@@ -288,6 +288,17 @@ def record_speed(model_id: str, messages: list[dict]) -> dict:
     return got
 
 
+def record_read_bound(model_id: str, tok_s: int) -> None:
+    """Add a read speed that a request which never got its first token was at most (the
+    runner's read_bound, #491) to speed.json's reading samples."""
+    path = _speed_path()
+    with store.locked(path.with_suffix(".lock")):
+        data = store.read_json(path, {}) or {}
+        row = data.setdefault(model_id, {})
+        row["read"] = (row.get("read", []) + [tok_s])[-SPEED_KEEP:]
+        store.write_json(path, data)
+
+
 def speed_samples(messages: list[dict]) -> dict:
     """{"write", "read", "ttft"}: each request's write and read speed (tok/s; the thresholds keep
     tiny requests from skewing them) and its time to first token (seconds), from a session
@@ -316,10 +327,13 @@ def speed(model_id: str) -> dict:
 def budgets(m: models.Model) -> dict:
     """{"think", "silence", "round"} in seconds for a task on this model."""
     sp = speed(m.id)
-    if not sp.get("write"):
+    if not sp:
         return {"think": THINK_DEFAULT_S, "silence": SILENCE_DEFAULT_S, "round": ROUND_DEFAULT_S}
+    # a reading speed alone stretches them too: a model whose first request never finished had
+    # only that (the runner's read_bound), and got the defaults again (#491)
     window = (m.config.get("limit") or {}).get("context") or BASE_WINDOW
-    think = THINK_TOKENS / sp["write"] + (window / sp["read"] if sp.get("read") else 0)
+    think = (THINK_TOKENS / sp["write"] if sp.get("write") else 0) + \
+        (window / sp["read"] if sp.get("read") else 0)
     think = int(min(max(think, THINK_DEFAULT_S), THINK_MAX))
     scale = max(1.0, think / THINK_DEFAULT_S)
     return {"think": think, "silence": int(SILENCE_DEFAULT_S * scale),

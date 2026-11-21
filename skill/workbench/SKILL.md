@@ -281,7 +281,9 @@ A session is woken only for its own tasks (those `wb start` ran in it, wherever;
 hand, or one whose Claude Code process has exited, from its directory or a repo in it): start a task from the session that will review it. Failing tests go back to the agent on their
 own for `--auto-fix` rounds before you are woken; `wb log <name>` shows what it is doing.
 A model that reads prompts slowly, or one the runner must load first, can spend minutes before
-its first reply. That is normal, not stuck.
+its first reply. That is normal, not stuck. A task stopped with "no first output" has taught the
+runner how slowly the model reads: a new `wb start` on it waits longer (the stop says how long);
+`--silence-timeout <seconds>` gives it more, or pick a smaller model.
 **Exit 4: the GPU is taken** by another task (often another session's project) or `wb image`,
 which the model can't run beside. Don't wait silently: tell the user who holds it, then either
 do the step yourself or `--queue` it to start when the GPU is free (it may be hours).
