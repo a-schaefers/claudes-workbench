@@ -272,8 +272,9 @@ checkout, not the worktree), so give it its own, `--setup 'uv sync' --test 'uv r
 agent's and the tests' PATH. A note that the agent's environment leaves out a proxy (it holds a password): a setup or tests that need the
 network fail there; ask the user before naming it in commands.json `env`. Tests that use the
 GPU themselves (CUDA, PyTorch, a game engine): add `--unload-for-tests`, or they run beside the
-model and fail out of memory (it also opens the GPU's device nodes to the lane; without it they
-see no device). With it, the base check, `wb verify` and `wb shot` wait for the GPU alone too.
+model and fail out of memory (it also opens the GPU's device nodes to the lane, and holds the GPU
+from other tasks while they run; without it they see no device). With it, the base check,
+`wb verify` and `wb shot` wait for the GPU alone too.
 A suite slower than 15 minutes: `--test-timeout <secs>` above its time, or
 narrow the command; a run past it isn't sent back to the agent (nor one the lane refused a
 device), you're woken with `auto-fix skipped:` and the cause.
