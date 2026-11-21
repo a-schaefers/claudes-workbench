@@ -24,6 +24,7 @@ import array
 import contextlib
 import json
 import math
+import operator
 import os
 import re
 import shutil
@@ -224,28 +225,75 @@ def _starts(path: Path) -> str:
     return f"it starts {head!r}" if head else "an empty file"
 
 
-def _pcm(path: Path) -> tuple[list[float], int] | None:
-    """The samples (mono, -1..1) and rate of a PCM WAV, or None when the wave module can't read
-    it (float or 24-bit WAV: ffmpeg converts those first)."""
+class _Meter:
+    """Duration, peak, clipping and silences, kept as running totals over 50 ms blocks of
+    magnitudes (each frame's loudest channel): only one bool a block is held. Every sample as a
+    Python float took ~200 MiB for a 5-minute clip, over 1 GiB at 48 kHz stereo (#599)."""
+
+    def __init__(self, rate: int, full: float):
+        self.rate, self.full, self.block = rate, full, max(1, rate // 20)
+        self.frames, self.peak, self.clipped, self.loud = 0, 0.0, 0, []
+
+    def add(self, mags) -> None:
+        """One block's magnitudes, at most ``block`` of them."""
+        if not len(mags):
+            return
+        self.frames += len(mags)
+        self.peak = max(self.peak, max(mags))
+        top = 0.999 * self.full
+        self.clipped += sum(map(top.__le__, mags))  # x >= top, in C
+        rms = math.sqrt(sum(map(operator.mul, mags, mags)) / len(mags)) / self.full
+        self.loud.append(_db(rms) > SILENT_DB)
+
+    def result(self) -> dict:
+        loud, rate = self.loud, self.rate
+        out = {"duration": round(self.frames / rate, 2) if rate else 0.0}
+        if not self.frames:
+            return {**out, "peak_db": -120.0, "clipped": 0.0, "lead": 0.0, "tail": 0.0, "gaps": []}
+        peak, clipped = _db(self.peak / self.full), round(self.clipped / self.frames, 4)
+        step = self.block / rate
+        if not any(loud):
+            return {**out, "peak_db": peak, "clipped": clipped, "lead": out["duration"],
+                    "tail": 0.0, "gaps": [], "silent": True}
+        first = loud.index(True)
+        last = len(loud) - 1 - loud[::-1].index(True)
+        gaps, run = [], 0
+        for j in range(first, last + 1):
+            if loud[j]:
+                if run * step >= GAP_SECS:
+                    gaps.append([round((j - run) * step, 1), round(run * step, 1)])  # [at, length]
+                run = 0
+            else:
+                run += 1
+        return {**out, "peak_db": peak, "clipped": clipped, "lead": round(first * step, 2),
+                "tail": round((len(loud) - 1 - last) * step, 2), "gaps": gaps}
+
+
+def _measure(path: Path) -> dict | None:
+    """`levels` of a PCM WAV at its own rate, each frame's loudest channel, read a block at a
+    time; None when the wave module can't read it (float or 24-bit WAV: ffmpeg converts those
+    first)."""
+    codes = {1: "B", 2: "h", 4: "i"}
     try:
         with wave.open(str(path)) as w:
-            ch, width, rate, frames = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
-            raw = w.readframes(frames)
+            ch, width, rate = w.getnchannels(), w.getsampwidth(), w.getframerate()
+            if width not in codes or not ch or not rate:
+                return None
+            full = 128.0 if width == 1 else float(2 ** (8 * width - 1))
+            meter = _Meter(rate, full)
+            while raw := w.readframes(meter.block):
+                a = array.array(codes[width])
+                a.frombytes(raw[:len(raw) - len(raw) % (width * ch)])
+                if sys.byteorder == "big" and width > 1:
+                    a.byteswap()
+                if width == 1:  # unsigned, 128 the zero
+                    a = array.array("h", (x - 128 for x in a))
+                mags = (array.array(a.typecode, map(abs, a)) if ch == 1 else
+                        list(map(max, *(map(abs, a[c::ch]) for c in range(ch)))))
+                meter.add(mags)
     except (wave.Error, EOFError, OSError):
         return None
-    codes = {1: "B", 2: "h", 4: "i"}
-    if width not in codes or not ch or not rate:
-        return None
-    a = array.array(codes[width])
-    a.frombytes(raw[:len(raw) - len(raw) % width])
-    if sys.byteorder == "big" and width > 1:
-        a.byteswap()
-    full = float(2 ** (8 * width - 1))
-    if width == 1:
-        a = array.array("h", (x - 128 for x in a))
-        full = 128.0
-    mono = a if ch == 1 else [max(a[i:i + ch], key=abs) for i in range(0, len(a) - ch + 1, ch)]
-    return [x / full for x in mono], rate
+    return meter.result()
 
 
 def _db(x: float) -> float:
@@ -253,35 +301,11 @@ def _db(x: float) -> float:
 
 
 def levels(samples: list[float], rate: int) -> dict:
-    """Duration, peak, clipping and silences, from 50 ms blocks."""
-    out = {"duration": round(len(samples) / rate, 2) if rate else 0.0}
-    if not samples:
-        return {**out, "peak_db": -120.0, "clipped": 0.0, "lead": 0.0, "tail": 0.0, "gaps": []}
-    peak = max(map(abs, samples))
-    clipped = sum(1 for x in samples if abs(x) >= 0.999) / len(samples)
-    block = max(1, rate // 20)
-    loud = []
-    for i in range(0, len(samples), block):
-        part = samples[i:i + block]
-        rms = math.sqrt(sum(x * x for x in part) / len(part))
-        loud.append(_db(rms) > SILENT_DB)
-    step = block / rate
-    if not any(loud):
-        return {**out, "peak_db": _db(peak), "clipped": round(clipped, 4), "lead": out["duration"],
-                "tail": 0.0, "gaps": [], "silent": True}
-    first = loud.index(True)
-    last = len(loud) - 1 - loud[::-1].index(True)
-    gaps, run = [], 0
-    for j in range(first, last + 1):
-        if loud[j]:
-            if run * step >= GAP_SECS:
-                gaps.append([round((j - run) * step, 1), round(run * step, 1)])  # [at, length]
-            run = 0
-        else:
-            run += 1
-    return {**out, "peak_db": _db(peak), "clipped": round(clipped, 4),
-            "lead": round(first * step, 2), "tail": round((len(loud) - 1 - last) * step, 2),
-            "gaps": gaps}
+    """Duration, peak, clipping and silences of samples in -1..1, from 50 ms blocks."""
+    meter = _Meter(rate, 1.0)
+    for i in range(0, len(samples), meter.block):
+        meter.add([abs(x) for x in samples[i:i + meter.block]])
+    return meter.result()
 
 
 def _ffmpeg(*args: str, timeout: int = 300) -> subprocess.CompletedProcess | None:
@@ -462,15 +486,15 @@ def inspect(path: Path, kind: str, script: str = "", seconds: float | None = Non
     with tempfile.TemporaryDirectory(prefix=".wb-listen-") as tmp:
         whole = Path(tmp) / "pcm.wav"
         r = _ffmpeg("-v", "error", "-i", str(path), "-c:a", "pcm_s16le", "-y", str(whole))
-        pcm = _pcm(whole if r and r.returncode == 0 and whole.is_file() else path)
-        if pcm is None:
+        measured = _measure(whole if r and r.returncode == 0 and whole.is_file() else path)
+        if measured is None:
             # ffmpeg couldn't decode it, or, with no ffmpeg, it doesn't even start like audio: an
             # engine's HTML error page was published as a clip and counted as made (#592)
             if (r is not None and r.returncode != 0) or (r is None and not _sounds(path)):
                 found["not_audio"] = True
             found["unreadable"] = "not a PCM WAV the wave module reads" + ("" if r else "; no ffmpeg to convert it")
         else:
-            found.update(levels(*pcm))
+            found.update(measured)
         if r is not None:
             found["lufs"] = loudness(path)
             if draw:

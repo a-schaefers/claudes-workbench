@@ -7131,6 +7131,35 @@ class Audio(Base):
                  "wer": audio.wer(script, "東京タワーへ行きましょう"), "differences": ["に → へ"]}
         self.assertIn('CER 8% (に → へ)', audio.summary(found, None))
 
+    def test_the_checks_read_a_long_clip_in_memory_that_doesnt_grow_with_its_length(self):
+        # #599 (Codex's audit of 1.8 → 1.90): every sample was held as a Python float, about
+        # 1.2 GiB for 5 minutes of 48 kHz stereo read without ffmpeg
+        import array as _array, math, wave as _wave
+        tmp, rate = Path(self.tmp.name), 48000
+        tone = _array.array("h", (int(20000 * math.sin(i / 7)) for i in range(rate * 2))).tobytes()
+        hush = bytes(rate * 4)  # a second of stereo silence
+
+        def clip(name, minutes):  # a 1 s lead, a 2 s gap at 10 s, a tone to the end
+            with _wave.open(str(tmp / name), "wb") as w:
+                w.setnchannels(2); w.setsampwidth(2); w.setframerate(rate)
+                w.writeframes(hush + tone * 9 + hush * 2 + tone * int(minutes * 60 - 12))
+            return tmp / name
+
+        child = ("import resource, sys; sys.path.insert(0, sys.argv[1]); from workbench import audio\n"
+                 "r = lambda: resource.getrusage(resource.RUSAGE_SELF).ru_maxrss\n"
+                 "before = r(); found = audio._measure(sys.argv[2])\n"
+                 "grew = (r() - before) / (2 ** 20 if sys.platform == 'darwin' else 2 ** 10)\n"
+                 "print(repr((found, grew)))\n")
+        grew = {}
+        for minutes in (0.5, 4):
+            out = subprocess.run([sys.executable, "-c", child, str(ROOT), str(clip(f"{minutes}.wav", minutes))],
+                                 capture_output=True, text=True, check=True).stdout
+            found, grew[minutes] = ast.literal_eval(out)
+            self.assertEqual((found["duration"], found["lead"], found["tail"], found["gaps"]),
+                             (minutes * 60, 1.0, 0.0, [[10.0, 2.0]]))
+            self.assertEqual((found["peak_db"], found["clipped"]), (-4.3, 0.0))
+        self.assertLess(grew[4], 16, grew)                     # MiB, for 46 MB of samples
+
     def test_an_engine_refuses_what_it_has_no_slot_for_and_the_wrong_kind(self):
         tmp, tone = Path(self.tmp.name), self.tone()
         self.engines({"tts": {"command": f"{sys.executable} {tone} --out {{out}}", "gpu": False,

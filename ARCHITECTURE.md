@@ -3609,7 +3609,11 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   note "unreadable: … no ffmpeg to convert it". Either way the levels come from
   each frame's loudest channel at the clip's own rate: measured on the 16 kHz mono copy, a stereo
   take clipped on one channel read clean, one with a channel inverted read SILENT (the downmix
-  cancelled it), and clipping above 8 kHz was filtered out (#586). `levels` reads 50 ms blocks: silence is below `SILENT_DB` (-50 dBFS), a gap is
+  cancelled it), and clipping above 8 kHz was filtered out (#586). `_measure` reads the WAV 50 ms
+  at a time into `_Meter`, which keeps running totals (the peak, the clipped count, one bool a
+  block), so memory doesn't grow with the clip: every sample as a Python float took ~200 MiB for
+  5 minutes, over 1 GiB at 48 kHz stereo (#599); `levels` is the same over a list of samples.
+  The blocks: silence is below `SILENT_DB` (-50 dBFS), a gap is
   `GAP_SECS` (1 s) or more between sounds, and a sample at 0.999 of full scale or more counts as
   clipped. `_spans` aligns the script's words with the heard ones (`_align`: the fewest word
   edits, Levenshtein with a backtrace, lower case) and keeps each stretch of edits as a span,
