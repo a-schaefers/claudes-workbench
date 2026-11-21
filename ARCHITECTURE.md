@@ -807,7 +807,8 @@ outside `OPENCODE_TESTED`.
    `verify.gpu`) takes the GPU first and its turn only around the run itself (`verify.on_base`'s
    `turn`): taken first, the turn was held through the whole wait for the GPU, behind another
    task's rounds, and every queued task's setup waited with it (#679). A round's own tests don't
-   take a turn: the GPU lease already orders the rounds.
+   take a turn: the GPU lease already orders the rounds. With probe on, round 1's outline
+   (`add_outline`, *Experiments*) comes next, still before the lease.
 2. Hold one `GpuLease` for everything that follows, except where it steps aside
    (`lease.step_aside`: out of `gpu.json`, `gpu.lock` unlocked) because the task needs no GPU: the
    tests, and a wait for a server that is down. All of `drive` ran under it, so queued tasks waited
@@ -5538,14 +5539,18 @@ agent knows*: it bounds the shell's output, not the built-in `read`, which keeps
 50 KB; so the note's last sentence, "A read of a long file returns only its first 2,000 lines (or
 50 KB): read further with `offset` and `limit`, or `probe extract` the function"), and **an outline
 in round 1**: before round 1's first OpenCode call (`runner.add_outline`, from `drive`, once: status
-`outline` lists the files, `[]` when none; a restarted runner adds nothing), for each file over
+`outline` lists the files, from the worktree's top, `[]` when none; a restarted runner adds
+nothing), and before the GPU lease, since it needs none and a hanging probe would hold the GPU
+from other tasks with the model loaded (the review, 2026-11-21), for each file over
 `PROBE_FILE_LINES` that the spec names in the worktree (`context.long_files`, the spec cut at the
-protocol), the runner runs `probe symbols --allow-tests -o json <file>` (`runner.probe_symbols`,
+protocol; lines counted a chunk at a time, `context._Lines`, so a named data file is never read
+whole), the runner runs `probe symbols --allow-tests -o json <file>` (`runner.probe_symbols`,
 the probe `context.probe_bin` finds, in the worktree, `OUTLINE_TIMEOUT` 20 s each, read with
 `errors="replace"`; JSON rather than probe's text, whose signatures run over lines) and appends to
 the prompt, per file, `Outline of <file> (from probe symbols):` and one line per symbol,
 `<first>-<last> <signature>` (`  (in <class>)` for a method), longest first, then `… N more:
-`+"`probe symbols <file>`"+` when cut. All of it within `context.PROBE_OUTLINE_TOKENS` (1000, at
+`+"`probe symbols <file>`"+` when cut, `<file>` named from where the agent runs (`task.workdir`: in a
+package task `big.py` or `../top.py`, not `pkg/big.py`). All of it within `context.PROBE_OUTLINE_TOKENS` (1000, at
 `CHARS_PER_TOKEN`: about 4,000 characters), shared evenly between the files (one 5,900-line file
 took it all when tried on workbench). A probe that fails, times out or prints what isn't its JSON
 adds nothing and never fails the round; later rounds get no outline. The agent starts knowing

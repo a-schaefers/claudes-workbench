@@ -22236,6 +22236,49 @@ class ProbeLevels(Base):
         a, b = section.split("\n\n")
         self.assertLess(abs(len(a) - len(b)), 200)                         # shared, not first come
 
+    def test_a_package_tasks_outline_names_each_file_as_the_agent_reaches_it_from_the_package(self):
+        # review, 2026-11-21 (#857): the agent runs in worktree/<subdir>, and the outline named
+        # pkg/big.py from the worktree's top, a path that isn't there from pkg/
+        ran = self.symbols_probe(n=800)
+        run_wb("experiment", "probe", "moderate")
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        pkg = self.repo / "pkg"
+        pkg.mkdir()
+        (pkg / "CLAUDE.md").write_text("# pkg\nThe package.\n")
+        body = "".join(f"def f{i}():\n    return {i}\n" for i in range(context.PROBE_FILE_LINES))
+        (pkg / "big.py").write_text(body)
+        (self.repo / "top.py").write_text(body)
+        g("add", "-A")
+        g("commit", "-qm", "a package")
+        self.spec.write_text("Change `big.py`, using `top.py`.\n")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-pkg", "--spec", str(self.spec), "--repo", str(pkg), "--model", "mimo")
+        wait_phase("t-pkg", {"review"})
+        task = store.Task("t-pkg")
+        self.assertEqual(task.spec["subdir"], "pkg")
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertIn("symbols --allow-tests -o json pkg/big.py", ran.read_text())  # run from the top
+        for shown in ("big.py", "../top.py"):                              # said from the package
+            self.assertIn(context.OUTLINE_HEAD.format(file=shown), prompt)
+            self.assertIn(f"more: `probe symbols {shown}`", prompt)
+            self.assertTrue((task.workdir / shown).is_file())
+        self.assertNotIn("pkg/big.py", prompt)
+        self.assertEqual(task.status["outline"], ["pkg/big.py", "top.py"])
+
+    def test_counting_a_named_files_lines_reads_it_a_chunk_at_a_time(self):
+        # review, 2026-11-21 (#857): read whole, a spec naming a large data file loaded all of it
+        lines = context.PROBE_FILE_LINES + 1
+        (self.repo / "data.csv").write_bytes(b"x" * (1 << 17) + b"\n" * (lines - 1) + b"end")
+        self.assertEqual(context.long_files("See data.csv and empty.txt.", self.repo), {"data.csv": lines})
+        (self.repo / "empty.txt").write_bytes(b"")
+        self.assertEqual(context.long_files("empty.txt", self.repo), {})
+        subprocess.run(["git", "-C", str(self.repo), "add", "data.csv"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "data"], check=True)
+        (self.repo / "data.csv").write_bytes(b"short\n")                  # the commit's, not the file's
+        self.assertEqual(context.long_files("data.csv", self.repo, rev="HEAD"), {"data.csv": lines})
+        with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("read whole")):
+            self.assertEqual(context.long_files("data.csv", self.repo), {})
+
     def test_aggressive_becomes_adaptables_pick_after_five_better_long_file_tasks_and_not_four(self):
         from workbench import tuning
         run_wb("experiment", "probe", "adaptable")

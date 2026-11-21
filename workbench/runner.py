@@ -829,8 +829,11 @@ def outline_section(task: store.Task, prompt: str) -> tuple[str, list[str]]:
     parts, files = [], []
     for k, (rel, syms) in enumerate(found):
         room = left // (len(found) - k)
-        head = context.OUTLINE_HEAD.format(file=rel)
-        more = lambda n: context.OUTLINE_MORE.format(n=n, file=rel)  # noqa: E731
+        # named as the agent reaches it from where it runs (task.workdir): in a package task
+        # `pkg/big.py`, from the worktree's top, sent it to pkg/pkg/big.py (review, 2026-11-21)
+        shown = os.path.relpath(task.worktree / rel, task.workdir)
+        head = context.OUTLINE_HEAD.format(file=shown)
+        more = lambda n: context.OUTLINE_MORE.format(n=n, file=shown)  # noqa: E731
         if room < len(head) + len(more(len(syms))) + 2:
             continue
         lines, room = [head], room - len(head) - 1
@@ -3091,6 +3094,10 @@ def drive(task: store.Task) -> None:
         _base_check(task)  # on the untouched base, before the agent and the GPU
     if opencode_moved(task):  # before the GPU is taken for a round that can't run (#866)
         return
+    if task.status.get("round", 1) == 1:  # before round 1's first OpenCode call (probe on), and
+        # before the lease: it needs no GPU, and a probe that hangs (20 s a file) held it from the
+        # other tasks, the model already loaded (review, 2026-11-21)
+        add_outline(task)
     # beside the running tasks' models when all fit the GPU, else alone once they finish
     with models.GpuLease(m, task.name, say) as lease:
         # this runner reached the lease: from now on gpu.json says whether it holds the GPU, so
@@ -3109,8 +3116,6 @@ def drive(task: store.Task) -> None:
                         ("probe_aggressive",) if task.spec.get("probe_explored") else ())
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
-        if task.status.get("round", 1) == 1:  # before round 1's first OpenCode call (probe on)
-            add_outline(task)
         handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)
         first = True
         revived = None  # the round run again after its server went away under it

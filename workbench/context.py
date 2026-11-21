@@ -564,9 +564,12 @@ def long_files(text: str, root: Path, sub: str | None = None, rev: str | None = 
     top = os.path.realpath(root)
     for p in spec_paths(text):
         for rel in ([f"{sub}/{p}"] if sub else []) + [p]:
+            # counted a chunk at a time: read whole, a spec naming a large data file loaded all
+            # of it, at wb start inside Claude's Bash limit (review, 2026-11-21)
+            lines = _Lines()
             if rev:
                 try:
-                    n = _count_lines(gitops.git_bytes(root, "cat-file", "blob", f"{rev}:{rel}"))
+                    gitops.git_hash(root, lines, "cat-file", "blob", f"{rev}:{rel}")
                 except gitops.GitError:
                     continue
             else:
@@ -574,17 +577,32 @@ def long_files(text: str, root: Path, sub: str | None = None, rev: str | None = 
                 if not real.startswith(top + os.sep) or not os.path.isfile(real):
                     continue
                 try:
-                    n = _count_lines(Path(real).read_bytes())
+                    with open(real, "rb") as f:
+                        while chunk := f.read(1 << 16):
+                            lines.update(chunk)
                 except OSError:
                     continue
+            n = lines.count()
             if n > PROBE_FILE_LINES:
                 out.setdefault(rel, n)
             break
     return out
 
 
-def _count_lines(data: bytes) -> int:
-    return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
+class _Lines:
+    """A file's lines, fed a chunk at a time (as gitops.git_hash feeds a hash): its newlines,
+    and one more for a last line without one."""
+
+    def __init__(self):
+        self.n, self.last = 0, b"\n"
+
+    def update(self, chunk: bytes) -> None:
+        if chunk:
+            self.n += chunk.count(b"\n")
+            self.last = chunk[-1:]
+
+    def count(self) -> int:
+        return self.n + (self.last != b"\n")
 
 
 # How wb accept --merge lands: a merge commit, fast-forward only, or one squashed commit (#352)
