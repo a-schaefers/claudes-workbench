@@ -10274,8 +10274,37 @@ class ClaudeSpend(Base):
         self.assertEqual(spend.usage(t2)["output"], 25)
         self.assertEqual(spend.usage(t2)["turns"], 1)
         self.assertEqual(spend.usage(t2)["calls"], 0.5)
-        self.assertEqual(spend.usage(self.task("never-named"))["output"], 0)
+        self.assertIsNone(spend.usage(self.task("never-named")))     # found, unnamed: unmeasured (#718)
         self.assertEqual(spend.usage(store.Task("theirs")), None)   # its session has no transcript
+
+    def test_a_task_a_subagent_started_reviewed_and_accepted_is_charged_its_calls(self):
+        # #718: the main turn's one call was the Agent tool's, which names no task, so the
+        # subagent's start, diff and accept were charged nothing, and the row's claude was all
+        # zeros, averaged into the router's cost as a measured 0
+        from workbench import spend
+        t = self.task("dates")
+        self.task("other")
+        main = self.transcript([
+            _turn("add date parsing, in a subagent", "2026-11-17T10:00:00Z"),
+            *_call("a1", "2026-11-17T10:00:01Z", 7),                       # the Agent tool call
+            _turn("what time is it?", "2026-11-17T10:30:00Z"),
+            *_call("a2", "2026-11-17T10:30:01Z", 1000),
+        ])
+        sub = main.parent / self.SID / "subagents" / "agent-1.jsonl"
+        sub.parent.mkdir(parents=True)
+        sub.write_text("".join(json.dumps(r) + "\n" for r in [
+            _turn("Hand the date parsing to a local agent and accept it.", "2026-11-17T10:00:02Z"),
+            *_call("s1", "2026-11-17T10:00:03Z", 10),                      # reading for the spec
+            *_call("s2", "2026-11-17T10:00:04Z", 20, "wb start dates --spec s.md"),
+            *_call("s3", "2026-11-17T10:00:05Z", 30, "wb wait dates"),
+            *_call("s4", "2026-11-17T10:10:00Z", 40, "wb diff dates"),
+            *_call("s5", "2026-11-17T10:10:01Z", 50),                      # reading the diff
+            *_call("s6", "2026-11-17T10:10:02Z", 60, "wb accept dates -m 'feat: dates'"),
+            *_call("s7", "2026-11-17T10:10:03Z", 70),                      # its report, after
+        ]))
+        u = spend.usage(t)
+        self.assertEqual((u["output"], u["turns"]), (10 + 20 + 30 + 40 + 50 + 60, 1))
+        self.assertIsNone(spend.usage(store.Task("other")))   # its transcript read, never named
 
     def test_the_turns_after_a_clear_are_charged_to_the_task_too(self):
         # #451: /clear continues the process under a new session id and transcript, and only the
@@ -10323,7 +10352,7 @@ class ClaudeSpend(Base):
         ])
         u = spend.usage(t2)
         self.assertEqual((u["output"], u["turns"]), (10 + 20 + 30 + 40 + 50, 1))
-        self.assertEqual(spend.usage(t3)["output"], 0)
+        self.assertIsNone(spend.usage(t3))
 
     def test_a_turn_of_other_work_ending_in_wb_start_charges_only_the_spec_before_it(self):
         from workbench import spend

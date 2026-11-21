@@ -498,8 +498,12 @@ session only:
   no tool result, not `isMeta` (an image a Read showed, a skill's body) and not
   `isCompactSummary`: those, taken for new turns, ended a review's charge mid-turn, and a summary
   quoting a wake was charged as one (#557);
-- a call naming several tasks is split evenly; a subagent's call is charged as the session's
-  call before it.
+- a call naming several tasks is split evenly;
+- each subagent's transcript is a thread of its own, charged by the same rules (its prompt starts
+  its turn, its `wb … <task>` calls name tasks, `CLOSING` and the reading before a `wb` apply),
+  in the turn of the session's call before it; a subagent call that names no task is charged as
+  that session call. Charged only that way, a task a subagent started, reviewed and accepted, in a
+  turn whose one session call was the Agent tool's, cost Claude nothing (#718).
 
 Charging whole turns was the first design and was wrong: one long autonomous turn that also ran a
 task put 5.5M cached tokens of other work on it (2026-11-17). What is missed: the accept's own
@@ -513,7 +517,9 @@ cache read 0.1, which errs high for the models whose reads cost less: no model i
 task saved*), or alone when there is no estimate (`claude: ~N K input-equivalent tokens over T
 turn(s)`), and
 `wb stats` averages it per model and size. A task with no session (started by hand, or before
-0.90) or whose transcript Claude Code has cleaned up records none. The router reads it
+0.90), whose transcript Claude Code has cleaned up, or whose transcript no call charges to it
+records none (`usage_by_step` gives None, and the row has no `claude`): written as a measured
+zero, it pulled the model's mean cost down in `_cheaper` and the stats (#718). The router reads it
 (`_cheaper`, *Choosing a model*).
 
 **Each step's share** (`spend.usage_by_step`, #558). A task of several steps (`wb next`) also
