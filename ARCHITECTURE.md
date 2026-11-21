@@ -5027,7 +5027,7 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
 - **Claude Code's dialogs** (the user, 2026-11-18: the terminal's dialog waited for nobody). While
   the user is away (a web message within 6 h, or since then while one of this session's
   `--backlog` tasks is open: a night's batch outlasts six hours, #110; none typed in the terminal
-  since), the listening
+  since: `chat/away.json`, the user's, not one session's, #688), every delegating
   session's mod puts them on the page as cards (`kind`):
   - `permission`: the tool and what it would run, with Deny and Allow, alike in weight (green made
     allowing look like the right answer, #103). When Claude said what the call is for (Bash's
@@ -5085,6 +5085,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   `CLAIM_STALE` (120 s) old (its session gone); exit 1 otherwise, and exit 1 with `<id> expired:
   over 6 hours unread, so not passed to Claude; the page offers to send it again` for an expired
   message (below).
+- `away.json`: `{at, by}`, written by the mod: when the listening session last passed on a web
+  message (seconds; `by` its key), `{at: 0}` once a prompt is typed in any session or the chat is
+  turned off. Every session reads it for whether the user is away (#688).
 - `listener.json`: `{session, cwd, pid, start, busy}`, written by the mod when it changes (`start`:
   its `wb events` process's, from the hello). A listener counts while its pid is this user's and
   started at `start` (`chat._alive`, which is `models._alive`: a root daemon under a recycled pid
@@ -5483,7 +5486,7 @@ const bound to one; imports from the module's own files also pass). The helpers 
 and an atom read under an old tag is absent, so change the tag when its type changes:
 `tasks` (`tasks-7`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
 updatedAt, tokens, recent, repo, cwd, session, claude_pid, claude_start, backlog, parked, allowed), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
-`chat` (`chat-3`, {key, delegating, webAt, url, web}: workbench mode lives here, plus the session's
+`chat` (`chat-4`, {key, delegating, url, web}: workbench mode lives here, plus the session's
 listener key and the web chat's switch as last read), `pane` (`pane-1`, {tab, open, focus,
 minimized}: the pane's tab, the open settings row, the option under the ring, the strip), `sessions` (`sessions-1`, string[]: every Claude Code session id this process
 has had, `mem.ids` while loaded), `savings` (`savings-1`, string: the pane's saving line, '' for
@@ -5518,7 +5521,7 @@ a failure toasts once (`can't run \`wb events\` (<why>)…: put wb on Claude Cod
 WB_BIN`) and the wait doubles up to a minute. A 1.5 s timer polls when there's no events child, a task is
 queued/running/testing/asking, a turn is queued, or 30 s passed since the last poll (`SAFETY_MS`). A
 450 ms timer animates the apprentice, blitting only changed frames. Each poll reads
-`chat/switch.json` (`readSwitch`: off clears the link and `webAt`); while the chat is on, every
+`chat/switch.json` (`readSwitch`: off clears the link and `chat/away.json`); while the chat is on, every
 10 minutes `wb chat url` refreshes the pinned link (`chatLink`; only a `…#token=…` URL is pinned;
 the call creates the token file if missing). Subprocess limits: `wb` 120 s (`wb update` 600 s, the engine's most: its steps
 take up to 300 s each), `wb watch` 30 s, `tail` 30 s, `kill -0` 5 s. `runWb` returns the exit
@@ -5702,10 +5705,14 @@ receipt `how=now`; busy → `session.send` into the running turn with WEB_NOTE, 
 prompt (`how=queued`); `wb chat ack <id> --by <key> --how …` once it entered (a dropped prompt
 gets no receipt and is tried again a minute later); a queued one is acked again `how=now` when
 that turn ends (`mem.chatQueued`, `readQueued`: by then Claude has it, at the turn's next step or
-as the next turn; the page said "Queued for Claude" for good, 2026-11-21), `webAt = now`, a toast. Dialogs
+as the next turn; the page said "Queued for Claude" for good, 2026-11-21), `chat/away.json`
+`{at: now, by: <key>}`, a toast. Away is the user's (#688: `away()` reads that file, so every
+session in workbench mode relays its dialogs and ends its wakes with AWAY_NOTE, not only the
+listener; kept in the listener's own state, another session's overnight backlog left its dialogs in
+the empty terminal, #110 again); a prompt typed in any session writes `{at: 0}` (`back`). Dialogs
 (`classic.PermissionRequest`; the terminal shows its dialog meanwhile, and the hook's answer
 settles it): unless a settings hook already decided, or the session isn't delegating with
-`webAt` within AWAY_MS (6 h; a prompt typed in the terminal sets it to 0) or this session with a
+`chat/away.json`'s `at` within AWAY_MS (6 h; a prompt typed in any session's terminal sets it to 0) or this session with a
 backlog task open (`awayNow`), `askOnChat` runs `wb
 chat ask --tool=<t> --kind=<KIND[tool], else permission> --text=<a permission's: the input's
 command, file_path, url, path or pattern, else its JSON, cut at 1500>` (each `--opt=value`, so a

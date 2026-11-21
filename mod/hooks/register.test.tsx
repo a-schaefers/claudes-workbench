@@ -1563,6 +1563,49 @@ test('a permission prompt while the user is away goes to the web chat, and their
   expect(runs.slice(n).some(a => a[2] === 'ask')).toBe(false)
 })
 
+test('a session that isn\'t listening treats the user as away too, relaying its dialogs and saying so in its wakes (#688)', async ($, on) => {
+  // #688: only the listening session set its own `webAt`, so another session's overnight backlog
+  // left its permission dialogs in the empty terminal (#110 again) and its wakes never said
+  // to answer in the chat
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project' })
+  fakeTasks(on, files)
+  chatOn(files)
+  files['/wb/chat/listener.json'] = JSON.stringify({ session: 'other-key', pid: 777, start: '1' }) // another session listens
+  files['/proc/777/stat'] = `777 (wb) S 1 ${'0 '.repeat(17)}1 0 0`
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    const [, cmd, act] = e.argv
+    if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: 'ask-1-ab open\n', stderr: '' } }
+    if (cmd === 'chat' && act === 'wait') return { value: { exitCode: 0, stdout: JSON.stringify({ answer: 'allow' }), stderr: '' } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('classic.PermissionRequest', () => ({}))
+  const ask = (tool_name: string, tool_input: unknown) =>
+    $.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(files['/wb/chat/listener.json']).toContain('other-key')   // still the other's
+  files['/wb/chat/away.json'] = JSON.stringify({ at: 1_800_000_000, by: 'other-key' }) // it took a web message
+  expect((await ask('Bash', { command: 'git push' })).decision).toEqual({ behavior: 'allow' })
+  expect(runs.some(a => a[2] === 'ask')).toBe(true)
+  notice(files, { ts: ts0 + 5, task: 'fix-it', kind: 'review', text: 'REPORT-fix-it' })
+  await clock.advance(31_000)                                   // the safety poll reads it
+  expect(woken.find(t => t.includes('REPORT-fix-it'))).toContain('wb chat reply')  // AWAY_NOTE
+  await $.prompt.submit({ text: 'back now' } as any)             // typed here: back, for every session
+  expect(JSON.parse(files['/wb/chat/away.json']).at).toBe(0)
+  const n = runs.length
+  expect((await ask('Bash', { command: 'git push' })).decision).toBeUndefined()
+  expect(runs.slice(n).some(a => a[2] === 'ask')).toBe(false)
+})
+
 test('a dialog wb chat ask refuses is announced on the phone, and a long plan or preview is cut to fit', async ($, on) => {
   // #535 (the 2026-11-20 audit): a long or CJK plan was refused, and the dialog sat in the
   // terminal with nothing posted and nothing said

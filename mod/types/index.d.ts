@@ -37,9 +37,10 @@ export type WbLine = { s: string; t: string }
 /** The task the pane follows live, and its transcript so far (the newest lines). */
 export type WbLive = { task: string; lines: WbLine[] }
 
-/** This session and the web chat: whether it listens, when the user last wrote from there, and
- * whether the user has it on (`wb chat on|off`: off, no link and no listening). */
-export type WbChat = { key: string; delegating: boolean; webAt: number; url: string; web: boolean }
+/** This session and the web chat: whether it listens and whether the user has it on (`wb chat
+ * on|off`: off, no link and no listening). When the user last wrote from there is chat/away.json,
+ * every session's (#688). */
+export type WbChat = { key: string; delegating: boolean; url: string; web: boolean }
 
 /** The pane's view: its tab ('tasks', 'stats' or 'settings'), the settings row open ('' none,
  * 'coding', 'chat', 'record', 'live', 'every', 'progress'), the option the focus ring is on ('' none),

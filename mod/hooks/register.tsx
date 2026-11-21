@@ -122,7 +122,7 @@ const HISTORY_CHARS = 60000
 // The user turns it on or off (`wb chat on|off`, or the pane's row; chat/switch.json): off by
 // default, and then no session listens, sends it prompts or shows its link (the user, 2026-11-19).
 const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
-  { key: '', delegating: false, webAt: 0, url: '', web: false } as WbChat, { shape: 'chat-3' })
+  { key: '', delegating: false, url: '', web: false } as WbChat, { shape: 'chat-4' })
 // The pane's view: a Tasks tab and a Settings tab, as backseat-driver's (the user, 2026-11-19: the
 // settings belong on a page of their own). A settings row names its value, a press opens its
 // options under it as Buttons (a click or the ring's Enter picks), the option under the ring or the
@@ -170,8 +170,19 @@ export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) =>
   return !list.some(t => ACTIVE.has(t.phase) ||
     (waitsOnClaude(t) && isMine(t) && now - t.updatedAt <= REWAKE_MAX_MS))
 }
+// Away is the user's, not one session's (#688): the listening session records the last web
+// message in chat/away.json and a prompt typed in any session clears it, so every delegating
+// session relays its dialogs and says AWAY_NOTE. Kept in the listener's own state, only it did:
+// another session's overnight backlog left its permission dialogs in the empty terminal (#110 again).
+const awayFile = () => `${mem.root}/chat/away.json`
+async function webAt($: any): Promise<number> {
+  return Number((await readJson($, awayFile())).at ?? 0) * 1000 || 0
+}
 async function away($: any, st: WbChat): Promise<boolean> {
-  return awayNow(st.webAt, await $.clock.now(), await read($, tasks), mine)
+  return st.web && awayNow(await webAt($), await $.clock.now(), await read($, tasks), mine)
+}
+async function back($: any) {
+  if (await webAt($)) await $.fs.write(awayFile(), JSON.stringify({ at: 0 })).catch(() => {})
 }
 // Said in the context blocks while away, and in each wake while away (#540): those blocks come once
 // per conversation, so a user who went to the web chat later was never told of, and a task's
@@ -2016,7 +2027,8 @@ async function readSwitch($: any) {
   const web = !!(await readJson($, `${mem.root}/chat/switch.json`)).on
   if (web === (await read($, chat)).web) return
   if (web) mem.chatUrlAt = 0
-  await update($, chat, c => ({ ...c, web, ...(web ? {} : { url: '', webAt: 0 }) }))
+  await update($, chat, c => ({ ...c, web, ...(web ? {} : { url: '' }) }))
+  if (!web) await back($)
 }
 
 // The web chat's link while it is on, looked up again every ten minutes (it changes only with the token)
@@ -2078,7 +2090,7 @@ async function listen($: any, now: number) {
       if (r.isDelivered) await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', 'now'])
       else void sendWeb($, id, text, 'queued', st.key)
     } else void sendWeb($, id, text, 'now', st.key)
-    await update($, chat, c => ({ ...c, webAt: now }))
+    await $.fs.write(awayFile(), JSON.stringify({ at: now / 1000, by: st.key })).catch(() => {})
     $.ui.toast('workbench: a message from the web chat')
   }
 }
@@ -2534,9 +2546,7 @@ export const register: Register = (on, options) => {
 
   // Typed in the terminal: the user is back, so answers go here again
   on('prompt.submit', async ($, e, next) => {
-    if (!e.isMeta && !e.text.startsWith(WEB) && !e.text.startsWith('[workbench]') && (await read($, chat)).webAt) {
-      await update($, chat, c => ({ ...c, webAt: 0 }))
-    }
+    if (!e.isMeta && !e.text.startsWith(WEB) && !e.text.startsWith('[workbench]')) await back($)
     return next(e)
   })
 
