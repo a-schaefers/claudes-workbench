@@ -3356,6 +3356,30 @@ class WorktreeSetup(Base):
         wait_phase("t-c9", {"review"})
         self.assertNotIn("local-input.dat", gitops.changed(store.Task("t-c9").worktree))
 
+    def test_takeover_refuses_a_task_whose_checkout_never_finished_so_a_hand_back_keeps_claudes_edits(self):
+        # #655: takeover after a failed checkout said "Edit in …/worktree"; wb feedback's runner saw
+        # checked_out unset, removed the worktree and made it again, and Claude's edits were gone
+        subprocess.run(["git", "-C", str(self.repo), "tag", "v0"], check=True)
+        self.ignore("local.dat")
+        (self.repo / "local.dat").write_text("LOCAL\n")
+        self.start("t-co", "ok", "--copy", "local.dat", "--base", "v0")
+        wait_phase("t-co", {"failed"})
+        task = store.Task("t-co")
+        self.assertFalse(runner.checked_out(task))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("takeover", "t-co")
+        self.assertIn("its worktree isn't ready yet", err.getvalue())
+        self.assertNotEqual(task.status["last"], "Claude took over")
+        # one taken over before the refusal: the runner fails it, never makes it again
+        task.set_status(phase="review", last="Claude took over", taken_over=True)
+        (task.worktree / "claude.txt").write_text("mine\n")
+        run_wb("feedback", "t-co", "--text", "carry on")
+        wait_phase("t-co", {"failed"})
+        self.assertEqual((task.worktree / "claude.txt").read_text(), "mine\n")
+        note = [r for r in store.notices() if r["task"] == "t-co"][-1]["text"]
+        self.assertIn("handed to Claude before its checkout finished", note)
+
     def test_copy_refuses_a_virtualenv_and_says_to_recreate_it_with_setup(self):
         # #260 (the audit of 1.2): a copied .venv's activate and shebangs named the checkout, so
         # the task's tests ran the developer's environment and its writes left the lane

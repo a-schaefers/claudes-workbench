@@ -1595,6 +1595,11 @@ def checkout(task: store.Task) -> bool:
     if checked_out(task):
         return True
     spec, wt = task.spec, task.worktree
+    # Claude has had this worktree (wb takeover refuses one not checked out, but not a task taken
+    # over before it did): never removed and made again under Claude's edits (#655)
+    if task.status.get("taken_over") and os.path.lexists(wt):
+        return _checkout_failed(task, "the worktree was handed to Claude before its checkout "
+                                "finished", f"wb discard {task.name} and start again")
     repo = Path(spec["repo"])
     task.set_status(last="checking out the base")
     # the disk may have filled since wb start measured it: a checkout cut short by a full disk

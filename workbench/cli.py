@@ -1976,6 +1976,9 @@ def cmd_takeover(a):
     task = need(a.name)
     if task.status.get("phase") in store.CLOSED:
         die(f"{a.name} is {task.status.get('phase')}")
+    if not runner.checked_out(task):  # the runner's checkout, running or failed: a hand-back made
+        # it again from nothing, and Claude's edits went with the old worktree (#655)
+        die(f"{a.name}: its worktree isn't ready yet: wait for it, or wb discard {a.name}")
     _coding_gate(task, getattr(a, "user", False))
     if getattr(a, "user", False) and coding_mode() != "decide":  # the user's hand-back: Claude
         _allow(task, "the whole task: the user handed it to Claude",  # finishes it (the mod's
@@ -1983,7 +1986,7 @@ def cmd_takeover(a):
     _stop_runner(task)
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "takeover",
                 "text": "Claude took over"})
-    task.set_status(phase="review", last="Claude took over", pid=None)
+    task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True)
     _ack_all(task)
     print(f"took over {a.name}: the agent is stopped. Edit in {task.worktree} and leave it "
           f"uncommitted, then wb accept {a.name} -m \"…\" (it commits), or hand it back with "
