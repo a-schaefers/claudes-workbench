@@ -10797,12 +10797,36 @@ class Routing(Base):
         top, why = router.choose("trivial")
         self.assertEqual(top.model.id, big)
         self.assertIn("costs Claude least on trivial work", why)
-        self.assertIn("~50K Claude tokens a task", why)
+        self.assertIn("~50K Claude tokens a landed step", why)
         self.result(big, "trivial", "accepted", n=6, claude=cost(110))    # now ~90K: within 15%
         self.assertEqual(router.choose("trivial")[0].model.id, small)
         self.result(big, "trivial", "discarded", n=9)                      # out of the band
         self.result(small, "trivial", "accepted", n=9, claude=cost(100))
         self.assertEqual(router.choose("trivial")[0].model.id, small)
+
+    def test_claude_s_cost_is_compared_per_landed_step_so_chains_and_discards_count_fairly(self):
+        # #903 (the third audit of 2026-11-21): the mean a task set a model whose record held
+        # `wb next` chains (a row is the whole chain's cost) as dear beside one that ran single
+        # tasks, and a discard, which records only what Claude spent before it, as a cheap task
+        from workbench import router
+        cost = lambda k: {"input": 0, "cache_read": 0, "output": 0, "cache_write_5m": 0,  # noqa
+                          "cache_write_1h": k * 500}                                  # k thousand
+        small, big = "ollama/mimo-v2.6:9b-q8_0", "ollama/qwen3.8-27b"
+        steps = lambda n: [{"landed": True} for _ in range(n)]  # noqa
+        self.result(small, "trivial", "accepted", n=3, claude=cost(60))
+        # 160K a 4-step chain is 40K a step, and 40K a single task: cheaper than 60K, though its
+        # mean a task (100K) is more than twice the small model's
+        self.result(big, "trivial", "accepted", n=2, claude=cost(160), steps=steps(4))
+        self.result(big, "trivial", "accepted", n=2, claude=cost(40), steps=steps(1))
+        top, why = router.choose("trivial")
+        self.assertEqual(top.model.id, big)
+        self.assertIn("~40K Claude tokens a landed step", why)
+        # cheap discards (5K before giving up, nothing landed) don't make a model look cheap
+        self.result(small, "trivial", "accepted", n=8, claude=cost(60))
+        self.result(big, "trivial", "discarded", n=1, claude=cost(5))
+        sc = {s.model.id: s for s in router.rank("trivial")}
+        self.assertGreater(sc[big].claude, 40_000)  # the 5K added with no landed step
+        self.assertEqual(sc[big].claude_n, 5)
 
     def test_the_record_on_the_same_kind_of_work_counts_most(self):
         from workbench import router

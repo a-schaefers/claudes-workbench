@@ -12,7 +12,7 @@ decides: for significant work the largest model (more parameters, better judgmen
 work the smallest (faster), and at equal size the one already on the GPU. Claude's tokens are
 what workbench saves, so once two of those models each have COST_MIN tasks of the size with what
 they cost Claude recorded (results' `claude`: the session's calls on the task), one that costs
-Claude COST_MARGIN less a task than the guess's pick goes first: on 2026-11-18 the smaller,
+Claude COST_MARGIN less a landed step (#903) than the guess's pick goes first: on 2026-11-18 the smaller,
 faster model the guess sends trivial work to cost Claude more, in its review and fixes, than a
 larger one whose first change was right. A model too big for
 the GPU (models.need over its budget) spills into RAM and runs several times slower, so in that
@@ -82,8 +82,8 @@ class Score:
     stack: tuple = ()              # the kind of work asked about, and the record on it
     like_tries: int = 0
     like_wins: float = 0
-    claude: float | None = None    # mean input-equivalent tokens a task cost Claude (spend.py)
-    claude_n: int = 0              # the tasks it is the mean of
+    claude: float | None = None    # input-equivalent tokens a landed step cost Claude (spend.py)
+    claude_n: int = 0              # the tasks it is measured over
     cheaper: bool = False          # put ahead of the guess for costing Claude less (_cheaper)
     explored: bool = False         # put first to explore it (choose's task_name)
     # the record weighed by recency (HALF_LIFE_DAYS); None: as counted
@@ -101,7 +101,7 @@ class Score:
             return "no real tasks yet"
         t = f", ~{self.minutes:.1f} min of active work a step" if self.minutes is not None else ""
         like = f", {round(self.like_wins, 1):g}/{self.like_tries} on {'/'.join(self.stack)}" if self.like_tries else ""
-        c = f", ~{self.claude / 1000:.0f}K Claude tokens a task" if self.claude_n >= COST_MIN else ""
+        c = f", ~{self.claude / 1000:.0f}K Claude tokens a landed step" if self.claude_n >= COST_MIN else ""
         return f"{round(self.wins, 1):g}/{self.tries} real tasks accepted{like}{t}{c}"
 
 
@@ -224,9 +224,21 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     s.w = (sum(_weight(r, now) for r in real), sum(_weight(r, now) * tuning.credit(r) for r in real),
            sum(_weight(r, now) for r in like), sum(_weight(r, now) * tuning.credit(r) for r in like))
     s.minutes, s.minutes_n = _typical(real)
-    spent = [spend.weighted(r["claude"]) for r in real if isinstance(r.get("claude"), dict)]
-    s.claude, s.claude_n = (statistics.fmean(spent) if spent else None), len(spent)
+    s.claude, s.claude_n = _per_step(real)
     return s
+
+
+def _per_step(real: list[dict]) -> tuple[float | None, int]:
+    """What Claude spent on the rows with a `claude`, over the steps of theirs that landed as the
+    agent's (credit x steps), and how many rows that is. The mean a task set a model whose record
+    held `wb next` chains (a row is the whole chain's cost) as dear beside one that ran single
+    tasks, and counted a discard, which records only what Claude spent before giving up, as a
+    cheap task (#903, the third audit of 2026-11-21). None while no step landed."""
+    rows = [r for r in real if isinstance(r.get("claude"), dict)]
+    landed = sum(tuning.credit(r) * tuning._steps(r) for r in rows)
+    if not landed:
+        return None, 0
+    return sum(spend.weighted(r["claude"]) for r in rows) / landed, len(rows)
 
 
 def _typical(real: list[dict]) -> tuple[float | None, int]:

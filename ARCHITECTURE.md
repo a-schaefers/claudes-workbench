@@ -3564,11 +3564,15 @@ weight bytes for `significant` work, the smallest for `trivial` (a size the serv
 guessed from the name, `Score.guessed`; a model of unknown size still ranks last), then
 the one already resident. Then what Claude spends (`_cheaper`): once the guess's pick and another
 model in the band each have `COST_MIN` 3 tasks of the size with a results `claude` (spend.py), the
-one whose mean costs Claude `COST_MARGIN` 15% less goes first ("costs Claude least on <size>
-work"; a model that would spill never jumps one that fits). Claude's tokens are what workbench
+one that costs Claude `COST_MARGIN` 15% less a landed step goes first ("costs Claude least on <size>
+work"; a model that would spill never jumps one that fits). A landed step (`_per_step`): the rows'
+weighted `claude` summed, over their `tuning.credit` times their steps, so a `wb next` chain's row,
+which holds the whole chain's cost, is set against single tasks per step, and a discard adds what
+Claude spent with no landed work; as a mean a task, a chain-heavy record looked dear and a model
+discarded more often looked cheap (#903). Claude's tokens are what workbench
 saves, and on 2026-11-18 the smaller model the guess sends trivial work to cost Claude more in
 review and fixes than a larger one whose first change was right. With no spend recorded the guess
-stands, so a new install routes as before. `Score.line` adds `~NK Claude tokens a task` once
+stands, so a new install routes as before. `Score.line` adds `~NK Claude tokens a landed step` once
 it is evidence. The rest follow by quality, unavailable models last. `allowed()`:
 models.json `sizes`; when it leaves no model, `choose` says "no local model takes <size> tasks
 (…: limited by wb model sizes; …, or pass --model)", not that there are none. **Exploring** (`choose(size, stack, task_name)`, from `wb start`): one task in
