@@ -617,15 +617,19 @@ NOTE_MAX = 2000
 AWAY = ("ask", "allow")  # prefs.json `away`: ask the user here, or let Claude go ahead
 
 
-def ask(tool: str, text: str, kind: str = "permission", detail: dict | None = None) -> dict:
+def ask(tool: str, text: str, kind: str = "permission", detail: dict | None = None,
+        pid: int | None = None) -> dict:
     """A new ask. A permission while the user's setting says `allow` is answered at once, by
-    `setting`, and stays in the thread so they see what ran."""
+    `setting`, and stays in the thread so they see what ran. ``pid``: the asking session's `wb
+    events` process, which lives exactly as long as the session; once it is gone the ask expires."""
     if kind not in KINDS:
         raise ValueError(kind)
     row = {"id": f"ask-{int(time.time() * 1000)}-{secrets.token_hex(4)}", "ts": store.now(),
            "tool": tool[:200], "text": text[:ASK_TEXT], "kind": kind}
     if detail is not None:
         row["detail"] = fit_detail(detail)
+    if pid:
+        row["pid"] = int(pid)
     store.append_jsonl(chat_dir() / "asks.jsonl", row)
     _open_update(lambda w: w["asks"].__setitem__(row["id"], row))
     if kind == "permission" and prefs()["away"] == "allow":
@@ -684,8 +688,21 @@ def asks(limit: int = 20) -> list[dict]:
                    key=lambda a: (a.get("ts", 0), a.get("id", "")))
     rows, now = list(seen.values()), store.now()
     out = older + [a for a in rows[:max(0, len(rows) - limit)] if a["answer"] is None] + rows[-limit:]
+    for a in out:
+        if a["answer"] is None and a.get("pid") and not _alive(a["pid"]):
+            _orphaned(a)
     return [{**a, "stale": True} if a["answer"] is None and now - a["ts"] > ASK_STALE else a
             for a in out]
+
+
+def _orphaned(a: dict) -> None:
+    """Expire an open ask whose session is gone (its pid), by `interrupted`, in place. A Bash card
+    left by a crashed or closed session stayed open for good: answerable for an hour though nobody
+    waited, then "it waits in the terminal", and every later push showed it (#538)."""
+    row = {"id": a["id"], "ts": store.now(), "answer": "expired", "by": "interrupted"}
+    store.append_jsonl(chat_dir() / "asks.jsonl", row)
+    _answered({k: v for k, v in a.items() if k not in ("answer", "stale")}, row)
+    a.update(answer="expired", answered=row["ts"], by="interrupted")
 
 
 def find_ask(ask_id: str) -> dict | None:

@@ -1270,7 +1270,8 @@ test('a permission prompt while the user is away goes to the web chat, and their
   await clock.advance(3000)                                     // a web message: the user is away
   expect((await ask('Bash', { command: 'git push origin main', description: 'Push the fix' })).decision).toEqual({ behavior: 'allow' })
   expect(runs.find(a => a[2] === 'ask')).toEqual(['wb', 'chat', 'ask', '--tool=Bash', '--kind=permission',
-    '--text=git push origin main', '--detail={"purpose":"Push the fix"}'])  // the card leads with it (#103)
+    '--text=git push origin main', '--pid=4242', '--detail={"purpose":"Push the fix"}'])  // the card leads with it (#103);
+  // the pid is this session's `wb events`: once it's gone wb expires the ask (#538)
   expect(runs.find(a => a[2] === 'wait')?.slice(0, 4)).toEqual(['wb', 'chat', 'wait', 'ask-1-ab'])
   expect(toasts.some(t => t.includes('waiting for you in the web chat'))).toBe(true)
 
@@ -1279,7 +1280,7 @@ test('a permission prompt while the user is away goes to the web chat, and their
   expect(no.behavior).toBe('deny')
   expect(no.message).toContain('wb chat reply')                  // Claude asks the user what instead
   expect(no.message).toContain('not on main')                    // with their words
-  expect(runs.filter(a => a[2] === 'ask').at(-1)?.at(-1)).toBe('--text=/etc/hosts')
+  expect(runs.filter(a => a[2] === 'ask').at(-1)).toContain('--text=/etc/hosts')
 
   // a finished plan: approved, or sent back with a note
   said = { answer: 'allow' }

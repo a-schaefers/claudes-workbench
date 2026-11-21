@@ -3387,7 +3387,7 @@ def cmd_chat(a):
         if not (a.text or a.kind != "permission"):
             die("wb chat ask --kind permission needs --text")
         try:
-            row = chat.ask(a.tool, a.text or "", a.kind, detail)
+            row = chat.ask(a.tool, a.text or "", a.kind, detail, pid=a.pid)
             if unknown:  # nothing to answer on the page: the dialog comes up in its terminal
                 row = chat.answer(row["id"], "expired", "terminal")
         except ValueError as e:
@@ -4402,6 +4402,8 @@ def parser() -> argparse.ArgumentParser:
                    "or {plan_file}")
     s.add_argument("--session", help="ask: the Claude Code session asking (its plan file)")
     s.add_argument("--repo", help="ask: the session's directory (named when its plan is unknown)")
+    s.add_argument("--pid", type=int, help="ask: the asking session's `wb events` process: once it "
+                   "is gone, the ask expires")
     s.add_argument("--note", help="answer: words to pass on with it")
     s.add_argument("--timeout", type=float, default=30, help="wait: seconds")
     s.add_argument("--json", action="store_true", help="wait: the whole ask, answered or not")

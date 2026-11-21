@@ -11578,6 +11578,27 @@ class WebChat(Base):
             chat.answer(chat.ask("Bash", "ls")["id"], "allow", "web")  # a day on, it is let go
             self.assertNotIn(old["id"], chat.open_work()["answered"])
 
+    def test_a_prompt_whose_session_died_expires_and_takes_no_answer(self):
+        # #538 (the 2026-11-20 audit, reproduced): a Bash card whose session crashed stayed open
+        # for good, took an Allow nobody waited for, and every later push showed it
+        chat = self.chat
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        dead = run_wb("chat", "ask", "--tool", "Bash", "--text", "rm -rf build", "--pid", str(gone.pid)).split()[0]
+        live = chat.ask("Bash", "make", pid=os.getpid())
+        old = chat.ask("Bash", "ls")                                          # from a wb before the pid
+        listed = {a["id"]: a for a in chat.snapshot()["asks"]}
+        self.assertEqual((listed[dead]["answer"], listed[dead]["by"]), ("expired", "interrupted"))
+        self.assertIsNone(listed[live["id"]]["answer"])
+        self.assertIsNone(listed[old["id"]]["answer"])
+        self.assertEqual(chat.answer(dead, "allow", "web")["answer"], "expired")  # no answer for nobody
+        self.assertEqual(self.call("/api/answer", {"id": dead, "answer": "allow"}, token=chat.token())[1]["ask"]["answer"],
+                         "expired")
+        self.assertEqual(run_wb("chat", "wait", dead, "--timeout", "0.1").strip(), "expired")
+        self.assertNotIn(dead, chat.open_work()["asks"])
+        self.assertEqual(sum(r.get("id") == dead and "answer" in r              # expired once
+                             for r in store.read_jsonl(chat.chat_dir() / "asks.jsonl")[0]), 1)
+
     def test_wb_chat_wait_blocks_until_the_answer_or_says_open(self):
         chat = self.chat
         a = chat.ask("Write", "/etc/hosts")

@@ -1445,6 +1445,9 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
   const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
   // `--opt=value`: a value starting with `-` was read as a flag (#535)
   const args = ['chat', 'ask', `--tool=${tool}`, `--kind=${kind}`, `--text=${kind === 'permission' ? askText(input) : ''}`]
+  // this session's `wb events` process: once it's gone wb expires the ask, so a card left by a
+  // crashed or closed session doesn't stay open for good, and pushes don't show it (#538)
+  if (mem.eventsPid) args.push(`--pid=${mem.eventsPid}`)
   if (kind === 'question') args.push(`--detail=${JSON.stringify({ questions: askQuestions(i.questions) })}`)
   // what the call is for, as Claude described it (Bash's description): the card leads with it
   if (kind === 'permission' && typeof i.description === 'string' && i.description.trim())

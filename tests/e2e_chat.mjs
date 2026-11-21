@@ -5,6 +5,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, copyFileSync, readFileSync, existsSync, rmSync, statSync, utimesSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createServer, connect as dial } from 'node:net'
+import { runInNewContext } from 'node:vm'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -503,6 +504,23 @@ async function run(engine, device) {
   await browser.close()
   await stopServer()
 }
+
+// The worker's notification text, run in node against a given state (no browser shows a push)
+async function swSays(state) {
+  const ctx = { self: { addEventListener() {} }, caches: { open: async () => ({ match: async () => null }) },
+    fetch: async () => ({ ok: true, json: async () => state }), Date, Math, String }
+  runInNewContext(readFileSync(join(ROOT, 'workbench/chat_static/sw.js'), 'utf8'), ctx)
+  return ctx.what()
+}
+await check("a push shows Claude's newer reply over an older or stale prompt, and an open newer prompt over it", async () => {
+  // #538 (the 2026-11-20 audit): a dead session's card beat every later reply in every push
+  const ask = { id: 'ask-1', ts: 100, tool: 'Bash', text: 'rm -rf build', kind: 'permission', answer: null }
+  const reply = { id: 'r1', ts: 200, from: 'claude', text: 'Tests pass, ready for review' }
+  const said = async s => (await swSays({ now: 300, push: {}, ...s })).body
+  if (await said({ asks: [ask], messages: [reply] }) !== 'Tests pass, ready for review') throw new Error('the older prompt won')
+  if (await said({ asks: [{ ...ask, ts: 250, stale: true }], messages: [reply] }) !== 'Tests pass, ready for review') throw new Error('a stale prompt won')
+  if (await said({ asks: [{ ...ask, ts: 250 }], messages: [reply] }) !== 'rm -rf build') throw new Error('the newer prompt lost')
+})
 
 try {
   await run('webkit', 'iPhone 13')
