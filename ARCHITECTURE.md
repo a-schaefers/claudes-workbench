@@ -3375,8 +3375,12 @@ a server that says none of these is idle) (a running server with no `stop` is le
 that it may hold GPU memory); after a stop that succeeded, free_gpu waits up to `STOP_SETTLE`
 (30 s) in all, first until each stopped server stops answering (`status` not resident: a stop
 like `pkill vllm` returns at once, and two equal reads a second apart, before the server had begun
-to let go, read as released, #898), then `released` until the cards' used VRAM stops falling
-(`media.settle` waits the same way), since a stop returns before the memory is freed and Ollama
+to let go, read as released, #898), or until the cards use less than before the first stop
+(`_vram_used`, by more than `FALLING` 64 MiB: a stop that unloads and leaves its server answering,
+an unload endpoint or `lms unload`, paid all 30 s on every round; a server seen still answering at
+the end of that wait is in `_STOP_STAYS` and, for the rest of the process, waited on only through
+its VRAM, so one stopped again with nothing loaded costs a second, reviewing #898), then
+`released` until the cards' used VRAM stops falling (`media.settle` waits the same way), since a stop returns before the memory is freed and Ollama
 loading at once split the model (#703); every model loaded on each discovered Ollama server is unloaded
 (`POST /api/generate {keep_alive: 0}`) except kept ones, and except models.json's `keep_loaded`
 (`keep_loaded()`: ids or Ollama names; a server whose model is listed is never stopped), which

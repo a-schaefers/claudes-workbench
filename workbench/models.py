@@ -1567,6 +1567,7 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
     # a server swaps its own models; one serving another model on the kept one's port is stopped
     done = lmstudio | {o.server for o in kept if o.engine == "server"
                        and (not _contended(o) or status(o)["resident"])}
+    base, took = None, False  # the cards' used VRAM before the first stop (the wait after it)
     for other in local:
         if other.engine != "server" or other.server in done or not status(other)["resident"]:
             continue
@@ -1579,6 +1580,8 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
         while not _server_idle(other) and time.monotonic() < deadline:  # never cut off a reply
             time.sleep(5)
         say(f"stopping {other.id}")
+        if not took:
+            base, took = _vram_used(), True
         try:
             r = subprocess.run(other.stop, shell=True, capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=300)  # any bytes (#664)
@@ -1594,10 +1597,19 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
         # a stop (pkill llama-server) returns before the server's VRAM is freed: Ollama loading
         # at once found it taken and put part of the model on the CPU (#703). Waiting for the
         # VRAM to stop falling alone ended in a second while the server still held it all, two
-        # equal reads before it had begun to let go (#898): first until it stops answering
+        # equal reads before it had begun to let go (#898): first until it stops answering, or
+        # the cards hold less than before the stops. A stop that unloads and leaves the server
+        # up (an unload endpoint, `lms unload`) never stops answering, and paid all of
+        # STOP_SETTLE on every round; one seen still answering isn't waited on again
+        # (_STOP_STAYS): stopped again with nothing loaded, the VRAM had nothing to give back
+        # (reviewing #898, 2026-11-21)
         deadline = time.monotonic() + STOP_SETTLE
-        while any(status(o)["resident"] for o in stopped) and time.monotonic() < deadline:
+        wait = [o for o in stopped if o.server not in _STOP_STAYS]
+        while (up := [o for o in wait if status(o)["resident"]]) and time.monotonic() < deadline:
+            if base is not None and (used := _vram_used()) is not None and used < base - FALLING:
+                break  # it has begun to let go: released follows it down
             time.sleep(1)
+        _STOP_STAYS.update(o.server for o in up)
         released(max(deadline - time.monotonic(), 0))
     kept_ollama = [o for o in kept if o.engine == "ollama"]
     doomed = {root: [name for name in _ollama_loaded(root)  # every model Ollama has loaded,
@@ -1617,19 +1629,29 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
 
 
 STOP_SETTLE = 30  # seconds free_gpu waits at most for a stopped server's VRAM to be released
+FALLING = 64 * 2 ** 20  # less than this given back is VRAM no longer falling (released, free_gpu)
+# Servers a stop of free_gpu's left answering (it unloads, the server stays): this process waits
+# only for their VRAM after the next stop
+_STOP_STAYS: set = set()
+
+
+def _vram_used() -> int | None:
+    """The bytes of VRAM the cards use, together; None where no card says (a Mac, a GPU named
+    from Windows)."""
+    cards = [g["vram_used"] for g in hardware.gpus(windows=False) if g.get("vram_used") is not None]
+    return sum(cards) if cards else None
 
 
 def released(timeout: float) -> bool:
-    """Wait, up to ``timeout`` seconds, until the GPUs' used VRAM stops falling (less than 64 MiB
-    a second): memory let go returns after the call that let it go. True once it has; at once
-    where no card says its use (a Mac, a GPU named from Windows)."""
+    """Wait, up to ``timeout`` seconds, until the GPUs' used VRAM stops falling (less than
+    FALLING a second): memory let go returns after the call that let it go. True once it has; at
+    once where no card says its use (a Mac, a GPU named from Windows)."""
     deadline, last = time.time() + timeout, None
     while time.time() < deadline:
-        cards = [g["vram_used"] for g in hardware.gpus(windows=False) if g.get("vram_used") is not None]
-        if not cards:
+        used = _vram_used()
+        if used is None:
             return True
-        used = sum(cards)
-        if last is not None and last - used < 64 * 2 ** 20:
+        if last is not None and last - used < FALLING:
             return True
         last = used
         time.sleep(1)

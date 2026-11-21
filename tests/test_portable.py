@@ -148,6 +148,7 @@ class Real(unittest.TestCase):
         models._DOWN.clear()
         models._KEYS.clear()
         models._FACTS.clear()
+        models._STOP_STAYS.clear()
         self.servers = []
         no_gpu = mock.patch.object(models.hardware, "gpus", lambda windows=True: [])  # this machine's
         no_gpu.start()  # would decide what fits; a test that wants a budget sets models.json gpu_gb
@@ -714,7 +715,26 @@ class Real(unittest.TestCase):
                 mock.patch.object(models, "time", mock.Mock(wraps=time, sleep=lambda s: None)):
             models.free_gpu(say=lambda m: None)
         self.assertGreater(len(answered), 3)               # waited until it stopped answering
-        self.assertTrue(seen and min(seen) > 3)            # and read the VRAM only after
+        self.assertEqual(seen[0], 0)                       # the cards read before the stop: held
+        self.assertTrue(seen[-1] > 3)                      # and read as released only after
+
+    def test_a_stop_that_unloads_and_leaves_its_server_answering_is_not_waited_on_for_30_s(self):
+        # reviewing #898 (2026-11-21): free_gpu waited, up to STOP_SETTLE, for a stopped server to
+        # stop answering; a stop that unloads (an unload endpoint, `lms unload`) leaves it up and
+        # listing its model, so every free_gpu paid 30 s, and again each round it was stopped
+        flag = Path(self.tmp.name) / "unloaded"
+        srv = self.server({"/v1/models": {"data": [{"id": "m"}]}})       # it answers throughout
+        self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}},
+                    {"s": {"stop": f"touch '{flag}'"}})
+        took = []
+        with mock.patch.object(models.hardware, "gpus", lambda windows=True: [
+                {"name": "card", "vram": 16 * 2 ** 30, "vram_used": (2 if flag.exists() else 8) * 2 ** 30}]):
+            for _ in range(2):  # the second: stopped again with nothing left to give back
+                t0 = time.monotonic()
+                models.free_gpu(say=lambda m: None)
+                took.append(time.monotonic() - t0)
+        self.assertTrue(flag.exists())
+        self.assertLess(max(took), 10, took)
 
     def test_a_llama_server_or_vllm_answering_a_request_is_not_idle(self):
         # #465 (the audit of 1.8): only a JSON /metrics `live.state` was read; llama-server and
