@@ -16910,8 +16910,14 @@ class ModelSet(Base):
         with mock.patch.object(cli.models, "servers_here", return_value=found):
             lines = cli.server_lines({"lms": {"root": "http://127.0.0.1:1234"}})
         self.assertNotIn("no provider", lines[1])
-        with mock.patch.object(cli.models, "servers_here", return_value=([], [])):
+        # windows_host too, or on WSL the real gateway gave WSL's own advice, and this failed on
+        # every WSL2 nightly (#948); with one, WSL's branch is tested on every platform
+        with mock.patch.object(cli.models, "servers_here", return_value=([], [])), \
+                mock.patch.object(cli.models, "windows_host", return_value=None):
             self.assertEqual(cli.server_lines({}), ["  none found on PATH or answering on the usual ports"])
+        with mock.patch.object(cli.models, "servers_here", return_value=([], [])), \
+                mock.patch.object(cli.models, "windows_host", return_value="172.20.0.1"):
+            self.assertEqual(cli.server_lines({}), [f"  none answering here: {cli.models.WSL_NAT}"])
 
     def test_a_window_too_small_for_a_task_is_refused(self):
         # At 8K OpenCode compacted before the earliest handover point, at 4K before the first
@@ -20215,8 +20221,12 @@ class Hardware(unittest.TestCase):
                     mock.patch.object(hw, "_read", lambda path: f"[automount]\nroot = {root}/  # moved\n"
                                       if path == hw.WSL_CONF else ""):
                 self.assertEqual(hardware_powershell(), str(exe))
-            with mock.patch.object(hw.shutil, "which", lambda n: None):
-                self.assertIsNone(hardware_powershell())     # /mnt/c has none here either
+        # an automount root with none: never the machine's own /mnt/c, which on the WSL2 nightly
+        # held the real powershell.exe, and this failed there on every run (#948)
+        with tempfile.TemporaryDirectory() as empty, mock.patch.object(hw.shutil, "which", lambda n: None), \
+                mock.patch.object(hw, "_read", lambda path: f"[automount]\nroot = {empty}\n"
+                                  if path == hw.WSL_CONF else ""):
+            self.assertIsNone(hardware_powershell())
         card = "AMD Radeon RX 7800 XT\t17163091968\r\n"
         answers, asked = ["", card, ""], []
         clock = [1000.0]
