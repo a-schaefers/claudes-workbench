@@ -17521,6 +17521,21 @@ class WebChat(Base):
         store.write_json(ports, {"port": 51583, "pid": me, "start": models._started(me)})
         self.assertEqual(self.chat.port(), 51583)
 
+    def test_a_listener_another_machine_claimed_on_a_shared_state_directory_listens(self):
+        # the review of #922: its pid means nothing in this process table, so the page said
+        # "Waiting for a Claude session" and `wb chat log` "no session is listening" while that
+        # machine's session got every message; the mod writes the file only on a change
+        listener, gone = self.chat.chat_dir() / "listener.json", 2 ** 22 + 7
+        store.write_json(listener, {"session": "s", "cwd": "/b/repo", "pid": gone, "start": "1",
+                                    "machine": "another-machine"})
+        os.utime(listener, (0, 0))                                    # long unwritten
+        self.assertEqual(self.chat.listener()["session"], "s")
+        self.assertEqual(self.chat.snapshot()["listener"]["session"], "s")
+        self.assertIn("listening: /b/repo", run_wb("chat", "log"))
+        store.write_json(listener, {"session": "s", "cwd": "/b/repo", "pid": gone, "start": "1",
+                                    "machine": store.machine()})
+        self.assertIsNone(self.chat.listener())                       # this machine's: asked here
+
     def test_the_web_chat_is_off_until_turned_on_and_stays_as_left(self):
         # The user, 2026-11-19: off by default, a switch in the pane, remembered across /workbench runs.
         # On starts a server when none answers; off stops only one wb started, and nobody listens.

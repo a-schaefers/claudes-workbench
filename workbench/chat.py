@@ -1206,10 +1206,16 @@ def _alive(pid, start=None) -> bool:
 
 def listener() -> dict | None:
     """The session listening now. Its `wb events` process (pid) lives exactly as long as the
-    session; a listener.json without a pid falls back to its age."""
+    session; a listener.json without a pid falls back to its age. A claim another machine wrote
+    (`machine`, on a shared state directory) listens, as the mod has it: its pid means nothing in
+    this process table, and the page said "Waiting for a Claude session" while that machine's
+    session got every message (the review of #922). The mod writes the file only on a change, so
+    its age can't say either."""
     st = store.read_json(chat_dir() / "listener.json", None)
     if not st:
         return None
+    if isinstance(st.get("machine"), str) and st["machine"] and st["machine"] != store.machine():
+        return st
     if st.get("pid"):
         return st if _alive(st["pid"], st.get("start")) else None
     return st if store.now() - st.get("ts", 0) <= LISTENING_FOR else None

@@ -5703,6 +5703,10 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   reads that pid as gone and takes the listener, #922). A listener counts while its pid is this user's and
   started at `start` (`chat._alive`, which is `models._alive`: a root daemon under a recycled pid
   answered EPERM and read as listening, #532), or, with no pid, while its `ts` is under 15 s old.
+  A claim whose `machine` is another one's always counts (`chat.listener`, for the page and `wb chat
+  log`, as for the mod): its pid can't be asked here and the file is written only on a change, so the
+  page said "Waiting for a Claude session" while that machine's session got every message (the
+  review of #922).
 - `asks.jsonl`: the dialogs. An ask row `{id: "ask-<ms>-<8 hex>", ts, tool (200 characters),
   text (2000), kind: "permission"|"plan"|"question", detail?, pid?}` from `wb chat ask` (`pid`:
   the asking session's `wb events` process, from `--pid`; once it no longer answers `kill -0`, the
