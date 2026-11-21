@@ -542,7 +542,12 @@ def _worktree_setup(repo: Path, a) -> dict:
             if at == there or there.is_relative_to(at) or at.is_relative_to(there):
                 die(f"--sibling {n}: " + (f"it overlaps --sibling {other}: name one of them"
                                           if other else "its link would be the task's worktree"))
-    return {k: v for k, v in (("setup", setup), ("copy", copy), ("siblings", sibs)) if v}
+    limit = a.setup_timeout if getattr(a, "setup_timeout", None) is not None \
+        else conf.get("setup_timeout")
+    if limit is not None and limit <= 0:
+        die("--setup-timeout is seconds: a positive whole number")
+    return {k: v for k, v in (("setup", setup), ("copy", copy), ("siblings", sibs),
+                              ("setup_timeout", limit if setup else None)) if v}
 
 
 def _missing_dirs(repo: Path) -> list[str]:
@@ -3838,6 +3843,9 @@ def parser() -> argparse.ArgumentParser:
                    help="run this in the agent's lane to set the worktree up before the base check "
                    "(e.g. 'npm ci'); a failure stops the task before any round (default: "
                    "commands.json \"repos\")")
+    s.add_argument("--setup-timeout", type=int, metavar="SECS",
+                   help="seconds the setup may run, in the worktree and in each scratch checkout "
+                   "(default 1800, or commands.json \"repos\" \"setup_timeout\")")
     s.add_argument("--copy", action="append", metavar="PATH",
                    help="copy this ignored path from your checkout into the worktree (repeatable; "
                    "never a secret)")

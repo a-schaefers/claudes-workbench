@@ -185,7 +185,8 @@ def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
         # its setup, copies and siblings, as the worktree (#201): copied from it (#249)
         code, said = runner.prepare(at, None if setup else task.worktree)
         if code != 0:
-            return "setup failed", f"[setting up the scratch checkout failed: {code}]\n{said}"
+            why = runner.setup_timed_out(task.spec) if code == "timeout" else code
+            return "setup failed", f"[setting up the scratch checkout failed: {why}]\n{said}"
         out = runner.run_in_lane(at, cmd(work) if callable(cmd) else cmd, limit)
         if keep:
             keep(work)

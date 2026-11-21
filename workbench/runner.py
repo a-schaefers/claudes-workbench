@@ -1091,8 +1091,22 @@ def run_tests(task: store.Task, n: int):
 
 
 # seconds the setup command may run (npm ci, a first cargo build), in the worktree and again in
-# each scratch checkout (the base check, wb verify, wb shot)
+# each scratch checkout (the base check, wb verify, wb shot), unless the task says otherwise
 SETUP_SECS = 1800
+
+
+def setup_limit(spec: dict) -> int:
+    """The task's setup limit: task.json `setup_timeout` (wb start --setup-timeout, or its repo's
+    commands.json entry), else SETUP_SECS. A fixed 1800 s failed a big first build before round
+    1 every time, and starting again hit it again (#520)."""
+    v = spec.get("setup_timeout")
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else SETUP_SECS
+
+
+def setup_timed_out(spec: dict) -> str:
+    """What a setup past its limit says, the limit and how to raise it named."""
+    return (f"timed out after {setup_limit(spec)}s; wb start --setup-timeout SECS, or "
+            '"setup_timeout" in the repo\'s commands.json "repos" entry, raises it')
 
 
 def _copy(src: Path, dest: Path) -> None:
@@ -1177,7 +1191,7 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
         return "copy failed", str(e)
     if not (cmd := spec.get("setup")):
         return 0, ""
-    return run_in_lane(task, cmd, SETUP_SECS)
+    return run_in_lane(task, cmd, setup_limit(spec))
 
 
 def build_source(path: Path) -> Path | None:
@@ -1280,7 +1294,7 @@ def _prepare(task: store.Task) -> bool:
         task.set_status(prepared=True, prepared_paths=made, setup_secs=secs)
         return True
     what = f"the setup command failed (exit {code})" if isinstance(code, int) else \
-        f"setting up the worktree failed ({code})"
+        f"setting up the worktree failed ({setup_timed_out(spec) if code == 'timeout' else code})"
     tail = "\n".join("    " + x for x in clip_tail(output, 8, total=1500).splitlines())
     proxy = f"\n{proxy_line(gone)}, if the setup needed it" if (gone := proxy_gap(output)) else ""
     task.set_status(phase="failed", last=what, infra="setup")  # the machine's, not the model's (#508)
