@@ -97,6 +97,38 @@ async function run(engine, device) {
     await until(async () => (await page.locator('.row.claude .bubble strong').count()) === 1)
     if (await page.locator('.thread .working').count()) throw new Error('still shows working')
   })
+  await check("Claude's reply copies over plain http at a LAN address, where navigator.clipboard is missing", async () => {
+    // #745 (the 2026-11-21 audit, finding 104): navigator.clipboard exists only in a secure
+    // context, so over http://100.x.y.z:1337 every tap said "copy failed"
+    const p = await ctx.newPage()
+    await p.addInitScript(() => {
+      Object.defineProperty(Navigator.prototype, 'clipboard', { get: () => undefined, configurable: true })
+      Object.defineProperty(window, 'isSecureContext', { get: () => false, configurable: true })
+      const real = document.execCommand.bind(document)
+      window.copied = []
+      document.execCommand = (cmd, ...rest) => {
+        const el = document.activeElement
+        if (cmd === 'copy') window.copied.push(el && el.value !== undefined ? el.value.slice(el.selectionStart, el.selectionEnd) : String(getSelection()))
+        return real(cmd, ...rest)
+      }
+      // what the button said: a state event redraws the row (and the button) at once
+      window.said = []
+      addEventListener('click', e => { const t = e.target; if (t.tagName === 'BUTTON') setTimeout(() => window.said.push(t.textContent), 50) }, true)
+    })
+    try {
+      await p.goto(base)
+      const row = p.locator('.row.claude').last()
+      await until(async () => (await row.locator('.bubble').textContent()).includes('make test passes'))
+      const button = row.locator('.meta button', { hasText: 'copy' })
+      await button.click()
+      await until(async () => (await p.evaluate(() => window.said)).length === 1)
+      const said = await p.evaluate(() => window.said)
+      if (said[0] !== 'copied') throw new Error('the button said ' + said[0])
+      const got = await p.evaluate(() => window.copied)
+      if (got.length !== 1 || !got[0].includes('`make test` passes')) throw new Error('copied ' + JSON.stringify(got))
+      if (await p.locator('textarea:not(#input)').count()) throw new Error('the copy textarea was left behind')
+    } finally { await p.close() }
+  })
   await check('a message sent while the server is down lands exactly once when it is back', async () => {
     await stopServer()
     await page.fill('#input', 'sent while you were down')

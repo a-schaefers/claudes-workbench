@@ -5320,7 +5320,8 @@ it posts `/api/send` with their ids, and a refused one marks the message not sen
 tap saves it), each fetched once with the token as a blob (`fileURL`), or from this page's own
 bytes; one `wb gc` removed says "no longer on the computer".
 Away from localhost over plain HTTP the page isn't a secure context, so the browser's UUID and
-clipboard are missing (the page falls back), and it can't install or notify: the gear says so,
+clipboard are missing (the page falls back: its own ids, and a reply's *copy* through a selected
+textarea and `execCommand('copy')`, `copyText`; it said "copy failed" on every tap, #745), and it can't install or notify: the gear says so,
 and that `tailscale serve --bg 1337` gives it an https address on the tailnet.
 
 **The app and notifications** (the user, 2026-11-18: like their other site's, but no new

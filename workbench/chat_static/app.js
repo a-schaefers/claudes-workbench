@@ -179,6 +179,21 @@
     if (d.toDateString() === y.toDateString()) return 'Yesterday'
     return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' })
   }
+  // navigator.clipboard exists only in a secure context: over plain http at a LAN or tailnet
+  // address it is undefined and every copy said "copy failed" (#745). There a selected textarea
+  // and execCommand('copy') still work, inside the tap's user gesture.
+  async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(text); return true } catch {}
+    }
+    const t = document.createElement('textarea')
+    t.value = text; t.readOnly = true
+    t.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0'
+    document.body.append(t)
+    try { t.select(); t.setSelectionRange(0, text.length); return document.execCommand('copy') }
+    catch { return false }
+    finally { t.remove() }
+  }
   const span = (cls, text) => { const s = document.createElement('span'); if (cls) s.className = cls; s.textContent = text; return s }
   const since = ts => { const s = Math.max(0, Math.round(now() - ts)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s` }
 
@@ -208,8 +223,7 @@
       meta.append(span('', 'Claude · ' + clock(m.ts) + ' · '))
       const c = document.createElement('button'); c.textContent = 'copy'
       c.onclick = async () => {
-        try { await navigator.clipboard.writeText(m.text); c.textContent = 'copied' }
-        catch { c.textContent = 'copy failed' }
+        c.textContent = await copyText(m.text) ? 'copied' : 'copy failed'
         setTimeout(() => { c.textContent = 'copy' }, 1500)
       }
       meta.append(c)
