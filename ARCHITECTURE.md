@@ -4832,7 +4832,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   (*Installing*); adding one would freeze them on it. **A release** (by hand, when the owner
   calls it one) → `__version__` in `workbench/__init__.py` (`wb --version`, task.json's
   `wb_version`, the ask server's `serverInfo`), `docs/release-checklist.md` filled in as
-  `docs/releases/<version>.md` (a green nightly on the commit, the platforms by hand), then a
+  `docs/releases/<version>.md` (a green nightly on the commit, every command the README offers
+  run at the tagged commit (#422), the platforms by hand), then a
   `v<version>` tag (a trailing `.0` dropped, as `v0.90`) and a GitHub release (`gh release create
   v<version> --generate-notes`, its notes linking the filled-in checklist). **`wb setup`'s links** → README's quickstart and
   *Installing*.

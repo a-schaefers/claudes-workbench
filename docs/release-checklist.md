@@ -18,6 +18,14 @@ three apart: a skip is not a pass. A release may ship with a skip only when its 
 - [ ] `opencode`: the newest OpenCode, or the break it found has an issue.
 - [ ] `chat`, when the web chat changed since the last release.
 
+## What the README offers
+
+- [ ] Every feature and command the README offers runs at the tagged commit, not only on main: in
+      a checkout of the tag, each one's `wb` command answers (`bin/wb <command> --help` exits 0),
+      and an offer the tag can't keep is cut from the README on the release commit, or waits for
+      the next release. (#422: 1.8's README offered audio; `wb audio` landed after the tag, #410,
+      and at the tag `wb audio --help` exits 2.)
+
 ## By hand, on real machines
 
 Best effort, never a gate: the project has neither the users nor the hardware nor the funding to
