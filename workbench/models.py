@@ -41,6 +41,7 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -1736,9 +1737,32 @@ def _lease_lock(path: Path):
         os.close(fd)  # releases the lock
 
 
+# A shared lease's files, readable by every account in the directory's group. Created under an
+# account's umask 077 they were 0600, and every other account's holders(), wb start, wb optimize
+# and GpuLease failed with PermissionError until an admin chmodded them (#802).
+LEASE_MODE = 0o664
+
+
 def _lease_fd(path: Path) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
-    return os.open(path, os.O_RDONLY | os.O_CREAT, 0o664)
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT, LEASE_MODE)
+    if lease_shared():
+        st = os.fstat(fd)
+        if st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) & LEASE_MODE != LEASE_MODE:
+            os.fchmod(fd, stat.S_IMODE(st.st_mode) | LEASE_MODE)  # only its owner may
+    return fd
+
+
+def unshared_lease_files() -> list[Path]:
+    """A shared lease's files the directory's group can't read (wb doctor names them): another
+    account's holders() and GpuLease fail on each (#802). [] when the lease isn't shared."""
+    if not lease_shared():
+        return []
+    try:
+        return sorted(p for p in lease_dir().glob("gpu*") if p.is_file()
+                      and not p.name.startswith(".") and not p.stat().st_mode & stat.S_IRGRP)
+    except OSError:
+        return []
 
 
 def max_loaded(root: str | None = None) -> int:
@@ -2044,7 +2068,9 @@ class GpuLease:
         return holders(self.home, self.pool)
 
     def _set(self, held: dict) -> None:
-        store.write_json(self.home / f"{self.pool}.json", held)
+        # renamed into place, so its mode is the writer's each time: the group's to read (#802)
+        store.write_json(self.home / f"{self.pool}.json", held,
+                         mode=LEASE_MODE if lease_shared() else None)
 
     def _entry(self, waiting: bool = False) -> dict:
         # the start time tells this runner from a later process given its pid (after a reboot)

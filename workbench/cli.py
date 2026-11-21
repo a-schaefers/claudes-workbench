@@ -4800,6 +4800,10 @@ def cmd_doctor(a):
                   f"all of them: sudo install -d -m 2775 -g <their group> {models.SHARED_GPU} (#393)")
     if models.lease_shared():
         print(f"--  the GPU lease is shared at {models.lease_dir()}: every account using it takes turns")
+        if closed := models.unshared_lease_files():  # made under a umask 077 before #802
+            line(False, f"the GPU lease's {', '.join(p.name for p in closed)} can't be read by the "
+                 "other accounts, whose tasks then fail to take the GPU: "
+                 f"chmod g+r {' '.join(shlex.quote(str(p)) for p in closed)} (as their owner, or sudo)")
     elif models.SHARED_GPU.is_dir() and not os.environ.get("WB_GPU_DIR"):
         line(False, f"{models.SHARED_GPU} is the machine's shared GPU lease, and this account can't "
              "write it: add it to the directory's group, then log in again")

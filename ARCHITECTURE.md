@@ -3100,8 +3100,12 @@ else `SHARED_GPU` (`/var/lib/workbench/gpu`) when it is a directory this account
 `$WB_HOME` as before. An admin opts a machine in once (`sudo install -d -m 2775 -g <group>
 /var/lib/workbench/gpu`, the accounts in that group): every account's tasks then take turns or
 share there like one account's. Lock files are opened read-only (`_lease_lock`, `_lease_fd`:
-another account made them 0644, and flock needs no write); `gpu.json` is replaced by rename (the
-directory's write). Each entry carries `uid` and `user`: a holder of another uid can't be
+another account made them, and flock needs no write); `gpu.json` is replaced by rename (the
+directory's write). In a shared lease every file is the group's to read (`LEASE_MODE` 0664:
+`_lease_fd` fchmods the lock files it owns, `GpuLease._set` writes `gpu.json` through
+`store.write_json(…, mode=)`): under one account's umask 077 they were 0600, and every other
+account's `holders()`, `wb start`, `wb optimize` and `GpuLease` failed with PermissionError (#802).
+`wb doctor` names any the group still can't read (`unshared_lease_files`), with the chmod. Each entry carries `uid` and `user`: a holder of another uid can't be
 signalled, so `_alive` takes it as alive when its start time matches (an entry of this uid, or
 one without `uid` or `start`, refused a signal is still dead). Another account's model id is
 usually not in this account's config, so `admits` doesn't share beside it: they take turns, and

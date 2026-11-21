@@ -340,7 +340,9 @@ def boot_id() -> str | None:
     return _BOOT[0]
 
 
-def write_json(path: Path, data) -> None:
+def write_json(path: Path, data, mode: int | None = None) -> None:
+    """``data`` as ``path``, atomically; ``mode``: the file's, else the umask's (a shared GPU
+    lease's gpu.json is the group's to read: #802)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     # a name of its own per write, created exclusively: by pid alone, two of the chat server's
     # threads writing one file shared it, and one's rename found it gone (the 2026-11-19 audit).
@@ -352,6 +354,8 @@ def write_json(path: Path, data) -> None:
         with open(tmp, "x", encoding="utf-8", errors="backslashreplace") as fh:  # as append_jsonl
             fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
             _synced(fh)
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)  # readers (woken by inotify on the rename) never see half a file
     except BaseException:
         tmp.unlink(missing_ok=True)

@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -908,6 +909,31 @@ class SharedLease(Base):
             self.assertEqual([h["task"] for h in held.values()], ["an-image"])
             self.assertEqual(next(iter(held.values()))["uid"], os.getuid())
         self.assertEqual(models.holders(), {})
+
+    def test_lease_files_made_under_a_umask_077_are_still_the_groups_to_read(self):
+        # #802: account A's umask 077 left gpu.lock, gpu.admit, gpu.load and gpu.json 0600, and
+        # account B's holders(), wb start and GpuLease failed with PermissionError
+        shared = Path(self.tmp.name) / "shared-gpu"
+        shared.mkdir()
+        os.environ["WB_GPU_DIR"] = str(shared)
+        (shared / "gpu.load").touch()
+        (shared / "gpu.load").chmod(0o600)           # left by an earlier run under that umask
+        self.assertEqual([p.name for p in models.unshared_lease_files()], ["gpu.load"])
+        old = os.umask(0o077)
+        try:
+            with models.GpuLease(None, "an-image", say=lambda *_: None):
+                with models._lease_lock(shared / "gpu.load"):
+                    pass
+                modes = {p.name: stat.S_IMODE(p.stat().st_mode) for p in shared.glob("gpu*")}
+        finally:
+            os.umask(old)
+        self.assertEqual(set(modes), {"gpu.lock", "gpu.admit", "gpu.load", "gpu.json"})
+        for name, mode in modes.items():
+            self.assertEqual(mode & 0o044, 0o044, f"{name} is {mode:o}")
+        self.assertEqual(models.unshared_lease_files(), [])
+        os.environ["WB_GPU_DIR"] = str(store.home())  # not shared: the umask's
+        self.assertFalse(models.lease_shared())
+        self.assertEqual(models.unshared_lease_files(), [])
 
     def test_a_refusal_names_another_accounts_task_as_theirs(self):
         held = {"1": {"task": "fix-it", "model": BIG, "uid": os.getuid() + 1, "user": "sam"}}
