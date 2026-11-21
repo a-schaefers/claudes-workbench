@@ -7214,6 +7214,26 @@ class Permission(Base):
             self.assertEqual(self.verdict(rules, cmd), pip, cmd)
         self.assertEqual(self.verdict(rules, "pip install -e .[dev] requests"), "deny")
 
+    def test_more_ecosystems_and_plain_builtins_run_without_asking(self):
+        # #672 (the 2026-11-21 audit): OCaml, Clojure, Erlang, Gleam, Elm, CocoaPods and Ant had
+        # no entry, nor pushd/popd or printenv, so each first use cost a question and a wake
+        task = store.Task("t-eco")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-eco", "repo": str(self.repo)}))
+        rules = context.shell_rules(task)
+        for cmd in ("dune build", "dune test", "opam exec -- dune build", "lein test",
+                    "clojure -M:test", "clj -X:test", "rebar3 eunit", "nimble test",
+                    "shards install", "shards build", "crystal spec", "nim c -r t.nim", "gleam test",
+                    "elm make src/Main.elm", "mill foo.test", "scala-cli test .", "pod install",
+                    "ant test", "pushd sub", "popd", "printenv PATH", ":", "ulimit -n 4096",
+                    "local x=1", "declare -a xs", "shift", "trap 'rm -f x' EXIT", "pgrep -f srv",
+                    "nimble install -d"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        for cmd in ("opam install lwt", "nimble install jester", "gleam add gleam_json",
+                    "elm install elm/http", "clojure -Ttools install io.github.x/y '{}' :as y",
+                    "opam switch create 5.1", "nix build"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+
     def test_git_by_path_is_refused_but_a_directory_named_git_is_not(self):
         # `*/git` refused `go test ./internal/git` whatever Claude allowed, and `time -p sudo`
         # matched only the allow rule `time *` (the 2026-11-16 audit)

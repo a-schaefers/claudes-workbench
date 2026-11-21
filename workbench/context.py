@@ -132,6 +132,12 @@ ALLOWED_COMMANDS = (
     "python3.*", "pip3.*", "pypy3", "pdm", "pipenv", "hatch", "nox", "pixi", "conda", "mamba",
     "micromamba", "pre-commit", "pyright", "flutter", "dart", "bazel", "bazelisk", "just", "task",
     "pio", "platformio", "conan", "xcodebuild", "xcrun", "rubocop", "golangci-lint", "shellcheck",
+    # whole ecosystems and plain builtins #514 missed: `dune build`, `lein test`, `pod install`,
+    # `pushd sub && make && popd` and `printenv PATH` each cost a question and a wake (#672).
+    # Not nix: its builds go through the daemon's socket, outside the lane.
+    "dune", "opam exec", "lein", "clojure", "clj", "rebar3", "nimble", "shards", "gleam", "elm",
+    "mill", "scala-cli", "pod", "ant", "crystal", "nim", "erlc", "escript",
+    "pushd", "popd", "printenv", ":", "ulimit", "local", "declare", "shift", "trap", "pgrep",
 )
 # A project's own tools and builds, by their usual relative paths (`./x` is allowed already).
 PROJECT_BINS = (".venv/bin/*", "venv/bin/*", "node_modules/.bin/*", "build/*", "target/debug/*",
@@ -152,6 +158,8 @@ ASK_FIRST = (
     "mamba install *", "micromamba install *", "flutter pub add *", "dart pub add *",
     "dart pub global activate *", "flutter pub global activate *", "pio pkg install *",
     "platformio pkg install *", "conan install *--requires*",
+    "opam install *", "nimble install *", "gleam add *", "elm install *", "clojure -Ttools *",
+    "clj -Ttools *",  # (#672)
     # fetch a package and run it
     "npx -y *", "npx --yes *", "npm exec *", "pnpm dlx *", "yarn dlx *", "bunx *", "uvx *",
     # their other spellings (the 2026-11-16 audit); a plain `npx <pkg>` runs only what the
@@ -169,7 +177,7 @@ INSTALL_LISTED = (
     "uv pip install -e .",
     "pip3.* install -r *", "pip3.* install -e .", "python3.* -m pip install -r *",
     "python3.* -m pip install -e .", "pipenv install", "pipenv install --dev", "pipenv sync",
-    "pio pkg install", "platformio pkg install",
+    "pio pkg install", "platformio pkg install", "nimble install -d", "nimble install --depsOnly",
 )
 # and with the flags projects spell those installs with, one flag each, and pip's extras of the
 # project itself: `pnpm install --frozen-lockfile` and `pip install -e ".[dev]"` were refused,

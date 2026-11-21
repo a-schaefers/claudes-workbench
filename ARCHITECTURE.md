@@ -1183,14 +1183,18 @@ one character (a space too), treats a trailing ` *` as optional (`npm install *`
 wins; no match means ask, which `--auto` allows. The rules, in order:
 1. deny `*`;
 2. allow `c *` (a bare `c` too) and `*=* c *` (`ASSIGN`: a variable set before it,
-   `PYTHONPATH=. pytest`) for each of `ALLOWED_COMMANDS` (about 240: the shell's builtins and
+   `PYTHONPATH=. pytest`) for each of `ALLOWED_COMMANDS` (about 270: the shell's builtins and
    everyday tools, files and text, archivers, builds and compilers, test runners, interpreters,
    package managers, `bash`/`sh`, `sqlite3`, `git` (the shim), and since #514 (the audit of 1.90)
    the toolchains the lane makes room for and the common runners and linters: `python3.*`,
    `pip3.*`, `pypy3`, `pdm`, `pipenv`, `hatch`, `nox`, `pixi`, `conda`, `mamba`, `micromamba`,
    `pre-commit`, `pyright`, `flutter`, `dart`, `bazel`, `bazelisk`, `just`, `task`, `pio`,
-   `platformio`, `conan`, `xcodebuild`, `xcrun`, `rubocop`, `golangci-lint`, `shellcheck`);
-   not on it: `curl`, `wget`, `ssh`,
+   `platformio`, `conan`, `xcodebuild`, `xcrun`, `rubocop`, `golangci-lint`, `shellcheck`; and
+   since #672 (each first use cost a question and a wake) more ecosystems' drivers, `dune`, `opam
+   exec`, `lein`, `clojure`, `clj`, `rebar3`, `nimble`, `shards`, `gleam`, `elm`, `mill`,
+   `scala-cli`, `pod`, `ant`, `crystal`, `nim`, `erlc`, `escript`, and the builtins `pushd`,
+   `popd`, `printenv`, `:`, `ulimit`, `local`, `declare`, `shift`, `trap`, with `pgrep`);
+   not on it: `nix` (its builds go through the daemon's socket, outside the lane), `curl`, `wget`, `ssh`,
    `rsync`, `docker`, `systemctl`, `opencode`. OpenCode matches each simple command's raw text,
    so `FOO=1 ls` was refused while `ls` and `env FOO=1 ls` ran, and a small model copying the
    project's own `CI=1 npm test` spent a Claude wake asking or stopped running the tests (#258, the
@@ -1209,7 +1213,9 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `pnpm i *`, `yarn global add *`, `bun i *`, `deno add *`, `deno install *`, `cargo add *`,
    `go get *`, `dotnet add * package *`, `python3.* -m pip install *`, `pdm add *`,
    `pipenv install *`, `pixi add *`, `conda install *`, `flutter pub add *`, `dart pub add *`,
-   `pio pkg install *`, `conan install *--requires*`, …) and fetching a package to run it (`npx -y *`,
+   `pio pkg install *`, `conan install *--requires*`, `opam install *`, `nimble install *`
+   (`nimble install -d` and `--depsOnly` allowed again), `gleam add *`, `elm install *`,
+   `clojure -Ttools *`, `clj -Ttools *`, …) and fetching a package to run it (`npx -y *`,
    `npx --yes *`, `npm exec *`, `npm x *`, `npx -p *`, `npx --package *`, `pnpm dlx *`,
    `yarn dlx *`, `bunx *`, `bun x *`, `uvx *`, `uv tool run *`, `uv tool install *`,
    `uv run --with *`, `deno run *npm:*`, `deno run *jsr:*`). A plain `npx <pkg>` stays allowed
@@ -1221,7 +1227,8 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `pnpm install`, `pnpm i`, `bun install`, `bun i`, `yarn`, `yarn install`, `pip install -r *`,
    `pip install -e .` (and `pip3`, `pip3.*`, `python -m pip`, `python3 -m pip`,
    `python3.* -m pip`, `uv pip` forms), `pipenv install`, `pipenv install --dev`, `pipenv sync`,
-   `pio pkg install`, `platformio pkg install`; the npm, pnpm and bun ones with one of
+   `pio pkg install`, `platformio pkg install`, `nimble install -d`, `nimble install
+   --depsOnly`; the npm, pnpm and bun ones with one of
    `INSTALL_FLAGS` (`--frozen-lockfile`, `--immutable`, `--prefer-offline`, `--offline`,
    `--legacy-peer-deps`, `--no-audit`, `--ignore-scripts`, `--prod`, `--production`), and the
    pip ones as `-e .[*]`, `-e ".[*]"`, `-e '.[*]'`, the project's own extras (#671: refused, an
