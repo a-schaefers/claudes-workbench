@@ -5316,6 +5316,29 @@ class AskServer(Base):
         self.assertNotIn("question", [r["kind"] for r in store.read_jsonl(store.home() / "notify.jsonl")[0]])
         self.assertEqual(ask_mcp.used(task), 0)              # and it cost no budget
 
+    def test_a_refused_ask_costs_the_agent_no_question_the_runner_never_counted(self):
+        # #831 (the second 2026-11-21 audit): the server counted every ask file, the ones the
+        # runner refused ("x": an empty question, close_all's strays) too, so with a budget of 2
+        # a malformed call and one real question left the agent BUDGET_USED for its second
+        self.start("t-831", "ok")
+        wait_phase("t-831", {"review"})
+        task, opened = store.Task("t-831"), {}
+        before = set(os.listdir(context.ask_dir(task)))
+        self.assertEqual(ask_mcp.ask(task, "  ", context="the log"), ask_mcp.NO_QUESTION)
+        self.assertEqual(set(os.listdir(context.ask_dir(task))), before)   # no file written
+        task.set_status(phase="running")
+        self.agent_asks(task, "cccccccc", question="")                       # past the server
+        ask_mcp.relay(task, opened)                                          # refused: "x"
+        self.agent_asks(task, "dddddddd", question="stray?")
+        ask_mcp.close_all(task)                                              # a stray: "x"
+        self.assertEqual(task.status["asks"], {"cccccccc": "x", "dddddddd": "x"})
+        threading.Thread(target=self.answer_soon, args=(task, "Use 42.", opened)).start()
+        self.assertEqual(ask_mcp.ask(task, "41 or 42?"), "Use 42.")
+        self.assertEqual(ask_mcp.used(task), 1)
+        threading.Thread(target=self.answer_soon, args=(task, "Yes.", opened)).start()
+        self.assertEqual(ask_mcp.ask(task, "and the docs?"), "Yes.")    # the second of two
+        self.assertEqual(ask_mcp.ask(task, "a third?"), ask_mcp.BUDGET_USED)
+
     def test_two_questions_at_once_keep_the_task_asking_until_both_are_answered(self):
         # the first answer set the phase running while the other still waited, and the silence
         # guard stopped the round (the 2026-11-16 audit)

@@ -69,6 +69,7 @@ BUDGET_USED = ("The question budget for this task is used up. Make the most reas
 PERMISSIONS_USED = (f"You have asked for {PERMISSION_BUDGET} refused commands or directories "
                     "already. Work inside your lane with the allowed tools, and list what you "
                     "couldn't do in your final summary.")
+NO_QUESTION = "Ask with a `question`, and ask again."
 NO_ANSWER = ("No answer arrived in time. Make the most reasonable assumption, carry on, and state "
              "the assumption in your final summary.")
 
@@ -123,12 +124,21 @@ def ask(task: store.Task, question: str, context: str = "", command: str = "",
         path: str = "") -> str:
     if why := bad_request(command, path):
         return why
+    if not (question or "").strip():  # as the runner judges it (_judge): never an "x" file (#831)
+        return NO_QUESTION
     spec = task.spec
-    asked = [q for q in (read_question(task, n[:-5]) for n in _names(task)) if q]
-    if command or path:  # the runner counts them too, outside the lane (relay): this is a courtesy
-        if sum(1 for q in asked if _permission(q)) >= PERMISSION_BUDGET:
+    # The runner counts them too, outside the lane (relay): this is a courtesy, counted as it
+    # counts, from status `asks` (readable in the lane), and a file not judged yet by what it
+    # holds. Counting every file charged the ones it refused ("x": an empty question,
+    # close_all's strays), so a question the runner would relay got BUDGET_USED (#831).
+    asks = task.status.get("asks") or {}
+    kinds = [k for k in asks.values() if k in ("q", "p")]
+    kinds += ["p" if _permission(q) else "q" for n in _names(task) if n[:-5] not in asks
+              and (q := read_question(task, n[:-5]))]
+    if command or path:
+        if kinds.count("p") >= PERMISSION_BUDGET:
             return PERMISSIONS_USED
-    elif sum(1 for q in asked if not _permission(q)) >= int(spec.get("ask_budget", 2)):
+    elif kinds.count("q") >= int(spec.get("ask_budget", 2)):
         return BUDGET_USED
     qid = uuid.uuid4().hex[:8]
     qfile, afile = ask_dir(task) / f"{qid}.json", ask_dir(task) / f"{qid}.answer"
@@ -295,7 +305,7 @@ def _judge(task: store.Task, q: dict | None, asks: dict) -> tuple[str, str | Non
     """A new ask file's kind ("q" a question, "p" a permission request, "x" refused) and, when
     refused, what the agent is told instead."""
     if q is None or not q["question"].strip():
-        return "x", "Ask with a `question`, and ask again."
+        return "x", NO_QUESTION
     if why := bad_request(q["command"], q["path"]):
         return "x", why
     if _permission(q):

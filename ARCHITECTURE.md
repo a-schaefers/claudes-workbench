@@ -1990,8 +1990,13 @@ that stopped loading the server would have left the agent mute, and nothing said
 round: kept from round 1, the note could fire only there (#481).
 The server runs inside the agent's lane, so it writes only `ask/`. A call first checks `command`
 and `path` (`bad_request`: one line of at most `LINE_MAX`, 4096, characters; a path absolute) and
-replies with what to fix instead of asking; past a budget (counted from the ask files, a
-courtesy: the runner's count is the one that holds) it returns the refusal. Otherwise it writes
+an empty `question` (`NO_QUESTION`, "Ask with a `question`, and ask again.", as the runner's
+`_judge` says it), and replies with what to fix instead of asking; past a budget (a courtesy:
+the runner's count is the one that holds; counted as the runner counts, from status `asks`,
+which the lane reads, its `q` and `p` entries, and each ask file not judged yet by what it
+holds: counting every file charged the ones the runner refused, `x`, an empty question or
+`close_all`'s strays, so a question the runner would have relayed got the budget's refusal,
+#831, the second 2026-11-21 audit) it returns the refusal. Otherwise it writes
 `ask/<id>.json` (`{id, ts, round, question, context, command?, path?}`) and blocks (a `Watcher`
 on `ask/`) until `ask/<id>.answer` appears or the ask timeout passes (`--ask-timeout`, 20
 minutes), returning the answer or "No answer arrived in time. Make the most reasonable
