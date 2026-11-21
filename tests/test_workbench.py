@@ -4984,6 +4984,124 @@ class Lane(Base):
                 self.assertIsNone(context.interop_gap())
 
 
+class CheckoutVenv(Base):
+    """#490 (the audit of 1.90): the user's activated venv, when it is their checkout's, stays out
+    of the agent's environment, so the agent, the setup and the tests import the worktree."""
+    TEST = ("python3 -c \"import mypkg, sys; print(mypkg.__file__); "
+            "sys.exit(mypkg.VALUE != 'base')\"")
+
+    def setUp(self):
+        super().setUp()
+        pkg = self.repo / "src" / "mypkg"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("VALUE = 'base'\n")
+        (self.repo / ".gitignore").write_text(".venv/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "pkg"], check=True)
+        (pkg / "__init__.py").write_text("VALUE = 'user'\n")   # the user's own work in progress
+
+    def venv(self, root: Path, editable: Path | None = None) -> Path:
+        """A virtualenv at ``root``, active as `source bin/activate` leaves it; with ``editable``,
+        a src-layout editable install of that directory (the .pth uv and hatch write)."""
+        import venv
+        venv.create(root, symlinks=True, with_pip=False)
+        if editable:
+            site = next(root.glob("lib/*/site-packages"))
+            (site / "_mypkg.pth").write_text(f"{editable}\n")
+        os.environ["VIRTUAL_ENV"] = str(root)
+        os.environ["PATH"] = f"{root / 'bin'}{os.pathsep}{os.environ['PATH']}"
+        return root
+
+    def test_the_tests_import_the_worktree_not_the_checkout_its_editable_venv_points_at(self):
+        user = self.venv(self.repo / ".venv", self.repo / "src")
+        # what SKILL.md advises: the setup makes the worktree its own venv, editable into it
+        setup = ("python3 -m venv --without-pip .venv && .venv/bin/python3 -c \"import os, site; "
+                 "open(site.getsitepackages()[0] + '/_mypkg.pth', 'w').write(os.getcwd() + '/src')\"")
+        out = self.start("t-venv", "ok", "--setup", setup, "--test", self.TEST, "--auto-fix", "0",
+                         "--no-base-check")
+        self.assertIn(f"note: the active Python environment {user} (inside the repo) is your "
+                      "checkout's", out)
+        st = wait_phase("t-venv", {"review"})
+        task = store.Task("t-venv")
+        said = task.round_dir(1).joinpath("tests.txt").read_text()
+        self.assertTrue(st["tests"]["ok"], said)                  # VALUE 'base', the worktree's
+        self.assertIn(str(task.worktree / "src" / "mypkg"), said)
+        env = runner.agent_env(task)
+        self.assertEqual(env["VIRTUAL_ENV"], str(task.worktree / ".venv"))
+        path = env["PATH"].split(os.pathsep)
+        self.assertEqual(path[:2], [str(context.rules_dir(task) / "bin"),  # the git shim first
+                                    str(task.worktree / ".venv" / "bin")])
+        self.assertNotIn(str(user / "bin"), path)
+        from workbench import verify                              # the base check's scratch
+        code, said = verify.on_base(task, self.TEST, 60)          # checkout, its setup run again
+        self.assertEqual(code, 0, said)
+        self.assertNotIn(str(self.repo / "src"), said)
+        rules = context.shell_rules(task)                         # into its own venv: no ask
+        self.assertEqual(Permission.verdict(rules, "pip install -e ."), "allow")
+        self.assertEqual(Permission.verdict(rules, "poetry install"), "allow")
+
+    def test_without_a_setup_the_checkouts_venv_is_left_out_and_wb_start_says_how_to_add_one(self):
+        user = self.venv(Path(self.tmp.name) / "elsewhere", self.repo / "src")  # editable only
+        bins = self.repo / "node_modules" / ".bin"
+        os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{bins}"  # a direnv PATH_add
+        out = self.start("t-novenv", "ok", "--test", self.TEST, "--auto-fix", "0", "--no-base-check")
+        self.assertIn(f"{user} (an editable install of the repo) is your checkout's", out)
+        self.assertIn("--setup 'uv sync' --test 'uv run pytest'", out)
+        st = wait_phase("t-novenv", {"review"})
+        task = store.Task("t-novenv")
+        said = task.round_dir(1).joinpath("tests.txt").read_text()
+        self.assertFalse(st["tests"]["ok"])                       # not the checkout's 'user'
+        self.assertNotIn(str(self.repo / "src"), said)
+        env = runner.agent_env(task)
+        self.assertNotIn("VIRTUAL_ENV", env)
+        path = env["PATH"].split(os.pathsep)
+        self.assertNotIn(str(user / "bin"), path)
+        self.assertEqual(path[-1], str(task.worktree / "node_modules" / ".bin"))
+        # none active: pip installs where Landlock bounds it, else it asks
+        rules = context.shell_rules(task)
+        self.assertEqual(Permission.verdict(rules, "pip install -e ."),
+                         "allow" if lane.abi() else "deny")
+
+    def test_a_venv_in_a_per_project_home_or_on_path_alone_is_the_checkouts_too(self):
+        task = store.Task("t-homes")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-homes", "repo": str(self.repo)}))
+        workon = Path(self.tmp.name) / "workon"
+        os.environ["WORKON_HOME"] = str(workon)
+        root = self.venv(workon / "proj")                         # virtualenvwrapper's, not editable
+        del os.environ["VIRTUAL_ENV"]                             # found on PATH alone
+        self.assertEqual(context.checkout_envs(task), {str(root): "a per-project venv"})
+        finder = Path(self.tmp.name) / "conda"                    # setuptools' editable finder
+        self.venv(finder)
+        site = next(finder.glob("lib/*/site-packages"))
+        (site / "__editable___mypkg_0_1_finder.py").write_text(
+            f"MAPPING = {{'mypkg': {str(self.repo / 'src' / 'mypkg')!r}}}\n")
+        self.assertEqual(context.checkout_envs(task)[str(finder)], "an editable install of the repo")
+        (site / "__editable___mypkg_0_1_finder.py").write_text(
+            f"MAPPING = {{'mypkg': {str(self.repo) + '-other/src'!r}}}\n")  # another repo
+        self.assertNotIn(str(finder), context.checkout_envs(task))
+
+    def test_a_venv_that_isnt_the_checkouts_stays_but_the_agent_may_not_install_into_it(self):
+        envs = Path(self.tmp.name) / "envs"
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [str(envs)]}))
+        tools = self.venv(envs / "tools")                         # pytest and ruff, no project
+        (envs / "scratch").mkdir()
+        self.assertNotIn("is your checkout's", self.start("t-tools", "ok"))
+        wait_phase("t-tools", {"review"})
+        task = store.Task("t-tools")
+        env = runner.agent_env(task)
+        self.assertEqual(env["VIRTUAL_ENV"], str(tools))
+        self.assertIn(str(tools / "bin"), env["PATH"].split(os.pathsep))
+        rules = context.shell_rules(task)
+        for cmd in ("pip install -e .", "python3 -m pip install -r requirements.txt",
+                    "poetry install", "pip uninstall -y mypkg", "uv pip sync requirements.txt"):
+            self.assertEqual(Permission.verdict(rules, cmd), "deny", cmd)
+        self.assertEqual(Permission.verdict(rules, "npm ci"), "allow")
+        lane_ = context.writable(task)                            # granted, but not the venv
+        self.assertIn(str(envs / "scratch"), lane_)
+        self.assertFalse(any(p == str(tools) or p.startswith(str(tools) + os.sep) for p in lane_))
+
+
 class Permission(Base):
     """A refused command: the agent asks with `command`, `wb allow` answers and restarts it."""
     def test_a_request_is_answered_by_wb_allow_outside_the_question_budget(self):

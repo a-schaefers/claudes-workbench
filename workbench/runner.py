@@ -52,7 +52,9 @@ def _on_term(signum, frame):
 
 def opencode_bin() -> list[str]:
     fake = os.environ.get("WB_OPENCODE_BIN")
-    return shlex.split(fake) if fake else ["opencode"]
+    # by the runner's own PATH: the agent's puts the worktree's .venv/bin first (#490), where an
+    # `opencode` the agent wrote would run its next round
+    return shlex.split(fake) if fake else [shutil.which("opencode") or "opencode"]
 
 
 # The OpenCode versions the rules were checked against (the real-OpenCode tests, CLAUDE.md's
@@ -248,8 +250,14 @@ def agent_env(task: store.Task, run: str = "") -> dict:
         # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
         env.pop("WSL_INTEROP", None)
         env["PATH"] = context.agent_path(env["PATH"])
-    env.update(gitguard.install(context.rules_dir(task) / "bin", Path(task.spec["repo"]), PKG_ROOT,
-                                env["PATH"]) or {})
+    # not the user's checkout's venv: the tests imported their checkout, not the worktree (#490)
+    inside = set(context.python_env(task, env))
+    # the real git found outside the worktree: the runner runs it (gitguard.install), outside
+    # the lane, so a `git` the agent wrote into .venv/bin must not be the one it finds
+    outside = os.pathsep.join(d for d in env["PATH"].split(os.pathsep) if d not in inside)
+    shim = context.rules_dir(task) / "bin"
+    if gitguard.install(shim, Path(task.spec["repo"]), PKG_ROOT, outside):
+        env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
     return env
 
 

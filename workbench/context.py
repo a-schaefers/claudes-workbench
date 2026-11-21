@@ -20,9 +20,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 
-from . import audio, chat, gitops, hardware, images, models, skills, store
+from . import audio, chat, gitops, hardware, images, lane, models, skills, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 HANDBOOK = PKG_ROOT / "agent" / "HANDBOOK.md"
@@ -142,6 +143,12 @@ INSTALL_LISTED = (
     "python -m pip install -e .", "python3 -m pip install -e .", "uv pip install -r *",
     "uv pip install -e .",
 )
+# The pip forms above are allowed only when they install into the worktree's own venv, or no
+# environment is active and Landlock bounds pip (python_installs); else they ask first. These,
+# which change the active venv, ask first while it is the user's (#490)
+ENV_INSTALLS = ("poetry install *", "poetry sync *", "poetry remove *", "uv sync --active *",
+                "uv pip sync *", "uv pip uninstall *", "pip uninstall *", "pip3 uninstall *",
+                "python -m pip uninstall *", "python3 -m pip uninstall *")
 
 
 def allowed_patterns(task: store.Task) -> list[str]:
@@ -299,10 +306,11 @@ def shell_rules(task: store.Task) -> list[dict]:
     rules += [{"action": "shell", "resource": f"{d}/*", "effect": "allow"}
               for d in (writable(task) or []) if os.path.isdir(d)
               and not d.startswith(("/dev", "/proc"))]
+    pip, theirs = python_installs(task)  # into the worktree's venv, not the user's (#490)
     rules += [{"action": "shell", "resource": r, "effect": "deny"}
-              for p in ASK_FIRST for r in (p, f"{ASSIGN} {p}")]
+              for p in (*ASK_FIRST, *(ENV_INSTALLS if theirs else ())) for r in (p, f"{ASSIGN} {p}")]
     rules += [{"action": "shell", "resource": r, "effect": "allow"}
-              for p in INSTALL_LISTED for r in (p, f"{ASSIGN} {p}")]
+              for p in INSTALL_LISTED if pip or "pip" not in p for r in (p, f"{ASSIGN} {p}")]
     rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in allowed_patterns(task)]
     rules += [{"action": "shell", "resource": c, "effect": "deny"} for c in denied_shell()]
     return rules
@@ -566,7 +574,9 @@ def writable(task: store.Task) -> list[str] | None:
                 os.makedirs(os.path.join(r, "toolchains"), exist_ok=True)
             except OSError:
                 pass
-    out_of = _hidden() | \
+    # the user's active Python environments too: a venv in a tool home (poetry's, pipenv's,
+    # WORKON_HOME) was the agent's to install into (#490)
+    out_of = _hidden() | set(python_envs()) | \
         {os.path.realpath(p) for p in (*(home / h for h in NOT_WRITABLE),
                                        *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()),
                                        *((Path(rustup) / "toolchains",) if rustup else ()))
@@ -816,6 +826,155 @@ def agent_path(path: str) -> str:
     if drives is None:
         return path
     return os.pathsep.join(d for d in path.split(os.pathsep) if not (d and on_windows(d, drives)))
+
+
+# A Python environment the user activated (a venv, a conda env, direnv's `layout python`, `poetry
+# shell`) reached the agent with its PATH. When it was the checkout's own (inside the repo, an
+# editable install of it, or in a per-project venv home), the agent, the setup, the base check and
+# the tests imported the user's checkout instead of the worktree: a test the agent added failed in
+# every auto-fix round, or a review said the tests passed on code they never imported; and the
+# agent's allowed `pip install -e .` repointed the user's venv at the worktree, which accept or
+# discard then deleted (#490, the audit of 1.90). Such an env stays out of the agent's environment
+# (python_env); the worktree's own venv, the setup's `uv sync`, comes first on its PATH.
+VENV_VARS = {"VIRTUAL_ENV": ("VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT"),
+             "CONDA_PREFIX": ("CONDA_PREFIX", "CONDA_DEFAULT_ENV", "CONDA_PROMPT_MODIFIER")}
+# where poetry, pipenv, virtualenvwrapper and hatch keep one venv per project (under the home, or
+# where their variable moved them): writable tool homes in the lane, so the agent's installs
+# would land there even with Landlock
+VENV_HOMES = (".cache/pypoetry/virtualenvs", "Library/Caches/pypoetry/virtualenvs",
+              ".local/share/virtualenvs", ".virtualenvs", ".local/share/hatch/env",
+              "Library/Application Support/hatch/env")
+VENV_HOME_VARS = {"WORKON_HOME": "", "POETRY_VIRTUALENVS_PATH": "",
+                  "POETRY_CACHE_DIR": "virtualenvs", "HATCH_DATA_DIR": "env"}
+# what in a site-packages names an installed project's source: .pth lines, setuptools' editable
+# finders, the old develop's egg-links, pip's direct_url.json
+EDITABLE_FILES = ("*.pth", "__editable__*", "*.egg-link", "*.dist-info/direct_url.json")
+
+
+def python_envs(environ=None) -> list[str]:
+    """The Python environments active in ``environ`` (the runner's by default), real paths:
+    VIRTUAL_ENV, CONDA_PREFIX and each PATH directory that is a venv's or conda env's `bin`."""
+    env = os.environ if environ is None else environ
+    roots = [env.get("VIRTUAL_ENV"), env.get("CONDA_PREFIX")]
+    for d in (env.get("PATH") or "").split(os.pathsep):
+        p = Path(d)
+        if p.is_absolute() and p.name == "bin" and ((p.parent / "pyvenv.cfg").is_file()
+                                                   or (p.parent / "conda-meta").is_dir()):
+            roots.append(str(p.parent))
+    return list(dict.fromkeys(os.path.realpath(r) for r in roots if r and os.path.isdir(r)))
+
+
+def _in_repo(path: str, repo: str) -> bool:
+    """``path`` in the repo, unless the repo holds the home directory (a dotfiles repo at ~)."""
+    home = os.path.realpath(Path.home())
+    return not (home == repo or _under(home, repo)) and (path == repo or _under(path, repo))
+
+
+def checkout_env(root: str, repo: str) -> str:
+    """Why the environment at ``root`` is the user's checkout's (``repo``, a real path): ''
+    when it isn't."""
+    if _in_repo(root, repo):
+        return "inside the repo"
+    homes = [Path.home() / h for h in VENV_HOMES]
+    homes += [Path(os.environ[v]).expanduser() / sub for v, sub in VENV_HOME_VARS.items()
+              if os.environ.get(v)]
+    if any(_under(root, os.path.realpath(h)) for h in homes):
+        return "a per-project venv"
+    names = {repo, os.path.abspath(repo)}
+    names |= {urllib.parse.quote(n) for n in names}
+    found = re.compile("|".join(map(re.escape, sorted(names))) + r"(?=$|[/\\'\"\s,}])", re.M)
+    sites = [*glob.glob(os.path.join(glob.escape(root), "lib", "*", "site-packages")),
+             os.path.join(root, "lib", "site-packages")]
+    for site in sites:
+        for pattern in EDITABLE_FILES:
+            for f in glob.glob(os.path.join(glob.escape(site), pattern)):
+                try:
+                    with open(f, encoding="utf-8", errors="replace") as fh:
+                        text = fh.read(1 << 16)
+                except OSError:
+                    continue
+                lines = (ln.strip() for ln in text.splitlines()) if f.endswith(".pth") else ()
+                if found.search(text) or any(  # a .pth line through a link
+                        ln and not ln.startswith(("#", "import")) and os.path.isabs(ln)
+                        and _in_repo(os.path.realpath(ln), repo) for ln in lines):
+                    return "an editable install of the repo"
+    return ""
+
+
+def checkout_envs(task: store.Task, environ=None) -> dict[str, str]:
+    """The active Python environments that are the user's checkout's, each with why."""
+    repo = os.path.realpath(task.spec["repo"])
+    return {r: why for r in python_envs(environ) if (why := checkout_env(r, repo))}
+
+
+def own_venv(task: store.Task) -> Path | None:
+    """The worktree's own virtualenv (`.venv` or `venv`, in the package or at the top: the
+    setup's `uv sync` or `python3 -m venv .venv`), else None."""
+    for d in dict.fromkeys((task.workdir, task.worktree)):
+        for name in (".venv", "venv"):
+            if (d / name / "pyvenv.cfg").is_file() and not (d / name).is_symlink():
+                return d / name
+    return None
+
+
+def python_env(task: store.Task, env: dict) -> list[str]:
+    """``env``, the agent's, without the user's checkout's Python environments (checkout_envs):
+    their variables and their `bin` directories off PATH; the PATH directories inside the repo
+    as the worktree's (`node_modules/.bin`, a direnv PATH_add); the worktree's own venv first,
+    as VIRTUAL_ENV. In place; the PATH entries now inside the worktree, which the agent writes
+    and the runner's own lookups (the git shim's) must not use."""
+    repo = os.path.realpath(task.spec["repo"])
+    dropped = list(checkout_envs(task, env))
+    gone = lambda p: any(p == r or _under(p, r) for r in dropped)  # noqa: E731
+    for var, names in VENV_VARS.items():
+        if env.get(var) and gone(os.path.realpath(env[var])):
+            for n in names:
+                env.pop(n, None)
+    if env.get("PYTHONHOME") and (gone(home := os.path.realpath(env["PYTHONHOME"]))
+                                  or _in_repo(home, repo)):
+        env.pop("PYTHONHOME")
+    path, inside = [], []
+    for d in (env.get("PATH") or "").split(os.pathsep):
+        real = os.path.realpath(d) if os.path.isabs(d) else ""
+        if real and gone(real):
+            continue
+        if real and _in_repo(real, repo):
+            d = os.path.normpath(os.path.join(task.worktree, os.path.relpath(real, repo)))
+            inside.append(d)
+        path.append(d)
+    if own := own_venv(task):
+        inside.append(str(own / "bin"))
+        path.insert(0, str(own / "bin"))
+        env["VIRTUAL_ENV"] = str(own)
+        env.pop("VIRTUAL_ENV_PROMPT", None)
+    env["PATH"] = os.pathsep.join(path)
+    return inside
+
+
+def python_installs(task: store.Task) -> tuple[bool, bool]:
+    """Whether the agent may install what the project lists with pip (`pip install -e .`, `-r`)
+    without asking: into the worktree's own venv, or with none active (the user's checkout's are
+    dropped, python_env) while Landlock bounds what pip writes; else pip would write the user's
+    own environment (a conda env, a tools venv), or their Python without the lane (#490). And
+    whether the active venv the agent's shell has is the user's (ENV_INSTALLS ask first)."""
+    if own_venv(task):
+        return True, False
+    kept = [r for r in python_envs() if r not in checkout_envs(task)]
+    return not kept and writable(task) is not None and lane.abi() > 0, bool(kept)
+
+
+def venv_line(task: store.Task, setup: bool) -> str:
+    """For wb start: the active environments the agent leaves out, and how to give it its own."""
+    envs = checkout_envs(task)
+    if not envs:
+        return ""
+    said = "; ".join(f"{r} ({why})" for r, why in envs.items())
+    line = (f"the active Python environment {said} is your checkout's: the agent, its setup and "
+            "its tests leave it out, so they import the worktree's code")
+    if not setup:
+        line += ("; --setup 'uv sync' --test 'uv run pytest' (or the project's own install) gives "
+                 "the worktree its own .venv, first on their PATH")
+    return line
 
 
 def interop_gap() -> str | None:

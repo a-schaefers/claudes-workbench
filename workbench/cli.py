@@ -746,6 +746,8 @@ def cmd_start(a):
         print(f"note: {gap}")
     if proxies := runner.dropped_proxies():  # #380 (the audit of 1.6)
         print(f"note: {runner.proxy_line(proxies)}")
+    if venvs := context.venv_line(task, bool(setup and setup.get("setup"))):  # #490
+        print(f"note: {venvs}")
     if context.on_windows(str(repo), context.windows_drives()):  # finding 30 (the 2026-11-19 audit)
         print("note: the repo is on a Windows drive, where git is many times slower and wb checks "
               "the worktree at every step: a clone in WSL's own filesystem (~/...) runs faster")

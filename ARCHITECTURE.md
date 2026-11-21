@@ -789,7 +789,8 @@ check that needed them failed on the base and in every round for that, not for t
   environment and its writes left the lane (#260, the audit of 1.2); the refusal says to
   recreate it with `--setup` (`python3 -m venv .venv && .venv/bin/pip install -r …`, `uv sync`).
 - `setup` (`--setup`), in the lane and the agent's shell, as the tests run (`run_in_lane`), for
-  at most `SETUP_SECS` (1800 s).
+  at most `SETUP_SECS` (1800 s). A venv it makes in the worktree (`.venv`, `venv`) is first on
+  the agent's and the tests' PATH from then on (`context.own_venv`, *Its environment*).
 
 Its output goes to `setup.txt` (as tests.txt, with the seconds it took). Done, status `prepared`
 is set and it isn't run again, with `prepared_paths` (the worktree's ignored paths it left,
@@ -948,7 +949,16 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
 6. allow `INSTALL_LISTED`, installing what the project already lists, because with the optional
    trailing ` *` the rules above also refuse the bare forms: `npm install`, `npm i`, `npm ci`,
    `pnpm install`, `pnpm i`, `bun install`, `bun i`, `yarn`, `yarn install`, `pip install -r *`,
-   `pip install -e .` (and `pip3`, `python -m pip`, `python3 -m pip`, `uv pip` forms);
+   `pip install -e .` (and `pip3`, `python -m pip`, `python3 -m pip`, `uv pip` forms). The pip
+   forms only where pip installs into the worktree's own venv, or with no Python environment
+   active (the user's checkout's are left out: *Its environment*, below) while Landlock bounds
+   what pip writes (`context.python_installs`); otherwise they ask first, since pip would write
+   the user's own conda env or tools venv, or their Python with no lane. While a venv of the
+   user's stays active in the agent's shell (one that isn't the checkout's), `ENV_INSTALLS`
+   (`poetry install *`, `poetry sync *`, `poetry remove *`, `uv sync --active *`, `uv pip sync
+   *`, the `pip uninstall` forms), which change the active venv, ask first too (#490, the audit
+   of 1.90: the agent's `pip install -e .` repointed the user's venv at the worktree, which
+   accept or discard then deleted);
 7. allow the user's standing patterns (`commands.json` `allow`) and the task's grants
    (`rules/<task>/grants.json` `allow`: `wb allow`, `wb start|next --allow`); a `*` there lifts
    everything above;
@@ -1017,6 +1027,9 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   uv must download first, like `uv tool install`, asks; and `NOT_WRITABLE` (`.cargo/bin`,
   `.cargo/env`, `.dotnet/tools`, `.cabal/bin`, `.ghcup/bin`, `.rustup/toolchains`, and
   `$CARGO_HOME`'s `bin` and `env` and `$RUSTUP_HOME`'s `toolchains`) are left out of their homes;
+  so are the user's active Python environments (`context.python_envs`: `VIRTUAL_ENV`,
+  `CONDA_PREFIX`, each PATH `bin` beside a `pyvenv.cfg` or `conda-meta`), which poetry's,
+  pipenv's and virtualenvwrapper's homes put inside the lane (#490);
   `cargo install`, `rustup toolchain install` (or a `rust-toolchain.toml` naming one not
   installed yet) and the like need `wb allow --path`. A rustup home gets `toolchains/` made first,
   so the split keeps it out even before rustup made it. What stays in the lane is a documented
@@ -1188,6 +1201,32 @@ host`, `ProxyError` and the like) says it again (`proxy_gap`: the setup's `faile
 status `tests.proxy`, which the report names), each with the `"env": [...]` line that passes it.
 OpenCode's own environment adds `OPENCODE_ENV`
 (`npm_config_yes=false`); the tests' doesn't.
+
+*The user's Python environment* (`context.python_env`, in `agent_env`, so the agent, the setup,
+the tests, the base check and `wb verify` alike). An activated venv or conda env (`source
+.venv/bin/activate`, direnv's `layout python`, `poetry shell`, `conda activate`) reached the agent
+on its PATH, and when it was the checkout's own, `import mypkg` in the worktree loaded the user's
+checkout: a test the agent added failed in every auto-fix round, or a review said the tests passed
+on code they never imported, and a setup that made `worktree/.venv` didn't help unless `--test`
+named `.venv/bin/pytest` (#490, the audit of 1.90). An active environment (`python_envs`) is the
+checkout's (`checkout_env`, `checkout_envs`) when it lies inside the repo (not when the repo holds
+the home directory), in a per-project venv home (`VENV_HOMES`: poetry's, pipenv's,
+virtualenvwrapper's `~/.virtualenvs` and hatch's, or where `VENV_HOME_VARS` move them:
+`WORKON_HOME`, `POETRY_VIRTUALENVS_PATH`, `POETRY_CACHE_DIR`, `HATCH_DATA_DIR`), or when a file in
+its site-packages (`EDITABLE_FILES`: `.pth` lines, setuptools' `__editable__` finders, egg-links,
+`direct_url.json`) names a path in the repo. Such an environment leaves the agent's: its
+variables (`VENV_VARS`: `VIRTUAL_ENV`, `VIRTUAL_ENV_PROMPT`; `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`,
+`CONDA_PROMPT_MODIFIER`), a `PYTHONHOME` in it or the repo, and its `bin` on PATH. Other PATH
+directories inside the repo become the worktree's (`node_modules/.bin`, a direnv `PATH_add`), and
+the worktree's own venv (`own_venv`: `.venv` or `venv` in the package or at the top, made by the
+setup) comes first, as `VIRTUAL_ENV`, so a plain `pytest` or `python3` runs it. The git shim's
+real git is looked up without those worktree directories (the runner runs it outside the lane),
+and OpenCode is found by the runner's own PATH (`opencode_bin`). Any other active environment (a
+conda env holding the project's dependencies, a tools venv) stays, written by nothing in the lane
+and installed into only when asked (*Commands*, step 6). `wb start` names each one it leaves out
+(`venv_line`) and, without `--setup`, how to give the worktree its own: `--setup 'uv sync' --test
+'uv run pytest'`, or the project's own install. Not covered: a user site-packages
+(`~/.local/lib`) `.pth` pointing at the checkout, from `pip install --user -e .`.
 
 **Project config can't lift the rules.** OpenCode loads a project's `opencode.json` (the
 worktree's, `.opencode/`, and one in any directory above it) after `OPENCODE_CONFIG`, and appends

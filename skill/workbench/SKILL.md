@@ -262,7 +262,10 @@ The worktree holds only committed files. When the acceptance command needs what 
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
 path>`; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
 directories it lacks, and a failing setup fails the task before any round. A note that the
-agent's environment leaves out a proxy (it holds a password): a setup or tests that need the
+active Python environment is the checkout's: the agent leaves it out (it would import the user's
+checkout, not the worktree), so give it its own, `--setup 'uv sync' --test 'uv run pytest'` or
+`--setup 'python3 -m venv .venv && .venv/bin/pip install -e .'`; that .venv comes first on the
+agent's and the tests' PATH. A note that the agent's environment leaves out a proxy (it holds a password): a setup or tests that need the
 network fail there; ask the user before naming it in commands.json `env`. Tests that use the
 GPU themselves (CUDA, PyTorch, a game engine): add `--unload-for-tests`, or they run beside the
 model and fail out of memory (it also opens the GPU's device nodes to the lane; without it they
