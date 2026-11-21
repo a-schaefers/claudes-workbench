@@ -731,11 +731,11 @@ def wait_up(port: int, pid: int, limit: float = START_WAIT) -> bool:
 def start(port: int) -> int:
     """`wb chat serve` detached, its output in chat/serve.log, its pid in chat/serve.pid: for a
     machine without the systemd unit, so turning the chat on is enough to reach it."""
+    from . import cli  # only here: the server never starts one
     root = Path(__file__).resolve().parent.parent
-    with open(chat_dir() / "serve.log", "a") as log:
-        proc = subprocess.Popen([sys.executable, "-X", "utf8", str(root / "bin" / "wb"), "chat", "serve",
-                                 "--port", str(port)], cwd=root, stdin=subprocess.DEVNULL,
-                                stdout=log, stderr=log, start_new_session=True)  # outlives wb
+    with open(chat_dir() / "serve.log", "a") as log:  # outlives wb, and a logout (#531)
+        proc = cli.detach([sys.executable, "-X", "utf8", str(root / "bin" / "wb"), "chat", "serve",
+                           "--port", str(port)], cwd=root, stdout=log, stderr=log)
     store.write_json(chat_dir() / "serve.pid", {"pid": proc.pid, "port": port, "start": _started(proc.pid)})
     return proc.pid
 

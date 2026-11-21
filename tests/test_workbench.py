@@ -9624,6 +9624,40 @@ class LogoutStops(Base):
         self.assertEqual(len(said), 1)                      # the manager stops too: linger
         self.assertIn("runners", said[0])
 
+    def test_a_bench_run_wb_optimize_and_a_chat_wb_started_each_get_a_scope_of_their_own(self):
+        # #531: only the runners had one, so under KillUserProcesses=yes a logout killed the
+        # bench driver (its replay discarded), wb optimize (which then never started the bench)
+        # and a chat started by wb chat on
+        from workbench import bench, chat, models, optimize
+        scope = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
+        with self.fake_loginctl("yes", "yes", scope="ok"):
+            self.assertEqual(cli.runner_scope(), scope)     # asked before Popen is a fake
+            started = []
+            def popen(argv, **kw):
+                started.append(argv)
+                self.assertTrue(kw.get("start_new_session"))
+                return types.SimpleNamespace(pid=os.getpid())
+            with mock.patch("subprocess.Popen", popen), \
+                    mock.patch.object(models, "_started", return_value="1"):
+                chat.start(51583)
+                with mock.patch.object(optimize, "candidates", return_value=[object()]), \
+                        mock.patch.object(optimize, "estimate", return_value=60), \
+                        mock.patch.object(models, "holders", return_value={}):
+                    optimize.start()
+                with mock.patch.object(bench, "driver", return_value=None), \
+                        mock.patch.object(bench, "cases", return_value={"c": {}}), \
+                        mock.patch.object(models, "discover", return_value={}), \
+                        mock.patch.object(models, "resolve", return_value=types.SimpleNamespace(id="m")):
+                    bench.start(["m"], [], [], "", 1)
+        self.assertEqual(len(started), 3)
+        for argv, what in zip(started, (("chat", "serve"), ("-m", "workbench.optimize"),
+                                        ("-m", "workbench.bench"))):
+            self.assertEqual(tuple(argv[:5]), scope, argv)
+            self.assertIn(" ".join(what), " ".join(argv))
+        with self.fake_loginctl("yes", "yes", scope="fails"):
+            said = cli.logout_stops()
+        self.assertIn("wb bench and wb optimize runs and a chat wb chat on started", said[0])
+
     def test_doctor_names_the_chats_linger_only_with_the_chat_on(self):
         # most desktops linger off, and the chat is off until turned on: no warning for that
         from workbench import chat

@@ -126,10 +126,8 @@ def spawn_runner(task: store.Task) -> int:
     with open(task.dir / "runner.log", "a") as log:
         # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
         # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
-        proc = subprocess.Popen([*runner_scope(), sys.executable, "-X", "utf8", "-m", "workbench.runner",
-                                 task.name],
-                                cwd=PKG_ROOT, env=env, stdin=subprocess.DEVNULL, stdout=log,
-                                stderr=log, start_new_session=True)  # outlives this command
+        proc = detach([sys.executable, "-X", "utf8", "-m", "workbench.runner", task.name],
+                      cwd=PKG_ROOT, env=env, stdout=log, stderr=log)
     task.set_status(pid=proc.pid)
     return proc.pid
 
@@ -153,10 +151,11 @@ def kills_sessions() -> bool:
 
 @functools.cache
 def runner_scope() -> tuple[str, ...]:
-    """What starts a runner in a scope of its own under the user's systemd manager, where logind
-    kills a login session's processes at logout: a runner started from an SSH or desktop session
-    died with it, and the night's backlog too (#351, the audit of 1.4). `--scope` execs the
-    command, so the pid is the runner's. Empty anywhere else, or when the manager doesn't answer."""
+    """What starts a detached process (`detach`) in a scope of its own under the user's systemd
+    manager, where logind kills a login session's processes at logout: a runner started from an
+    SSH or desktop session died with it, and the night's backlog too (#351, the audit of 1.4).
+    `--scope` execs the command, so the pid is the command's. Empty anywhere else, or when the
+    manager doesn't answer."""
     if not kills_sessions() or not shutil.which("systemd-run"):
         return ()
     argv = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
@@ -165,6 +164,15 @@ def runner_scope() -> tuple[str, ...]:
     except (OSError, subprocess.SubprocessError):
         ok = False
     return argv if ok else ()
+
+
+def detach(argv: list[str], **kw) -> subprocess.Popen:
+    """Start what outlives this command: a runner, the bench driver, wb optimize, the chat `wb
+    chat on` starts. Its own session, stdin from /dev/null, and its own scope where logind kills
+    a session's processes at logout (runner_scope): the runners alone had one, so the others
+    still died there (#531)."""
+    return subprocess.Popen([*runner_scope(), *argv], stdin=subprocess.DEVNULL,
+                            start_new_session=True, **kw)
 
 
 def runner_alive(task: store.Task) -> bool:
@@ -3229,8 +3237,10 @@ def cmd_chat(a):
 
 
 def logout_stops() -> list[str]:
-    """What a logout would stop, from logind: the user manager (so wb-chat.service) unless the
-    user lingers, and every process in the login session, runners too, under KillUserProcesses=yes.
+    """What a logout would stop, from logind: the user manager (so wb-chat.service, and every
+    scope `detach` made) unless the user lingers, and every process in the login session, under
+    KillUserProcesses=yes, all that `detach` started too (runners, wb bench and wb optimize runs,
+    the chat `wb chat on` started: #531) when it can't give them a scope.
     A headless box reached by SSH, or a desktop logged out overnight, lost the chat and the night's
     backlog without a word (#351, the audit of 1.4). Empty when logind can't say (macOS, WSL
     without systemd, a container): unknown isn't a warning."""
@@ -3242,13 +3252,13 @@ def logout_stops() -> list[str]:
     scoped = runner_scope()
     if lingers == "no":
         out.append(f"logind stops your user services at logout, the web chat's wb-chat.service "
-                   f"{'and the runners of tasks running then ' if scoped else ''}too: loginctl "
-                   f"enable-linger {user} keeps them up")
+                   f"{'and the runners, bench and optimize runs going then ' if scoped else ''}too: "
+                   f"loginctl enable-linger {user} keeps them up")
     if kills_sessions() and not scoped:
         out.append("logind kills every process of a login session at logout (KillUserProcesses=yes),"
-                   " running tasks too, and systemd-run --user can't give them a scope of their own:"
-                   " start wb from a session that stays, or set KillUserProcesses=no in"
-                   " /etc/systemd/logind.conf")
+                   " running tasks, wb bench and wb optimize runs and a chat wb chat on started too,"
+                   " and systemd-run --user can't give them a scope of their own: start wb from a"
+                   " session that stays, or set KillUserProcesses=no in /etc/systemd/logind.conf")
     return out
 
 

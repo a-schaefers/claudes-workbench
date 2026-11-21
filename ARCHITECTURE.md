@@ -95,7 +95,7 @@ installed module:
 | Process | Started by | How it finds `workbench` |
 |---|---|---|
 | `wb` | the user, Claude, the mod | `bin/wb` puts its real path's repo root on `sys.path` (so the `~/.local/bin/wb` symlink works) |
-| the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` = the repo root, own session (and its own systemd scope where logind kills sessions at logout: `cli.runner_scope`, #351), output to `runner.log` |
+| the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` = the repo root, own session (and its own systemd scope where logind kills sessions at logout: `cli.detach`, `cli.runner_scope`, #351), output to `runner.log` |
 | the ask server | OpenCode, from the config layer's `mcp.servers.workbench` | `[sys.executable, <root>/bin/wb-ask-mcp]`, like `bin/wb` |
 | the git shim | the agent's shell (`<rules>/bin/git`) | a `/bin/sh` wrapper that execs `<python> -I -c` (quoted: a shebang splits at a space) with an explicit `sys.path.insert` |
 | the lane | the runner, before OpenCode | `python -I lane.py …`, a standard-library-only script |
@@ -3765,12 +3765,15 @@ reached by SSH, a desktop logged out overnight): `loginctl enable-linger $USER` 
 `wb chat on` says so when logind reports `Linger=no`, and `wb doctor` too while the chat is on
 (most desktops linger off, and the chat is off until turned on). Where logind's
 `KillUserProcesses=yes` would kill the session's runners at logout (`cli.kills_sessions`, the
-manager's property through `loginctl show-session`: systemd 262 has no `show` verb), each runner
-starts in a scope of its own under the user's manager (`cli.runner_scope`: `systemd-run --user
---scope --quiet --collect`, which execs it, so the pid is the runner's; probed once per `wb`
-call), and the linger line names the runners too, with or without the chat; `wb doctor` warns
-only when that scope can't be had (`cli.logout_stops`; quiet where `loginctl` is absent; #351,
-the audit of 1.4).
+manager's property through `loginctl show-session`: systemd 262 has no `show` verb), everything
+wb leaves running starts in a scope of its own under the user's manager (`cli.detach`, with
+`cli.runner_scope`'s `systemd-run --user --scope --quiet --collect`, which execs it, so the pid
+is the command's; probed once per `wb` call): each runner, the bench driver (`bench.start`), `wb
+optimize` (`optimize.start`) and the chat server `wb chat on` starts (`chat.start`; the runners
+alone had one, so a logout still killed the rest: #531). The linger line names the runners,
+bench and optimize runs too, with or without the chat; `wb doctor` warns only when that scope
+can't be had (`cli.logout_stops`, naming all four; quiet where `loginctl` is absent; #351, the
+audit of 1.4).
 The unit runs systemd's `python3`; a Python from pyenv, uv or conda goes in with `systemctl --user
 edit wb-chat` (the unit's comment says how). On macOS, a launchd agent running `~/.local/bin/wb
 chat serve` does the same. `wb chat url` prints the link, `http://localhost:1337/#token=…` (the
@@ -5117,6 +5120,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `free`, `publish`): a change there changes both (`tests.Images`, `tests.Audio`). A new kind of
   generated media → its config path in `store.PATH_VARS` and `context.private_paths`, its output
   directory in `cli.EVENT_SKIP` (and the mod's ears), its engines in `wb scout`.
+- **A process wb leaves running** (a runner, the bench driver, `wb optimize`, the chat `wb chat
+  on` starts) → started through `cli.detach` (its own scope where logind kills sessions: #531),
+  and named in `cli.logout_stops`' lines.
 - **A file in a task's directory** → `context.TASK_FILES`, the names a `--sibling` can't take
   (its link sits beside the worktree).
 - **Where a task's worktree is** (`Task.worktree`, `tree/…/worktree` for a sibling further up,
