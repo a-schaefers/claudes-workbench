@@ -733,6 +733,9 @@ def cmd_start(a):
             + (" (--force queues it anyway, to wait for it)" if models.may_come_up(state) else ""), 3)
     dirty = gitops.git(repo, "status", "--porcelain").strip()
     if not gitops.base_commit(repo, a.base):  # first: a typo read as a missing CLAUDE.md (the audit)
+        if not gitops.base_commit(repo, "HEAD") and gitops.current_branch(repo):  # unborn (#476)
+            die(f"{repo} has no commits yet: commit, or wb init {shlex.quote(str(repo))} (it "
+                "commits the project as it is)")
         die(f"no commit {a.base} in {repo}: a typo, or a ref not fetched yet (git fetch)")
     if not _identity(repo):
         die("git has no user.name/user.email here: the user's identity signs the commits "

@@ -3410,6 +3410,24 @@ class StartChecks(Base):
         self.assertIn("NOTE: the agent's OpenCode never listed workbench_ask_reviewer, so it can't "
                       "ask you anything", run_wb("report", "t-n"))
 
+    def test_start_in_a_repo_with_no_commits_says_so_not_a_typo(self):
+        # #476 (the audit of 1.8): an unborn HEAD read as "no commit HEAD: a typo, or a ref not
+        # fetched yet (git fetch)"
+        fresh = Path(self.tmp.name) / "fresh"
+        fresh.mkdir()
+        subprocess.run(["git", "-C", str(fresh), "init", "-q"], check=True)
+        (fresh / "CLAUDE.md").write_text("# fresh\n")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("start", "t-unborn", "--spec", str(self.spec), "--repo", str(fresh),
+                   "--model", "mimo")
+        self.assertIn(f"{fresh} has no commits yet: commit, or wb init {fresh}", err.getvalue())
+        self.assertNotIn("typo", err.getvalue())
+        with self.assertRaises(SystemExit), redirect_stderr(err):  # a typo is still one
+            run_wb("start", "t-typo", "--spec", str(self.spec), "--repo", str(self.repo),
+                   "--model", "mimo", "--base", "nope")
+        self.assertIn("no commit nope", err.getvalue())
+
 
 class Steering(Base):
     def setUp(self):
