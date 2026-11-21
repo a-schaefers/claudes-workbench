@@ -8817,7 +8817,9 @@ class Verify(Base):
         for held in (base_check, base, cand):                       # alone, as no model's task
             self.assertEqual([(p, h["model"], h["task"]) for p, h in held.items()],
                              [(me, None, "t-gpu")])
-        self.assertEqual(round_tests, {})                            # the round's: stepped aside
+        # the round's: the model stepped aside, the task still holds the GPU for its tests (#428)
+        self.assertEqual([(h["model"], h["task"], h.get("tests")) for h in round_tests.values()],
+                         [(None, "t-gpu", True)])
         shots = [h for cmd, h in seen if "WB_SHOT_OUT" in cmd]
         self.assertEqual([list(h) for h in shots], [[me], [me]])
         self.assertEqual(len(freed), 3)                              # once each: check, verify, shot
