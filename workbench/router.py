@@ -26,8 +26,8 @@ with the context window the model is served, from what was measured on a 32K one
 step then says how a slice that size went (results.step): well when it landed with at most one
 review round the agent caused, badly when a session compacted or filled up with reading before
 any change, the agent got stuck, or it took BAD_REVIEWS rounds. Handing over to a fresh session isn't held against a step: that is how the
-runner gets through one. The biggest that went well sets a floor, the smallest that went badly a
-ceiling, so a big window on a strong machine earns big tasks.
+runner gets through one. Of the latest steps, the size most good ones reached sets a floor and
+the smallest that went badly a ceiling, so a big window on a strong machine earns big tasks.
 
 How long the agent may think, or go quiet, before the runner acts (budgets) is learned too: each
 round's session says how fast the model reads and writes on this machine (record_speed).
@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import math
 import statistics
 import time
 import types
@@ -64,6 +65,8 @@ SIZES = ("trivial", "significant")
 BASE_WINDOW, BASE_FILES, BASE_LINES = 32768, 3, 150
 GUESS_MAX = 4
 BAD_REVIEWS = 2  # review rounds the agent caused at which a step held too much
+SLICE_RECENT = 20  # the measured steps the slice is learned from, the latest
+FIT_MIN, FIT_SHARE = 2, 0.75  # good steps before they raise it, and the share of them it covers
 
 
 @dataclass
@@ -323,18 +326,33 @@ def slice(m: models.Model) -> Slice:
     basis = f"{window // 1024}K window" if window else "window unknown"
     steps = [s for r in store.results() if r.get("model") == m.id and tuning.judged(r)
              for s in r.get("steps") or [] if s.get("files") and (not window or s.get("window") in (None, window))]
+    every = len(steps)
+    steps = steps[-SLICE_RECENT:]  # the latest say how it does now
     went = [_went(s) for s in steps]
     fit = [s for s, w in zip(steps, went) if w == "well"]
     over = [s for s, w in zip(steps, went) if w == "badly"]
-    if over:  # below the smallest step that went badly
-        files = min(files, max(1, min(s["files"] for s in over) - 1))
-        lines = min(lines, max(50, min(s["lines"] for s in over) * 3 // 4))
-    if fit:  # at least the biggest that went well
-        files, lines = max(files, max(s["files"] for s in fit)), max(lines, max(s["lines"] for s in fit))
+    # Below the smallest recent step that went badly; raised to the size most recent good steps
+    # reached (FIT_SHARE of them, once there are FIT_MIN), unless the steps of the bad one's size
+    # or more mostly went badly. The biggest good step ever once won over every cap: one lockfile
+    # bump, or a rename across 30 files, set the slice for good, and 30 failures at a sixth of its
+    # size couldn't lower it (#720).
+    got = {"files": files, "lines": lines}
+    for key, least, cap in (("files", 1, lambda n: n - 1), ("lines", 50, lambda n: n * 3 // 4)):
+        bad = min((s[key] for s in over), default=None)
+        if bad is not None:
+            got[key] = min(got[key], max(least, cap(bad)))
+        if len(fit) >= FIT_MIN:
+            sizes = sorted(s[key] for s in fit)
+            reach = sizes[math.ceil(FIT_SHARE * len(sizes)) - 1]
+            there = [w for s, w in zip(steps, went) if bad is not None and s[key] >= bad]
+            if bad is None or reach < bad or there.count("badly") <= there.count("well"):
+                got[key] = max(got[key], reach)
+    files, lines = got["files"], got["lines"]
     if not steps:
         return Slice(files, lines, f"a guess from its {basis}; no steps measured yet" if window
                      else "a guess, its window unknown; no steps measured yet")  # not "from its window unknown" (the 0.90 review)
-    return Slice(files, lines, f"{basis}; {len(fit)} of {len(steps)} measured steps went well, "
+    last = f"the last {len(steps)}" if every > len(steps) else f"{len(steps)}"
+    return Slice(files, lines, f"{basis}; {len(fit)} of {last} measured steps went well, "
                  f"{len(over)} badly")
 
 

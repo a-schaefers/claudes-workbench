@@ -240,9 +240,9 @@ files named, and no bigger than its slice: `wb models` (and `wb start`) give eac
 `~3 files, ~150 new lines per task`. The slice comes from the context window the model is served
 (on 32K, 2–3 files and ~150 lines, measured 2026-11-16; a task that spends it, 8 files at once,
 cost 30–60 minutes of compactions, re-reading and drift) and is corrected by every step that
-closes: the biggest that went well raise it, the smallest that went badly (compacted, stuck, or
-two review rounds the agent caused) lower it; a handover to a fresh session doesn't count against
-a step. So a strong
+closes: the size most recent good steps reached raises it, the smallest that went badly (compacted,
+stuck, or two review rounds the agent caused) lowers it; a handover to a fresh session doesn't
+count against a step, and lockfiles and generated files don't count toward a step's size. So a strong
 machine's big window earns big tasks; don't hold it to the 32K numbers. When the last few steps
 went well, try the next one a little bigger than the slice; that is how it learns to grow.
 Splitting is your job, the architect's: run the parts one after another, each with its own acceptance command.

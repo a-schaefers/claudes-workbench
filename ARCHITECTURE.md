@@ -601,8 +601,11 @@ the whole GPU's draw, so each one adds this task's share: the draw over `runner.
 tasks holding the lease and not waiting (`models.holders`, a task's GPU tests one task with it):
 two tasks sharing a 300 W GPU for an hour each counted 300 Wh, and the period's energy and cost
 doubled (#706). The mean and peak (`gpu_w_*`) stay the GPU's own draw. The size: `gitops.footprint` gives `files`, `lines` (added) and
-`removed`; each step records them (`results.step`), and an accepted task's row sums them as
-`diff`.
+`removed` (a renamed file under its new name), leaving out the files a tool writes
+(`gitops.generated`: a package manager's lockfile by name, `gitops.LOCKFILES`, or one the repo's
+.gitattributes marks `linguist-generated` or `-diff`), which it counts apart as `generated`
+(`{files, lines, removed}`, only when there are any, #720); each step records them
+(`results.step`), and an accepted task's row sums them as `diff`.
 
 **Sharing it** (`wb savings --share`, `savings.share`, #119) prints a plain summary for the user
 to paste into a discussion, where users pool their evidence. Nothing is sent anywhere. It covers
@@ -2044,8 +2047,11 @@ added lines (`results.step`) and how it went: badly when its session was compact
 reading before any change, the agent got stuck, or it needed two review rounds the agent caused
 (`BAD_REVIEWS`; a round marked `--spec-gap` is Claude's, not the agent's); well when it landed
 short of that. A handover is counted but not held against the step: it is how the runner gets
-through a big one, and its cost shows in the task's time. The biggest step that went well raises
-the slice past the guess; the smallest that went badly lowers it below its size. `wb models`,
+through a big one, and its cost shows in the task's time. The latest steps say how the model
+does now: the smallest of them that went badly lowers the slice below its size, and the size most
+of the good ones reached raises it past the guess, unless the steps that big mostly went badly
+(#720: the biggest good step ever once set it for good, a lockfile bump or a rename across 30
+files at that). `wb models`,
 `wb start` and `wb scout` show it (`slice: ~3 files, ~150 new lines per task (32K window; 4 of 5
 measured steps went well, 1 badly)`). Check-ins and reports name changed files the spec never
 mentions (`NOTE: the spec doesn't name src/util.c`; a brace form like `src/io.{h,c}` names each
@@ -3108,14 +3114,21 @@ its first tasks by hand (`--model`).
 **The slice** (`router.slice(m)`, printed by `wb start`, `wb models`, `wb scout`). The guess
 scales with the window (`limit.context`; unknown → 32K): files = max(1, round(3s)), new lines =
 max(50, round(15s)·10), s = min(window/32768, `GUESS_MAX` 4): 3 files/150 lines on 32K (measured
-2026-11-16), 12/600 from 128K. Correction from every closed step on that model and window
-(results rows' `steps`, with files ≥ 1, from rows `tuning.judged` keeps): `_went` is badly when the step compacted (in its last session, or in one a handover replaced: the `fresh` event's `compacted`), filled up
+2026-11-16), 12/600 from 128K. Correction from the last `SLICE_RECENT` (20) closed steps on that model and window
+(results rows' `steps`, with files ≥ 1, from rows `tuning.judged` keeps; files and lines without
+the generated ones, `gitops.footprint`): `_went` is badly when the step compacted (in its last session, or in one a handover replaced: the `fresh` event's `compacted`), filled up
 reading (`read_full`), got stuck (a `stuck` or `failed` notice of its rounds, but not one whose
 `cause` is `signal` or `died`, `results.NOT_THE_STEP`, nor one from before `cause` with
 `SIGNAL_STOP`'s or reap's text: a shutdown mid-step shrank the slice for good, #582), or needed ≥ `BAD_REVIEWS` 2 agent-caused review rounds; well
-when it landed and wasn't taken over; else no evidence. A bad step caps the slice below its size
-(files − 1, lines × 3/4); the biggest good step raises it to its size and wins over the cap.
-A handover is counted, not held against a step.
+when it landed and wasn't taken over; else no evidence. Files and lines are each learned alone:
+the smallest bad step caps the slice below its size (files − 1, lines × 3/4); once `FIT_MIN` (2)
+steps went well, the size `FIT_SHARE` (75%) of them reached (nearest rank) raises it, past the
+cap only when that size is under the bad step's or the steps of the bad step's size or more went
+well at least as often as badly. The biggest good step once raised it to its size and won over
+the cap, with nothing decaying: one dependency bump (+2,400 lockfile lines) made a 128K model's
+slice ~2,400 lines, and six later 900-line steps that all compacted left it there (#720). With
+more steps than `SLICE_RECENT`, the line says `of the last 20 measured steps`. A handover is
+counted, not held against a step.
 
 **Budgets and speed** (`router.budgets`, `record_speed`, `speed`). After every round the runner
 reads the session export (`measure_speed`) and `record_speed` keeps, per model, the write speed

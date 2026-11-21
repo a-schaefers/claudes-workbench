@@ -908,12 +908,60 @@ def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False, stat_co
     return None if out is None else out.rstrip()
 
 
+# Files a tool writes, not a person: a package manager's lockfiles, by name. With the files
+# .gitattributes marks `linguist-generated` or `-diff`, they are counted apart from a change's
+# size: one dependency bump's 2,400-line package-lock.json set a model's slice for good (#720).
+LOCKFILES = frozenset({
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock",
+    "bun.lockb", "deno.lock", "Cargo.lock", "poetry.lock", "Pipfile.lock", "uv.lock", "pdm.lock",
+    "Gemfile.lock", "composer.lock", "go.sum", "go.work.sum", "flake.lock", "mix.lock",
+    "pubspec.lock", "Podfile.lock", "packages.lock.json", "gradle.lockfile", "Package.resolved",
+    "conda-lock.yml", "pixi.lock", "MODULE.bazel.lock"})
+
+
+def generated(worktree: Path, paths: list[str]) -> set[str]:
+    """Which of ``paths`` a tool writes: a known lockfile, or one the repo's .gitattributes marks
+    `linguist-generated` or `-diff`."""
+    out = {p for p in paths if Path(p).name in LOCKFILES}
+    rest = [p for p in paths if p not in out]
+    if rest:
+        try:
+            r = _run(worktree, ["check-attr", "-z", "--stdin", "linguist-generated", "diff"],
+                     input="".join(p + "\0" for p in rest).encode())
+            words = r.stdout.decode("utf-8", "replace").split("\0")
+        except (GitError, OSError):
+            words = []
+        for path, attr, value in zip(words[::3], words[1::3], words[2::3]):
+            if (attr == "linguist-generated" and value in ("set", "true")) or \
+                    (attr == "diff" and value == "unset"):
+                out.add(path)
+    return out
+
+
 def footprint(worktree: Path, base: str) -> dict:
     """What a change spans since ``base``: files touched and lines added or removed, new files
-    included."""
-    rows = [r.split("\t") for r in diff(worktree, base, numstat=True).splitlines() if r]
-    return {"files": len(rows), "lines": sum(int(r[0]) for r in rows if r[0].isdigit()),
-            "removed": sum(int(r[1]) for r in rows if len(r) > 1 and r[1].isdigit())}
+    included, a renamed file under its new name. Generated files (`generated`) are left out of
+    those and counted in `generated` ({files, lines, removed}, only when there are any)."""
+    out = with_new_files(worktree, "diff", "--no-ext-diff", "--no-color", "--numstat", "-z", base)
+    words, rows = (out or "").split("\0"), []
+    i = 0
+    while i < len(words):
+        cols = words[i].split("\t")
+        i += 1
+        if len(cols) < 3:
+            continue
+        added, removed, path = cols[0], cols[1], cols[2]
+        if not path:  # a rename: its old name, then its new one
+            path, i = (words[i + 1] if i + 1 < len(words) else ""), i + 2
+        rows.append((added, removed, path))
+    made = generated(worktree, [p for _, _, p in rows if p])
+
+    def total(rs):
+        return {"files": len(rs), "lines": sum(int(a) for a, _, _ in rs if a.isdigit()),
+                "removed": sum(int(r) for _, r, _ in rs if r.isdigit())}
+    size = total([r for r in rows if r[2] not in made])
+    gen = [r for r in rows if r[2] in made]
+    return {**size, **({"generated": total(gen)} if gen else {})}
 
 
 # Source files by extension, for the kind of work a repo holds (stack). Markup, data and docs
