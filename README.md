@@ -32,6 +32,19 @@ On bigger coding tasks, once the session is already open, handing the coding off
 model typically costs Claude about half the tokens of writing the code itself
 ([how we measured it](THESIS.md)).
 
+## Why small local models hold up
+
+| Local agents tend to… | Workbench |
+|---|---|
+| lose the thread on long tasks | sizes each step to the model, and hands over to a fresh session before its context fills |
+| loop or think in circles | guards stop repeats, error streaks and silence; a nudge past the think budget |
+| write code that only looks right | your tests run after every round, failures go back to the agent, then Claude reviews the diff |
+| touch what they shouldn't | their own git worktree, read-only git, and on Linux a Landlock sandbox |
+| cost Claude tokens to babysit | Claude sleeps until a task needs it: no polling |
+| differ from machine to machine | the model choice and time limits are learned from this machine's own results |
+
+How and why: [Why it's built this way](ARCHITECTURE.md#why-its-built-this-way).
+
 ## Quickstart
 
 ### What you need
