@@ -146,7 +146,8 @@ def spawn_runner(task: store.Task) -> int:
     _coding_used(task)  # work handed (back) to the agent: Claude's allowance, if any, is spent
     env = context.detached_env()  # the user's PYTHONPATH kept for the agent (#512)
     env.pop("WB_TASK", None)  # the agent's mark (runner.sweep kills what carries it), not the runner's
-    task.set_status(stopping=None, parked=None)  # a stop wb made earlier says nothing about this runner
+    # a stop wb made earlier says nothing about this runner, nor an earlier runner's beat (#872)
+    task.set_status(stopping=None, parked=None, beat=None)
     with open(task.dir / "runner.log", "a") as log:
         # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
         # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
@@ -315,7 +316,7 @@ def runner_alive(task: store.Task) -> bool:
     if not pid:
         return False
     if store.elsewhere(task.status):  # another machine's, on a shared state directory: its pid
-        return True                   # isn't in this process table (#849), its own wb reaps it
+        return _beats(task)           # isn't in this process table (#849), its lock file beats
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):  # gone, or a recycled pid that isn't ours
@@ -324,6 +325,24 @@ def runner_alive(task: store.Task) -> bool:
     # reboot, SIGKILL an unrelated process group given the dead runner's pid (the 2026-11-16
     # audit). Whole words: task "a" isn't the runner of task "ab".
     return models.runs(pid, "workbench.runner", task.name)
+
+
+# Another machine's runner is dead once its lock file hasn't beaten (runner.BEAT_SECS) for this
+# long: one killed with its machine kept its task live for good (#872). Generous, for clock skew
+# between machines and a machine asleep, whose runner finds its task failed when it wakes.
+BEAT_DEAD = 30 * 60
+
+
+def _beats(task: store.Task) -> bool:
+    """Whether another machine's runner still beats (BEAT_DEAD). A runner from before the beat
+    (no status `beat`) is trusted, as before."""
+    if not task.status.get("beat"):
+        return True
+    try:
+        at = runner.lock_file(task.name, "runner").stat().st_mtime
+    except OSError:
+        return False
+    return time.time() - at < BEAT_DEAD
 
 
 # A live task whose runner is gone without a word (SIGKILL, out of memory, a reboot) would sit
@@ -347,8 +366,9 @@ def _restarted(st: dict) -> bool:
 def reap(task: store.Task, quiet: bool = False) -> bool:
     """Fail a live task whose runner is dead; True when this call did it. quiet: no notice (a
     restart's batch, which one notice names)."""
-    agent = task.status.get("agent_pid")
-    restart = _restarted(task.status)
+    far = store.elsewhere(task.status)  # its pids and boot are another machine's (#872)
+    agent = None if far else task.status.get("agent_pid")
+    restart = _restarted(task.status) and not far
     try:
         st = task.set_status_if(  # one reaper wins: two waiters, one notice
             lambda st: st.get("phase") in LIVE and not runner_alive(task)
@@ -386,8 +406,9 @@ def reap(task: store.Task, quiet: bool = False) -> bool:
         return True
     free = store.free_bytes()
     full = free is not None and free < DISK_SPARE  # a full disk is the likely why (#342)
-    task.notify("failed", f"task {task.name}: the runner died without a report (killed, out of "
-                f"memory or a reboot{'; the disk has ' + store.gb(free) + ' free' if full else ''}); "
+    silent = f"no heartbeat for {BEAT_DEAD // 60} min: " if far else ""  # #872
+    task.notify("failed", f"task {task.name}: the runner{' on ' + far if far else ''} died "
+                f"without a report ({silent}killed, out of memory or a reboot{'; the disk has ' + store.gb(free) + ' free' if full else ''}); "
                 f"see {task.dir / 'runner.log'}. wb resume {task.name} "
                 "continues it in a fresh session", round=st.get("round"), cause="died")  # #582
     return True
@@ -431,9 +452,9 @@ def _stop_for_update(tasks) -> str:
     stopped = []
     for t in tasks:
         with store.locked(runner.lock_file(t.name, "cmd")):
-            if t.status.get("phase") in store.CLOSED or (t.status.get("pid")
-                                                         and store.elsewhere(t.status)):
-                continue  # another machine's runner (#849): that machine's wb stops it
+            if t.status.get("phase") in store.CLOSED or (t.status.get("pid") and store.elsewhere(
+                    t.status) and runner_alive(t)):
+                continue  # another machine's live runner (#849): that machine's wb stops it
             _stop_runner(t)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": UPDATE_STOP})
@@ -1795,7 +1816,10 @@ def cmd_diff(a):
 def _stop_runner(task):
     pid = task.status.get("pid")
     if pid and (where := store.elsewhere(task.status)):  # #849: its pid here is another process
-        die(f"{task.name} runs on {where}, which shares this state directory: stop it there")
+        if runner_alive(task):
+            die(f"{task.name} runs on {where}, which shares this state directory: stop it there "
+                f"(once its runner stops beating for {BEAT_DEAD // 60} min, here too)")
+        return  # dead there (#872): nothing to signal, and nothing of it runs here to sweep
     if pid and runner_alive(task):
         task.set_status(stopping=True)  # wb's stop, not a shutdown's (runner.SIGNAL_STOP)
         try:
@@ -1832,9 +1856,9 @@ def stop_everything(tasks=None) -> list[str]:
         # each task under its command lock, as one_at_a_time (which --all skips): an accept or
         # discard that closed it after the listing was set back to stuck (the 0.90 review)
         with store.locked(runner.lock_file(t.name, "cmd")):
-            if t.status.get("phase") in store.CLOSED or (t.status.get("pid")
-                                                         and store.elsewhere(t.status)):
-                continue  # another machine's runner (#849): that machine's wb stops it
+            if t.status.get("phase") in store.CLOSED or (t.status.get("pid") and store.elsewhere(
+                    t.status) and runner_alive(t)):
+                continue  # another machine's live runner (#849): that machine's wb stops it
             _stop_runner(t)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": "bail out: stopped by the user"})

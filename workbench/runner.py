@@ -2918,7 +2918,8 @@ def drive(task: store.Task) -> None:
     # infra: why the machine, not the agent, failed the task's last run (wb bench grades none of it)
     task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid(), infra=None,
                     boot=store.boot_id(),  # a later boot reaps it as a restart's (cli.reap)
-                    machine=store.machine(), host=store.host())  # whose pid it is (#849)
+                    machine=store.machine(), host=store.host(),  # whose pid it is (#849)
+                    beat=BEAT_SECS)  # and that its lock file beats (#872)
     say = lambda msg: task.set_status(last=msg)  # noqa: E731
     try:
         m = models.resolve(task.spec["model"])
@@ -3364,6 +3365,26 @@ def _one_runner(task: store.Task):
     return fh
 
 
+# How often the runner touches its lock file (lock_file "runner"): another machine sharing the
+# state directory can't see its pid, so it tells a live runner from a dead one by this alone
+# (cli.runner_alive). A runner killed with its machine (power loss, a recreated container with a
+# new host name, a reimaged machine) kept its task live there for good: no command could stop,
+# discard or resume it (#872, Claude's audit of 1.90.24). The lock file's name ends in .lock, so
+# no `wb events` wakes for the touch.
+BEAT_SECS = 60
+
+
+def _beat(path: Path) -> None:
+    def touch():
+        while True:
+            time.sleep(BEAT_SECS)
+            try:
+                os.utime(path)
+            except OSError:
+                pass  # a full or gone state directory: the beat is best effort
+    threading.Thread(target=touch, daemon=True, name="beat").start()
+
+
 def main():
     store.absolute_env()
     gitops.drop_repo_env()  # the caller's repository variables, for the agent too (#798)
@@ -3372,6 +3393,7 @@ def main():
     if lock is None:
         print(f"another runner drives {task.name}; this one exits", flush=True)
         return
+    _beat(lock_file(task.name, "runner"))
     signal.signal(signal.SIGTERM, _on_term)
     CURRENT["code"] = code_print()  # what the children load; compared before each round (#603)
     from . import router, transcript, verify  # noqa: F401 (now, not mid-task from an updated clone)

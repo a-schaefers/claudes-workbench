@@ -4812,6 +4812,44 @@ class Steering(Base):
             run_wb("status")
         self.assertEqual(store.Task("t-m1").status["phase"], "failed")
 
+    def test_another_machines_runner_that_stopped_beating_is_reaped_and_stoppable_here(self):
+        # #872 (Claude's audit of 1.90.24): a runner killed with its machine (a recreated
+        # container with a new host name, a reimaged machine) kept its task running for good:
+        # never reaped, and wb stop, discard and resume all refused it
+        self.start("t-m2", "slow")
+        self.wait_session("t-m2")
+        task = store.Task("t-m2")
+        self.assertEqual(task.status["beat"], runner.BEAT_SECS)
+        os.kill(task.status["pid"], signal.SIGKILL)
+        task.set_status(machine="another-machine", host="lab-2", boot="another-boot")
+        lock = runner.lock_file("t-m2", "runner")
+        with mock.patch.object(cli, "REAP_GRACE", 0):
+            run_wb("status")
+            self.assertEqual(store.Task("t-m2").status["phase"], "running")  # still beating
+            old = time.time() - cli.BEAT_DEAD - 60
+            os.utime(lock, (old, old))
+            self.assertFalse(cli.runner_alive(store.Task("t-m2")))
+            run_wb("status")
+        st = store.Task("t-m2").status
+        self.assertEqual(st["phase"], "failed")
+        self.assertEqual(st["last"], cli.RUNNER_DIED)         # not a restart: its boot is lab-2's
+        self.assertIn("the runner on lab-2 died without a report (no heartbeat",
+                      store.notices()[-1]["text"])
+        out = run_wb("discard", "t-m2")
+        self.assertEqual(store.Task("t-m2").status["phase"], "discarded", out)
+
+    def test_the_runner_touches_its_lock_file_while_it_lives(self):
+        # #872: the beat another machine tells a live runner by
+        lock = Path(tempfile.mkdtemp()) / "x.runner.lock"
+        lock.write_text("1")
+        os.utime(lock, (1, 1))
+        with mock.patch.object(runner, "BEAT_SECS", 0.05):
+            runner._beat(lock)
+            deadline = time.time() + 5
+            while lock.stat().st_mtime < 100 and time.time() < deadline:
+                time.sleep(0.05)
+        self.assertGreater(lock.stat().st_mtime, time.time() - 60)
+
     def test_on_a_network_state_dir_each_machine_takes_the_gpu_under_its_own_lease(self):
         # #849: one gpu.json for every machine sharing the state dir: each pruned the other's
         # holders as dead, and they took turns on GPUs they don't share

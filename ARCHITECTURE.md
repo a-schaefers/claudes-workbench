@@ -223,7 +223,17 @@ reaped: on a state directory several machines share (a network home), each one's
 other's live runners as dead, its pid not in this process table, failed them as restarted and
 would signal its pid here (#849). `wb stop` and `discard` (`_stop_runner`) refuse it ("<task> runs on
 <host>…: stop it there"), `wb stop --all` and `wb update --stop` leave it out, and `wb status` shows
-"on <host>:" before its `last`. `wb doctor` says when the state directory is on a network file system
+"on <host>:" before its `last`. Alive means beating: the runner touches its lock file
+(`locks/<task>.runner.lock`) every `runner.BEAT_SECS` (60 s, a daemon thread, `runner._beat`;
+`.lock` is `QUIET`, so no `wb events` wakes) and says so (status `beat`), and another machine's
+runner whose lock file is older than `cli.BEAT_DEAD` (30 min, generous for clock skew and a
+machine asleep, whose runner then finds its task failed when it wakes) is dead here
+(`cli._beats`): reaped ("the runner on <host> died without a report (no heartbeat for 30 min:
+…"), not as a restart, its `agent_pid` left alone (another machine's pid), and `wb stop`,
+`discard`, `stop --all` and `update --stop` clear it without signalling. A runner killed with its
+machine (power loss, a container recreated with a new host name, `store.machine()` falling back
+to it, a reimaged machine) kept its task live for good, no command able to clear it (#872); one
+recorded before the beat (no `beat`) is trusted, as before. `wb doctor` says when the state directory is on a network file system
 (`store.network_fs`, by its mount type). The agent's group (`agent_pid`, read before it is
 cleared) is killed when `models.runs` shows it still runs `run --standalone` (off Linux the kernel leaves it running when its parent dies, as the
 2026-11-19 audit observed), and `runner.sweep` kills what its agent left. The
@@ -757,7 +767,7 @@ resume refuse 1.x as `wb start` does (exit 3, before anything is written) and no
 outside `OPENCODE_TESTED`.
 
 **`drive(task)`**, the loop:
-1. Phase `queued`, `pid`, `boot`, `machine`, `host`; resolve the model (unknown: `failed`). With a `setup`, `copy` or
+1. Phase `queued`, `pid`, `boot`, `machine`, `host`, `beat` (its lock file touched every `BEAT_SECS` from `main` on, #872); resolve the model (unknown: `failed`). With a `setup`, `copy` or
    `siblings` and no `prepared` in status: the worktree set up (`_prepare`; a failure: `failed`,
    before any round). With `--test`, while no round has reported (`needs_base_check`: no
    `base_check` in status, step one, no review round, no `rounds/<n>/summary.md`; not
@@ -6517,7 +6527,7 @@ $WB_HOME (~/.local/state/workbench)
                                  submodules.json (each submodule filled in the worktree: [{"path", "src" (the
                                  user's checkout of it), "sha", "index"}]) and its submodule-<n>.index (#419);
                                  removed when the task closes (cli._closed), and by gc for a closed or vanished task
-  locks/<task>.runner.lock       held by the task's runner for its life (its pid inside): one runner a task
+  locks/<task>.runner.lock       held by the task's runner for its life (its pid inside; touched every BEAT_SECS, #872): one runner a task
   locks/<task>.cmd.lock          one wb command on the task at a time
   locks/<task>.<file>.lock       one writer of the task's status, events, steer and grants files
   locks/<task>.ack.lock          one taker of the task's notice (`wb ack`, `wb wait`: cli.claim_ack, #687; _ack_all and release_ack, #786)
@@ -6685,7 +6695,8 @@ check-ins off), not `wb start`'s.
 | `parked` | when `wb stop --all` (/workbench-quit) stopped it, or `--park-waiting` parked it waiting on Claude; counted only while the phase is review, stuck or failed (`store.parked`, `store.PARKS`: #698), cleared by `spawn_runner` and `wb takeover` (#541) |
 | `signalled` | when a SIGTERM that wasn't wb's stopped the runner (`SIGNAL_STOP`): a shutdown's tasks are batched by it (`runner._signal_notice`, #544) |
 | `boot` | the boot the runner started in (`store.boot_id`: Linux's and WSL2's `/proc/sys/kernel/random/boot_id`, macOS's `kern.boottime`); `reap` reads another as a restart (#544) |
-| `machine`, `host` | the machine the runner runs on (`store.machine()`) and its name (`store.host()`), written by `spawn_runner` and `drive`: another machine's runner, on a shared state directory, is never reaped, stopped or signalled here (`store.elsewhere`, #849) |
+| `machine`, `host` | the machine the runner runs on (`store.machine()`) and its name (`store.host()`), written by `spawn_runner` and `drive`: another machine's runner, on a shared state directory, is never reaped, stopped or signalled here (`store.elsewhere`, #849) while its lock file beats |
+| `beat` | `runner.BEAT_SECS`, written by `drive` (cleared by `spawn_runner`): the runner touches `locks/<task>.runner.lock` that often, and another machine's runner silent past `cli.BEAT_DEAD` is dead (#872) |
 | `round`, `round_started_at` | the runner round (every kind counts); when it started |
 | `limits` | `{think?, silence?, round?}` seconds: the limits no flag gave, raised before the round for a model measured slower since wb start (`runner.stretch_limits`, #814); null when none was |
 | `steps`, `step_round`, `step_sizes` | `wb next`: the step number, the round it began, the closed steps' `results.step` |
