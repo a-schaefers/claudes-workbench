@@ -25,7 +25,7 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
   you accept.
 - **Beyond code: images and audio.** Optionally, Claude directs local image and audio models
   for a project's icons, illustrations, voice lines, sound effects and music, and checks each one;
-  a voice or music you pick by ear, on your phone too ([images](ARCHITECTURE.md#images),
+  a voice or music you pick by ear ([images](ARCHITECTURE.md#images),
   [audio](ARCHITECTURE.md#audio)).
 
 On bigger coding tasks, once the session is already open, handing the coding off to the local
