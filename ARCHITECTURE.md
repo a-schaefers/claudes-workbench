@@ -2074,7 +2074,8 @@ nothing until a surface attaches.
   `coding`; `▸ Web chat: Off (default)`, key `chat`; the default option says so, to show how it was at
   the start, the user 2026-11-19); a press opens its options under it as Buttons (keys
   `coding:only|ask|decide`, `chat:off|on`, `probe:off|on`, the chosen one marked `❯`), picked by a click or Enter
-  on the ring, and a pick folds the row again. Under them, the sentence of the option the ring is
+  on the ring, and a pick folds the row again; the option already chosen only folds it, running
+  nothing (#578: picking On again ran a bare `wb progress on`). Under them, the sentence of the option the ring is
   on (the `ui.focus` hook keeps it in the `pane` atom), else the chosen one's; the pointer on an
   option lays its own sentence over it (a hover reveal: `display: "none"` Boxes, absolute, under
   the option's hover scope, since no hook runs on hover). **Claude coding** (#93, *Claude coding*):
@@ -2097,8 +2098,10 @@ nothing until a surface attaches.
   *Stats recording*), **Live view** (`LIVE_STOPS`: `wb stats set live`), **Live refresh**
   (`EVERY_STOPS`, `1 s`, `2 s (default)`, `5 s`: `wb stats set every`), each read back from
   stats.json (`statsSettings`, a mistyped value its default); **Progress checks**
-  (`PROGRESS_STOPS`, `Off (default)` / `On`: `wb progress on|off`, read from progress.json; off by
-  default because each check wakes Claude); and **Electricity price per kWh**, an Input (key
+  (`PROGRESS_STOPS`, `Off (default)` / `On`: `wb progress on|off`, read from progress.json
+  (`progressSettings`); off by default because each check wakes Claude; with a threshold kept
+  there (`wb progress on --after N`, `after` a number other than 0) On reads `On, after N min`
+  and its sentence names it (`progressStops`), where it said "its typical length", #578); and **Electricity price per kWh**, an Input (key
   `price`) that runs `wb savings --price X --json` (`setPrice`, through `parsePrice`: one comma or
   point as the decimal separator, a currency sign or code of up to three characters before or
   after, decimal digits only; anything else, `0x10` and `1e3` among them, is refused with a toast

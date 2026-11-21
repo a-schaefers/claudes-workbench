@@ -507,16 +507,26 @@ const EVERY_STOPS: [string, string, string][] = [
   ['2', '2 s (default)', 'How often the live view samples the GPU, the tasks and the models.'],
   ['5', '5 s', 'How often the live view samples the GPU, the tasks and the models.'],
 ]
+const PROGRESS_OFF: [string, string, string] = ['off', 'Off (default)', 'No progress checks: each one wakes Claude, which spends its tokens.']
 const PROGRESS_STOPS: [string, string, string][] = [
-  ['off', 'Off (default)', 'No progress checks: each one wakes Claude, which spends its tokens.'],
+  PROGRESS_OFF,
   ['on', 'On', 'A task past its typical length gets a check and one recommendation, waking Claude.'],
 ]
+// With a threshold set (`wb progress on --after N`, kept through the row's bare on/off) On says
+// it: the typical length it named instead was the wrong one (#578)
+function progressStops(after: number): [string, string, string][] {
+  if (!after) return PROGRESS_STOPS
+  return [PROGRESS_OFF, ['on', `On, after ${after} min`,
+    `A task past ${after} min of active work gets a check and one recommendation, waking Claude.`]]
+}
 const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress):/ // the rows whose ring the pane follows
 
 // One settings row: a Button naming the choice, which opens its options under it, each a Button
 // (a click, or Enter on the ring), the chosen one marked. Under them the sentence of the option
 // the ring is on, else the chosen one's; the pointer on an option lays its own over it (a hover
-// reveal: no hook runs on hover). A pick folds the row again, which redraws it.
+// reveal: no hook runs on hover). A pick folds the row again, which redraws it; the option
+// already chosen only folds it, running nothing (#578: picking On again ran a bare
+// `wb progress on`, which then dropped a `--after` threshold).
 function settingRow(kit: Row, $: any, name: string, title: string, stops: [string, string, string][],
   value: string, view: WbPane, pick: (value: string) => Promise<unknown>) {
   const { Box, Text, Button } = kit
@@ -531,7 +541,7 @@ function settingRow(kit: Row, $: any, name: string, title: string, stops: [strin
       {stops.map(([v, label]) => (
         <Button key={`${name}:${v}`} label={`  ${v === chosen[0] ? '❯' : ' '} ${label}`} plain dimColor={v !== chosen[0]}
           hover={{ scope: `wb-${name}-${v}` }}
-          onPress={() => { void pick(v).then(() => update($, pane, p => ({ ...p, open: '', focus: '' }))) }} />
+          onPress={() => { void (v === chosen?.[0] ? Promise.resolve() : pick(v)).then(() => update($, pane, p => ({ ...p, open: '', focus: '' }))) }} />
       ))}
       <Box key={`${name}-says`}>
         <Text dimColor>{`    ${ringed[2].padEnd(width)}`}</Text>
@@ -563,8 +573,13 @@ async function statsSettings($: any): Promise<{ recording: boolean; live: boolea
   return { recording: on(d?.recording), live: on(d?.live), every: [1, 2, 5].includes(d?.every) ? d.every : 2 }
 }
 
-async function progressOn($: any): Promise<boolean> {
-  try { return JSON.parse(await $.fs.read(`${mem.root}/progress.json`)).on === true } catch { return false }
+// progress.json as wb reads it (progress.py): on only when it says so; a fixed threshold when
+// `after` is a number other than 0 (wb's falsy), else 0
+async function progressSettings($: any): Promise<{ on: boolean; after: number }> {
+  let d: any = {}
+  try { d = JSON.parse(await $.fs.read(`${mem.root}/progress.json`)) } catch { /* off */ }
+  const after = typeof d?.after === 'number' && Number.isFinite(d.after) ? d.after : 0
+  return { on: d?.on === true, after }
 }
 
 // The Stats tab's history: `wb stats --json`, only while the tab is shown, and only when what it
@@ -2549,6 +2564,7 @@ export const register: Register = (on, options) => {
     if (view.tab === 'settings') {
       const st = await statsSettings($)
       const probe = await probeStatus($)
+      const prog = await progressSettings($)
       const picked = (args: string[]) => runWb($, args).then(() => { void refreshStats($, true); void syncTop($) })
       return (
         <Box flexDirection="column">
@@ -2565,7 +2581,7 @@ export const register: Register = (on, options) => {
               v => picked(['stats', 'set', 'live', v]))}
             {settingRow(kit, $, 'every', 'Live refresh', EVERY_STOPS, String(st.every), view,
               v => picked(['stats', 'set', 'every', v]))}
-            {settingRow(kit, $, 'progress', 'Progress checks', PROGRESS_STOPS, (await progressOn($)) ? 'on' : 'off', view,
+            {settingRow(kit, $, 'progress', 'Progress checks', progressStops(prog.after), prog.on ? 'on' : 'off', view,
               v => runWb($, ['progress', v]))}
             <kit.Input key="price" label="▸ Electricity price per kWh: " value={mem.price ? String(mem.price) : ''}
               placeholder="not set (energy shows in Wh)" submitLabel="set" onSubmit={(v: string) => { void setPrice($, v) }} />

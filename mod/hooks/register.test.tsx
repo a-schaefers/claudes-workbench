@@ -2244,6 +2244,45 @@ test('the Stats tab\'s settings pick through wb, progress checks stay off by def
   await ui.unmount()
 })
 
+test('the Progress checks row names a set --after threshold, and picking the option already chosen runs nothing (#578)', async ($, on) => {
+  // #578: the row's On said "its typical length" while `wb progress on --after 30` held, and
+  // picking On again ran a bare `wb progress on`, which then dropped the threshold
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/progress.json': JSON.stringify({ on: true, after: 30.0, ts: 1_800_000_000 }) }
+  fakeTasks(on, files, [])
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    if (e.argv[1] === 'progress' && e.argv[2]) {
+      const was = JSON.parse(files['/wb/progress.json'] ?? '{}')
+      files['/wb/progress.json'] = JSON.stringify({ ...was, on: e.argv[2] === 'on' })   // wb keeps after
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  const label = async (ui: any) => (await ui.find({ key: 'progress' }))?.props.label
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-settings' })
+  expect(await label(ui)).toBe('▸ Progress checks: On, after 30 min')
+  await ui.press({ key: 'progress' })
+  expect((await ui.find({ key: 'progress:on' }))?.props.label).toBe('  ❯ On, after 30 min')
+  expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('A task past 30 min of active work gets a check')
+  await ui.press({ key: 'progress:on' })                               // the one already chosen
+  expect(runs.filter(r => r[1] === 'progress')).toEqual([])            // folds the row, runs nothing
+  expect(await label(ui)).toBe('▸ Progress checks: On, after 30 min')
+  await ui.press({ key: 'progress' })
+  await ui.press({ key: 'progress:off' })
+  expect(runs.filter(r => r[1] === 'progress').map(r => r.join(' '))).toEqual(['wb progress off'])
+  expect(await label(ui)).toBe('▸ Progress checks: Off (default)')
+
+  files['/wb/progress.json'] = JSON.stringify({ on: true, ts: 1_800_000_000 })  // --after 0 cleared it
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  expect(await label(ui)).toBe('▸ Progress checks: On')
+  await ui.unmount()
+})
+
 const TICK = {
   ts: 1_800_000_000, every: 2,
   gpus: [{ index: 0, name: 'Advanced Micro Devices, Inc. [AMD/ATI] Navi 48 [Radeon RX 9070 XT]', used: 2 ** 33, total: 2 ** 34, busy: 40, watts: 120 }],
