@@ -12,7 +12,8 @@ images.json: {"command": "<argv template>"} or {"url": "<an OpenAI /v1/audio/spe
 plus "kind" (speech, sfx, music, or listen: the checker; default speech), "gpu" (false: it runs on
 the CPU, without the GPU lease, so beside a task; a url on another host is off this GPU unless
 true), "voices", "seconds" (the default length),
-"unload" (a URL POSTed after a batch, so a server lets its GPU memory go), "ref_arg", "model",
+"unload" (a URL POSTed after a batch, so a server lets its GPU memory go), "key" (a url
+engine's API key), "ref_arg", "model",
 "label", "notes" (the licence: shown to Claude), "timeout" (s). Placeholders: {text} {out} {seed}
 {seconds} {voice} {lyrics}, and {in} for a listener, which prints its transcript on stdout. No
 model is named here: the user installs one and describes it.
@@ -30,12 +31,11 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 import uuid
 import wave
 from pathlib import Path
 
-from . import media, models, store
+from . import media, store
 
 KINDS = ("speech", "sfx", "music")
 PLACEHOLDERS = ("text", "out", "seed", "seconds", "voice", "lyrics")
@@ -54,7 +54,7 @@ def kind_of(e: dict) -> str:
 
 def ready(e: dict) -> str:
     """'' when the engine can run, else why not; a kind it doesn't know is refused (#596)."""
-    return media.ready(e, (*KINDS, "listen"))
+    return media.ready(e, (*KINDS, "listen"), config_path().parent)
 
 
 def engines() -> dict[str, dict]:
@@ -108,10 +108,9 @@ def _server(e: dict, values: dict) -> None:
     for k, v in (("model", e.get("model")), ("voice", values["voice"] or None)):
         if v:
             body[k] = v
-    req = urllib.request.Request(e["url"], json.dumps(body).encode(),
-                                 {"Content-Type": "application/json"})
-    with models._open(req, timeout=float(e.get("timeout", 1800))) as r:
-        Path(values["out"]).write_bytes(r.read())
+    raw, _ = media.post(e, e["url"], json.dumps(body).encode(), "application/json",
+                        float(e.get("timeout", 1800)), config_path().parent)
+    Path(values["out"]).write_bytes(raw)
 
 
 def _unload(e: dict, say) -> None:
@@ -120,9 +119,8 @@ def _unload(e: dict, say) -> None:
     if not e.get("unload"):
         return
     try:
-        req = urllib.request.Request(e["unload"], b"{}", {"Content-Type": "application/json"})
-        models._open(req, timeout=30).close()
-    except OSError as err:
+        media.post(e, e["unload"], b"{}", "application/json", 30, config_path().parent)
+    except (OSError, RuntimeError) as err:
         say(f"couldn't unload the audio server ({e['unload']}: {err}); it may still hold GPU memory")
 
 
@@ -346,9 +344,8 @@ def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
         out = r.stdout.strip()
     else:
         body, ctype = _multipart({"model": e.get("model")}, clip)
-        req = urllib.request.Request(e["url"], body, {"Content-Type": ctype})
-        with models._open(req, timeout=float(e.get("timeout", 600))) as resp:
-            out = resp.read().decode(errors="replace").strip()
+        raw, _ = media.post(e, e["url"], body, ctype, float(e.get("timeout", 600)), config_path().parent)
+        out = raw.decode(errors="replace").strip()
     try:
         data = json.loads(out)
         if isinstance(data, dict) and isinstance(data.get("text"), str):

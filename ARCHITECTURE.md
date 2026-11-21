@@ -3388,6 +3388,8 @@ Then describe the engine in `~/.config/workbench/images.json` (`$WB_IMAGES`). Tw
   `ref_arg` (e.g. `"-r"`) adds `--ref` images, for models that edit or keep a character
   consistent.
 - A **url** is any server with the OpenAI images API (SGLang, vLLM-Omni, LocalAI and others).
+  One started with an API key takes `"key"` (`{env:NAME}` and `{file:path}` work, as in
+  OpenCode's config, a relative path from the engine file's directory), sent as a Bearer token.
 - `notes` is shown to Claude. Put the model's licence there: some licences limit where and how
   their output may be used.
 - `"gpu": false` marks an engine that isn't on this machine's GPU (a CPU build, another box): it
@@ -3410,7 +3412,8 @@ custom-node packs do run their own Python).
 - `images.json` (`$WB_IMAGES`, default `~/.config/workbench/images.json`) maps an engine name to an
   entry; the first entry is the default, non-object values are ignored. Keys: `command` or `url`,
   `ref_arg`, `model`, `label`, `notes` (shown to Claude: put the licence there), `timeout` (s,
-  default 1800), `gpu` (`media.on_gpu`: false is off this GPU; unset, a url on another host is off
+  default 1800), `key` (a url engine's API key, `media.auth`: `models._expand`, no agent filter),
+  `gpu` (`media.on_gpu`: false is off this GPU; unset, a url on another host is off
   it and anything else on; #587: a remote or CPU engine took the exclusive lease, unloaded the
   coding models and refused while any task ran).
 - A command engine (`_argv`, through `media.fill`): `shlex.split(command)`, `~` expanded per token, then `{prompt}`,
@@ -3420,15 +3423,21 @@ custom-node packs do run their own Python).
   through a shell; `--ref` images are appended as `[ref_arg, path]` pairs (both `command` and `ref_arg` are
   required for refs). stdin is /dev/null; stdout and stderr go to `<out_dir>/engine.log`; a
   nonzero exit or no file at `{out}` fails with the log's last lines.
-- A url engine (`_server`): POST `{prompt, n: 1, size: "WxH", response_format: "b64_json", seed[,
-  model]}` (no auth header), decode `data[0].b64_json`.
+- A url engine (`_server`, through `media.post`): POST `{prompt, n: 1, size: "WxH", response_format:
+  "b64_json", seed[, model]}` with the `key` as `Authorization: Bearer` when there is one, decode
+  `data[0].b64_json`, or fetch `data[0].url` for a server that ignores `response_format` (the key
+  goes only to the engine's own server). An error status is a RuntimeError with the status and the
+  first 300 characters of the body, and a 401 or 403 without a key says it wants one; a reply of
+  another shape quotes it ("sent no image: …"). A 200 with a url gave "wb: b64_json", `{"data":
+  []}` or a page that isn't JSON a traceback, a 400 only "Bad Request" (#597).
 - Ready (`ready`, shown by `wb image --list` and `wb scout`): an entry `media.problem` finds
   nothing wrong with (the string keys strings, a command `shlex.split` accepts, `timeout` and
   `seconds` positive numbers, `voices` a list of names, `gpu` true or false, a known `kind` for
   audio; else "not usable: <why>", refused by `generate` before the lease: an open quote or
   `"timeout": "10m"` ended `wb scout` in a traceback or crashed a generation after the unloads,
   `"voices": "af_heart"` passed the voice "a", #596), then a command whose first token is on
-  PATH or a file; a url whose server answers a GET (any status) within 2 s.
+  PATH or a file; a url whose server answers a GET within 2 s (any status but 401 and 403, "wants
+  an API key" or "refused the key": #597, it was listed as ready and failed every generation).
 - `generate`: an engine off this GPU (`media.on_gpu`) runs with no lease and frees nothing; any
   other holds the GPU for the whole batch through `media.gpu`, that is `models.GpuLease(None, "wb image",
   wait=…)` (any live holder in gpu.json: a RuntimeError naming them, unless `--wait`; then it
@@ -3554,7 +3563,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
 - A **url** engine is any OpenAI `/v1/audio/speech` server (audio.cpp's `audiocpp_server`,
   Kokoro-FastAPI, Speaches). It makes speech only, since sound effects and music have no common
   API. `unload` is POSTed after each batch so the server lets its GPU memory go (audio.cpp's
-  `/v1/tasks/unload_all_models`), which a url image engine can't do.
+  `/v1/tasks/unload_all_models`), which a url image engine can't do. `key` is sent as a Bearer
+  token, as for images, to the speech, transcription and unload URLs alike; an error status
+  says what the server said (`media.post`, #597).
 - A **listen** engine prints its transcript on stdout (`{in}` is the clip; JSON with `text`, and
   audio.cpp's `text_output=` line among its `key=value` lines, are read too), or is an OpenAI
   `/v1/audio/transcriptions` server. The first one in the file checks
@@ -3567,7 +3578,7 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
 
 **How it works** (`workbench/audio.py`, `cli.cmd_audio`; shared with images: `workbench/media.py`).
 - `audio.json` keys: `command` or `url`, `kind` (`speech`, `sfx`, `music`, `listen`; default
-  `speech`), `gpu`, `voices`, `seconds`, `unload`, `ref_arg`, `model`, `label`, `notes`,
+  `speech`), `gpu`, `voices`, `seconds`, `unload`, `key`, `ref_arg`, `model`, `label`, `notes`,
   `timeout` (s, default 1800; a listener's 600); `audio.ready` refuses a `kind` it doesn't know
   (it skipped the listener and took 10 s, #596). `engine(name, kind)` returns the named engine
   (refused when it's of another kind), else the first of `--kind`, else the first that isn't a
@@ -5582,7 +5593,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
   *Keeping the docs true* is the procedure; `tests/test_docs.py` checks what it can (every command
   and flag here, every module and environment variable in CLAUDE.md, CLAUDE.md's size).
-- **`wb image` and `wb audio` share `media.py`** (the engine file, `problem`, `ready`, `fill`, `settle`, `gpu`, `on_gpu`, `serving`,
+- **`wb image` and `wb audio` share `media.py`** (the engine file, `problem`, `ready`, `auth`, `post`, `fill`, `settle`, `gpu`, `on_gpu`, `serving`,
   `free`, `publish`): a change there changes both (`tests.Images`, `tests.Audio`). A new kind of
   generated media → its config path in `store.PATH_VARS` and `context.private_paths`, its output
   directory in `cli.EVENT_SKIP` (and the mod's ears), its engines in `wb scout`.

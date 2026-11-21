@@ -14,6 +14,7 @@ import shlex
 import shutil
 import time
 import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -30,7 +31,7 @@ def load(path: Path) -> dict[str, dict]:
     return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
 
 
-STRINGS = ("command", "url", "ref_arg", "model", "unload", "label", "notes")
+STRINGS = ("command", "url", "ref_arg", "model", "unload", "label", "notes", "key")
 
 
 def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:
@@ -60,7 +61,38 @@ def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:
     return ""
 
 
-def ready(e: dict, kinds: tuple[str, ...] = ()) -> str:
+def auth(e: dict, base: Path | None = None) -> dict:
+    """The url engine's `key` (OpenCode's `{env:NAME}` and `{file:path}` work, a relative path
+    from the engine file's directory, ``base``) as a Bearer header: a server started with an API
+    key failed 401 on every generation (#597)."""
+    key = models._expand(e.get("key") or "", agent=False, base=base or Path.cwd())
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
+def _gist(raw: bytes) -> str:
+    text = " ".join(raw.decode(errors="replace").split())
+    return text[:300] + ("…" if len(text) > 300 else "")
+
+
+def post(e: dict, url: str, data: bytes, ctype: str, timeout: float,
+         base: Path | None = None) -> tuple[bytes, str]:
+    """POST to a url engine; its reply and Content-Type. An error status is a RuntimeError with
+    the server's own words: "HTTP Error 400: Bad Request" hid "voice not found" (#597)."""
+    req = urllib.request.Request(url, data, {"Content-Type": ctype, **auth(e, base)})
+    try:
+        with models._open(req, timeout=timeout) as r:
+            return r.read(), r.headers.get("Content-Type") or ""
+    except urllib.error.HTTPError as err:
+        try:
+            said = _gist(err.read())
+        except OSError:
+            said = ""
+        raise RuntimeError(f"{url} answered HTTP {err.code}" + (f": {said}" if said else "")
+                           + (" (it wants an API key: `key` in the engine's entry)"
+                              if err.code in (401, 403) and not e.get("key") else "")) from None
+
+
+def ready(e: dict, kinds: tuple[str, ...] = (), base: Path | None = None) -> str:
     """'' when the engine can run, else why not."""
     if why := problem(e, kinds):
         return f"not usable: {why}"
@@ -72,10 +104,12 @@ def ready(e: dict, kinds: tuple[str, ...] = ()) -> str:
         return "" if shutil.which(exe) or Path(exe).is_file() else f"{exe} not found"
     if e.get("url"):
         root = re.sub(r"/v1/.*$", "", e["url"])
-        try:
-            models._open(root, timeout=2).close()  # no proxy to this machine (models._open)
-        except urllib.error.HTTPError:
-            pass  # something answers
+        try:  # no proxy to this machine (models._open)
+            models._open(urllib.request.Request(root, headers=auth(e, base)), timeout=2).close()
+        except urllib.error.HTTPError as err:  # something answers
+            if err.code in (401, 403):  # it was listed as ready, then failed every generation (#597)
+                return (f"{root} refused the key (HTTP {err.code})" if e.get("key")
+                        else f"{root} wants an API key (HTTP {err.code}): `key` in its entry")
         except OSError:
             return f"nothing answers at {root}"
         return ""

@@ -6804,6 +6804,71 @@ class Images(Base):
         self.engines({})
         self.assertIn("no image engine", run_wb("image", "--list"))
 
+    def test_a_url_engine_says_what_the_server_said_fetches_a_url_reply_and_sends_its_key(self):
+        # #597: a 200 with {"data": [{"url": …}]} gave "wb: b64_json", {"data": []} and a page
+        # that isn't JSON a traceback, a 400 only "HTTP Error 400: Bad Request"; and a server
+        # started with an API key was listed as ready, then failed 401 on every generation
+        import base64, threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from workbench import audio, images
+        seen = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def reply(self, code, body):
+                self.send_response(code); self.end_headers(); self.wfile.write(body)
+
+            def do_GET(self):
+                seen.append((self.path, self.headers.get("Authorization")))
+                if self.headers.get("Authorization") != "Bearer sekrit":
+                    return self.reply(401, b'{"error": "missing key"}')
+                self.reply(200, b"PNGFROMURL" if self.path == "/img.png" else b"ok")
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                seen.append((self.path, self.headers.get("Authorization")))
+                root = f"http://127.0.0.1:{self.server.server_port}"
+                self.reply(*{"/v1/url/x": (200, json.dumps({"data": [{"url": root + "/img.png"}]}).encode()),
+                             "/v1/empty/x": (200, b'{"data": []}'),
+                             "/v1/html/x": (200, b"<html><body>502 Bad Gateway</body></html>"),
+                             "/v1/audio/speech": (400, b'{"detail": "voice not found"}')}[self.path])
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        root = f"http://127.0.0.1:{srv.server_port}"
+        tmp = Path(self.tmp.name)
+        (tmp / "key.txt").write_text("sekrit\n")
+        self.engines({"url": {"url": root + "/v1/url/x", "key": "{file:key.txt}"},
+                      "empty": {"url": root + "/v1/empty/x", "key": "{env:IMG_KEY}"},
+                      "html": {"url": root + "/v1/html/x", "key": "sekrit"},
+                      "nokey": {"url": root + "/v1/url/x"}})
+        os.environ["IMG_KEY"] = "sekrit"
+        self.addCleanup(os.environ.pop, "IMG_KEY", None)
+        listed = run_wb("image", "--list")
+        self.assertIn(f"nokey: {root}/v1/url/x · {root} wants an API key (HTTP 401)", listed)
+        self.assertIn(f"url: {root}/v1/url/x · ready", listed)   # the key read from its file
+        images.generate("a fox", tmp / "o", n=1, seed=1, name="url", say=lambda m: None)
+        self.assertEqual((tmp / "o" / "a-fox-1.png").read_bytes(), b"PNGFROMURL")
+        self.assertIn(("/v1/url/x", "Bearer sekrit"), seen)
+        self.assertIn(("/img.png", "Bearer sekrit"), seen)        # the engine's own server
+        for name, said in (("empty", 'sent no image: {"data": []}'),
+                           ("html", "sent no image: <html><body>502 Bad Gateway</body></html>")):
+            with self.assertRaises(RuntimeError) as err:
+                images.generate("a fox", tmp / "o", n=1, name=name, say=lambda m: None)
+            self.assertIn(said, str(err.exception))
+        Path(os.environ["WB_IMAGES"]).write_text("{}")
+        (tmp / "audio.json").write_text(json.dumps({"srv": {"url": root + "/v1/audio/speech",
+                                                            "key": "sekrit", "gpu": False}}))
+        os.environ["WB_AUDIO"] = str(tmp / "audio.json")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("audio", "hello", "--n", "1", "--voice", "zoe", "--out", str(tmp / "a"))
+        self.assertIn(f'{root}/v1/audio/speech answered HTTP 400: {{"detail": "voice not found"}}',
+                      err.getvalue())
+
     def test_an_engine_off_this_gpu_runs_beside_a_task_and_a_shared_server_is_kept_up(self):
         # #587: a remote or CPU image engine took the exclusive lease, unloaded the coding models
         # and refused while any task ran; and an images url on a coding provider's server with a
