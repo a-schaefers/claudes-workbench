@@ -570,6 +570,38 @@ async function run(engine, device) {
     const n = messages().filter(m => m.text === 'retried after a lost reply').length
     if (n !== 1) throw new Error(`landed ${n} times`)
   })
+  await check("storage full: a 200 that doesn't name the message (a portal's page, an empty body) leaves it in the box and it is sent again", async () => {
+    // #934 (the review of 1.90.24): any 200 cleared a held message's box, its only copy, though
+    // nothing had reached the server
+    // its own context with no service worker: WebKit's routing doesn't see a page's fetches
+    // while one is registered
+    const qc = await browser.newContext({ ...(device ? pw.devices[device] : {}), serviceWorkers: 'block' })
+    const q = await qc.newPage()
+    q.on('pageerror', e => errors.push(String(e)))
+    await q.goto(base + '#token=' + token)
+    await until(async () => await q.locator('#input').isEditable())
+    await q.evaluate(() => { Storage.prototype.setItem = () => { throw new DOMException('full', 'QuotaExceededError') } })
+    const foreign = [{ body: '' }, { contentType: 'text/html', body: '<html>Welcome to the Wi-Fi</html>' },
+      { contentType: 'application/json', body: JSON.stringify({ message: { cid: 'someone-else', text: 'not yours' } }) }]
+    let n = 0
+    await q.route('**/api/send', route => n < foreign.length ? route.fulfill({ status: 200, ...foreign[n++] }) : route.continue())
+    try {
+      const text = 'held through a captive portal'
+      await q.fill('#input', text)
+      await q.click('#send')
+      for (let i = 1; i <= foreign.length; i++) {
+        await until(() => n >= i, 15000)
+        await sleep(200)
+        if ((await q.inputValue('#input')) !== text) throw new Error(`the box was cleared by foreign 200 number ${i}`)
+        if (messages().some(m => m.text === text)) throw new Error('reached the server through a foreign 200')
+      }
+      await until(() => messages().filter(m => m.text === text).length === 1, 20000)
+      await until(async () => (await q.inputValue('#input')) === '', 10000)
+      await sleep(1500)
+      const rows = messages().filter(m => m.text === text)
+      if (rows.length !== 1 || new Set(rows.map(m => m.cid)).size !== 1) throw new Error(`landed ${rows.length} times`)
+    } finally { await qc.close() }
+  })
   await check('a message over 6 h unread says it was not passed to Claude, never Delivered, and sends again', async () => {
     // #536 (the 2026-11-20 audit): the mod skipped it, and the page said "Delivered" for good
     listen(false)

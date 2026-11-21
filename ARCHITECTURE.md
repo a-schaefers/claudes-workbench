@@ -6028,7 +6028,9 @@ two tabs offline, and only the second's message reached the server (#199). A mes
 browser won't store (its storage full, or denied) is `held`: it stays in the composer, sent from
 memory and retried like the outbox, and the box is cleared only once the server has it; the
 banner says so while it waits (`HELD`). Send cleared the box at quota, showed no pending bubble
-and sent nothing (#245, the audit of 1.2). The server ignores a cid
+and sent nothing (#245, the audit of 1.2). Held or not, a message has landed only when the reply
+names its cid: a 200 that doesn't (a captive portal's or a proxy's page, an empty body) is tried
+again, where any 200 cleared a held message's box, its only copy (#934). The server ignores a cid
 it already holds, so nothing is sent twice; a 4xx other than 401 marks it not sent, with retry,
 edit and delete. Each send gives up after `POST_MS` 15 s and is tried again, so a dead line
 can't hold the outbox. Staying connected: a 40 s watchdog (`DEAD_MS`; pings count) aborts a silent

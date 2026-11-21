@@ -1046,8 +1046,12 @@
         // landed: the reply names it. The snapshot alone holds the newest 200, so a retry after
         // a lost reply, 205 messages later, kept its pending bubble for good (#264, the audit of 1.2)
         if (r.ok) {
-          if (o === held) sentHeld()
-          else if (j.message && j.message.cid === o.cid) { forgetFiles(o); drop(o.cid) }
+          // a 200 that doesn't name it isn't the chat server's (a captive portal, a proxy's
+          // page, an empty body): for a held message it cleared the box, its only copy, though
+          // nothing had reached the server (#934). Tried again; the server ignores a cid it has
+          if (!(j.message && j.message.cid === o.cid)) again = true
+          else if (o === held) sentHeld()
+          else { forgetFiles(o); drop(o.cid) }
           if (j.state) apply(j.state, { reply: true }); else render()
           continue
         }
