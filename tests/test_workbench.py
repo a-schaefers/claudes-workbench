@@ -17792,7 +17792,9 @@ class DiskRoom(Base):
         # #852: on APFS statvfs leaves out purgeable space (local snapshots, iCloud's optimized
         # files), so a Mac with 1.5 GB by statvfs and 30 GB in Finder refused every start
         small = types.SimpleNamespace(f_bavail=1500, f_frsize=10**6)            # 1.5 GB
-        with mock.patch.object(store.os, "statvfs", return_value=small):
+        # no Windows drive behind it, as on a Mac: on WSL the faked statvfs was C:'s too (#950)
+        with mock.patch.object(store.os, "statvfs", return_value=small), \
+                mock.patch.object(store, "host_drive", return_value=None):
             with mock.patch.object(store, "_important_free", return_value=30 * 10**9):
                 self.assertEqual(store.free_bytes(), 30 * 10**9)
                 self.assertIsNotNone(cli._disk_room(self.repo, "HEAD", {}))     # room: no refusal
