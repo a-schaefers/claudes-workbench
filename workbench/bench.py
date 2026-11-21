@@ -708,10 +708,21 @@ def _self_usage(result: dict, calls: int | None = None) -> dict:
             "output": u.get("output_tokens") or 0}
 
 
-def handoff_cost(case: dict) -> int | None:
-    """What handing the case's original task off cost Claude (its results row; every step's)."""
+def handoff_cost(case: dict) -> tuple[int | None, int]:
+    """What handing the case's step of its original task off cost Claude, and how many steps
+    that figure covers: 1 when it is the step's own (its results row's `steps`, or the row's
+    `claude` for a task of one step), the task's step count when only the whole task's is
+    known (a row written before #558), which can't be set against Claude writing one step."""
     row = next((r for r in reversed(store.results(trials=True)) if r.get("task") == case.get("task")), {})
-    return spend.weighted(row["claude"]) if row.get("claude") else None
+    steps = row.get("steps") or []
+    n = max(len(steps), (case.get("original") or {}).get("steps") or 1)
+    step = case.get("step") or 1
+    if n > 1:
+        own = steps[step - 1].get("claude") if len(steps) >= step else None
+        if isinstance(own, dict):
+            return spend.weighted(own), 1
+        return (spend.weighted(row["claude"]) if row.get("claude") else None), n
+    return (spend.weighted(row["claude"]) if row.get("claude") else None), 1
 
 
 def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
@@ -791,11 +802,15 @@ def self_lines(rs: list[dict]) -> list[str]:
     have = cases()
     for r in rs:
         mine = spend.weighted(r["claude"]) if r.get("claude") else None
-        hand = handoff_cost(have.get(r["case"]) or {"task": None})
-        ratio = f", handoff/self {hand / mine:.2f}" if hand and mine else ""
+        hand, covers = handoff_cost(have.get(r["case"]) or {"task": None})
+        # a whole task's cost over one step's writing: 240K over 90K read 2.67 when step 3's
+        # own share was about 80K (#558, Claude's audit of 1.90)
+        ratio = f", handoff/self {hand / mine:.2f}" if hand and mine and covers == 1 else ""
         out.append(f"{r['case']}: {'PASS' if r['outcome'] == 'passed' else 'fail'}, self "
                    + (f"~{mine / 1000:.0f}K" if mine else "?") + ", handoff "
-                   + (f"~{hand / 1000:.0f}K" if hand else "not measured") + ratio)
+                   + (f"~{hand / 1000:.0f}K" + (f" (all {covers} steps; not comparable)"
+                                                 if covers > 1 else "")
+                      if hand else "not measured") + ratio)
     return out
 
 

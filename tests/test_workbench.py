@@ -8650,6 +8650,30 @@ class Bench(Base):
             time.sleep(0.1)
         self.assertFalse(Path(f"/proc/{pid}").exists(), "the check's child outlived it")
 
+    def test_a_later_steps_case_is_set_against_that_steps_handoff_cost_never_the_whole_tasks(self):
+        # #558 (Claude's audit of 1.90): step 3's case read "handoff ~240K, handoff/self 2.67"
+        # when step 3's own share was about 80K
+        from workbench import bench
+        mine = {"input": 0, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 0, "output": 18000}
+        def cost(out):
+            return {**mine, "output": out}
+        case = {"name": "t-3s-s3", "task": "t-3s", "step": 3, "original": {"steps": 3}}
+        row = {"case": "t-3s-s3", "outcome": "passed", "claude": mine}       # self ~90K
+        store.append_jsonl(store.home() / "results.jsonl", {"ts": store.now(), "task": "t-3s",
+            "outcome": "accepted", "claude": cost(48000), "steps": [{}, {}, {}]})  # before #558
+        with mock.patch.object(bench, "cases", return_value={"t-3s-s3": case}):
+            line = bench.self_lines([row])[-1]
+            self.assertEqual(line, "t-3s-s3: PASS, self ~90K, handoff ~240K (all 3 steps; not comparable)")
+            store.append_jsonl(store.home() / "results.jsonl", {"ts": store.now(), "task": "t-3s",
+                "outcome": "accepted", "claude": cost(48000),
+                "steps": [{"claude": cost(20000)}, {"claude": cost(12000)}, {"claude": cost(16000)}]})
+            self.assertEqual(bench.self_lines([row])[-1],
+                             "t-3s-s3: PASS, self ~90K, handoff ~80K, handoff/self 0.89")
+            one = {**case, "step": 1, "original": {"steps": 1}}               # one step: the row's
+            store.append_jsonl(store.home() / "results.jsonl", {"ts": store.now(), "task": "t-3s",
+                "outcome": "accepted", "claude": cost(36000), "steps": [{}]})
+            self.assertEqual(bench.handoff_cost(one), (180000, 1))
+
     def test_a_case_from_a_later_step_starts_where_that_step_did(self):
         from workbench import bench
         self.start("t-steps", "ok", "--test", TEST_CMD)
@@ -9196,6 +9220,67 @@ class ClaudeSpend(Base):
         self.assertEqual(spend._usage(row)["cache_write_1h"], 20)
         self.assertEqual(spend._wb_calls("a; /x/bin/wb next t -m 'a b' >/dev/null && wb status"),
                          [["next", "t", "-m", "a b"], ["status"]])
+
+    def test_each_step_of_a_task_is_charged_its_own_calls_and_the_next_specs_go_to_the_next(self):
+        # #558 (Claude's audit of 1.90): only the whole task's cost was kept, so a bench case of
+        # step 3 set a 3-step task's 240K against Claude writing step 3 alone
+        from datetime import datetime
+        from workbench import spend
+        t = self.task("t-many")
+
+        def at(hms):
+            return datetime.fromisoformat(f"2026-11-17T{hms}+00:00").timestamp()
+        for hms in ("10:20:05", "10:40:03"):                           # wb next's own events
+            store.append_jsonl(t.dir / "events.jsonl", {"ts": at(hms), "kind": "next_step"})
+        self.transcript([
+            _turn("add the thing", "2026-11-17T10:00:00Z"),
+            *_call("m1", "2026-11-17T10:00:01Z", 10),                      # reading for step 1's spec
+            *_call("m2", "2026-11-17T10:00:02Z", 20, "wb start t-many --spec s.md"),
+            _turn("[workbench] Task `t-many` is ready for review.", "2026-11-17T10:20:00Z"),
+            *_call("m3", "2026-11-17T10:20:01Z", 40),                      # reviewing step 1
+            {"type": "assistant", "timestamp": "2026-11-17T10:20:02Z", "message": {  # step 2's spec
+                "id": "e1", "role": "assistant", "usage": {"output_tokens": 5},
+                "content": [{"type": "tool_use", "name": "Write", "input": {"file_path": "/tmp/s/s2.md"}}]}},
+            *_call("m4", "2026-11-17T10:20:03Z", 7, "wb next t-many --spec /tmp/s/s2.md -m x"),
+            *_call("m5", "2026-11-17T10:20:06Z", 11),                      # after it: step 2's
+            _turn("[workbench] Task `t-many` is ready for review.", "2026-11-17T10:40:00Z"),
+            *_call("m6", "2026-11-17T10:40:01Z", 100),
+            *_call("m7", "2026-11-17T10:40:02Z", 13, "wb next t-many --spec s3.md -m y"),
+            _turn("[workbench] Task `t-many` is ready for review.", "2026-11-17T11:00:00Z"),
+            *_call("m8", "2026-11-17T11:00:01Z", 200),
+            *_call("m9", "2026-11-17T11:00:02Z", 300, "wb accept t-many -m z"),
+        ])
+        total, per = spend.usage_by_step(t)
+        self.assertEqual([s["output"] for s in per], [10 + 20 + 40, 5 + 7 + 11 + 100, 13 + 200 + 300])
+        self.assertEqual(total["output"], sum(s["output"] for s in per))
+        self.assertEqual([s["turns"] for s in per], [2, 2, 2])
+        self.assertEqual(spend.usage(t), total)
+        (t.dir / "events.jsonl").unlink()                              # one step: no split
+        self.assertEqual(spend.usage_by_step(t), (total, None))
+
+    def test_a_task_of_several_steps_records_each_steps_claude_cost_in_its_row(self):
+        from datetime import datetime, timezone
+        os.environ["CLAUDE_CODE_SESSION_ID"] = self.SID
+        self.start("t-two", "ok")
+        wait_phase("t-two", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Then the rest.\n")
+        run_wb("next", "t-two", "--spec", str(step2), "-m", "feat: one")
+        wait_phase("t-two", {"review"})
+        [b] = [e["ts"] for e in store.read_jsonl(store.Task("t-two").dir / "events.jsonl")[0]
+               if e.get("kind") == "next_step"]
+
+        def iso(ts):
+            return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+        self.transcript([_turn("make it", iso(b - 60)),
+                         *_call("m1", iso(b - 59), 300, "wb start t-two"),
+                         *_call("m2", iso(b - 1), 50, f"wb next t-two --spec {step2} -m x"),
+                         _turn("[workbench] Task `t-two` is ready for review.", iso(b + 30)),
+                         *_call("m3", iso(b + 31), 700, "wb accept t-two -m y")])
+        run_wb("accept", "t-two", "-m", "feat: two")
+        row = store.results()[-1]
+        self.assertEqual([s["claude"]["output"] for s in row["steps"]], [300, 50 + 700])
+        self.assertEqual(row["claude"]["output"], 1050)
 
     def test_no_session_or_no_transcript_records_no_claude_cost(self):
         from workbench import spend

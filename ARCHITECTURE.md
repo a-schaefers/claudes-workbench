@@ -486,6 +486,20 @@ turn(s)`), and
 0.90) or whose transcript Claude Code has cleaned up records none. The router reads it
 (`_cheaper`, *Choosing a model*).
 
+**Each step's share** (`spend.usage_by_step`, #558). A task of several steps (`wb next`) also
+records each step's cost, in its row's `steps[i].claude`, so a bench case of one step is set
+against that step's handoff, not the whole task's (Claude's audit of 1.90: a 3-step task's 240K
+read handoff/self 2.67 against Claude writing step 3 for 90K, when step 3's own share was about
+80K). The split is by time: the task's `next_step` events (written by `wb next`) mark where each
+step began, and a charged call is the step under way when it was made, except that a call
+running `wb next <task>` and the calls charged with it as its spec (the reading back to the spec's
+edit, as for `wb start`; `calls` marks them `ahead`) are the step it hands over. So a step's cost
+is its spec, its reviews and its feedback; step 1's also has the planning before `wb start`, and
+the last step's the accept. A review read before the next spec was written stays with the step
+reviewed; a spec written in an earlier turn, not just before `wb next`, stays where it was charged.
+A `wb next` that failed hands nothing over (clamped to the last step). No split is written when a
+charged call has no timestamp, or the steps counted don't match the row's.
+
 ### What a task saved: an estimate of Claude writing it
 `workbench/savings.py` sets a task's cost beside an estimate of what Claude would have spent
 writing the same change itself (the user, 2026-11-18: nothing in the product showed the saving).
@@ -3107,8 +3121,10 @@ followed by `SELF_PROMPT` (the acceptance command, run before finishing).
 - **The row.** It goes to runs.jsonl with `arm: "claude"`, `model: "claude"`, `label: "claude"`,
   `claude`, `turns`, `claude_model`. `wb bench report` keeps those rows out of the per-model
   table and lists each one under "Claude writing it": PASS or fail, its weighted tokens, and the
-  original task's handoff cost to Claude (its results row's `claude`, every step's;
-  `handoff_cost`) with the ratio handoff/self.
+  handoff cost to Claude of the case's step (`handoff_cost`: its results row's `steps[step-1].claude`
+  for a task of several steps, *Each step's share*; the row's `claude` for one step) with the
+  ratio handoff/self. A task of several steps whose row has only the whole task's cost (written
+  before #558) prints `handoff ~240K (all N steps; not comparable)` and no ratio.
 - **The yes.** It refuses without `--yes`, because it spends Claude tokens, and nothing runs it
   on its own.
 
@@ -5183,7 +5199,7 @@ the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 d
 | `wb notes` / `add "…"` / `drop N…` | | The user's standing delegation preferences (`notes.md`, `- ` lines, at most 20 of 300 characters). |
 | `wb bench add <task>` | `--step N` (the last), `--hidden PATH…` (the test files the step changed), `--check CMD`, `--name CASE` (the task's; `<task>-sN` for a step of several) | Makes a case of one step of an accepted task (*Bench*): the base as a bundle, the spec, the acceptance command, the hidden checks, the grants. Refused: not accepted or a trial, the repo or commit gone, no acceptance command, no hidden checks, ones that pass on the base already, submodules or Git LFS files the repo can't supply (named), or ones its own commit fails in the agent's lane (no replay could pass them), or a shallow clone (#478). |
 | `wb bench list` / `wb bench report` / `wb bench stop` | `report`: `--run ID`, `--label TEXT` | The cases; pass rates, rounds, auto-fixes, minutes and local tokens per label and model, then each case against the original's model and review rounds (with the running run's progress), the preempted count, and each replay that didn't start with why and its `wb.log`, or that the machine broke off (`broke off: <infra>: …`, its task's `runner.log`, #508) (the last 10; a run of only those said "no replays yet", #89); stop the driver, which closes its replay. |
-| `wb bench self <case>` | `--yes` (required: it spends Claude tokens), `--turns N` (40) | Claude Code writes the case (`claude -p`, edits and the acceptance command only), graded by its hidden checks in the original task's lane; one runs.jsonl row (`arm: claude`) and its line: PASS or fail, the weighted tokens, the handoff's cost and the ratio (*Bench*). |
+| `wb bench self <case>` | `--yes` (required: it spends Claude tokens), `--turns N` (40) | Claude Code writes the case (`claude -p`, edits and the acceptance command only), graded by its hidden checks in the original task's lane; one runs.jsonl row (`arm: claude`) and its line: PASS or fail, the weighted tokens, the handoff's cost of the case's step and the ratio, or for a row with only a whole multi-step task's cost, that cost marked not comparable and no ratio (*Bench*). |
 | `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. First closes what a killed driver left (`bench.sweep`), and refuses while a replay's runner still lives. Skips what an earlier run with the same label already passed or failed (an `error` runs again); with nothing left, says so and starts no driver. |
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run), archived tasks included (#270): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`; without a name, `[{backlog, tasks, open}]` (it printed the text, #602). |
 | `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X\|off` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive and finite, else exit 1) writes savings.json first; `--price off` removes `kwh_price`, its other keys kept (`savings.set_price(None)`, #609). The cost reads `GPU 600 Wh, cost 0.15`: no currency sign. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price}` (`price`: the kWh price set, or null; the pane's Settings row shows it). `--card FILE.svg`: the badge as an image (*The badge*). |
@@ -5450,7 +5466,9 @@ medians of status `speeds`) and `gpu_w` (`{mean, peak}`); `commit` and `merged` 
 discard. A step (`results.step`): `files`,
 `lines` (added, against HEAD, new files included), `removed`, `window`, `landed`, `compacted` (its last
 session, or one a handover replaced: a `fresh` event's `compacted`), `handovers` (fresh sessions
-with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
+with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`, and `claude` (that
+step's share of the row's `claude`, `spend.usage_by_step`, same shape: only in a row of several
+steps whose cost was split, #558).
 
 **bench/cases/<case>/case.json** (`bench.add`): `name`, `task`, `step`, `repo`, `base`,
 `reference`, `size`, `stack`, `test_cmd`, `test_timeout`, `check_cmd`, `hidden` (paths, their
@@ -5842,6 +5860,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **The mod's wake opening** (`` [workbench] Task `<name>` ``, register.tsx) **or Claude Code's
   transcript rows** (`type`, `message.id`, `message.usage`, a Bash `tool_use`'s `command`,
   `timestamp`, `subagents/`) → `spend.py` (`WAKE`, `calls`) and the ClaudeSpend tests' rows.
+- **`wb next`'s `next_step` event** (its `ts`, written after the step's commit) **or the
+  results row's `steps` count** → `spend.usage_by_step` (where each step's cost begins),
+  `results.record` (which writes it per step) and `bench.handoff_cost` (which reads it, #558).
 - **`cli.PROTOCOL`** → the transcript's fold marker `\n---\nHow to work`, the `Lesson:` parser,
   the handbook (they shouldn't contradict), and every agent's prefill (keep it short).
 - **`agent/HANDBOOK.md`** → every agent prompt carries it; each token costs prefill time.
