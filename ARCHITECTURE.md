@@ -1930,10 +1930,23 @@ through `_strip_jsonc` (comments and trailing commas removed), then the user's
 variable is set, never its keys; #347). A provider's relative
 `{file:path}` starts in the directory of the file that defines it (`_provider_dirs`).
 `opencode_config_path()` is the global file wb names: `opencode.json` if it exists, else
-`opencode.jsonc` if it exists, else `opencode.json`; `write_config` writes the one file there is,
+`opencode.jsonc` if it exists, else `opencode.json`; `own_config` writes the one file there is,
 else that one.
 A file that doesn't parse is a `RuntimeError` naming it (every command prints it as a message;
-`wb doctor` prints it as BAD and stops). `write_config(cfg, change)` refuses while two files are
+`wb doctor` prints it as BAD and stops). Every write (`write_entry`, `_add_provider`,
+`remove_remote`, `set_default`) changes that one file's own parsed contents, `own_config(change)`
+yielding (the file, its contents) and writing them back when the change ends, under the file's
+lock (`store.edit_config`); `read_config`'s merge is for lookups only. Writing the merge back
+copied an admin's system file and a session's `OPENCODE_CONFIG_CONTENT` (an `apiKey` with it)
+into the user's file, where the admin's later changes stopped taking effect (#421, the audit of
+1.8). What another layer sets is that layer's (`set_elsewhere(target, *keys, later)`, naming each
+file, or `OPENCODE_CONFIG_CONTENT`): removing a model or a `wb remote` provider another layer also
+sets is refused, since it would stay in effect, and so is changing a model, or `--set-default`'s
+`model`, that a layer loaded after the file sets, which would win ("… is set in <layer>, which wb
+doesn't write: make this change there by hand: …"). A model for a provider only the system file
+defines goes into the user's file as an overlay (`{"provider": {"<id>": {"models": {…}}}}`, which
+OpenCode merges over the admin's); one for a provider only `OPENCODE_CONFIG_CONTENT` defines is
+refused (it would leave a provider with no baseURL on disk once the session ends). `own_config` refuses while two files are
 layered (one merged file would undo the layering), unless the file is strict JSON (no comments,
 no trailing commas), and when the file (or a symlink's target) isn't writable (a Nix store), and
 then prints only `change`, what to do by hand (the keys wb sets, or the key to delete or set),
@@ -2601,7 +2614,7 @@ output cap, and an entry no request could fit refused before anything is made: a
 128K entry once wrote an input limit of -16384 and kept its 32K and 64K caps, #332, the audit of
 1.4; an alias's `id` dropped, since it would name the old model). The router weighs both by their records; retiring the
 old one is the user's call (`wb model retire`). The config is checked first (`models.config_target`,
-the checks `write_config` makes: one file, no comments, writable), before anything is made: the
+the checks `own_config` makes: one file, no comments, writable), before anything is made: the
 variant was made, then a config with comments refused its entry, and once the config was plain
 JSON the retry refused the variant as taken (#266, the audit of 1.2). A variant made and not yet
 registered is kept in optimize.json `made` (`<provider>/<name>` → the source's id), so a retry
@@ -4131,7 +4144,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
 |---|---|---|
-| `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed); the router's ranking per size. `--set-default` writes the significant-work pick as OpenCode's `model`. |
+| `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed); the router's ranking per size. `--set-default` writes the significant-work pick as OpenCode's `model` (`models.set_default`: in the user's file, refused while `OPENCODE_CONFIG_CONTENT` sets one, which would win: #421). |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | Registers a model in opencode.json, merged into any existing entry; `--url` first writes an OpenAI-compatible provider for any server on this machine (`models.add_server_provider`: a provider already there is never touched, and one for another baseURL refuses the add; a URL off this machine needs models.json `local: true`), and `--start`/`--stop` write the model's models.json `start`/`stop`; on a first run with no `--url` it writes the `ollama` provider when Ollama answers; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | Asked for, or when due at setup and session start (*Optimize*). `start --if-due`: only when due, else nothing printed. `estimate`: how long a run would hold the GPU. `start`: detached; measures each Ollama model's largest window all on the GPU (refused while a task holds it; a task that wants it stops it); `--bench` then starts `wb bench run` on every model. `report` (the default): a line per model. `stop`. `apply <id>…`: adds the measured window as an entry of its own beside the model (an Ollama `<name>:<tag>-<N>k`, `optimize.entry_name`, with that `num_ctx`, the entry's settings copied; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL. `--remove` undoes it; not while OpenCode's default model is one of them, nor for a provider wb didn't add or that now points elsewhere. |
@@ -4235,9 +4248,10 @@ $WB_HOME (~/.local/state/workbench)
 ~/.local/share/workbench/skills/ ($WB_SKILLS) the skill library, its own git repo; retired/
 ~/.local/share/workbench/try/<n>/ wb try's sample projects, each a repo of its own (its task: try-<n>;
                                  beside $WB_SKILLS, whatever it is set to)
-~/.config/workbench/             wb's writes to models.json, commands.json and savings.json go through
-                                 store.edit_config: locked, through a symlink to its target, the mode
-                                 kept (0600 for a new file); a read-only target is refused
+~/.config/workbench/             wb's writes to models.json, commands.json and savings.json (and OpenCode's
+                                 config, models.own_config) go through store.edit_config: locked, through a
+                                 symlink to its target, the mode kept (0600 for a new file); a read-only
+                                 target is refused
   models.json ($WB_MODELS)       what OpenCode can't say about each model or provider
   images.json ($WB_IMAGES)       image engines
   audio.json ($WB_AUDIO)         audio engines (speech, sfx, music, and a listener)

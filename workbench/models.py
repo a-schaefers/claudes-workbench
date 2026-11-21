@@ -43,6 +43,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -257,7 +258,7 @@ def agent_providers() -> dict:
 
 
 def config_target(change: str) -> Path:
-    """The file write_config would write, or RuntimeError saying why it won't (and ``change``, to
+    """The file own_config would write, or RuntimeError saying why it won't (and ``change``, to
     make by hand). Asked first by a change that does something else before writing: wb optimize
     made its Ollama variant, then the config refused it (#266, the audit of 1.2)."""
     system = {p.resolve() for p in _system_files() if p.exists()}  # an admin's: never written (#370)
@@ -274,14 +275,75 @@ def config_target(change: str) -> Path:
     return store.writable_target(path, change)
 
 
-def write_config(cfg: dict, change: str) -> None:
-    """Write OpenCode's config back; refused for a file with comments, which a rewrite would lose,
-    and while two files are layered, which one merged file would rewrite (config_target). A
+CONTENT = "OPENCODE_CONFIG_CONTENT"  # how a refusal names the session's config layer
+
+
+@contextmanager
+def own_config(change: str):
+    """(the file, its own parsed contents) of OpenCode's config file wb writes (config_target),
+    to change in place: written back when the body ends, under its lock, through a symlink, its
+    mode kept (store.edit_config); nothing written when the body raises. Refused for a file with
+    comments, which a rewrite would lose, and while two files are layered (config_target). A
     refusal says only ``change`` (what to do by hand): it once printed the whole config, a
-    provider's apiKey included, into Claude's context (the 2026-11-16 audit). A symlinked file
-    (dotfiles, stow) is written through to its target, and its mode is kept: a 0600 file holding
-    keys came back 0644, and the link was replaced by a plain file (the 2026-11-16 audit)."""
-    store.write_through(config_target(change), cfg, change)
+    provider's apiKey included, into Claude's context (the 2026-11-16 audit). Only the file's own
+    contents: the merged view (read_config) is for lookups. Written back, it copied an admin's
+    system file and a session's OPENCODE_CONFIG_CONTENT, an apiKey with it, into the user's file,
+    where the admin's later changes no longer took effect (#421, the audit of 1.8)."""
+    target = config_target(change)
+    def read():
+        try:
+            own = json.loads(target.read_text()) if target.exists() else {}
+        except ValueError:
+            raise RuntimeError(f"{target} has comments, which rewriting it would lose; make this "
+                               f"change by hand: {change}") from None
+        if not isinstance(own, dict):
+            raise RuntimeError(f"{target} doesn't hold an object; make this change by hand: {change}")
+        return own
+    with store.edit_config(target, read, change) as own:
+        yield target, own
+
+
+def _sets(layer: dict, keys: tuple) -> bool:
+    """Whether ``layer`` sets the key path ``keys`` (a provider's under either shape's key)."""
+    for head in ("provider", "providers") if keys[0] == "provider" else keys[:1]:
+        node = layer.get(head)
+        for k in keys[1:]:
+            node = node.get(k) if isinstance(node, dict) else None
+        if node is not None:
+            return True
+    return False
+
+
+def set_elsewhere(target: Path, *keys, later: bool = False) -> list[str]:
+    """The layers OpenCode loads besides ``target`` (own_config's file) that set the key path
+    ``keys``, by name (a file, or OPENCODE_CONFIG_CONTENT): every one, or with ``later`` only
+    those loaded after it, whose value wins over the target's. What wb can't write: a model
+    removed from the user's file stayed in effect from the system file, and a default written
+    there lost to the session's (#421)."""
+    layers = [(str(p), p.resolve(), layer) for p, layer in _layers()]
+    if content := users_config_content():
+        layers.append((CONTENT, None, content))
+    if later:
+        at = next((i for i, (_, p, _) in enumerate(layers) if p == target), None)
+        layers = layers[at + 1:] if at is not None else [x for x in layers if x[1] is None]
+    return [name for name, p, layer in layers if p != target and _sets(layer, keys)]
+
+
+def _not_ours(what: str, where: list[str], change: str) -> RuntimeError:
+    return RuntimeError(f"{what} is set in {' and '.join(where)}, which wb doesn't write: make "
+                        f"this change there by hand: {change}")
+
+
+def set_default(model_id: str):
+    """Make ``model_id`` OpenCode's default model ("model" in the user's file); the default it
+    replaces. Refused while a layer loaded later (OPENCODE_CONFIG_CONTENT) sets one, which wins."""
+    change = f'set "model": "{model_id}"'
+    old = read_config().get("model")
+    with own_config(change) as (target, own):
+        if where := set_elsewhere(target, "model", later=True):
+            raise _not_ours('"model"', where, change)
+        own["model"] = model_id
+    return old
 
 
 def overrides_path() -> Path:
@@ -1679,8 +1741,8 @@ def _add_provider(cfg: dict, pid: str, name: str, base: str) -> None:
     key, url = ("providers", "settings") if "providers" in cfg and "provider" not in cfg \
         else ("provider", "options")  # the first: OpenCode 2.x's own shape
     entry = {"npm": "@ai-sdk/openai-compatible", "name": name, url: {"baseURL": base}}
-    cfg.setdefault(key, {})[pid] = entry
-    write_config(cfg, f'under "{key}" add "{pid}": {json.dumps(entry)}')
+    with own_config(f'under "{key}" add "{pid}": {json.dumps(entry)}') as (_, own):
+        own.setdefault(key, {})[pid] = entry  # the user's file only: never the merge (#421)
 
 
 def _has_provider(cfg: dict, pid: str) -> bool:
@@ -1805,8 +1867,12 @@ def remove_remote(host: str) -> tuple[str, list[str]]:
         raise RuntimeError(f"{cfg['model']} is OpenCode's default model; wb models --set-default "
                            "picks another first")
     names = sorted(prov.get("models") or {})
-    del cfg[key][pid]
-    write_config(cfg, f'under "{key}" remove "{pid}"')
+    change = f'under "{key}" remove "{pid}"'
+    with own_config(change) as (target, own):
+        if where := set_elsewhere(target, "provider", pid):  # it would stay in effect (#421)
+            raise _not_ours(f"provider {pid}", where, change)
+        for k in ("provider", "providers"):
+            (own.get(k) or {}).pop(pid, None)
     for mid in [f"{pid}/{n}" for n in names] + [pid]:
         for k in list(_overrides().get(mid) or {}):
             set_override(mid, k, None)
@@ -1966,20 +2032,36 @@ def set_override(model_id: str, key: str, value) -> None:
 
 
 def write_entry(provider: str, name: str, entry: dict | None) -> None:
-    """Add, replace (entry) or remove (None) one model in OpenCode's config."""
+    """Add, replace (entry) or remove (None) one model in OpenCode's config: in the user's file
+    (own_config), the provider looked up in the merged view. A provider that file doesn't define
+    gets the model as an overlay there (an admin's, from the system file), unless only the
+    session's OPENCODE_CONFIG_CONTENT defines it, which wb can't write; a model another layer sets
+    is not removed, nor changed when that layer loads later and wins (#421)."""
     cfg = read_config()
-    prov = (cfg.get("provider") or cfg.get("providers") or {}).get(provider)
-    if prov is None:
+    if _provider(cfg, provider) is None:
         raise RuntimeError(f"OpenCode has no provider {provider!r}")
-    entries = prov.setdefault("models", {})
     if entry is None:
-        entries.pop(name, None)
         change = f'delete "{name}" from provider {provider}\'s "models"'
-    else:  # keys added by hand (variants, options) stay
-        old = entries.get(name) or {}
-        entries[name] = {**old, **entry, "options": {**(old.get("options") or {}), **(entry.get("options") or {})}}
-        if not entries[name]["options"]:
-            del entries[name]["options"]
+    else:
         change = (f'under provider {provider}\'s "models", merge into "{name}" (keeping keys you '
                   f"added): {json.dumps(entry)}")  # wb's own keys only: never the rest of the config
-    write_config(cfg, change)
+    with own_config(change) as (target, own):
+        if where := set_elsewhere(target, "provider", provider, "models", name, later=entry is not None):
+            raise _not_ours(f"{provider}/{name}", where, change)
+        mine = _provider(own, provider)
+        if mine is None:
+            if entry is None:
+                return  # in no layer at all: nothing to remove
+            if set_elsewhere(target, "provider", provider) == [CONTENT]:
+                raise _not_ours(f"provider {provider}", [CONTENT], change)
+            key = next((k for k in ("provider", "providers") if k in own),
+                       "provider" if provider in (cfg.get("provider") or {}) else "providers")
+            mine = own.setdefault(key, {}).setdefault(provider, {})
+        entries = mine.setdefault("models", {})
+        if entry is None:
+            entries.pop(name, None)
+        else:  # keys added by hand (variants, options) stay
+            old = entries.get(name) or {}
+            entries[name] = {**old, **entry, "options": {**(old.get("options") or {}), **(entry.get("options") or {})}}
+            if not entries[name]["options"]:
+                del entries[name]["options"]

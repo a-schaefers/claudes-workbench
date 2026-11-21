@@ -2081,11 +2081,8 @@ def cmd_models(a):
         top, why = router.choose("significant")
         if top is None:
             die(why)
-        cfg = models.read_config()
-        old = cfg.get("model")
-        cfg["model"] = top.model.id
         try:
-            models.write_config(cfg, f'set "model": "{top.model.id}"')
+            old = models.set_default(top.model.id)
         except RuntimeError as e:
             die(str(e))
         print(f"\nOpenCode's default model: {old} → {top.model.id} ({why})")
