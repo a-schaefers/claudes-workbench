@@ -9339,7 +9339,7 @@ class Stats(Base):
     def test_a_new_install_feeds_nothing_but_the_settings(self):
         from workbench import stats
         f = json.loads(run_wb("stats", "--json"))
-        self.assertEqual(set(f), {"ts", "settings", "tasks"})  # no section of zeros
+        self.assertEqual(set(f), {"ts", "until", "settings", "tasks"})  # no section of zeros
         self.assertEqual(f["tasks"], 0)
         self.assertEqual(stats.summary(f), [])
         self.assertIn("no finished tasks yet", run_wb("stats"))
@@ -9412,6 +9412,14 @@ class Stats(Base):
         self.assertNotIn("helps", head)
         self.assertNotIn("models", head)
         self.assertEqual(stats.summary(head), stats.summary(f))
+
+    def test_the_feed_says_it_holds_until_the_next_local_midnight(self):
+        # #575: the pane kept an ended streak and last week's numbers for days, files unchanged
+        from workbench import stats
+        now = time.mktime((2026, 11, 20, 23, 30, 0, 0, 0, -1))
+        until = stats.feed(now)["until"]
+        self.assertEqual(time.localtime(until)[:6], (2026, 11, 21, 0, 0, 0))
+        self.assertGreater(until, now)
 
     def test_a_models_write_speed_trend_compares_its_newest_third_with_its_oldest(self):
         from workbench import stats

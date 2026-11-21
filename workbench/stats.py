@@ -78,6 +78,14 @@ def _day(ts: float | None) -> str | None:
     return time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else None  # a row too old to say
 
 
+def _midnight(now: float) -> float:
+    """The next local midnight after ``now``: the feed holds until then (its streak, its 7 and 30
+    days and its periods are counted from today), so the pane reads it again once it passes, files
+    unchanged or not (#575)."""
+    t = time.localtime(now)
+    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+
+
 def _landed(r: dict) -> bool:
     return r.get("outcome") == "accepted"
 
@@ -245,7 +253,7 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
     now = store.now() if now is None else now
     every = store.results()
     rows = [r for r in every if tuning.judged(r)]  # trials and spec-gap discards out
-    out: dict = {"ts": now, "settings": settings(), "tasks": len(rows)}
+    out: dict = {"ts": now, "until": _midnight(now), "settings": settings(), "tasks": len(rows)}
     periods = {}
     for name, span in savings.PERIODS.items():
         since = now - span if span else 0

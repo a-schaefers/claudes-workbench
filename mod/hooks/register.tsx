@@ -136,7 +136,8 @@ const STRIP_HINT = 'minimized · restore: click, or Ctrl+X Tab then Enter'
 // Stats between them (#406): looked at more often than Settings
 const TABS: [string, string, string][] = [['tasks', 'Tasks', '1'], ['stats', 'Stats', '2'], ['settings', 'Settings', '3']]
 // The Stats tab's history (`wb stats --json`), read while the tab is shown: when it is first
-// shown in a load, and again when results.jsonl or stats.json changes. No timer.
+// shown in a load (`mem.statsLoaded`: the atom outlives a reload), again when results.jsonl or
+// stats.json changes, and once the feed's `until` (the next local midnight) has passed. No timer.
 const statsFeed = atom({ plugin: 'workbench', key: 'stats' } as const, { key: '', feed: null } as WbStats,
   { shape: 'stats-1' })
 // The Stats tab's live view (#408): one `wb top --json` child, only while the tab is on screen
@@ -530,9 +531,10 @@ async function progressOn($: any): Promise<boolean> {
 }
 
 // The Stats tab's history: `wb stats --json`, only while the tab is shown, and only when what it
-// is made from changed since the last read (results.jsonl: a task closed; stats.json: a setting).
-// `force` after a settings pick. A stat is all a poll costs while the tab is shown; nothing at all
-// while it isn't.
+// is made from changed since the last read (results.jsonl: a task closed; stats.json: a setting),
+// the day it was counted from has ended (its `until`: an ended streak and last week's numbers
+// stayed for days, #575), or not yet in this load. `force` after a settings pick. A stat is all a
+// poll costs while the tab is shown; nothing at all while it isn't.
 async function refreshStats($: any, force = false) {
   if (mem.statsReading || (await read($, pane)).tab !== 'stats') return
   const shown = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
@@ -542,13 +544,17 @@ async function refreshStats($: any, force = false) {
   }
   const key = `${await stamp('results.jsonl')} ${await stamp('stats.json')}`
   const had = await read($, statsFeed)
-  if (!force && had.feed && key === had.key) return
+  const dayOver = typeof had.feed?.until === 'number' && (await $.clock.now()) / 1000 >= had.feed.until
+  if (!force && had.feed && key === had.key && mem.statsLoaded && !dayOver) return
   mem.statsReading = true
   try {
     const r = await $.process.run([mem.wb, 'stats', '--json'], { timeoutMs: 30_000 })
     if (r.exitCode !== 0) return
     const feed = JSON.parse(r.stdout)
-    if (feed && typeof feed === 'object') await update($, statsFeed, () => ({ key, feed }))
+    if (feed && typeof feed === 'object') {
+      await update($, statsFeed, () => ({ key, feed }))
+      mem.statsLoaded = true
+    }
   } catch {
     // wb missing or slow: the last feed stays; tried again at the next poll
   } finally {
@@ -884,6 +890,7 @@ const mem = {
   liveKey: '', // the followed task and its updated_at when last read
   liveAt: 0, // when its transcript was last read
   statsReading: false, // a `wb stats --json` under way (refreshStats)
+  statsLoaded: false, // the history was read in this load: the atom's feed may be an older load's
   top: null as any, // the `wb top --json` child while the live view runs (syncTop)
   topRetryAt: 0, // not before then, after one ended by itself
   price: null as number | null, // the electricity price wb says is set (`wb savings --json`)

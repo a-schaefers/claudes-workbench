@@ -1741,7 +1741,9 @@ part of the setting. `live` and `every` are the Stats tab's live view (`wb top`)
 **The Stats feed** (`stats.feed`, `wb stats --json`, #405): everything workbench has learned, as
 one object for the Stats tab's history, built from what already computes it. Rows are
 `store.results()` that `tuning.judged` keeps (no trials, no spec-gap discards). A section with
-nothing in it is left out, never zeros, so a new install's feed is `{ts, settings, tasks: 0}`.
+nothing in it is left out, never zeros, so a new install's feed is `{ts, until, settings, tasks:
+0}`; `until` is the next local midnight (`_midnight`): the streak, days and periods are counted
+from today, so the pane reads the feed again once it passes.
 Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `accepted_pct`,
 `active_minutes`, and `savings` (`savings.totals`) with its `score` once a task can be compared),
 `streak` (`{current, best, days}`: local days in a row with a task landed; the current run ends
@@ -2026,7 +2028,10 @@ nothing until a surface attaches.
   windows. A section with no data is left out; a new install's says to delegate one with
   /workbench. It is read (`refreshStats`) only while the tab is shown (`pane.tab` and `$.ui.panes()`
   `isShown`): on the tab's press, then at each poll when results.jsonl's or stats.json's size or
-  mtime changed (`$.fs.stat`, the key kept with the feed), and after a Stats setting is picked.
+  mtime changed (`$.fs.stat`, the key kept with the feed), when the feed's `until` (its next local
+  midnight) has passed, and after a Stats setting is picked; and once in each load
+  (`mem.statsLoaded`), since the atom outlives a reload. Without the clock, an ended streak, last
+  week's numbers and a 30-day chart ending days ago stayed until a task closed (#575).
   No timer: hidden, it costs nothing; shown, a stat per poll. The feed is the `stats` atom
   (`stats-1`).
 - **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting

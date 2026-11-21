@@ -1857,6 +1857,57 @@ test('the Stats tab draws the history, read from wb stats only while it is shown
   await ui.unmount()
 })
 
+test('the Stats tab reads the history again once its day has ended, with nothing on disk changed', async ($, on) => {
+  // #575: an ended streak, last week's "This week" and a 30-day chart ending days ago stayed until
+  // a task closed: the feed says when its day ends (until), and a load reads it once anyway
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  const pane = fakeTasks(on, files, [])
+  const reads: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'stats' && e.argv[2] === '--json') {
+      reads.push(e.argv)
+      return { value: { exitCode: 0, stdout: JSON.stringify({ ...FEED, until: clock.now() / 1000 + 60 }), stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(10)
+  expect(reads.length).toBe(1)
+  await clock.advance(31_000)
+  expect(reads.length).toBe(1)                                           // the same day: not read again
+  await clock.advance(62_000)
+  expect(reads.length).toBe(2)                                           // past midnight: read again
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
+test('a load reads the history once even when the feed an earlier load kept still matches the files', async ($, on) => {
+  // #575: the stats atom, key included, survives /reload-plugins, so a reload never re-read it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  const pane = fakeTasks(on, files, [])
+  const kept = { key: `${files['/wb/results.jsonl'].length}@0 -`, feed: { ...FEED, until: 1_900_000_000 } }
+  on('state.get', (_: any, e: any, next: any) => e.key === 'stats' && e.plugin === 'workbench'
+    ? { value: { value: { shape: 'stats-1', value: kept }, version: 1 } } : next(e))
+  const reads: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'stats' && e.argv[2] === '--json') reads.push(e.argv)
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify(FEED) : '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(10)
+  expect(reads.length).toBe(1)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
 test('the Stats tab\'s settings pick through wb, progress checks stay off by default, and the price is typed', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
