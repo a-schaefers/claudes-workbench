@@ -1200,6 +1200,7 @@ UPLOAD_FILES = 10         # files one message may carry
 # characters, 120 CJK ones were 360 bytes, the rename failed ENAMETOOLONG, and the page retried
 # that 500 for good (#742)
 UPLOAD_NAME = 140
+FILE_CACHE = "private, max-age=31536000, immutable"  # GET /api/file/<id> (#754)
 UPLOAD_ID = re.compile(r"[A-Za-z0-9-]{8,64}")  # crypto.randomUUID(), or the page's fallback
 UPLOAD_TYPE = re.compile(r"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*")
 SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"}  # served as images
@@ -1474,9 +1475,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # the journal needn't hold every poll
         pass
 
-    def _security_headers(self) -> None:
+    def _security_headers(self, cache: str = "no-store") -> None:
         self.send_header(MARK, identity(self.secret))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -1659,7 +1660,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(size))
             if not shown:
                 self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(m['name'])}")
-            self._security_headers()
+            # an upload's bytes never change under its id: the browser may keep them, so the
+            # thread's photos aren't all fetched whole again on every load (#754)
+            self.send_header("Vary", "Authorization")
+            self._security_headers(FILE_CACHE)
             self.end_headers()
             shutil.copyfileobj(f, self.wfile, 1 << 16)
 

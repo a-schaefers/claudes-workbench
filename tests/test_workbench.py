@@ -15842,6 +15842,23 @@ class ChatUploads(Base):
         self.assertEqual(get("/api/upload/kkkkkkkk-9")[0], 404)
         self.assertEqual(get("/api/file/..%2Ftoken")[0], 404)
 
+    def test_a_file_may_be_kept_by_the_browser_and_nothing_else_is(self):
+        # #754 (the 2026-11-21 audit, finding 101): `no-store` on every response, so each load of
+        # the thread fetched every photo whole again; an upload never changes under its id
+        self.put("cccccccc-1", b"\x89PNG img", name="shot.png", ctype="image/png")
+        def headers(path, token=True):
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            c.request("GET", path, headers={"Host": "localhost", **({"Authorization": f"Bearer {self.tok}"} if token else {})})
+            r = c.getresponse()
+            r.read()
+            c.close()
+            return r.status, r.getheader("Cache-Control"), r.getheader("Vary")
+        self.assertEqual(headers("/api/file/cccccccc-1"),
+                         (200, "private, max-age=31536000, immutable", "Authorization"))
+        for path in ("/api/upload/cccccccc-1", "/api/file/cccccccc-9", "/api/state", "/"):
+            self.assertEqual(headers(path)[1], "no-store", path)
+        self.assertEqual(headers("/api/file/cccccccc-1", token=False)[:2], (401, "no-store"))
+
     def test_gc_drops_old_uploads_once_their_message_is_read_and_drafts_never_sent(self):
         for uid in ("llllllll-1", "llllllll-2", "llllllll-3", "llllllll-4"):
             self.put(uid, uid.encode())

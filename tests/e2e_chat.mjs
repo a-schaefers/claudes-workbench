@@ -583,6 +583,26 @@ async function run(engine, device) {
     await page.click('.viewer')
     await until(async () => (await page.locator('.viewer').count()) === 0)
   })
+  await check("the thread's photos are fetched as they scroll near the view, not all at each load", async () => {
+    // #754 (the 2026-11-21 audit, finding 101): every photo in the last 200 messages was fetched
+    // whole, uncached, on every load, to fill 132-pixel thumbnails
+    const now = Date.now() / 1000
+    for (let i = 0; i < 60; i++) appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: `fill-${i}`,
+      ts: now + i / 100, from: 'claude', text: `filler reply ${i}\n\n` + 'a line of words to make it tall\n'.repeat(4) }) + '\n')
+    await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('filler reply 59'))
+    const gets = []
+    const count = r => { if (r.url().includes('/api/file/')) gets.push(r.url()) }
+    page.on('request', count)
+    try {
+      await page.reload()
+      await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('filler reply 59'))
+      await sleep(1500)
+      if (gets.length) throw new Error(`fetched ${gets.length} photo(s) far above the view`)
+      await page.$eval('main', m => { m.scrollTop = 0 })
+      await until(() => gets.length === 1)
+      await until(() => page.$eval('.row.user .files .pic img', i => i.complete && i.naturalWidth > 0))
+    } finally { page.off('request', count) }
+  })
   await check('a file over the limit is refused on its chip, and ✕ drops it', async () => {
     writeFileSync(env.WB_CHAT_CONFIG, JSON.stringify({ upload_mb: 0.001 }))
     try {

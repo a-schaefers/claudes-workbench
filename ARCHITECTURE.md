@@ -5173,7 +5173,7 @@ thread no longer):
   With `0.0.0.0` the names come from the host name, which Debian, Ubuntu and WSL resolve to
   127.0.1.1, and they miss an address gained after the start (a late Wi-Fi, a VPN), so a phone on
   the LAN or tailnet IP got that 403 (#533).
-  Responses carry `Cache-Control: no-store`, `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and
+  Responses carry `Cache-Control: no-store` (but `GET /api/file`), `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and
   a CSP (`default-src 'self'`, inline styles only, images also from `blob:` (the screenshots),
   media only from `blob:` (the audio takes, #397), no framing, no forms).
 - `GET /`, `/index.html`, `/<name>` with a known suffix (html, js, css, svg, png, webmanifest)
@@ -5232,7 +5232,9 @@ thread no longer):
 - `GET /api/upload/<id>`: 200 `{upload}` when stored, else 404 (the page asks before it uploads).
   `GET /api/file/<id>`: the file, never through a link; an image (`SHOWN`: png, jpeg, gif, webp,
   avif) as itself, anything else as `application/octet-stream` with `Content-Disposition:
-  attachment`, so nothing uploaded renders as a page.
+  attachment`, so nothing uploaded renders as a page. It alone is cacheable, `FILE_CACHE`
+  (`private, max-age=31536000, immutable`, `Vary: Authorization`): an upload never changes under
+  its id, and with `no-store` every photo in the thread was fetched whole again on each load (#754).
 - `POST /api/answer`: the same checks, `{id: 1–64 characters, answer: "allow"|"deny", note?: up
   to 2000 characters, answers?: up to 4}` (400; `expired` is the mod's alone; answers that don't
   fit the question, or answers on anything but a question, or a question allowed without them,
@@ -5338,7 +5340,9 @@ it posts `/api/send` with their ids, and a refused one marks the message not sen
 (edit puts its files back in the tray). In the thread a message shows its images as thumbnails
 (a tap shows one whole, `view`; a tap or Escape closes it) and other files as name and size (a
 tap saves it), each fetched once with the token as a blob (`fileURL`), or from this page's own
-bytes; one `wb gc` removed says "no longer on the computer". Each render and each removed chip
+bytes; one `wb gc` removed says "no longer on the computer". A thumbnail is fetched only once it
+scrolls within 600 px of the thread's view (`whenNear`, an IntersectionObserver on `main`), and the
+browser's cache may answer it: a thread of 30 phone photos was 100-150 MB on every load (#754). Each render and each removed chip
 revokes the object URLs no chip, thread row or open viewer still names (`sweepSoon`): picked and
 removed photos held their full-size blobs until the page closed (#746).
 Away from localhost over plain HTTP the page isn't a secure context, so the browser's UUID and

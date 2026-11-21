@@ -13,6 +13,7 @@
   const K = { token: 'wb-chat-token', seen: 'wb-chat-seen', outbox: 'wb-chat-outbox', draft: 'wb-chat-draft', thread: 'wb-chat-thread', about: 'wb-chat-about' }
   const BACKOFF = [500, 1000, 2000, 4000, 8000, 15000, 30000]
   let viewing = null, sweeping = false  // the photo the viewer shows; a sweep of object URLs queued (#746)
+  let nearView = null  // loads the thread's thumbnails as they near the view (#754)
   const DEAD_MS = 40000          // the server pings every 15 s: this long silent means the line is dead
   const CONNECT_MS = 12000       // a connection that never answers: dial again
   const HIDDEN_GRACE_MS = 60000  // a hidden page keeps its stream this long, then lets go
@@ -918,7 +919,9 @@
       urls.set(id, (async () => {
         let b = bytes.get(id) || await db.get(id)
         if (!b) {
-          const r = await fetch('/api/file/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+          // the browser's cache may answer: an upload never changes, so the server lets it keep one
+          // (every photo in the thread was fetched whole again on every load, #754)
+          const r = await fetch('/api/file/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + token } })
           if (!r.ok) throw new Error('HTTP ' + r.status)
           b = await r.blob()
         }
@@ -926,6 +929,15 @@
       })().catch(e => { urls.delete(id); throw e }))
     }
     return urls.get(id)
+  }
+  // A thumbnail is fetched once it scrolls near the view, not every photo in the thread at once (#754)
+  // (made on first use: a thread restored at load renders before this line has run)
+  function whenNear(el, load) {
+    if (!('IntersectionObserver' in window)) return load()
+    nearView = nearView || new IntersectionObserver(es => {
+      for (const e of es) if (e.isIntersecting) { nearView.unobserve(e.target); e.target.wbLoad() }
+    }, { root: document.querySelector('main'), rootMargin: '600px 0px' })
+    el.wbLoad = load; nearView.observe(el)
   }
   // in the thread: images as thumbnails (a tap shows one whole), other files as name and size
   function makeFiles(files) {
@@ -935,7 +947,7 @@
       if (isPic(f.type)) {
         b.className = 'pic'; b.setAttribute('aria-label', 'Show ' + f.name)
         const img = document.createElement('img'); img.alt = f.name; b.append(img)
-        fileURL(f.id).then(u => { img.src = u }).catch(() => { img.remove(); b.className = 'doc'; b.append(fileFace({ name: f.name }), fileText(f, 'no longer on the computer')) })
+        whenNear(b, () => fileURL(f.id).then(u => { img.src = u }).catch(() => { img.remove(); b.className = 'doc'; b.append(fileFace({ name: f.name }), fileText(f, 'no longer on the computer')) }))
         b.onclick = () => { if (b.className === 'pic') view(f) }
       } else {
         b.className = 'doc'; b.setAttribute('aria-label', 'Save ' + f.name)
