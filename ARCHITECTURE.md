@@ -2579,7 +2579,10 @@ clock line:
 - *Clock:* `⏲ task T · round N t · model load t`, then while it runs (queued, running, testing, asking) the ETA (`~X left (typically
   Nm)`, `X past its typical Nm`, or no ETA yet; typical is `router.expected_minutes`, the median
   active minutes a step of this model's judged results of this size (rows without `active_minutes`
-  skipped; a chain's divided by its steps, #815), against the step's active work so far
+  skipped; a chain's divided by its steps, #815; those on the task's own weights, task.json
+  `weights_id`, when it has one; read from the files alone, never the model's server: a whole
+  `router.score` asked a sleeping LAN box for weights it never used, ~5 s each time the pane ran
+  `wb watch --json`, #819), against the step's active work so far
   (`runner.active_so_far`: status `active_s` less `step_active_s`, plus the round under way): a mean of wall minutes held queues, reviews and nights before an accept,
   108 minutes for a 12-minute task, #543), `context U of WK (P%)` and tokens written.
 

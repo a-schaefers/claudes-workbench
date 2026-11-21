@@ -13624,6 +13624,25 @@ class Progress(Base):
         from workbench import runner
         self.assertAlmostEqual(runner.active_so_far(task, now), ran, delta=2)
 
+    def test_an_eta_reads_only_the_files_and_never_asks_the_model_server(self):
+        # #819: expected() built a whole score() as if the model were up, reading its weights and
+        # identity from the server: each `wb watch --json` spent ~5 s on a sleeping box's timeouts
+        from workbench import models, router
+        model = "ollama/mimo-v2.6:9b-q8_0"
+        for w, mins in (("ollama:aaaa", 12), ("ollama:aaaa", 12), ("ollama:bbbb", 90), (None, 12)):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": model, "size": "small", "outcome": "accepted", "active_minutes": mins,
+                **({"weights_id": w} if w else {})})
+        asked = []
+        with mock.patch.object(models, "identity", lambda m: asked.append("identity")), \
+                mock.patch.object(models, "weights", lambda m: asked.append("weights") or 0), \
+                mock.patch.object(models, "status", lambda *a, **k: asked.append("status")):
+            self.assertEqual(router.expected(model, "small", "ollama:aaaa"), (12, 3))  # its weights'
+            self.assertEqual(router.expected(model, "small")[1], 4)                  # unknown: all
+            self.assertEqual(progress.typical({"model": model, "size": "small", "weights_id": "ollama:bbbb"}),
+                             (45.0, "default"))                                 # one on its weights
+        self.assertEqual(asked, [])
+
     def test_with_too_few_timed_tasks_the_first_check_comes_at_the_sizes_default_then_spaced_out(self):
         # #724: with no history the checks never came though `wb progress on` said they would,
         # and one 1.5-minute task made the threshold 1.5 minutes: a check every 1.5 minutes

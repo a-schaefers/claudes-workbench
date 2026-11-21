@@ -476,7 +476,8 @@ def clock_line(task: store.Task, now: float | None = None, data: dict | None = N
     if st.get("load_secs", 0) >= 1:
         parts.append(f"model load {_secs(st['load_secs'] * 1000)}")
     if st.get("phase") in ("queued", "running", "testing", "asking"):
-        typical = router.expected_minutes(sp.get("model", ""), sp.get("size", "significant"))
+        typical = router.expected_minutes(sp.get("model", ""), sp.get("size", "significant"),
+                                          sp.get("weights_id"))
         if typical:  # against active work, as typical is (#543)
             from .runner import active_so_far
             left = typical * 60 - active_so_far(task, now)

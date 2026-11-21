@@ -222,16 +222,21 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     now = time.time()
     s.w = (sum(_weight(r, now) for r in real), sum(_weight(r, now) * tuning.credit(r) for r in real),
            sum(_weight(r, now) for r in like), sum(_weight(r, now) * tuning.credit(r) for r in like))
+    s.minutes, s.minutes_n = _typical(real)
+    spent = [spend.weighted(r["claude"]) for r in real if isinstance(r.get("claude"), dict)]
+    s.claude, s.claude_n = (statistics.fmean(spent) if spent else None), len(spent)
+    return s
+
+
+def _typical(real: list[dict]) -> tuple[float | None, int]:
+    """The median of the rows' active minutes a step, and how many rows it is of."""
     # the agent's active work, median: wall minutes held the queue, Claude's review and a night
     # before an accept (480 min for a 12-minute task), and a mean let one such row set every
     # ETA and progress check at many times the real length (#543). Rows without it are skipped.
     # A step's: a `wb next` chain's row holds every step's minutes, and set beside single tasks
     # it put a step past "its typical" minutes into its chain (#815), as tuning's reward does
     times = [t for r in real if (t := tuning._step_minutes(r)) is not None]
-    s.minutes, s.minutes_n = (statistics.median(times) if times else None), len(times)
-    spent = [spend.weighted(r["claude"]) for r in real if isinstance(r.get("claude"), dict)]
-    s.claude, s.claude_n = (statistics.fmean(spent) if spent else None), len(spent)
-    return s
+    return (statistics.median(times) if times else None), len(times)
 
 
 def _weight(r: dict, now: float) -> float:
@@ -279,19 +284,24 @@ def _cheaper(close: list[Score]) -> list[Score]:
     return [best] + [s for s in close if s is not best]
 
 
-def expected_minutes(model_id: str, size: str) -> float | None:
-    """How long a task of this size usually takes on this model, from real tasks: the median of
-    their active minutes (the agent's own working time), so compare it with a task's active time."""
-    return expected(model_id, size)[0]
+def expected_minutes(model_id: str, size: str, weights: str | None = None) -> float | None:
+    """How long a step of this size usually takes on this model, from real tasks: the median of
+    their active minutes a step (the agent's own working time), so compare it with a step's active
+    time. ``weights``: the task's own (task.json `weights_id`): rows on other weights left out."""
+    return expected(model_id, size, weights)[0]
 
 
-def expected(model_id: str, size: str) -> tuple[float | None, int]:
-    """expected_minutes, and how many timed tasks it is the median of."""
+def expected(model_id: str, size: str, weights: str | None = None) -> tuple[float | None, int]:
+    """expected_minutes, and how many timed tasks it is the median of. From the files alone: a
+    whole score() asked the server for the weights and the identity it never used, and every
+    `wb watch --json` the pane ran each 5 s spent ~5 s on a sleeping LAN box's timeouts (#819)."""
     m = models.discover().get(model_id)
     if not m:
         return None, 0
-    s = score(m, size, state={"available": True, "resident": True})
-    return s.minutes, s.minutes_n
+    ids = lineage(m, probe=False)
+    real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
+            and tuning.judged(r)]
+    return _typical(same_weights(real, {m.id: weights} if weights else {}))
 
 
 def allowed(m: models.Model, size: str) -> bool:

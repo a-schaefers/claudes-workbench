@@ -55,7 +55,7 @@ def typical(spec: dict) -> tuple[float, str]:
         return float(s["after"]), "user"
     from . import router  # router -> models: only when on
     size = spec.get("size", "significant")
-    mins, n = router.expected(spec.get("model", ""), size)
+    mins, n = router.expected(spec.get("model", ""), size, spec.get("weights_id"))
     if mins is not None and n >= TYPICAL_MIN:
         return max(FLOOR_MIN, mins), "measured"
     return float(DEFAULT_MIN.get(size, DEFAULT_MIN["significant"])), "default"

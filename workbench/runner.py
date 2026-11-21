@@ -774,7 +774,8 @@ def checkin_text(task: store.Task, n: int, out: dict, since: float, active: floa
     from . import router  # router -> models; imported late to keep the runner's startup lean
     spec, st, now = task.spec, task.status, time.time()
     took = now - spec["created_at"]
-    typical = router.expected_minutes(spec["model"], spec.get("size", "significant"))
+    typical = router.expected_minutes(spec["model"], spec.get("size", "significant"),
+                                      spec.get("weights_id"))
     eta = ""
     if typical:  # active work against active work: the wall clock held queues and reviews (#543)
         left = typical * 60 - (active_so_far(task, now) if active is None else active)
