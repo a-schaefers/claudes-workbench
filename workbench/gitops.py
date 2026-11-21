@@ -246,18 +246,29 @@ def relocate(repo: Path, worktree: Path) -> None:
     (one the agent made) is refused first, as _pinned refuses it: a newer git's repair would
     quietly take it back."""
     common, dotgit = common_dir(repo), Path(worktree) / ".git"
-    admin = None
+    # With worktree.useRelativePaths (git 2.48+) both links are relative: the admin dir's, read
+    # against wb's cwd, matched nothing, and every relocate was refused (#682). Read against the
+    # admin dir it still can't match once the repo moved (the admin dir moved, the worktree
+    # didn't), so the admin dir is also known by its name in gitdir.json, unless its link names
+    # another worktree that exists.
+    rec = _record(worktree)
+    want = store.read_json(rec) if rec else None
+    name = Path(want["gitdir"]).name if isinstance(want, dict) and want.get("gitdir") else None
+    admin = by_name = None
     for d in (common / "worktrees").iterdir() if common and (common / "worktrees").is_dir() else ():
         with contextlib.suppress(OSError):
-            if os.path.realpath((d / "gitdir").read_text().strip()) == os.path.realpath(dotgit):
+            link = os.path.realpath(d / (d / "gitdir").read_text().strip())
+            if link == os.path.realpath(dotgit):
                 admin = d
-    if admin is None:
+            elif d.name == name and not os.path.isfile(link):
+                by_name = d
+    if (admin := admin or by_name) is None:
         raise GitError(f"{worktree} isn't one of {repo}'s worktrees")
 
     def said() -> Path | None:
         try:
-            if stat.S_ISREG(os.lstat(dotgit).st_mode):
-                return Path(dotgit.read_text().removeprefix("gitdir:").strip())
+            if stat.S_ISREG(os.lstat(dotgit).st_mode):  # a relative one is the worktree's (#682)
+                return Path(worktree) / dotgit.read_text().removeprefix("gitdir:").strip()
         except OSError:
             pass
         return None
@@ -269,7 +280,7 @@ def relocate(repo: Path, worktree: Path) -> None:
         if dotgit.is_symlink() or dotgit.is_dir():
             raise GitError(f"{dotgit} isn't a file: it isn't one of {repo}'s worktrees")
         dotgit.write_text(f"gitdir: {admin}\n")
-    if rec := _record(worktree):
+    if rec:
         store.write_json(rec, {"gitdir": str(admin), "dotgit": dotgit.read_text()})
 
 
@@ -559,7 +570,7 @@ def submodule_edits(worktree: Path) -> list[str]:
     out of the diff and the commit, and read-only files stop no `sed -i`, which replaces a file
     through its directory: an edit the tests passed on vanished at wb accept (#419, the audit of
     1.8). Checked with the user's checkout of it as git dir and a copy of the index made at fill
-    time, so the agent's files are only read; a submodule that can't be checked is left out."""
+    time, so the agent's files are only read; a submodule that can't be checked is said too."""
     rec = _record(worktree)
     subs = store.read_json(rec.with_name(SUBMODULES), []) if rec else []
     out = []
@@ -583,6 +594,11 @@ def submodule_edits(worktree: Path) -> list[str]:
                 new = _run(sub["src"], (*opts, "ls-files", "--others", "--exclude-standard", "-z"),
                            env=env).stdout
             except (GitError, OSError):
+                # skipped, an edit there went unreported and vanished at accept: the #419
+                # failure, back for a task whose repo moved (#682)
+                out.append(f"edits in submodule {sub['path']} can't be checked: its checkout "
+                           f"{sub['src']} is gone or unreadable (moved? wb relocate {rec.parent.name} "
+                           "--repo <its new path>)")
                 continue
         files = [os.fsdecode(f) for f in (changed + new).split(b"\0") if f]
         if files:

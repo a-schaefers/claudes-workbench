@@ -2505,7 +2505,8 @@ def _repo(task: store.Task) -> Path:
 def cmd_relocate(a):
     """Tell a task where its repository is now: moved or renamed (`mv proj proj2`), or the
     checkout it started from removed. Repairs its worktree's link (gitops.relocate) and rewrites
-    task.json `repo`, `git_common` and a `cwd` that was inside it. Without it the task could only
+    task.json `repo`, `git_common` and a `cwd` that was inside it, and the filled submodules'
+    checkouts (submodules.json `src`). Without it the task could only
     be discarded: every git call on its worktree failed, and `git worktree repair` was refused
     by the pinning (#498, the audit of 1.90)."""
     task = need(a.name)
@@ -2526,6 +2527,14 @@ def cmd_relocate(a):
     cwd = Path(spec.get("cwd") or old)
     if cwd == old or cwd.is_relative_to(old):
         spec["cwd"] = str(repo / cwd.relative_to(old))
+    # the filled submodules' checkouts, which submodule_edits checks an edit against: left at the
+    # old path, every check failed and was skipped, and an edit there vanished at accept (#682)
+    subs = context.rules_dir(task) / gitops.SUBMODULES
+    if isinstance(rows := store.read_json(subs, None), list):
+        for row in rows:
+            if isinstance(row, dict) and Path(src := row.get("src") or "").is_relative_to(old):
+                row["src"] = str(repo / Path(src).relative_to(old))
+        store.write_json(subs, rows)
     spec.update(repo=str(repo), git_common=str(gitops.common_dir(repo)))
     store.write_json(task.dir / "task.json", spec)
     print(f"relocated {a.name}: {repo} (was {old})")

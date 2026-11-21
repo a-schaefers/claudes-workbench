@@ -2902,6 +2902,49 @@ class RepoMoved(Base):
         self.assertIn("isn't one of", self.fails("relocate", "t-r", "--repo", str(new)))
 
 
+    def test_relocate_works_when_git_writes_relative_worktree_paths(self):
+        # #682 (Claude's audit of main, reproduced with git 2.56): with worktree.useRelativePaths
+        # both links are relative, read against wb's cwd nothing matched, and every relocate
+        # was refused with "isn't one of <repo>'s worktrees"
+        if gitops.version() < (2, 48):
+            self.skipTest("worktree.useRelativePaths needs git 2.48+")
+        self.git(self.repo, "config", "worktree.useRelativePaths", "true")
+        self.start("t-rel", "ok")
+        wait_phase("t-rel", {"review"})
+        wt = store.Task("t-rel").worktree
+        self.assertFalse((wt / ".git").read_text().removeprefix("gitdir:").strip().startswith("/"))
+        old, new = self.repo, Path(self.tmp.name) / "relmoved"
+        old.rename(new)
+        self.assertIn("relocated t-rel", run_wb("relocate", "t-rel", "--repo", str(new)))
+        self.assertIn("+42", run_wb("diff", "t-rel"))
+        self.assertEqual(self.git(wt, "status", "--short").returncode, 0)
+        self.assertIn("accepted t-rel", run_wb("accept", "t-rel", "-m", "feat: answer"))
+
+    def test_after_a_relocate_an_edit_in_a_filled_submodule_is_still_refused(self):
+        # #682: relocate left submodules.json's `src` at the old path, submodule_edits failed on
+        # it and skipped the submodule, and the edit vanished at accept (the #419 failure)
+        lib = Path(self.tmp.name) / "lib"
+        self.git(self.tmp.name, "init", "-q", str(lib))
+        (lib / "lib.c").write_text("int x;\n")
+        self.git(lib, "add", ".")
+        self.git(lib, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "lib")
+        self.git(self.repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
+        self.git(self.repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "sub")
+        self.start("t-subm", "ok")
+        wait_phase("t-subm", {"review"})
+        wt = store.Task("t-subm").worktree
+        (wt / "vendor/lib/lib.c").unlink()
+        (wt / "vendor/lib/lib.c").write_text("int z;\n")
+        old, new = self.repo, Path(self.tmp.name) / "submoved"
+        old.rename(new)
+        run_wb("relocate", "t-subm", "--repo", str(new))
+        subs = json.loads((store.home() / "rules" / "t-subm" / gitops.SUBMODULES).read_text())
+        self.assertEqual(subs[0]["src"], str(new / "vendor/lib"))
+        self.assertIn("edits in submodule vendor/lib can't land: lib.c", self.fails("accept", "t-subm", "-m", "x"))
+        shutil.rmtree(new / "vendor/lib")                    # its checkout gone: said, not skipped
+        self.assertIn("edits in submodule vendor/lib can't be checked", self.fails("accept", "t-subm", "-m", "x"))
+
+
 class WorktreeSetup(Base):
     """#201 (the 2026-11-19 audit): a task's worktree holds only committed files, under the state
     directory, so a project's check that needs its installed dependencies, an ignored local file
