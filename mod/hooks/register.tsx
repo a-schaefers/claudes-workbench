@@ -374,8 +374,16 @@ const CHAT_STOPS: [string, string, string][] = [
 // on|off`, experiments.json), off by default. A task keeps what it started with.
 const PROBE_STOPS: [string, string, string][] = [
   ['off', 'Off (default)', 'The agent reads whole files, as without the experiment.'],
-  ['on', 'On', "The agent may read a file's outline and one function, with probe (its release binary)."],
+  ['on', 'On', "The agent may read a file's outline and one function, with probe (its release binary, which you install)."],
 ]
+
+// Turns the probe experiment on or off through wb. On without a probe that has `symbols`, wb says
+// it changes nothing yet and where the release binary is: the pane says so too, since the row
+// alone read "On" while nothing changed (the user, 2026-11-20)
+async function setProbe($: any, value: string) {
+  const { ok, out } = await runWb($, ['experiment', 'probe', value])
+  if (!ok || out.includes('but no probe')) $.ui.toast(`workbench: ${brief(out)}`)
+}
 
 async function probeMode($: any): Promise<string> {
   try {
@@ -2041,7 +2049,7 @@ export const register: Register = (on, options) => {
               v => runWb($, ['coding', v]))}
             {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
             {settingRow(kit, $, 'probe', 'Agent code navigation (experimental, may go away)', PROBE_STOPS, await probeMode($), view,
-              v => runWb($, ['experiment', 'probe', v]))}
+              v => setProbe($, v))}
             {settingRow(kit, $, 'record', 'Stats recording', RECORD_STOPS, st.recording ? 'on' : 'off', view,
               v => picked(['stats', 'set', 'recording', v]))}
             {settingRow(kit, $, 'live', 'Live view', LIVE_STOPS, st.live ? 'on' : 'off', view,

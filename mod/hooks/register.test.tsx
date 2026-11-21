@@ -1559,6 +1559,39 @@ test('Claude coding: its own edit in a task\'s worktree waits for the user\'s ye
   expect((await edit('/wb/tasks/fix-it/tree/shared/lib/power.py')).deny).toBeUndefined()   // a sibling's link
 })
 
+test('turning the probe experiment on without a probe that has symbols says so in a toast', async ($, on) => {
+  // the user, 2026-11-20: the row read "On" while wb said it changed nothing yet
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  let found = false
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] !== 'experiment') return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    files['/wb/experiments.json'] = JSON.stringify({ probe: e.argv[3] })
+    const said = e.argv[3] === 'off' ? 'probe: off (wb experiment probe on)'
+      : found ? 'probe: on, found (probe-code 0.6.0)'
+      : 'probe: on, but no probe with `symbols` is on PATH, so it changes nothing yet (its release binary: github.com/probelabs/probe/releases)'
+    return { value: { exitCode: 0, stdout: `${said}; tasks already started keep theirs\n`, stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-settings' })
+  await ui.press({ key: 'probe' })
+  await ui.press({ key: 'probe:on' })
+  expect(toasts.filter(t => t.includes('probe'))).toEqual([
+    'workbench: probe: on, but no probe with `symbols` is on PATH, so it changes nothing yet (its release binary: github.com/probelabs/probe/releases); tasks already started keep theirs'])
+  await ui.press({ key: 'probe' })
+  await ui.press({ key: 'probe:off' })
+  found = true
+  await ui.press({ key: 'probe' })
+  await ui.press({ key: 'probe:on' })
+  expect(toasts.filter(t => t.includes('probe'))).toHaveLength(1)   // off, or on and found: nothing to say
+  await ui.unmount()
+})
+
 test('the settings rows open to Buttons, pick through wb, and say the sentence of the option the ring is on', async ($, on) => {
   // #93, and the user, 2026-11-19: a Select's sentence followed only the saved choice, and the options
   // should take a click or the keys
