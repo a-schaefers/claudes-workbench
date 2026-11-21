@@ -4386,8 +4386,12 @@ directory and in the task's own lane and environment (`runner.run_in_lane` on a 
   golden file left behind made the base fail for lack of it, which was called proven, #500; as
   they are in the candidate: a deleted one, such as a renamed test's old name, is left out, and
   each path goes to git `:(literal)`; the old name once stopped git on its pathspec before either
-  run, #194). That copy is what makes a test separable from the change; with no test file it
-  refuses.
+  run, #194). The test files the candidate deleted, a renamed test's old name among them, are
+  deleted from the base too (`verify.removed_tests`, `result.json` `removed`; `wb shot`'s base
+  likewise): kept, `unittest discover` ran a failing `test_old.py` on the base and only its
+  passing replacement on the candidate, and verify said proven with no code changed (#643,
+  Codex's audit of 1.90.6). That copy is what makes a test separable from the change; with no
+  test file it refuses.
 - **The candidate**: the same clone at the worktree's HEAD, then `read-tree -u` of a snapshot of
   the worktree, new files included: the tree `wb accept` would commit (`gitops.snapshot(landing=True)`,
   also `wb shot`'s and the staleness check's), not the review snapshot (*The runner, inside*,
@@ -4421,7 +4425,7 @@ quoting `assert 2 = 2` was proof too (#326, the audit of 1.4). `assertion` picks
 line, else a failed test's header. Each run is kept in `tasks/<task>/verify/<n>/`: `base.txt`,
 `candidate.txt` and `result.json` `{cmd, files, tree, ts, base: {rev, exit, assertion}, candidate:
 {rev, exit, assertion}, verdict, dir, expect (when given), uncopied (the candidate's added files
-not copied to the base, when any), missing (those the base's output said it couldn't find), left_out (when any)}`. `verify.last` reads the newest, with `stale` once the worktree
+not copied to the base, when any), removed (the candidate's deleted tests, gone from the base too), missing (those the base's output said it couldn't find), left_out (when any)}`. `verify.last` reads the newest, with `stale` once the worktree
 or the comparison base has changed since. The verdict names the base commit and candidate tree.
 
 The comparison reaches the review (#97): `wb report <task>` (the latest round's) ends with the

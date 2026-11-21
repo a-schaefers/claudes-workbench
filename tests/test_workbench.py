@@ -10531,6 +10531,37 @@ class Verify(Base):
         self.assertIn("proven: it fails on the base", run_wb("verify", "t", "--test", test))
         self.assertEqual(verify.note(store.Task("t")), "")
 
+    def test_a_failing_test_swapped_for_a_passing_one_with_no_code_change_is_not_proven(self):
+        # #643 (Codex's audit of 1.90.6): the base overlay borrowed the candidate's new test but
+        # kept the one it deleted, so `unittest discover` ran the failing test_old.py on the base
+        # and only the passing test_new.py on the candidate, and verify said proven, citing the
+        # deleted test's assertion, with calc.py unchanged
+        from workbench import verify
+        run_wb("discard", "t")
+        (self.repo / "test_old.py").write_text(
+            "import unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_kw(self):\n        self.assertEqual(kw(250000), 250)\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a failing test"], check=True)
+        self.start("t2", "ok")
+        wait_phase("t2", {"review"})
+        wt = store.Task("t2").worktree
+        (wt / "test_old.py").unlink()
+        (wt / "test_new.py").write_text(
+            "import unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_zero(self):\n        self.assertEqual(kw(0), 0)\n")
+        out = run_wb("verify", "t2", "--test", "python3 -m unittest discover")
+        self.assertIn("not proven: it already passes on the base", out)
+        r = verify.last(store.Task("t2"))
+        self.assertEqual((r["verdict"], r["files"], r["removed"]),
+                         ("base-passes", ["test_new.py"], ["test_old.py"]))
+        # renamed away and made to pass: the old name goes from the base too
+        (wt / "test_new.py").unlink()
+        (wt / "test_renamed.py").write_text((self.repo / "test_old.py").read_text()
+                                            .replace("kw(250000), 250", "kw(0), 0"))
+        self.assertIn("already passes on the base",
+                      run_wb("verify", "t2", "--test", "python3 -m unittest discover"))
+
     def test_a_killed_verify_leaves_no_scratch_clone_and_no_test_running(self):
         # #372 (the audit of 1.6): Claude's Bash killed wb verify at 2 minutes, and its clone and
         # the test (in a session of its own) were left behind

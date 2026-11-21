@@ -92,6 +92,13 @@ def test_files(task: store.Task, tree: str, base_rev: str) -> list[str]:
             if not st.startswith("D") and looks_like_test(p)]
 
 
+def removed_tests(task: store.Task, tree: str, base_rev: str) -> list[str]:
+    """The test files (looks_like_test) the candidate deleted, a renamed test's old name among
+    them: the base run goes without them too (#643)."""
+    return [p for st, p in _changes(task, tree, base_rev)
+            if st.startswith("D") and looks_like_test(p)]
+
+
 def missing(text: str, added: list[str]) -> list[str]:
     """The files of ``added`` (the candidate's new ones, not copied to the base) that ``text``
     (the base's output) says it couldn't find: a line saying a file is missing that names one, by
@@ -204,14 +211,23 @@ def on_base(task: store.Task, cmd: str, limit: int, say=_say) -> tuple[int | str
                     cmd, limit)
 
 
-def _checkouts(task: store.Task, tree: str, files: list[str], base_rev: str):
-    """The base, with the candidate's ``files`` copied in, and the candidate as the worktree is."""
+def _checkouts(task: store.Task, tree: str, files: list[str], base_rev: str,
+               removed: list[str] = ()):
+    """The base, with the candidate's ``files`` copied in and its ``removed`` tests gone, and the
+    candidate as the worktree is."""
     head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
 
     def base(work: Path) -> None:
         gitops.git(work, "checkout", "-q", "--detach", base_rev)
         if files:  # the candidate's, alone; literal, so a `*` in a name is no glob
             gitops.git(work, "checkout", "-q", tree, "--", *(f":(literal){f}" for f in files))
+        # the tests the candidate deleted or renamed away go from the base too: kept, broad
+        # discovery ran a failing test_old.py on the base and only the passing test_new.py on the
+        # candidate, and the old test's assertion was called proof with no code changed (#643,
+        # Codex's audit of 1.90.6)
+        for i in range(0, len(removed), 200):
+            gitops.git(work, "rm", "-q", "--ignore-unmatch", "--",
+                       *(f":(literal){f}" for f in removed[i:i + 200]))
 
     def candidate(work: Path) -> None:
         gitops.git(work, "checkout", "-q", "--detach", head)
@@ -264,7 +280,8 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
                            "test's files with --files (or review it as usual)")
     # the candidate's new files the base doesn't get: a test that reads one fails there for that
     uncopied = [p for st, p in _changes(task, tree, base_rev) if st.startswith("A") and p not in files]
-    base, candidate = _checkouts(task, tree, files, base_rev)
+    removed = removed_tests(task, tree, base_rev)
+    base, candidate = _checkouts(task, tree, files, base_rev, removed)
     with gpu(task):  # both runs under one hold: nothing loads in between
         b_code, b_out = _run(task, base, cmd, limit, setup=setup)
         c_code, c_out = _run(task, candidate, cmd, limit, setup=setup)
@@ -283,6 +300,7 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
               "verdict": said, "dir": str(out),
               **({"expect": expect} if expect else {}),
               **({"uncopied": uncopied[:50]} if uncopied else {}),
+              **({"removed": removed[:50]} if removed else {}),
               **({"left_out": left} if left else {})}
     if b_code != 0 and (gone := missing(b_out, uncopied)):
         result["missing"] = gone
@@ -338,7 +356,8 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     base_rev = _review_base(task)
     if not base_rev:
         raise RuntimeError("cannot find the last approved step's commit for the comparison")
-    base, candidate = _checkouts(task, tree, files or [], base_rev)
+    base, candidate = _checkouts(task, tree, files or [], base_rev,
+                                 removed_tests(task, tree, base_rev))
     d = task.dir / "shots"
     n = 1 + max((int(p.name) for p in d.glob("*") if p.name.isdigit()), default=0)
     out = d / str(n)
