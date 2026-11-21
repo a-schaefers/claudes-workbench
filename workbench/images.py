@@ -195,6 +195,8 @@ def _get(e: dict, url: str, timeout: float) -> bytes:
             return r.read()
     except urllib.error.HTTPError as err:
         raise RuntimeError(f"{url} answered HTTP {err.code}") from None
+    except http.client.HTTPException as err:  # cut off mid-body (#925)
+        raise media.cut_off(url, err) from None
 
 
 def _comfyui(e: dict, values: dict) -> None:
@@ -296,32 +298,54 @@ def _server(e: dict, values: dict) -> None:
         except urllib.error.HTTPError as err:
             raise RuntimeError(f"{e['url']} ignored response_format b64_json and its image url "
                                f"answered HTTP {err.code}") from None
+        except http.client.HTTPException as err:  # cut off mid-body (#925)
+            raise media.cut_off(url, err) from None
     else:
         raise RuntimeError(f"{e['url']} sent no image: {media._gist(raw)}")
 
 
-# The image servers' default ports, for `wb scout`: (port, the api that speaks to it, what probes it)
-PORTS = ((8188, "comfyui", "/system_stats"), (7860, "a1111", "/sdapi/v1/options"))
+# The image servers' default ports, for `wb scout`: (port, the api that speaks to it, what probes
+# it). 8000 is ComfyUI Desktop's (the packaged app for macOS and Windows: #923)
+PORTS = ((8188, "comfyui", "/system_stats"), (8000, "comfyui", "/system_stats"),
+         (7860, "a1111", "/sdapi/v1/options"))
+# A port other servers use too (vLLM's is 8000): a hit there only when the reply has these keys,
+# and any other answer is no image server, not "something answers" (#923)
+SHARED_PORTS = {8000: ("system", "devices")}
+
+
+def _probe(root: str, port: int, kind: str, probe: str) -> dict | None:
+    """What answers at ``root``: {"root", "api"}, the api "" when something answers but not that
+    API; None when nothing does, or something else does on a shared port."""
+    keys = SHARED_PORTS.get(port)
+    try:
+        with models._open(root + probe, timeout=1) as r:
+            body = json.loads(r.read())
+        if isinstance(body, dict) and all(k in body for k in keys or ()):
+            return {"root": root, "api": kind}
+    except (urllib.error.HTTPError, ValueError):  # something answers, but not that API
+        pass
+    except (OSError, http.client.HTTPException):
+        return None
+    return None if keys else {"root": root, "api": ""}
 
 
 def servers_here() -> list[dict]:
     """The image servers answering on their default ports on this machine, not through a proxy,
     1 s each: {"root", "api"}, the api "" when something answers there but not that API (an
     AUTOMATIC1111 started without --api). The skill proposed an 11 GB install to a user whose
-    ComfyUI or Forge was already running (#753). None under WB_FAKE_MODELS (the tests)."""
+    ComfyUI or Forge was already running (#753). On WSL2, when none answers here, the same ports
+    at the Windows host too, all at once, with "windows": its address: in the default NAT
+    networking a server on Windows isn't on 127.0.0.1, and the install was proposed again (#923;
+    models.servers_here does the same, #663). None under WB_FAKE_MODELS (the tests)."""
     if models._fake():
         return []
-    found = []
-    for port, kind, probe in PORTS:
-        root = f"http://127.0.0.1:{port}"
-        try:
-            with models._open(root + probe, timeout=1) as r:
-                body = json.loads(r.read())
-            found.append({"root": root, "api": kind if isinstance(body, dict) else ""})
-        except (urllib.error.HTTPError, ValueError):  # something answers, but not that API
-            found.append({"root": root, "api": ""})
-        except (OSError, http.client.HTTPException):
-            pass
+    found = [x for port, kind, probe in PORTS
+             if (x := _probe(f"http://127.0.0.1:{port}", port, kind, probe))]
+    if (win := models.windows_host()) and not found:  # mirrored networking found them above
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(len(PORTS)) as pool:  # a firewall that drops: one wait, not three
+            got = list(pool.map(lambda p: _probe(f"http://{win}:{p[0]}", *p), PORTS))
+        found += [{**x, "windows": win} for x in got if x]
     return found
 
 

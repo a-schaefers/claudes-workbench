@@ -146,8 +146,13 @@ def parse(skill_md: Path) -> dict:
             "license": meta.get("license", ""), "body": body, "text": text}
 
 
-def check(skill_md: Path, name: str) -> tuple[list[str], list[str]]:
-    """(problems that refuse it, warnings worth fixing) for a skill about to enter the library."""
+def check(skill_md: Path, name: str, alone: bool = False,
+          kept: Path | None = None) -> tuple[list[str], list[str]]:
+    """(problems that refuse it, warnings worth fixing) for a skill about to enter the library.
+    ``alone``: the file is copied by itself (`wb skill add --from <file>`), so what sits beside
+    it isn't the skill's: its parent (a scratch directory, /tmp) once passed a references/ path
+    the library's copy lacked, warned of its clutter and walked its whole tree (#907, the third
+    audit of 2026-11-21). ``kept``: then, the library's copy it updates, whose other files stay."""
     problems, warnings = [], []
     if not skill_md.is_file():
         return [f"no {skill_md}"], []
@@ -173,21 +178,22 @@ def check(skill_md: Path, name: str) -> tuple[list[str], list[str]]:
     if s["description"] and not re.search(r"\b(when|for|before|after|if)\b", s["description"], re.I):
         warnings.append("the description should say when to use it (\"Use when ...\")")
     # what a directory skill ships beside its SKILL.md
-    root = skill_md.parent
+    root = kept if alone else skill_md.parent
     for ref in sorted(set(SUPPORT.findall(s["body"]))):
-        if (root / ref).exists():
+        if root is not None and (root / ref).exists():
             continue
         # scripts/, templates/ and assets/ are ordinary project directories too: "put the page in
         # templates/polls/detail.html, run scripts/test.sh" was refused with no way in but
         # rewording (#738, the 2026-11-21 audit). Refused only where it must be the skill's own:
         # references/ (a skill's word), or a directory of that name the skill has.
         top = ref.split("/", 1)[0]
-        if top == "references" or skill_md.name == "SKILL.md" and (root / top).is_dir():
+        if top == "references" or root is not None and (alone or skill_md.name == "SKILL.md") \
+                and (root / top).is_dir():
             problems.append(f"names {ref}, which the skill doesn't have: the agent would go looking")
         else:
             warnings.append(f"names {ref}, which the skill doesn't have: if it is the skill's own "
                             "file, add it; if it is a path in the project, ignore this")
-    if skill_md.name == "SKILL.md" and root.is_dir():
+    if not alone and skill_md.name == "SKILL.md" and root.is_dir():
         extra = [p for p in root.rglob("*") if p.is_file() and p != skill_md
                  and ".git" not in p.relative_to(root).parts]
         clutter = sorted(p.name for p in extra if p.name in CLUTTER)
@@ -240,8 +246,9 @@ def _add(src: Path, name: str, message: str, source: str,
     if src.resolve().is_relative_to(library().resolve()):  # it would be scanned against itself
         raise ValueError(f"{src} is in the library: edit a copy elsewhere and add that, or use "
                          "wb skill patch")
-    problems, warnings = check(src_md, name)
     dest = library() / name
+    problems, warnings = check(src_md, name, alone=not src.is_dir(),
+                               kept=dest if dest.is_dir() else None)  # #907
     found = scan.scan(src)
     if dest.exists():
         found = scan.new_findings(found, scan.scan(dest))

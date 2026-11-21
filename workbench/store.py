@@ -108,7 +108,8 @@ def disk_full(e: BaseException) -> bool:
 def free_bytes(path: Path | None = None) -> int | None:
     """Free space where the state directory lives (or ``path``), for the user; None if unknown.
     On macOS the larger of statvfs's and what the volume has for important use (_important_free),
-    which counts the purgeable space macOS frees when asked."""
+    which counts the purgeable space macOS frees when asked. On WSL2 at most the Windows drive's
+    behind the distro's virtual disk (host_drive)."""
     p = Path(path or home())
     while not p.exists() and p != p.parent:
         p = p.parent
@@ -116,7 +117,30 @@ def free_bytes(path: Path | None = None) -> int | None:
         st = os.statvfs(p)
     except OSError:
         return None
-    return max(st.f_bavail * st.f_frsize, _important_free(p) or 0)
+    free = max(st.f_bavail * st.f_frsize, _important_free(p) or 0)
+    if (drive := host_drive(p)) is not None:
+        try:
+            st = os.statvfs(drive)
+            free = min(free, st.f_bavail * st.f_frsize)
+        except OSError:
+            pass
+    return free
+
+
+def host_drive(path: Path) -> str | None:
+    """On WSL, for a ``path`` in the distro's own file system, the Windows drive's mount that
+    holds its virtual disk: the system drive's (/mnt/c, where WSL puts ext4.vhdx unless it was
+    moved), else the first drive's. statvfs there says up to 1 TB free, the virtual disk's
+    ceiling, whatever the Windows drive has: on a full C: the checkout grew the disk until
+    Windows refused, and WSL saw EIO and a read-only remount, never ENOSPC (#897). None elsewhere,
+    for a path on a Windows drive (its own statvfs is that drive's), or with no drive mounted."""
+    from . import context, hardware  # both import this module
+    if hardware.system() != "wsl":
+        return None
+    drives = context.windows_drives() or []
+    if not drives or context.on_windows(str(path), drives):
+        return None
+    return next((d for d in drives if os.path.basename(d).lower() == "c"), drives[0])
 
 
 def _important_free(path: Path) -> int | None:
@@ -470,9 +494,30 @@ def network_fs(path: str) -> str | None:
             for row in out.splitlines():
                 if (m := re.search(r" on (/.*) \(([^,)]+)", row)):
                     mounts.append((m.group(1), m.group(2)))
-    best = max((m for m in mounts if path == m[0] or path.startswith(m[0].rstrip("/") + "/")),
-               key=lambda m: len(m[0]), default=None)
+    # the longest mount point holding it, and of several at one point the last listed, which is
+    # stacked on the others: an automount (x-systemd.automount, an autofs direct map) lists its
+    # autofs trigger first and the NFS mount after it at the same path, and max() kept the
+    # trigger, so a network home read as local (#896)
+    best = None
+    for m in mounts:
+        if (path == m[0] or path.startswith(m[0].rstrip("/") + "/")) and \
+                (best is None or len(m[0]) >= len(best[0])):
+            best = m
     return best[1] if best and best[1] in NETWORK_FS else None
+
+
+def machine_dir() -> Path:
+    """Where this machine's own state lives: $WB_HOME, or on a network file system its
+    `machines/<machine()>/`, since several machines may share the state directory there. The GPU
+    lease's files were the first (#849); optimize.json, boxes.json and wsl-gpus.json followed,
+    shared, one machine's measurements re-measured away by the next and its loads on a wb remote
+    box read as the other's own (#894). Made when needed."""
+    h = home()
+    if not network_fs(os.path.realpath(h)):
+        return h
+    own = h / "machines" / machine()
+    own.mkdir(parents=True, exist_ok=True)
+    return own
 
 
 def write_json(path: Path, data, mode: int | None = None) -> None:
@@ -606,6 +651,20 @@ def read_json(path: Path, default=None):
         return json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError):  # ValueError: bad JSON, or bytes that aren't UTF-8
         return default
+
+
+def lock_fd(path: Path | str, mode: int = 0o664) -> int:
+    """An fd to flock `path` through, made if missing: read-write when this account may write it,
+    else read-only (another account's file in a shared lease or git dir: flock needs no write
+    there). Read-only alone failed on NFSv4, whose client turns an exclusive flock into a
+    whole-file write lock and refuses it with EBADF on an fd without write access: every task
+    failed at the GPU lease, and wb accept --merge ended committed but unmerged (#892)."""
+    try:
+        return os.open(path, os.O_RDWR | os.O_CREAT, mode)
+    except OSError as e:
+        if e.errno not in (errno.EACCES, errno.EPERM, errno.EROFS):
+            raise
+        return os.open(path, os.O_RDONLY | os.O_CREAT, mode)
 
 
 @contextmanager
@@ -822,9 +881,11 @@ class Task:
     def event(self, row: dict) -> None:
         append_jsonl(self.dir / "events.jsonl", row)
 
-    def notify(self, kind: str, text: str, **extra) -> None:
+    def notify(self, kind: str, text: str, **extra) -> dict | None:
+        """The notice, as notify.jsonl has it (its `ts` maybe moved later), or None for a bench
+        replay's, which wakes no one."""
         if self.spec.get("bench"):  # a replay of wb bench's: no one is to be woken
-            return
+            return None
         # stamped after every notice before it and after the task's acknowledgement, whatever
         # the clock did since: corrected backwards (a dual boot with a local-time RTC), a notice
         # raised after a mark came out at or before it, and wb wait, the mod's wake and its idle
@@ -849,6 +910,7 @@ class Task:
                 was = 0.0
             if d.is_dir() and not was >= row["ts"]:
                 replace_bytes(d / "noticed", str(row["ts"]).encode())
+        return row
 
 
 # The scratch directories workbench makes in its home, each named <prefix><maker's pid>-…: wb gc
@@ -861,10 +923,18 @@ SCRATCH_AGE = 3600
 
 
 def scratch(prefix: str) -> str:
-    """``prefix`` (one of SCRATCH_PREFIXES) with this process's pid and its start (`.<tag>`,
-    models.start_tag: a pid recycled since isn't the maker, #532), for tempfile."""
+    """``prefix`` (one of SCRATCH_PREFIXES) with this process's pid, its start (`.<tag>`,
+    models.start_tag: a pid recycled since isn't the maker, #532) and this machine
+    (`.<machine_tag>`: on a state directory several machines share, gc on one removed another's
+    live clone, its pid not in this process table, #876), for tempfile."""
     pid = os.getpid()
-    return f"{prefix}{pid}{'.' + tag if (tag := _start_tag(pid)) else ''}-"
+    return f"{prefix}{pid}.{_start_tag(pid)}.{machine_tag()}-"
+
+
+def machine_tag() -> str:
+    """This machine (store.machine) in 8 hex digits, for a name."""
+    import zlib
+    return f"{zlib.crc32(machine().encode()):08x}"
 
 
 @functools.cache  # by pid: a forked child is another process
@@ -884,6 +954,21 @@ def write_ack(task: "Task", ts: float) -> None:
     between a truncate and the write (or a write that failed after it) saw 0, every old notice
     news again (the 2026-11-16 audit)."""
     replace_bytes(task.dir / "acked", str(ts).encode())  # synced: read back empty, all news (#734)
+
+
+def ack_batch(batch: list, row: dict | None, ts: float) -> None:
+    """The rest of a batch notice's tasks (batch[1:]) acknowledged with it: up to the stamp
+    notify.jsonl has (`row`), which append_jsonl may have moved past `ts`, and never lower than
+    each one's own mark. Acked at the `ts` asked for, each was left below its `noticed`, and the
+    mod's idle net woke Claude once a task, the wake the batch was for (#874, Claude's audit of
+    1.90.24)."""
+    upto = row["ts"] if row else ts
+    for t in batch[1:]:
+        try:
+            acked = float((t.dir / "acked").read_text() or 0)
+        except (OSError, ValueError):
+            acked = 0.0
+        write_ack(t, max(acked, upto) if math.isfinite(acked) else upto)
 
 
 def all_tasks(archived: bool = False):

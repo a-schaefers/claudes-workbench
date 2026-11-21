@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import functools
 import ipaddress
 import json
 import os
@@ -127,7 +126,7 @@ def server_key(url: str, remote: bool = False) -> tuple:
     own name or address are one server. Compared as strings, two spellings of one Ollama made
     free_gpu unload the models it was told to keep (the 2026-11-16 audit), and wb model retire
     --delete delete the default's weights (#368, the audit of 1.6). This runs on every
-    admission: a host name is looked up once per process (_named_here)."""
+    admission: a host name is looked up once per process, or a minute when it failed (_named_here)."""
     u = urlparse(url)
     here = not remote and _this_host(u.hostname)
     return ("this host" if here else (u.hostname or "").lower(),
@@ -392,9 +391,17 @@ def _overrides() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-@functools.lru_cache(maxsize=1)
+# _own_addresses' last reading: (time.monotonic(), addresses). Kept for the process, a tailnet
+# IP that came up after a runner, the chat server or wb top started never counted (#900)
+_ADDRS: list = []
+ADDR_SECS = 60
+
+
 def _own_addresses() -> frozenset:
-    """This machine's own IP addresses (LAN, Tailscale, ...): a provider at one of them is local."""
+    """This machine's own IP addresses (LAN, Tailscale, ...): a provider at one of them is local.
+    Read again after ADDR_SECS."""
+    if _ADDRS and time.monotonic() - _ADDRS[0][0] < ADDR_SECS:
+        return _ADDRS[0][1]
     found = set()
     try:
         found |= {a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None)}
@@ -413,7 +420,11 @@ def _own_addresses() -> frozenset:
                   for line in out.splitlines() for i, w in enumerate(line.split())
                   if i and line.split()[i - 1] in ("inet", "inet6")}
         break
-    return frozenset(found)
+    _ADDRS[:] = [(time.monotonic(), frozenset(found))]
+    return _ADDRS[0][1]
+
+
+_own_addresses.cache_clear = _ADDRS.clear  # as the lru_cache it was, for the tests
 
 
 def _this_host(host: str | None) -> bool:
@@ -434,29 +445,48 @@ def _this_host(host: str | None) -> bool:
 RESOLVE_WAIT = 1.0  # seconds a baseURL's host name gets to resolve; slower counts as another host
 
 
-@functools.lru_cache(maxsize=64)
+# _named_here's lookups by name: (time.monotonic(), True for this machine's FQDN, the addresses
+# it resolved to, or None for a lookup that failed or ran past RESOLVE_WAIT)
+_NAMES: dict[str, tuple] = {}
+
+
 def _named_here(name: str) -> bool:
     """Whether the host name ``name`` is this machine by another name: its FQDN (or that's short
     form), or a name (LAN DNS, a tailnet's) that resolves to a loopback or own address. A config
     naming the box as box.lan or box.tail1234.ts.net was another host: a GPU pool of its own, no
-    sharing, residency or fit check, and the local lease never saw it (#807). Once per process
-    (server_key runs on every admission), within RESOLVE_WAIT; a failure is not this machine."""
-    out: list = []
+    sharing, residency or fit check, and the local lease never saw it (#807). Looked up once per
+    process (server_key runs on every admission), within RESOLVE_WAIT; a failure or a timeout is
+    not this machine for now, and looked up again after DOWN_SECS: kept for good, a slow DNS or a
+    tailnet reconnecting after a wake made a runner or the chat server take this machine's server
+    for another host's for hours, beside processes that knew better (#900). The addresses a name
+    resolved to are checked against _own_addresses each time, which are read again too."""
+    hit = _NAMES.get(name)
+    if hit is None or (hit[1] is None and time.monotonic() - hit[0] >= DOWN_SECS):
+        out: list = []
 
-    def look():
-        try:
-            fq = socket.getfqdn().lower()
-            if name in (fq, fq.split(".")[0]):
-                out.append(True)
-                return
-            ips = {a[4][0].split("%")[0] for a in socket.getaddrinfo(name, None)}
-            out.append(any(ipaddress.ip_address(ip).is_loopback or ip in _own_addresses() for ip in ips))
-        except (OSError, ValueError, UnicodeError):
-            out.append(False)
-    t = threading.Thread(target=look, daemon=True)
-    t.start()
-    t.join(RESOLVE_WAIT)
-    return bool(out and out[0])
+        def look():
+            try:
+                fq = socket.getfqdn().lower()
+                if name in (fq, fq.split(".")[0]):
+                    out.append(True)
+                    return
+                out.append(frozenset(a[4][0].split("%")[0] for a in socket.getaddrinfo(name, None)))
+            except (OSError, ValueError, UnicodeError):
+                out.append(None)
+        t = threading.Thread(target=look, daemon=True)
+        t.start()
+        t.join(RESOLVE_WAIT)
+        hit = _NAMES[name] = (time.monotonic(), out[0] if out else None)
+    found = hit[1]
+    if found is None or found is True:
+        return bool(found)
+    try:
+        return any(ipaddress.ip_address(ip).is_loopback or ip in _own_addresses() for ip in found)
+    except ValueError:
+        return False
+
+
+_named_here.cache_clear = _NAMES.clear  # as the lru_cache it was, for the tests
 
 
 _ENGINES: dict[str, str] = {}  # root -> engine, once its server has answered
@@ -1223,6 +1253,24 @@ def _ollama_loaded(root: str) -> list[str]:
     return [x.get("name") for x in (_get(f"{root}/api/ps") or {}).get("models", [])]
 
 
+def keep_warm(m: Model) -> bool:
+    """Renew this machine's Ollama's keep-alive for ``m`` (30 minutes, as make_resident loads it)
+    while it is loaded; whether it was. Every request OpenCode sends sets Ollama's default 5
+    minutes again, so a round waiting on a background test run or on Claude's answer lost the
+    model, and its next request loaded it cold, past free_gpu, and read the whole session again
+    (#864). Never loads it: one already gone is left to the next round's make_resident. Not on
+    another machine's GPU, where other clients share the box (box_others)."""
+    if _fake() or m.engine != "ollama" or (m.remote and not same_gpu(m)):
+        return False
+    if not _matches(m.name, set(_ollama_loaded(m.root))):
+        return False
+    try:
+        _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"}, timeout=30)
+    except Exception:  # a server that went away: the round's own guards say so
+        return False
+    return True
+
+
 def single_loads(st: dict) -> list[float]:
     """A task's loads one by one (status `loads`: each load that happened, #577), the samples of a
     model's typical load (wb top, wb optimize); a task from before `loads` gives its `load_secs`."""
@@ -1267,10 +1315,11 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
     t0 = time.time()
     if not away and not _room_beside(m):
         free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
-    others = box_others(m, keep) if away else []
+    # this machine's own marks too: another client may be mid-round on one of them (#893)
+    others = box_others(m, keep, own=True) if away else []
     host = urlparse(m.root).hostname
     if others:  # another client's model on the box: not evicted in the middle of its round
-        box_quiet(m, others, say, warn)
+        others = box_quiet(m, others, say, warn, mine=box_mine(m.root))
     if m.engine == "ollama":
         if respread:
             # Ollama never re-places a loaded runner: a generate with the same options reuses
@@ -1497,7 +1546,7 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
     if _fake():
         return
     seen: dict = {}
-    stopped = False
+    stopped: list[Model] = []
     held = keep_loaded()
     local = on_this_gpu(discover())  # another host's GPU isn't ours to free (unless it's this one: #750)
     kept = [o for o in local if o.id in keep or o.id in held]
@@ -1535,11 +1584,16 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
             warn(f"{other.id}'s stop command failed (exit {r.returncode}): "
                  f"{(r.stderr or r.stdout).strip()[-200:]}")
         else:
-            stopped = True
+            stopped.append(other)
     if stopped:
         # a stop (pkill llama-server) returns before the server's VRAM is freed: Ollama loading
-        # at once found it taken and put part of the model on the CPU (#703)
-        released(STOP_SETTLE)
+        # at once found it taken and put part of the model on the CPU (#703). Waiting for the
+        # VRAM to stop falling alone ended in a second while the server still held it all, two
+        # equal reads before it had begun to let go (#898): first until it stops answering
+        deadline = time.monotonic() + STOP_SETTLE
+        while any(status(o)["resident"] for o in stopped) and time.monotonic() < deadline:
+            time.sleep(1)
+        released(max(deadline - time.monotonic(), 0))
     kept_ollama = [o for o in kept if o.engine == "ollama"]
     doomed = {root: [name for name in _ollama_loaded(root)  # every model Ollama has loaded,
                      if not any(o.server == key and _matches(o.name, {name}) for o in kept_ollama)
@@ -1612,26 +1666,39 @@ def slept() -> float:
     return 0.0
 
 
-def _past(stamp: str) -> bool:
+def _stamp_time(stamp: str) -> float | None:
+    """An /api/ps expires_at as a Unix time; None when it doesn't parse or has no zone."""
+    try:  # Ollama writes nanoseconds; fromisoformat before 3.12 reads at most six digits
+        when = datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", stamp.replace("Z", "+00:00")))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return when.timestamp() if when.tzinfo is not None else None
+
+
+# How far a wb remote box's clock may be from this machine's, for its stamps (_past)
+BOX_SKEW = 10
+
+
+def _past(stamp: str, remote: bool = False) -> bool:
     """Whether an /api/ps expires_at has gone by (a request running past the keep-alive). Ollama
     sets it from the wall clock but times the unload on Go's monotonic clock, which stops in a
     suspend: after a lid closed and opened, an idle model's stamp is past while its timer still
     runs, and was read as answering someone, the next task waiting behind a warning for nothing
     (#716). So a stamp is past only by more than the machine has slept (slept: 0 on one that
-    never sleeps, a server, where #378's shared Ollamas run); a request on it still moves it."""
-    try:  # Ollama writes nanoseconds; fromisoformat before 3.12 reads at most six digits
-        when = datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", stamp.replace("Z", "+00:00")))
-    except (ValueError, TypeError):
-        return False
-    return when.tzinfo is not None and when.timestamp() < time.time() - 2 - slept()
+    never sleeps, a server, where #378's shared Ollamas run); a request on it still moves it.
+    ``remote``: a wb remote box's stamp, timed by the box's clocks: this machine's sleep is no
+    excuse there, only BOX_SKEW. A laptop that had slept for hours since boot never saw one past,
+    a request running past the keep-alive (#899)."""
+    when = _stamp_time(stamp)
+    return when is not None and when < time.time() - (BOX_SKEW if remote else 2 + slept())
 
 
-def _in_use(doomed: dict, watch: float | None = None) -> set:
+def _in_use(doomed: dict, watch: float | None = None, remote: bool = False) -> set:
     """The (root, name) pairs of ``doomed`` with a request on them, watched for ``watch`` seconds
-    (INFLIGHT_WATCH): expires_at moved, or is past. A server whose /api/ps gives no expires_at
-    has nothing to watch: none."""
+    (INFLIGHT_WATCH): expires_at moved, or is past (_past, ``remote`` for a box's). A server
+    whose /api/ps gives no expires_at has nothing to watch: none."""
     first = _stamps(doomed)
-    busy = {k for k, v in first.items() if _past(v)}
+    busy = {k for k, v in first.items() if _past(v, remote)}
     deadline = time.monotonic() + (INFLIGHT_WATCH if watch is None else watch)
     while first and len(busy) < len(first) and time.monotonic() < deadline:
         time.sleep(min(1.0, max(deadline - time.monotonic(), 0)))
@@ -1677,18 +1744,31 @@ BOX_SHARED = ("clients of one wb remote box don't share a GPU lease, so their mo
 BOX_QUIET = 150
 BOX_WAIT = 2400  # at most this long waiting for it: a round's default limit (router.ROUND_DEFAULT_S)
 BOX_POLL = 2.0   # seconds between two looks at the box's /api/ps meanwhile
+# Ollama's default keep-alive: a box's stamp less this is when the model's last request finished,
+# if the box keeps the default (box_quiet)
+BOX_KEEP_ALIVE = 300
 
 
-def box_quiet(m: Model, others: list[str], say, warn) -> None:
+def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
     """Wait, up to BOX_WAIT, until each of ``others`` (box_others: what the box has loaded for
     another client) has had no request for BOX_QUIET seconds in a row, or has gone, before ``m``
     is loaded over it (#812). Watched from now: /api/ps says when a model expires, not when it was
     last used. A request finishing moves its expires_at, and one past is a request still running
-    (_past, as _in_use reads them). A server that gives no expires_at has nothing to watch."""
+    (_past, as _in_use reads them). A server that gives no expires_at has nothing to watch.
+    One of ``mine`` (box_mine: this machine loaded it there) is only watched for INFLIGHT_WATCH:
+    this machine runs one task at a time on a box (its pool), so a request on it now is another
+    client's, and its mark is dropped (_forget_mine). Before, a mark kept a week hid a model
+    another client was mid-round on, and the load evicted it unwarned (#893). Returns the models
+    taken as another client's (``others`` less this machine's idle ones)."""
     host, root = urlparse(m.root).hostname, m.root
+    own = [n for n in others if any(_matches(x, {n}) for x in mine)]
+    used = {n for _, n in _in_use({root: own}, remote=True)} if own else set()
+    if used:
+        _forget_mine(root, used)
+    others = [n for n in others if n not in own or n in used]
     last = _stamps({root: others})
     if not last:
-        return
+        return others
     names = ", ".join(sorted({n for _, n in last}))
     say(f"{names} on {host} is another client's: loading {m.name} once it has gone "
         f"{BOX_QUIET} s without a request")
@@ -1696,9 +1776,18 @@ def box_quiet(m: Model, others: list[str], say, warn) -> None:
     busy = False
     while True:
         now = _stamps({root: others})
-        moved = sorted({k[1] for k, v in now.items() if _past(v) or last.get(k) not in (None, v)})
-        if moved:
+        moved = sorted({k[1] for k, v in now.items() if _past(v, remote=True)
+                        or last.get(k) not in (None, v)} | used)
+        used = set()  # seen answering in the watch above: counted once, from now
+        # a stamp that last moved over BOX_QUIET ago (its expires_at less BOX_KEEP_ALIVE) may be
+        # a request still running: a stamp stands still while one runs, and one longer than
+        # BOX_QUIET (a reasoning model, a long prefill) read as quiet, was loaded over, and the
+        # two swapped on every request after (#899). Idle, the model goes when its keep-alive
+        # ends, under BOX_KEEP_ALIVE - BOX_QUIET from now (a box keeping it longer, sooner)
+        if moved or any((t := _stamp_time(v)) is not None and time.time() - (t - BOX_KEEP_ALIVE) > BOX_QUIET
+                        for v in now.values()):
             quiet = time.monotonic()
+        if moved:
             if not busy:
                 warn(f"{', '.join(moved)} on {host} is answering another client's requests: "
                      f"waiting up to {BOX_WAIT // 60} min for it to go {BOX_QUIET} s unused before "
@@ -1706,22 +1795,24 @@ def box_quiet(m: Model, others: list[str], say, warn) -> None:
             busy = True
         last = now
         if not now or time.monotonic() - quiet >= BOX_QUIET:
-            return
+            return others
         if time.monotonic() - began >= BOX_WAIT:
             warn(f"{names} on {host} was still in use after {BOX_WAIT // 60} min: loading "
                  f"{m.name} anyway, and the two may swap on every request ({BOX_SHARED})")
-            return
+            return others
         time.sleep(min(BOX_POLL, max(BOX_QUIET - (time.monotonic() - quiet), 0) + 0.01,
                        max(BOX_WAIT - (time.monotonic() - began), 0) + 0.01))
 
 
-def box_others(m: Model, keep=()) -> list[str]:
+def box_others(m: Model, keep=(), own: bool = False) -> list[str]:
     """The models a wb remote box (``m``'s Ollama on another machine) has loaded that this
     client's task isn't using: ``m`` and the models ``keep`` names aside, and keep_loaded's.
-    Another client's, or the box's own. [] when it doesn't answer, and for a local model."""
+    Another client's, or the box's own. [] when it doesn't answer, and for a local model.
+    ``own``: the ones this machine loaded there too (box_mine), which another client may be
+    using since (#893): box_quiet tells which."""
     if m.engine != "ollama" or not m.remote or same_gpu(m) or _fake():
         return []
-    held, found, mine = keep_loaded(), discover(), box_mine(m.root)
+    held, found, mine = keep_loaded(), discover(), set() if own else box_mine(m.root)
     ours = [m, *(o for o in (found.get(k) for k in keep) if o)]
     return [n for n in _ollama_loaded(m.root) if n and not _kept_name(n, held)
             and not any(o.server == m.server and _matches(o.name, {n}) for o in ours)
@@ -1736,7 +1827,9 @@ BOX_MINE_S = 7 * 86400
 
 
 def _boxes_path() -> Path:
-    return store.home() / "boxes.json"
+    # this machine's (store.machine_dir): shared on a network home, another machine's loads on
+    # the box read as this one's, and box_quiet never waited for them (#894)
+    return store.machine_dir() / "boxes.json"
 
 
 def box_mine(root: str) -> set[str]:
@@ -1746,6 +1839,18 @@ def box_mine(root: str) -> set[str]:
     now = time.time()
     return {n for n, t in (row if isinstance(row, dict) else {}).items()
             if isinstance(t, (int, float)) and now - t < BOX_MINE_S}
+
+
+def _forget_mine(root: str, names) -> None:
+    """Drop box_mine's mark on ``names`` at ``root``: another client was seen using them (#893)."""
+    with store.locked(_boxes_path().with_suffix(".lock")):
+        saved = store.read_json(_boxes_path(), {}) or {}
+        row = saved.get(root) if isinstance(saved, dict) else None
+        if not isinstance(row, dict):
+            return
+        left = {n: t for n, t in row.items() if not any(_matches(n, {x}) for x in names)}
+        if left != row:
+            store.write_json(_boxes_path(), {**saved, root: left})
 
 
 def _note_mine(m: Model) -> None:
@@ -1887,12 +1992,7 @@ def _own_lease() -> Path:
     """The state directory, or on a network file system its `machines/<store.machine()>/`: there
     several machines may share it, and each one's wb read the other's holders as dead and erased
     them from gpu.json, and took turns with them on a GPU they don't share (#849)."""
-    home = store.home()
-    if not store.network_fs(os.path.realpath(home)):
-        return home
-    own = home / "machines" / store.machine()
-    own.mkdir(parents=True, exist_ok=True)
-    return own
+    return store.machine_dir()
 
 
 def lease_shared() -> bool:
@@ -1902,8 +2002,9 @@ def lease_shared() -> bool:
 
 @contextlib.contextmanager
 def _lease_lock(path: Path):
-    """store.locked for a lease file, opened read-only (flock needs no write): in a shared lease
-    another account made the file, 0644 under its umask, so opening it to append was refused."""
+    """store.locked for a lease file, opened read-only when it must be (store.lock_fd): in a
+    shared lease another account made the file, 0644 under its umask, so opening it to append
+    was refused."""
     fd = _lease_fd(path)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -1920,7 +2021,7 @@ LEASE_MODE = 0o664
 
 def _lease_fd(path: Path) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDONLY | os.O_CREAT, LEASE_MODE)
+    fd = store.lock_fd(path, LEASE_MODE)
     if lease_shared():
         st = os.fstat(fd)
         if st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) & LEASE_MODE != LEASE_MODE:
@@ -2303,7 +2404,9 @@ class GpuLease:
                         "text": msg})
 
     def __enter__(self):
-        self.fh = os.fdopen(_lease_fd(self.home / f"{self.pool}.lock"), "r")
+        fd = _lease_fd(self.home / f"{self.pool}.lock")
+        writable = fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDWR
+        self.fh = os.fdopen(fd, "r+" if writable else "r")  # the mode the fd has (#892)
         try:
             self._admit()
             return self
@@ -2426,7 +2529,9 @@ class GpuLease:
         if self.m.remote:
             # gone from a wb remote box since this task's last round, with another client's model
             # there: the other client's load evicted it, and nothing said so to this task (#812)
-            if self.loaded and (others := box_others(self.m)) and not status(self.m)["resident"]:
+            # own=True: this task is this machine's one on the box, so what replaced its model
+            # was another client's, even one this machine once loaded itself (#893)
+            if self.loaded and (others := box_others(self.m, own=True)) and not status(self.m)["resident"]:
                 self.warn(f"{self.m.name} was unloaded from {urlparse(self.m.root).hostname} since "
                           f"the last round, which has {', '.join(others)} loaded for another "
                           f"client: {BOX_SHARED}")

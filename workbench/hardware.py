@@ -138,7 +138,7 @@ WINDOWS_SCRIPT = (  # UTF-8 out: names arrive intact for the registry match (#66
     "Get-CimInstance Win32_VideoController | ForEach-Object { $n = $_.Name; "
     "$m = ($r | Where-Object { $_.DriverDesc -eq $n } | Select-Object -First 1).'HardwareInformation.qwMemorySize'; "
     "$n + [char]9 + $m }")
-WINDOWS_CACHE = "wsl-gpus.json"  # under $WB_HOME: {ts, gpus: [{name, vram}], tried?}
+WINDOWS_CACHE = "wsl-gpus.json"  # in store.machine_dir() (#894): {ts, gpus: [{name, vram}], tried?}
 WINDOWS_FOR = 3600  # seconds a reading serves: PowerShell takes seconds to start
 WINDOWS_RETRY = 60  # seconds a failed reading waits before PowerShell is asked again
 WSL_CONF = Path("/etc/wsl.conf")
@@ -173,7 +173,7 @@ def _windows_gpus() -> list[dict]:
     the last good one stays and PowerShell is asked again after WINDOWS_RETRY. Cached as an hour's
     "no GPU", a 16 GB Radeon had no budget, and a read that only sometimes worked flipped wb
     optimize's fingerprint, so each flip emptied the GPU to measure (#702)."""
-    path = store.home() / WINDOWS_CACHE
+    path = store.machine_dir() / WINDOWS_CACHE
     hit = store.read_json(path, None)
     hit = hit if isinstance(hit, dict) and isinstance(hit.get("gpus"), list) else {"gpus": []}
     now, rows = time.time(), hit["gpus"]

@@ -23,7 +23,8 @@ check-in, when an agent asks for a command or a directory, a spec needs web rese
   user's checkout or another project: there, take the file yourself or say no. `wb allow --path`
   refuses a path through a link (it names the target: allow that only if it is what the task
   needs; the agent can plant links in its lane), a place inside credentials or workbench's own
-  state and config, and one in the task's own repo (the user's checkout: take that file yourself).
+  state and config, one in the task's own repo (the user's checkout: take that file yourself),
+  and one the lane always keeps out (`~/.cargo/bin`, rustup's toolchains, the user's active venv).
   A toolchain the build wants installed (a Python uv must download, a
   `rust-toolchain.toml` toolchain, `uv tool install`, `cargo install`, the gems a `bundle
   install` adds to an rbenv, rvm, asdf or mise Ruby) is refused there: install it yourself (the
@@ -130,7 +131,8 @@ run it as a backlog. Each task still gets the same review it would by day.
 - Spec everything up front, before the first start, while you have the user's intent fresh.
   Bundle trivial items into one task. When the user names GitHub issues, read each one (`gh issue
   view`) and spec from it.
-- Start each with `wb start … --queue --backlog <name>`. They take the GPU in the order you
+- Start each with `wb start … --queue --backlog <name>`, a fresh, dated name for each batch
+  (`overnight-2026-11-21`: `wb start` refuses an earlier batch's). They take the GPU in the order you
   started them, and a task you send back goes ahead of the rest. Their setups and base checks
   run one at a time, in the same order.
 - Review each wake as usual: accept, feedback, or discard. Accept without `--merge`: nothing

@@ -155,6 +155,11 @@ class Real(unittest.TestCase):
         awake = mock.patch.object(models, "slept", lambda: 0.0)  # this machine's suspends would
         awake.start()  # excuse the past stamps the tests set (#716); a test that wants one sets it
         self.addCleanup(awake.stop)
+        # the tests' stamps run minutes ahead while they scale BOX_QUIET to seconds: read with the
+        # real keep-alive, every idle model would look mid-request (#899); the test of that sets it
+        keep = mock.patch.object(models, "BOX_KEEP_ALIVE", 0)
+        keep.start()
+        self.addCleanup(keep.stop)
 
     def tearDown(self):
         for s in self.servers:
@@ -675,8 +680,10 @@ class Real(unittest.TestCase):
     def test_free_gpu_waits_for_a_stopped_servers_vram_before_ollama_loads(self):
         # #703: pkill llama-server returns before its memory is freed, and Ollama loading at once
         # put part of the model on the CPU
-        srv = self.server({"/v1/models": {"data": [{"id": "m"}]}})
-        self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}}, {"s": {"stop": "true"}})
+        flag = Path(self.tmp.name) / "stopped"
+        srv = self.server({"/v1/models": lambda h: 503 if flag.exists() else {"data": [{"id": "m"}]}})
+        self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}},
+                    {"s": {"stop": f"touch '{flag}'"}})
         used = iter([8 * 2 ** 30, 5 * 2 ** 30, 2 * 2 ** 30, 2 * 2 ** 30])
         reads = []
         with mock.patch.object(models.hardware, "gpus", lambda windows=True: reads.append(1) or [
@@ -684,6 +691,30 @@ class Real(unittest.TestCase):
                 mock.patch.object(models, "time", mock.Mock(wraps=time, sleep=lambda s: None)):
             models.free_gpu(say=lambda m: None)
         self.assertEqual(len(reads), 4)        # until the used VRAM stopped falling
+
+    def test_free_gpu_waits_for_a_stopped_server_to_go_before_reading_its_vram_as_released(self):
+        # #898: a stop that returns at once (pkill vllm) left the server holding its VRAM; two
+        # equal reads a second apart read as "stopped falling", and Ollama loaded into the card
+        # still taken, part of its model on the CPU for round 1
+        flag, answered = Path(self.tmp.name) / "stopped", []
+
+        def catalog(h):  # the server lets go three looks after the stop returned
+            if flag.exists():
+                answered.append(1)
+                if len(answered) > 3:
+                    return 503
+            return {"data": [{"id": "m"}]}
+        srv = self.server({"/v1/models": catalog})
+        self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}},
+                    {"s": {"stop": f"touch '{flag}'"}})
+        seen = []
+        with mock.patch.object(models.hardware, "gpus", lambda windows=True: seen.append(len(answered)) or [
+                {"name": "card", "vram": 16 * 2 ** 30,
+                 "vram_used": (2 if len(answered) > 3 else 8) * 2 ** 30}]), \
+                mock.patch.object(models, "time", mock.Mock(wraps=time, sleep=lambda s: None)):
+            models.free_gpu(say=lambda m: None)
+        self.assertGreater(len(answered), 3)               # waited until it stopped answering
+        self.assertTrue(seen and min(seen) > 3)            # and read the VRAM only after
 
     def test_a_llama_server_or_vllm_answering_a_request_is_not_idle(self):
         # #465 (the audit of 1.8): only a JSON /metrics `live.state` was read; llama-server and
@@ -1382,6 +1413,37 @@ class Real(unittest.TestCase):
         self.assertEqual(warned, [])
         self.assertEqual([p["model"] for p in posts], ["x"])
 
+    def test_a_box_model_whose_stamp_stands_still_past_box_quiet_is_waited_for_until_it_moves_or_goes(self):
+        # #899: a stamp stands still while a request runs, so another client's request running
+        # past BOX_QUIET read as quiet and was loaded over; and a laptop's suspend time since boot
+        # excused every box stamp from being past
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        theirs = {"name": "theirs", "size": 10, "size_vram": 10, "expires_at": at(250)}  # done 50 s ago
+        loaded, posts = [theirs], []
+        srv, port = fake_ollama(loaded, ["x", "theirs"], posts)
+        self.servers.append(srv)
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"x": {}}}},
+                    {"box": {"local": True}})
+        gone = []
+
+        def done():  # its keep-alive ends (or its long request did, and its round): Ollama unloads it
+            loaded.clear()
+            gone.append(time.monotonic())
+        threading.Timer(2.5, done).start()
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "BOX_KEEP_ALIVE", 300), mock.patch.object(models, "BOX_QUIET", 1), \
+                mock.patch.object(models, "BOX_POLL", 0.1):
+            models.make_resident(models.discover()["box/x"], say=lambda *_: None, warn=lambda *_: None)
+            loaded_at = time.monotonic()
+        self.assertTrue(gone and loaded_at >= gone[0])           # not after BOX_QUIET of no movement
+        self.assertEqual([p["model"] for p in posts], ["x"])
+        # a box's stamp past by more than BOX_SKEW is a request still running, however long this
+        # machine has slept since it booted
+        with mock.patch.object(models, "slept", lambda: 36000.0):
+            self.assertTrue(models._past(at(-60), remote=True))
+            self.assertFalse(models._past(at(-60)))                  # this machine's own Ollama: excused
+            self.assertFalse(models._past(at(-5), remote=True))      # within the clocks' skew
+
     def test_a_model_this_machine_left_on_its_box_is_loaded_over_without_waiting(self):
         # reviewing #812 (2026-11-21): every model on the box that the task wasn't using read as
         # another client's, so one user with one box waited BOX_QUIET at every model switch for
@@ -1393,6 +1455,7 @@ class Real(unittest.TestCase):
         self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
                              "models": {"x": {}, "y": {}}}}, {"box": {"local": True}})
         with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "INFLIGHT_WATCH", 0.3), \
                 mock.patch.object(models, "BOX_QUIET", 30), mock.patch.object(models, "BOX_POLL", 0.1):
             found = models.discover()
             models.make_resident(found["box/x"], say=lambda *_: None, warn=lambda *_: None)
@@ -1404,6 +1467,42 @@ class Real(unittest.TestCase):
             self.assertLess(time.monotonic() - began, 5)                # no BOX_QUIET wait
             loaded[:] = [{"name": "theirs", "size": 10, "size_vram": 10, "expires_at": at(300)}]
             self.assertEqual(models.box_others(found["box/y"]), ["theirs"])   # still another's
+
+    def test_a_model_this_machine_once_loaded_on_its_box_is_waited_for_while_another_client_uses_it(self):
+        # #893: boxes.json marked a model this machine loaded on Monday as its own for a week, so
+        # on Wednesday, with another client mid-round on it, the load evicted it without waiting
+        # or a word. A request on it now is another client's: this machine runs one task there
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        x = {"name": "x", "size": 10, "size_vram": 10, "expires_at": at(300)}
+        loaded, posts = [], []
+        srv, port = fake_ollama(loaded, ["x", "y"], posts)
+        self.servers.append(srv)
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+                             "models": {"x": {}, "y": {}}}}, {"box": {"local": True}})
+        warned, requests = [], []
+
+        def request():  # the other client's request on x finishes
+            requests.append(time.monotonic())
+            x["expires_at"] = at(300 + len(requests))
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "INFLIGHT_WATCH", 1), \
+                mock.patch.object(models, "BOX_QUIET", 1.5), mock.patch.object(models, "BOX_POLL", 0.1):
+            found = models.discover()
+            models.make_resident(found["box/x"], say=lambda *_: None, warn=lambda *_: None)
+            root = found["box/x"].root
+            self.assertIn("x", models.box_mine(root))
+            loaded[:] = [x]
+            self.assertEqual(models.box_others(found["box/y"]), [])                 # as before
+            self.assertEqual(models.box_others(found["box/y"], own=True), ["x"])
+            threading.Timer(0.4, request).start()
+            posts[:] = []
+            models.make_resident(found["box/y"], say=lambda *_: None, warn=warned.append)
+            loaded_at = time.monotonic()
+        self.assertEqual(len(requests), 1)
+        self.assertGreaterEqual(loaded_at - requests[-1], 1.5)       # waited BOX_QUIET for it
+        self.assertIn("x on 127.0.0.1 is answering another client's requests", warned[0])
+        self.assertNotIn("x", models.box_mine(root))                   # no longer taken as ours
+        self.assertEqual([p["model"] for p in posts], ["y"])
 
     def test_a_remote_task_hears_when_another_client_unloaded_its_model_between_rounds(self):
         # #812: the other client's load evicted this task's model, and nothing told this task why
@@ -1900,6 +1999,42 @@ class Remote(unittest.TestCase):
             self.assertEqual((why, remote), ("", False))
             m = models.Model(id="o/m", provider="o", name="m", base_url=url, engine="ollama", label="o/m")
             self.assertEqual(models.pool(m), "gpu")
+
+    def test_a_host_lookup_that_failed_is_asked_again_and_a_new_address_is_seen(self):
+        # #900: a lookup that timed out or failed (a tailnet reconnecting after a wake, slow DNS)
+        # was cached as "another host" for the life of the process, and so were the machine's
+        # addresses: a runner or the chat server took this machine's server for another's for
+        # hours, beside processes that knew better
+        me = socket.gethostname().split(".")[0].lower()
+        name, looked = f"{me}.tail1234.ts.net", []
+        up = []                                            # the tailnet: down, then up
+
+        def resolve(host, *a, **kw):
+            looked.append(host)
+            if not up:
+                raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("100.64.0.7", 0))]
+        ip_out = ["1: lo    inet 127.0.0.1/8 scope host lo\n"]
+
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 0, ip_out[0] if argv[0] == "ip" else "", "")
+        for f in (models._own_addresses, models._named_here):
+            f.cache_clear()
+            self.addCleanup(f.cache_clear)
+        with mock.patch.object(models.socket, "getaddrinfo", resolve), \
+                mock.patch.object(models.socket, "getfqdn", lambda *a: "desk.corp.example"), \
+                mock.patch.object(models.subprocess, "run", run):
+            self.assertFalse(models._this_host(name))
+            self.assertFalse(models._this_host(name))
+            self.assertEqual(looked.count(name), 1)         # within DOWN_SECS: not asked again
+            up.append(1)
+            ip_out[0] += "3: tailscale0    inet 100.64.0.7/32 scope global tailscale0\n"
+            with mock.patch.object(models, "DOWN_SECS", 0), mock.patch.object(models, "ADDR_SECS", 0):
+                self.assertTrue(models._this_host(name))    # asked again, and the tailnet IP is ours
+                self.assertTrue(models._this_host("100.64.0.7"))
+            n = len(looked)
+            self.assertTrue(models._this_host(name))        # a definite answer: kept
+            self.assertEqual(len(looked), n)
 
     def test_wb_remote_registers_the_tool_models_of_another_machines_ollama_and_remove_undoes_it(self):
         ctx = {"llama.context_length": 131072}
@@ -2985,6 +3120,22 @@ class Budgets(Base):
         self.assertEqual(router.budgets(m)["think"], 420)
         router.record_speed(m.id, self.session(60, 2800))      # faster: never below the default
         self.assertEqual(router.budgets(m), {"think": 420, "silence": 900, "round": 2400})
+
+    def test_machines_sharing_a_network_state_dir_each_budget_from_their_own_speeds(self):
+        # #901: speed.json was one file for every machine on a network home, so a fast desktop's
+        # samples outvoted a slow laptop's in the median and the laptop's rounds got the defaults
+        m = models.resolve("mimo")
+        router.record_speed(m.id, self.session(15, 150))         # measured before #901: shared
+        with mock.patch.object(store, "network_fs", return_value="nfs"):
+            with mock.patch.object(store, "machine", return_value="desktop"):
+                self.assertEqual(router.speed(m.id), {"write": 15.0, "read": 150})  # until its own
+                router.record_speed(m.id, self.session(60, 2800, n=20))
+                self.assertEqual(router.budgets(m)["think"], 420)
+            with mock.patch.object(store, "machine", return_value="laptop"):
+                router.record_speed(m.id, self.session(15, 150))
+                self.assertEqual(router.speed(m.id), {"write": 15.0, "read": 150})
+                self.assertEqual(router.budgets(m)["think"], int(13500 / 15 + 32768 / 150))
+        self.assertTrue((store.home() / "machines" / "laptop" / "speed.json").exists())
 
     def test_a_slow_machine_gets_time(self):
         m = models.resolve("mimo")

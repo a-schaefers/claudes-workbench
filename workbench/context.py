@@ -195,9 +195,23 @@ INSTALL_LISTED = (
 # `[*]` ends in `]`, which no package name does (a second requirement with extras after it
 # would match: a guardrail, not a sandbox).
 INSTALL_FLAGS = ("--frozen-lockfile", "--immutable", "--prefer-offline", "--offline",
-                 "--legacy-peer-deps", "--no-audit", "--ignore-scripts", "--prod", "--production")
+                 "--legacy-peer-deps", "--no-audit", "--ignore-scripts", "--prod", "--production",
+                 "--no-fund")
+# and the common CI lines with two, as written, by the managers that spell them:
+# `pnpm install --frozen-lockfile --prefer-offline` and `npm i --no-audit --no-fund` asked first
+# (#916, the third 2026-11-21 audit). A short list, not every pair: with each rule's `*=*` copy
+# those were ~80 KB, past CONFIG_CONTENT_MAX, whose fallback drops AGENTS.md and the project's
+# skills. No flag with `=*`: the `*` would let a package name through.
+INSTALL_FLAG_PAIRS = {
+    ("npm install", "npm i"): ("--no-audit --no-fund", "--no-fund --no-audit",
+                               "--prefer-offline --no-audit", "--no-audit --prefer-offline"),
+    ("pnpm install", "bun install"): ("--frozen-lockfile --prefer-offline",
+                                      "--prefer-offline --frozen-lockfile",
+                                      "--frozen-lockfile --ignore-scripts",
+                                      "--frozen-lockfile --production")}
 INSTALL_LISTED += tuple(f"{c} {f}" for c in ("npm install", "npm i", "pnpm install", "pnpm i",
                                              "bun install", "bun i") for f in INSTALL_FLAGS)
+INSTALL_LISTED += tuple(f"{c} {f}" for cs, fs in INSTALL_FLAG_PAIRS.items() for c in cs for f in fs)
 INSTALL_LISTED += tuple(f"{c} -e {e}" for c in (
     "pip install", "pip3 install", "python -m pip install", "python3 -m pip install",
     "uv pip install", "pip3.* install", "python3.* -m pip install")
@@ -241,17 +255,21 @@ def _simple_commands(line: str) -> list[str]:
 
 def test_allowances(test: str | None) -> tuple[list[str], list[str]]:
     """What `wb start --test` and `wb next --test` grant the task, as (allow, test_tools): the
-    acceptance command's own simple commands, as written and with more arguments (`npm test *`),
+    acceptance command's own simple commands as written, and with more arguments (`npm test *`)
     and their tools (`npm *`). The protocol tells the agent to run it; refused (`flutter test`,
     `just test`, `scripts/test.sh`), it spent an ask and a Claude wake on a command Claude chose,
     or finished untested (#514, the audit of 1.90). The tools go in a tier of their own, before
     ASK_FIRST (shell_rules): granted with the commands, after it, `--test 'npm test'` allowed
     `npm install left-pad`, `--test 'uv run pytest'` `uv add requests` (#646, the audit of main).
+    So does each command with more arguments: after the asks, `--test 'npm install && npm test'`
+    allowed `npm install left-pad`, `pip install -e . && pytest` `pip install -e . requests`
+    (#915, the third 2026-11-21 audit); only the command as written comes after them.
     The hard limits come later in the rules, so no grant here lifts them."""
     import shlex
     exact, tools = [], []
     for cmd in _simple_commands(test or ""):
-        exact += [cmd, f"{cmd} *"]
+        exact.append(cmd)
+        tools.append(f"{cmd} *")
         try:
             words = shlex.split(cmd)
         except ValueError:
@@ -483,13 +501,25 @@ TOOL_HOMES = (".cache", ".cargo", ".rustup", "go/pkg", ".npm", ".bun/install/cac
               ".local/share/hatch", ".local/share/virtualenvs",
               # NuGet's http and plugins caches, Cabal 3.10's store without ~/.cabal, and
               # Android's debug keystore, its adbkey hidden (SECRETS): each build failed (#437)
-              ".local/share/NuGet", ".local/state/cabal", ".android")
+              ".local/share/NuGet", ".local/state/cabal", ".android",
+              # the homes of ecosystems #672 allowed: `nimble install -d` writes ~/.nimble/pkgs2,
+              # `elm make` in a fresh worktree takes ~/.elm's package lock, Clojure's git deps
+              # fill ~/.gitlibs, and each was refused (#911, the third 2026-11-21 audit)
+              ".nimble", ".elm", ".gitlibs")
 # where the user moved them: a toolchain follows its variable, not the default path; GOPATH and
-# BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches
+# BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches. The second
+# line's were refused where the user moved them, HF_HOME though ENV_KEEP passes it on (#911)
 TOOL_HOME_VARS = ("CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE", "GOCACHE", "npm_config_cache",
                   "PIP_CACHE_DIR", "UV_CACHE_DIR", "GRADLE_USER_HOME", "BUN_INSTALL", "DENO_DIR",
                   "MIX_HOME", "HEX_HOME", "PUB_CACHE", "KONAN_DATA_DIR", "HATCH_DATA_DIR",
-                  "WORKON_HOME", "CARGO_TARGET_DIR", "NPM_CONFIG_CACHE", "NUGET_PACKAGES")
+                  "WORKON_HOME", "CARGO_TARGET_DIR", "NPM_CONFIG_CACHE", "NUGET_PACKAGES",
+                  "CCACHE_DIR", "SCCACHE_DIR", "YARN_CACHE_FOLDER", "PRE_COMMIT_HOME", "STACK_ROOT",
+                  "CABAL_DIR", "JULIA_DEPOT_PATH", "CONAN_HOME", "PLATFORMIO_CORE_DIR", "HF_HOME",
+                  "TORCH_HOME", "ELM_HOME", "NIMBLE_DIR")
+# the variables whose every entry is a home, not only the first: Julia stacks its depots (#911)
+ALL_ENTRIES = ("JULIA_DEPOT_PATH",)
+# TOOL_HOMES' entries under these follow the variable, as secret_paths does (#911)
+XDG_BASES = (("XDG_DATA_HOME", ".local/share/"), ("XDG_STATE_HOME", ".local/state/"))
 # The SDKs a build reads by variable, not from PATH: with only Android's platform-tools on PATH,
 # Gradle couldn't open ~/Android/Sdk/platforms' android.jar, and every build and test failed
 # (#437, the audit of 1.8). Their targets are readable, and so are the SDKs' default places.
@@ -498,10 +528,18 @@ SDK_DEFAULTS = ("Android/Sdk", "Library/Android/sdk")
 VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
 # inside a toolchain home in the lane, what stays out of it: the programs on the user's PATH and
 # what their shell sources, and the toolchains rustup's proxies run (relative to the home, or to
-# CARGO_HOME and RUSTUP_HOME for theirs); a toolchain a rust-toolchain.toml names that isn't
-# installed yet asks first (`wb allow --path`)
+# CARGO_HOME and RUSTUP_HOME for theirs); no grant reaches them (kept_out, #912), so `cargo
+# install` or a toolchain a rust-toolchain.toml names that isn't installed yet is Claude's to do
 NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghcup/bin",
-                ".rustup/toolchains")
+                ".rustup/toolchains", ".nimble/bin")
+# and the same places in the homes TOOL_HOME_VARS moved: nimble and cabal install programs into
+# their bin/ (#911)
+VAR_NOT_WRITABLE = {"CARGO_HOME": ("bin", "env"), "RUSTUP_HOME": ("toolchains",),
+                    "NIMBLE_DIR": ("bin",), "CABAL_DIR": ("bin",)}
+# a home holding one is made with it first, so the split keeps it out before the tool makes it
+# (else the agent could make it and plant a program there)
+MADE_FIRST = {".rustup": "toolchains", ".nimble": "bin", "RUSTUP_HOME": "toolchains",
+              "NIMBLE_DIR": "bin"}
 # and what cargo makes at the top of its split home, made first so the split grants it: a split
 # home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
 # every build with a dependency, and a git dependency failed wherever git/ didn't exist yet)
@@ -622,7 +660,7 @@ def repo_dirs(task: store.Task) -> set[str]:
 
 # What a task's directory holds beside its worktree: a sibling's link (`../<name>` from the
 # worktree) may not take one of these names. A new file in the task directory goes here too.
-TASK_FILES = ("acked", "ask", "base-tests.txt", "claude-sessions", "context.md", "events.jsonl", "noticed", "rounds",
+TASK_FILES = ("acked", "ask", "base-tests.txt", "claude-sessions", "context.md", "events.jsonl", "noticed", "prepared.json", "rounds",
               "runner.log", "setup.txt", "shots", "status.json", "steer.jsonl", "steps.bundle", "task.json",
               "tree", "verify", "worktree")
 
@@ -686,15 +724,27 @@ def _split(place: str, out_of: set[str]) -> list[str]:
     return [q for n in names for q in _split(os.path.join(real, n), out_of)]
 
 
+def tool_homes() -> list[Path]:
+    """TOOL_HOMES' places: under the home, or under XDG_DATA_HOME and XDG_STATE_HOME where those
+    are set (pnpm's store, hatch's and cabal's were refused there, #911)."""
+    home, out = Path.home(), []
+    for t in TOOL_HOMES:
+        var = next((v, b) for v, b in (*XDG_BASES, (None, "")) if t.startswith(b))
+        out.append(Path(os.environ[var[0]]) / t[len(var[1]):] if var[0] and os.environ.get(var[0])
+                   else home / t)
+    return out
+
+
 def tool_var_homes() -> list[str]:
-    """The toolchain homes TOOL_HOME_VARS name, each that is set (its first entry, its cache for
-    VAR_CACHES' whole homes)."""
+    """The toolchain homes TOOL_HOME_VARS name, each that is set (its first entry, every one for
+    ALL_ENTRIES, its cache for VAR_CACHES' whole homes)."""
     out = []
     for v in TOOL_HOME_VARS:
         if os.environ.get(v):
-            first = os.environ[v].split(os.pathsep)[0]
-            if os.path.isabs(first):  # a relative CARGO_TARGET_DIR is the build's own, in the repo
-                out.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
+            entries = os.environ[v].split(os.pathsep)
+            for e in entries if v in ALL_ENTRIES else entries[:1]:
+                if os.path.isabs(e):  # a relative CARGO_TARGET_DIR is the build's own, in the repo
+                    out.append(os.path.join(e, VAR_CACHES[v]) if v in VAR_CACHES else e)
     return out
 
 
@@ -705,7 +755,7 @@ def tool_home_of(real: str) -> str | None:
     what exists), and the walk up from a refused `~/.npm/_cacache` reached the home directory,
     which no grant may name, so a first `npm ci` or `go test` named no grant at all (#824)."""
     homes = dict.fromkeys(os.path.realpath(h) for h in (
-        *(Path.home() / t for t in TOOL_HOMES), *tool_var_homes()))
+        *tool_homes(), *tool_var_homes()))
     homes.pop(os.path.realpath(Path.home()), None)
     within = [h for h in homes if real == h or _under(real, h)]
     if within:
@@ -714,14 +764,19 @@ def tool_home_of(real: str) -> str | None:
     return below[0] if len(below) == 1 else None
 
 
+def not_writable_paths() -> list[Path]:
+    """NOT_WRITABLE's places under the home and VAR_NOT_WRITABLE's in the homes those variables
+    name, made or not."""
+    return [*(Path.home() / h for h in NOT_WRITABLE),
+            *(Path(os.environ[v]) / n for v, names in VAR_NOT_WRITABLE.items()
+              if os.environ.get(v) for n in names)]
+
+
 def not_writable(made_only: bool = True) -> set[str]:
-    """NOT_WRITABLE's places, CARGO_HOME's and RUSTUP_HOME's own among them, as real paths: those
-    that exist, or with ``made_only`` false every one (lane_grant: a grant made before cargo or
-    rustup runs must not hold their bin/ either)."""
-    cargo, rustup = os.environ.get("CARGO_HOME"), os.environ.get("RUSTUP_HOME")
-    return {os.path.realpath(p) for p in (*(Path.home() / h for h in NOT_WRITABLE),
-                                          *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()),
-                                          *((Path(rustup) / "toolchains",) if rustup else ()))
+    """NOT_WRITABLE's places, CARGO_HOME's, RUSTUP_HOME's and the like's own among them, as real
+    paths: those that exist, or with ``made_only`` false every one (lane_grant: a grant made
+    before cargo or rustup runs must not hold their bin/ either)."""
+    return {os.path.realpath(p) for p in not_writable_paths()
             if not made_only or os.path.lexists(p)}
 
 
@@ -730,6 +785,19 @@ def split_points() -> set[str]:
     files, the user's active Python environments (#825: the test report named `~/.cache`, which
     a grant split around the same venv again) and NOT_WRITABLE's places, made or not."""
     return _hidden() | set(python_envs()) | not_writable(made_only=False)
+
+
+def kept_out(raw: str) -> str | None:
+    """Why the lane drops a grant of ``raw`` whole, or None: it is (in) a place writable() always
+    splits out, an active Python environment or a NOT_WRITABLE place, made or not. `wb allow
+    --path ~/.cargo/bin` was saved and the agent told to run it again, and its retry was refused
+    the same way (#912, the third 2026-11-21 audit)."""
+    real = os.path.realpath(Path(raw).expanduser())
+    for h in sorted(set(python_envs()) | not_writable(made_only=False)):
+        if real == h or _under(real, h):
+            return (f"{raw}: in {h}, which the lane always keeps out (what is there runs later "
+                    "outside the lane, as you); install the toolchain or package there yourself")
+    return None
 
 
 def gem_home_of(real: str) -> str | None:
@@ -775,7 +843,7 @@ def writable(task: store.Task) -> list[str] | None:
             print(f"workbench: can't make OpenCode's directory {d} ({e.strerror}): "
                   f"its first run fails without it", file=sys.stderr)
     places = [tempfile.gettempdir(), *TEMP_ROOTS, *DEV_NODES, *gpu_nodes(task), "/proc",
-              *(home / h for h in TOOL_HOMES + OPENCODE_HOMES), *(x for x in xdg if x),
+              *tool_homes(), *(home / h for h in OPENCODE_HOMES), *(x for x in xdg if x),
               *flutter_caches(),
               *(Path(p).expanduser() for p in extra)]
     whole = {"/", os.path.realpath(home)}  # a GOPATH=~ must not hand over the home directory
@@ -792,11 +860,11 @@ def writable(task: store.Task) -> list[str] | None:
                         Path(c, n).touch()
                 except OSError:  # a read-only home: the task starts all the same
                     pass
-    rustup = os.environ.get("RUSTUP_HOME")
-    for r in {os.path.realpath(r) for r in (home / ".rustup", rustup) if r}:
-        if os.path.isdir(r):  # made, so it is split out: else the agent could make it and plant one
-            try:
-                os.makedirs(os.path.join(r, "toolchains"), exist_ok=True)
+    for k, n in MADE_FIRST.items():  # ~/.rustup's toolchains/, ~/.nimble's bin/ (#911)
+        r = os.environ.get(k) if k.isupper() else str(home / k)
+        if r and os.path.isabs(r) and os.path.isdir(r):  # made, so it is split out: else the
+            try:                                         # agent could make it and plant one
+                os.makedirs(os.path.join(r, n), exist_ok=True)
             except OSError:
                 pass
     # the user's active Python environments too: a venv in a tool home (poetry's, pipenv's,
@@ -907,10 +975,14 @@ def snaps(names) -> list[str]:
 # (logger, syslog) and name and user lookups (resolved, userdb for systemd-homed users, nscd,
 # sssd). The files alone, never their directories (sssd's pipes/private stays out), and not the
 # system bus, which reaches polkit's actions (the 0.90 review: `logger` and `resolvectl` failed).
+# And the other NSS lookups: avahi's (nsswitch's mdns4_minimal: a `.local` model server resolved
+# for the runner's probes and failed every request in the lane), nslcd's and winbind's (LDAP and
+# AD users: getpwuid() failed, so `whoami` and ssh did) (#913, the third 2026-11-21 audit)
 SYSTEM_SOCKETS = ("/dev/log", "/run/systemd/journal/socket", "/run/systemd/journal/stdout",
                   "/run/systemd/resolve/io.systemd.Resolve",
                   "/run/systemd/userdb/io.systemd.Multiplexer", "/run/nscd/socket",
-                  "/var/lib/sss/pipes/nss")
+                  "/var/lib/sss/pipes/nss", "/run/avahi-daemon/socket", "/run/nslcd/socket",
+                  "/run/samba/winbindd/pipe", "/var/run/samba/winbindd/pipe")
 
 
 def secret_sockets() -> set[str]:
@@ -1076,8 +1148,9 @@ ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home")
 # runs through interop as a Windows process, as the user, outside Landlock and no-new-privileges.
 # The read lane let the agent start one: python3 running cmd.exe, or the allowed `npm` resolving to
 # a Windows-only Node (the 0.90 review). So on WSL they are left out of the agent's PATH
-# (agent_path) and of tool_roots: out of the read lane, the exec itself is refused, since execve
-# opens the program for reading. A Windows program inside the lane still runs (`wb doctor` says
+# (agent_path), of tool_roots and, wherever they are mounted, of the reads (readable keeps only
+# what is kept beneath them, as for ONLY_KEPT, #914): out of the read lane, the exec itself is
+# refused, since execve opens the program for reading. A Windows program inside the lane still runs (`wb doctor` says
 # so, interop_gap): only turning interop off closes that.
 MOUNTS = "/proc/self/mounts"
 DRIVE_LETTER = re.compile(r"/mnt/[a-zA-Z](/|$)")
@@ -1489,6 +1562,9 @@ def readable(task: store.Task) -> list[str] | None:
     own = (PKG_ROOT, task.dir, rules_dir(task))
     inner = {r for r in map(os.path.realpath, own) if any(_under(r, h) or r == h for h in hidden)}
     only_kept = {os.path.realpath(p) for p in ONLY_KEPT}
+    # and WSL's drives wherever they are mounted: at /c (wsl.conf's `[automount] root = /`) a
+    # drive was read whole, so the agent could exec cmd.exe by its path, outside the lane (#914)
+    only_kept |= set(windows_drives() or [])
     under = _under
     out: list[str] = []
 
@@ -1540,10 +1616,7 @@ def read_only(task: store.Task, lane: list[str]) -> list[str]:
     the audit of 1.90). Also the SDKs (sdk_roots). Never one inside a lane entry, whose own
     rules say what is done there."""
     hidden = secret_paths() | private_paths()
-    home = Path.home()
-    split = [home / h for h in NOT_WRITABLE]
-    split += [Path(v) / d for v, d in ((os.environ.get("RUSTUP_HOME"), "toolchains"),
-                                       (os.environ.get("CARGO_HOME"), "bin")) if v]
+    split = not_writable_paths()
     places = tool_roots(hidden) | sdk_roots(hidden) | {
         os.path.realpath(p) for p in split
         if os.path.isdir(p) and not any(_under(os.path.realpath(p), h) for h in hidden)}

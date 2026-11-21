@@ -320,6 +320,17 @@ def session_entries(data: dict, worktree: str, verbose: bool) -> list[Entry]:
     return out
 
 
+# The event kinds task_entries gives a line, each but the tool rows (from the session's export)
+# from its own row. wb log prints these too, one line each, from this one set: it once printed a
+# fixed nine, so the runner's own (a model partly on the CPU, a handover, a steer) never showed
+# there, and a test checks task_entries has a branch for each (#861).
+EVENT_KINDS = frozenset({
+    "round", "tests", "autofix", "self_review", "ask", "answer", "captain", "steer", "skills",
+    "allow", "interrupted", "fresh", "full", "load", "left_bg", "reading_full", "compacted",
+    "limits", "export", "resumed", "coding", "spec_gap", "next_step", "takeover", "stopped",
+    "error", "retry", "gpu"})
+
+
 def task_entries(task: store.Task) -> list[Entry]:
     out = []
     rows, _ = store.read_jsonl(task.dir / "events.jsonl")
@@ -362,8 +373,9 @@ def task_entries(task: store.Task) -> list[Entry]:
         elif kind == "interrupted":
             out.append(Entry(ts, key, [("bad", "■ the agent was interrupted")]))
         # reading_full: why a session grew into compaction, beside fresh and full; it, resumed,
-        # spec_gap and coding were dropped as kinds with no branch (#846)
-        elif kind in ("fresh", "full", "load", "left_bg", "reading_full"):
+        # spec_gap and coding were dropped as kinds with no branch (#846), and then compacted,
+        # limits and export, written just before (#865)
+        elif kind in ("fresh", "full", "load", "left_bg", "reading_full", "compacted", "limits", "export"):
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
         elif kind in ("resumed", "coding"):  # the text says who: Claude, or the user's allowance
             out.append(Entry(ts, key, [("claude", f"■ {r.get('text', '')}")]))
@@ -406,8 +418,10 @@ def activity(task: store.Task, data: dict, now: float | None = None) -> str | No
     phase = st.get("phase")
     last = st.get("last") or ""
     if phase == "queued":  # the runner says what it waits on, or what it loads
+        # the base check said "Waiting for the GPU" (the 0.90 review), and so did a setup
+        # running for half an hour, and a reload of a model partly on the CPU (#869)
         if last.startswith(("loading", "starting", "stopping", "unloading", "sharing", "waiting",
-                            "checking")):  # the base check said "Waiting for the GPU" (the 0.90 review)
+                            "checking", "setting", "reloading")):
             return f"{last[:1].upper()}{last[1:]}…"
         return "Waiting for the GPU…"
     if phase == "testing":

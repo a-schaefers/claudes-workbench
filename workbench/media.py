@@ -146,6 +146,15 @@ def post(e: dict, url: str, data: bytes, ctype: str, timeout: float,
         raise RuntimeError(f"{url} answered HTTP {err.code}" + (f": {said}" if said else "")
                            + (" (it wants an API key: `key` in the engine's entry)"
                               if err.code in (401, 403) and not e.get("key") else "")) from None
+    except http.client.HTTPException as err:
+        raise cut_off(url, err) from None
+
+
+def cut_off(url: str, err: http.client.HTTPException) -> RuntimeError:
+    """A reply that broke off (IncompleteRead: a server OOM-killed or restarted mid-body closed the
+    connection cleanly) or wasn't HTTP: an HTTPException, not an OSError, so `wb image` and `wb
+    audio` ended in a traceback instead of one line naming the server (#925)."""
+    return RuntimeError(f"{url}: the reply was cut off ({err!r})")
 
 
 def unload(used: list[dict], say, what: str, base: Path | None = None) -> None:

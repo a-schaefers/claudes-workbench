@@ -985,6 +985,31 @@ class SharedLease(Base):
         self.assertFalse(models.lease_shared())
         self.assertEqual(models.unshared_lease_files(), [])
 
+    def test_the_lease_and_the_merge_lock_work_where_an_exclusive_flock_needs_a_writable_fd(self):
+        # #892: NFSv4 turns an exclusive flock into a whole-file write lock and refuses it with
+        # EBADF on an O_RDONLY fd: every task failed at the GPU lease, and wb accept --merge
+        # ended committed but unmerged with a bare "Bad file descriptor"
+        import errno
+        import fcntl
+        from workbench import gitops
+        real = fcntl.flock
+
+        def nfs4(fd, op):
+            f = fd if isinstance(fd, int) else fd.fileno()
+            if op & fcntl.LOCK_EX and fcntl.fcntl(f, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY:
+                raise OSError(errno.EBADF, "Bad file descriptor")
+            return real(fd, op)
+        with mock.patch.object(fcntl, "flock", nfs4):
+            with models.GpuLease(None, "an-image", say=lambda *_: None):
+                self.assertEqual([h["task"] for h in models.holders().values()], ["an-image"])
+            with gitops.merge_lock(self.repo):
+                pass
+        # a lock the file system refuses some other way is the accept's GitError, said plainly
+        with mock.patch.object(fcntl, "flock", side_effect=OSError(errno.ENOLCK, "No locks available")), \
+                self.assertRaisesRegex(gitops.GitError, "can't lock .* for the merge \\(No locks available\\)"):
+            with gitops.merge_lock(self.repo):
+                pass
+
     def test_a_refusal_names_another_accounts_task_as_theirs(self):
         held = {"1": {"task": "fix-it", "model": BIG, "uid": os.getuid() + 1, "user": "sam"}}
         self.assertIn(f"sam's task fix-it ({BIG})", models.busy(held, "wait"))
@@ -1150,6 +1175,42 @@ class LmStudioJustInTime(unittest.TestCase):
             with self.assertRaises(RuntimeError) as e:
                 models.make_resident(self.model(), say=lambda *_: None)
         self.assertIn("lms load coder --context-length 65536", str(e.exception))
+
+
+class KeepWarm(unittest.TestCase):
+    """#864 (the third 2026-11-21 audit): a round waiting on a long background job or on Claude's
+    answer let Ollama's 5-minute keep-alive lapse, and the model unloaded mid-round."""
+
+    def model(self, **kw):
+        return models.Model(id="ollama/coder", provider="ollama", name="coder",
+                            base_url="http://127.0.0.1:9/v1", engine="ollama", label="coder",
+                            config={"limit": {"context": 32768}}, **kw)
+
+    def setUp(self):
+        fake = mock.patch.dict(os.environ, {"WB_FAKE_MODELS": ""})
+        fake.start()
+        self.addCleanup(fake.stop)
+
+    def test_a_loaded_ollama_model_gets_its_keep_alive_again_and_one_gone_is_never_loaded(self):
+        posts = []
+        post = lambda url, body, **kw: posts.append((url, body))  # noqa: E731
+        with mock.patch.object(models, "_ollama_loaded", return_value=["coder:latest"]), \
+                mock.patch.object(models, "_post", post):
+            self.assertTrue(models.keep_warm(self.model()))
+        self.assertEqual(posts, [("http://127.0.0.1:9/api/generate",
+                                  {"model": "coder", "prompt": "", "keep_alive": "30m"})])
+        posts.clear()
+        with mock.patch.object(models, "_ollama_loaded", return_value=[]), \
+                mock.patch.object(models, "_post", post):
+            self.assertFalse(models.keep_warm(self.model()))   # a load here would skip free_gpu
+        with mock.patch.object(models, "_ollama_loaded", return_value=["coder"]), \
+                mock.patch.object(models, "_post", post), \
+                mock.patch.object(models, "same_gpu", return_value=False):
+            self.assertFalse(models.keep_warm(self.model(remote=True)))  # another box's GPU
+        self.assertEqual(posts, [])
+        with mock.patch.object(models, "_ollama_loaded", return_value=["coder"]), \
+                mock.patch.object(models, "_post", side_effect=RuntimeError("HTTP 500")):
+            self.assertFalse(models.keep_warm(self.model()))
 
 
 if __name__ == "__main__":

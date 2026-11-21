@@ -37,9 +37,12 @@ C_LOCALE = {"LC_ALL": "C", "LANGUAGE": ""}  # git's messages in English, to be m
 # codes in the changed-files list, and core.quotePath escaped every non-ASCII file name.
 # (color.diff/status/branch=always outrank color.ui, so each is named.) log.showSignature put
 # "No signature" ahead of the hash a `git log --format=%h` was read for, and a finished wb accept
-# died on it (the audit).
+# died on it (the audit). submodule.recurse=true made a sparse worktree's `read-tree -mu HEAD`
+# reset a submodule the new worktree has no git dir for, so no task could start there (#888, the
+# third 2026-11-21 audit): none of our checkouts, resets or merges recurse, fill_submodules fills them.
 PLAIN = ("-c", "color.ui=never", "-c", "color.diff=never", "-c", "color.status=never",
-         "-c", "color.branch=never", "-c", "core.quotePath=false", "-c", "log.showSignature=false")
+         "-c", "color.branch=never", "-c", "core.quotePath=false", "-c", "log.showSignature=false",
+         "-c", "submodule.recurse=false")
 
 
 # No git hook runs from workbench in a task's worktree: with a relative core.hooksPath (husky's
@@ -510,8 +513,34 @@ def checkout_size(repo: Path, commit: str) -> tuple[int, int]:
     start's disk check passed it (#382, the audit of 1.6). Only what the sparse cone checks out
     counts, and in a partial clone only the blobs it holds, asked with lazy fetching off (git
     2.44+; an older one's are all unknown): the whole tree of a 30 GB monorepo was counted for a
-    1 GB cone, and a blobless clone fetched every blob, one at a time, to size it (#436)."""
-    keeps = _sparse_keeps(repo)
+    1 GB cone, and a blobless clone fetched every blob, one at a time, to size it (#436). The
+    submodules fill_submodules fills count too, whole and nested: a gitlink is no blob, so a
+    6 GB engine/ submodule counted nothing, the check passed on 8 GB free, and the base check's
+    scratch fill hit ENOSPC (#886, the third 2026-11-21 audit)."""
+    size, unknown = _tree_size(repo, commit, sparse=True)
+    sub_size, sub_unknown = _submodules_size(repo, commit)
+    return size + sub_size, unknown + sub_unknown
+
+
+def _submodules_size(repo: Path, commit: str) -> tuple[int, int]:
+    """checkout_size of each submodule of ``commit`` that _fill can fill (the user's checkout of
+    it holds the commit recorded), at that commit, its whole tree (checkout-index writes it all)
+    and its own submodules."""
+    size = unknown = 0
+    for path in submodules(repo, commit):
+        row = git(repo, "ls-tree", commit, "--", path, check=False).split()
+        sha = row[2] if len(row) >= 3 and row[1] == "commit" else ""
+        src = Path(repo) / path
+        if not sha or not (src / ".git").exists() or \
+                _run(src, ("cat-file", "-e", f"{sha}^{{commit}}"), check=False).returncode:
+            continue
+        for s, u in (_tree_size(src, sha, sparse=False), _submodules_size(src, sha)):
+            size, unknown = size + s, unknown + u
+    return size, unknown
+
+
+def _tree_size(repo: Path, commit: str, sparse: bool) -> tuple[int, int]:
+    keeps = _sparse_keeps(repo) if sparse else None
     lazy = partial_clone(repo)
     no_fetch = {"GIT_NO_LAZY_FETCH": "1"}
     size, unknown, pointers, blobs = 0, 0, [], []
@@ -649,23 +678,32 @@ def _fill(repo: Path, commit: str, checkout: Path, keep: Path | None, filled: li
                 _run(src, (f"--work-tree={dest}", "update-index", "-q", "--refresh"), env=env,
                      check=False)
                 name = f"submodule-{len(filled)}.index"
-                with contextlib.suppress(OSError):
-                    shutil.copyfile(env["GIT_INDEX_FILE"], keep / name)
+                with contextlib.suppress(OSError):  # copy2: its time is git's racy-file guard
+                    shutil.copy2(env["GIT_INDEX_FILE"], keep / name)
                 filled.append({"path": at + path, "src": str(src), "sha": sha, "index": name})
         left += [f"{path}/{p}" for p in _fill(src, sha, dest, keep, filled, f"{at}{path}/")]
     return left
 
 
 def submodule_edits(worktree: Path) -> list[str]:
-    """For each submodule fill_submodules filled in a task's worktree whose files no longer match
-    its commit (changed, deleted, new and not ignored): why it can't land. The gitlink keeps them
-    out of the diff and the commit, and read-only files stop no `sed -i`, which replaces a file
+    """For each submodule fill_submodules filled in a task's worktree whose tracked files no
+    longer match its commit (changed or deleted): why it can't land. The gitlink keeps them out
+    of the diff and the commit, and read-only files stop no `sed -i`, which replaces a file
     through its directory: an edit the tests passed on vanished at wb accept (#419, the audit of
     1.8). Checked with the user's checkout of it as git dir and a copy of the index made at fill
-    time, so the agent's files are only read; a submodule that can't be checked is said too."""
+    time, so the agent's files are only read; a submodule that can't be checked is said too.
+    New untracked files aren't edits: submodule_check."""
+    return submodule_check(worktree)[0]
+
+
+def submodule_check(worktree: Path) -> tuple[list[str], list[str]]:
+    """(submodule_edits, a note per filled submodule with new files not ignored there). New files
+    are left behind as any submodule checkout leaves them: counted as edits, the build output a
+    test command wrote in a vendored submodule (`make -C vendor/lua`) refused every wb accept and
+    came back with the next test run (#889, the third 2026-11-21 audit)."""
     rec = _record(worktree)
     subs = store.read_json(rec.with_name(SUBMODULES), []) if rec else []
-    out = []
+    out, notes = [], []
     for sub in subs if isinstance(subs, list) else []:
         dest = Path(worktree) / sub["path"]
         if not dest.is_dir() or dest.is_symlink():
@@ -677,7 +715,12 @@ def submodule_edits(worktree: Path) -> list[str]:
             opts = (*NO_HOOKS, "-c", "core.fsmonitor=false", f"--work-tree={dest}")
             try:
                 try:
-                    shutil.copyfile(rec.parent / sub["index"], env["GIT_INDEX_FILE"])
+                    # with its own time: git trusts an entry's stat (whole seconds, inode, size)
+                    # unless the file is as new as the index. A fresh copy made every entry look
+                    # older, so a same-size rewrite in the second the fill wrote it, on an inode
+                    # the filesystem reused, read as unchanged, and the edit vanished at accept
+                    # (#419 again; CI on ext4, batch 7 of 2026-11-21)
+                    shutil.copy2(rec.parent / sub["index"], env["GIT_INDEX_FILE"])
                 except OSError:
                     _run(sub["src"], ("read-tree", sub["sha"]), env=env)
                 _run(sub["src"], (*opts, "update-index", "-q", "--refresh"), env=env, check=False)
@@ -692,10 +735,14 @@ def submodule_edits(worktree: Path) -> list[str]:
                            f"{sub['src']} is gone or unreadable (moved? wb relocate {rec.parent.name} "
                            "--repo <its new path>)")
                 continue
-        files = [shown(f) for f in (changed + new).split(b"\0") if f]
-        if files:
+        if files := [shown(f) for f in changed.split(b"\0") if f]:
             out.append(_edit_line(sub, files))
-    return out
+        if files := [shown(f) for f in new.split(b"\0") if f]:
+            notes.append(f"new files in submodule {sub['path']} won't be committed: "
+                         f"{', '.join(brief(files))}. The submodule doesn't track them, so the "
+                         "gitlink leaves them out: build output can stay; a new source file "
+                         "belongs in the submodule's own repository")
+    return out, notes
 
 
 def _edit_line(sub: dict, files: list[str]) -> str:
@@ -1121,15 +1168,22 @@ def footprint(worktree: Path, base: str) -> dict:
 
 
 # Source files by extension, for the kind of work a repo holds (stack). Markup, data and docs
-# say nothing about it and are left out.
+# say nothing about it and are left out. A `.h` is C, C++ or Objective-C, so it isn't here: it
+# goes to whichever of those the repo's sources are mostly (HEADERS). Counted as C, a C++ repo's
+# headers made it "c/c++" and C and C++ records mixed in the router (#908, the third audit of
+# 2026-11-21), which also missed the extensions from mts to cu below.
 LANGUAGES = {
     "py": "python", "js": "javascript", "mjs": "javascript", "cjs": "javascript", "jsx": "javascript",
-    "ts": "typescript", "tsx": "typescript", "c": "c", "h": "c", "cc": "c++", "cpp": "c++",
-    "cxx": "c++", "hpp": "c++", "hh": "c++", "rs": "rust", "go": "go", "java": "java", "kt": "kotlin",
-    "swift": "swift", "m": "objective-c", "cs": "c#", "rb": "ruby", "php": "php", "lua": "lua",
+    "ts": "typescript", "tsx": "typescript", "mts": "typescript", "cts": "typescript",
+    "vue": "javascript", "svelte": "javascript", "astro": "javascript",
+    "c": "c", "cc": "c++", "cpp": "c++", "cxx": "c++", "hpp": "c++", "hh": "c++", "hxx": "c++",
+    "ipp": "c++", "inl": "c++", "cu": "cuda", "cuh": "cuda", "rs": "rust", "go": "go", "java": "java",
+    "kt": "kotlin", "kts": "kotlin", "swift": "swift", "m": "objective-c", "mm": "objective-c",
+    "cs": "c#", "fs": "f#", "fsx": "f#", "vb": "visual basic", "rb": "ruby", "php": "php", "lua": "lua",
     "zig": "zig", "dart": "dart", "scala": "scala", "ex": "elixir", "exs": "elixir", "hs": "haskell",
     "ml": "ocaml", "sh": "shell", "bash": "shell", "gd": "gdscript", "glsl": "glsl", "sql": "sql",
 }
+HEADERS = ("c", "c++", "objective-c")  # what a .h may be, the first when the repo has none of them
 STACK_SHARE = 0.2  # a language holding at least this share of the source files is part of it
 
 
@@ -1141,7 +1195,13 @@ def stack(repo, subdir: str | None = None) -> list[str]:
         names = git(repo, "ls-files", "-z", *(["--", subdir] if subdir else [])).split("\0")
     except (GitError, OSError):
         return []
-    langs = Counter(LANGUAGES[x] for n in names if (x := Path(n).suffix[1:].lower()) in LANGUAGES)
+    exts = Counter(Path(n).suffix[1:].lower() for n in names)
+    langs = Counter()
+    for x, n in exts.items():
+        if x in LANGUAGES:
+            langs[LANGUAGES[x]] += n
+    if exts["h"]:  # max takes the first of HEADERS on a tie: c when the repo has none
+        langs[max(HEADERS, key=lambda lang: langs[lang])] += exts["h"]
     total = sum(langs.values())
     return [lang for lang, n in langs.most_common(2) if n >= STACK_SHARE * total]
 
@@ -1170,6 +1230,40 @@ def drop_accepted(repo: Path, task: str, tip: str) -> bool:
                     check=False).returncode
 
 
+def scratch_clone(repo: Path, dest: Path, bare: bool = False, tags: bool = True) -> None:
+    """A `--shared --no-checkout` (or ``bare``) clone of ``repo`` at ``dest``, every scratch
+    checkout's (the base check, wb verify and shot, bench's), borrowing the repo's objects
+    through alternates. A shallow repo's clone ignores --shared, writes no alternates and
+    pack-copies what its refs reach: the review snapshot's tree and a squashed task's earlier
+    steps, which no ref reaches, weren't there (wb verify and shot died "failed to unpack tree
+    object", bench add on step 2), and a big shallow checkout was copied whole for each base
+    check (#884, the third 2026-11-21 audit). So there it is made by hand: init, alternates, the
+    repo's `shallow` file, its branches (and tags) and HEAD."""
+    dest = Path(dest)
+    if git(repo, "rev-parse", "--is-shallow-repository", check=False).strip() != "true":
+        git(dest.parent, "clone", "-q", "--shared", "--bare" if bare else "--no-checkout",
+            *([] if tags else ["--no-tags"]), str(repo), str(dest))
+        return
+    common = Path(repo) / git(repo, "rev-parse", "--git-common-dir").strip()
+    git(dest.parent, "init", "-q", *(["--bare"] if bare else []), str(dest))
+    gd = dest if bare else dest / ".git"
+    info = gd / "objects" / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "alternates").write_text(f"{(common / 'objects').resolve()}\n")
+    shutil.copyfile(common / "shallow", gd / "shallow")
+    at = (f"--git-dir={gd}",)  # named: safe.bareRepository=explicit (#887)
+    refs = git(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads",
+               *(["refs/tags"] if tags else []))
+    if lines := [f"create {r} {sha}\n" for sha, _, r in
+                 (row.partition(" ") for row in refs.splitlines()) if r]:
+        _run(dest.parent, (*at, "update-ref", "--stdin"), input="".join(lines).encode())
+    if head := git(repo, "symbolic-ref", "-q", "HEAD", check=False).strip():
+        git(dest.parent, *at, "symbolic-ref", "HEAD", head)
+    else:
+        git(dest.parent, *at, "update-ref", "--no-deref", "HEAD",
+            git(repo, "rev-parse", "HEAD").strip())
+
+
 STEPS_BUNDLE = "steps.bundle"  # tasks/<task>/: an accepted task's steps, which wb bench add reads
 
 
@@ -1186,9 +1280,13 @@ def bundle_steps(repo: Path, base: str, tip: str, dest: Path) -> bool:
     with tempfile.TemporaryDirectory(prefix="wb-steps-") as tmp:
         clone, part = Path(tmp) / "c", dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
         try:
-            git(tmp, "clone", "-q", "--bare", "--shared", "--no-tags", str(repo), str(clone))
-            git(clone, "update-ref", "refs/heads/steps", tip)
-            git(clone, "bundle", "create", "-q", str(part.resolve()), f"{base}..steps")
+            scratch_clone(repo, clone, bare=True, tags=False)  # a shallow repo's too (#884)
+            # named, not found from the cwd: safe.bareRepository=explicit refuses a bare repo git
+            # discovers, the bundle was never made, and every accept kept the ref #799 removed
+            # (#887, the third 2026-11-21 audit)
+            bare = f"--git-dir={clone}"
+            git(tmp, bare, "update-ref", "refs/heads/steps", tip)
+            git(tmp, bare, "bundle", "create", "-q", str(part.resolve()), f"{base}..steps")
             os.replace(part, dest)
         except (GitError, OSError):
             part.unlink(missing_ok=True)
@@ -1538,10 +1636,12 @@ def merge_lock(repo: Path, say=None):
     A merged, B conflicted and its rollback reset to the HEAD it had read, rewinding A's merge
     while A's record said merged and its branch was gone (#639, Codex's audit of 1.90.6). The
     file is opened read-only (flock needs no write: another account made it). An agent can read
-    the git dir and so could hold the lock: past MERGE_WAIT the merge is refused, never made."""
+    the git dir and so could hold the lock: past MERGE_WAIT the merge is refused, never made.
+    Read-write where it may be (store.lock_fd): NFSv4 refuses an exclusive flock on a read-only
+    fd with EBADF, and the accept ended in a bare "Bad file descriptor" (#892)."""
     gd = git(repo, "rev-parse", "--absolute-git-dir").strip()
     try:
-        fd = os.open(os.path.join(gd, MERGE_LOCK), os.O_RDONLY | os.O_CREAT, 0o664)
+        fd = store.lock_fd(os.path.join(gd, MERGE_LOCK), 0o664)
     except OSError as e:
         raise GitError(f"can't lock {gd} for the merge ({e.strerror})") from None
     try:
@@ -1557,6 +1657,8 @@ def merge_lock(repo: Path, say=None):
                     say(f"waiting for another merge into {repo}")
                     said = True
                 time.sleep(0.2)
+            except OSError as e:  # a file system that can't lock it: say so, as a GitError (#892)
+                raise GitError(f"can't lock {gd} for the merge ({e.strerror})") from None
         yield
     finally:
         os.close(fd)  # releases the lock

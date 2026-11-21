@@ -464,6 +464,48 @@ test('a task whose Claude Code process is gone is claimed by the first session t
   expect(adopts.length).toBe(claims)                            // claimed once, not at every poll
 })
 
+test('#922: a Claude Code process or chat listener recorded on another machine is never read as gone here', async ($, on) => {
+  // on a state directory two machines share, each machine's mod read the other's live session as
+  // dead (its pid not in this /proc), adopted its tasks, and the two passed them back and forth
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'theirs', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-a', claude_pid: 4242, claude_machine: 'machine-a' })
+  task(files, 'ours', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4141, claude_machine: 'machine-b' })
+  for (const name of ['theirs', 'ours']) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, ['theirs', 'ours'], true, [], false)
+  chatOn(files)
+  const claim = JSON.stringify({ session: 'other-key', pid: 777, start: '1', machine: 'machine-a' })
+  files['/wb/chat/listener.json'] = claim                         // A's listener, its file stale
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout', text: '{"hello": 4343, "parent": 9000, "parent_start": "77", "machine": "machine-b"}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  on('session.id', () => ({ value: 'sess-new' }))
+  const adopts: string[] = []
+  on('process.run', (_: any, e: any) => {
+    const [cmd, ...args] = e.argv
+    if (cmd === 'kill') return { value: { exitCode: 1, stdout: '', stderr: '' } }   // no such pid here
+    if (cmd === 'wb' && args[0] === 'adopt') {
+      adopts.push(args[1])
+      const path = `/wb/tasks/${args[1]}/task.json`
+      files[path] = JSON.stringify({ ...JSON.parse(files[path]), session: 'sess-new', claude_pid: 9000, claude_machine: 'machine-b' })
+      return { value: { exitCode: 0, stdout: `adopted ${args[1]}`, stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(40_000)
+  expect(adopts).toEqual(['ours'])                                // this machine's gone process only
+  expect(woken.join('\n')).not.toContain('REPORT-theirs')
+  expect(files['/wb/chat/listener.json']).toBe(claim)              // A's listener stands
+})
+
 test('a session resumed in a new process comes back in workbench mode, and a quit ends it for good (#689)', async ($, on) => {
   // #689: the mode lived in the old process's state: `claude --continue` came back with it off,
   // so the chat didn't listen, the status line didn't show it and a compaction dropped it
@@ -548,7 +590,7 @@ test('a session that adopts a task whose process is gone turns workbench mode on
 
 // #834: /workbench-quit parked the review (or the hand-back took it over), the session ended, and
 // the next one in the project adopted it and turned the mode back on against the quit
-async function adoptsLeftOver($: any, on: any, extra: Record<string, unknown>) {
+async function adoptsLeftOver($: any, on: any, extra: Record<string, unknown>, modeOn = false) {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   const ui: string[] = []
@@ -576,8 +618,17 @@ async function adoptsLeftOver($: any, on: any, extra: Record<string, unknown>) {
   await clock.advance(3000)
   expect(JSON.parse(files['/wb/tasks/orphan/task.json']).session).toBe('sess-new') // still adopted
   await clock.advance(3000)
-  expect(ui).not.toContain('open workbench')
-  expect(ui.some(l => l.includes('workbench mode'))).toBe(false)
+  if (modeOn) {
+    expect(ui.filter(l => l.startsWith('status')).at(-1)).toBe('status ⚒ wb · 1 awaiting review')
+    await $.command.run({ command: 'workbench-quit', args: '' })   // the mode was on: the quit says so
+    expect(ui).toContain('close workbench')
+  } else {
+    expect(ui).not.toContain('open workbench')
+    expect(ui.some(l => l.includes('workbench mode'))).toBe(false)
+    await $.command.run({ command: 'workbench-quit', args: '' })
+    expect(ui).not.toContain('close workbench')                    // it was off
+  }
+  await clock.advance(3000)
 }
 
 test('adopting a task the user\'s quit parked leaves workbench mode off (#834)', async ($, on) => {
@@ -586,6 +637,12 @@ test('adopting a task the user\'s quit parked leaves workbench mode off (#834)',
 
 test('adopting a task handed back to Claude leaves workbench mode off (#834)', async ($, on) => {
   await adoptsLeftOver($, on, { taken_over: true })
+})
+
+test('adopting a task taken over, handed back to the agent and in review again turns workbench mode on (#926)', async ($, on) => {
+  // the hand-back (wb feedback/next/resume) clears taken_over (spawn_runner): the review is the
+  // agent's work again, and a later session adopting it gets the mode and its procedure back
+  await adoptsLeftOver($, on, { round: 2, last: 'round 2 done' }, true)
 })
 
 test('in workbench mode the status line counts only this session\'s tasks as awaiting review (#693)', async ($, on) => {
@@ -1275,6 +1332,34 @@ test('a task in review whose events have not changed is not read again on every 
   expect(waits()).toBe(2)
 })
 
+test('#921: notify.jsonl unchanged is not read again on every poll, mid-turn or not', async ($, on) => {
+  // deliver read the whole file (past 1 MiB, a `tail` spawned) before its size@mtime check
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review')
+  task(files, 'runs', 'running')                                  // a task active: a poll each 1.5 s
+  notice(files, { ts: ts0 - 7200, task: 'fix-it', kind: 'review', text: 'OLD ' + 'x'.repeat(5000) })
+  const { reads } = fakeTasks(on, files, ['fix-it', 'runs'])
+  on('process.run', wbAck(files))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const notify = () => reads.filter(p => p === '/wb/notify.jsonl').length
+  await clock.advance(15_000)                                     // ten polls and more
+  expect(notify()).toBe(1)
+  await $.turn.start({ text: 'busy', turnId: 't1' })
+  await clock.advance(15_000)                                     // mid-turn: the rows kept
+  expect(notify()).toBe(1)
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'NEW' })  // it changed: read once
+  await clock.advance(6000)
+  expect(notify()).toBe(2)
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(6000)
+  expect(woken.filter(t => t.includes('NEW'))).toHaveLength(1)     // the held wake still comes
+  expect(notify()).toBe(2)
+})
+
 test('outside workbench mode another session\'s running task opens no pane and fills no status line', async ($, on) => {
   // 2026-11-17: a session opened in another project showed the pane and the task's status line for
   // a task this session never started, and /workbench-quit couldn't clear it
@@ -1485,6 +1570,25 @@ test('wb failing is said as a failure: not open tasks, not agents stopped', asyn
   expect(submitted.join('\n')).not.toContain('Leave workbench mode')   // no turn to finish what wasn't handed over
 })
 
+test('#918: a hand-back that took over one task and was refused another still gives Claude its turn', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {})
+  on('process.run', (_: any, e: any) => ({ value: e.argv[1] === 'takeover'
+    ? { exitCode: 3, stdout: 'took over fix-it: the agent is stopped.', stderr: 'wb: other: report the blocker to the user' }
+    : { exitCode: 0, stdout: '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const submitted: string[] = []
+  on('prompt.submit', (_: any, e: any) => { submitted.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const back = await $.command.run({ command: 'workbench-quit-and-hand-back-claude', args: '' })
+  expect(back.text).not.toContain('failed')
+  expect(toasts.join('\n')).toContain("some tasks weren't taken over")
+  await clock.advance(2000)
+  expect(submitted.at(-1)).toContain('took over fix-it')        // the turn for the one taken
+  expect(submitted.at(-1)).toContain('report the blocker')      // and the refusal, said with it
+})
+
 test('a closed task compacts Claude early, keeping the delegation state; open tasks come back after', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const ts = 1_800_000_000
@@ -1669,12 +1773,14 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
   const files: Record<string, string> = {}
   fakeTasks(on, files, [], false)
   on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   const asked: string[] = []
   on('prompt.submit', (_: any, e: any) => {
     asked.push(e.text)
     return { text: e.text }
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'delegate', frontmatter: {}, source: 'userSettings' })  // workbench mode (#919)
   await clock.advance(3000)
   expect(asked.length).toBe(0)                       // nobody has used the session yet
 
@@ -1701,6 +1807,28 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
   expect(asked.length).toBe(2)
   expect(asked[1]).toContain('The weekly model check is due')
 })
+
+for (const [what, options, mode] of [['a session that never used workbench', {}, false],
+  ['a session in workbench mode with wakes off', { wake: 'off' }, true]] as const) {
+  test(`#919: the weekly model check never starts a turn in ${what}, and stays due for another`, { options }, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_800_000_000_000 })
+    const files: Record<string, string> = {}
+    fakeTasks(on, files, [], false)
+    on('ui.toast', () => ({ value: undefined }))
+    on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+    on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+    on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+    const asked: string[] = []
+    on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    if (mode) await $.skill.prompt({ skill: 'workbench', text: 'delegate', frontmatter: {}, source: 'userSettings' })
+    await $.turn.start({ text: 'hi', turnId: 't1' })
+    await $.turn.complete(endTurn('t1'))
+    await clock.advance(120_000)
+    expect(asked.filter(t => t.includes('The weekly model check is due'))).toEqual([])
+    expect(files['/wb/scout.json']).toBe(undefined)           // offered_at untouched: still due
+  })
+}
 
 test('/workbench-models when the weekly check is due raises it once, not twice', async ($, on) => {
   // the 2026-11-16 audit: the weekly check followed at once, burying Claude's question to the user
@@ -3144,6 +3272,34 @@ test('the Stats tab reads the history again after wb optimize, a bench run, a pr
   await ui.press({ key: 'tab-stats' })                                   // pressed: read, files unchanged
   await clock.advance(10)
   expect(reads.length).toBe(5)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
+test('the Stats tab reads the history again after a machine of a network home measures (#894)', async ($, on) => {
+  // #894: on a network home each machine keeps optimize.json and speed.json in machines/<id>/,
+  // which the key never stamped: the tab kept a feed without the machine's new measurements
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  const pane = fakeTasks(on, files, ['m-a'])                     // fs.list: machines/m-a (no tasks/)
+  const reads: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'stats' && e.argv[2] === '--json') reads.push(e.argv)
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ ...FEED, until: 1_900_000_000 }) : '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(10)
+  expect(reads.length).toBe(1)
+  await clock.advance(31_000)
+  expect(reads.length).toBe(1)                                           // nothing changed
+  for (const [i, f] of ['optimize.json', 'speed.json'].entries()) {
+    files[`/wb/machines/m-a/${f}`] = '{}'
+    await clock.advance(31_000)
+    expect(reads.length).toBe(2 + i)
+  }
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })

@@ -9,11 +9,14 @@ A push service is Google's, Apple's, Mozilla's or Microsoft's; only their hosts 
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
 import secrets
 import ssl
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -95,19 +98,46 @@ def key_path(token_path: Path) -> Path:
     return token_path.with_name(token_path.name + "-push")  # beside the token: the same secrecy
 
 
+def _key_in(path: Path) -> int | None:
+    """The key a file holds, or None: missing, empty, or not a key."""
+    try:
+        d = int(path.read_text().strip(), 16)
+    except (OSError, ValueError):
+        return None
+    return d if 0 < d < N else None
+
+
+_making = threading.Lock()
+
+
 def private_key(token_path: Path) -> int:
-    """This machine's VAPID key, made on first use (mode 600, like the token)."""
+    """This machine's VAPID key, made on first use (mode 600, like the token). Written whole to a
+    temp file beside it, fsynced, then linked into place: created first and written after, a
+    full disk or a crash left it empty, and every chat request failed on it, not only push (#924).
+    An empty or unparsable one is replaced the same way; two handler threads on first use make
+    one (the lock), and another process's linked first is the key."""
     path = key_path(token_path)
-    if not path.exists():
+    if (d := _key_in(path)) is not None:
+        return d
+    with _making:
+        if (d := _key_in(path)) is not None:
+            return d
         path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")  # 600
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w") as f:
                 f.write(f"{secrets.randbelow(N - 1) + 1:064x}\n")
-        except FileExistsError:  # another process made it first
-            pass
-    d = int(path.read_text().strip(), 16)
-    if not 0 < d < N:
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.link(tmp, path)
+            except FileExistsError:  # a broken one (read above), or another process's just made
+                if _key_in(path) is None:
+                    os.replace(tmp, path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)
+    if (d := _key_in(path)) is None:
         raise RuntimeError(f"{path} holds no usable key: delete it and the chat makes a new one")
     return d
 

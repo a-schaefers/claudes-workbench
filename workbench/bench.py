@@ -134,7 +134,7 @@ def bundle(repo: Path, commit: str, dest: Path) -> None:
     history couldn't be bundled (#478), has the tree."""
     with tempfile.TemporaryDirectory(prefix="wb-bench-") as tmp:
         clone = Path(tmp) / "c"
-        gitops.git(tmp, "clone", "-q", "--no-checkout", "--shared", str(repo), str(clone))
+        gitops.scratch_clone(repo, clone)  # a shallow repo's too (#884)
         when = gitops.git(clone, "log", "-1", "--format=%aI", commit).strip()
         who = {"GIT_AUTHOR_NAME": "workbench bench", "GIT_AUTHOR_EMAIL": "bench@workbench.invalid",
                "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
@@ -214,11 +214,19 @@ def _submodule_repos(src: Path, commit: str, dest: Path) -> list[str]:
     return left
 
 
+def _repo(case: dict) -> Path:
+    """The case's repo: case.json `repo`, or once that linked worktree is removed, its
+    repository's main one (gitops.repo_of, from `git_common`): read from the removed path, a
+    replay lost its line endings, and one with Git LFS files or submodules failed as "gone"
+    (#909, the third audit of 2026-11-21)."""
+    return gitops.repo_of({"repo": case.get("repo"), "git_common": case.get("git_common")})
+
+
 def checkout(case: dict, dest: Path) -> None:
     """The case's base, checked out at `dest`, with an identity of its own (nothing commits), and
     its Git LFS files and submodules as the task had them, from the case's repo (#509).
     RuntimeError naming what it couldn't reproduce."""
-    repo = Path(case["repo"])
+    repo = _repo(case)
     _clone_base(case_dir(case["name"]) / "base.bundle", dest, repo)
     gitops.git(dest, "config", "user.name", "workbench bench")
     gitops.git(dest, "config", "user.email", "bench@workbench.invalid")
@@ -277,7 +285,7 @@ def _prepared(at: store.Task, where: str) -> None:
 def _inputs(case: dict, repo: Path) -> None:
     """The original checkout's copied paths and siblings, beside a replay's checkout, where its
     wb start --copy and --sibling find them (#250)."""
-    src = Path(case["repo"])
+    src = _repo(case)
     for p in case.get("copy") or ():
         if os.path.lexists(src / p):
             runner._copy(src / p, repo / p)
@@ -298,9 +306,13 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         raise RuntimeError(f"{name} is {st.get('phase')}: a case is made from an accepted task")
     if spec.get("trial") or spec.get("bench"):
         raise RuntimeError(f"{name} is a trial run: a check of workbench, not work to replay")
-    repo = Path(spec.get("repo") or "")
+    # the checkout it started from, else its repository's main worktree once that linked one is
+    # removed, as accept and discard find it: refused as gone, though restore_steps and
+    # step_commit below would have found the commits (#909, the third audit of 2026-11-21)
+    repo = gitops.repo_of(spec)
     if not repo.is_dir():
-        raise RuntimeError(f"{repo} is gone: the case is cut from its repo")
+        raise RuntimeError(f"{spec.get('repo')} moved or was deleted: wb relocate {name} --repo "
+                           "<its new path>, then try again")
     steps = st.get("steps", 1)
     step = step or steps
     if not 1 <= step <= steps:
@@ -354,7 +366,9 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         measured = row.get("steps") or []
         step_row = measured[step - 1] if len(measured) >= step else {}
         grants = context.grants(task)
-        case = {"name": case_name, "task": name, "step": step, "repo": str(repo), "base": base,
+        case = {"name": case_name, "task": name, "step": step, "repo": str(repo),
+                **({"git_common": str(c)} if (c := gitops.common_dir(repo)) else {}),  # _repo
+                "base": base,
                 "reference": ref, "size": spec.get("size"), "stack": spec.get("stack"),
                 "test_cmd": test.group(1), "test_timeout": spec.get("test_timeout") or 900,
                 "check_cmd": check, "hidden": picked, "allow": grants.get("allow") or [],
@@ -399,7 +413,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
         with tempfile.TemporaryDirectory(prefix=store.scratch(".check-"), dir=home()) as scratch:
             work = _checkout_at(Path(scratch), case)
-            gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
+            gitops.scratch_clone(repo, work)  # a shallow repo's too (#884)
             # the repo's core.autocrlf and info/attributes: a clone has none of its local config,
             # so the reference check read LF where the task read CRLF and refused the case, and
             # each replay was graded on other bytes than the task saw (#736, the 2026-11-21 audit)
@@ -439,9 +453,19 @@ def wb_commit() -> str:
 
 
 def driver() -> dict:
-    """The driver running now ({pid, run, start}), or {}. `start` is when it started (#511): a
-    recycled pid of ours that runs the bench again isn't it."""
+    """The driver running now ({pid, run, start, machine, host}), or {}. `start` is when it
+    started (#511): a recycled pid of ours that runs the bench again isn't it. Another machine's
+    (on a state directory several share) lives while its lock file beats (runner.BEAT_SECS): on
+    this one its pid was dead, so gc here discarded its live replays and removed their clones, and
+    wb bench start started a second driver beside it (#876, Claude's audit of 1.90.24)."""
     d = store.read_json(home() / "driver.json", {}) or {}
+    if d.get("machine") not in (None, store.machine()):
+        from . import cli  # cli imports this module
+        try:
+            beat = (home() / "driver.lock").stat().st_mtime
+        except OSError:
+            return {}
+        return d if time.time() - beat < cli.BEAT_DEAD else {}
     pid = d.get("pid")
     if not isinstance(pid, int) or pid <= 0 or not models._alive(pid, d.get("start")):
         return {}
@@ -463,6 +487,8 @@ def sweep() -> list[str]:
         b = t.spec.get("bench")
         if not isinstance(b, dict) or b.get("run") == live:
             continue
+        if store.elsewhere(t.status) and cli.runner_alive(t):
+            continue  # another machine's replay, its runner still beating there (#876)
         if t.status.get("phase") not in store.CLOSED:
             with open(os.devnull, "w") as quiet, redirect_stdout(quiet):
                 try:
@@ -470,6 +496,8 @@ def sweep() -> list[str]:
                                                     spec_gap=None, keep_branch=False))
                 except SystemExit:
                     pass
+            if t.status.get("phase") not in store.CLOSED:
+                continue  # the discard refused: its clone is still in use (#876)
             out.append(t.name)
         d = home() / "runs" / str(b.get("run")) / t.name
         for left in (d / "repo", d / "tree"):  # tree/ for a sibling further up (_checkout_at)
@@ -483,6 +511,9 @@ def stop_driver() -> int | None:
     d = driver()
     if not d:
         return None
+    if d.get("machine") not in (None, store.machine()):  # its pid here is another process (#876)
+        raise RuntimeError(f"bench run {d.get('run')} runs on {d.get('host') or d['machine']}, "
+                           "which shares this state directory: stop it there")
     try:
         os.kill(d["pid"], signal.SIGTERM)  # it stops its replay's runner and closes the task
     except ProcessLookupError:
@@ -550,7 +581,8 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
         proc = cli.detach([sys.executable, "-X", "utf8", "-m", "workbench.bench", run], cwd=d,
                           awake=f"wb bench run {run}", env=env, stdout=log, stderr=log)  # #516
     store.write_json(home() / "driver.json", {"pid": proc.pid, "run": run,
-                                              "start": models._started(proc.pid)})
+                                              "start": models._started(proc.pid),
+                                              "machine": store.machine(), "host": store.host()})
     return run, [f"bench run {run}: {len(pairs)} replay(s) × {repeat}"
                  + (f", label {label}" if label else "") + ", one at a time; real tasks go first",
                  f"follow: wb bench report --run {run}   stop: wb bench stop"]
@@ -970,6 +1002,9 @@ def main() -> None:
     run = sys.argv[1]
     signal.signal(signal.SIGTERM, _on_term)
     store.absolute_env()
+    beat = home() / "driver.lock"  # .lock: no wb events wakes for the touch
+    beat.touch()
+    runner._beat(beat)  # another machine sharing the state directory sees it alive (#876)
     try:
         drive(run)
     finally:

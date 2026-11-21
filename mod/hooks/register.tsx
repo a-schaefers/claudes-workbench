@@ -685,8 +685,13 @@ async function refreshStats($: any, force = false) {
   const stamp = async (f: string) => {
     try { const s = await $.fs.stat(f.startsWith('/') ? f : `${mem.root}/${f}`); return `${s.size}@${s.mtimeMs}` } catch { return '-' }
   }
+  // on a network home each machine keeps its optimize.json and speed.json in machines/<id>/
+  // (store.machine_dir, #894): every machine's, since which one is this is wb's to say
+  const machines = await $.fs.list(`${mem.root}/machines`).catch(() => []) as { name: string; kind: string }[]
+  const own = machines.filter(e => e.kind === 'dir').flatMap(e =>
+    ['optimize.json', 'speed.json'].map(f => `machines/${e.name}/${f}`))
   const key = (await Promise.all(['results.jsonl', 'stats.json', 'optimize.json', 'bench/runs.jsonl',
-    'speed.json', mem.savingsFile || '-'].map(stamp))).join(' ')
+    'speed.json', ...own, mem.savingsFile || '-'].map(stamp))).join(' ')
   const had = await read($, statsFeed)
   const now = await $.clock.now()
   const dayOver = typeof had.feed?.until === 'number' && now / 1000 >= had.feed.until
@@ -1290,6 +1295,7 @@ const mem = {
   startedAt: 0,
   lastDrawn: '',
   lastNotify: '-', // notify.jsonl's size and mtime when last read
+  notifyRows: { key: '', rows: [] as Row[] }, // its rows as last parsed, under that key (#921)
   paneOpened: false,
   polling: false,
   watching: false,
@@ -1348,6 +1354,7 @@ const mem = {
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
   eventsStart: '', // its start, as its hello says: with the pid, listener.json's proof of life (#532)
   claudePid: 0, // this Claude Code process, the `wb events` child's parent, as its hello says: 0 unknown (#687)
+  machine: '', // this machine, as the hello says (store.machine): '' from a wb before #922
   claudeStart: '', // and its start
   earsOk: false, // `wb events` has said hello in this load: wb runs
   gone: new Set<string>(), // task directories closed past KEEP_CLOSED_MS: final, never read again
@@ -1409,11 +1416,17 @@ const mine = (t: { session?: string; repo?: string; cwd?: string; subdir?: strin
 const PID_CHECK_MS = 30_000
 const pidKey = (t: { claude_pid?: number; claude_start?: string }) =>
   `${Number(t.claude_pid ?? 0)}@${t.claude_start ?? ''}`
-async function noteClaude($: any, t: { session?: string; claude_pid?: number; claude_start?: string },
+// A pid recorded on another machine (task.json `claude_machine`, listener.json `machine`): it
+// means nothing in this one's /proc. On a state directory two machines share, each machine's mod
+// read the other's live session as gone and adopted its tasks, back and forth, and took the chat's
+// listener from it too (#922; the runners' own pids got the same fix in #849).
+const elsewhere = (machine: unknown) => typeof machine === 'string' && !!machine && !!mem.machine && machine !== mem.machine
+
+async function noteClaude($: any, t: { session?: string; claude_pid?: number; claude_start?: string; claude_machine?: string },
   now: number): Promise<void> {
   const pid = Number(t.claude_pid ?? 0)
   const key = pidKey(t)
-  if (!pid || !t.session || mem.deadPids.has(key)) return
+  if (!pid || !t.session || mem.deadPids.has(key) || elsewhere(t.claude_machine)) return
   // this session's own, unless stamped by an older process of it (`claude --resume`): that one's
   // death is what lets this process claim it back from the others (#687)
   if (mem.ids.has(t.session) && (!mem.claudePid || ownPid(t))) return
@@ -1762,6 +1775,7 @@ async function ears($: any) {
             mem.eventsStart = typeof ev.start === 'string' ? ev.start : '' // listener.json's start (#532)
             mem.claudePid = Number(ev.parent ?? 0) || 0 // whose tasks `wb adopt` claims (#687)
             mem.claudeStart = typeof ev.parent_start === 'string' ? ev.parent_start : ''
+            mem.machine = typeof ev.machine === 'string' ? ev.machine : ''
             mem.earsOk = hello = true
             wait = 2000
           }
@@ -1889,9 +1903,12 @@ async function poll($: any) {
       mem.boundary = false
       await compactAtBoundary($)
     }
-    // the weekly check needs wb to run (`wb events` said hello) and a quiet minute after a turn
+    // the weekly check needs wb to run (`wb events` said hello) and a quiet minute after a turn,
+    // in a session that delegates with wakes on: the plugin runs in every session, and one for
+    // another project got the check, spent the day's offer and ignored wake off (#919)
     const quiet = quietForJobs(list, now, mine)
-    if (mem.sawTurn && mem.earsOk && !mem.busy && !mem.scoutAsked && quiet &&
+    if ((on || mem.delegated) && mem.wake &&
+      mem.sawTurn && mem.earsOk && !mem.busy && !mem.scoutAsked && quiet &&
       now - mem.turnEndedAt >= SCOUT_QUIET_MS) await scoutIfDue($, now)
     if (mem.sawTurn && mem.earsOk && !mem.updateAsked) {
       mem.updateAsked = true
@@ -2127,7 +2144,8 @@ async function listen($: any, now: number) {
   // (no /proc) each ask is a `kill` and a `ps`, run on every poll, 80 a minute, even for this
   // session's own claim, whose answer went unused (#839).
   let lives: boolean | null = false
-  if (theirs && claim.pid) {
+  if (theirs && claim.pid && elsewhere(claim.machine)) lives = true // can't be asked here (#922)
+  else if (theirs && claim.pid) {
     const key = `${Number(claim.pid)}@${claim.start ?? ''}`
     if (now - (mem.listenerAt.get(key) ?? -Infinity) < PID_CHECK_MS) lives = true
     else {
@@ -2141,7 +2159,7 @@ async function listen($: any, now: number) {
     : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens
   if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
   const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid,
-    ...(mem.eventsStart ? { start: mem.eventsStart } : {}), busy: mem.busy })
+    ...(mem.eventsStart ? { start: mem.eventsStart } : {}), ...(mem.machine ? { machine: mem.machine } : {}), busy: mem.busy })
   if (body !== mem.listenerBody || theirs || claim.session !== st.key) { // only on change: a write is an event
     mem.listenerBody = body
     await $.fs.write(`${dir}/listener.json`, body)
@@ -2286,18 +2304,33 @@ async function readQueued($: any) {
 // not acknowledged here.
 async function deliver($: any, now: number) {
   const root = mem.root
-  const file = await readTail($, `${root}/notify.jsonl`, NOTIFY_TAIL)
-  if (!file) {
-    warnOnce($, 'notify', `can't read ${root}/notify.jsonl, so no wake can come: wb doctor`)
-    return
-  }
+  const path = `${root}/notify.jsonl`
+  // The stat first, as recentEvents does (#739): every poll read the whole file (up to
+  // NOTIFY_TAIL, past it a `tail` spawned) before the size@mtime check, which then skipped only
+  // the parse; a few weeks of notices are hundreds of KB, read at each status write (#921).
+  let key = ''
+  try {
+    const st = await $.fs.stat(path)
+    key = `${path}:${st.size}@${st.mtimeMs}`
+  } catch {}
   // While Claude is mid-turn, look every poll (the turn may act on the task) but hold the wake:
   // a prompt submitted now would queue and arrive after the task has moved on.
+  if (key && key === mem.lastNotify && !mem.busy) return
+  let file = key && key === mem.notifyRows.key ? mem.notifyRows : null // mid-turn: parsed already
+  if (!file) {
+    const got = await readTail($, path, NOTIFY_TAIL)
+    if (!got) {
+      warnOnce($, 'notify', `can't read ${path}, so no wake can come: wb doctor`)
+      return
+    }
+    file = { key: got.key && `${path}:${got.key}`, rows: parseLines(got.text) }
+    if (file.key) mem.notifyRows = file
+  }
   if (file.key === mem.lastNotify && !mem.busy) return
   // Per task, its newest notice and every question: two asked at once (parallel tool calls) are
   // both open, and the newest alone hid the first, its agent blocked (the 2026-11-16 audit).
   const due = new Map<string, Row[]>()
-  for (const row of parseLines(file.text)) {
+  for (const row of file.rows) {
     // Every notice counts for rewake, however old: a notice delivered before a reload (or by
     // another session) is news Claude had, not a lost one (the 2026-11-16 audit).
     // a batch's notice is news for each task it names (acked with it), or rewake woke for the rest
@@ -2795,10 +2828,14 @@ export const register: Register = (on, options) => {
   on('command.run', { command: HAND_BACK }, async $ => {
     await workbenchMode($, false)
     const { ok, out } = await runWb($, ['takeover', '--all', '--user', ...(await scope($))])
-    if (!ok) { // nothing was handed over: no turn telling Claude to finish it
+    // A refusal (the coding gate) still takes over the rest: a turn for those whenever one was
+    // taken, the refusals said with them. Keyed on the exit code alone, one refused task left
+    // Claude no turn for the ones whose agents it had just stopped (#918).
+    if (!ok && !/^took over /m.test(out)) { // nothing was handed over: no turn telling Claude to finish it
       $.ui.toast(`workbench: wb takeover --all failed: ${brief(out)}`)
       return { text: `wb takeover --all failed; the agents may still be running (wb status):\n${out}` }
     }
+    if (!ok) $.ui.toast(`workbench: some tasks weren't taken over: ${brief(out)}`)
     mem.queued.push(DONE_NOTE(out)) // a command may not start a turn itself: the next poll does
     return { text: `Agents stopped; Claude is taking over. ${out}` }
   })

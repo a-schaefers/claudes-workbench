@@ -30,11 +30,12 @@ memory while it runs, unless its entry has an `unload` URL (`(no unload URL)` in
 it hasn't): then ask the user to stop it before big coding tasks.
 
 **No ready engine? Offer to set one up; never set it up unasked.** This is an optional step, as
-ARCHITECTURE.md's Images section (in the workbench code, two directories above `readlink -f "$(command -v wb)"`) says. First read `wb scout`: it names an image server already answering on ComfyUI's or
-AUTOMATIC1111's port with the entry that would use it, and ask whether the user runs one
+ARCHITECTURE.md's Images section (in the workbench code, two directories above `readlink -f "$(command -v wb)"`) says. First read `wb scout`: it names an image server already answering on ComfyUI's (8188, or
+ComfyUI Desktop's 8000) or AUTOMATIC1111's port, on WSL2 at the Windows host too, with the entry
+that would use it, and ask whether the user runs one
 elsewhere: AUTOMATIC1111, Forge or SD.Next (port 7860; an entry `{"url":
 "http://127.0.0.1:7860/sdapi/v1/txt2img"}` speaks its API, `"unload":
-".../sdapi/v1/unload-checkpoint"`), ComfyUI (port 8188; `{"url": "http://127.0.0.1:8188",
+".../sdapi/v1/unload-checkpoint"`), ComfyUI (port 8188, the Desktop app 8000; `{"url": "http://127.0.0.1:8188",
 "workflow": "<file>"}`, a workflow the user saved with Export (API), `{prompt}` in its text node,
 `{seed}`, `{width}`, `{height}` where it wants them; it unloads through `/free` by itself), or one
 with the OpenAI images API. Otherwise use `wb scout`'s OS and GPU, then propose in one

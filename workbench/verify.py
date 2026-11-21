@@ -224,7 +224,7 @@ def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
         repo = gitops.repo_of(task.spec)  # a removed linked worktree: the main one (#498)
         work = context.tree(Path(scratch), task.spec["repo"], task.spec.get("siblings"), "repo")
         work.parent.mkdir(parents=True, exist_ok=True)
-        gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
+        gitops.scratch_clone(repo, work)  # a shallow repo's too (#884)
         checkout_settings(repo, work)  # its line endings, as the task's (#426)
         gitops.share_lfs(repo, work)  # its LFS files as data (#382)
         if sparse := gitops.sparse_of(repo):  # as the task's worktree is (#263)

@@ -12,7 +12,7 @@ decides: for significant work the largest model (more parameters, better judgmen
 work the smallest (faster), and at equal size the one already on the GPU. Claude's tokens are
 what workbench saves, so once two of those models each have COST_MIN tasks of the size with what
 they cost Claude recorded (results' `claude`: the session's calls on the task), one that costs
-Claude COST_MARGIN less a task than the guess's pick goes first: on 2026-11-18 the smaller,
+Claude COST_MARGIN less a landed step (#903) than the guess's pick goes first: on 2026-11-18 the smaller,
 faster model the guess sends trivial work to cost Claude more, in its review and fixes, than a
 larger one whose first change was right. A model too big for
 the GPU (models.need over its budget) spills into RAM and runs several times slower, so in that
@@ -82,8 +82,8 @@ class Score:
     stack: tuple = ()              # the kind of work asked about, and the record on it
     like_tries: int = 0
     like_wins: float = 0
-    claude: float | None = None    # mean input-equivalent tokens a task cost Claude (spend.py)
-    claude_n: int = 0              # the tasks it is the mean of
+    claude: float | None = None    # input-equivalent tokens a landed step cost Claude (spend.py)
+    claude_n: int = 0              # the tasks it is measured over
     cheaper: bool = False          # put ahead of the guess for costing Claude less (_cheaper)
     explored: bool = False         # put first to explore it (choose's task_name)
     # the record weighed by recency (HALF_LIFE_DAYS); None: as counted
@@ -101,7 +101,7 @@ class Score:
             return "no real tasks yet"
         t = f", ~{self.minutes:.1f} min of active work a step" if self.minutes is not None else ""
         like = f", {round(self.like_wins, 1):g}/{self.like_tries} on {'/'.join(self.stack)}" if self.like_tries else ""
-        c = f", ~{self.claude / 1000:.0f}K Claude tokens a task" if self.claude_n >= COST_MIN else ""
+        c = f", ~{self.claude / 1000:.0f}K Claude tokens a landed step" if self.claude_n >= COST_MIN else ""
         return f"{round(self.wins, 1):g}/{self.tries} real tasks accepted{like}{t}{c}"
 
 
@@ -136,14 +136,15 @@ def _root(over: dict, model_id: str) -> str:
 # renaming the provider (`ollama` to `local`), moving from `name:latest` to its explicit tag or
 # renaming a llama-swap alias started it fresh: behind the models with a record, on the window's
 # guess, the default knobs and the default budgets, which stall on a slow machine (#818).
-def earlier(m: models.Model, probe: bool = True) -> list[str]:
+def earlier(m: models.Model, probe: bool = True, weights: str | None = None) -> list[str]:
     """The ids ``m`` had before, nearest first: models.json `renamed_from` (wb model rename),
-    followed back; and, with ``probe`` (a server read, cached: models.identity), each id no
-    longer discovered whose newest results row ran on the Ollama digest ``m`` has now. Only a
-    digest: a `bytes:` size matches other weights too often to be called the same model."""
+    followed back; and, with ``probe`` (a server read, cached: models.identity) or ``weights``
+    (its identity, already known: task.json `weights_id`), each id no longer discovered whose
+    newest results row ran on the Ollama digest ``m`` has now. Only a digest: a `bytes:` size
+    matches other weights too often to be called the same model."""
     over = models._overrides()
     out = _up(over, m.id, "renamed_from")
-    if probe and (w := models.identity(m)) and w.startswith("ollama:"):
+    if (w := weights or (models.identity(m) if probe else None)) and w.startswith("ollama:"):
         newest = {r["model"]: r.get("weights_id") for r in store.results() if r.get("model")}
         if any(v == w for k, v in newest.items() if k != m.id):
             found = models.discover()
@@ -224,9 +225,21 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     s.w = (sum(_weight(r, now) for r in real), sum(_weight(r, now) * tuning.credit(r) for r in real),
            sum(_weight(r, now) for r in like), sum(_weight(r, now) * tuning.credit(r) for r in like))
     s.minutes, s.minutes_n = _typical(real)
-    spent = [spend.weighted(r["claude"]) for r in real if isinstance(r.get("claude"), dict)]
-    s.claude, s.claude_n = (statistics.fmean(spent) if spent else None), len(spent)
+    s.claude, s.claude_n = _per_step(real)
     return s
+
+
+def _per_step(real: list[dict]) -> tuple[float | None, int]:
+    """What Claude spent on the rows with a `claude`, over the steps of theirs that landed as the
+    agent's (credit x steps), and how many rows that is. The mean a task set a model whose record
+    held `wb next` chains (a row is the whole chain's cost) as dear beside one that ran single
+    tasks, and counted a discard, which records only what Claude spent before giving up, as a
+    cheap task (#903, the third audit of 2026-11-21). None while no step landed."""
+    rows = [r for r in real if isinstance(r.get("claude"), dict)]
+    landed = sum(tuning.credit(r) * tuning._steps(r) for r in rows)
+    if not landed:
+        return None, 0
+    return sum(spend.weighted(r["claude"]) for r in rows) / landed, len(rows)
 
 
 def _typical(real: list[dict]) -> tuple[float | None, int]:
@@ -480,7 +493,9 @@ SPEED_KEEP = 60  # samples kept per model and measure
 
 
 def _speed_path():
-    return store.home() / "speed.json"
+    # this machine's (store.machine_dir): shared on a network home, a fast desktop's samples
+    # outvoted a laptop's in the median, and the laptop's rounds ran on the desktop's limits (#901)
+    return store.machine_dir() / "speed.json"
 
 
 def record_speed(model_id: str, messages: list[dict]) -> dict:
@@ -533,20 +548,41 @@ def speed_samples(messages: list[dict]) -> dict:
     return {"write": write, "read": read, "ttft": ttft}
 
 
-def speed(model_id: str) -> dict:
+def speed(model_id: str, weights: str | None = None) -> dict:
     """{"write", "read"}: the model's median tokens per second on this machine, where measured;
-    unmeasured under this id, under the nearest id it had before (earlier, #818)."""
-    data = store.read_json(_speed_path(), {}) or {}
-    row = data.get(model_id) or {}
-    if not row and data:
-        m = models.discover().get(model_id)
-        row = next((data[i] for i in (earlier(m) if m else []) if data.get(i)), {})
+    unmeasured under this id, under the nearest id it had before (earlier, #818), else the
+    `wb optimize apply` variant it replaced or the source it is a variant of (#906).
+
+    No server is asked: `wb top` and the Stats tab's feed call this for every running task and
+    rack row on their tick, and earlier()'s identity read cost 2.5 s an unreachable Ollama root,
+    ~4 s a model on another server, frozen with a few on a sleeping LAN box (#905, as #819 was
+    for expected). The digest link only from ``weights``, the identity the caller already has
+    (task.json `weights_id`: wb start, the runner's budgets)."""
+    def row_in(path: Path) -> dict:
+        data = store.read_json(path, {}) or {}
+        row = data.get(model_id) or {}
+        if not row and data:
+            over = models._overrides()
+            ids = _up(over, model_id, "renamed_from")
+            if weights and (m := models.discover().get(model_id)):
+                ids = earlier(m, probe=False, weights=weights)
+            # a variant's first round got the default budgets, though it shares its source's record:
+            # stopped as stuck on a slow machine, the step went into the shared slice as gone badly
+            # (#906). The variant it replaced first (made for this GPU too), then the source, whose
+            # speed is the variant's at worst: it spilled, so the budgets err long
+            ids += [i for key in ("replaces", "variant_of") for i in _up(over, model_id, key) if i not in ids]
+            row = next((data[i] for i in ids if data.get(i)), {})
+        return row
+    row = row_in(_speed_path())
+    if not row and (shared := store.home() / "speed.json") != _speed_path():
+        row = row_in(shared)  # every machine's, from before #901: until this one has measured it
     return {k: statistics.median(row[k]) for k in ("write", "read") if row.get(k)}
 
 
-def budgets(m: models.Model) -> dict:
-    """{"think", "silence", "round"} in seconds for a task on this model."""
-    sp = speed(m.id)
+def budgets(m: models.Model, weights: str | None = None) -> dict:
+    """{"think", "silence", "round"} in seconds for a task on this model; ``weights``: its
+    identity, when known (speed)."""
+    sp = speed(m.id, weights)
     if not sp:
         return {"think": THINK_DEFAULT_S, "silence": SILENCE_DEFAULT_S, "round": ROUND_DEFAULT_S}
     # a reading speed alone stretches them too: a model whose first request never finished had

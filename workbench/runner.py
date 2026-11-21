@@ -23,6 +23,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -95,6 +96,30 @@ def opencode_version() -> tuple[int, int] | None:
         return None
     v = re.search(r"(\d+)\.(\d+)", r.stdout) if r.returncode == 0 else None
     return (int(v[1]), int(v[2])) if v else None
+
+
+def opencode_moved(task: store.Task) -> bool:
+    """Whether OpenCode changed under the task since the last wb command started its runner
+    (status `opencode`, set by wb start, feedback, next and resume), or is now before 2.0; if so,
+    the task is left stuck for wb resume, cause `opencode`: not the step's. Only wb start
+    looked: OpenCode reinstalled from npm (1.x) mid-task failed the next round as "opencode
+    exited 1", charged to the model's slice, and every resume repeated it (#866). Not installed
+    or saying no version: the lane's own error says so."""
+    if not (have := opencode_version()):
+        return False
+    now, was = f"{have[0]}.{have[1]}", task.status.get("opencode")
+    if have >= (2, 0) and (not was or was == now):
+        return False
+    msg = (f"OpenCode {now} can't run tasks: workbench needs OpenCode 2.x: {OPENCODE_GET}; then wb "
+           f"resume {task.name}" if have < (2, 0) else
+           f"{OPENCODE_MOVED} ({was}, now {now}): wb resume {task.name} continues it on {now}"
+           + (f". {drift}" if (drift := untested(have)) else ""))
+    task.set_status(phase="stuck", last=msg[:200])
+    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="opencode")
+    return True
+
+
+OPENCODE_MOVED = "OpenCode was changed under this task"
 
 
 def untested(version: tuple[int, int] | None) -> str:
@@ -224,7 +249,7 @@ def stretch_limits(task: store.Task, m) -> dict:
     given = spec.get("timeouts_given")
     if given is None:  # a task from before #814: whether a flag gave them is unknown
         return {}
-    fresh = router.budgets(m)
+    fresh = router.budgets(m, spec.get("weights_id"))  # no server read for it (#905)
     raised = {k: fresh[k] for k, key in LIMITS.items()
               if k not in given and fresh[k] > float(spec.get(key) or 0)}
     task.set_status(limits=raised or None)
@@ -870,6 +895,18 @@ def renudged(st: dict, n: int) -> bool:
     return st.get("nudged_round") == n - 1 and bool(st.get("session"))
 
 
+# How often a round waiting on a background job or on Claude's answer renews the model's
+# keep-alive: under Ollama's default 5 minutes, which each of OpenCode's requests sets again (#864)
+KEEP_WARM_S = 180
+
+
+def _keep_warm(model_id) -> None:
+    try:
+        models.keep_warm(models.resolve(model_id))
+    except Exception:  # an unknown model or a config that can't be read: nothing to renew
+        pass
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -955,6 +992,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # session between two steps, and the agent worked on from its summary (#774).
     last_step: tuple = (None, 0)
     opened: dict = {}  # the questions open this round (ask_mcp.relay)
+    warmed = time.monotonic()  # the model's keep-alive, renewed while the round waits (#864)
     while True:
         try:  # woken by the agent's output or a steer note; the timeout runs the clocks below
             line = q.get(timeout=5)
@@ -1129,6 +1167,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         if out["full"]:
             _stop(proc)
             break
+        if (waiting_bg or asking) and mono - warmed >= KEEP_WARM_S:
+            warmed = mono  # off the loop: a server slow to answer holds no clock or steer up
+            threading.Thread(target=_keep_warm, args=(task.spec.get("model"),), daemon=True).start()
         every = float(spec.get("checkin") or 0) * 60
         since = max(started, float(task.status.get("checkin_at") or 0))
         active = step_prior + clock.ran(mono)
@@ -1535,6 +1576,76 @@ def _copy(src: Path, dest: Path) -> None:
         shutil.copy2(src, dest, follow_symlinks=False)
 
 
+PREPARED = "prepared.json"
+
+
+def prepared_record(task) -> dict:
+    """What the setup left, for the scratch checkouts: {paths, marks, bytes} from the task's
+    prepared.json, else from status (a task prepared before the file, or a stand-in with status
+    alone). In status.json, an in-tree C build's one entry per object file was megabytes, parsed
+    and rewritten on every tool call (#867)."""
+    d = getattr(task, "dir", None)
+    try:
+        got = store.read_json(d / PREPARED) if d is not None else None
+    except OSError:
+        got = None
+    if isinstance(got, dict):
+        return got
+    st = task.status
+    return {"paths": st.get("prepared_paths"), "marks": st.get("prepared_marks"),
+            "bytes": st.get("prepared_bytes")}
+
+
+# paths given to one cp at a time: well under any ARG_MAX, with the paths' own lengths
+COPY_BATCH = 500
+
+
+def _copy_all(src: Path, dest: Path, paths: list[str]) -> None:
+    """Each of ``paths`` from under ``src`` to the same place under ``dest``, as _copy does, in
+    one GNU cp a batch (`--parents`): one cp per path forked tens of thousands of times for an
+    in-tree C build's object files before the base check ran (#867). A batch that fails (macOS's
+    or busybox's cp, a read error) is copied path by path."""
+    for i in range(0, len(paths), COPY_BATCH):
+        batch = paths[i:i + COPY_BATCH]
+        if len(batch) > 1 and sys.platform != "darwin":
+            try:
+                if subprocess.run(["cp", "-a", "--reflink=auto", "--parents", "-t", str(dest), "--", *batch],
+                                  cwd=src, capture_output=True).returncode == 0:
+                    continue
+            except OSError:
+                pass
+        for p in batch:
+            _copy(src / p, dest / p)  # what a failed batch left is replaced
+
+
+def _reflinks(at: Path) -> bool:
+    """Whether a copy made in ``at`` can be a clone that takes no space (btrfs, XFS, APFS):
+    one small file cloned there, or not."""
+    argv = ["cp", "-c"] if sys.platform == "darwin" else ["cp", "--reflink=always"]
+    try:
+        with tempfile.TemporaryDirectory(dir=at) as d:
+            Path(d, "a").write_bytes(b"x" * 4096)
+            return subprocess.run([*argv, str(Path(d, "a")), str(Path(d, "b"))],
+                                  capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+def _no_room_for(task: store.Task, wt: Path) -> str | None:
+    """Why the setup's work (prepared.json `bytes`) can't be copied into the scratch checkout
+    ``wt`` without filling the disk, or None. wb start counted only the checkout, measured before
+    any setup ran: a 12 GB target/ copied on ext4 filled the disk twice over (cp, then copytree),
+    and every other open task's status write failed meanwhile (#860)."""
+    need = int(prepared_record(task).get("bytes") or 0)
+    free = store.free_bytes(wt)
+    if not need or free is None or free >= need + CHECKOUT_SPARE or _reflinks(wt.parent):
+        return None
+    return (f"the setup's work in the worktree ({store.gb(need)}: its build output, installs and "
+            f"copies) doesn't fit in a scratch copy: {store.gb(free)} free where the state directory "
+            "is, 2 GB kept spare. Free some (another task's build, wb gc), or have the scratch "
+            "checkout run the setup itself (wb verify --setup, wb shot --setup)")
+
+
 def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, str]:
     """Make `task.worktree` the project as the user has it, before anything runs there: the
     links beside it to the repo's `siblings`, the ignored paths to `copy` from the user's
@@ -1542,13 +1653,14 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
     only committed files, so a check that needed node_modules, a .venv or ../lib failed on the
     base and in every round, for that and not for the step). The setup's exit code and output;
     (0, "") with nothing to do. A scratch checkout passes the task's ``prepared`` worktree: the
-    ignored paths its preparation left (status `prepared_paths`, the setup's work and the copies)
+    ignored paths its preparation left (prepared.json `paths`, the setup's work and the copies)
     are copied from there, and the setup isn't run again. The base check, wb verify (twice) and
     wb shot each ran it from nothing, up to SETUP_SECS: a first build compiled three to five
     times a task (#249, the audit of 1.2)."""
     spec, wt = task.spec, task.worktree
     repo = Path(spec["repo"])
-    made = task.status.get("prepared_paths") if prepared else None
+    record = prepared_record(task) if prepared else {}
+    made = record.get("paths") if prepared else None
     # A virtualenv names the checkout it was made in (pyvenv.cfg's home is fine, its activate
     # and its scripts' shebangs aren't): copied, the base check and wb verify ran the task's
     # worktree's interpreter and code, and failed where the task passed (#325, the audit of
@@ -1561,8 +1673,8 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
     # And one whose prepared paths the rounds rebuilt: the agent rebuilt a monorepo's
     # packages/lib/dist (or a C extension in place), the base got the candidate's build, its tests
     # imported it and passed, and verify said `base-passes` for a valid fix (#732, the 2026-11-21
-    # audit). Recorded at setup (status `prepared_marks`); a task prepared before them copies as before.
-    if made and (marks := task.status.get("prepared_marks")) and \
+    # audit). Recorded at setup (prepared.json `marks`); a task prepared before them copies as before.
+    if made and (marks := record.get("marks")) and \
             any(p in marks and prepared_mark(prepared / p) != marks[p] for p in made):
         made = None
     # a scratch checkout (the base check's, wb verify's, wb shot's), not the task's own worktree
@@ -1580,6 +1692,9 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
             # a worktree refuses the copy. Comparing each parent with its own resolution refused
             # every prepared input under a linked home (#345, the audit of 1.4).
             roots = prepared.resolve(), wt.resolve()
+            if why := _no_room_for(task, wt):
+                return "copy failed", why
+            todo = []
             for p in made:
                 src, dest = prepared / p, wt / p
                 # A later step can track an earlier build path or change its parent to a link.
@@ -1590,7 +1705,8 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
                         or dest.parent.resolve() != (roots[1] / p).parent
                         or not os.path.lexists(src)):
                     return "copy failed", f"prepared input {p} changed; use --setup for a fresh checkout"
-                _copy(src, dest)
+                todo.append(p)
+            _copy_all(prepared, wt, todo)
             return _foreign_builds(wt, made, others)
         for p in spec.get("copy") or ():
             _copy(repo / p, wt / p)
@@ -1812,21 +1928,27 @@ def checkout(task: store.Task) -> bool:
 # running agent: a small machine swapped, base checks timed out "not checked", and a test server
 # on a fixed port failed EADDRINUSE in all but one clone, a base failure the base doesn't have
 # (#590, the audit of 1.90). Taken in queue order (task.json created_at), in locks/, which no
-# lane reads: prepare-<n>.lock the slots, prepare.json the queue.
+# lane reads: prepare-<n>.lock the slots, prepare.json the queue. Setups and base checks queue
+# apart (prepare-check-<n>.lock, prepare-check.json): one queue made a 5-second base check, held
+# to 120 s, wait out another task's 25-minute build, with the GPU idle (#868). Two base checks
+# (two test suites, a fixed port) still never run together, nor two setups.
 PREP_SLOTS = 1
+PREP_KINDS = {"setup": ("prepare", "setup"), "check": ("prepare-check", "base check")}
 
 
-def _prep_queue() -> Path:
-    return store.home() / "locks" / "prepare.json"
+def _prep_queue(kind: str = "setup") -> Path:
+    return store.home() / "locks" / f"{PREP_KINDS[kind][0]}.json"
 
 
 @contextlib.contextmanager
-def prep_turn(task: store.Task):
-    """Hold one of PREP_SLOTS, waiting behind the tasks queued before this one (status `last`
-    names the one it waits for). A holder that died lets go: the kernel drops its flock, and
-    its queue entry is passed over once its pid is gone."""
+def prep_turn(task: store.Task, kind: str = "setup"):
+    """Hold one of PREP_SLOTS for a setup or (``kind`` "check") a base check, waiting behind the
+    tasks queued for the same before this one (status `last` names the one it waits for). A
+    holder that died lets go: the kernel drops its flock, and its queue entry is passed over
+    once its pid is gone."""
     import fcntl
-    path = _prep_queue()
+    path = _prep_queue(kind)
+    stem, what = PREP_KINDS[kind]
     path.parent.mkdir(parents=True, exist_ok=True)
     me = str(os.getpid())
     mine = {"task": task.name, "since": task.spec.get("created_at") or store.now(),
@@ -1850,7 +1972,7 @@ def prep_turn(task: store.Task):
             waiting = [(pid, r) for _, pid, r in queue if not r.get("holding")]
             if waiting and waiting[0][0] == os.getpid():
                 for i in range(PREP_SLOTS):
-                    f = open(path.with_name(f"prepare-{i}.lock"), "a+")
+                    f = open(path.with_name(f"{stem}-{i}.lock"), "a+")
                     try:
                         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:
@@ -1862,7 +1984,7 @@ def prep_turn(task: store.Task):
                 ahead = next((r["task"] for _, pid, r in queue if r.get("holding")), None) or \
                     next((r["task"] for pid, r in waiting if pid != os.getpid()), None)
                 if ahead and ahead != said:
-                    task.set_status(phase="queued", last=f"waiting for {ahead}'s setup or base check "
+                    task.set_status(phase="queued", last=f"waiting for {ahead}'s {what} "
                                     "(one at a time on this machine)")
                     said = ahead
                 time.sleep(1)
@@ -1899,7 +2021,11 @@ def _prepare_now(task: store.Task) -> bool:
         except gitops.GitError:
             made = None
         marks = {p: prepared_mark(task.worktree / p) for p in made} if made else None  # #732
-        task.set_status(prepared=True, prepared_paths=made, prepared_marks=marks, setup_secs=secs)
+        # what each scratch checkout's copy of them takes, checked against the free space (#860)
+        size = sum(store.dir_size(task.worktree / p, budget=10)[0] for p in made) if made else 0
+        # a file of its own, not status.json, which every status write rewrites whole (#867)
+        store.write_json(task.dir / PREPARED, {"paths": made, "marks": marks, "bytes": size})
+        task.set_status(prepared=True, setup_secs=secs)
         return True
     what = f"the setup command failed (exit {code})" if isinstance(code, int) else \
         f"setting up the worktree failed ({setup_timed_out(spec) if code == 'timeout' else code})"
@@ -1937,7 +2063,7 @@ def base_check(task: store.Task) -> dict | None:
     from . import verify  # verify imports this module
     timed: list[float] = []  # its scratch checkout and run, not the waits for the GPU or a turn (#779)
     code, output = verify.on_base(task, cmd, limit, say=lambda msg: task.set_status(last=msg),
-                                  turn=lambda: _timed(prep_turn(task), timed))  # one at a time, as setups (#590)
+                                  turn=lambda: _timed(prep_turn(task, "check"), timed))  # one at a time (#590), apart from setups (#868)
     task.dir.joinpath("base-tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     return {"ok": code == 0, "exit": code, "tail": clip_tail(output, 8, total=1500), "limit": limit,
@@ -2019,7 +2145,12 @@ def proposals(worktree: Path) -> list[tuple[Path, Path]]:
     worktree: a new file, untracked at the step's start (HEAD), never a link (it could point
     anywhere). A `CLAUDE.md.proposed` the project already tracked was settled too, and accept
     deleted a draft the agent never touched and the review never showed; and an rglob walked
-    every copied node_modules on each review (#321, the audit of 1.4). Git skips ignored paths."""
+    every copied node_modules on each review (#321, the audit of 1.4). Git skips ignored paths.
+    An instruction file that is a link inside the worktree (wb init's AGENTS.md -> CLAUDE.md)
+    pairs its proposal with the link's target, so the diff and the write go to the real file:
+    paired with the link, the review diffed against nothing and --take-claude-md put a plain
+    AGENTS.md over the link, leaving CLAUDE.md unchanged (#871, Claude's audit of 1.90.24). A
+    link out of the worktree stays paired with the link, which `link_problem` refuses."""
     try:
         listed = gitops.git(worktree, "ls-files", "--others", "--exclude-standard", "-z", "--",
                             *(f":(glob)**/{name}.proposed" for name in PROPOSABLE))
@@ -2029,8 +2160,30 @@ def proposals(worktree: Path) -> list[tuple[Path, Path]]:
     for rel in sorted(p for p in listed.split("\0") if p):
         prop = worktree / rel
         if not prop.is_symlink() and prop.is_file():
-            out.append((prop.with_name(prop.name.removesuffix(".proposed")), prop))
+            real = prop.with_name(prop.name.removesuffix(".proposed"))
+            if real.is_symlink():
+                try:
+                    real = worktree / real.resolve().relative_to(worktree.resolve())
+                except (OSError, RuntimeError, ValueError):
+                    pass  # out of the worktree, or a loop: link_problem says so
+            out.append((real, prop))
     return out
+
+
+def link_problem(worktree: Path) -> str | None:
+    """Why the proposals can't be taken as they are, or None: two proposals for one file
+    (CLAUDE.md.proposed and AGENTS.md.proposed through wb init's link), or one whose file is a
+    link out of the worktree. Taking either replaced a link or kept one proposal at random (#871)."""
+    seen: dict[Path, Path] = {}
+    for real, prop in proposals(worktree):
+        if real.is_symlink():
+            return (f"{real.relative_to(worktree)} is a link out of the worktree, so no commit "
+                    f"would take {prop.name}: apply {prop} by hand")
+        if real in seen:
+            return (f"{seen[real].name} and {prop.name} both propose "
+                    f"{real.relative_to(worktree)}: delete one ({seen[real]} or {prop})")
+        seen[real] = prop
+    return None
 
 
 def proposal_diff(task: store.Task) -> str:
@@ -2046,9 +2199,12 @@ def proposal_diff(task: store.Task) -> str:
         old = read.read_text(errors="replace").splitlines(keepends=True) if read else []
         d = "".join(difflib.unified_diff(old, prop.read_text(errors="replace").splitlines(
             keepends=True), f"a/{rel}", f"b/{rel}"))
-        parts.append(f"\n\nthe agent proposes this change to {rel} (wb accept --take-claude-md "
-                     f"takes it; without it, accept drops it):\n{d or '(no change)'}")
-    return "".join(parts)
+        via = "" if prop.name == f"{real.name}.proposed" and prop.parent == real.parent else \
+            f" (as {prop.relative_to(task.worktree)}, through the link)"
+        parts.append(f"\n\nthe agent proposes this change to {rel}{via} (wb accept "
+                     f"--take-claude-md takes it; without it, accept drops it):\n{d or '(no change)'}")
+    problem = link_problem(task.worktree)
+    return "".join(parts) + (f"\n\n--take-claude-md is refused: {problem}" if problem else "")
 
 
 def review_diff(task: store.Task) -> str:
@@ -2219,7 +2375,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
                      ".claude/ are yours to write; keep, rewrite or revert them")
     if nested := gitops.nested_repos(task.worktree):
         lines.append(gitops.nested_line(nested))
-    lines += [f"NOTE: {e}" for e in gitops.submodule_edits(task.worktree)]  # #419
+    edits, new = gitops.submodule_check(task.worktree)
+    lines += [f"NOTE: {e}" for e in edits + new]  # #419, #889
     try:  # a git that refuses the diff costs the report a line, not the task (#493)
         stat = gitops.diff(task.worktree, spec["base"], stat=True).splitlines()
     except gitops.GitError as e:
@@ -2363,9 +2520,14 @@ def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
     # read no further than the room: a 300 MB generated file, not ignored, was read whole into
     # the runner at each handover only to be cut, risking an OOM kill (#474, the audit of 1.8)
     diff = gitops.diff(wt, "HEAD", limit=room)
+    # its stat capped as the review's is: uncapped, a venv or a build directory the repo doesn't
+    # ignore put 3,000 stat lines ahead of "## Now", past the fresh session's reach (#863)
     work = (f"```diff\n{diff}\n```" if diff is not None else
             "The diff is too long to include; read the changed files:\n"
-            f"```\n{gitops.diff(wt, 'HEAD', stat=True)}\n```")
+            f"```\n{gitops.diff(wt, 'HEAD', stat=True, stat_count=gitops.CHANGED_SHOWN)}\n```"
+            + "".join(f"\n{d} holds {k:,} new files the project doesn't ignore: build output, "
+                      "probably; don't read them" for d, k in
+                      gitops.build_dirs(wt, gitops.changed(wt))[:gitops.CHANGED_SHOWN]))
     return (f"You are picking this task up in a fresh session ({why}). Nothing from the earlier "
             f"session carries over except what is in the working tree, so start from what is "
             f"below and re-read the files you need.\n\n## The task\n\n"
@@ -2436,7 +2598,14 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
         now = raw
     else:
         asks = round_asks(task, n)  # ends with this round's own: instructions.md is written
-        now = raw if len(asks) < 2 else ASKED.format("\n\n".join(asks[:-1])).strip() + "\n\nNow:\n\n" + raw
+        # ... unless round n is the runner's nudge, which round_asks skips but for Claude's
+        # notes folded into it: dropping the last ask then dropped the newest real one, the
+        # review feedback, and the fresh session got the nudge alone and reported done (#859)
+        notes = task.round_dir(n) / FOLDED
+        own = (not (task.round_dir(n) / NUDGED).exists()
+               or (notes.is_file() and bool(notes.read_text().strip())))
+        prior = asks[:-1] if own else asks
+        now = raw if not prior else ASKED.format("\n\n".join(prior)).strip() + "\n\nNow:\n\n" + raw
     path.write_text(handoff_prompt(task, why, now))
     task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]] * bool(st.get("session")),
                     context=None, skills_told=None)  # a new session hears the skills again
@@ -2579,15 +2748,22 @@ BOUND_MIN_S = 120
 OPENCODE_PROMPT_TOKENS = 3000
 
 
-def read_bound(task: store.Task, n: int, rnd: dict) -> int | None:
+def read_bound(task: store.Task, n: int, rnd: dict, m: models.Model | None = None) -> int | None:
     """Record round ``n``'s read speed bound (tokens/s) when it ended before the model's first
     output, after BOUND_MIN_S or more, by the silence or round limit or OpenCode giving up; and
     return it; else None. Not after a nudge or Claude's interruption: a model thinking silently
-    behind a server that sent its headers at once would read as a slow reader."""
+    behind a server that sent its headers at once would read as a slow reader. Nor when the
+    server (model ``m``'s) is down or stopped now, or OpenCode's retries say it refused or failed
+    a request (anything but a timeout): a server that died before the first token read as ~12
+    tokens/s, and the model's next rounds and tasks waited an hour of silence (#862)."""
     from . import router
     waited = float(rnd.get("waited") or 0)
     if rnd.get("answered") or rnd.get("interrupted") or waited < BOUND_MIN_S \
             or rnd.get("guard") not in (None, "silence", "round"):
+        return None
+    if any("timed out" not in str(t).lower() for t in rnd.get("retries") or ()):
+        return None
+    if m is not None and (_down(m) or _stopped(m)):
         return None
     try:
         layer = json.loads((context.rules_dir(task) / "opencode.json").read_text())
@@ -2743,7 +2919,8 @@ def drive(task: store.Task) -> None:
     # infra: why the machine, not the agent, failed the task's last run (wb bench grades none of it)
     task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid(), infra=None,
                     boot=store.boot_id(),  # a later boot reaps it as a restart's (cli.reap)
-                    machine=store.machine(), host=store.host())  # whose pid it is (#849)
+                    machine=store.machine(), host=store.host(),  # whose pid it is (#849)
+                    beat=BEAT_SECS)  # and that its lock file beats (#872)
     say = lambda msg: task.set_status(last=msg)  # noqa: E731
     try:
         m = models.resolve(task.spec["model"])
@@ -2765,6 +2942,8 @@ def drive(task: store.Task) -> None:
             return _load_failed(task, e)
     if needs_base_check(task):
         _base_check(task)  # on the untouched base, before the agent and the GPU
+    if opencode_moved(task):  # before the GPU is taken for a round that can't run (#866)
+        return
     # beside the running tasks' models when all fit the GPU, else alone once they finish
     with models.GpuLease(m, task.name, say) as lease:
         # this runner reached the lease: from now on gpu.json says whether it holds the GPU, so
@@ -2784,6 +2963,8 @@ def drive(task: store.Task) -> None:
         revived = None  # the round run again after its server went away under it
         while True:
             if _updated(task):  # before the round: its lane, shim and ask server would be new
+                return
+            if not first and opencode_moved(task):  # reinstalled between rounds (#866)
                 return
             if not first:
                 # Again before every round: each request resets Ollama's keep-alive to its own
@@ -2820,7 +3001,7 @@ def drive(task: store.Task) -> None:
             finally:  # before the lease is released: the GPU's next task must not meet our agent
                 _end_agent(task)
             measure_speed(task, began)
-            if (bound := read_bound(task, n, rnd)) and rnd["guard"] == "silence":
+            if (bound := read_bound(task, n, rnd, m)) and rnd["guard"] == "silence":
                 from . import router
                 rnd["stuck"] += (f" (it read at most ~{bound} tokens/s here: this task's next "
                                  f"round and a new task on this model now wait "
@@ -3142,7 +3323,7 @@ def _signal_notice(task: store.Task, at: float) -> None:
         ts = store.now()
         # the steps `wb next` committed, which a discard keeps (#494), for each task they are in
         kept = [line for t in batch if (line := steps_line(t))]
-        batch[0].notify("stuck", (
+        row = batch[0].notify("stuck", (
             f"task {task.name}: {SIGNAL_STOP}. wb resume {task.name} continues it in a fresh "
             f"session, wb discard {task.name} drops it" if len(batch) == 1 else
             f"{len(batch)} tasks' runners were stopped by a signal (a shutdown, a logout or a "
@@ -3153,8 +3334,7 @@ def _signal_notice(task: store.Task, at: float) -> None:
             + "".join(f"\n{k}" for k in kept),
             round=batch[0].status.get("round"), ts=ts, tasks=names,
             cause="signal")  # not the step's size (#582)
-        for t in batch[1:]:
-            store.write_ack(t, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
+        store.ack_batch(batch, row, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
 
 
 def lock_file(name: str, kind: str):
@@ -3185,6 +3365,26 @@ def _one_runner(task: store.Task):
     return fh
 
 
+# How often the runner touches its lock file (lock_file "runner"): another machine sharing the
+# state directory can't see its pid, so it tells a live runner from a dead one by this alone
+# (cli.runner_alive). A runner killed with its machine (power loss, a recreated container with a
+# new host name, a reimaged machine) kept its task live there for good: no command could stop,
+# discard or resume it (#872, Claude's audit of 1.90.24). The lock file's name ends in .lock, so
+# no `wb events` wakes for the touch.
+BEAT_SECS = 60
+
+
+def _beat(path: Path) -> None:
+    def touch():
+        while True:
+            time.sleep(BEAT_SECS)
+            try:
+                os.utime(path)
+            except OSError:
+                pass  # a full or gone state directory: the beat is best effort
+    threading.Thread(target=touch, daemon=True, name="beat").start()
+
+
 def main():
     store.absolute_env()
     gitops.drop_repo_env()  # the caller's repository variables, for the agent too (#798)
@@ -3193,6 +3393,7 @@ def main():
     if lock is None:
         print(f"another runner drives {task.name}; this one exits", flush=True)
         return
+    _beat(lock_file(task.name, "runner"))
     signal.signal(signal.SIGTERM, _on_term)
     CURRENT["code"] = code_print()  # what the children load; compared before each round (#603)
     from . import router, transcript, verify  # noqa: F401 (now, not mid-task from an updated clone)

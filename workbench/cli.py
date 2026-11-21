@@ -66,6 +66,20 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
+def read_text(src: str, what: str) -> str:
+    """A spec or message: the file `src`, or stdin for "-", as strict UTF-8. A Latin-1 or CP1252
+    file raised a traceback, and piped from a C-locale shell (stdin's surrogateescape) passed every
+    check and died writing prompt.md, leaving a task with no status that only discard cleared
+    (#873, Claude's audit of 1.90.24)."""
+    if src == "-" and not hasattr(sys.stdin, "buffer"):  # already text (a StringIO)
+        return sys.stdin.read()
+    data = sys.stdin.buffer.read() if src == "-" else Path(src).read_bytes()
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        die(f"{'stdin' if src == '-' else src}: {what} isn't UTF-8 (byte {e.start}): save it as UTF-8")
+
+
 def need(name: str) -> store.Task:
     """The task a command names, by its name exactly. 'foo/', './foo' (or 'Foo' on macOS) opened
     tasks/foo too, but the runner's command line says 'foo': its live runner read as dead, so
@@ -128,11 +142,31 @@ def _coding_used(task: store.Task) -> None:
             {**x, "used": x.get("used") or (store.now() if _spent(x) else None)} for x in rows]})
 
 
+def _opencode_again(task: store.Task) -> None:
+    """wb start's check of OpenCode, again before feedback, next or resume writes anything:
+    reinstalled from npm or GitHub's Latest (1.x) mid-task, the round failed as "opencode exited
+    1" and was charged to the model (#866). The version it finds is the runner's to compare with
+    (status `opencode`, runner.opencode_moved)."""
+    if (have := runner.opencode_version()) and have < (2, 0):
+        die(f"OpenCode {have[0]}.{have[1]} can't run tasks: workbench needs OpenCode 2.x: "
+            f"{runner.OPENCODE_GET}", 3)
+    if have:
+        if drift := runner.untested(have):
+            print(f"note: {drift}")
+        task.set_status(opencode=f"{have[0]}.{have[1]}")
+
+
 def spawn_runner(task: store.Task) -> int:
     _coding_used(task)  # work handed (back) to the agent: Claude's allowance, if any, is spent
     env = context.detached_env()  # the user's PYTHONPATH kept for the agent (#512)
     env.pop("WB_TASK", None)  # the agent's mark (runner.sweep kills what carries it), not the runner's
-    task.set_status(stopping=None, parked=None)  # a stop wb made earlier says nothing about this runner
+    # a stop wb made earlier says nothing about this runner, nor an earlier runner's beat (#872)
+    task.set_status(stopping=None, parked=None, beat=None)
+    # handed back to the agent: no longer Claude's, so a later session adopting its review turns
+    # workbench mode back on (#926: the mod's delegatedWork read the old takeover). Kept for a
+    # task not checked out, whose runner's #655 guard reads it
+    if task.status.get("taken_over") and runner.checked_out(task):
+        task.set_status(taken_over=None)
     with open(task.dir / "runner.log", "a") as log:
         # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
         # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
@@ -301,7 +335,7 @@ def runner_alive(task: store.Task) -> bool:
     if not pid:
         return False
     if store.elsewhere(task.status):  # another machine's, on a shared state directory: its pid
-        return True                   # isn't in this process table (#849), its own wb reaps it
+        return _beats(task)           # isn't in this process table (#849), its lock file beats
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):  # gone, or a recycled pid that isn't ours
@@ -310,6 +344,24 @@ def runner_alive(task: store.Task) -> bool:
     # reboot, SIGKILL an unrelated process group given the dead runner's pid (the 2026-11-16
     # audit). Whole words: task "a" isn't the runner of task "ab".
     return models.runs(pid, "workbench.runner", task.name)
+
+
+# Another machine's runner is dead once its lock file hasn't beaten (runner.BEAT_SECS) for this
+# long: one killed with its machine kept its task live for good (#872). Generous, for clock skew
+# between machines and a machine asleep, whose runner finds its task failed when it wakes.
+BEAT_DEAD = 30 * 60
+
+
+def _beats(task: store.Task) -> bool:
+    """Whether another machine's runner still beats (BEAT_DEAD). A runner from before the beat
+    (no status `beat`) is trusted, as before."""
+    if not task.status.get("beat"):
+        return True
+    try:
+        at = runner.lock_file(task.name, "runner").stat().st_mtime
+    except OSError:
+        return False
+    return time.time() - at < BEAT_DEAD
 
 
 # A live task whose runner is gone without a word (SIGKILL, out of memory, a reboot) would sit
@@ -333,8 +385,9 @@ def _restarted(st: dict) -> bool:
 def reap(task: store.Task, quiet: bool = False) -> bool:
     """Fail a live task whose runner is dead; True when this call did it. quiet: no notice (a
     restart's batch, which one notice names)."""
-    agent = task.status.get("agent_pid")
-    restart = _restarted(task.status)
+    far = store.elsewhere(task.status)  # its pids and boot are another machine's (#872)
+    agent = None if far else task.status.get("agent_pid")
+    restart = _restarted(task.status) and not far
     try:
         st = task.set_status_if(  # one reaper wins: two waiters, one notice
             lambda st: st.get("phase") in LIVE and not runner_alive(task)
@@ -372,8 +425,9 @@ def reap(task: store.Task, quiet: bool = False) -> bool:
         return True
     free = store.free_bytes()
     full = free is not None and free < DISK_SPARE  # a full disk is the likely why (#342)
-    task.notify("failed", f"task {task.name}: the runner died without a report (killed, out of "
-                f"memory or a reboot{'; the disk has ' + store.gb(free) + ' free' if full else ''}); "
+    silent = f"no heartbeat for {BEAT_DEAD // 60} min: " if far else ""  # #872
+    task.notify("failed", f"task {task.name}: the runner{' on ' + far if far else ''} died "
+                f"without a report ({silent}killed, out of memory or a reboot{'; the disk has ' + store.gb(free) + ' free' if full else ''}); "
                 f"see {task.dir / 'runner.log'}. wb resume {task.name} "
                 "continues it in a fresh session", round=st.get("round"), cause="died")  # #582
     return True
@@ -392,15 +446,14 @@ def _restart_notice(task: store.Task) -> None:
     ts = store.now()
     # the batch by name: `wb resume --all --repo <cwd>` resumed nothing for a session in ~ (a
     # broad directory claims no task) and, in a repo two sessions share, the other's tasks too (#692)
-    batch[0].notify("failed", (f"task {task.name}: {RESTARTED}" if len(batch) == 1 else
+    row = batch[0].notify("failed", (f"task {task.name}: {RESTARTED}" if len(batch) == 1 else
                                f"{len(batch)} tasks were {RESTARTED.replace('it)', 'them)')}: "
                                + ", ".join(t.name for t in batch))
                     + f". wb resume {' '.join(t.name for t in batch)}"
                     + " continues them in the order they were started (one that never ran a "
                     "round starts it again)", round=batch[0].status.get("round"), ts=ts,
                     tasks=[t.name for t in batch], cause="died")  # not the step's size (#582)
-    for t in batch[1:]:
-        _write_ack(t, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
+    store.ack_batch(batch, row, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
 
 
 def _whose(t) -> str:
@@ -417,9 +470,9 @@ def _stop_for_update(tasks) -> str:
     stopped = []
     for t in tasks:
         with store.locked(runner.lock_file(t.name, "cmd")):
-            if t.status.get("phase") in store.CLOSED or (t.status.get("pid")
-                                                         and store.elsewhere(t.status)):
-                continue  # another machine's runner (#849): that machine's wb stops it
+            if t.status.get("phase") in store.CLOSED or (t.status.get("pid") and store.elsewhere(
+                    t.status) and runner_alive(t)):
+                continue  # another machine's live runner (#849): that machine's wb stops it
             _stop_runner(t)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": UPDATE_STOP})
@@ -430,13 +483,12 @@ def _stop_for_update(tasks) -> str:
         groups.setdefault(store.owner(t), []).append(t)
     for batch in groups.values():
         names, ts = [t.name for t in batch], store.now()
-        batch[0].notify("stuck", (f"task {names[0]}: {UPDATE_STOP}" if len(batch) == 1 else
+        row = batch[0].notify("stuck", (f"task {names[0]}: {UPDATE_STOP}" if len(batch) == 1 else
                                   f"{len(batch)} tasks were {UPDATE_STOP}: " + ", ".join(names))
                         + f". wb resume {' '.join(names)} continues "
                         + ("it" if len(batch) == 1 else "them") + " in a fresh session",
                         round=batch[0].status.get("round"), ts=ts, tasks=names, cause="update")
-        for t in batch[1:]:
-            _write_ack(t, ts)  # had with the first's notice, as a restart's batch (#544)
+        store.ack_batch(batch, row, ts)  # had with the first's notice, as a restart's batch (#544)
     return "stopped for the update: " + (", ".join(f"{t.name} ({_whose(t)})" for t in stopped)
                                           or "nothing was running")
 
@@ -450,6 +502,8 @@ def _worktree_problem(task: store.Task) -> str | None:
     if task.spec.get("repo") and not gitops.repo_of(task.spec).is_dir():  # damaged: the runner says (#475)
         return (f"{task.spec['repo']} moved or was deleted: wb relocate {task.name} --repo <its "
                 "new path>, then try again")
+    if why := _accepting(task):  # before the discard advice (#878)
+        return why
     if task.worktree.is_dir():
         return None
     if not runner.checked_out(task):
@@ -458,6 +512,19 @@ def _worktree_problem(task: store.Task) -> str | None:
     return (f"{task.name}'s worktree is gone ({task.worktree}): its committed work is on branch "
             f"{task.spec.get('branch')}; wb discard {task.name} --keep-branch drops the task and "
             "keeps the branch")
+
+
+def _accepting(task: store.Task) -> str | None:
+    """Why the task can't be changed or dropped: an earlier wb accept got past its commit
+    (status `closing`) and stopped before it finished (Claude's Bash limit, an Esc, a signer
+    waiting on a touch). It looked like a task still in review: discard recorded committed work
+    as discarded, and feedback or next added work that the retried accept's forced worktree
+    removal then deleted (#878, Claude's audit of 1.90.24)."""
+    close = task.status.get("closing")
+    if not close or task.status.get("phase") in store.CLOSED:
+        return None
+    return (f"{task.name} is being accepted: an earlier wb accept committed {close.get('commit')} "
+            f"and stopped partway; wb accept {task.name} finishes it")
 
 
 def _need_worktree(task: store.Task) -> None:
@@ -528,14 +595,18 @@ def _gpu_holders(me: str | None = None, of: models.Model | None = None) -> dict:
     but ``me``: its gpu.json's live entries, plus each task whose runner is alive but hasn't
     reached the lease yet (one just started), as an entry of its own. A runner that has (status
     `leased`, its pid) and isn't in gpu.json stepped aside for its tests or a server's wait:
-    counted, wb start refused (exit 4) a task the lease would have let in (#805)."""
+    counted, wb start refused (exit 4) a task the lease would have let in (#805). Another
+    machine's task (a network home's) isn't, with this machine's own lease: it is on that
+    machine's GPU, and its checkout or base check here refused an idle GPU (#895)."""
     pool = models.pool(of)
     held = {p: h for p, h in models.holders(pool=pool).items() if h.get("task") != me}
     named = {h.get("task") for h in held.values()}
     found = models.discover()
+    own = not models.lease_shared()
     for t in store.all_tasks():
         m = found.get(t.spec.get("model") or "")
         if t.name not in named and t.name != me and m and models.pool(m) == pool \
+                and not (own and store.elsewhere(t.status)) \
                 and t.status.get("phase") in store.ACTIVE and runner_alive(t) \
                 and t.status.get("leased") != t.status.get("pid"):
             held[f"task {t.name}"] = {"model": m.id, "task": t.name}
@@ -554,8 +625,11 @@ def _preempt_bench(m: models.Model, me: str | None = None) -> str:
     records them preempted and replays them once no real task runs). An overnight run must
     never make the morning's task queue."""
     held, waits = _gpu_wait(m, me)
+    # never another machine's: _stop_runner refuses it, and wb start, feedback, next and resume
+    # died with "runs on <host>" before their --queue check (#895)
     names = sorted({h["task"] for h in held.values() if h.get("task")
-                    and store.Task(h["task"]).spec.get("bench")}) if waits else []
+                    and store.Task(h["task"]).spec.get("bench")
+                    and not store.elsewhere(store.Task(h["task"]).status)}) if waits else []
     for name in names:
         t = store.Task(name)
         with store.locked(runner.lock_file(name, "cmd")):
@@ -795,21 +869,40 @@ def _worktree_setup(repo: Path, a, sub: str | None = None) -> dict:
                               ("setup_timeout", limit if setup else None)) if v}
 
 
-def _missing_dirs(repo: Path) -> list[str]:
-    """The checkout's ignored top-level directories (but caches), which a task's worktree won't
-    have: what a --setup would install (node_modules/, .venv/, target/)."""
+# What an install makes, at any depth: a monorepo's per-package node_modules or .venv
+INSTALL_DIRS = ("node_modules", ".venv", "venv", "target", "vendor")
+
+
+def _missing_dirs(repo: Path, sub: str | None = None) -> list[str]:
+    """The checkout's ignored directories (but caches), which a task's worktree won't have:
+    what a --setup would install (node_modules/, .venv/, target/). Those at the top, directly
+    in the package (`sub`) and any install directory (INSTALL_DIRS) deeper, named from the
+    package: only the top level was looked at, so a monorepo's services/api/.venv and
+    web/node_modules got no note, and every round ran against a base that could never pass
+    (#877, Claude's audit of 1.90.24)."""
     try:
         out = gitops.git(repo, "ls-files", "--others", "--ignored", "--exclude-standard",
                          "--directory", "-z")
     except gitops.GitError:
         return []
-    return [p for p in out.split("\0") if p.endswith("/") and p.count("/") == 1
-            and p[:-1] not in CACHE_DIRS and not p[:-1].endswith("cache")]
+    pre = f"{sub.strip('/')}/" if sub else ""
+    keep = []
+    for p in out.split("\0"):
+        if not p.endswith("/"):
+            continue
+        name = p[:-1].rsplit("/", 1)[-1]
+        if name in CACHE_DIRS or name.endswith("cache"):
+            continue
+        if p.count("/") == 1 or (pre and p.startswith(pre) and p[len(pre):].count("/") == 1) \
+                or name in INSTALL_DIRS:
+            keep.append(os.path.relpath(p, pre or ".") + "/" if pre else p)
+    return keep
 
 
 # A task takes its checkout and --copy paths, then the base check's and wb verify's scratch
-# checkouts copy them again (a full copy on ext4, where reflinks don't exist), plus the build
-# (#342, the audit of 1.4)
+# checkouts copy them again (a full copy on ext4, where reflinks don't exist) (#342, the audit
+# of 1.4). The setup's build output can't be measured before it runs: runner._no_room_for checks
+# it before each scratch copy (#860).
 DISK_COPIES, DISK_SPARE = 3, runner.CHECKOUT_SPARE
 
 
@@ -867,11 +960,32 @@ def _disk_room(repo: Path, base: str, setup: dict) -> int | None:
         + (f"; history: {kept}" if (kept := history_held()) else ""))
 
 
+# A batch is started in one sitting: a backlog whose tasks are all closed, the newest started
+# this long ago, is an earlier night's
+BACKLOG_GAP = 6 * 3600
+
+
+def _backlog_done(name: str) -> str | None:
+    """Why `--backlog name` is refused: an earlier batch had the name. Reused, the morning's
+    `wb backlog` listed both nights' tasks and added their savings, and on WSL2 the second
+    night's first task found the first's and never said nothing keeps Windows awake (#880,
+    Claude's audit of 1.90.24)."""
+    ts = [t for t in store.all_tasks(archived=True) if t.spec.get("backlog") == name]
+    if not ts or any(t.status.get("phase") not in store.CLOSED for t in ts) or time.time() - max(
+            t.spec.get("created_at") or 0 for t in ts) < BACKLOG_GAP:
+        return None
+    fresh = f"{name[:37].rstrip('-')}-{time.strftime('%Y-%m-%d')}"
+    return (f"backlog {name!r} was an earlier batch ({len(ts)} task(s), all closed): give this "
+            f"one a fresh name, as --backlog {fresh}")
+
+
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
     if a.backlog is not None and not store.NAME_RE.match(a.backlog):
         die("a backlog name is lowercase letters, digits and hyphens, at most 48")
+    if a.backlog and (why := _backlog_done(a.backlog)):
+        die(why)
     task = store.Task(a.name)
     if task.exists:  # discarding never frees a name, so the refusal doesn't suggest it (the audit)
         die(f"task {a.name!r} exists ({task.status.get('phase')}): task names are never reused, "
@@ -891,7 +1005,7 @@ def cmd_start(a):
         die(f"{repo} is task {owner.name}'s worktree, not a project: start from its repo "
             f"(--repo {owner.spec.get('repo', '<the project>')})")
     _lane_fits(repo, a.test, off="*" in (a.allow_path or []))
-    spec_text = Path(a.spec).read_text(encoding="utf-8") if a.spec != "-" else sys.stdin.read()
+    spec_text = read_text(a.spec, "the spec")
     if not spec_text.strip():
         die("the spec is empty")
     handed = _skill_names(a.skill)
@@ -964,10 +1078,19 @@ def cmd_start(a):
         die(why)  # #797: the checkout would have two paths in one file
     store.write_json(task.dir / STARTING, {"repo": str(repo), "worktree": str(wt),
                                            "pid": os.getpid(), "at": store.now(),
-                                           "start": models._started(os.getpid())})
+                                           "start": models._started(os.getpid()),
+                                           "machine": store.machine()})  # whose pid (#876)
     subs = gitops.fill_submodules(repo, base, wt, dry=True)
     budget = a.ask_budget
-    limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
+    # round 1's prompt before task.json: a write that fails leaves a dead start for gc, not a
+    # task with no status (#873)
+    prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
+                                                  test_line=test_line(a.test), budget=budget)
+    task.round_dir(1).mkdir(parents=True)
+    task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
+    # from the model's measured speed on this machine, else defaults; its identity (cached:
+    # weights_id below) finds the speed it had under an id it was renamed from (#905)
+    limits = router.budgets(m, models.identity(m))
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "cwd": os.getcwd(), "base": base, "base_ref": a.base,
         # the repository's own git dir: where its branch is once `repo` is removed (#498)
@@ -975,7 +1098,10 @@ def cmd_start(a):
         # the Claude Code session whose Bash ran this (_scope, the mod's `mine`); none by hand.
         # And its process: once that is gone, the directory rule may hand the task to a new one
         **({"session": sid} if (sid := os.environ.get("CLAUDE_CODE_SESSION_ID")) else {}),
-        **({"claude_pid": int(pid), "claude_start": models._started(int(pid))}
+        # and its machine: on a state directory two machines share, the other's pid means
+        # nothing there, and each machine's mod adopted the other's live session's tasks (#922)
+        **({"claude_pid": int(pid), "claude_start": models._started(int(pid)),
+            "claude_machine": store.machine()}
            if (pid := os.environ.get("CLAUDE_PID", "")).isdigit() else {}),
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         # the weights behind the id: a record on other weights under it isn't this model's (#726)
@@ -1009,12 +1135,9 @@ def cmd_start(a):
                            if v] + (["think"] if a.think_timeout is not None else []),
         "created_at": store.now(), "wb_version": __version__})
     (task.dir / STARTING).unlink(missing_ok=True)  # a task now: wb discard drops it from here on
-    prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
-                                                  test_line=test_line(a.test), budget=budget)
-    task.round_dir(1).mkdir(parents=True)
-    task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
+                    opencode=f"{have[0]}.{have[1]}" if have else None,  # runner.opencode_moved
                     skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
     exact, tools = context.test_allowances(a.test)
     context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
@@ -1026,7 +1149,8 @@ def cmd_start(a):
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
     if a.test and not a.no_base_check:
         print("base check: the runner runs the acceptance command once on the base first; what "
-              "it saw comes with the first report (a check-in at once if it already passes)")
+              "it saw comes with the first report (a check-in at once if --test-timeout cuts it "
+              "short)")  # a base that passes is a note in that report, no wake (#881)
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
@@ -1041,7 +1165,7 @@ def cmd_start(a):
         print(f"setup: the runner sets the worktree up first ({'; '.join(does)}); a failure stops "
               "the task before any round")
     elif "repos" not in context.commands_conf() or not context.repo_conf(repo, sub):
-        if lack := _missing_dirs(repo):
+        if lack := _missing_dirs(repo, sub):
             print(f"note: the worktree has only committed files, not the checkout's ignored "
                   f"{', '.join(lack[:4])}: --setup '<install command>' sets a task up (--copy "
                   "<path> copies one in); commands.json \"repos\" for every task")
@@ -1063,7 +1187,7 @@ def cmd_start(a):
               "the worktree at every step: a clone in WSL's own filesystem (~/...) runs faster")
     if fixed:
         print(f"note: {fixed}")
-    if drift := runner.untested(runner.opencode_version()):
+    if drift := runner.untested(have):
         print(f"note: {drift}")
     print(f"model: {why}" if why != "asked for" else f"model: {m.id} (asked for)")
     print(f"slice: {router.slice(m).line()}")
@@ -1126,11 +1250,14 @@ def cmd_feedback(a):
     st = task.status
     if st.get("phase") not in ("review", "stuck", "failed"):
         die(f"{a.name} is {st.get('phase')}; feedback goes to a task waiting for review")
+    if why := _accepting(task):  # (#878)
+        die(why)
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
     _need_worktree(task)
+    _opencode_again(task)
     text = a.text if a.text is not None else \
-        sys.stdin.read() if a.message == "-" else Path(a.message).read_text(encoding="utf-8")
+        read_text(a.message, "the feedback")
     if not text.strip():  # before anything is written: an empty one cost a round (the audit)
         die("the feedback is empty")
     _spec_gaps(task, a.spec_gap)
@@ -1164,6 +1291,8 @@ def _settle_proposals(task: store.Task, take: bool):
     when it fails: wb next dropped the proposal, then died on its commit, so a retry with
     --take-claude-md had nothing to take (#507, Claude's audit of 1.90). Said once it stands."""
     done, local = [], {}
+    if take and (problem := runner.link_problem(task.worktree)):  # never over a link (#871)
+        raise gitops.GitError(problem)
     if take:  # a file git ignores is in no commit: the checkout's own copy takes it (#506)
         for real, prop in runner.proposals(task.worktree):
             rel = real.relative_to(task.worktree)
@@ -1221,19 +1350,22 @@ def cmd_next(a):
     spec, st = task.spec, task.status
     if st.get("phase") != "review":
         die(f"{a.name} is {st.get('phase')}; wb next follows an approved step under review")
+    if why := _accepting(task):  # (#878)
+        die(why)
     handed = _skill_names(a.skill) if a.skill else None
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
     _need_worktree(task)
+    _opencode_again(task)
     step = st.get("steps", 1)
     try:  # read before anything is committed: a bad path must leave the step as it was
-        nxt = sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text(encoding="utf-8")
+        nxt = read_text(a.spec, "the next step's spec")
     except OSError as e:
         die(f"can't read the next step's spec: {e}")
     if not nxt.strip():
         die("the next step's spec is empty")
     commit = _step_landed(task, step)
-    measured = results.step(task, landed=True, since="HEAD~1" if commit else "HEAD")
+    measured = results.step(task, landed=True, since="HEAD~1" if commit else "HEAD", gaps=a.spec_gap)
     if not commit:
         try:
             with _settle_proposals(task, a.take_claude_md):
@@ -1302,6 +1434,17 @@ def cmd_next(a):
     _say(gpu)
     _say_dropped(dropped)
     _say(lessons.nudge(task))
+
+
+def _accept_landed(task: store.Task) -> bool:
+    """Whether the worktree's tip is an earlier wb accept's own commit (`Workbench-Task: <task>`,
+    no step) with nothing changed since, as _step_landed for wb next (#879)."""
+    try:
+        body = gitops.git(task.worktree, "log", "-1", "--format=%B", "HEAD")
+        return (f"Workbench-Task: {task.name}" in body.splitlines()
+                and not gitops.changed(task.worktree))
+    except gitops.GitError:
+        return False
 
 
 def _step_landed(task: store.Task, step: int) -> str | None:
@@ -1424,7 +1567,8 @@ def cmd_ack(a):
 
 def cmd_adopt(a):
     """The mod's claim of a task whose Claude Code process is gone (#687): under the task's command
-    lock, task.json's `session`, `claude_pid` and `claude_start` become the claimer's, so the first
+    lock, task.json's `session`, `claude_pid`, `claude_start` and `claude_machine` (#922) become
+    the claimer's, so the first
     session to claim it owns it and the others drop it. Nothing recorded it: once the process that
     ran `wb start` ended, every live session near the task, and the one resumed with `claude
     --resume`, owned it for good, and both woke for its review. The resumed session (its id is the
@@ -1443,11 +1587,13 @@ def cmd_adopt(a):
             return
         if not spec.get("session"):
             die(f"{a.name} records no session: it goes by directory")
-        if not _gone(old, spec.get("claude_start")):
-            die(f"{a.name} belongs to a live Claude Code session (pid {old})")
+        if not _gone(old, spec.get("claude_start"), spec.get("claude_machine")):
+            die(f"{a.name} belongs to a live Claude Code session (pid {old}"
+                + (" on another machine" if store.elsewhere({"machine": spec.get("claude_machine")})
+                   else "") + ")")
         if spec.get("session") not in a.session:
             spec["session"] = a.session[0]
-        spec.update(claude_pid=pid, claude_start=start)
+        spec.update(claude_pid=pid, claude_start=start, claude_machine=store.machine())
         store.write_json(task.dir / "task.json", spec)
     print(f"adopted {a.name}")
 
@@ -1567,12 +1713,16 @@ def cmd_watch(a):
         sys.stdout = open(os.devnull, "w")
 
 
-def _gone(pid, start=None) -> bool:
+def _gone(pid, start=None, machine=None) -> bool:
     """Whether the Claude Code process a task recorded (task.json `claude_pid`) has exited. One we
     can't signal isn't it either: it ran as this user. Nor is one that started at another time
     than `claude_start` says: the pid was recycled, and a new `claude` in the project never
-    adopted the task (#532). Unknown (no pid) is not gone."""
+    adopted the task (#532). Unknown (no pid) is not gone, nor is one of another machine
+    (`claude_machine`): its pid means nothing here, and on a shared state directory each
+    machine's session adopted the other's tasks, back and forth (#922, as store.elsewhere, #849)."""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if isinstance(machine, str) and machine and machine != store.machine():
         return False
     return not models._alive(pid, start if isinstance(start, str) else None)
 
@@ -1616,7 +1766,8 @@ def _scope(tasks, where, sessions=None):
             cwd and cwd.is_relative_to(here)
             or repo and (repo.is_relative_to(here) or here.is_relative_to(spot)))
         if sessions and sid:
-            ok = sid in sessions or near and _gone(t.spec.get("claude_pid"), t.spec.get("claude_start"))
+            ok = sid in sessions or near and _gone(t.spec.get("claude_pid"), t.spec.get("claude_start"),
+                                                   t.spec.get("claude_machine"))
         elif here is None or (not cwd and not repo):
             ok = True
         else:
@@ -1704,19 +1855,26 @@ def cmd_log(a):
     # the agent's words and output, on a terminal: no raw escape sequences (transcript.plain)
     shown = transcript.plain if sys.stdout.isatty() else str
 
+    # the agent's text, its tool calls, and every kind wb watch shows (transcript.EVENT_KINDS):
+    # a fixed nine once left out the runner's own rows, a gpu or handover among them (#861)
+    kinds = {"text", "tool"} | transcript.EVENT_KINDS
+
     def show(r):
-        t = time.strftime("%H:%M:%S", time.localtime(r["ts"]))
-        k = r["kind"]
+        t = time.strftime("%H:%M:%S", time.localtime(r.get("ts") or 0))
+        k = r.get("kind")
         if k == "tool":
-            mark = "" if r["ok"] else "  ✗ " + r.get("error", "")[:100]
+            mark = "" if r.get("ok") else "  ✗ " + r.get("error", "")[:100]
             # flushed: piped or redirected, a follow printed nothing for minutes (#545)
-            print(shown(f"{t} r{r['round']} {r['tool']:8} {r['brief']}{mark}"), flush=True)
-        elif k in ("text", "ask", "answer", "stopped", "autofix", "round", "tests", "error", "retry"):
-            body = r.get("text", "")
+            print(shown(f"{t} r{r.get('round')} {r.get('tool', ''):8} {r.get('brief', '')}{mark}"), flush=True)
+        elif k in kinds:
+            body = str(r.get("text") or "")
             if k == "text" and not a.verbose:
                 body = body.strip().splitlines()[0][:110] if body.strip() else ""
-            print(shown(f"{t} r{r['round']} {k:8} {body}"), flush=True)
+            print(shown(f"{t} r{r.get('round')} {k:8} {body}"), flush=True)
 
+    # -n counts the lines printed: the last N rows, cut before the filter, held step rows (one
+    # per model request) that never print, and `-n 30` showed a dozen lines (#861)
+    rows = [r for r in rows if r.get("kind") in kinds]
     for r in rows[-a.n:] if a.n else rows:
         show(r)
     watcher = Watcher(task.dir) if a.follow else None
@@ -1768,7 +1926,10 @@ def cmd_diff(a):
 def _stop_runner(task):
     pid = task.status.get("pid")
     if pid and (where := store.elsewhere(task.status)):  # #849: its pid here is another process
-        die(f"{task.name} runs on {where}, which shares this state directory: stop it there")
+        if runner_alive(task):
+            die(f"{task.name} runs on {where}, which shares this state directory: stop it there "
+                f"(once its runner stops beating for {BEAT_DEAD // 60} min, here too)")
+        return  # dead there (#872): nothing to signal, and nothing of it runs here to sweep
     if pid and runner_alive(task):
         task.set_status(stopping=True)  # wb's stop, not a shutdown's (runner.SIGNAL_STOP)
         try:
@@ -1805,9 +1966,9 @@ def stop_everything(tasks=None) -> list[str]:
         # each task under its command lock, as one_at_a_time (which --all skips): an accept or
         # discard that closed it after the listing was set back to stuck (the 0.90 review)
         with store.locked(runner.lock_file(t.name, "cmd")):
-            if t.status.get("phase") in store.CLOSED or (t.status.get("pid")
-                                                         and store.elsewhere(t.status)):
-                continue  # another machine's runner (#849): that machine's wb stops it
+            if t.status.get("phase") in store.CLOSED or (t.status.get("pid") and store.elsewhere(
+                    t.status) and runner_alive(t)):
+                continue  # another machine's live runner (#849): that machine's wb stops it
             _stop_runner(t)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": "bail out: stopped by the user"})
@@ -1877,8 +2038,10 @@ INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP, UPDATE_STOP)
 def _interrupted(last) -> bool:
     """Whether status `last` says the task was interrupted from outside: one of INTERRUPTED, or
     runner._updated's (runner.UPDATED, then the task's own `wb resume <name>`), which no exact
-    match could ever hit: after a pull under running tasks, wb resume --all resumed none (#788)."""
-    return last in INTERRUPTED or isinstance(last, str) and last.startswith(runner.UPDATED + ":")
+    match could ever hit: after a pull under running tasks, wb resume --all resumed none (#788).
+    And runner.opencode_moved's, OpenCode changed under it (#866)."""
+    return last in INTERRUPTED or isinstance(last, str) and last.startswith(
+        (runner.UPDATED + ":", runner.OPENCODE_MOVED + " ("))
 
 
 @one_at_a_time
@@ -1944,10 +2107,13 @@ def _resume(task: store.Task) -> None:
     st, name = task.status, task.name
     if st.get("phase") not in ("stuck", "failed"):
         die(f"{name} is {st.get('phase')}; wb resume continues a stopped task")
+    if why := _accepting(task):  # (#878)
+        die(why)
     if runner_alive(task):
         die(f"{name}'s runner is still running")
     if not _rechecks_out(task):
         _need_worktree(task)
+    _opencode_again(task)
     n = st.get("round", 1)
     if _first_round(st):
         # it never ran a round (queued behind the GPU, its model or the base check): round 1
@@ -1994,8 +2160,8 @@ def _lane_dir(raw: str, guard: set[str] = frozenset()) -> str:
     real = os.path.realpath(given)
     if real != given:
         die(f"{raw} is a link to {real}: allow {real} itself if that is what the task needs")
-    if why := context.lane_refusal(real):
-        die(why)
+    if why := context.lane_refusal(real) or context.kept_out(real):
+        die(why)  # kept_out: writable() would split the grant away, the retry refused (#912)
     if any(real == g or context._under(real, g) for g in guard):
         die(f"{raw}: inside the task's own repo or its git directory, which no lane may write (wb's "
             "git runs there, and a hook planted in it would run outside the lane); take what the "
@@ -2237,7 +2403,14 @@ def cmd_takeover(a):
             print("no open delegated tasks to take over")
         refused = 0
         for t in tasks:  # each refusal said (die's line) and the rest still taken: one refused
-            try:         # first left every other runner going (#601, the audit of v1.90)
+            # first left every other runner going (#601, the audit of v1.90). Not ready is skipped,
+            # not refused: a task still checking out, or failed at checkout, made every hand-back
+            # exit 1, and the mod queued no turn for the tasks it had taken over (#918)
+            if not runner.checked_out(t):
+                print(f"not ready: {t.name} (its checkout hasn't finished): wait for it, "
+                      f"or wb discard {t.name}")
+                continue
+            try:
                 cmd_takeover(argparse.Namespace(name=t.name, all=False, repo=None, session=None,
                                                 user=a.user))
             except SystemExit as e:
@@ -2253,6 +2426,8 @@ def cmd_takeover(a):
     task = need(a.name)
     if task.status.get("phase") in store.CLOSED:
         die(f"{a.name} is {task.status.get('phase')}")
+    if why := _accepting(task):  # (#878)
+        die(why)
     if not runner.checked_out(task):  # the runner's checkout, running or failed: a hand-back made
         # it again from nothing, and Claude's edits went with the old worktree (#655)
         die(f"{a.name}: its worktree isn't ready yet: wait for it, or wb discard {a.name}")
@@ -2365,8 +2540,20 @@ def cmd_accept(a):
            f"\n\nWorkbench-Task: {a.name}\nOpenCode-Session: {st.get('session')}")
     if close:
         commit, measured = close["commit"], close.get("step")
+        if task.worktree.is_dir() and (gitops.changed(task.worktree) or gitops.git(
+                task.worktree, "rev-parse", "HEAD", check=False).strip() != gitops.git(
+                    repo, "rev-parse", "--verify", "-q", f"{commit}^{{commit}}", check=False).strip()):
+            # the forced worktree removal below would delete what changed, and the merge leave
+            # it out (#878)
+            die(f"{a.name}'s worktree changed after an earlier wb accept committed {commit}: "
+                f"put it back to that commit (git -C {shlex.quote(str(task.worktree))} status), "
+                f"or keep the changes elsewhere, then wb accept {a.name} again")
     else:
-        measured = results.step(task, landed=True)
+        # a retry after an accept killed between its commit and `closing` (ENOSPC, a kill):
+        # measured since HEAD, its own commit, the step read as 0 files and 0 lines and the
+        # savings card priced the task at nothing (#879, Claude's audit of 1.90.24)
+        measured = results.step(task, landed=True, gaps=a.spec_gap,  # recorded below (#904)
+                                since="HEAD~1" if _accept_landed(task) else "HEAD")
         try:
             commit = _landed(task)
             if not commit:
@@ -2393,7 +2580,8 @@ def cmd_accept(a):
             into = gitops.current_branch(repo)
         close = {"commit": commit, "step": measured, "merge": bool(a.merge), "merge_into": into,
                  "merge_as": a.merge_as or "merge", "sign": _signed(spec, a)}
-        task.set_status(closing=close, tip=tip)  # before anything is removed
+        task.set_status(closing=close, tip=tip,  # before anything is removed
+                        last=f"being accepted: wb accept {a.name} finishes it if this stops")  # #878
         _spec_gaps(task, a.spec_gap)
     tip = task.status["tip"]
     # before the branch can go: wb bench add reads the steps (#649), from a bundle in the task's
@@ -2531,6 +2719,11 @@ def _dead_start(task: store.Task) -> dict | None:
     if task.exists or not task.dir.is_dir():
         return None
     info = store.read_json(task.dir / STARTING)
+    if isinstance(info, dict) and info.get("machine") not in (None, store.machine()):
+        # another machine's start, on a shared state directory: its pid means nothing here, and
+        # gc took a start under way there for a dead one (#876); none outlives RULES_GRACE
+        at = info.get("at")
+        return None if not isinstance(at, (int, float)) or time.time() - at < RULES_GRACE else info
     if isinstance(info, dict) and isinstance(info.get("pid"), int):
         # with its start: a recycled pid refused a retry and kept the worktree from gc (#532)
         return None if models._alive(info["pid"], info.get("start")) else info
@@ -2556,10 +2749,19 @@ def _drop_start(task: store.Task, info: dict) -> None:
     shutil.rmtree(context.rules_dir(task), ignore_errors=True)
 
 
+# Another machine's scratch directory (its name's machine tag, store.scratch) is left to that
+# machine's gc this long: gc here removed a live one, its pid not in this process table (#876)
+FAR_SCRATCH_AGE = 86400
+
+
 def _maker_alive(pid: str, tag: str) -> bool:
-    """Whether a scratch directory's maker (its name's <pid>.<start tag>, store.scratch) still
-    runs: a pid recycled since is another process, and its clone was kept for ever (#532). An
-    untagged name (made before the tag, or where no start could be read) goes by the pid alone."""
+    """Whether a scratch directory's maker (its name's <pid>.<start tag>[.<machine tag>],
+    store.scratch) still runs: a pid recycled since is another process, and its clone was kept
+    for ever (#532). An untagged name (made before the tag, or where no start could be read) goes
+    by the pid alone; another machine's, by its age (FAR_SCRATCH_AGE, #876)."""
+    tag, _, mach = tag.partition(".")
+    if mach and mach != store.machine_tag():
+        return True  # _drop_scratches judges it by its age
     if not (pid.isdigit() and models._alive(int(pid))):
         return False
     return not tag or models.same_tag(int(pid), tag)
@@ -2594,11 +2796,12 @@ def _drop_scratches() -> int:
         if maker is None or not d.is_dir() or d.is_symlink():
             continue
         pid, _, tag = maker.partition(".")
+        far = tag.partition(".")[2] not in ("", store.machine_tag())  # #876
         try:
-            old = time.time() - d.stat().st_mtime > store.SCRATCH_AGE
+            age = time.time() - d.stat().st_mtime
         except OSError:
             continue
-        if old and not _maker_alive(pid, tag):
+        if far and age > FAR_SCRATCH_AGE or age > store.SCRATCH_AGE and not _maker_alive(pid, tag):
             gitops._rmtree(d)
             n += 1
     return n
@@ -2922,6 +3125,8 @@ def cmd_discard(a):
         if _finish_record(task):
             return
         die(f"{a.name} is already {task.status.get('phase')}")
+    if why := _accepting(task):  # its commit exists, perhaps merged: not a discard (#878)
+        die(why)
     _stop_runner(task)
     _spec_gaps(task, a.spec_gap)
     repo = gitops.repo_of(spec)  # a removed linked worktree: the repository's main one (#498)
@@ -3653,26 +3858,31 @@ def image_server_lines() -> list[str]:
     """An image server answering on its default port here that no engine names, with the entry
     that would use it: the skill proposed an 11 GB install to a user already running ComfyUI or
     Forge (#753)."""
-    named = set()
+    named = set()  # (host, port): the host as the url has it, and "" for this machine's
     for e in images.engines().values():
         try:
             u = urlparse(str(e.get("url") or ""))
-            if u.port and models._this_host(u.hostname):
-                named.add(u.port)
+            if u.port:
+                named.add(((u.hostname or "").lower(), u.port))
+                if models._this_host(u.hostname):
+                    named.add(("", u.port))
         except ValueError:  # a url that doesn't parse: listed as not usable (#748)
             pass
     out = []
     for s in images.servers_here():
         port = urlparse(s["root"]).port
-        if port in named:
+        if ((s.get("windows") or "").lower(), port) in named:
             continue
+        # one on Windows (WSL2's NAT, #923) answers at the host's address: it listens beyond
+        # Windows' own localhost (ComfyUI's --listen), which it has to keep for this to reach it
+        where = " on Windows (keep it started with --listen)" if s.get("windows") else ""
         if s["api"] in IMAGE_SERVERS:
             what, entry = IMAGE_SERVERS[s["api"]]
-            out.append(f"  {what} answers at {s['root']}, and no engine uses it: "
+            out.append(f"  {what} answers at {s['root']}{where}, and no engine uses it: "
                        + entry.format(root=s["root"]))
         else:
             usual = next(IMAGE_SERVERS[k][0] for p, k, _ in images.PORTS if p == port)
-            out.append(f"  something answers at {s['root']} ({usual}'s port), but not its API"
+            out.append(f"  something answers at {s['root']}{where} ({usual}'s port), but not its API"
                        + (" (AUTOMATIC1111 needs --api)" if port == 7860 else ""))
     return out
 
@@ -4098,8 +4308,11 @@ def cmd_events(a):
     parent = os.getppid()
     # its start too: the mod records both in chat/listener.json, so a recycled pid isn't a listener (#532)
     # and its parent's, the Claude Code process: the mod claims tasks for it (wb adopt, #687)
+    # and this machine, which the mod records beside its pids: on a shared state directory a pid
+    # of another machine's is never read as gone here (#922)
     print(json.dumps({"hello": os.getpid(), "start": models._started(os.getpid()),
-                      "parent": parent, "parent_start": models._started(parent)}), flush=True)
+                      "parent": parent, "parent_start": models._started(parent),
+                      "machine": store.machine()}), flush=True)
     # accepted and discarded are final and names aren't reused; tasks/ itself stays watched, so a
     # new task is picked up, and one that closes while this runs simply stays watched
     closed = tuple(f"tasks/{t.name}" for t in store.all_tasks() if t.status.get("phase") in store.CLOSED)
@@ -4496,17 +4709,25 @@ def _fetch_origin() -> None:
     """The update check's fetch: never prompts and never hangs. The user's own ssh command
     (GIT_SSH_COMMAND, GIT_SSH, core.sshCommand) is kept, as replacing it picked the wrong key for
     good; with none, ssh runs in BatchMode. No terminal, so nothing can ask, and a time limit
-    inside the mod's (the 2026-11-16 audit)."""
+    inside the mod's (the 2026-11-16 audit). From the remote the branch's upstream is on
+    (`branch.<name>.remote`), origin only when there is none: a fork's clone tracking
+    `upstream/main` read "already up to date" against a stale ref, and a clone with no origin
+    couldn't check at all (#875, Claude's audit of 1.90.24)."""
+    branch = gitops.git(PKG_ROOT, "symbolic-ref", "-q", "--short", "HEAD", check=False).strip()
+    remote = branch and gitops.git(PKG_ROOT, "config", f"branch.{branch}.remote",
+                                   check=False).strip() or "origin"
+    if remote == ".":  # its upstream is a local branch: nothing to fetch
+        return
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "SSH_ASKPASS_REQUIRE": "never"}
     if not (env.get("GIT_SSH_COMMAND") or env.get("GIT_SSH")
             or gitops.git(PKG_ROOT, "config", "core.sshCommand", check=False).strip()):
         env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15"
     try:
-        r = subprocess.run(["git", "-C", str(PKG_ROOT), "fetch", "-q", "origin"], env=env,
+        r = subprocess.run(["git", "-C", str(PKG_ROOT), "fetch", "-q", "--", remote], env=env,
                            capture_output=True, stdin=subprocess.DEVNULL, start_new_session=True,
                            timeout=FETCH_SECS)
     except subprocess.TimeoutExpired:
-        raise gitops.GitError(f"origin didn't answer in {FETCH_SECS}s") from None
+        raise gitops.GitError(f"{remote} didn't answer in {FETCH_SECS}s") from None
     if r.returncode:
         raise gitops.GitError(r.stderr.decode("utf-8", "replace").strip() or "git fetch failed")
 
@@ -4561,8 +4782,11 @@ def cmd_update(a):
             behind = int(gitops.git(PKG_ROOT, "rev-list", "--count", "HEAD..@{u}"))
         except (gitops.GitError, ValueError) as e:
             die(f"couldn't check for an update: {e}")
-        if subprocess.run(["git", "-C", str(PKG_ROOT), "merge-base", "--is-ancestor", "HEAD", "@{u}"],
-                          capture_output=True, stdin=subprocess.DEVNULL).returncode:
+        # only a clone behind and diverged: one only ahead (a local patch) has nothing to pull,
+        # and died here, skipping the plugin steps too (#875)
+        if behind and subprocess.run(["git", "-C", str(PKG_ROOT), "merge-base", "--is-ancestor",
+                                      "HEAD", "@{u}"], capture_output=True,
+                                     stdin=subprocess.DEVNULL).returncode:
             die(f"{PKG_ROOT} has commits its upstream hasn't: a fast-forward pull can't update it "
                 "(push or rebase them, then wb update)")
         if behind:  # nothing to pull: no task needs stopping, the plugin steps still run
@@ -4865,6 +5089,12 @@ def cmd_doctor(a):
                  + ("" if free >= DISK_SPARE else ": a task's writes fail on a full disk; wb "
                     "discard an open task, or free some")
                  + (f"; history: {kept}" if (kept := history_held()) else ""))
+        if hardware.system() == "wsl" and not context.on_windows(str(store.home()), context.windows_drives()):
+            drive = store.host_drive(store.home())  # the virtual disk's free space alone hid a full C: (#897)
+            print(f"--  free space is at most {drive}'s, the Windows drive WSL's virtual disk is on "
+                  "unless it was moved (a moved one's drive isn't seen)" if drive else
+                  "--  no Windows drive is mounted: the free space is the virtual disk's, and a "
+                  "full Windows drive behind it isn't seen")
         if gitops._modes_hold(str(store.home())) is False:  # exFAT, NTFS, CIFS, drvfs (#683)
             print("--  the state dir's file system keeps no file modes: a task's git ignores them, "
                   "so a script the agent makes executable lands as the repo had it")
@@ -4955,6 +5185,8 @@ def main(argv=None):
     try:
         a.f(a)
     except RuntimeError as e:  # wb's own failures (git, a config that doesn't parse): a message
+        die(str(e))
+    except UnicodeError as e:  # text no encoding takes: a line, not a traceback (#873)
         die(str(e))
     except OSError as e:  # a --spec, --message or --file that isn't there: a line, not a traceback
         if store.disk_full(e):  # (#342)
