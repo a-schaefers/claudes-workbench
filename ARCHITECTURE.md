@@ -6372,8 +6372,9 @@ broken pipe or when its parent process changes.
 `cmd_*` function. `die(msg, code=1)` prints `wb: <msg>` on stderr. Exit codes: 1 an error; 2 a
 usage error, or `wait` on a closed task, with no open task, or a timeout; 3 no model can run
 (`start`); 4 the GPU is held by a task the new one can't run beside (`start` without `--queue`);
-`scout --due` 0 when due, 1 when not; `doctor` 0/1. cli writes notify.jsonl only in `reap` (the
-runner writes the rest). `wb --version` prints the version
+`scout --due` 0 when due, 1 when not; `doctor` 0/1. cli writes notify.jsonl only in `reap` (its
+died notice and a restart's batch, `_restart_notice`) and in `wb update --stop` (`_stop_for_update`:
+one `stuck` notice per owner, cause `update`, with `tasks`); the runner writes the rest (#882). `wb --version` prints the version
 (`workbench.__version__`).
 
 **Acknowledging.** `_ack_all(task)` moves the task's `acked` mark: if an unacked notice of the
