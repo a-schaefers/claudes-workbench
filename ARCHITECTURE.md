@@ -5524,7 +5524,8 @@ picks the line the report shows: pytest's first `E` line, else the first asserti
 `candidate.txt` and `result.json` `{cmd, files, tree, ts, base: {rev, exit, assertion}, candidate:
 {rev, exit, assertion}, verdict, dir, expect (when given), uncopied (the candidate's added files
 not copied to the base, when any), removed (the candidate's deleted tests, gone from the base too), missing (those the base's output said it couldn't find), code_copied (`--files` paths that
-aren't tests), left_out (when any)}`. `verify.last` reads the newest, with `stale` once the worktree
+aren't tests), left_out (when any), filtered (when any: why a side's scratch checkout wasn't the
+task's bytes, a repo filter's file or failure named, and the verdict then inconclusive, #932)}`. `verify.last` reads the newest, with `stale` once the worktree
 or the comparison base has changed since. The verdict names the base commit and candidate tree.
 
 The comparison reaches the review (#97): `wb report <task>` (the latest round's) ends with the
