@@ -3011,9 +3011,18 @@ def server_lines(provs: dict) -> list[str]:
     for x in answering:
         listed = ", ".join(x["models"][:8]) + (", ..." if len(x["models"]) > 8 else "") or "no models"
         known = models.server_key(x["root"]) in keys
+        if x.get("windows"):  # WSL2's Windows host, beyond this machine (#663)
+            lines.append(f"  {x['root']} answers on Windows (usually {x['usually']}): {listed}"
+                         + ("" if known else f"; it needs local: true (wb remote {x['windows']} "
+                            f"for an Ollama; else wb model add <provider>/<model> --url "
+                            f"{x['root']}/v1 --context N, then local: true for its provider in "
+                            f"{models.overrides_path()})"))
+            continue
         lines.append(f"  {x['root']} answers (usually {x['usually']}): {listed}" + (
             "" if known else f"; OpenCode has no provider for it (wb model add <provider>/<model> "
                              f"--url {x['root']}/v1 --context N)"))
+    if not answering and models.windows_host():  # whatever is on PATH here (#663)
+        lines.append(f"  none answering here: {models.WSL_NAT}")
     return lines or ["  none found on PATH or answering on the usual ports"]
 
 
@@ -3941,18 +3950,30 @@ def first_run() -> list[str]:
         found = models.discover()
     except RuntimeError:  # an OpenCode config that doesn't parse: wb doctor says which
         found = {}
+    on_windows = []
     if models._fake():
         answering = bool(found)
     else:
         answering = any(models.ollama_answers(p["root"]) or
                         isinstance(models._get(f"{p['root']}/v1/models", timeout=1), dict)
                         for p in models.providers().values())
-        answering = answering or models.ollama_answers(models.ollama_root_here()) or \
-            bool(models.servers_here()[1])
-    out.append("ok  a model server answers" if answering else
-               "--  no model server answers here: start yours, or run /workbench and Claude lays out "
-               "the ones that fit this machine; any OpenAI-compatible server works "
-               "(wb model add <p>/<m> --url <baseURL>)")
+        answering = answering or models.ollama_answers(models.ollama_root_here())
+        if not answering:
+            here = models.servers_here()[1]
+            on_windows = [x for x in here if x.get("windows")]
+            answering = len(here) > len(on_windows)
+    if not answering and on_windows:  # WSL2: answering at the Windows host only (#663)
+        out.append(f"--  a model server answers on Windows at {on_windows[0]['root']} (usually "
+                   f"{on_windows[0]['usually']}): it needs local: true (wb remote "
+                   f"{on_windows[0]['windows']} for an Ollama; else wb model add <p>/<m> --url "
+                   f"{on_windows[0]['root']}/v1, then local: true for its provider in "
+                   f"{models.overrides_path()})")
+    else:
+        out.append("ok  a model server answers" if answering else
+                   "--  no model server answers here: start yours, or run /workbench and Claude "
+                   "lays out the ones that fit this machine; any OpenAI-compatible server works "
+                   "(wb model add <p>/<m> --url <baseURL>)"
+                   + (f"; {models.WSL_NAT}" if models.windows_host() else ""))
     out.append(f"ok  {len(found)} local model(s) registered" if found else
                "--  no local model registered yet: run /workbench in Claude Code, and Claude picks one "
                "for this machine (wb scout)")

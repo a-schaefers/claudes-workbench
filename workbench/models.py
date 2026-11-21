@@ -41,6 +41,7 @@ import re
 import shlex
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -2495,19 +2496,63 @@ SERVER_COMMANDS = ("ollama", "lms", "llama-server", "llama-swap", "vllm", "sglan
                    "local-ai", "mlx_lm.server", "jan")
 
 
+# WSL2's default NAT networking forwards Windows to WSL's localhost but not the reverse, so Ollama
+# for Windows or LM Studio there was never found on 127.0.0.1: first run said no server answers,
+# and Claude proposed installing a second one inside WSL (#663). Mirrored networking reaches it
+# on 127.0.0.1; else only a server listening beyond Windows' loopback, at the Windows host.
+WSL_NAT = ("on WSL2, a server running on Windows listens on Windows' own 127.0.0.1, which WSL's "
+           "default NAT networking can't reach: set networkingMode=mirrored under [wsl2] in "
+           "%UserProfile%\\.wslconfig (then wsl --shutdown), or have it listen on 0.0.0.0 "
+           "(Ollama: OLLAMA_HOST=0.0.0.0) with a firewall rule, then wb remote <Windows' address>")
+
+
+ROUTE, RESOLV = Path("/proc/net/route"), Path("/etc/resolv.conf")
+
+
+def windows_host() -> str | None:
+    """The Windows host as WSL2's NAT networking reaches it (the default gateway in
+    /proc/net/route, else the generated resolv.conf's nameserver), or None off WSL."""
+    if hardware.system() != "wsl":
+        return None
+    with contextlib.suppress(OSError, ValueError, struct.error):
+        for row in ROUTE.read_text().splitlines()[1:]:
+            f = row.split()
+            if len(f) > 2 and f[1] == "00000000" and int(f[2], 16):
+                return socket.inet_ntoa(struct.pack("<I", int(f[2], 16)))
+    with contextlib.suppress(OSError):
+        for row in RESOLV.read_text().splitlines():
+            f = row.split()
+            if len(f) > 1 and f[0] == "nameserver" and not f[1].startswith("127."):
+                return f[1]
+    return None
+
+
+def _models_at(root: str, timeout: float) -> list[str] | None:
+    body = _get(f"{root}/v1/models", timeout=timeout)
+    if isinstance(body, dict) and isinstance(body.get("data"), list):
+        return [str(x.get("id")) for x in body["data"] if isinstance(x, dict)]
+    return None
+
+
 def servers_here() -> tuple[list[str], list[dict]]:
     """The model servers' commands on PATH, and the servers answering on their default ports here:
-    {"root", "usually", "models"} (the ids an OpenAI-compatible /v1/models lists)."""
+    {"root", "usually", "models"} (the ids an OpenAI-compatible /v1/models lists), and on WSL2
+    those at the Windows host too, with "windows": its address (#663)."""
     on_path = [c for c in SERVER_COMMANDS if shutil.which(c)]
     if _fake():
         return on_path, []
     answering = []
     for port, usually in SERVER_PORTS:
         root = f"http://127.0.0.1:{port}"
-        body = _get(f"{root}/v1/models", timeout=1)
-        if isinstance(body, dict) and isinstance(body.get("data"), list):
-            answering.append({"root": root, "usually": usually,
-                              "models": [str(x.get("id")) for x in body["data"] if isinstance(x, dict)]})
+        if (names := _models_at(root, 1)) is not None:
+            answering.append({"root": root, "usually": usually, "models": names})
+    if (win := windows_host()) and not answering:  # mirrored networking found them above
+        from concurrent.futures import ThreadPoolExecutor
+        roots = [(f"http://{win}:{port}", usually) for port, usually in SERVER_PORTS]
+        with ThreadPoolExecutor(len(roots)) as pool:  # a firewall that drops: one wait, not six
+            found = list(pool.map(lambda r: _models_at(r[0], 1), roots))
+        answering += [{"root": root, "usually": usually, "models": names, "windows": win}
+                      for (root, usually), names in zip(roots, found) if names is not None]
     return on_path, answering
 
 
