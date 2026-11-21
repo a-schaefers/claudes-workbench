@@ -5516,9 +5516,32 @@ ablations, probe's own agent, OpenCode's, Qwen Code's and Codex's output limits,
 on over-triggering) pointed at three causes: each search printed twice its cap, the order fired on
 files where probe saves little, and OpenCode 2.x prunes no old tool output. The first two are what
 the note and protocol line above now change; the next A/B measures them against the arm above.
-Left for later, if that isn't enough: a `probe` shim (repeats answered in one line, empty searches
-stopped, output capped), the outline put in round 1's prompt, and a per-call output cap
-(`tool_output`) sized to the window for every task. `wb bench report --label <arm>` prints the use line per arm (`bench.use_lines`).
+**Measured again (2026-11-21, the quick A/B).** Each new wording on the two cases above, against
+the replays of that morning (the off arm doesn't change), one replay each, about 20 minutes:
+
+| case | arm | passed | min | tokens read | handovers | probe calls |
+|---|---|---|---|---|---|---|
+| big-this-host | off (a second run) | yes | 13 | 95K | 1 | 0 |
+| | a condition ("when you need one function …") | yes | 11 | 68K | 1 | 0 |
+| | an order from 1,500 lines ("never read … whole") | yes | 16 | 110K | 1 | 12 |
+| big-compaction | a condition | yes | 5 | 30K | 0 | 1 |
+| | an order from 1,500 lines | **no** | 14 | 67K | 1 | 8 |
+
+- On big-this-host every arm handed over once, probe or not: the task needs more than the 40K
+  window, and probe changed where the tokens came from (the order: 36 paged reads, 42K, in place
+  of whole reads), not how many. The two off runs, 41 and 13 minutes, show how far one replay's
+  time moves.
+- The harder the prompt pushed probe, the more the agent explored and the sooner it overflowed;
+  the order failed big-compaction, the only failure on that case in any arm.
+- The condition is the only wording that never did worse than off: on the mid-sized case one
+  extract and the best run of all, on the big one probe not used at all.
+
+So, on this model and window, no wording made probe better than not having it. The experiment
+keeps the condition (what an opted-in user gets does no harm), stays opt-in and off by default,
+and gets no "recommended" note. What filled the window in every arm was OpenCode's own reads
+(one `read` returns up to 2,000 lines or 50 KB, 14K tokens for models.py), which a per-call output
+cap (`tool_output`) sized to the window would bound for every task, probe or not; a `probe` shim
+and the outline in round 1's prompt are the other levers left untried. `wb bench report --label <arm>` prints the use line per arm (`bench.use_lines`).
 
 ## Verifying a fix against the base
 
