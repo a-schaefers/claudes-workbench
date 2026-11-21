@@ -3678,13 +3678,16 @@ speed (input / (first token − created), ≥ 1000 tokens over > 0.5 s, also fro
 short before it completed), the last `SPEED_KEEP` 60 of
 each, in `speed.json` (`{"<id>": {"write": [...], "read": [...]}}`, under `speed.lock`; this
 machine's, in `store.machine_dir()`: on a network home a fast machine's samples outvoted a slow
-one's, whose rounds then ran on the fast one's limits, #901); `speed()` takes the medians, 
-from
-`$WB_HOME/speed.json` (every machine's, from before) until this machine has measured the model,
-and of the id it had before when neither has one (`renamed_from`, #818), else of
-the variant a `wb optimize apply` variant replaced (`replaces`), then its source (`variant_of`): a variant's
-first round got the default budgets and on a slow machine was stopped as stuck into the record it
-shares; the source's speed, measured spilling, errs long (#906). It asks no server (#905). 
+one's, whose rounds then ran on the fast one's limits, #901); `speed()` takes the medians of
+the first row it finds in this machine's `speed.json`, in order: the id; the ids it had before,
+nearest first (`renamed_from`, #818, followed back; with the caller's `weights`, `earlier`'s,
+which adds an id gone whose newest results row ran on the same Ollama digest); the variant a `wb
+optimize apply` variant replaced (`replaces`); its source (`variant_of`): a variant's first round
+got the default budgets and on a slow machine was stopped as stuck into the record it shares; the
+source's speed, measured spilling, errs long (#906). Only when none of those has a row there, the
+same chain in `$WB_HOME/speed.json` (every machine's, from before #901): so this machine's row for
+a variant's source or a renamed model's old id wins over the shared file's row for the id itself.
+It asks no server (#905).
 At `wb start`, `budgets(m)` sets think = `THINK_TOKENS` 13,500 / write + window
 / read (either term alone when only one speed is measured: a read bound may be all there is,
 #491), clamped to [420, `THINK_MAX` 1800] s, and scales silence (900) and round (2400) by

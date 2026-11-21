@@ -3187,6 +3187,19 @@ class Budgets(Base):
                 self.assertEqual(router.budgets(m)["think"], int(13500 / 15 + 32768 / 150))
         self.assertTrue((store.home() / "machines" / "laptop" / "speed.json").exists())
 
+    def test_this_machines_row_for_a_variants_source_wins_over_the_shared_files_row_for_the_variant(self):
+        # reviewing the merge of #901/#905/#906 (2026-11-21): the docs said the shared file's row
+        # was taken before the chain of earlier ids; speed() runs the whole chain in this
+        # machine's file first, its own measurements, and the docs now say so
+        var, src = "ollama/mimo-v2.6:9b-q8_0-fit", models.resolve("mimo").id
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({var: {"variant_of": src}}))
+        store.write_json(store.home() / "speed.json", {var: {"write": [60.0], "read": [2800]}})
+        with mock.patch.object(store, "network_fs", return_value="nfs"), \
+                mock.patch.object(store, "machine", return_value="laptop"):
+            self.assertEqual(router.speed(var), {"write": 60.0, "read": 2800})   # nothing here yet
+            router.record_speed(src, self.session(15, 150))
+            self.assertEqual(router.speed(var), {"write": 15.0, "read": 150})
+
     def test_a_slow_machine_gets_time(self):
         m = models.resolve("mimo")
         router.record_speed(m.id, self.session(15, 150))
