@@ -4905,6 +4905,7 @@ toasted once (`workbench: <name> <headline>`); a task that isn't this session's 
 refuses, and the row's key kept in `mem.heldAsks`), and anything else waits and leaves the file unseen; a held question gone stale whose
 `<id>.answer` opens with ask_mcp's NO_ANSWER, its task still open, gets the MISSED_NOTE wake; else the mod writes `acked
 = row.ts` and submits (`wake`) `[workbench] Task \`<n>\` <headline>.\n\n<row.text>\n\n<NEXT[kind]>`
+(and `\n\n<AWAY_NOTE>` while the user is away on the web chat, as every wake and `intoTurn` text, #540)
 (HEADLINE and NEXT are the per-kind texts at the top of register.tsx; NEXT names the commands to
 run: a question's `wb answer <n> --id <id>`, and a PERMISSION request is answered by the `wb
 allow` it names). A submit the engine drops (`{drop}`) puts `acked` back if it still holds the
@@ -4976,7 +4977,8 @@ conversation's first message and after a compaction or `/clear`, not every turn)
 every plan is a handoff plan, the SKILL.md path); `user-notes` while delegating and notes.md has
 notes; `web-chat` for six hours after a web message (longer while a backlog task of this
 session's is open: `awayNow`), until a prompt is typed in the terminal
-(reply with `wb chat reply`, `wb chat log` shows the thread); `workbench-wake` with the `wake`
+(AWAY_NOTE: reply with `wb chat reply`, `wb chat log` shows the thread; each wake says it too
+while away, below); `workbench-wake` with the `wake`
 setting off, while delegating or with a task of this session's open (WAKE_OFF_NOTE: no wake will
 come; tell the user, pick it up when asked); `workbench` whenever `wb status` with `scope()`
 exits 0 listing open tasks (the status, plus `wb report`/`wb watch`; a failing one toasts once
@@ -4995,7 +4997,11 @@ rule no longer applies). `/workbench` appends them to the skill's text (or to AG
 first message) leaves those blocks out; a compaction or the turn's end clears it. Every poll
 runs `sayRules`: what is still unsaid (the mode turned on by a Bash `wb start`, the pane's
 coding row, `wb coding` anywhere) goes in as a user-role row the model reads
-(`$.session.append`, which starts no turn), or, refused, as a queued `[workbench]` turn.
+(`$.session.append`, which starts no turn), or, refused, as a queued `[workbench]` turn. Being
+away comes and goes with the web chat, so it isn't one of them: `wake` and `intoTurn` end
+their text with AWAY_NOTE while `away()` holds (`awayToo`), and a wake after the user typed in
+the terminal again doesn't (the web-chat block alone left a user who went to the web chat after
+the first message unseen: a task's news was written for the terminal they had left).
 
 **Compaction.** `session.compact` (main conversation only, while a task of this session's is
 open, in a session delegating or that delegated in this load) appends

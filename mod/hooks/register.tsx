@@ -164,6 +164,16 @@ export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: 
 async function away($: any, st: WbChat): Promise<boolean> {
   return awayNow(st.webAt, await $.clock.now(), await read($, tasks), mine)
 }
+// Said in the context blocks while away, and in each wake while away (#540): those blocks come once
+// per conversation, so a user who went to the web chat later was never told of, and a task's
+// news reached only the terminal they had left.
+const AWAY_NOTE =
+  'The user is away from the terminal and last wrote from the web chat. Tell them ' +
+  'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
+  '`wb chat log` shows the thread. Typing in the terminal again ends this.'
+async function awayToo($: any, text: string): Promise<string> {
+  return (await away($, await read($, chat))) ? `${text}\n\n${AWAY_NOTE}` : text
+}
 const WEB = '[web chat]'
 // Only for a delivery into a running turn, which the engine frames as another session's message:
 // the rules for answering live in the /workbench skill (The web chat), loaded whenever this listens.
@@ -2064,7 +2074,7 @@ async function deliver($: any, now: number) {
 // Into the running turn, as a message typed mid-turn would be (`listen` does the same for the web
 // chat): whether the engine took it.
 async function intoTurn($: any, text: string): Promise<boolean> {
-  const r = await $.session.send({ to: { sessionId: await $.session.id() }, text: `${text}\n\n${MIDTURN_NOTE}` })
+  const r = await $.session.send({ to: { sessionId: await $.session.id() }, text: `${await awayToo($, text)}\n\n${MIDTURN_NOTE}` })
     .catch(() => ({ isDelivered: false }))
   return !!r?.isDelivered
 }
@@ -2080,7 +2090,7 @@ async function asking($: any, name: string, id: string): Promise<boolean> {
 // lost for good (the 2026-11-16 audit): the mark goes back, unless something acted on the task
 // since, and rewake tries again after a minute.
 async function wake($: any, name: string, text: string, prev: number, ts: number) {
-  const r = await $.prompt.submit({ text }).catch((err: unknown) => ({ drop: String(err) }))
+  const r = await $.prompt.submit({ text: await awayToo($, text) }).catch((err: unknown) => ({ drop: String(err) }))
   if (!r?.drop) return
   mem.dropped.set(name, await $.clock.now())
   const ackPath = `${mem.root}/tasks/${name}/acked`
@@ -2423,12 +2433,7 @@ export const register: Register = (on, options) => {
     mem.said = want
     if (want.coding !== 'decide' && had?.coding !== want.coding) blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
     if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
-    if (isAway) blocks.push({
-      name: 'web-chat',
-      text: 'The user is away from the terminal and last wrote from the web chat. Tell them ' +
-        'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
-        '`wb chat log` shows the thread. Typing in the terminal again ends this.',
-    })
+    if (isAway) blocks.push({ name: 'web-chat', text: AWAY_NOTE })
     if (want.wakeOff && !had?.wakeOff) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
     const { ok, out: status } = await runWb($, ['status', ...(await scope($))])
     if (!ok) warnOnce($, 'status', `wb status failed: ${brief(status)}; wb doctor`)

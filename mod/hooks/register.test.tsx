@@ -1440,6 +1440,44 @@ test('a dialog wb chat ask refuses is announced on the phone, and a long plan or
   expect(runs.filter(a => a[2] === 'ask').at(-1)).toContain('--text=--version')
 })
 
+test('a task\'s wake while the user is away on the web chat tells Claude to answer them there, and stops once they type in the terminal (#540)', async ($, on) => {
+  // the web-chat block comes once per conversation: a user who went to the web chat after the
+  // first message was never said to be away, and a task's news reached only the terminal
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files)
+  chatOn(files)
+  task(files, 'fix-it', 'running', { repo: '/home/u/project', cwd: '/home/u/project' })
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  const wakes = () => asked.filter(t => t.startsWith('[workbench] Task'))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: ts0 + 3, from: 'user', text: 'on my phone' }) + '\n'
+  await clock.advance(3000)
+  expect(asked).toContain('[web chat] on my phone')            // the user is away now
+
+  task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project' }, ts0 + 6)
+  notice(files, { ts: ts0 + 6, task: 'fix-it', kind: 'review', text: 'REPORT-1' })
+  await clock.advance(3000)
+  expect(wakes()).toHaveLength(1)
+  expect(wakes()[0]).toContain('REPORT-1')
+  expect(wakes()[0]).toContain('last wrote from the web chat')
+  expect(wakes()[0]).toContain('wb chat reply')
+
+  await $.prompt.submit({ text: 'back now' } as any)            // typed in the terminal: back
+  notice(files, { ts: ts0 + 12, task: 'fix-it', kind: 'review', text: 'REPORT-2' })
+  await clock.advance(31_000)                                   // nothing runs: the safety poll reads it
+  expect(wakes()).toHaveLength(2)
+  expect(wakes()[1]).toContain('REPORT-2')
+  expect(wakes()[1]).not.toContain('web chat')
+})
+
 test('running wb counts as workbench mode, and a web message reaches a running turn', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
