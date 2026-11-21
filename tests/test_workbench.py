@@ -17108,7 +17108,7 @@ class Drift(unittest.TestCase):
                          8192 + 4096)              # no input limit: OpenCode 2.3 uses the window
         self.assertIsNone(runner.compaction_buffer({}))
 
-    def test_the_buffer_puts_opencodes_compaction_at_the_ceiling_whatever_the_entry_says_of_input(self):
+    def test_the_buffer_puts_opencodes_compaction_where_wb_plans_it_whatever_the_entry_says_of_input(self):
         # #675: OpenCode 2.3 compacts at min(input, context) - buffer (input unset: context - buffer).
         # wb took an unset input as context - output, wrote a 4K buffer for {32K, output 16K}, and
         # OpenCode compacted at 87.5% while the handovers were planned against 37.5%
@@ -17117,7 +17117,8 @@ class Drift(unittest.TestCase):
             cfg = {"limit": lim}
             inp = min(lim["input"], lim["context"]) if lim.get("input") else lim["context"]
             self.assertEqual((inp - runner.compaction_buffer(cfg)) / lim["context"],
-                             runner.fresh_ceiling(cfg), lim)
+                             runner.compaction_point(cfg), lim)
+            self.assertLess(runner.fresh_ceiling(cfg), runner.compaction_point(cfg))  # #644's margin
         self.assertEqual(runner.compaction_buffer({"limit": {"context": 32768, "output": 16384}}), 20480)
 
     def test_outside_spec_names_files_the_spec_never_mentions(self):

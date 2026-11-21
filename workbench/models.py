@@ -876,6 +876,7 @@ def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
         return {"available": True, "resident": True, "why": "fake"}
     if m.engine == "ollama":
         tags = None if m.root in down else _get(f"{m.root}/api/tags")
+        _IDS[(m.root, None)] = (time.monotonic(), tags)  # identity's read too: one ask a pass
         if tags is None:
             if isinstance(down, set):
                 down.add(m.root)
@@ -1028,7 +1029,12 @@ def identity(m: Model | None) -> str | None:
     if (hit := _IDS.get(key)) and time.monotonic() - hit[0] < FACTS_TTL:
         return hit[1]
     if m.engine == "ollama":
-        row = _tag_row(m.name, _get(f"{m.root}/api/tags") or {})
+        # one tags read a root per TTL, kept as a (root, None) entry: a wb remote box asleep was
+        # asked again for each of its models, into a 2.5 s timeout each (#705 and #726, merged)
+        tags = _IDS.get((m.root, None))
+        if not tags or time.monotonic() - tags[0] >= FACTS_TTL:
+            _IDS[(m.root, None)] = tags = (time.monotonic(), _get(f"{m.root}/api/tags"))
+        row = _tag_row(m.name, tags[1] or {})
         got = f"ollama:{row['digest'][:16]}" if row and isinstance(row.get("digest"), str) and row["digest"] else None
     else:
         n = server_facts(m.root, m.name, m.api_key)["weights"]
