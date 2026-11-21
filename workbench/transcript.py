@@ -351,6 +351,8 @@ def task_entries(task: store.Task) -> list[Entry]:
             out.append(Entry(ts, key, [("bad", f"■ stopped: {r.get('text', '')}")]))
         elif kind == "error":
             out.append(Entry(ts, key, [("bad", f"■ error: {r.get('text', '')}")]))
+        elif kind == "retry":  # OpenCode sends a request again (#491)
+            out.append(Entry(ts, key, [("bad", f"■ OpenCode retries a request: {r.get('text', '')}")]))
         elif kind == "gpu":  # a server wb can't stop, a model partly on the CPU: why rounds crawl
             out.append(Entry(ts, key, [("bad", f"■ GPU: {r.get('text', '')}")]))
     return out

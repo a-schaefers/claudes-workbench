@@ -57,10 +57,18 @@ def normalize(raw: dict, round_no: int):
                 "in": n(tok.get("input")), "out": n(tok.get("output")),
                 "cache": n(cache.get("read")) + n(cache.get("write"))}
     if kind == "error":
-        err = raw.get("error") or {}
-        return {"ts": ts, "round": round_no, "kind": "error",
-                "text": str(err.get("message") if isinstance(err, dict) and err.get("message") else err)[:400]}
+        return {"ts": ts, "round": round_no, "kind": "error", "text": _message(raw.get("error"))}
+    if kind == "retry":  # a request OpenCode gave up on and sends again: not the model's output
+        attempt = raw.get("attempt")
+        return {"ts": ts, "round": round_no, "kind": "retry", "text": _message(raw.get("error")),
+                **({"attempt": attempt} if isinstance(attempt, int) else {})}
     return None
+
+
+def _message(err) -> str:
+    """An event's error, {type, message} in OpenCode 2.3, as its message."""
+    err = err or {}
+    return str(err.get("message") if isinstance(err, dict) and err.get("message") else err)[:400]
 
 
 class StuckDetector:

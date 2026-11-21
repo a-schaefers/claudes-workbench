@@ -262,7 +262,10 @@ The worktree holds only committed files. When the acceptance command needs what 
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
 path>`; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
 directories it lacks, and a failing setup fails the task before any round. A note that the
-agent's environment leaves out a proxy (it holds a password): a setup or tests that need the
+active Python environment is the checkout's: the agent leaves it out (it would import the user's
+checkout, not the worktree), so give it its own, `--setup 'uv sync' --test 'uv run pytest'` or
+`--setup 'python3 -m venv .venv && .venv/bin/pip install -e .'`; that .venv comes first on the
+agent's and the tests' PATH. A note that the agent's environment leaves out a proxy (it holds a password): a setup or tests that need the
 network fail there; ask the user before naming it in commands.json `env`. Tests that use the
 GPU themselves (CUDA, PyTorch, a game engine): add `--unload-for-tests`, or they run beside the
 model and fail out of memory (it also opens the GPU's device nodes to the lane; without it they
@@ -278,7 +281,9 @@ A session is woken only for its own tasks (those `wb start` ran in it, wherever;
 hand, or one whose Claude Code process has exited, from its directory or a repo in it): start a task from the session that will review it. Failing tests go back to the agent on their
 own for `--auto-fix` rounds before you are woken; `wb log <name>` shows what it is doing.
 A model that reads prompts slowly, or one the runner must load first, can spend minutes before
-its first reply. That is normal, not stuck.
+its first reply. That is normal, not stuck. A task stopped with "no first output" has taught the
+runner how slowly the model reads: a new `wb start` on it waits longer (the stop says how long);
+`--silence-timeout <seconds>` gives it more, or pick a smaller model.
 **Exit 4: the GPU is taken** by another task (often another session's project) or `wb image`,
 which the model can't run beside. Don't wait silently: tell the user who holds it, then either
 do the step yourself or `--queue` it to start when the GPU is free (it may be hours).

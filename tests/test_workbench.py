@@ -3442,7 +3442,8 @@ class ConfigLayer(Base):
         self.assertNotIn("strata/strata", models.discover())   # a task's layer is never the user's
         os.environ.pop("OPENCODE_CONFIG")
         layer = json.loads(runner.write_config_layer(store.Task("t-alt")).read_text())
-        self.assertNotIn("provider", layer)        # the global files: OpenCode loads them itself
+        self.assertEqual(list(layer["provider"]), ["ollama"])  # the global files: OpenCode loads
+        self.assertEqual(list(layer["provider"]["ollama"]), ["options"])  # them; its timeouts (#491)
 
     def test_opencodes_config_is_read_from_its_config_dir_and_the_system_file_first(self):
         # #370 (the audit of 1.6, reproduced): OPENCODE_CONFIG_DIR held the user's providers and
@@ -3521,6 +3522,63 @@ class ConfigLayer(Base):
                               "params": {"protocolVersion": "2025-06-18"}}) + "\n",
             env={**os.environ, "WB_TASK": "nope", "PYTHONPATH": ""}, timeout=20)
         self.assertEqual(json.loads(out.stdout)["result"]["serverInfo"]["name"], "workbench")
+
+
+class SlowFirstToken(Base):
+    """#491 (the audit of 1.90): OpenCode's 300 s header timeout cut every request a slow reader
+    hadn't answered in 5 minutes, its retry lines reset the silence clock, and no read speed was
+    learned for the next task."""
+
+    def test_the_tasks_provider_waits_for_its_headers_and_neither_config_puts_the_timeout_back(self):
+        self.start("t-hdr", "ok", "--silence-timeout", "1500")
+        wait_phase("t-hdr", {"review"})
+        task = store.Task("t-hdr")
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["provider"]["ollama"]["options"],    # merged with its entry
+                         {**OPENCODE_CONFIG["provider"]["ollama"]["options"],
+                          "headerTimeout": False, "chunkTimeout": 1560 * 1000})
+        self.assertEqual(layer["provider"]["strata"], OPENCODE_CONFIG["provider"]["strata"])
+        # the user's own content loads last: their providers stay, the timeouts on top
+        theirs = {"provider": {"ollama": {"options": {"headerTimeout": 300000, "x": 1}},
+                               "mine": {"models": {}}}}
+        with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": json.dumps(theirs)}):
+            os.environ.pop("WB_OPENCODE_CONFIG")
+            got = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(got["provider"]["ollama"]["options"],
+                         {"headerTimeout": False, "chunkTimeout": 1560 * 1000, "x": 1})
+        self.assertEqual(got["provider"]["mine"], {"models": {}})
+        self.assertNotIn("baseURL", json.dumps(got))              # no provider copied into it
+
+    def test_retries_are_not_output_so_a_server_that_never_answers_is_stopped_for_silence(self):
+        out = self.start("t-retry", "retry", "--silence-timeout", "4", "--round-timeout", "600")
+        self.assertIn("started", out)
+        st = wait_phase("t-retry", {"stuck"}, timeout=40)
+        self.assertIn("no first output", st["last"])
+        self.assertIn("--silence-timeout", st["last"])
+        task = store.Task("t-retry")
+        rows = [r for r in store.read_jsonl(task.dir / "events.jsonl")[0] if r["kind"] == "retry"]
+        self.assertTrue(rows and rows[0]["text"] == "Timed out waiting for response headers", rows)
+        self.assertIn("OpenCode resent", run_wb("report", "t-retry"))
+        self.assertIn("cut the request at the provider's timeout", run_wb("report", "t-retry"))
+        self.assertIn("retry    Timed out waiting for response headers", run_wb("log", "t-retry"))
+
+    def test_a_round_that_never_got_its_first_token_records_how_fast_it_read_at_most(self):
+        from workbench import models, router
+        self.start("t-bound", "ok")
+        wait_phase("t-bound", {"review"})
+        task = store.Task("t-bound")
+        m = models.resolve(task.spec["model"])
+        self.assertEqual(router.budgets(m)["silence"], router.SILENCE_DEFAULT_S)
+        for rnd in ({"answered": True, "waited": 900}, {"waited": 30},       # it answered; too soon
+                    {"waited": 900, "interrupted": True}, {"waited": 900, "guard": "think"}):
+            self.assertIsNone(runner.read_bound(task, 1, {"guard": None, **rnd}), rnd)
+        (task.round_dir(1) / "prompt.md").write_text("x" * 48_000)   # ~12K tokens with the rest
+        bound = runner.read_bound(task, 1, {"answered": False, "waited": 900, "guard": "silence"})
+        self.assertTrue(bound and bound < 20, bound)
+        self.assertEqual(router.speed(m.id), {"read": bound})
+        b = router.budgets(m)                                     # a read speed alone stretches
+        self.assertGreater(b["silence"], router.SILENCE_DEFAULT_S)
+        self.assertGreater(b["round"], router.ROUND_DEFAULT_S)
 
 
 class AgentContext(Base):
@@ -4151,6 +4209,23 @@ class RealOpenCodeRun(Base):
         self.assertTrue(st["tests"]["ok"])
         sent = {json.loads(x).get("model") for x in self.requests.read_text().splitlines()}
         self.assertEqual(sent, {"cap"})
+
+    def test_a_server_that_holds_its_headers_past_the_providers_timeout_is_still_waited_for(self):
+        # #491 (the audit of 1.90): OpenCode 2.3's provider headerTimeout (300 s unless set) cut
+        # a slow reader's request, retried it four times and failed the round. Here the user's
+        # own entry sets 2 s, standing in for the default, and the server takes 4 s to answer:
+        # the task's layer (and its config content, loaded last) lift it for the task alone.
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(conf.read_text())
+        cfg["provider"]["cap"]["options"]["headerTimeout"] = 2000
+        conf.write_text(json.dumps(cfg))
+        os.environ["CAPTURE_HEADER_DELAY"] = "4"
+        task, st = self.answered([WRITE_42])
+        self.assertTrue(st["tests"]["ok"])
+        rows, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertFalse([r for r in rows if r.get("kind") in ("retry", "error")], rows)
+        self.assertEqual(json.loads(conf.read_text())["provider"]["cap"]["options"]["headerTimeout"],
+                         2000)                                     # the user's file untouched
 
     def test_a_full_window_and_a_compaction_are_read_from_the_real_export(self):
         task, st = self.answered([WRITE_42])
@@ -5033,6 +5108,124 @@ class Lane(Base):
                 self.assertIn("[interop] enabled=false in /etc/wsl.conf", context.interop_gap())
                 (binfmt / "WSLInterop").write_text("disabled\ninterpreter /init\n")
                 self.assertIsNone(context.interop_gap())
+
+
+class CheckoutVenv(Base):
+    """#490 (the audit of 1.90): the user's activated venv, when it is their checkout's, stays out
+    of the agent's environment, so the agent, the setup and the tests import the worktree."""
+    TEST = ("python3 -c \"import mypkg, sys; print(mypkg.__file__); "
+            "sys.exit(mypkg.VALUE != 'base')\"")
+
+    def setUp(self):
+        super().setUp()
+        pkg = self.repo / "src" / "mypkg"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("VALUE = 'base'\n")
+        (self.repo / ".gitignore").write_text(".venv/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "pkg"], check=True)
+        (pkg / "__init__.py").write_text("VALUE = 'user'\n")   # the user's own work in progress
+
+    def venv(self, root: Path, editable: Path | None = None) -> Path:
+        """A virtualenv at ``root``, active as `source bin/activate` leaves it; with ``editable``,
+        a src-layout editable install of that directory (the .pth uv and hatch write)."""
+        import venv
+        venv.create(root, symlinks=True, with_pip=False)
+        if editable:
+            site = next(root.glob("lib/*/site-packages"))
+            (site / "_mypkg.pth").write_text(f"{editable}\n")
+        os.environ["VIRTUAL_ENV"] = str(root)
+        os.environ["PATH"] = f"{root / 'bin'}{os.pathsep}{os.environ['PATH']}"
+        return root
+
+    def test_the_tests_import_the_worktree_not_the_checkout_its_editable_venv_points_at(self):
+        user = self.venv(self.repo / ".venv", self.repo / "src")
+        # what SKILL.md advises: the setup makes the worktree its own venv, editable into it
+        setup = ("python3 -m venv --without-pip .venv && .venv/bin/python3 -c \"import os, site; "
+                 "open(site.getsitepackages()[0] + '/_mypkg.pth', 'w').write(os.getcwd() + '/src')\"")
+        out = self.start("t-venv", "ok", "--setup", setup, "--test", self.TEST, "--auto-fix", "0",
+                         "--no-base-check")
+        self.assertIn(f"note: the active Python environment {user} (inside the repo) is your "
+                      "checkout's", out)
+        st = wait_phase("t-venv", {"review"})
+        task = store.Task("t-venv")
+        said = task.round_dir(1).joinpath("tests.txt").read_text()
+        self.assertTrue(st["tests"]["ok"], said)                  # VALUE 'base', the worktree's
+        self.assertIn(str(task.worktree / "src" / "mypkg"), said)
+        env = runner.agent_env(task)
+        self.assertEqual(env["VIRTUAL_ENV"], str(task.worktree / ".venv"))
+        path = env["PATH"].split(os.pathsep)
+        self.assertEqual(path[:2], [str(context.rules_dir(task) / "bin"),  # the git shim first
+                                    str(task.worktree / ".venv" / "bin")])
+        self.assertNotIn(str(user / "bin"), path)
+        from workbench import verify                              # the base check's scratch
+        code, said = verify.on_base(task, self.TEST, 60)          # checkout, its setup run again
+        self.assertEqual(code, 0, said)
+        self.assertNotIn(str(self.repo / "src"), said)
+        rules = context.shell_rules(task)                         # into its own venv: no ask
+        self.assertEqual(Permission.verdict(rules, "pip install -e ."), "allow")
+        self.assertEqual(Permission.verdict(rules, "poetry install"), "allow")
+
+    def test_without_a_setup_the_checkouts_venv_is_left_out_and_wb_start_says_how_to_add_one(self):
+        user = self.venv(Path(self.tmp.name) / "elsewhere", self.repo / "src")  # editable only
+        bins = self.repo / "node_modules" / ".bin"
+        os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{bins}"  # a direnv PATH_add
+        out = self.start("t-novenv", "ok", "--test", self.TEST, "--auto-fix", "0", "--no-base-check")
+        self.assertIn(f"{user} (an editable install of the repo) is your checkout's", out)
+        self.assertIn("--setup 'uv sync' --test 'uv run pytest'", out)
+        st = wait_phase("t-novenv", {"review"})
+        task = store.Task("t-novenv")
+        said = task.round_dir(1).joinpath("tests.txt").read_text()
+        self.assertFalse(st["tests"]["ok"])                       # not the checkout's 'user'
+        self.assertNotIn(str(self.repo / "src"), said)
+        env = runner.agent_env(task)
+        self.assertNotIn("VIRTUAL_ENV", env)
+        path = env["PATH"].split(os.pathsep)
+        self.assertNotIn(str(user / "bin"), path)
+        self.assertEqual(path[-1], str(task.worktree / "node_modules" / ".bin"))
+        # none active: pip installs where Landlock bounds it, else it asks
+        rules = context.shell_rules(task)
+        self.assertEqual(Permission.verdict(rules, "pip install -e ."),
+                         "allow" if lane.abi() else "deny")
+
+    def test_a_venv_in_a_per_project_home_or_on_path_alone_is_the_checkouts_too(self):
+        task = store.Task("t-homes")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-homes", "repo": str(self.repo)}))
+        workon = Path(self.tmp.name) / "workon"
+        os.environ["WORKON_HOME"] = str(workon)
+        root = self.venv(workon / "proj")                         # virtualenvwrapper's, not editable
+        del os.environ["VIRTUAL_ENV"]                             # found on PATH alone
+        self.assertEqual(context.checkout_envs(task), {str(root): "a per-project venv"})
+        finder = Path(self.tmp.name) / "conda"                    # setuptools' editable finder
+        self.venv(finder)
+        site = next(finder.glob("lib/*/site-packages"))
+        (site / "__editable___mypkg_0_1_finder.py").write_text(
+            f"MAPPING = {{'mypkg': {str(self.repo / 'src' / 'mypkg')!r}}}\n")
+        self.assertEqual(context.checkout_envs(task)[str(finder)], "an editable install of the repo")
+        (site / "__editable___mypkg_0_1_finder.py").write_text(
+            f"MAPPING = {{'mypkg': {str(self.repo) + '-other/src'!r}}}\n")  # another repo
+        self.assertNotIn(str(finder), context.checkout_envs(task))
+
+    def test_a_venv_that_isnt_the_checkouts_stays_but_the_agent_may_not_install_into_it(self):
+        envs = Path(self.tmp.name) / "envs"
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [str(envs)]}))
+        tools = self.venv(envs / "tools")                         # pytest and ruff, no project
+        (envs / "scratch").mkdir()
+        self.assertNotIn("is your checkout's", self.start("t-tools", "ok"))
+        wait_phase("t-tools", {"review"})
+        task = store.Task("t-tools")
+        env = runner.agent_env(task)
+        self.assertEqual(env["VIRTUAL_ENV"], str(tools))
+        self.assertIn(str(tools / "bin"), env["PATH"].split(os.pathsep))
+        rules = context.shell_rules(task)
+        for cmd in ("pip install -e .", "python3 -m pip install -r requirements.txt",
+                    "poetry install", "pip uninstall -y mypkg", "uv pip sync requirements.txt"):
+            self.assertEqual(Permission.verdict(rules, cmd), "deny", cmd)
+        self.assertEqual(Permission.verdict(rules, "npm ci"), "allow")
+        lane_ = context.writable(task)                            # granted, but not the venv
+        self.assertIn(str(envs / "scratch"), lane_)
+        self.assertFalse(any(p == str(tools) or p.startswith(str(tools) + os.sep) for p in lane_))
 
 
 class Permission(Base):

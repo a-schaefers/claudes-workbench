@@ -16,6 +16,8 @@
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
   toolhang  one tool call, then silent (a command that prints nothing for long)
+  retry  no answer from the model's server: a `retry` line every FAKE_RETRY_EVERY seconds (1),
+         OpenCode cutting the request at its provider timeout and sending it again (#491)
 A `run` message must follow `--` when it starts with '-', or the fake prints its usage and exits
 1, as OpenCode does. FAKE_LATE: seconds before the first event (a model reading its prompt).
 FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_RUNS one that records
@@ -158,6 +160,13 @@ elif scenario == "chatter":  # a newer OpenCode's progress event, unknown here, 
     for _ in range(600):
         print(json.dumps({"type": "progress", "timestamp": t(), "sessionID": session}), flush=True)
         time.sleep(0.1)
+elif scenario == "retry":  # as OpenCode 2.3 prints it, after the step_start above
+    for attempt in range(2, 200):
+        print(json.dumps({"type": "retry", "timestamp": t(), "sessionID": session,
+                          "messageID": "msg_fake", "attempt": attempt, "nextRetryAt": t() + 1000,
+                          "error": {"type": "provider.transport",
+                                    "message": "Timed out waiting for response headers"}}), flush=True)
+        time.sleep(float(os.environ.get("FAKE_RETRY_EVERY", 1)))
 elif scenario == "toolhang":
     tool("bash", {"command": "make check"})
     time.sleep(3600)
