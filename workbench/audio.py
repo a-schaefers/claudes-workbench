@@ -284,18 +284,33 @@ def words(text: str) -> list[str]:
     return re.findall(r"[\w']+", text.lower().replace("’", "'"))
 
 
-def wer(script: str, heard: str) -> float:
-    """Word error rate: word-level edit distance over the script's length."""
+def _spans(script: str, heard: str) -> tuple[int, list[tuple[str, str]]]:
+    """The script's words and where the listener heard something else, as (script, heard)
+    spans. A span that differs only in spacing or apostrophes ("boatswain's", "boat swain's") is
+    a match: the first real run (#396) counted a perfect take of it as a miss."""
+    import difflib
     ref, hyp = words(script), words(heard)
-    if not ref:
-        return 0.0 if not hyp else 1.0
-    prev = list(range(len(hyp) + 1))
-    for i, r in enumerate(ref, 1):
-        cur = [i]
-        for j, h in enumerate(hyp, 1):
-            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (r != h)))
-        prev = cur
-    return round(prev[-1] / len(ref), 3)
+    flat = lambda ws: "".join(ws).replace("'", "")  # noqa: E731
+    spans = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ref, hyp, autojunk=False).get_opcodes():
+        if op != "equal" and flat(ref[i1:i2]) != flat(hyp[j1:j2]):
+            spans.append((" ".join(ref[i1:i2]), " ".join(hyp[j1:j2])))
+    return len(ref), spans
+
+
+def wer(script: str, heard: str) -> float:
+    """Word error rate: the words in the spans heard differently, over the script's length.
+    Read it with `differences`: a listener writes "2026" for "twenty twenty-six", and Claude can
+    tell that from a fumble only by seeing the words."""
+    n, spans = _spans(script, heard)
+    if not n:
+        return 0.0 if not words(heard) else 1.0
+    return round(min(1.0, sum(max(len(a.split()), len(b.split())) for a, b in spans) / n), 3)
+
+
+def differences(script: str, heard: str, most: int = 4) -> list[str]:
+    """Up to ``most`` spans as 'script → heard' ('…→ (nothing)' for a skipped stretch)."""
+    return [f"{a or '(nothing)'} → {b or '(nothing)'}" for a, b in _spans(script, heard)[1][:most]]
 
 
 def _multipart(fields: dict, file: Path) -> tuple[bytes, str]:
@@ -308,8 +323,9 @@ def _multipart(fields: dict, file: Path) -> tuple[bytes, str]:
 
 
 def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
-    """The listener's transcript: a command's stdout ({in} the clip; JSON with "text" is read
-    too), or an OpenAI /v1/audio/transcriptions server's "text"."""
+    """The listener's transcript: a command's stdout ({in} the clip; JSON with "text", or
+    audio.cpp's `text_output=` line, is read too), or an OpenAI /v1/audio/transcriptions
+    server's "text"."""
     name, e = ear
     if e.get("command"):
         argv = media.fill(e["command"], {"in": clip})
@@ -332,7 +348,10 @@ def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
             return data["text"].strip()
     except ValueError:
         pass
-    return out
+    # audio.cpp's CLI prints key=value lines, the words with their timestamps among them: scored
+    # whole, a perfect take read as a WER of several hundred percent (the first real run, #396)
+    said = [line.split("=", 1)[1] for line in out.splitlines() if line.startswith("text_output=")]
+    return " ".join(said).strip() if said else out
 
 
 def inspect(path: Path, kind: str, script: str = "", seconds: float | None = None,
@@ -359,7 +378,8 @@ def inspect(path: Path, kind: str, script: str = "", seconds: float | None = Non
         if ear and script:
             try:
                 heard = transcribe(ear, clip, log or Path(tmp) / "listen.log")
-                found.update(transcript=heard, wer=wer(script, heard), listener=ear[0])
+                found.update(transcript=heard, wer=wer(script, heard),
+                             differences=differences(script, heard), listener=ear[0])
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as err:
                 found["listen_error"] = str(err)
     return found
@@ -385,7 +405,8 @@ def summary(found: dict, seconds: float | None) -> str:
         if found["gaps"]:
             bits.append("gaps " + ", ".join(f"{g[1]:g} s at {g[0]:g} s" for g in found["gaps"]))
     if "transcript" in found:
-        bits.append(f"heard \"{found['transcript']}\" WER {found['wer']:.0%}")
+        bits.append(f"heard \"{found['transcript']}\" WER {found['wer']:.0%}"
+                    + (f" ({'; '.join(found['differences'])})" if found.get("differences") else ""))
     elif "listen_error" in found:
         bits.append(f"listener failed: {found['listen_error']}")
     return " · ".join(bits)

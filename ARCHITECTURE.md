@@ -2776,9 +2776,9 @@ and the skill says which judgements stay the user's:
 Taste (a song, a voice's character) is the user's: Claude shortlists on the checks and asks the
 user to listen. The keeper goes into the project, converted with ffmpeg as the project needs, and
 is committed with what its `.json` sidecar says made it, like an image. The coding agents can't
-make audio; one that needs a sound asks Claude. Still to come (milestone 1.90): the measured real
-runs (#396), a player in the web chat so the user can pick by ear (#397), and the weekly model
-check re-checking the audio picks (#398).
+make audio; one that needs a sound asks Claude. Still to come (milestone 1.90.1): a player in the web
+chat so the user can pick by ear (#397), and the weekly model check re-checking the audio picks
+(#398).
 
 **Setting it up is optional.** Claude offers it the first time a project needs a sound and never
 installs anything unasked (the skill's `reference/audio.md`). The recommended runtime is
@@ -2798,30 +2798,60 @@ proposes, each checked at setup against its licence text:
 | listen | Parakeet TDT 0.6B v3, or Qwen3-ASR 0.6B | CC-BY-4.0, Apache-2.0 | only checks transcripts |
 
 ```sh
-git clone https://github.com/0xShug0/audio.cpp ~/.local/opt/audio.cpp && cd ~/.local/opt/audio.cpp
-cmake -S . -B build -DENGINE_ENABLE_VULKAN=ON && cmake --build build -j --target audiocpp_cli
-ln -s "$PWD/build/bin/audiocpp_cli" ~/.local/bin/audiocpp_cli  # weights: audio-cpp/audio.cpp-gguf
+sudo pacman -S --needed espeak-ng   # Kokoro's phonemizer (GPL-3.0), a shared library it loads; or the distro's package
+git clone --depth 1 --branch v0.9.5 --recurse-submodules https://github.com/0xShug0/audio.cpp ~/.local/opt/audio.cpp
+cd ~/.local/opt/audio.cpp && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_VULKAN=ON
+cmake --build build -j --target audiocpp_cli && ln -s "$PWD/build/bin/audiocpp_cli" ~/.local/bin/
+mkdir -p ~/models/audio && cd ~/models/audio   # the Q8 GGUFs from audio-cpp/audio.cpp-gguf, 11 GB in all:
+B=https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main
+for f in Kokoro-82M-GGUF/kokoro-82m-q8_0.gguf Parakeet-TDT-0.6B-v3-GGUF/parakeet-tdt-0.6b-v3-q8_0.gguf \
+         MOSS-SoundEffect-v2-GGUF/moss-soundeffect-v2-q8_0.gguf ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-q8_0.gguf
+do mkdir -p "$(dirname $f)" && curl -fL -C - -o "$f" "$B/$f"; done
 ```
 
+On NVIDIA, build with `-DENGINE_ENABLE_CUDA=ON`; on a Mac, Metal is on by default. Linux and macOS
+release binaries are on its releases page too.
+
 Then describe the engines in `~/.config/workbench/audio.json` (`$WB_AUDIO`). The flags below are
-audio.cpp's; check them against the installed version (some families take `--seed`, others
-`--request-option seed=`):
+audio.cpp 0.9.5's, as run on the development machine (some families take `--seed`, others
+`--request-option seed=`; a Kokoro voice needs its own `--language`: `af_`/`am_` voices
+`en-us`, `bf_`/`bm_` `en-gb`, so one engine per language):
 
 ```json
 {
   "kokoro": {"kind": "speech", "gpu": false, "voices": ["af_heart", "am_puck"],
-             "command": "audiocpp_cli --task tts --family kokoro_tts --model ~/models/audio/kokoro --backend cpu --text {text} --voice-id {voice} --seed {seed} --out {out}",
+             "command": "audiocpp_cli --task tts --family kokoro_tts --model ~/models/audio/Kokoro-82M-GGUF/kokoro-82m-q8_0.gguf --backend cpu --language en-us --voice-id {voice} --seed {seed} --text {text} --out {out}",
              "notes": "licence: Apache-2.0; English best; no cloning"},
   "moss-sfx": {"kind": "sfx",
-               "command": "audiocpp_cli --task gen --family moss_soundeffect --model ~/models/audio/moss-soundeffect-v2-q8_0.gguf --backend vulkan --text {text} --request-option duration_sec={seconds} --request-option seed={seed} --out {out}",
+               "command": "audiocpp_cli --task gen --family moss_soundeffect --model ~/models/audio/MOSS-SoundEffect-v2-GGUF/moss-soundeffect-v2-q8_0.gguf --backend vulkan --text {text} --request-option duration_sec={seconds} --request-option seed={seed} --out {out}",
                "notes": "licence: Apache-2.0; 0.1-30 s"},
+  "ace-step": {"kind": "music", "seconds": 30,
+               "command": "audiocpp_cli --task gen --family ace_step --model ~/models/audio/ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-q8_0.gguf --backend vulkan --task-route text2music --text {text} --lyrics {lyrics} --duration-seconds {seconds} --seed {seed} --out {out}",
+               "notes": "licence: MIT; instrumental when no --lyrics"},
   "parakeet": {"kind": "listen", "gpu": false,
-               "command": "audiocpp_cli --task asr --family parakeet_tdt --model ~/models/audio/parakeet-tdt-0.6b-v3 --backend cpu --audio {in}",
+               "command": "audiocpp_cli --task asr --family parakeet_tdt --model ~/models/audio/Parakeet-TDT-0.6B-v3-GGUF/parakeet-tdt-0.6b-v3-q8_0.gguf --backend cpu --audio {in}",
                "notes": "licence: CC-BY-4.0"},
   "server": {"kind": "speech", "url": "http://127.0.0.1:8080/v1/audio/speech", "model": "qwen3-tts",
              "unload": "http://127.0.0.1:8080/v1/tasks/unload_all_models"}
 }
 ```
+
+**Measured on the development machine** (2026-11-20, #396: Arch Linux, a 16 GB AMD card on
+Vulkan, audio.cpp 0.9.5, the Q8 GGUFs; each call loads its model afresh, which these times
+include; VRAM is the peak above the desktop's own 1.5 GB). They describe this machine, not a
+requirement:
+
+| Engine | Clip | Time per clip | VRAM |
+|---|---|---|---|
+| Kokoro-82M, CPU | a 3.7 s line | 1.5 s | none |
+| Parakeet TDT 0.6B v3, CPU (the listener) | a 6 s clip | 1.8 s | none |
+| MOSS-SoundEffect v2, Vulkan | 4 s | 23 s | 5.1 GB |
+| ACE-Step 1.5 turbo, Vulkan | 20 s, instrumental | 12 s | 10.6 GB |
+
+What the runs taught: Kokoro needs eSpeak-ng installed, and a voice needs its language
+(`bm_george` with `en-us` exits "voice/language mismatch"); its takes of one script differ only
+slightly. A sound effect's hit came 0.8 to 1.45 s in (the line's lead), so the skill says to trim
+it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
 
 - A **command** engine fills `{text}`, `{out}`, `{seed}`, `{seconds}`, `{voice}` and `{lyrics}`
   the way `wb image` fills its placeholders: one argument each, never through a shell. An option
@@ -2831,8 +2861,9 @@ audio.cpp's; check them against the installed version (some families take `--see
   Kokoro-FastAPI, Speaches). It makes speech only, since sound effects and music have no common
   API. `unload` is POSTed after each batch so the server lets its GPU memory go (audio.cpp's
   `/v1/tasks/unload_all_models`), which a url image engine can't do.
-- A **listen** engine prints its transcript on stdout (`{in}` is the clip; JSON with `text` is
-  read too), or is an OpenAI `/v1/audio/transcriptions` server. The first one in the file checks
+- A **listen** engine prints its transcript on stdout (`{in}` is the clip; JSON with `text`, and
+  audio.cpp's `text_output=` line among its `key=value` lines, are read too), or is an OpenAI
+  `/v1/audio/transcriptions` server. The first one in the file checks
   every speech batch.
 - `"gpu": false` marks an engine that runs on the CPU. It takes no GPU lease and frees nothing,
   so it can run beside a coding task. Any other engine has the GPU to itself, exactly as
@@ -2856,14 +2887,17 @@ audio.cpp's; check them against the installed version (some families take `--see
   with `showspectrumpic`. Without ffmpeg it uses the `wave` module alone and says "loudness: no
   ffmpeg". `levels` reads 50 ms blocks: silence is below `SILENT_DB` (-50 dBFS), a gap is
   `GAP_SECS` (1 s) or more between sounds, and a sample at 0.999 of full scale or more counts as
-  clipped. `wer` is the word edit distance over the script's word count (lower case, apostrophes
-  kept, so the skill says to write numbers as words). A listener that fails is reported on the
+  clipped. `_spans` aligns the script's words with the heard ones (`difflib`, lower case) and keeps
+  the spans heard differently, except those that differ only in spacing or apostrophes
+  ("boatswain's", "Boat Swain's"); `wer` is their words over the script's, `differences` the
+  first four as `script → heard`. The line shows both, because a WER alone misled on the first
+  real run (#396): a perfect "Twenty twenty-six" read 30%, the listener having written "2026". A listener that fails is reported on the
   line, not raised.
 - The line reads `3.4 s (asked 3) · peak -1.2 dBFS · -16 LUFS · lead 0.1 s, tail 0.3 s · gaps … ·
-  heard "…" WER 0%`, then the spectrogram's path. Under 80% of the asked length it adds "cut
+  heard "…" WER 30% (twenty twenty six → 2026)`, then the spectrogram's path. Under 80% of the asked length it adds "cut
   short".
 - The sidecar: `{text, kind, seed, seconds, voice, lyrics, refs, engine, secs, ts, duration,
-  peak_db, clipped, lead, tail, gaps, silent?, lufs?, transcript?, wer?, listener?,
+  peak_db, clipped, lead, tail, gaps, silent?, lufs?, transcript?, wer?, differences?, listener?,
   listen_error?, unreadable?}`. `--out` defaults to `$WB_HOME/audio/<YYYYmmdd-HHMMSS>/`.
 
 ## Git, commits and projects

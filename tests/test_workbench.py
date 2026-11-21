@@ -5090,7 +5090,8 @@ class Audio(Base):
         self.assertAlmostEqual(side["lead"], 0.2, delta=0.06)  # ffmpeg's resampling rings a little
         self.assertEqual(side["wer"], audio.wer(script, "the gate is closed"))
         self.assertGreater(side["wer"], 0)
-        self.assertIn('heard "the gate is closed" WER', out)
+        self.assertIn('heard "the gate is closed" WER 62% (open home rm rf seed → closed)', out)
+        self.assertEqual(side["differences"], ["open home rm rf seed → closed"])
         calls = [ast.literal_eval(l) for l in Path(str(tone) + ".calls").read_text().splitlines()]
         self.assertEqual(calls[0][:2], ["--text", script])  # one argument, never through a shell
         self.assertEqual(calls[1][calls[1].index("--seed") + 1], "6")
@@ -5104,6 +5105,18 @@ class Audio(Base):
         with self.assertRaises(SystemExit), redirect_stderr(err):
             run_wb("audio", "hi", "--voice", "zoe", "--out", str(tmp / "o"))
         self.assertIn("has no voice 'zoe' (voices: anna, bo)", err.getvalue())
+
+    def test_audio_cpps_key_value_transcript_is_read_for_its_text(self):
+        # the first real run (#396): audio.cpp's CLI prints task=, word_timestamps=[…] and
+        # text_output= lines; scored whole, a perfect take read as a WER of several hundred percent
+        tmp = Path(self.tmp.name)
+        ear = self.ear("family=parakeet_tdt\ntask=asr\nword_timestamps=[{\"word\": \"Hello\"}]\n"
+                       "text_output=Hello there, friend.")
+        clip = tmp / "c.wav"
+        clip.write_bytes(b"")
+        heard = audio.transcribe(("ear", {"command": f"{sys.executable} {ear} {{in}}"}), clip, tmp / "log")
+        self.assertEqual(heard, "Hello there, friend.")
+        self.assertEqual(audio.wer("Hello there friend", heard), 0.0)
 
     def test_the_checks_find_a_gap_a_short_clip_a_silent_one_and_clipping(self):
         tmp, tone = Path(self.tmp.name), self.tone()
@@ -5131,8 +5144,16 @@ class Audio(Base):
         loud = audio.levels([1.0, -1.0] * 1000, rate)
         self.assertEqual((loud["peak_db"], loud["clipped"]), (0.0, 1.0))
         self.assertIn("clipped 100.0%", audio.summary(loud, None))
-        self.assertEqual(audio.wer("It's three o'clock", "its three oclock"), round(2 / 3, 3))
         self.assertEqual(audio.wer("open the gate", "Open the gate."), 0.0)
+        # the first real run (#396): spacing and apostrophes are the listener's spelling, not a
+        # miss; a number it writes as digits is shown, for Claude to judge
+        self.assertEqual(audio.wer("It's three o'clock; the boatswain's", "its three oclock the boat swain's"), 0.0)
+        script = "Twenty twenty-six was the year the lighthouse went dark."
+        self.assertEqual(audio.differences(script, "2026 was the year the lighthouse went dark."),
+                         ["twenty twenty six → 2026"])
+        self.assertEqual(audio.differences("open the gate and walk", "open the walk"),
+                         ["gate and → (nothing)"])
+        self.assertEqual(audio.wer("open the gate and walk", "open the walk"), 0.4)
 
     def test_an_engine_refuses_what_it_has_no_slot_for_and_the_wrong_kind(self):
         tmp, tone = Path(self.tmp.name), self.tone()

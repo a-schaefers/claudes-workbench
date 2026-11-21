@@ -22,8 +22,10 @@ Never say a sound "sounds" good. Say what the checks show, and let the user's ea
 2. `wb audio "<script or description>" [--kind speech|sfx|music] --n 3 [--seconds S] [--voice V]
    [--lyrics FILE] [--seed S]`. **Read every check line and look at every spectrogram.** Never
    pick by filename.
-3. **Speech:** keep a take with WER 0% (or only a harmless difference, such as a number written
-   as digits), no clipping and no long gap. If none qualifies, rewrite the script (phonetic
+3. **Speech:** read the differences in brackets after the WER, not the number alone. The listener
+   writes numbers as digits and spells odd names its own way ("twenty twenty six → 2026" is a
+   match). A missing, extra or wrong word isn't. Keep a take whose differences are all harmless,
+   with no clipping and no long gap. If none qualifies, rewrite the script (phonetic
    spellings for the words it fumbles, shorter sentences) and go again. For long text, make one
    call per few sentences and join the takes afterwards with ffmpeg: long generations drift.
 4. **Sfx and music:** drop candidates that are "cut short", SILENT, clipped, or have gaps you
@@ -31,8 +33,9 @@ Never say a sound "sounds" good. Say what the checks show, and let the user's ea
    a tail that never decays on a loop). Tell the user which you'd keep and why, and ask them to
    listen (give the paths). Stop after three rounds and show the best.
 5. Convert it to what the project uses with ffmpeg (format, trim, `loudnorm` to the project's
-   level, a loop point), commit it, and say which engine, text and seed made it (the `.json`
-   sidecar has them). Credit the model when its licence requires it (CC-BY).
+   level, a loop point). A sound effect's hit often comes a second or more in, so trim the lead
+   it reports (`silenceremove`) for anything that must play on cue. Then commit it and say
+   which engine, text and seed made it (the `.json` sidecar has them). Credit the model when its licence requires it (CC-BY).
 
 Mind each engine's `notes` in `wb audio --list`: an audio model's licence can forbid commercial
 use or require attribution. A `--ref` clip clones a voice: use only the user's own voice or one
