@@ -401,8 +401,18 @@ step), the failure goes straight back to the agent as the next round's prompt (`
 the code, don't weaken the tests; a failing check it wrote this task, work its expected value out
 by hand first and correct the test if that was wrong; never blame the compiler or system: an
 agent whose change compared the wrong way round spent 40 minutes sure gcc was broken,
-2026-11-18), and Claude isn't woken. A note that arrives during the tests goes to
-the agent first; that test result is dropped. With self-review on (the `self_review` knob,
+2026-11-18), and Claude isn't woken. Not a failure that says nothing about the change
+(`not_the_code`, #496, the audit of 1.90): a run past `--test-timeout` (the agent edited code that
+may well have been right, nothing ever naming the limit) or one the lane refused a device
+(`lane_refused`, #331: rounds 2 and 3 ran on the same refusal) is no auto-fix round; the round
+goes to review, status `last` the cause ("the acceptance command ran past --test-timeout (900s):
+Claude reviews next", "the lane refused /dev/kvm: …") and the report led by `auto-fix skipped:
+<cause>` with what to do (run it in the worktree, narrow it, a larger `--test-timeout`; `wb allow
+<task> --path <node>`, then `wb feedback`). A dropped proxy (`proxy_gap`, #380) may be either: the
+auto-fix round runs, its prompt saying first, after its opening sentence, that the output shows a
+failed connection with the proxy left out, and not to change code for one. With either key set
+(`proxy`, `lane`) the prompt doesn't say the system works and the bug is in this change. A note
+that arrives during the tests goes to the agent first; that test result is dropped. With self-review on (the `self_review` knob,
 *Self-tuning*: on by default, learned per model; `--self-review`/`--no-self-review`, task.json
 `self_review`, set it for one task), the first time the tests pass in a review round (status `self_reviewed`, the `[steps, reviews]` it
 ran at) the agent gets one more round, `runner.SELF_REVIEW`: Claude's own review checks (each
@@ -630,8 +640,8 @@ once more and `pid` and `stopping` are cleared.
    pending, `_undelivered`), phase `stuck`/`failed`, a notice, exit; the edits so far stay in the
    worktree. Otherwise `run_tests`; a note that arrived meanwhile, or while
    the report was being written → `_steer_round`. The report
-   goes to `rounds/<n>/summary.md`. Failing tests with auto-fix left → an auto-fix round (round
-   n+1's prompt is the failure). Otherwise phase `review`, a `review` notice (the report, then
+   goes to `rounds/<n>/summary.md`. Failing tests with auto-fix left, unless `not_the_code` (a timeout, a lane refusal) → an
+   auto-fix round (round n+1's prompt is the failure). Otherwise phase `review`, a `review` notice (the report, then
    `review_diff`: the whole diff under review when it is at most `REVIEW_DIFF_MAX` = 32,000
    characters (~8K tokens), else its stat (the diff read as it streams, `gitops.diff(limit=)`,
    git stopped past the limit: a 19 MB generated file's patch was held whole, a 55 MiB peak, for a
@@ -919,7 +929,8 @@ exit, tail (clip_tail: 8 lines, 1500 characters), limit}`, and `base_check_line`
 report (*The round report*, below): a note when it already passes (the usual case when the agent
 writes the step's tests: only those can fail it, so Claude checks the diff adds tests that fail
 without the change), a warning when `--test-timeout` cut it short (every round's tests will time
-out too), a note when it ran past 120 s (not checked), a note when setting the scratch checkout
+out too), a note when it ran past 120 s (not checked; with a larger `--test-timeout`, that a round's run
+may pass it too, #496), a note when setting the scratch checkout
 up failed (not checked), else its exit and tail, for Claude to check it fails only for what the
 step changes. The warning also raises a `checkin` at once, so Claude
 can discard before round 1 lands. A passing base once did too, telling Claude to discard and start
@@ -928,7 +939,8 @@ again: that cost a whole restart in one task of two (the 2026-11-17 measurement)
 
 **The round report** (`summary_text`), line by line:
 1. `task X · label · round n · M.m min · local tokens IN in / OUT out` (this round; input
-   excludes cache reads).
+   excludes cache reads). Ahead of it in the review notice and `summary.md`, `auto-fix skipped:
+   <cause>` when `not_the_code` kept the failure from the agent.
 2. `agent context: U.UK of WK (P%)[, compacted Nx][; the next round starts a fresh session]`.
 3. `STOPPED: why` or `opencode exited N (see …/runner.log)`, when either; then, past the first
    step, `steps 1-N committed on delegate/<task> (wb next): wb discard <task> drops this step and

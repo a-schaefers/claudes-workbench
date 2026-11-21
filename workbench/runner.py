@@ -1456,7 +1456,10 @@ def base_check_line(r: dict, task: store.Task) -> str:
             return (f"warning: the acceptance command ran past --test-timeout ({limit}s) on the "
                     "base, so every round's tests will time out too: raise --test-timeout or "
                     "narrow the command (wb discard, then start again)")
-        return f"note: the acceptance command ran past {limit}s on the base; not checked"
+        full = int(task.spec.get("test_timeout") or 900)  # #496: an 18-minute suite under 15
+        return (f"note: the acceptance command ran past {limit}s on the base; not checked"
+                + (f". If it runs that long, a round's run may pass --test-timeout ({full}s) too: "
+                   "raise it for a slow suite" if full > limit else ""))
     if r["ok"]:
         # the usual case when the agent writes the step's tests: a warning that said to discard
         # and start again cost a whole restart in one task of two (the 2026-11-17 measurement)
@@ -1857,14 +1860,42 @@ SELF_REVIEW = (
 # An agent whose change compared the wrong way round spent 40 minutes sure the compiler was
 # broken, compiling test programs in /tmp, until Claude pointed at its loop (2026-11-18). A test
 # it wrote this task can be the wrong half too, so it checks that one by hand first.
+# Behind a proxy the agent's environment leaves out (#380), a connection failure isn't the
+# change's, and "the system works" sent the agent to edit code for it (#496, the audit of 1.90).
 def auto_fix_prompt(tests: dict, cmd: str) -> str:
-    return (f"The acceptance tests fail. Command: `{cmd}` (exit {tests['exit']}). Output:\n\n"
+    net = (f" The output shows a failed connection, and your environment leaves out "
+           f"{', '.join(tests['proxy'])} (a proxy that needs a password), so it may be the "
+           "network's: don't change code for a connection failure; fix only the other "
+           "failures." if tests.get("proxy") else "")
+    vouch = "" if tests.get("proxy") or tests.get("lane") else \
+        " The compiler, libraries and system work; the bug is in this change."
+    return (f"The acceptance tests fail.{net} Command: `{cmd}` (exit {tests['exit']}). Output:\n\n"
             f"```\n{tests['tail']}\n```\n\nFix the code so the tests pass. When a failing check is "
             "one you wrote for this task, first work its expected value out by hand from the task: "
-            "if the test was wrong, correct it (that isn't weakening it). The compiler, libraries "
-            "and system work; the bug is in this change. Do not weaken, skip or delete tests to "
-            "make them pass. Do not commit. Finish with a short summary of what you changed and "
-            "the test result.")
+            f"if the test was wrong, correct it (that isn't weakening it).{vouch} Do not weaken, "
+            "skip or delete tests to make them pass. Do not commit. Finish with a short summary of "
+            "what you changed and the test result.")
+
+
+def not_the_code(task: store.Task, tests) -> str:
+    """Why a failed test run says nothing about the change, so no auto-fix round is spent on it
+    (#496, the audit of 1.90): a run past --test-timeout went back as "the bug is in this change"
+    and the agent edited code that may well have been right, nothing naming the limit; a device
+    the lane refused (lane_refused, #331) was named only after both auto-fix rounds. The part
+    before the first colon is the cause, for status.last. "" when the failure may be the code's
+    (a dropped proxy may be either: its auto-fix prompt says so, auto_fix_prompt)."""
+    if not tests or tests["ok"]:
+        return ""
+    if tests["exit"] == "timeout":
+        return (f"the acceptance command ran past --test-timeout "
+                f"({int(task.spec.get('test_timeout') or 900)}s): its failure says nothing about "
+                "the change; run it in the worktree yourself, or narrow it (wb next --test); "
+                "start a slow suite's task with a larger --test-timeout")
+    if nodes := tests.get("lane"):
+        return (f"the lane refused {', '.join(nodes)}: "
+                + "; ".join(f"wb allow {task.name} --path {n}" for n in nodes)
+                + ", then wb feedback, if the tests need it")
+    return ""
 
 
 def measure_speed(task: store.Task, since: float) -> None:
@@ -2132,12 +2163,14 @@ def drive(task: store.Task) -> None:
                 _steer_round(task, n, False)
                 continue
             text = summary_text(task, n, rnd, tests)
+            if skip := not_the_code(task, tests):  # first: what Claude must do about it
+                text = f"auto-fix skipped: {skip}\n" + text
             if pending_steer(task):  # a note that came in while the report was written
                 _steer_round(task, n, False)
                 continue
             task.round_dir(n).joinpath("summary.md").write_text(text)
             used = task.status.get("auto_fixes", 0)
-            if tests and not tests["ok"] and used < int(task.spec.get("auto_fix", 0)):
+            if tests and not tests["ok"] and not skip and used < int(task.spec.get("auto_fix", 0)):
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
                     auto_fix_prompt(tests, task.spec["test_cmd"]))
@@ -2157,6 +2190,7 @@ def drive(task: store.Task) -> None:
                 continue
             task.set_status(phase="review", tests=tests,
                             last="tests passed: Claude reviews next" if tests and tests["ok"]
+                            else f"{skip.split(':')[0]}: Claude reviews next" if skip
                             else "Claude reviews next")
             task.notify("review", text + review_diff(task), round=n)
             return

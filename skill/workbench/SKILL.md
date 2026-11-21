@@ -274,6 +274,9 @@ network fail there; ask the user before naming it in commands.json `env`. Tests 
 GPU themselves (CUDA, PyTorch, a game engine): add `--unload-for-tests`, or they run beside the
 model and fail out of memory (it also opens the GPU's device nodes to the lane; without it they
 see no device). With it, the base check, `wb verify` and `wb shot` wait for the GPU alone too.
+A suite slower than 15 minutes: `--test-timeout <secs>` above its time, or
+narrow the command; a run past it isn't sent back to the agent (nor one the lane refused a
+device), you're woken with `auto-fix skipped:` and the cause.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded

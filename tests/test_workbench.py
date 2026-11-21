@@ -2477,6 +2477,70 @@ class RoundEnd(Base):
         self.assertEqual((st["phase"], st["last"]), ("review", "tests passed: Claude reviews next"))
 
 
+class AutoFix(Base):
+    """What a failing test run sends back to the agent, and what it leaves to Claude."""
+
+    def notice(self, name) -> str:
+        rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        got = [r for r in rows if r["task"] == name]
+        self.assertEqual([r["kind"] for r in got], ["review"])
+        return got[0]["text"]
+
+    def test_a_test_run_past_the_test_timeout_is_not_sent_back_as_the_agents_bug(self):
+        # #496 (the audit of 1.90): `make check` past --test-timeout went back to the agent as
+        # "the acceptance tests fail … (exit timeout) … the bug is in this change", twice, and
+        # nothing ever named --test-timeout
+        self.start("t-slow", "ok", "--test", "sleep 30", "--test-timeout", "1", "--no-base-check")
+        st = wait_phase("t-slow", {"review", "stuck", "failed"})
+        self.assertEqual((st["phase"], st["round"], st.get("auto_fixes", 0)), ("review", 1, 0))
+        self.assertEqual(st["last"], "the acceptance command ran past --test-timeout (1s): "
+                                     "Claude reviews next")
+        self.assertTrue(self.notice("t-slow").startswith(
+            "auto-fix skipped: the acceptance command ran past --test-timeout (1s): its failure "
+            "says nothing about the change"))
+        self.assertFalse(store.Task("t-slow").round_dir(2).exists())
+
+    def test_tests_the_lane_refused_a_device_are_not_sent_back_as_the_agents_bug(self):
+        # #496: /dev/kvm refused was named in the report (#331), yet rounds 2 and 3 ran on it
+        self.start("t-kvm", "ok", "--no-base-check", "--test",
+                   "echo 'qemu: could not open /dev/kvm: Permission denied'; exit 1")
+        st = wait_phase("t-kvm", {"review", "stuck", "failed"})
+        self.assertEqual((st["phase"], st["round"], st.get("auto_fixes", 0)), ("review", 1, 0))
+        self.assertEqual(st["last"], "the lane refused /dev/kvm: Claude reviews next")
+        self.assertTrue(self.notice("t-kvm").startswith(
+            "auto-fix skipped: the lane refused /dev/kvm: wb allow t-kvm --path /dev/kvm, then "
+            "wb feedback, if the tests need it"))
+
+    def test_the_code_s_own_failure_still_goes_back_to_the_agent(self):
+        self.start("t-own", "fix", "--test", TEST_CMD, "--no-base-check")
+        st = wait_phase("t-own", {"review", "stuck", "failed"})
+        self.assertEqual((st["phase"], st["round"], st["auto_fixes"]), ("review", 2, 1))
+        self.assertNotIn("auto-fix skipped", self.notice("t-own"))
+        prompt = store.Task("t-own").round_dir(2).joinpath("prompt.md").read_text()
+        self.assertIn("the bug is in this change", prompt)
+
+    def test_a_dropped_proxy_leads_the_auto_fix_prompt_and_nothing_vouches_for_the_system(self):
+        # #496: behind an authenticated proxy the agent's environment leaves out, the prompt
+        # said "the system works; the bug is in this change" to a connection failure
+        prompt = runner.auto_fix_prompt({"exit": 6, "tail": "curl: (6) Could not resolve host",
+                                         "proxy": ["https_proxy"]}, "make check")
+        self.assertTrue(prompt.startswith("The acceptance tests fail"))   # the transcript's label
+        head, _, rest = prompt.partition("Command: `make check`")
+        self.assertIn("https_proxy", head)                                # first
+        self.assertIn("don't change code for a connection failure", head)
+        self.assertNotIn("the bug is in this change", prompt)
+        self.assertNotIn("system work", prompt)
+
+    def test_a_base_check_cut_at_its_own_cap_says_the_full_run_may_outlast_it_too(self):
+        # #496: "ran past 120s on the base; not checked" said nothing of a suite that takes 18
+        # minutes under a 15-minute --test-timeout
+        task = types.SimpleNamespace(spec={"test_timeout": 900}, dir=Path(self.tmp.name))
+        line = runner.base_check_line({"exit": "timeout", "limit": 120}, task)
+        self.assertEqual(line, "note: the acceptance command ran past 120s on the base; not "
+                               "checked. If it runs that long, a round's run may pass "
+                               "--test-timeout (900s) too: raise it for a slow suite")
+
+
 class WorktreeSetup(Base):
     """#201 (the 2026-11-19 audit): a task's worktree holds only committed files, under the state
     directory, so a project's check that needs its installed dependencies, an ignored local file
