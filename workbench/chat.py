@@ -545,9 +545,24 @@ def page_ask(a: dict) -> dict:
     return {**a, "detail": lean}
 
 
+def _push_key_or_none() -> str | None:
+    """push_key, or None when the key can't be had (a full disk, a broken file): a broken push key
+    took every snapshot with it, so the whole chat said "Can't reach the computer" (#924)."""
+    try:
+        return push_key()
+    except (OSError, ValueError, RuntimeError) as err:
+        if str(err) not in _no_key:  # said once in serve.log, not at every request
+            _no_key.add(str(err))
+            print(f"wb chat: no push key ({err}): notifications are off", file=sys.stderr, flush=True)
+        return None
+
+
+_no_key: set[str] = set()
+
+
 def snapshot() -> dict:
     return {"messages": thread(), "asks": [page_ask(a) for a in asks()], "listener": listener(), "prefs": prefs(),
-            "push": {"key": push_key(), "test": (store.read_json(chat_dir() / "push-test.json", None)
+            "push": {"key": _push_key_or_none(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
             "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
             "now": store.now()}

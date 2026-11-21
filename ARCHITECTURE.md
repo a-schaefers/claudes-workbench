@@ -5740,7 +5740,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   page showed on screen (each id once; with `endpoint`, for that device only, #537), or a push one
   device took (`endpoint`, each id once per device; a push row without one, from before, counts for every device); `push-test.json`: `{ts}`, the
   last test push. The VAPID key is beside the token (`<token file>-push`, mode 600, made on first
-  use).
+  use: written whole to a temp file beside it, fsynced, then linked into place, and an empty or
+  unparsable one replaced the same way, `webpush.private_key`; created first and written after, a
+  full disk or a crash left it empty and every chat request failed, #924).
 
 **Settings.** The token: `$WB_CHAT_TOKEN`, else `~/.config/workbench/chat-token` (created on first
 use with `O_EXCL`, mode 600, `token_urlsafe(32)`; kept at 600; one under 16 characters is refused
@@ -5819,7 +5821,8 @@ thread no longer):
   `chat.page_ask`: a plan past `PLAN_PREVIEW` 1,200 characters cut to them with `detail.cut`, a
   question's `detail.questions` only their `question` text, all the page shows of one answered;
   thirty answered plans were most of a 922 KB state, #755), prefs, push (`{key:
-  the VAPID public key, test: the last test push's ts}`), listener, savings (`chat.week_saved`:
+  the VAPID public key, null when it can't be had (`chat._push_key_or_none`, said once in
+  serve.log: a broken key stopped messaging too, #924), test: the last test push's ts}`), listener, savings (`chat.week_saved`:
   `savings.totals` over the last 7 days with its `score`, as `wb savings --json` without `period`), uploads (`chat.upload_limits`: `{file, message, files}`, the byte limits and files a message), build, expire (`MESSAGE_EXPIRE` in seconds: past it a
   user's unread row carries `expired`, #536), now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
   when the page does: a page that loaded other files reloads itself.

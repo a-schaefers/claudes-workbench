@@ -17933,6 +17933,34 @@ class WebChat(Base):
                                   base64.urlsafe_b64decode(sig + "==")))
         self.assertEqual(oct(wp.key_path(self.chat.token_path()).stat().st_mode & 0o777), "0o600")
 
+    def test_an_empty_or_broken_vapid_key_file_is_replaced_and_never_stops_the_chat(self):
+        # #924: created first and written after, a full disk or a crash left the key file empty,
+        # and every snapshot raised: the page said "Can't reach the computer" until it was deleted
+        from workbench import webpush as wp
+        chat, tok = self.chat, self.chat.token()
+        path = wp.key_path(chat.token_path())
+        for broken in ("", "zz\n", f"{wp.N:064x}\n"):                  # empty, not hex, out of range
+            path.write_text(broken)
+            chat._keys.clear()
+            d = wp.private_key(chat.token_path())
+            self.assertTrue(0 < d < wp.N)
+            self.assertEqual(path.read_text(), f"{d:064x}\n")         # replaced, whole
+            self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+            self.assertEqual(wp.private_key(chat.token_path()), d)  # and kept
+        self.assertEqual([p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")], [])
+        with mock.patch.object(wp.os, "fsync", side_effect=OSError(28, "No space left on device")):
+            path.unlink()
+            with self.assertRaises(OSError):
+                wp.private_key(chat.token_path())
+        self.assertFalse(path.exists())                                # nothing half-written left
+        chat._keys.clear()
+        with mock.patch.object(wp, "private_key", side_effect=RuntimeError("no usable key")), \
+                redirect_stderr(io.StringIO()):
+            status, state = self.call("/api/state", token=tok)
+            self.assertEqual(status, 200)                              # messaging goes on
+            self.assertIsNone(state["push"]["key"])
+            self.assertEqual(self.call("/api/send", {"text": "hi"}, token=tok)[0], 200)
+
     def test_devices_subscribe_only_with_a_push_services_address_and_hear_of_news_once(self):
         chat, tok = self.chat, self.chat.token()
         from workbench import webpush as wp
