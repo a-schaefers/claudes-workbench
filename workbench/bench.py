@@ -149,7 +149,7 @@ def bundle(repo: Path, commit: str, dest: Path) -> None:
 def _checkout_at(d: Path, case: dict) -> Path:
     """Where a case's checkout goes in `d`: nested as a task's worktree is when a sibling is two
     or more levels up, so that its link lands in `d` (#261, the audit of 1.2)."""
-    work = context.tree(d, case["repo"], case.get("siblings"), "repo")
+    work = context.tree(d, _checkout(case), case.get("siblings"), "repo")
     work.parent.mkdir(parents=True, exist_ok=True)
     return work
 
@@ -222,6 +222,16 @@ def _repo(case: dict) -> Path:
     return gitops.repo_of({"repo": case.get("repo"), "git_common": case.get("git_common")})
 
 
+def _checkout(case: dict) -> str:
+    """The checkout the task ran in, which its siblings are relative to (`../lib`), even once
+    that linked worktree is removed: Path.parents is lexical, so they resolve from the path
+    alone. Not _repo's main worktree, which sits elsewhere (Claude Code's
+    `.claude/worktrees/<name>`, `../proj-wt/feat`): resolved from there, a replay's links named
+    the wrong place, its build failed and the failure counted against the model (#909's
+    review). case.json `checkout`, or `repo` in a case from before it."""
+    return case.get("checkout") or case["repo"]
+
+
 def checkout(case: dict, dest: Path) -> None:
     """The case's base, checked out at `dest`, with an identity of its own (nothing commits), and
     its Git LFS files and submodules as the task had them, from the case's repo (#509).
@@ -284,7 +294,8 @@ def _prepared(at: store.Task, where: str) -> None:
 
 def _inputs(case: dict, repo: Path) -> None:
     """The original checkout's copied paths and siblings, beside a replay's checkout, where its
-    wb start --copy and --sibling find them (#250)."""
+    wb start --copy and --sibling find them (#250): the copies from the repo as it is now
+    (_repo), the siblings from where the task ran (_checkout)."""
     src = _repo(case)
     for p in case.get("copy") or ():
         if os.path.lexists(src / p):
@@ -292,7 +303,7 @@ def _inputs(case: dict, repo: Path) -> None:
     for name in case.get("siblings") or ():  # at any level the case reaches (#261)
         if not os.path.lexists(at := context.sibling_link(repo, name)):
             at.parent.mkdir(parents=True, exist_ok=True)
-            at.symlink_to(context.sibling_real(src, name))
+            at.symlink_to(context.sibling_real(_checkout(case), name))
 
 
 def add(name: str, step: int | None = None, hidden: list[str] | None = None,
@@ -367,6 +378,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         step_row = measured[step - 1] if len(measured) >= step else {}
         grants = context.grants(task)
         case = {"name": case_name, "task": name, "step": step, "repo": str(repo),
+                "checkout": str(spec.get("repo") or repo),  # its siblings' (_checkout)
                 **({"git_common": str(c)} if (c := gitops.common_dir(repo)) else {}),  # _repo
                 "base": base,
                 "reference": ref, "size": spec.get("size"), "stack": spec.get("stack"),

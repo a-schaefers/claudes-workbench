@@ -5221,7 +5221,8 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   with a CalledProcessError, and the guard held only the removed path (#776). So does `wb bench
   add` (its repo `gitops.repo_of`, refused naming `wb relocate` when that is nowhere, and each
   case's replays through `bench._repo`): it refused the task as "gone: the case is cut from its
-  repo" (#909). `wb relocate`
+  repo" (#909); a case's siblings still resolve from the removed checkout's own path (case.json
+  `checkout`), not the main worktree's. `wb relocate`
   (`gitops.relocate`, under the task's command lock) checks the new repo holds the task's base
   commit, finds the git dir it keeps for the worktree (`worktrees/<id>`, whose `gitdir` links back
   to it, a relative link read against that directory; else the one named as gitdir.json's, whose
@@ -6988,7 +6989,11 @@ steps whose cost was split, #558).
 
 **bench/cases/<case>/case.json** (`bench.add`): `name`, `task`, `step`, `repo` (where add ran
 its git: `gitops.repo_of`, the task's checkout or, that linked worktree removed, its repository's
-main one), `git_common` (its git dir: a replay's checkout, LFS objects, submodules and `--copy`
+main one), `checkout` (task.json `repo`, the checkout the task ran in, which its `siblings` are
+relative to: `bench._checkout` lays a replay's tree out and resolves them from that path, lexically,
+even once that linked worktree is removed; from the main worktree, elsewhere, a replay's `../lib`
+named the wrong place, #909's review; `repo` in a case from before the key), `git_common` (its
+git dir: a replay's checkout, LFS objects, submodules and `--copy`
 inputs come from `bench._repo`, the main worktree once `repo` is removed, #909), `base`,
 `reference`, `size`, `stack`, `test_cmd`, `test_timeout`, `check_cmd`, `hidden` (paths, their
 files in `hidden/`), `allow`, `paths` (the task's grants, from status `grants_kept` once its

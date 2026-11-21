@@ -12122,6 +12122,38 @@ class Bench(Base):
             run_wb("bench", "add", "t-wb")
         self.assertIn(f"{w1} moved or was deleted: wb relocate t-wb --repo <its new path>", err.getvalue())
 
+    def test_a_removed_linked_worktrees_cases_find_its_siblings_where_the_task_ran(self):
+        # #909's review: the siblings of a case from a removed linked worktree resolved from the
+        # main worktree, elsewhere, so a replay's `../lib` named the wrong place (here a missing
+        # one) and its build failed, counted against the model; bench add's own check of the
+        # reference commit failed too, for a case made after the removal
+        from workbench import bench
+        feat = Path(self.tmp.name) / "wts" / "proj" / "feat"
+        gitops.git(self.repo, "worktree", "add", "-q", "-b", "feat", str(feat))
+        (feat.parent / "lib").mkdir()
+        (feat.parent / "lib" / "VERSION").write_text("7\n")
+        self.assertFalse((self.repo.parent / "lib").exists())  # beside the main one: nothing
+        os.environ["FAKE_SCENARIO"] = "ok"
+        test = "grep -qx 7 ../lib/VERSION && sh tests/check.sh"
+        for name in ("t-sa", "t-sb"):
+            run_wb("start", name, "--spec", str(self.spec), "--repo", str(feat), "--model", "mimo",
+                   "--test", test, "--sibling", "../lib")
+            wait_phase(name, {"review"})
+            wt = store.Task(name).worktree
+            (wt / "tests").mkdir()
+            (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+            run_wb("accept", name, "-m", "feat: the answer")
+        run_wb("bench", "add", "t-sa", "--hidden", "tests/check.sh")
+        gitops.git(self.repo, "worktree", "remove", str(feat))
+        self.assertIn("on the base: fails",
+                      run_wb("bench", "add", "t-sb", "--hidden", "tests/check.sh"))
+        for name in ("t-sa", "t-sb"):
+            case = bench.cases()[name]
+            work = bench._checkout_at(Path(self.tmp.name) / f"replay-{name}", case)
+            bench.checkout(case, work)
+            bench._inputs(case, work)
+            self.assertEqual((work.parent / "lib" / "VERSION").read_text(), "7\n", name)
+
     def squashed(self, name: str) -> store.Task:
         """A two-step task accepted with --merge-as squash after main moved: no branch holds its
         steps."""
