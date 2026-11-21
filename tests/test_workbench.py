@@ -9808,7 +9808,7 @@ class WebChat(Base):
         self.assertEqual(chat.plan()["binds"], ["127.0.0.1"])         # no Tailscale assumed
         conf.write_text(json.dumps({"bind": ["localhost", "0.0.0.0"]}))
         p = chat.plan()
-        self.assertEqual(p["binds"], ["127.0.0.1", "0.0.0.0"])
+        self.assertEqual(p["binds"], ["0.0.0.0"])                     # the wildcard covers it (#534)
         self.assertIn(socket.gethostname().lower(), p["hosts"])      # its names, on any interface
         self.assertNotIn("evil.example", p["hosts"])
         conf.write_text(json.dumps({"bind": ["0.0.0.0"], "hosts": ["chat.example.org"]}))
@@ -9845,6 +9845,63 @@ class WebChat(Base):
     def test_a_taken_port_is_one_line_not_a_traceback(self):
         with self.assertRaisesRegex(RuntimeError, f"can't listen on 127.0.0.1:{self.port}: the port is taken"):
             self.chat.make_servers(self.port, ["127.0.0.1"])
+
+    def test_a_bind_mixing_a_wildcard_with_another_address_starts_and_answers_on_each(self):
+        # #534 (the 2026-11-20 audit): each further socket on the port failed EADDRINUSE on Linux,
+        # so these never started, blamed on "another wb chat serve", and wb-chat.service retried forever
+        import http.client
+        chat, conf = self.chat, Path(os.environ["WB_CHAT_CONFIG"])
+        try:
+            with socket.socket(socket.AF_INET6) as sk:
+                sk.bind(("::1", 0))
+            v6 = True
+        except OSError:
+            v6 = False
+        lists = [["localhost", "0.0.0.0"], ["0.0.0.0", "localhost"]]
+        if v6:
+            lists += [["0.0.0.0", "::"], ["::", "0.0.0.0"], ["127.0.0.1", "::"], ["::", "127.0.0.1"]]
+        for binds in lists:
+            with socket.socket() as sk:
+                sk.bind(("0.0.0.0", 0))
+                port = sk.getsockname()[1]
+            servers, p = chat.make_servers(port, binds)
+            try:
+                for srv in servers:
+                    threading.Thread(target=srv.serve_forever, daemon=True).start()
+                for at in ["127.0.0.1"] + (["::1"] if "::" in binds else []):
+                    c = http.client.HTTPConnection(at, port, timeout=5)
+                    c.request("GET", "/manifest.webmanifest", headers={"Host": "localhost"})
+                    self.assertEqual(c.getresponse().status, 200, (binds, at))
+                    c.close()
+            finally:
+                for srv in servers:
+                    srv.shutdown()
+                    srv.server_close()
+                servers[0].RequestHandlerClass.hub.close()
+        # a string is one address or name, not its characters
+        conf.write_text(json.dumps({"bind": "0.0.0.0", "hosts": "box.ts.net"}))
+        p = chat.plan()
+        self.assertEqual(p["binds"], ["0.0.0.0"])
+        self.assertIn("box.ts.net", p["hosts"])
+        self.assertNotIn("b", p["hosts"])
+        conf.write_text(json.dumps({"bind": 5}))                        # anything else: chat.json named
+        with self.assertRaisesRegex(chat.ConfigError, "chat.json: bind is a list of strings"):
+            chat.plan()
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as ex:
+            run_wb("chat", "serve", "--port", "0")
+        self.assertEqual(ex.exception.code, 78)                        # the unit stops: no retry fixes it
+        # no loopback in the list: the link names the address it listens on
+        conf.write_text(json.dumps({"bind": ["10.0.0.5"]}))
+        self.assertTrue(chat.url(1337).startswith("http://10.0.0.5:1337/#token="))
+        conf.write_text("{}")
+        if v6:  # a later address taken: not blamed on another wb chat serve
+            with socket.socket(socket.AF_INET6) as held:
+                held.bind(("::1", 0))
+                held.listen()
+                port = held.getsockname()[1]
+                with self.assertRaisesRegex(RuntimeError, "another address in the bind list"):
+                    chat.make_servers(port, ["127.0.0.1", "::1"])
 
     def test_a_bad_length_or_a_stalled_connection_is_turned_away(self):
         import http.client

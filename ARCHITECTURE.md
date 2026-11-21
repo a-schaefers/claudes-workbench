@@ -3751,7 +3751,8 @@ retries with a delay growing from 10 s to 5 min (`RestartSteps`, systemd 254+; e
 older ones), since retrying is what brings the chat up when a bound address arrives late (a user
 manager has no network-online.target) or the port is briefly held: a start limit gave up for good
 there (the 0.90 review). It stops only on exit 78 (`RestartPreventExitStatus`), which bin/wb's
-Python-version and Windows guards use; never 75, the replan exit below.
+Python-version and Windows guards use, and `wb chat serve` on a chat.json it can't follow (#534);
+never 75, the replan exit below.
 
 **Keeping it up, and reaching it** (moved here from the README, 2026-11-17). On Linux, link the
 unit from the copy `wb` runs from (`~/.claude/plugins/marketplaces/workbench` for a marketplace
@@ -3900,7 +3901,14 @@ with a message), read once when the server starts, so a new token needs a restar
 on, which replace localhost (`localhost`, an address, `tailscale`: the tailnet IPv4 from
 `tailscale status --json`, the CLI found on PATH or, on macOS, in the app bundle
 (`TAILSCALE_APP`); skipped as `tailscale (not running)`, or `tailscale (CLI not found: …)` when
-neither has it; `0.0.0.0` or `::`: every interface). `hosts`: extra host names to answer to (`*`: any). `--bind` replaces chat.json's
+neither has it; `0.0.0.0` or `::`: every interface). `hosts`: extra host names to answer to (`*`: any).
+Each is a list of strings; a string is a one-item list (iterated, `"0.0.0.0"` became the binds `0`
+and `.`), and anything else stops `serve` with `chat.ConfigError` naming chat.json, exit 78, so the
+unit doesn't retry it (#534). A wildcard covers its family's other binds: with `0.0.0.0` the plan
+drops the specific IPv4 ones, with `::` the specific IPv6 ones (their names stay answered), and
+`::` beside any IPv4 bind gets `IPV6_V6ONLY` (`plan()["v6only"]`, `_Server.v6only`). On Linux each
+further socket on the port failed `EADDRINUSE`, so `["localhost", "0.0.0.0"]`, `["0.0.0.0", "::"]`
+or `["127.0.0.1", "::"]` never started (#534). `--bind` replaces chat.json's
 binds, `--host` adds to its hosts, `--port` changes the port. Answered host names (`chat.plan`,
 worked out once at startup): `localhost`, `127.0.0.1`, `::1` always; for `tailscale` its DNS name,
 first label and host name; for a wildcard the host's name, its first label, its FQDN and whatever
@@ -3912,7 +3920,8 @@ answered the page itself 403 `unknown host` (#448). Only the full name (`box.tai
 serve's certificate has), which no other site's DNS can answer for. `serve` prints what it listens
 on, binds it skipped, and warnings for a wildcard bind or `hosts: *`; an address it can't listen
 on ends it with one line (`can't listen on <addr>:<port>: the port is taken: another wb chat serve
-… or another program; --port picks another`, or the address isn't on this machine). With a bind skipped (tailscale
+… or another program; --port picks another`; for an address after the first, `by another address in
+the bind list (chat.json's bind, or --bind) or another program`; or the address isn't on this machine). With a bind skipped (tailscale
 not up yet) or a `tailscale` bind (its address comes and goes), it rechecks every
 `REPLAN_EVERY` 30 s and once the set of addresses differs re-execs in place (as for a code
 change, below) to bind them. Only a longer list was noticed, so a tailscale-only chat serving
@@ -3923,7 +3932,9 @@ have changed and held still for a look (a pull writes files one by one), it says
 the same command line (`sys.orig_argv`) in the same process, so systemd and launchd see no exit
 and a hand-started server keeps running: one left up across an update served the new page from
 the old code for a day and a half (2026-11-18). `wb chat url` prints
-`http://localhost:<port>/#token=…` (the fragment never leaves the browser).
+`http://localhost:<port>/#token=…` (the fragment never leaves the browser); when chat.json's `bind`
+has neither loopback nor a wildcard, the plan's first address instead of localhost, which reached
+nothing there (#534).
 
 **The HTTP API** (`Handler`, HTTP/1.0, no keep-alive, no CORS; a connection that stalls for
 `TIMEOUT` 30 s, before its request is in or on a blocked write, is closed, so an idle one holds a

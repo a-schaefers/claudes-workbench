@@ -3119,7 +3119,10 @@ def cmd_chat(a):
     if a.port is None:  # named: that port; else the running server's, else the default (#349)
         a.port = chat.PORT if a.action == "serve" else chat.port()
     if a.action == "serve":
-        chat.serve(a.port, a.bind or None, a.host or None, say=lambda m: print(m, flush=True))
+        try:
+            chat.serve(a.port, a.bind or None, a.host or None, say=lambda m: print(m, flush=True))
+        except chat.ConfigError as e:  # 78 (EX_CONFIG): wb-chat.service stops, no retry fixes it
+            die(str(e), 78)
     elif a.action == "url":
         print(chat.url(a.port))  # the token is the key: keep the link private
     elif a.action == "on":  # the pane's switch, kept: the link shows and a session listens

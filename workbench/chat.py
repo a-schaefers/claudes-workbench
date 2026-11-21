@@ -85,9 +85,23 @@ def config_path() -> Path:
     return Path(os.environ.get("WB_CHAT_CONFIG") or Path.home() / ".config" / "workbench" / "chat.json")
 
 
+class ConfigError(RuntimeError):
+    """chat.json says something the server can't follow: no retry fixes it (`wb chat serve` exits 78)."""
+
+
 def settings() -> dict:
-    """The user's choices for the server: {"bind": [...], "hosts": [...]}; {} for the defaults."""
-    return store.read_json(config_path(), {}) or {}
+    """The user's choices for the server: {"bind": [...], "hosts": [...]}; {} for the defaults. A
+    string is a one-item list: iterated as a list, "0.0.0.0" became the binds '0' and '.' (#534)."""
+    conf = store.read_json(config_path(), {}) or {}
+    if not isinstance(conf, dict):
+        raise ConfigError(f"{config_path()} isn't a JSON object: {{\"bind\": [...], \"hosts\": [...]}}")
+    for key in ("bind", "hosts"):
+        val = conf.get(key)
+        if isinstance(val, str):
+            conf[key] = [val]
+        elif val is not None and not (isinstance(val, list) and all(isinstance(v, str) for v in val)):
+            raise ConfigError(f"{config_path()}: {key} is a list of strings, not {json.dumps(val)[:60]}")
+    return conf
 
 
 def token() -> str:
@@ -1181,12 +1195,25 @@ def plan(binds: list[str] | None = None, hosts: list[str] | None = None) -> dict
             allowed.add(b)
         if b not in out:
             out.append(b)
+    # A wildcard covers the specific addresses of its family, and on Linux (bindv6only=0) `::`
+    # takes IPv4 too: each further socket on the port failed EADDRINUSE, so ["localhost",
+    # "0.0.0.0"] or ["0.0.0.0", "::"] never started, blamed on "another wb chat serve" (#534).
+    # Their names stay answered; `::` beside any IPv4 bind is made IPv6-only (IPV6_V6ONLY).
+    if "0.0.0.0" in out:
+        out = [b for b in out if b == "0.0.0.0" or ":" in b]
+    if "::" in out:
+        out = [b for b in out if b == "::" or ":" not in b]
     return {"binds": out or ["127.0.0.1"], "hosts": None if "*" in extra else allowed | set(extra),
-            "names": names, "skipped": skipped}
+            "names": names, "skipped": skipped,
+            "v6only": "::" in out and any(":" not in b for b in out)}
 
 
 class _Server(ThreadingHTTPServer):
+    v6only = False  # set for `::` beside an IPv4 bind, so the two can share the port (#534)
+
     def server_bind(self):
+        if self.v6only:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
         # HTTPServer's own also looks the address's host name up (socket.getfqdn), which nothing
         # here reads: on macOS that lookup stalled the start past wb chat on's wait (#236)
         socketserver.TCPServer.server_bind(self)
@@ -1207,12 +1234,16 @@ def make_servers(port: int, binds: list[str] | None = None,
     servers = []
     for addr in p["binds"]:
         try:
-            srv = (_Server6 if ":" in addr else _Server)((addr, port), handler)
+            kind = (type("_Server6Only", (_Server6,), {"v6only": True}) if addr == "::" and p["v6only"]
+                    else _Server6 if ":" in addr else _Server)
+            srv = kind((addr, port), handler)
         except OSError as e:  # one line, not a traceback (the 2026-11-16 audit)
             for s in servers:
                 s.server_close()
-            why = ("the port is taken: another wb chat serve (systemctl --user status wb-chat) or "
-                   "another program; --port picks another" if e.errno == errno.EADDRINUSE else
+            why = (("the port is taken: by another address in the bind list (chat.json's bind, or "
+                    "--bind) or another program" if servers else
+                    "the port is taken: another wb chat serve (systemctl --user status wb-chat) or "
+                    "another program") + "; --port picks another" if e.errno == errno.EADDRINUSE else
                    "that address isn't on this machine (chat.json's bind, or --bind)"
                    if e.errno == errno.EADDRNOTAVAIL else e.strerror or str(e))
             raise RuntimeError(f"can't listen on {addr}:{port}: {why}") from None
@@ -1247,7 +1278,11 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
         def replan():
             while True:
                 time.sleep(REPLAN_EVERY)
-                if set(plan(binds, hosts)["binds"]) != set(p["binds"]):
+                try:
+                    now = set(plan(binds, hosts)["binds"])
+                except ConfigError:  # chat.json broken while it runs: keep serving what it bound
+                    continue
+                if now != set(p["binds"]):
                     restart("the addresses to listen on changed: restarting to bind them")
         threading.Thread(target=replan, daemon=True).start()
     threading.Thread(target=watch_code, args=(
@@ -1288,5 +1323,12 @@ def port() -> int:
 
 def url(port: int) -> str:
     """The one link to open: localhost, the token in the fragment. Reaching it from another
-    device (Tailscale, a tunnel) is the user's own setup: they change the host in the link."""
-    return f"http://localhost:{port}/#token={token()}"
+    device (Tailscale, a tunnel) is the user's own setup: they change the host in the link. A bind
+    list without loopback or a wildcard gets its first address instead: localhost reached nothing
+    there (#534)."""
+    host = "localhost"
+    binds = settings().get("bind") or []
+    if binds and not any(b in ("localhost", "127.0.0.1", "::1", *WILDCARD) for b in binds):
+        first = plan()["binds"][0]
+        host = f"[{first}]" if ":" in first else first
+    return f"http://{host}:{port}/#token={token()}"
