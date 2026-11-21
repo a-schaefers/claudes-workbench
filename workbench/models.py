@@ -2477,7 +2477,11 @@ class GpuLease:
         holder runs it, and the lease stays held for the tests, an entry with no model (`tests`)
         that nobody joins, so wb start refuses and a queued task waits: let go, a queued task was
         admitted and ran a model round beside them, both allocating VRAM at once (#428, the audit
-        of 1.8). On a remote model's server the tests use none of its GPU: let go there.
+        of 1.8). Kept, the tests still waited for nobody: a task already sharing the GPU kept its
+        model there and its rounds running beside them (#943), so the tests wait, holding their
+        entry, until every other holder has stepped aside or ended (_alone_for_tests); the runner
+        then frees what they left loaded. On a remote model's server the tests use none of its
+        GPU: let go there (the runner takes this machine's GPU for them: verify.gpu).
         `rejoin` before the next round."""
         if self.aside or not self.fh:
             return
@@ -2490,12 +2494,35 @@ class GpuLease:
             held.pop(self.me, None)
             if unload:
                 self._unload_unshared(held)
-            if unload and not (self.m and self.m.remote and not same_gpu(self.m)):
+            alone = unload and not (self.m and self.m.remote and not same_gpu(self.m))
+            if alone:
                 self._set({**held, self.me: {**self._entry(), "model": None, "tests": True}})
             else:
                 self._set(held)
                 fcntl.flock(self.fh, fcntl.LOCK_UN)
             self.aside = True
+        if alone:
+            self._alone_for_tests()
+
+    def _alone_for_tests(self) -> None:
+        """Wait, holding the tests' entry (nobody joins it), until no other holder is left in the
+        pool but tests of tasks started after this one (first come, by ``since``): admitted
+        beside this task before its tests, a peer's model kept serving its rounds while the
+        project's GPU tests allocated VRAM, and an out-of-memory failure went back to the agent
+        as its bug (#943). Two tasks' GPU tests never run together, and never wait on each
+        other: the later one waits. Waiting entries hold nothing."""
+        mine = (self.since or 0, self.task)
+
+        def ahead() -> list[str]:
+            return sorted({h.get("task") or "?" for p, h in self._holders().items()
+                           if p != self.me and not h.get("waiting")
+                           and not (h.get("tests") and (h.get("since") or 0, h.get("task") or "") > mine)})
+        if not (others := ahead()):
+            return
+        self.say(f"waiting for the GPU (held by {', '.join(others)}): the tests use it alone")
+        with Watcher(self.home) as w:
+            while ahead():
+                w.wait(QUEUE_POLL)
 
     def _unload_unshared(self, held: dict) -> None:
         held_ids = keep_loaded()  # the user's own (#215), and only Ollama unloads on request

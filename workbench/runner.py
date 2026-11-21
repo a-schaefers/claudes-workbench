@@ -2911,6 +2911,29 @@ def _loaded(task: store.Task, secs: float) -> None:
                     **({"loads": [*(st.get("loads") or []), secs]} if secs > 0 else {}))
 
 
+@contextlib.contextmanager
+def _tests_gpu(task: store.Task, lease):
+    """This machine's GPU to a round's tests alone, with --unload-for-tests, once `step_aside`
+    has let the model go: on this GPU the lease's own pool, held for them and waited empty, and
+    what the other tasks left loaded freed (free_gpu, keep_loaded kept) and let go of; for a model
+    on another machine's GPU (a wb remote box), whose pool the tests left, this machine's pool,
+    taken alone as the base check's is (verify.gpu). The tests run here whatever the model's
+    pool: before, a peer's model, a local task's or a wb image job's shared this GPU with them
+    (#943)."""
+    if not task.spec.get("unload_for_tests") or not task.spec.get("test_cmd"):
+        yield
+        return
+    from . import media, verify  # verify imports this module; media only for these tests
+    say = lambda msg: task.set_status(last=msg)  # noqa: E731
+    if lease.pool == "gpu":
+        models.free_gpu(say=say)
+        media.settle(say)
+        yield
+        return
+    with verify.gpu(task, say):
+        yield
+
+
 def _rejoin(task: store.Task, lease) -> None:
     """Back on the GPU before a round, after the tests or a server's wait let it go (#257):
     queued, in its first-come place, when the GPU is someone else's meanwhile."""
@@ -3061,7 +3084,8 @@ def drive(task: store.Task) -> None:
                 return
             # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257
             lease.step_aside(unload=bool(task.spec.get("unload_for_tests")))
-            tests = run_tests(task, n)
+            with _tests_gpu(task, lease):
+                tests = run_tests(task, n)
             if pending_steer(task):  # a note that came in while the tests ran
                 _steer_round(task, n, False)
                 continue

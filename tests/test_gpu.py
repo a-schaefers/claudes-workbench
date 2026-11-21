@@ -566,6 +566,33 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.assertEqual(wait_phase("t-gpu", {"review", "stuck", "failed"})["phase"], "review")
         self.assertEqual(wait_phase("t-rival", {"review", "stuck", "failed"})["phase"], "review")
 
+    def test_tests_that_use_the_gpu_wait_for_a_task_already_sharing_it_to_step_aside(self):
+        # #943 (an outside review of 1.90.24): the tests' entry stopped newcomers (#428), but a
+        # task admitted beside this one before its tests kept its model loaded and its rounds
+        # running while the project's GPU tests allocated VRAM beside it
+        os.environ["WB_FAKE_GPU_GB"] = "48"          # 25 + 11 GB: admitted together
+        self.start("t-big", "hang", "--model", BIG)
+        wait_running("t-big")
+        self.start("t-gpu", "ok", "--model", SMALL, "--no-base-check", "--unload-for-tests",
+                   "--test", f"touch ran-tests; {TEST_CMD}")
+        deadline = time.time() + 30
+        while "the tests use it alone" not in store.Task("t-gpu").status.get("last", ""):
+            self.assertLess(time.time(), deadline, store.Task("t-gpu").status)
+            time.sleep(0.1)
+        self.assertEqual(store.Task("t-gpu").status["last"],
+                         "waiting for the GPU (held by t-big): the tests use it alone")
+        time.sleep(1)
+        ran = store.Task("t-gpu").worktree / "ran-tests"
+        self.assertFalse(ran.exists())                                # not beside t-big's model
+        held = models.holders()
+        self.assertEqual(sorted((h["task"], h["model"], h.get("tests")) for h in held.values()),
+                         [("t-big", BIG, None), ("t-gpu", None, True)])
+        tests = {p: h for p, h in held.items() if h.get("tests")}
+        self.assertFalse(models.admits(models.resolve(BIG), tests))  # t-big can't rejoin meanwhile
+        run_wb("stop", "t-big")
+        self.assertEqual(wait_phase("t-gpu", {"review", "stuck", "failed"})["phase"], "review")
+        self.assertTrue(ran.exists())
+
     def test_two_tasks_whose_loads_misfit_both_get_the_gpu_once_the_holder_ends(self):
         # #366 (the audit of 1.6, reproduced): two leases let in beside a third, each finding at
         # its load that Ollama couldn't keep both, waited for the GPU to themselves. The second

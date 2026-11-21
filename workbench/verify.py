@@ -20,7 +20,7 @@ import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
 
-from . import context, gitops, models, runner, store
+from . import context, gitops, runner, store
 
 LIMIT = 300  # seconds for each run; past it, that run is inconclusive
 
@@ -262,21 +262,14 @@ def _say(msg: str) -> None:
 
 @contextlib.contextmanager
 def gpu(task: store.Task, say=_say):
-    """The GPU to the checks alone, for a task started with --unload-for-tests whose model is
-    local: queued with the tasks in first-come order, then the other models unloaded (models.json's
-    keep_loaded kept) and their memory let go (media.gpu), as the round's own tests have it. The
-    base check, wb verify and wb shot ran the project's GPU tests beside other tasks' resident
-    models, and an out-of-memory failure read as the base's or the change's (#502, the audit of
-    1.90). Otherwise nothing: tests that need no GPU don't wait for it."""
+    """The GPU to the checks alone, for a task started with --unload-for-tests: queued with the
+    tasks in first-come order, then the other models unloaded (models.json's keep_loaded kept) and
+    their memory let go (media.gpu), as the round's own tests have it. The base check, wb verify
+    and wb shot ran the project's GPU tests beside other tasks' resident models, and an
+    out-of-memory failure read as the base's or the change's (#502, the audit of 1.90). This
+    machine's GPU whatever the task's model: one on a wb remote box took none, yet the checks run
+    here (#943). Otherwise nothing: tests that need no GPU don't wait for it."""
     if not task.spec.get("unload_for_tests"):
-        yield
-        return
-    try:
-        m = models.resolve(task.spec["model"])
-        local = not m.remote or models.same_gpu(m)  # Ollama for Windows from WSL: this GPU (#750)
-    except KeyError:
-        local = True  # retired since: the GPU may still be busy, so take it
-    if not local:
         yield
         return
     from . import media  # media imports models and hardware; only these checks need it

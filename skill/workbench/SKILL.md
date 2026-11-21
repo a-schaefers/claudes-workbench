@@ -284,7 +284,8 @@ agent's and the tests' PATH. A note that the agent's environment leaves out a pr
 network fail there; ask the user before naming it in commands.json `env`. Tests that use the
 GPU themselves (CUDA, PyTorch, a game engine): add `--unload-for-tests`, or they run beside the
 model and fail out of memory (it also opens the GPU's device nodes to the lane, and holds the GPU
-from other tasks while they run; without it they see no device). With it, the base check,
+from other tasks while they run, waiting for any task sharing it to step aside first, and holds
+this machine's GPU even when the model is on a wb remote box; without it they see no device). With it, the base check,
 `wb verify` and `wb shot` wait for the GPU alone too.
 A suite slower than 15 minutes: `--test-timeout <secs>` above its time, or
 narrow the command; a run past it isn't sent back to the agent (nor one the lane refused a

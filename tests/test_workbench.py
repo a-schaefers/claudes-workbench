@@ -14554,13 +14554,52 @@ class Verify(Base):
                          [(None, "t-gpu", True)])
         shots = [h for cmd, h in seen if "WB_SHOT_OUT" in cmd]
         self.assertEqual([list(h) for h in shots], [[me], [me]])
-        self.assertEqual(len(freed), 3)                              # once each: check, verify, shot
+        self.assertEqual(len(freed), 4)          # once each: check, round's tests (#943), verify, shot
         self.assertEqual(runner.models.holders(), {})
         # without the flag, as before: no lease
         seen.clear()
         with mock.patch.object(runner, "run_in_lane", side_effect=look):
             run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
         self.assertEqual([h for _, h in seen], [{}, {}])
+
+    def test_with_unload_for_tests_and_a_remote_model_the_tests_have_this_machines_gpu_alone(self):
+        # #943 (an outside review of 1.90.24): with the model on a wb remote box, the round's
+        # tests let go of the box's pool and took nothing here, and verify.gpu returned at once
+        # ("not local"), yet the base check, the round's tests, wb verify and wb shot all run on
+        # this machine's GPU, beside a local task's model or a wb image job
+        models = runner.models
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama-pc"] = {"options": {"baseURL": "http://gpu-pc.invalid:11434/v1"},
+                                        "models": {"coder": {"limit": {"context": 32768}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"ollama-pc": {"local": True}}))
+        box = models.discover()["ollama-pc/coder"]
+        self.assertNotEqual(models.pool(box), "gpu")
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-gpu", "ok", "--queue", "--unload-for-tests", "--test", TEST_CMD,
+                       "--model", box.id)
+        seen, real = [], runner.run_in_lane
+
+        def look(task, cmd, limit):
+            seen.append((cmd, models.holders(), models.holders(pool=models.pool(box))))
+            return real(task, cmd, limit)
+        with mock.patch.object(runner, "run_in_lane", side_effect=look):
+            runner.drive(store.Task("t-gpu"))
+            wt = store.Task("t-gpu").worktree
+            (wt / "tests").mkdir()
+            (wt / "tests" / "test_x.py").write_text("")
+            run_wb("verify", "t-gpu", "--test", TEST_CMD)
+        checks = [(h, there) for cmd, h, there in seen if TEST_CMD in cmd and "-c" not in cmd]
+        self.assertEqual(len(checks), 4)                 # the base check, the round's, base, candidate
+        local = next(o for o in models.discover().values() if not o.remote)
+        for held, there in checks:
+            self.assertEqual([(p, h["model"], h["task"]) for p, h in held.items()],
+                             [(str(os.getpid()), None, "t-gpu")])       # this GPU, alone
+            self.assertFalse(models.admits(None, held))                  # wb image waits
+            self.assertFalse(models.admits(local, held))                 # and a local task
+        self.assertEqual(checks[1][1], {})                               # the box let go meanwhile
+        self.assertEqual(models.holders(), {})
+        self.assertEqual(store.Task("t-gpu").status["phase"], "review")
 
     def test_a_base_check_waiting_for_the_gpu_holds_no_prep_turn_meanwhile(self):
         # #679 (Claude's audit of main): an --unload-for-tests base check took the machine's one
