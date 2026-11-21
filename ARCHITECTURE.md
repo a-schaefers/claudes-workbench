@@ -1553,7 +1553,10 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    forms only where pip installs into the worktree's own venv, or with no Python environment
    active (the user's checkout's are left out: *Its environment*, below) while Landlock bounds
    what pip writes (`context.python_installs`); otherwise they ask first, since pip would write
-   the user's own conda env or tools venv, or their Python with no lane. While a venv of the
+   the user's own conda env or tools venv, or their Python with no lane. The pipenv ones wherever
+   no venv of the user's is active (the worktree's own may be), lane or none: pipenv installs into the active venv, else
+   makes its own in the worktree (`PIPENV_VENV_IN_PROJECT`), never the user's Python (#950: taken
+   for a pip form, `pipenv install` asked first on every Mac). While a venv of the
    user's stays active in the agent's shell (one that isn't the checkout's), `ENV_INSTALLS`
    (`poetry install *`, `poetry sync *`, `poetry remove *`, `uv sync --active *`, `uv pip sync
    *`, the `pip uninstall` forms), which change the active venv, ask first too (#490, the audit

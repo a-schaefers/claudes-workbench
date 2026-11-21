@@ -9425,6 +9425,10 @@ class CheckoutVenv(Base):
         rules = context.shell_rules(task)
         self.assertEqual(Permission.verdict(rules, "pip install -e ."),
                          "allow" if lane.abi() else "deny")
+        # pipenv makes its own venv in the worktree: no lane needed for that (#950)
+        self.assertEqual(Permission.verdict(rules, "pipenv install"), "allow")
+        with mock.patch.object(lane, "abi", return_value=0):
+            self.assertEqual(Permission.verdict(context.shell_rules(task), "pipenv install"), "allow")
 
     def test_a_venv_in_a_per_project_home_or_on_path_alone_is_the_checkouts_too(self):
         task = store.Task("t-homes")
@@ -9485,7 +9489,8 @@ class CheckoutVenv(Base):
         self.assertIn(str(tools / "bin"), env["PATH"].split(os.pathsep))
         rules = context.shell_rules(task)
         for cmd in ("pip install -e .", "python3 -m pip install -r requirements.txt",
-                    "poetry install", "pip uninstall -y mypkg", "uv pip sync requirements.txt"):
+                    "poetry install", "pip uninstall -y mypkg", "uv pip sync requirements.txt",
+                    "pipenv install"):  # pipenv's goes into the active venv too
             self.assertEqual(Permission.verdict(rules, cmd), "deny", cmd)
         self.assertEqual(Permission.verdict(rules, "npm ci"), "allow")
         lane_ = context.writable(task)                            # granted, but not the venv
