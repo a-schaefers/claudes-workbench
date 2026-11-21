@@ -14009,6 +14009,35 @@ class Projects(Base):
                       cli.claude_md_status(self.repo, "HEAD~1", "packages/app"))
         self.assertEqual(cli.claude_md_status(self.repo, "HEAD"), "no CLAUDE.md")    # the root's
 
+    def test_a_package_whose_claude_md_is_gitignored_is_still_the_package(self):
+        # #785: only a committed CLAUDE.md made a package, so with the package's kept local the
+        # agent, the setup and the tests ran at the root, its instructions never reached the
+        # agent, and with no root CLAUDE.md wb start refused the repo
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        web = self.repo / "packages" / "web"
+        web.mkdir(parents=True)
+        (web / ".gitignore").write_text("CLAUDE.md\n")
+        (web / "web.marker").write_text("")
+        g("rm", "-q", "CLAUDE.md")
+        g("add", "-A")
+        g("commit", "-qm", "a package, its CLAUDE.md kept local")
+        (web / "CLAUDE.md").write_text("# web\nThe web package, kept local.\n")
+        runs = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(runs)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-local", "--spec", str(self.spec), "--repo", str(web), "--model", "mimo",
+                     "--test", "test -f web.marker")
+        self.assertIn("package: packages/web", out)
+        self.assertIn("packages/web's CLAUDE.md is gitignored", out)
+        st = wait_phase("t-local", {"review"})
+        task = store.Task("t-local")
+        self.assertEqual(task.spec["subdir"], "packages/web")
+        first = json.loads(runs.read_text().splitlines()[0])
+        self.assertEqual(first["cwd"], str(task.workdir))
+        self.assertTrue(st["tests"]["ok"])                         # the tests ran in the package
+        self.assertIn(web / "CLAUDE.md", context.instruction_files(task)[0])
+        self.assertEqual(cli.claude_md_status(self.repo, "HEAD", "packages/web"), cli.LOCAL_CLAUDE_MD)
+
     def test_from_a_folder_inside_a_package_the_nearest_package_claude_md_above_is_used(self):
         # #606 (the audit of v1.90): only --repo itself was looked at, so from packages/app/src
         # wb start refused the repo, or with a root CLAUDE.md ran the task at the root

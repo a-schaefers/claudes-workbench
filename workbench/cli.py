@@ -638,12 +638,22 @@ def _package(repo: Path, given: Path, base: str) -> str | None:
     for n in range(len(parts), 0, -1):
         # not a `.claude` directory: its CLAUDE.md is its parent's .claude/CLAUDE.md, and from
         # .claude/skills/x the walk took the repo's own for a package at .claude (review of #606)
-        if parts[n - 1] != ".claude" and _claude_md_at(repo, base, sub := "/".join(parts[:n])):
+        if parts[n - 1] != ".claude" and (_claude_md_at(repo, base, sub := "/".join(parts[:n]))
+                                          or _local_package_md(repo, sub)):
             return sub
     return None
 
 
+def _local_package_md(repo: Path, sub: str) -> bool:
+    """A package's CLAUDE.md (or .claude/CLAUDE.md) kept out of git, as _local_claude_md at the
+    root: only committed ones made a package, so the agent, the setup and the tests ran at the
+    root and the package's instructions never reached the agent (#785)."""
+    return any((repo / sub / p).is_file() and _ignored(repo, f"{sub}/{p}") for p in PROJECT_MEMORY)
+
+
 def _need_claude_md(repo: Path, base: str, a, sub: str | None = None) -> None:
+    if sub and not _claude_md_at(repo, base, sub):  # a package's own, kept local (#785)
+        print(f"note: {sub}'s CLAUDE.md is gitignored: the agent gets your checkout's copy")
     if a.no_claude_md or sub:  # a package's own CLAUDE.md counts
         return
     if not _claude_md_at(repo, base) and _local_claude_md(repo):
@@ -3770,6 +3780,8 @@ def claude_md_status(repo: Path, ref: str = "HEAD", under: str = "") -> str:
     may be. With ``under`` (a monorepo package, task.json `subdir`) the package's own file first,
     measured against the package's commits only: accept said a repo whose packages each have
     one had none, sending Claude to write a root CLAUDE.md nobody needed (#783)."""
+    if under and not _claude_md_at(repo, ref, under) and _local_package_md(repo, under):
+        return LOCAL_CLAUDE_MD  # the package's, kept out of git (#785)
     if under and (md := _claude_md_at(repo, ref, under)):
         md = f"{under}/{md}"
         last = gitops.git(repo, "log", "-1", "--format=%h", ref, "--", md).strip()
