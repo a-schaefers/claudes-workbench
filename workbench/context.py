@@ -341,7 +341,10 @@ EXPERIMENTS = {
     "probe": "the agent's shell may run probe, and its handbook says how: a file's outline and "
              "one function, instead of the whole file",
 }
-# what an experiment adds to the agent's copy of the handbook, after its own text
+# what an experiment adds to the agent's copy of the handbook, after its own text. probe aborts
+# (SIGABRT, a core dump, a desktop crash dialog) when a pipe closes early: Rust's println! panics
+# on EPIPE. Agents piped it into `head` (the A/B of 2026-11-21), so the note steers them to its
+# own limits and to `grep`, which reads to the end (#857)
 EXPERIMENT_NOTES = {
     "probe": "\n## Reading code: probe\nFiles here can be long, and every line you read costs time. "
              "Before you read any file over 300 lines, run `probe symbols <file>` (add `--allow-tests` "
@@ -351,7 +354,9 @@ EXPERIMENT_NOTES = {
              "search \"name1 OR name2\" <dir>` (its output is capped; narrow the query, or add "
              "`ext:py`, when it is cut). After an edit, re-read only the function you changed. When "
              "probe says \"File too large\" (over 1 MB), use `grep -n` for the names and read those "
-             "lines.\n",
+             "lines. Never pipe probe into `head`: it crashes when its output is cut off. Limit a "
+             "search with `--max-results 5`, and filter an outline with `grep` (`probe symbols <file> "
+             "| grep -i <word>`).\n",
 }
 # what an experiment adds to every round prompt's protocol, beside the acceptance line: the
 # handbook alone went unread (probe: 0 calls in 14 replays, 2026-11-21)

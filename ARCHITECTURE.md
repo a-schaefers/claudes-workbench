@@ -5464,7 +5464,10 @@ file over 300 lines, `probe symbols` it. Both were added after the first measure
 the agent never ran probe in 14 replays: the note was in the handbook only, said "read a whole file
 only when you need most of it" on cases whose largest file was 312 lines, didn't name
 `--allow-tests` (without it `probe symbols` leaves out a test file's tests), and didn't say what to
-do when probe refuses a file over 1 MB ("File too large"; it has no setting to raise that). The
+do when probe refuses a file over 1 MB ("File too large"; it has no setting to raise that). It
+also says never to pipe probe into `head`: probe-code 0.6.0 aborts when a pipe closes early
+(Rust's println! panics on EPIPE: SIGABRT, a core dump, a desktop crash dialog each time, seen
+throughout the A/B of 2026-11-21), and points to `--max-results` and `grep` instead. The
 protocol's line on refused writes said "don't probe it" until then. So it stays read-only: no index,
 no daemon, no network. The rule was `probe *` until 2026-11-21, when testing the experiment found
 that it let the agent run `probe lsp` (a daemon and language servers), `--lsp` on a read (the

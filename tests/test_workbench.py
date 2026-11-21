@@ -21805,6 +21805,9 @@ class ProbeExperiment(Base):
         with mock.patch.dict(os.environ, {"PROBE_MAX_TOKENS": "900"}):
             self.assertEqual(runner.agent_env(task)["PROBE_MAX_TOKENS"], "900")
         self.assertIn("--allow-tests", context.EXPERIMENT_NOTES["probe"])
+        # probe aborts with a core dump when a pipe closes early: steered to its own limits (#857)
+        self.assertIn("Never pipe probe into `head`", context.EXPERIMENT_NOTES["probe"])
+        self.assertIn("--max-results", context.EXPERIMENT_NOTES["probe"])
         self.assertNotIn("don't probe it", prompt)
 
     def test_what_the_agent_used_of_probe_is_counted_live_and_reported(self):
