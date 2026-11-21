@@ -9612,9 +9612,19 @@ class WebChat(Base):
 FAKE_SMI = """import os, sys, time
 with open(os.environ["FAKE_SMI_LOG"], "a") as f:
     f.write(" ".join(sys.argv[1:]) + "\\n")
+mode = os.environ.get("FAKE_SMI_MODE", "")  # slow, exit (the stream), flaky (its first run exits), dead
 if "--query-gpu=index,name" in sys.argv:
+    if mode == "dead":
+        sys.exit(9)
     print("0, NVIDIA Fake 4090\\n1, NVIDIA Fake Old")
     sys.exit()
+if mode in ("exit", "dead"):
+    sys.exit(9)
+if mode == "flaky" and not os.path.exists(os.environ["FAKE_SMI_LOG"] + ".ran"):
+    open(os.environ["FAKE_SMI_LOG"] + ".ran", "w").close()
+    sys.exit(9)
+if mode == "slow":
+    time.sleep(0.6)
 ms = int(sys.argv[sys.argv.index("-lms") + 1])
 with open(os.environ["FAKE_SMI_PID"], "w") as f:
     f.write(str(os.getpid()))
@@ -9736,6 +9746,66 @@ class Top(Base):
         self.assertEqual([c for c in calls if "-lms" in c],
                          ["--query-gpu=index,memory.used,memory.total,utilization.gpu,power.draw "
                           "--format=csv,noheader,nounits -lms 2000"])  # one stream, not one per tick
+
+    def test_an_nvidia_card_is_never_shown_as_ram_while_its_stream_is_slow_dead_or_back(self):
+        # #547: before nvidia-smi's first line (the one pass Claude's Bash gets, the pane's first
+        # tick) and after its stream exited, wb top said "RAM (no GPU)" on an NVIDIA machine
+        from workbench import top
+        bindir = self.fake_smi()
+        smi, nodrm = str(bindir / "nvidia-smi"), Path(self.tmp.name, "nodrm")
+        os.environ["FAKE_SMI_MODE"] = "slow"
+        t = self.top(nodrm, smi=smi)
+        try:
+            first = t.gpus()      # Top waits up to one interval for the stream's first line
+        finally:
+            t.close()
+        self.assertEqual([(g["name"], g.get("used")) for g in first],
+                         [("NVIDIA Fake 4090", 1024 * 2 ** 20), ("NVIDIA Fake Old", None)])
+        out = io.StringIO()
+        with mock.patch.object(hardware, "system", lambda: "linux"), \
+                mock.patch.object(hardware, "smi_path", lambda: smi), \
+                mock.patch.object(top.models, "discover", lambda: {}):
+            top.main(every=2, out=out, drm=nodrm)
+        self.assertIn("GPU 0 ", out.getvalue())
+        self.assertNotIn("RAM (no GPU)", out.getvalue())
+        os.environ["FAKE_SMI_MODE"] = "exit"      # the stream exits: the cards stay, unread
+        t = self.top(nodrm, smi=smi)
+        try:
+            gone = t.gpus()
+        finally:
+            t.close()
+        self.assertEqual(gone, [{"name": "NVIDIA Fake 4090", "driver": "nvidia", "index": 0, "stale": True},
+                                {"name": "NVIDIA Fake Old", "driver": "nvidia", "index": 1, "stale": True}])
+        self.assertIn("no reading", top.render({"ts": 0, "every": 2, "gpus": gone, "running": [], "rack": [],
+                                                "queue": []}, 200, color=False))
+        os.environ["FAKE_SMI_MODE"] = "flaky"     # it exits once, then streams: started again
+        t = self.top(nodrm, smi=smi)
+        t.every = 0.2
+        try:
+            deadline = time.time() + 15
+            while t.gpus()[0].get("stale") and time.time() < deadline:
+                time.sleep(0.1)
+            back = t.gpus()[0]
+        finally:
+            t.close()
+        self.assertEqual((back.get("used"), back.get("stale")), (1024 * 2 ** 20, None))
+
+    def test_on_wsl_a_failing_nvidia_smi_falls_back_to_windows_adapters_not_the_ram(self):
+        # #547: on WSL a stream that started and then failed hid Windows' adapters too
+        from workbench import top
+        bindir = self.fake_smi()
+        os.environ["FAKE_SMI_MODE"] = "dead"
+        nodrm = Path(self.tmp.name, "nodrm")
+        with mock.patch.object(hardware, "system", lambda: "wsl"), \
+                mock.patch.object(hardware, "smi_path", lambda: str(bindir / "nvidia-smi")), \
+                mock.patch.object(hardware, "_windows_gpus", lambda: [
+                    {"name": "AMD Radeon RX 7800 XT", "driver": "windows (seen from WSL)",
+                     "vram": 17163091968, "vram_used": None}]):
+            t = top.Top(0.2, drm=nodrm)
+        try:
+            self.assertEqual(t.gpus(), [{"name": "AMD Radeon RX 7800 XT", "total": 17163091968}])
+        finally:
+            t.close()
 
     def test_a_tick_names_the_running_tasks_the_rack_and_the_queue(self):
         from workbench import models, top

@@ -30,6 +30,7 @@ LOAD_EVERY = 300   # seconds between recomputing each model's typical load time
 LIVE = ("queued", "running", "testing", "asking")
 EVENTS_TAIL = 64 * 1024  # bytes of a running task's events.jsonl read for its newest steps
 SMI_FIELDS = "index,memory.used,memory.total,utilization.gpu,power.draw"
+SMI_RETRY_MAX = 60  # seconds: a stream that keeps exiting is started again at most this rarely
 MIB = 2 ** 20
 
 
@@ -71,6 +72,7 @@ class SmiStream:
         self.ms = max(100, int(every * 1000))
         self.rows: dict[int, tuple[float, dict]] = {}
         self.buf = b""
+        self.ended = False  # its stdout reached EOF
         self.proc = subprocess.Popen(
             [path, f"--query-gpu={SMI_FIELDS}", "--format=csv,noheader,nounits", "-lms", str(self.ms)],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -88,6 +90,7 @@ class SmiStream:
             except OSError:
                 chunk = b""
             if not chunk:
+                self.ended = True
                 return
             self.buf += chunk
             *lines, self.buf = self.buf.split(b"\n")
@@ -96,6 +99,14 @@ class SmiStream:
                 row = parse_smi(line.decode(errors="replace"))
                 if row:
                     self.rows[row["index"]] = (now, row)
+
+    def wait(self, timeout: float) -> None:
+        """Until its first row, the stream's end or ``timeout`` seconds: read before nvidia-smi's
+        first line, an NVIDIA machine's one pass said "RAM (no GPU)" (#547)."""
+        end = time.monotonic() + timeout
+        while not self.rows and not self.ended and (left := end - time.monotonic()) > 0:
+            select.select([self.fileno()], [], [], left)
+            self.drain()
 
     def latest(self) -> dict[int, dict]:
         """Each GPU's newest row, when it is fresh (three intervals): a stream that stopped gives nothing."""
@@ -165,25 +176,26 @@ class Top:
         self.smi: SmiStream | None = None
         self.names: dict = {}
         self.static: list[dict] = []  # GPUs read once: a Mac's, Windows' seen from WSL
-        smi = hardware.smi_path() if self.where != "macos" else None
+        self.smi_path = smi = hardware.smi_path() if self.where != "macos" else None
+        self.smi_wait, self.smi_retry = every, 0.0  # the stream's restart backoff
         if smi:
             for line in hardware._run(smi, "--query-gpu=index,name", "--format=csv,noheader").splitlines():
                 i, _, name = line.partition(",")
                 if i.strip().isdigit():
                     self.names[("nvidia", int(i))] = name.strip()
-            try:
-                self.smi = SmiStream(smi, every)
-            except OSError:
-                self.smi = None
+            self._start_smi()
+            if self.smi:
+                self.smi.wait(every)
+        # the NVIDIA cards nvidia-smi named are its rows; one that named none leaves them to sysfs
         self.cards = [] if self.where == "macos" else \
-            [c for c in hardware.drm_cards(drm) if not (smi and c["driver"] == "nvidia")]
+            [c for c in hardware.drm_cards(drm) if not (self.names and c["driver"] == "nvidia")]
         for c in self.cards:
             self.names[c["slot"]] = hardware.card_name(c)
         if self.where == "macos":
             self.static = [{"name": g["name"], **({"total": g["vram"]} if g.get("vram") else {}),
                             **({"unified": True} if g.get("unified") else {})}
                            for g in hardware._mac_gpus()]
-        elif self.where == "wsl" and not self.smi and not self.cards:
+        elif self.where == "wsl" and not self.names and not self.cards:  # a failing nvidia-smi too (#547)
             self.static = [{"name": g["name"], **({"total": g["vram"]} if g.get("vram") else {})}
                            for g in hardware._windows_gpus()]
         self.probed = 0.0
@@ -197,17 +209,37 @@ class Top:
         if self.smi:
             self.smi.close()
 
+    def _start_smi(self) -> None:
+        """Start the stream, or start it again once it has ended, backing off (every interval,
+        doubling to SMI_RETRY_MAX): a driver reset or an Xid error ended it for the session (#547)."""
+        now = time.monotonic()
+        if not self.smi_path or (self.smi and self.smi.proc.poll() is None) or now < self.smi_retry:
+            return
+        if self.smi:
+            self.smi.close()
+            self.smi_wait = min(self.smi_wait * 2, SMI_RETRY_MAX)
+        try:
+            self.smi = SmiStream(self.smi_path, self.every)
+        except OSError:
+            self.smi = None
+        self.smi_retry = now + self.smi_wait
+
     # ---- the GPUs ----
 
     def gpus(self) -> list[dict]:
         out = []
-        if self.smi:
-            for i, row in sorted(self.smi.latest().items()):
-                out.append({"name": self.names.get(("nvidia", i), f"NVIDIA GPU {i}"),
-                            "driver": "nvidia", **row})
+        self._start_smi()
+        latest = self.smi.latest() if self.smi else {}
+        if latest:
+            self.smi_wait = self.every
+        # every card nvidia-smi named stays a row, its readings left out and `stale` set while it
+        # has none: missing telemetry read as missing hardware, "RAM (no GPU)" (#547)
+        for i in sorted({i for _, i in (k for k in self.names if isinstance(k, tuple))} | set(latest)):
+            out.append({"name": self.names.get(("nvidia", i), f"NVIDIA GPU {i}"), "driver": "nvidia",
+                        "index": i, **latest.get(i, {}), **({} if i in latest else {"stale": True})})
         for n, c in enumerate(self.cards):
             dev = c["dev"]
-            g = {"index": len(out) if self.smi else n, "name": self.names.get(c["slot"], c["card"]),
+            g = {"index": len(out) if self.smi_path else n, "name": self.names.get(c["slot"], c["card"]),
                  "driver": c["driver"]}
             used, total = hardware.vram(dev)
             if c["driver"] == "amdgpu" and hardware.apu(dev):
@@ -468,6 +500,8 @@ def lines(snap: dict) -> list[list[tuple[str, str]]]:
                     ("", f" {_gb(g['used'])}/{_gb(g['total'])} GB  ")]
         elif g.get("total"):
             row += [("dim", f"{_gb(g['total'])} GB{' unified' if g.get('unified') else ''}, use not said  ")]
+        if g.get("stale"):
+            row += [("dim", "no reading  ")]
         if g.get("busy") is not None:
             row += [("dim", "busy "), ("warn" if g["busy"] > 80 else "ok", bar(g["busy"] / 100, 8)),
                     ("", f" {g['busy']:>3}%  ")]

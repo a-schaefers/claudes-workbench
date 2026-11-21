@@ -1901,8 +1901,13 @@ Each tick reads, cheapest first:
   `nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu,power.draw
   --format=csv,noheader,nounits -lms <ms>` for the life of the command (`SmiStream`, found by
   `hardware.smi_path`: PATH, else WSL's), read line by line as it prints; a row older than three
-  intervals drops out. macOS: the GPUs from system_profiler once (no VRAM used, no busy %); WSL
-  without NVIDIA: Windows' adapters once (names, and memory as `total` where the registry says); no GPU at all: the RAM, from /proc/meminfo.
+  intervals drops out. Every card the `--query-gpu=index,name` asked at start named stays a row,
+  its readings left out and `stale` set while it has none, and the first tick (and the one pass)
+  waits up to one interval for the stream's first line (`SmiStream.wait`); a stream that ended is
+  started again, after an interval, doubling to `SMI_RETRY_MAX` 60 s, back to one interval once it
+  reads. Before the first line and after an exit (a driver reset, an Xid), an NVIDIA machine said
+  "RAM (no GPU)" (#547). NVIDIA's sysfs cards are left out only when nvidia-smi named its cards. macOS: the GPUs from system_profiler once (no VRAM used, no busy %); WSL
+  where nvidia-smi named no card (none, or one that fails): Windows' adapters once (names, and memory as `total` where the registry says); no GPU at all: the RAM, from /proc/meminfo.
 - **Tasks**: every task's task.json and status.json, re-read only when one changes (`_Files`, by
   mtime and size), and a running task's newest `step` events (the last 64 KiB of events.jsonl).
 - **The lease**: gpu.json and each remote pool's `gpu-<host>.json` through `models.holders` (dead
@@ -1918,7 +1923,8 @@ Each tick reads, cheapest first:
 `--json` prints one object per tick (sizes in bytes; a field the platform can't give is left out,
 never 0):
 - `ts`, `every`;
-- `gpus`: `[{index, name, driver, used, total, busy (%), watts, unified?}]`, or `[{name: "RAM (no
+- `gpus`: `[{index, name, driver, used, total, busy (%), watts, unified?, stale?}]` (`stale`: a
+  card nvidia-smi named with no fresh reading; the terminal and the pane say "no reading"), or `[{name: "RAM (no
   GPU)", ram: true, used, total}]`;
 - `running` (queued, running, testing, asking): `[{task, model, label, phase, round, round_s,
   tok_s, tok_s_from, read_tok_s, read_from, context_used, context_window, context_pct, last,

@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { awayNow, cardName, delegates,priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
+import { awayNow, cardName, delegates, liveLines, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -1833,6 +1833,12 @@ test('the live view runs wb top only while the Stats tab is on screen with Live 
   expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'Now')).toBe(false)
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
+})
+
+test('a card wb top knows but has no reading for says so, not nothing (#547)', () => {
+  const text = (gpus: any[]) => liveLines({ snap: { ts: 0, every: 2, gpus, running: [], rack: [], queue: [] }, busy: {} } as any)
+    .map(r => r.map(p => p.text).join(''))
+  expect(text([{ index: 0, name: 'NVIDIA GeForce RTX 4090', driver: 'nvidia', stale: true }])[0]).toBe('GPU 0 NVIDIA GeForce RTX 4090 no reading ')
 })
 
 test('a card is named by its product, never the vendor tag, as wb top names it (#576)', () => {

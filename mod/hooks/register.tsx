@@ -648,6 +648,7 @@ export function liveLines(t: WbTop): { color?: string; dim?: boolean; bold?: boo
       row.push({ color: f > 0.95 ? 'error' : f > 0.8 ? 'warning' : 'success', text: bar(f, 12) },
         { text: ` ${gib(g.used)}/${gib(g.total)} GiB ` })
     } else if (g.total) row.push({ dim: true, text: `${gib(g.total)} GiB${g.unified ? ' unified' : ''} ` })
+    if (g.stale) row.push({ dim: true, text: 'no reading ' })            // known, not read just now (#547)
     if (typeof g.busy === 'number')
       row.push({ dim: true, text: '· busy ' }, { color: g.busy > 80 ? 'warning' : 'success', text: bar(g.busy / 100, 8) },
         { text: ` ${g.busy}% ` })
