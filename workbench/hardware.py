@@ -501,6 +501,14 @@ def ollama_env_at(root: str | None) -> dict:
     the audit of 1.8). One with no OLLAMA_HOST listens on OLLAMA_PORT: read as matching nothing,
     the default-port server started after the other got the other's settings (the review of
     #460). A container's process gives no OLLAMA_HOST of the host's, so it isn't matched."""
+    return ollama_matched(root) or ollama_env()
+
+
+def ollama_matched(root: str | None) -> dict | None:
+    """ollama_env_at's environment when it is surely root's own: several `ollama serve` are
+    readable here and exactly one listens on root's port. None otherwise (one process, none or
+    two on that port, a container's), where ollama_env() is a guess that may be another
+    server's: what can tell two servers' cards apart (models.server_devices) needs the sure one."""
     procs = _ollama_processes() if root else []
     if len(procs) > 1:
         want = urlparse(root).port
@@ -511,7 +519,7 @@ def ollama_env_at(root: str | None) -> dict:
             for k in OLLAMA_KEYS:
                 env.setdefault(k, "")
             return env
-    return ollama_env()
+    return None
 
 
 def _ollama_container() -> tuple[dict, str] | None:

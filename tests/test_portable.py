@@ -4,6 +4,7 @@ import ctypes.util
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -317,6 +318,84 @@ class Real(unittest.TestCase):
         self.config({"a": {"options": {"baseURL": f"http://localhost:{port}/v1"}, "models": {"x": {}}},
                      "b": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"y": {}}}})
         return models.discover(), posts
+
+    def per_gpu(self, loaded_a, loaded_b, cuda=("0", "1")):
+        """Two fake Ollamas, one per card: a/* on GPU 0 (its OLLAMA_HOST on a's port), b/* on
+        GPU 1, each `ollama serve` in a fake /proc with its CUDA_VISIBLE_DEVICES (None: unset)."""
+        posts_a, posts_b = [], []
+        srv_a, port_a = fake_ollama(loaded_a, [x["name"] for x in loaded_a] + ["x"], posts_a)
+        srv_b, port_b = fake_ollama(loaded_b, [x["name"] for x in loaded_b], posts_b)
+        self.servers += [srv_a, srv_b]
+        self.config({"a": {"options": {"baseURL": f"http://127.0.0.1:{port_a}/v1"},
+                           "models": {"x": {}, "chat": {}}},
+                     "b": {"options": {"baseURL": f"http://127.0.0.1:{port_b}/v1"}, "models": {"y": {}}}},
+                    {"a/x": {"vram_gb": 4}})
+        proc = Path(self.tmp.name, "proc")
+        for pid, port, dev in (("100", port_a, cuda[0]), ("200", port_b, cuda[1])):
+            d = proc / pid
+            (d / "ns").mkdir(parents=True)
+            (d / "comm").write_text("ollama\n")
+            (d / "cmdline").write_bytes(b"ollama\0serve\0")
+            env = [f"OLLAMA_HOST=127.0.0.1:{port}"] + ([f"CUDA_VISIBLE_DEVICES={dev}"] if dev else [])
+            (d / "environ").write_bytes("\0".join(env).encode() + b"\0")
+            os.symlink("mnt:[1]", d / "ns" / "mnt")
+        (proc / "self" / "ns").mkdir(parents=True)
+        os.symlink("mnt:[1]", proc / "self" / "ns" / "mnt")
+        cards = [{"name": "RTX 3090", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30,
+                  "discrete": True, "uuid": f"GPU-{i}{i}"} for i in (0, 1)]
+        for patch in (mock.patch.object(models.hardware, "PROC", proc),
+                      mock.patch.object(models.hardware, "_run", lambda *a, **k: ""),
+                      mock.patch.object(models.hardware, "gpus", lambda windows=True: cards)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        return models.discover(), posts_a, posts_b
+
+    def test_with_one_ollama_per_gpu_freeing_one_card_leaves_the_other_cards_models_loaded(self):
+        # #460 (the audit of 1.8): free_gpu unloaded every Ollama's models, so a task on GPU 0's
+        # server emptied GPU 1's too, where they took none of its memory
+        gb = 10 ** 9
+        on_a = [{"name": "chat", "size": 18 * gb, "size_vram": 18 * gb}]
+        found, posts_a, posts_b = self.per_gpu(on_a, [{"name": "y", "size": 18 * gb, "size_vram": 18 * gb}])
+        x, y = found["a/x"], found["b/y"]
+        self.assertTrue(models.apart(x.root, y.root))
+        self.assertFalse(models.apart(x.root, x.root))
+        self.assertFalse(models._others_resident(found["a/chat"]))   # y is on the other card
+        self.assertTrue(models._room_beside(x))     # 18 + 4 of GPU 0's 23.2: y's 18 aren't on it
+        models.free_gpu(keep={"a/x"}, say=lambda m: None, of=x)
+        self.assertEqual([p["model"] for p in posts_a], ["chat"])
+        self.assertEqual(posts_b, [])
+        # can_share counts what sits on its own card: 15 + 15 on two cards of 24, not 30 on one
+        big = lambda m: models.Model(id=m.id, provider=m.provider, name=m.name,  # noqa: E731
+                                     base_url=m.base_url, engine="ollama", label=m.id,
+                                     extra={"vram_gb": 15})
+        self.assertTrue(models.can_share(big(x), [big(y)], models.gpu_budget(x.root)))
+        self.assertFalse(models.can_share(big(x), [big(found["a/chat"])], models.gpu_budget(x.root)))
+        on_a.append({"name": "chat", "size": 18 * gb, "size_vram": 18 * gb})
+        posts_a.clear()
+        models.make_resident(big(x), say=lambda m: None)   # no room beside chat: GPU 0 is freed
+        self.assertEqual([p["model"] for p in posts_a], ["chat", "x"])
+        self.assertEqual(posts_b, [])
+        models.free_gpu(say=lambda m: None)           # the whole GPU (wb image): every card
+        self.assertEqual([p["model"] for p in posts_b], ["y"])
+
+    def test_with_the_ollamas_cards_unknown_freeing_the_gpu_empties_every_server_as_before(self):
+        # #460: devices not known for sure are taken to be shared, as every server was before
+        gb = 10 ** 9
+        found, posts_a, posts_b = self.per_gpu([{"name": "chat", "size": 18 * gb, "size_vram": 18 * gb}],
+                                               [{"name": "y", "size": 18 * gb, "size_vram": 18 * gb}],
+                                               cuda=("0", None))  # b's server sees both cards
+        x, y = found["a/x"], found["b/y"]
+        self.assertFalse(models.apart(x.root, y.root))
+        self.assertFalse(models._room_beside(x))
+        models.free_gpu(keep={"a/x"}, say=lambda m: None, of=x)
+        self.assertEqual([p["model"] for p in posts_a + posts_b], ["chat", "y"])
+        big = lambda m: models.Model(id=m.id, provider=m.provider, name=m.name,  # noqa: E731
+                                     base_url=m.base_url, engine="ollama", label=m.id,
+                                     extra={"vram_gb": 15})
+        self.assertFalse(models.can_share(big(x), [big(y)], models.gpu_budget(x.root)))
+        shutil.rmtree(Path(self.tmp.name, "proc", "200"))  # one process readable: not sure
+        self.assertIsNone(models.server_devices(x.root))
+        self.assertFalse(models.apart(x.root, y.root))      # unknown is never apart
 
     def test_one_ollama_under_two_host_spellings_is_one_server(self):
         # free_gpu unloaded the very models it was told to keep (the 2026-11-16 audit)

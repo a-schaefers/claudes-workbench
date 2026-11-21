@@ -2710,7 +2710,8 @@ not loaded (wb loads it)"); with A loaded, B was told to set its id to A (#462, 
 known budget, no other server resident, `m` all in VRAM if loaded, Ollama's loaded-model limit not
 reached, and the loaded sizes from `/api/ps` plus `need(m)` within `SHARE_AT` of the budget):
 every round once unloaded the user's Open WebUI, autocomplete or embedding model, fits or not
-(the 2026-11-19 audit). Else `free_gpu(keep={m, *keep})`: every other running
+(the 2026-11-19 audit). Else `free_gpu(keep={m, *keep}, of=m)` (an Ollama known to be on other
+cards than `m`'s is left alone: `apart`, under **The machine** below): every other running
 server with a `stop` command is stopped once per server, after waiting up to 10 minutes while it
 answers someone (`_server_idle`: llama-server's `/slots` `is_processing`, else `/metrics` as a JSON
 `live.state` or Prometheus text with a `BUSY_GAUGES` gauge above 0, `llamacpp:requests_processing`
@@ -2794,7 +2795,8 @@ VRAM means no sharing. `gpus(windows=False)`: the budget asks WSL's PowerShell o
 at most hourly (`wsl-gpus.json`); each adapter named from Windows is a group of its own, since
 the registry can't tell a laptop's Radeon iGPU from its Radeon card: the largest counts (#522). A model's
 need: `vram_gb`, else Ollama's loaded size (weights and context), else weights × `KV_GUESS` 1.25.
-`can_share(m)`: every running model and `m` are Ollama and local, and their needs sum to at most
+`can_share(m)`: every running model and `m` are Ollama and local, and the needs of `m` and of the
+running models that may share its cards (not `apart`: one Ollama per GPU, **The machine**) sum to at most
 `SHARE_AT` 0.9 of the budget; the same model again (the same `server` and name) needs a slot of
 `OLLAMA_NUM_PARALLEL` for each task on it (two already running it need 3: a value of 2 once
 admitted any number, and a third task's requests queued inside Ollama while its silence budget
@@ -3045,9 +3047,17 @@ is the one whose `OLLAMA_HOST` listens on root's port (`_ollama_processes`; unse
 budget (`budget_devices(root)`, `gpu_budget(root)`), `can_share` and `_room_beside` read the
 task's own server's devices, `OLLAMA_NUM_PARALLEL` and `OLLAMA_MAX_LOADED_MODELS`, the last
 counting only the models on that server. The lowest pid's stood for both: two 24 GB cards were
-budgeted as GPU 0 alone for the second server (#460, the audit of 1.8). Still open: `free_gpu`
-unloads every server's models, on another card too, and `can_share` sums every running model
-against the task's server's budget (safe, but it refuses sharing that fits on disjoint cards).
+budgeted as GPU 0 alone for the second server (#460, the audit of 1.8). Which cards each server
+uses is `models.server_devices(root)`: its budget's devices (by UUID, else driver, name and size),
+and only when `hardware.ollama_matched(root)` is sure of its process (several readable, exactly
+one on that port); else None (one process readable, a container's, `gpu_gb` by hand, no card
+named). `models.apart(a, b)`: both known and no card in common; unknown is never apart, which is
+the behaviour from before. Servers apart don't touch each other's memory: `free_gpu(…, of=m)`
+(as `make_resident` calls it) unloads only on the Ollama servers not apart from `m`'s, and
+`_others_resident` asks only those; `_room_beside` and `can_share` count only the models on them
+against `m`'s budget. Every server's models were unloaded, so a task on GPU 0's Ollama emptied
+GPU 1's, and every running model was summed against one card, which refused sharing that fit.
+`free_gpu()` with no `of` (`wb image`, `wb audio`, `wb optimize`) still frees every card.
 `ollama_context()` (`OLLAMA_CONTEXT_LENGTH`
 with spaces and quotes trimmed, as Ollama reads it, and the raw value: `report` says when it isn't
 a number instead of crashing), `ollama_models_dir()` (`os.path.isdir`: a directory it can't read

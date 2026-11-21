@@ -1143,14 +1143,14 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         # the audit of 1.4). Load it here with the window OpenCode is told.
         t0 = time.time()
         if not m.remote and not _room_beside(m):
-            free_gpu(keep={m.id, *keep}, say=say, warn=warn)
+            free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
         _lmstudio_load(m, key, say)
         return time.time() - t0
     if st["resident"] and (m.remote or not _others_resident(m, keep) or _room_beside(m)):
         return 0.0
     t0 = time.time()
     if not m.remote and not _room_beside(m):
-        free_gpu(keep={m.id, *keep}, say=say, warn=warn)
+        free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
     if m.engine == "ollama":
         say(f"loading {m.name} into ollama")
         _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
@@ -1266,13 +1266,16 @@ def _kept_name(name: str, held: set[str]) -> bool:
     return bare(name) in want
 
 
-def free_gpu(keep=(), say=print, warn=None) -> None:
+def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
     """Stop every model server and unload every Ollama model holding the GPU, except the models
     in ``keep`` (ids): the task's own, and those of tasks running beside it; and those the user
-    keeps loaded (keep_loaded)."""
+    keeps loaded (keep_loaded). ``of``: the model the GPU is freed for; an Ollama known to use
+    only other cards than its server's (apart) keeps its models: every server's were unloaded,
+    so with one Ollama per GPU a task on one card emptied the other (#460, the audit of 1.8)."""
     warn = warn or say
     if _fake():
         return
+    seen: dict = {}
     held = keep_loaded()
     local = [o for o in discover().values() if not o.remote]  # another host's GPU isn't ours to free
     kept = [o for o in local if o.id in keep or o.id in held]
@@ -1303,7 +1306,8 @@ def free_gpu(keep=(), say=print, warn=None) -> None:
     doomed = {root: [name for name in _ollama_loaded(root)  # every model Ollama has loaded,
                      if not any(o.server == key and _matches(o.name, {name}) for o in kept_ollama)
                      and not _kept_name(name, held)]  # ours or another tool's
-              for key, root in _roots(o for o in local if o.engine == "ollama").items()}
+              for key, root in _roots(o for o in local if o.engine == "ollama").items()
+              if of is None or not apart(of.root, root, seen)}
     _wait_unused(doomed, warn)
     for root, names in doomed.items():
         for name in names:
@@ -1397,8 +1401,9 @@ def unheld_loaded(skip=()) -> list[str]:
 
 
 def _others_resident(m: Model, keep=()) -> bool:
-    """Whether anything free_gpu would let go of holds the GPU beside ``m``."""
-    held = keep_loaded()
+    """Whether anything free_gpu would let go of holds the GPU beside ``m``: an Ollama on other
+    cards (apart) isn't asked, as free_gpu leaves it be."""
+    held, seen = keep_loaded(), {}
     local = [o for o in discover().values() if not o.remote]
     ours = [m, *(o for o in local if o.id in keep or o.id in held)]
     if any(o.engine == "server" and o.stop and o.server not in {x.server for x in ours}
@@ -1407,7 +1412,7 @@ def _others_resident(m: Model, keep=()) -> bool:
     return any(not any(o.engine == "ollama" and o.server == key and _matches(o.name, {n}) for o in ours)
                and not _kept_name(n, held)
                for key, root in _roots(o for o in local if o.engine == "ollama").items()
-               for n in _ollama_loaded(root))
+               if not apart(m.root, root, seen) for n in _ollama_loaded(root))
 
 
 def _room_beside(m: Model) -> bool:
@@ -1422,8 +1427,10 @@ def _room_beside(m: Model) -> bool:
     local = [o for o in discover().values() if not o.remote]
     if any(o.engine == "server" and status(o)["resident"] for o in local):
         return False
-    used, here, mine = 0, [], False
+    used, here, mine, seen = 0, [], False, {}
     for key, root in _roots(o for o in local if o.engine == "ollama").items():
+        if apart(m.root, root, seen):
+            continue  # another card's models take none of m's budget (#460)
         for x in (_get(f"{root}/api/ps") or {}).get("models", []):
             if key == m.server and _matches(m.name, {x.get("name")}):
                 if not x.get("size") or x.get("size_vram") != x["size"]:
@@ -1554,6 +1561,31 @@ def gpu_budget(root: str | None = None) -> int | None:
     return budget_devices(root)[0]
 
 
+def server_devices(root: str | None) -> frozenset | None:
+    """The cards the Ollama at ``root`` may use (their UUIDs, else driver, name and size), when
+    that is surely its own: hardware.ollama_matched found its process among several. None when
+    unknown (one server readable, a container's, gpu_gb set by hand, no card named), and an
+    unknown server is taken to share every card with every other, as all were before #460."""
+    if not root or _fake() or _overrides().get("gpu_gb") is not None \
+            or hardware.ollama_matched(root) is None:
+        return None
+    devs = budget_devices(root)[1]
+    return frozenset(g.get("uuid") or f"{g.get('driver')}|{g.get('name')}|{g.get('vram')}"
+                     for g in devs) or None
+
+
+def apart(root: str | None, other: str | None, seen: dict | None = None) -> bool:
+    """Whether the Ollama servers at ``root`` and ``other`` are known to use no card in common
+    (server_devices), so one's models never take the other's memory: one Ollama per GPU (#460).
+    Unknown is never apart. ``seen``: root → server_devices, asked once per call."""
+    seen = {} if seen is None else seen
+    for r in (root, other):
+        if r not in seen:
+            seen[r] = server_devices(r)
+    a, b = seen[root], seen[other]
+    return a is not None and b is not None and not a & b
+
+
 def need(m: Model) -> int:
     """Bytes of GPU memory ``m`` takes: Ollama's own figure once loaded (weights and context),
     else models.json's `vram_gb`, else a guess from its weights; 0 when unknown."""
@@ -1595,7 +1627,10 @@ def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
     # its limit is its own server's: models another Ollama holds aren't counted against it
     if sum(k[0] == m.server for k in distinct) + 1 > max_loaded(m.root):
         return False
-    sizes = [need(o) for o in distinct.values()] + [need(m)]
+    # only what may sit on m's cards takes its budget: summed with another card's models, two
+    # tasks on one Ollama per GPU were refused sharing that fit (#460)
+    seen: dict = {}
+    sizes = [need(o) for o in distinct.values() if not apart(m.root, o.root, seen)] + [need(m)]
     return all(sizes) and sum(sizes) <= SHARE_AT * budget
 
 
