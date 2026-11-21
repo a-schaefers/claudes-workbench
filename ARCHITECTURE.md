@@ -1695,6 +1695,14 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   cargo makes at its top made for it (`CARGO_MADE`: `registry/`, `git/`, `.package-cache`,
   `.package-cache-mutate`, `.global-cache`): the 0.90 review found a fresh rustup install
   refusing every build with a dependency, and any git dependency where `git/` didn't exist yet.
+  A nimble home (`~/.nimble`, `$NIMBLE_DIR`), split around its `bin/` whenever it exists, gets
+  `NIMBLE_MADE` the same way (`pkgs2/`, `pkgcache/`, `buildtemp/`, `packages_temp.json`, which
+  every `nimble refresh` writes before copying it over `packages_official.json`, and
+  `nimbledata2.json` holding nimble's own empty data, `MADE_TEXT`: nimble parses the file it
+  finds, so an empty one would fail every command; `_make_first` never replaces an entry):
+  #911's review found an empty home granting nothing, refusing the first install, every
+  package build and every refresh. A package list can't be made ahead (an empty one reads as a
+  broken list), so in a home without one the first `nimble refresh` is Claude's to run.
   No entry may resolve to `/` or the home directory, nor contain the task's repo or its git
   directory (`repo_dirs`, the main worktree's for a removed linked one, #776: with `GOPATH=~/src` or the repo in `~/go/src`, the agent could write a
   hook or `core.fsmonitor` that wb's own git runs outside the lane): a place holding them is split

@@ -8435,6 +8435,29 @@ class Lane(Base):
             self.assertEqual(runner.lane_grant(f"{home}/.nimble/pkgs2/x-1.0/x.nim"),
                              f"{home}/.nimble/pkgs2")        # never its bin/
 
+    def test_an_empty_nimble_home_gets_what_nimble_makes_at_its_top_before_the_split(self):
+        # #911's review: ~/.nimble is split around bin/, so an empty or half-made home granted
+        # nothing at all (the #911 test pre-made pkgs2/), and nimble's first install, every build
+        # (buildtemp/) and every refresh (packages_temp.json) were refused
+        home = self.fake_home()
+        (home / ".nimble").mkdir()
+        (home / "nimbledir").mkdir()
+        (home / "nimbledir" / "nimbledata2.json").write_text('{"version": 1, "reverseDeps": {"x": {}}}')
+        task = self.bare_task("t-911b", self.repo)
+        with mock.patch.dict(os.environ, {"NIMBLE_DIR": str(home / "nimbledir")}):
+            w = context.writable(task)
+        for d in (".nimble", "nimbledir"):
+            for n in ("pkgs2", "pkgcache", "buildtemp", "packages_temp.json", "nimbledata2.json"):
+                self.assertIn(str(home / d / n), w, f"{d}/{n}")
+            self.assertNotIn(str(home / d), w)
+            self.assertNotIn(str(home / d / "bin"), w)
+        # nimble parses the data file it finds: the one made is nimble's own empty one, and the
+        # user's is kept
+        self.assertEqual(json.loads((home / ".nimble" / "nimbledata2.json").read_text()),
+                         {"version": 1, "reverseDeps": {}})
+        self.assertIn('"x"', (home / "nimbledir" / "nimbledata2.json").read_text())
+        self.assertFalse((home / ".nimble" / "packages_official.json").exists())
+
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     @home_outside_the_lane
     def test_secrets_stay_unreadable_inside_tool_homes_and_where_variables_moved_them(self):

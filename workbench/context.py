@@ -544,6 +544,16 @@ MADE_FIRST = {".rustup": "toolchains", ".nimble": "bin", "RUSTUP_HOME": "toolcha
 # home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
 # every build with a dependency, and a git dependency failed wherever git/ didn't exist yet)
 CARGO_MADE = ("registry/", "git/", ".package-cache", ".package-cache-mutate", ".global-cache")
+# and nimble's, for the same reason: its home is split around bin/ (MADE_FIRST), so a fresh or
+# half-made ~/.nimble refused pkgs2/ on the first `nimble install -d`, buildtemp/ on every
+# package build, pkgcache/, nimbledata2.json, and packages_temp.json, which every `nimble
+# refresh` writes before copying it over packages_official.json (#911's review). The data file
+# gets nimble's own empty contents (nimbledatafile.nim's newNimbleDataNode): it parses any
+# nimbledata2.json it finds, so an empty one would fail every command. A package list can't be
+# made ahead (an empty one reads as a broken list, not a missing one), so a home without one
+# needs a first `nimble refresh` from Claude.
+NIMBLE_MADE = ("pkgs2/", "pkgcache/", "buildtemp/", "packages_temp.json", "nimbledata2.json")
+MADE_TEXT = {"nimbledata2.json": '{"version": 1, "reverseDeps": {}}\n'}
 # and what the common tools make in a cache home split around an active venv (poetry's, from
 # `poetry shell` or direnv), made first so the split grants them: Landlock can only allow, so a
 # split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825)
@@ -852,14 +862,11 @@ def writable(task: store.Task) -> list[str] | None:
     cargo = os.environ.get("CARGO_HOME")
     for c in {os.path.realpath(c) for c in (home / ".cargo", cargo) if c}:
         if os.path.isdir(c) and any(os.path.lexists(os.path.join(c, n)) for n in ("bin", "env")):
-            for n in CARGO_MADE:
-                try:
-                    if n.endswith("/"):
-                        os.makedirs(os.path.join(c, n), exist_ok=True)
-                    elif not os.path.lexists(os.path.join(c, n)):
-                        Path(c, n).touch()
-                except OSError:  # a read-only home: the task starts all the same
-                    pass
+            _make_first(c, CARGO_MADE)
+    nimble = os.environ.get("NIMBLE_DIR")
+    for c in {os.path.realpath(c) for c in (home / ".nimble", nimble) if c and os.path.isabs(c)}:
+        if os.path.isdir(c):  # split around bin/ whenever it exists (MADE_FIRST, below)
+            _make_first(c, NIMBLE_MADE)
     for k, n in MADE_FIRST.items():  # ~/.rustup's toolchains/, ~/.nimble's bin/ (#911)
         r = os.environ.get(k) if k.isupper() else str(home / k)
         if r and os.path.isabs(r) and os.path.isdir(r):  # made, so it is split out: else the
@@ -893,6 +900,20 @@ def writable(task: store.Task) -> list[str] | None:
         else:  # split around the repo like a secret: a grant of ~/work beside the repo ~/work/api
             kept += _split(str(p), out_of | guard)  # was dropped whole (the 0.90 review)
     return [p for p in _both(kept) if os.path.exists(p) and os.path.realpath(p) not in whole]
+
+
+def _make_first(home: str, names) -> None:
+    """Make each of names in a split tool home (a trailing / is a directory, else a file with
+    MADE_TEXT's contents), keeping what is there: a split home refuses a new entry."""
+    for n in names:
+        try:
+            if n.endswith("/"):
+                os.makedirs(os.path.join(home, n), exist_ok=True)
+            elif not os.path.lexists(os.path.join(home, n)):
+                with open(os.path.join(home, n), "x") as f:  # never over the tool's own
+                    f.write(MADE_TEXT.get(n, ""))
+        except OSError:  # a read-only home, or the tool made it first: the task starts all the same
+            pass
 
 
 def flutter_caches() -> list[str]:

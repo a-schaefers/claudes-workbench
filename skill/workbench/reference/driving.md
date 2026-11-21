@@ -27,8 +27,9 @@ check-in, when an agent asks for a command or a directory, a spec needs web rese
   and one the lane always keeps out (`~/.cargo/bin`, rustup's toolchains, the user's active venv).
   A toolchain the build wants installed (a Python uv must download, a
   `rust-toolchain.toml` toolchain, `uv tool install`, `cargo install`, the gems a `bundle
-  install` adds to an rbenv, rvm, asdf or mise Ruby) is refused there: install it yourself (the
-  gems: `bundle install` in the user's checkout) rather than grant `~/.local/share/uv`,
+  install` adds to an rbenv, rvm, asdf or mise Ruby, the package list a nimble home doesn't
+  have yet) is refused there: install it yourself (the gems: `bundle install` in the user's
+  checkout; nimble's list: `nimble refresh`) rather than grant `~/.local/share/uv`,
   `~/.rustup/toolchains` or the gem home the report names, whose programs run later outside
   the lane. A test driving a program through a pseudo-terminal (pexpect, Python's pty,
   `script`, node-pty) fails in the lane ("out of pty devices", "failed to create
