@@ -817,7 +817,7 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
       p.spec_gaps ? `and ${p.spec_gaps} discard${p.spec_gaps === 1 ? '' : 's'} put down to the spec` : '',
       // the period's own energy, every task's: the saving's counts only the tasks it compares (#568)
       p.energy?.wh ? `${p.energy.wh >= 1000 ? `${(p.energy.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.energy.wh)} Wh`}` +
-        (p.energy.cost != null ? ` (${p.energy.cost.toFixed(2)})` : '') : '',
+        (p.energy.cost != null ? `, cost ${p.energy.cost.toFixed(2)}` : '') : '',
     ]
     out.push({ label, text: parts.filter(Boolean).join(' · ') })
   }
@@ -1369,8 +1369,9 @@ async function ears($: any) {
 // it buried the question Claude had just asked the person (the 2026-11-16 audit).
 const SCOUT_QUIET_MS = 60_000
 
-// `wb savings --json` as the pane's footer: "this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh";
-// '' until a task can be compared, or when the output isn't wb's.
+// `wb savings --json` as the pane's footer: "this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh",
+// with ", cost 0.27" once a price is set (as the Stats tab and `wb savings` label it: no currency
+// sign, the price is the user's); '' until a task can be compared, or when the output isn't wb's.
 export function savedLine(out: string): string {
   let t: any
   try { t = JSON.parse(out) } catch { return '' }
@@ -1378,7 +1379,8 @@ export function savedLine(out: string): string {
   const n = (x: number) => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : `${Math.round(x / 1e3)}K`)
   const pct = t.self_est > 0 ? ` (${Math.round((100 * t.saved) / t.self_est)}%, estimate)` : ' (estimate)'
   const what = t.saved >= 0 ? `saved ~${n(t.saved)} Claude tokens${pct}` : `cost ~${n(-t.saved)} more Claude tokens (estimate)`
-  const gpu = t.wh ? ` · ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}` : ''
+  const cost = typeof t.cost === 'number' ? `, cost ${t.cost.toFixed(2)}` : ''
+  const gpu = t.wh ? ` · ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${cost}` : ''
   return `this week: ${what}${gpu}`
 }
 
@@ -1392,12 +1394,24 @@ export function priceOf(out: string): number | null {
   }
 }
 
+// What the price row was typed, as `wb savings --price` takes it: "0,30", "€0.30", "0.30 EUR" and
+// "$0.3" are 0.3 (one comma or point, a currency sign or code before or after); empty is 'off'
+// (it clears the price); anything else, "0x10" or "1e3" among them, is null. Number() took
+// "0x10" as 16, and "0,30" and "€0.30" as nothing, with no hint why (#609).
+export function parsePrice(text: string): number | 'off' | null {
+  const s = text.trim()
+  if (!s) return 'off'
+  const m = /^(?:[^\d\s.,+-]{1,3}\s*)?(\d+(?:[.,]\d+)?|[.,]\d+)(?:\s*[^\d\s.,+-]{1,3})?$/u.exec(s)
+  const v = m ? Number(m[1].replace(',', '.')) : NaN
+  return v > 0 ? v : null
+}
+
 // The Settings tab's price row: wb checks and keeps it (`wb savings --price`), and its answer
-// is the week's saving again, now with the energy's cost
+// is the week's saving again, now with the energy's cost (the footer's `, cost …`)
 async function setPrice($: any, text: string) {
-  const v = Number(text.trim().replace(/^\$/, ''))
-  if (!(v > 0)) {
-    $.ui.toast('workbench: the electricity price is a positive number, per kWh')
+  const v = parsePrice(text)
+  if (v === null) {
+    $.ui.toast('workbench: the electricity price per kWh is a number, like 0.30 or 0,30 (empty clears it)')
     return
   }
   const { ok, out } = await runWb($, ['savings', '--price', String(v), '--json'])

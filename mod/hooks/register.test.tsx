@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { awayNow, cardName, delegates, liveLines, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
+import { awayNow, cardName, delegates, liveLines, parsePrice, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -1628,6 +1628,7 @@ test('the saving reads in thousands or millions, says when it cost more, and is 
   const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })
   expect(savedLine(t({}))).toBe('this week: saved ~30K Claude tokens (38%, estimate)')
   expect(savedLine(t({ wh: 1500 }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · 1.5 kWh')
+  expect(savedLine(t({ wh: 1500, cost: 0.45 }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · 1.5 kWh, cost 0.45')
   expect(savedLine(t({ saved: -4000 }))).toBe('this week: cost ~4K more Claude tokens (estimate)')
   expect(savedLine(t({ tasks: 0 }))).toBe('')
   expect(savedLine('usage: wb …')).toBe('')
@@ -1954,7 +1955,8 @@ test('the Stats tab\'s settings pick through wb, progress checks stay off by def
     if (e.argv[1] === 'stats' && e.argv[2] === 'set')
       files['/wb/stats.json'] = JSON.stringify({ [e.argv[3]]: e.argv[3] === 'every' ? Number(e.argv[4]) : e.argv[4] === 'on' })
     if (e.argv[1] === 'savings' && e.argv[2] === '--price')
-      return { value: { exitCode: 0, stdout: JSON.stringify({ tasks: 0, price: Number(e.argv[3]) }), stderr: '' } }
+      return { value: { exitCode: 0, stdout: JSON.stringify(e.argv[3] === 'off' ? { tasks: 0, price: null } :
+        { tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 1500, cost: 0.45, price: Number(e.argv[3]) }), stderr: '' } }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -1980,6 +1982,16 @@ test('the Stats tab\'s settings pick through wb, progress checks stay off by def
   await ui.input({ key: 'price', text: '$0.30' })
   expect(runs.some(r => r.join(' ') === 'wb savings --price 0.3 --json')).toBe(true)
   expect((await ui.find({ key: 'price' }))?.props.value).toBe('0.3')
+  runs.length = 0
+  await ui.input({ key: 'price', text: '0,30' })                         // #609: a decimal comma
+  expect(runs.some(r => r.join(' ') === 'wb savings --price 0.3 --json')).toBe(true)
+  await ui.press({ key: 'tab-tasks' })                                  // the footer shows the cost
+  expect((await ui.findAll({ type: 'Text' })).some(t => String(t.text).includes('1.5 kWh, cost 0.45'))).toBe(true)
+  await ui.press({ key: 'tab-settings' })
+  runs.length = 0
+  await ui.input({ key: 'price', text: '' })                             // an empty submit clears it
+  expect(runs.some(r => r.join(' ') === 'wb savings --price off --json')).toBe(true)
+  expect((await ui.find({ key: 'price' }))?.props.value).toBe('')
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })
@@ -2237,11 +2249,20 @@ test('the history says nothing it has no data for, and a new install how to begi
     optimized: { 'ollama/x': { window: 32768, fits: true } }, bench: { 'ollama/x': { run: 'r1', day: '2026-11-20', passed: 3, of: 4 } } })
   expect(early).toEqual([{ label: 'Bench', text: 'ollama/x 3/4 (2026-11-20)' },
     { label: 'Optimized', text: 'ollama/x 32K all on the GPU' }])
+  // #609: the energy's cost labelled as the footer and `wb savings` label it, no bare "(0.27)"
+  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, energy: { wh: 900, cost: 0.27 } } } })[0].text)
+    .toContain('900 Wh, cost 0.27')
   const lines = statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, accepted_pct: 100 } } })
   expect(lines).toEqual([{ label: 'This week', text: '1 task · 1 landed (100%)' }])   // no savings, no zeros
   expect(spark([0, 0])).toBe('')
   expect(spark([1, 4, 8])).toBe('▂▅█')
   expect(priceOf('{"price": 0.3}')).toBe(0.3)
+  // #609: a decimal comma and a currency sign or code before or after; empty clears; no hex
+  for (const typed of ['0,30', '€0.30', '0.30 EUR', '$0.3', ' 0.3 ', '0.30€', 'kr 0,3', '.3'])
+    expect(parsePrice(typed)).toBe(0.3)
+  expect(parsePrice('')).toBe('off')
+  for (const typed of ['0x10', '1e3', 'cheap', '0', '-0.3', '1,000.50', '0.3.1'])
+    expect(parsePrice(typed)).toBe(null)
   expect(priceOf('{"price": null}')).toBe(null)
   expect(priceOf('not json')).toBe(null)
 })

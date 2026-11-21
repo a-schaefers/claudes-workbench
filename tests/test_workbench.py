@@ -9496,10 +9496,22 @@ class Savings(Base):
         out = json.loads(run_wb("savings", "--price", "0.25", "--json"))
         self.assertEqual((out["period"], out["tasks"], out["cost"]), ("week", 1, 0.15))
         self.assertEqual(savings.price(), 0.25)
-        self.assertTrue(run_wb("savings").strip().endswith("GPU 600 Wh ($0.15) · score 5/100"))
-        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
-            run_wb("savings", "--price", "0")
+        # no currency sign: the price is the user's (#609, the audit of v1.90)
+        self.assertTrue(run_wb("savings").strip().endswith("GPU 600 Wh, cost 0.15 · score 5/100"))
+        for bad in ("0", "cheap", "inf", "nan"):
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                run_wb("savings", "--price", bad)
         self.assertEqual(savings.price(), 0.25)
+
+    def test_a_price_once_set_is_cleared_by_price_off(self):
+        # #609: --price took a positive float only, so a set price could only be removed by hand
+        from workbench import savings
+        run_wb("savings", "--price", "0.25")
+        Path(os.environ["WB_SAVINGS"]).write_text(json.dumps({"kwh_price": 0.25, "currency": "x"}))
+        out = json.loads(run_wb("savings", "--price", "off", "--json"))
+        self.assertIsNone(out["price"])
+        self.assertIsNone(savings.price())
+        self.assertEqual(json.loads(Path(os.environ["WB_SAVINGS"]).read_text()), {"currency": "x"})
 
     def test_wb_savings_with_nothing_to_compare_says_why(self):
         self.assertIn("no task to compare yet", run_wb("savings"))

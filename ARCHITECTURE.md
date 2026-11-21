@@ -504,7 +504,7 @@ average, so the constants stand until there are more runs to fit (#120).
 `claude: 56K · writing it yourself: ~59K (estimate) · saved ~3K · GPU 41 Wh` (a negative saving
 reads `cost ~3K more`); `totals(rows, since)` adds them up, with the energy's `cost` at the
 user's electricity price (`price()`, from `$WB_SAVINGS`, else `~/.config/workbench/savings.json`
-`{"kwh_price": …}`; `set_price` sets it, keeping any other key, through `store.edit_config`), and `of`, every closed task of the period, compared
+`{"kwh_price": …}`; `set_price` sets it, or with None removes it, keeping any other key, through `store.edit_config`), and `of`, every closed task of the period, compared
 or not (the coverage).
 
 **The badge** (`savings.score`, #101) is one number from 1 to 100 over those totals. B is the
@@ -2036,8 +2036,10 @@ nothing until a surface attaches.
   tests passed, accepted or landed alike). The transcript's last line says the same once
   (`■ done: Claude reviews next`), and status `last` (`tests passed: Claude reviews next`). A short pane gets its face on one line
   instead. Then the week's saving (`savedLine` of `wb savings --json`, read every 10 minutes
-  and again when a task closes: `this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh`;
-  nothing until a task can be compared). The web chat's link is the Settings tab's alone, under
+  and again when a task closes: `this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh`, with `, cost 0.27` once a
+  price is set, labelled as on the Stats tab and in `wb savings`, with no currency sign since the
+  price is the user's (#609: the cost never showed here, was a bare `(0.27)` on Stats and `($0.27)`
+  in `wb savings`); nothing until a task can be compared). The web chat's link is the Settings tab's alone, under
   its rows while the chat is on (never under the tasks: the user, 2026-11-19).
   The Settings tab (`settingRow`, after backseat-driver's: a Select there opened on a click and
   could pick nothing, and its sentence followed only the saved choice, the user 2026-11-19) has
@@ -2070,9 +2072,12 @@ nothing until a surface attaches.
   stats.json (`statsSettings`, a mistyped value its default); **Progress checks**
   (`PROGRESS_STOPS`, `Off (default)` / `On`: `wb progress on|off`, read from progress.json; off by
   default because each check wakes Claude); and **Electricity price per kWh**, an Input (key
-  `price`) that runs `wb savings --price X --json` (`setPrice`: anything not a positive number,
-  a leading `$` allowed, is refused with a toast before wb is asked), shown from `wb savings
-  --json`'s `price` (`priceOf`, `mem.price`). The ring's sentence follows any of these rows
+  `price`) that runs `wb savings --price X --json` (`setPrice`, through `parsePrice`: one comma or
+  point as the decimal separator, a currency sign or code of up to three characters before or
+  after, decimal digits only; anything else, `0x10` and `1e3` among them, is refused with a toast
+  before wb is asked; an empty submit runs `--price off`, clearing it: #609, where `0,30` and
+  `€0.30` were refused with no hint why and a price could never be removed), shown from `wb
+  savings --json`'s `price` (`priceOf`, `mem.price`). The ring's sentence follows any of these rows
   (`SETTING_ROWS`).
 - **The Stats tab** opens with **Now**, the live view (#408): `wb top --json` drawn by `liveLines`,
   a line per GPU (memory and busy % as bars, `bar`, in eighths; watts; busy's sparkline since the
@@ -5114,7 +5119,7 @@ the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 d
 | `wb bench self <case>` | `--yes` (required: it spends Claude tokens), `--turns N` (40) | Claude Code writes the case (`claude -p`, edits and the acceptance command only), graded by its hidden checks in the original task's lane; one runs.jsonl row (`arm: claude`) and its line: PASS or fail, the weighted tokens, the handoff's cost and the ratio (*Bench*). |
 | `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. First closes what a killed driver left (`bench.sweep`), and refuses while a replay's runner still lives. Skips what an earlier run with the same label already passed or failed (an `error` runs again); with nothing left, says so and starts no driver. |
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run), archived tasks included (#270): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`; without a name, `[{backlog, tasks, open}]` (it printed the text, #602). |
-| `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive, else exit 1) writes savings.json first. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price}` (`price`: the kWh price set, or null; the pane's Settings row shows it). `--card FILE.svg`: the badge as an image (*The badge*). |
+| `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X\|off` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive and finite, else exit 1) writes savings.json first; `--price off` removes `kwh_price`, its other keys kept (`savings.set_price(None)`, #609). The cost reads `GPU 600 Wh, cost 0.15`: no currency sign. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price}` (`price`: the kWh price set, or null; the pane's Settings row shows it). `--card FILE.svg`: the badge as an image (*The badge*). |
 | `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (the feed, *The Stats feed*) | `wb stats set` changes the Stats tab's settings (stats.json, *Stats recording*) and prints them. `wb stats` starts with the feed's headline (`stats.summary` over `feed(only=stats.SUMMARY)`: the week and all time, the streak, what the agents absorbed, their questions, the guards that fired), then the results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
 | `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`), the scratch directories (`store.SCRATCH_PREFIXES`: `.verify-`, `.base-`, `.check-`, `.submodule-`, `wb-index-`, `wb-merge-`, `.wb-image-`, `.wb-audio-`, each named `<prefix><maker's pid>.<start tag>-` by `store.scratch`, the tag `models.start_tag`, a crc32 of its start; and `wb bench add`'s half-made case `.<case>.<pid>.tmp`) in the state directory, `bench/`, `bench/cases/` and each default output directory of `wb image` and `wb audio` (`_scratch_homes`: only the top level was swept, and a bench add or a generation killed at Claude's Bash limit left its clone or temp directory for good, #589) `SCRATCH_AGE` (an hour) old whose maker is gone (`bench/`: a killed `wb bench add`'s clones, #439) (`_drop_scratches`, `_maker_alive`: a pid live again under a process with another start is gone, #532; an untagged name goes by the pid), half-made starts (`_dead_start`, `_drop_start`: a task directory with no task.json whose `starting.json` pid is gone or now another process's (its `start`, #532), or with none past `RULES_GRACE`; its worktree (unlocked first: killed mid-checkout, git leaves it locked "initializing", which remove and prune skip), registration and rules go too, and the branch only when `starting.json` says this start made it and only while it still points at `branch_at` (`delete_branch(at=)`: one `update-ref -d` compare-and-delete; an earlier task's unmerged `delegate/<task>` was deleted after a start killed before its worktree, #416); killed commands left full clones that `_disk_room` counted, and a killed start's name was refused for good: #376, the audit of 1.6) and the delegate branches of tasks accepted with `--merge` before accept deleted them itself (`_merged_branches`: tip recorded first, `branch -d`). Prints the counts; writes `gc.json`. Then (not in `cli.gc`, which a discard runs) `bench.sweep`: the bench replays a driver killed without warning left (*Bench*, #511), with a line naming them. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
 
@@ -5223,7 +5228,7 @@ $WB_HOME (~/.local/state/workbench)
   chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...]}
   chat-token ($WB_CHAT_TOKEN)    the web chat's token, mode 600
   savings.json ($WB_SAVINGS)     {"kwh_price": N}, the electricity price the energy is costed at (wb savings --price;
-                                 other keys kept)
+                                 --price off removes it; other keys kept)
 ~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; then $OPENCODE_CONFIG; $WB_OPENCODE_CONFIG) the models
 /tmp/wb-run-<uid>-<hash>/        the agent's XDG_RUNTIME_DIR (lane on; context.runtime_dir), 0700: kept while
                                  the task is open (stuck or in review too), removed by wb accept and wb discard

@@ -8,6 +8,7 @@ import fnmatch
 import functools
 import io
 import json
+import math
 import os
 import re
 import shlex
@@ -2428,10 +2429,14 @@ def cmd_stats(a):
 def cmd_savings(a):
     """What the delegated tasks saved Claude over a period, against the estimate of writing them
     (savings.py). `--price` sets the electricity price the energy is costed at."""
-    if a.price is not None:
-        if not a.price > 0:
-            die("--price is the electricity price per kWh: a positive number")
-        savings.set_price(a.price)
+    if a.price is not None:  # "off" clears it: nothing else could, once set (#609)
+        try:
+            kwh = None if a.price.strip().lower() == "off" else float(a.price)
+        except ValueError:
+            kwh = 0.0
+        if kwh is not None and not (kwh > 0 and math.isfinite(kwh)):
+            die("--price is the electricity price per kWh: a positive number, or off to clear it")
+        savings.set_price(kwh)
     period = "month" if a.month else "all" if a.all else "week"
     span = savings.PERIODS[period]
     since = store.now() - span if span else 0
@@ -4603,7 +4608,8 @@ def parser() -> argparse.ArgumentParser:
                    "discussion: the machine, model sizes (no names), tasks, ratios, energy")
     s.add_argument("--card", metavar="FILE.svg", help="write the savings badge as an image to keep "
                    "or post: the score out of 100, the period, the counts (made here; nothing sent)")
-    s.add_argument("--price", type=float, help="set the electricity price per kWh, then report")
+    s.add_argument("--price", metavar="X|off", help="set the electricity price per kWh (off "
+                   "clears it), then report")
     s.set_defaults(f=cmd_savings)
     sub.add_parser("tune", help="the settings tuned from results, per model and window").set_defaults(f=cmd_tune)
     s = sub.add_parser("gc", help="archive old closed tasks, rotate old notices, remove leftover "
