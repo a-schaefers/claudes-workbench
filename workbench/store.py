@@ -470,8 +470,15 @@ def network_fs(path: str) -> str | None:
             for row in out.splitlines():
                 if (m := re.search(r" on (/.*) \(([^,)]+)", row)):
                     mounts.append((m.group(1), m.group(2)))
-    best = max((m for m in mounts if path == m[0] or path.startswith(m[0].rstrip("/") + "/")),
-               key=lambda m: len(m[0]), default=None)
+    # the longest mount point holding it, and of several at one point the last listed, which is
+    # stacked on the others: an automount (x-systemd.automount, an autofs direct map) lists its
+    # autofs trigger first and the NFS mount after it at the same path, and max() kept the
+    # trigger, so a network home read as local (#896)
+    best = None
+    for m in mounts:
+        if (path == m[0] or path.startswith(m[0].rstrip("/") + "/")) and \
+                (best is None or len(m[0]) >= len(best[0])):
+            best = m
     return best[1] if best and best[1] in NETWORK_FS else None
 
 

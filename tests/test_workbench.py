@@ -5018,6 +5018,12 @@ class Steering(Base):
             fs = store.network_fs.__wrapped__
             self.assertEqual([fs("/home/u/.local/state/workbench"), fs("/mnt/my x/s"), fs("/var/x"),
                               fs("/homes")], ["nfs4", "cifs", None, None])
+        # #896: an automounted home lists its autofs trigger first and the NFS mount over it at
+        # the same path; the first of the two was kept, and the home read as local
+        mounts = ("/dev/sda1 / ext4 rw 0 0\nsystemd-1 /home autofs rw,fd=40 0 0\n"
+                  "nas:/export/home /home nfs4 rw 0 0\n")
+        with mock.patch.object(Path, "read_text", return_value=mounts):
+            self.assertEqual(store.network_fs.__wrapped__("/home/alice/.local/state/workbench"), "nfs4")
 
     def test_on_a_network_state_dir_each_machine_keeps_its_own_measurements_and_box_record(self):
         # #894: optimize.json, boxes.json and wsl-gpus.json were shared by every machine on a

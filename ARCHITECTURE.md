@@ -234,7 +234,9 @@ machine asleep, whose runner then finds its task failed when it wakes) is dead h
 machine (power loss, a container recreated with a new host name, `store.machine()` falling back
 to it, a reimaged machine) kept its task live for good, no command able to clear it (#872); one
 recorded before the beat (no `beat`) is trusted, as before. `wb doctor` says when the state directory is on a network file system
-(`store.network_fs`, by its mount type). There each machine keeps its own state in
+(`store.network_fs`, by the type of the longest mount point holding it, of several there the
+last listed: an automounted home lists its `autofs` trigger first and the NFS mount stacked on it
+after, and read as local, #896). There each machine keeps its own state in
 `$WB_HOME/machines/<store.machine()>/` (`store.machine_dir`, else `$WB_HOME`): the GPU lease
 (#849), optimize.json and optimize.log, boxes.json and wsl-gpus.json (#894: shared, each machine's
 `wb optimize` found the other's GPU in the fingerprint and emptied its own to measure again, and
