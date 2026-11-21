@@ -1211,8 +1211,8 @@ def free_gpu(keep=(), say=print, warn=None) -> None:
             warn(f"{other.id} is running and wb can't stop it (no stop command in "
                  f"{overrides_path().name}); it may hold GPU memory")
             continue
-        deadline = time.time() + 600
-        while not _server_idle(other) and time.time() < deadline:  # never cut off someone's reply
+        deadline = time.monotonic() + INFLIGHT_WAIT
+        while not _server_idle(other) and time.monotonic() < deadline:  # never cut off a reply
             time.sleep(5)
         say(f"stopping {other.id}")
         try:
@@ -1246,6 +1246,10 @@ def free_gpu(keep=(), say=print, warn=None) -> None:
 # and both paid a reload on every request (#378, the audit of 1.6).
 INFLIGHT_WATCH = 10   # seconds free_gpu watches /api/ps for a request on what it would unload
 INFLIGHT_WAIT = 600   # at most this long waiting for one in use, as for a server's reply
+# At least this long between two looks at /api/ps while waiting: a model whose stamp had passed
+# is busy at once, so each watch returned without a sleep and the wait asked again back to back
+# (1,137 requests in 0.25 s: #459, the audit of 1.8)
+INFLIGHT_POLL = 1.0
 
 
 def _stamps(doomed: dict) -> dict:
@@ -1281,6 +1285,7 @@ def _wait_unused(doomed: dict, warn) -> None:
     """Wait, up to INFLIGHT_WAIT, while a model free_gpu would unload is answering requests that
     aren't this account's tasks' (they are kept): unloading it between someone's requests made
     them reload it on the next (#378). It is unloaded after, used or not: the GPU is the task's."""
+    due = time.monotonic() + INFLIGHT_POLL
     busy = _in_use(doomed)
     if not busy:
         return
@@ -1290,6 +1295,8 @@ def _wait_unused(doomed: dict, warn) -> None:
          "idle before unloading it (models.json keep_loaded leaves a model loaded)")
     deadline = time.monotonic() + INFLIGHT_WAIT
     while busy and time.monotonic() < deadline:
+        time.sleep(max(min(due, deadline) - time.monotonic(), 0))
+        due = time.monotonic() + INFLIGHT_POLL
         busy = _in_use({root: [n for r, n in busy if r == root] for root in doomed},
                        min(INFLIGHT_WATCH, max(deadline - time.monotonic(), 0)))
     if busy:

@@ -384,6 +384,39 @@ class Real(unittest.TestCase):
         self.assertEqual([p["model"] for p in posts], ["long"])   # the GPU is the task's after all
         self.assertFalse(models._in_use({"r": []}))            # nothing to watch: no wait at all
 
+    def test_waiting_for_someone_elses_request_asks_ollama_at_most_once_a_second(self):
+        # #459 (the audit of 1.8, reproduced): a stamp already past is busy at once, so each
+        # watch returned without a sleep and the wait asked /api/ps back to back, 1,137 times
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        long = {"name": "long", "size": 10, "size_vram": 10, "expires_at": at(-60)}
+        found, _ = self.own([long], [])
+        root = found["a/x"].root
+        asked = []
+        real = models._get
+        def counting(url, timeout=2.5):
+            if url.endswith("/api/ps"):
+                asked.append(time.monotonic())
+            return real(url, timeout)
+        def per_second():
+            return len(asked) / max(asked[-1] - asked[0], 1)
+        with mock.patch.object(models, "_get", counting), \
+                mock.patch.object(models, "INFLIGHT_WATCH", 0.25), \
+                mock.patch.object(models, "INFLIGHT_WAIT", 3):
+            models._wait_unused({root: ["long"]}, warn=lambda m: None)        # busy throughout
+            self.assertLessEqual(per_second(), 2)
+            asked.clear()
+            threading.Timer(1.2, lambda: long.update(expires_at=at(300))).start()  # goes idle
+            began = time.monotonic()
+            models._wait_unused({root: ["long"]}, warn=lambda m: None)
+            self.assertLess(time.monotonic() - began, 2.9)     # it saw the quiet and stopped
+            self.assertLessEqual(len(asked), 8)
+            asked.clear()
+            long["expires_at"] = at(-60)
+            srv = self.servers.pop()
+            threading.Timer(0.5, lambda: (srv.shutdown(), srv.server_close())).start()  # goes away
+            models._wait_unused({root: ["long"]}, warn=lambda m: None)
+            self.assertLessEqual(per_second(), 2)
+
     def test_a_server_the_user_keeps_loaded_is_never_stopped(self):
         srv = self.server({"/v1/models": {"data": [{"id": "m"}]}})
         stopped = Path(self.tmp.name) / "stopped"

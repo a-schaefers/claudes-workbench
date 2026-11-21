@@ -2652,7 +2652,9 @@ finishes and stops its clock while one runs, so a stamp that moves, or one alrea
 tasks on a shared system Ollama, since `gpu.lock` is per account; Open WebUI; an editor). Then it
 warns ("<names> on ollama is answering requests that aren't this account's tasks …: waiting up to
 10 min for it to go idle before unloading it") and waits, up to `INFLIGHT_WAIT` 10 min, for a
-quiet watch, then unloads it either way. Each account's runner once unloaded the other's model
+quiet watch, looking at most once an `INFLIGHT_POLL` second (a stamp already past is busy at
+once, and the wait asked `/api/ps` back to back: 1,137 requests in 0.25 s, #459, the audit of
+1.8), then unloads it either way. Each account's runner once unloaded the other's model
 before every round, mid-use, and both reloaded on every request (#378, the audit of 1.6). A
 server whose `/api/ps` gives no `expires_at` has nothing to watch. A machine-wide lease (one
 `gpu.lock` for every account, opt-in) would be the whole answer and isn't built; meanwhile `wb
