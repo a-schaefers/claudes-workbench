@@ -449,7 +449,8 @@ class Task:
 # removes one SCRATCH_AGE old whose maker is gone. Killed commands left full clones there, with
 # their copied dependencies, that _disk_room then counted against every new task (#376, the
 # audit of 1.6).
-SCRATCH_PREFIXES = (".verify-", ".base-", ".check-", ".submodule-", "wb-index-", "wb-merge-")
+SCRATCH_PREFIXES = (".verify-", ".base-", ".check-", ".submodule-", "wb-index-", "wb-merge-",
+                    ".wb-image-", ".wb-audio-")  # the last two in wb image's and audio's output (#589)
 SCRATCH_AGE = 3600
 
 

@@ -12,6 +12,8 @@ import os
 import re
 import shlex
 import shutil
+import signal
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -19,6 +21,30 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import hardware, models
+
+
+def run_group(argv: list[str], timeout: float, **kw) -> subprocess.CompletedProcess:
+    """subprocess.run, with ``argv`` in a session of its own whose whole group is killed when it
+    is done, on a timeout, or when wb is ended (cli._ends_cleanly makes SIGTERM a SystemExit).
+    subprocess.run killed only its direct child: an engine that is a wrapper script left its
+    worker running, holding the GPU, after the lease was gone (#589, the audit of 1.90).
+    TimeoutExpired past ``timeout``, as subprocess.run."""
+    p = subprocess.Popen(argv, start_new_session=True, **kw)
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except BaseException:
+        _kill_group(p)
+        p.wait()
+        raise
+    _kill_group(p)  # what it left running behind it
+    return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+
+def _kill_group(p: subprocess.Popen) -> None:
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def load(path: Path) -> dict[str, dict]:

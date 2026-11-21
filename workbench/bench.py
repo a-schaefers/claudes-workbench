@@ -26,7 +26,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import ask_mcp, context, gitops, models, router, runner, spend, store
+from . import ask_mcp, context, gitops, media, models, router, runner, spend, store
 from .runner import PKG_ROOT
 from .watch import Watcher
 
@@ -286,7 +286,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         raise RuntimeError(f"step {step} changed no test files ({len(changed)} files): name the "
                            "hidden checks with --hidden <path>…, or --check <command>")
     d = case_dir(case_name)
-    tmp = d.with_name(f".{case_name}.tmp")
+    tmp = d.with_name(f".{case_name}.{os.getpid()}.tmp")  # the pid: wb gc sweeps a killed one's
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
     try:
@@ -735,8 +735,9 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
         argv = [claude, "-p", "--output-format", "json", "--max-turns", str(turns),
                 "--permission-mode", "acceptEdits", "--allowedTools", *allow, "--", prompt]
         try:
-            p = subprocess.run(argv, cwd=work / (subdir(case) or ""), capture_output=True, text=True,
-                               timeout=int(case.get("test_timeout") or 900) * 4)
+            # its own group, killed with wb (#589): a Bash-limit kill left claude -p running
+            p = media.run_group(argv, int(case.get("test_timeout") or 900) * 4, cwd=work / (subdir(case) or ""),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         except subprocess.TimeoutExpired:
             return {**row, "outcome": "error", "why": "claude -p timed out"}
         (d / "claude.json").write_text(p.stdout)
@@ -761,6 +762,10 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
         (d / "grade.txt").write_text("\n\n".join(out))
         return {**row, "outcome": "passed" if ok else "failed",
                 **({} if ok else {"why": "the hidden checks failed (grade.txt)"})}
+    except SystemExit:  # ended (Claude's Bash limit): a row says so, not nothing (#589)
+        store.append_jsonl(runs_file(), {**row, "outcome": "error",
+                                         "why": "stopped before it finished (a signal)"})
+        raise
     finally:
         shutil.rmtree(d / "tree" if work.parent != d else work, ignore_errors=True)
 

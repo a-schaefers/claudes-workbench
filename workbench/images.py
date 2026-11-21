@@ -75,8 +75,8 @@ def _argv(e: dict, values: dict, refs: list[Path]) -> list[str]:
 
 def _command(e: dict, values: dict, refs: list[Path], log: Path) -> None:
     with open(log, "a") as f:
-        r = subprocess.run(_argv(e, values, refs), stdin=subprocess.DEVNULL, stdout=f,
-                           stderr=subprocess.STDOUT, timeout=float(e.get("timeout", 1800)))
+        r = media.run_group(_argv(e, values, refs), float(e.get("timeout", 1800)),
+                            stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT)
     if r.returncode or not Path(values["out"]).is_file():
         tail = "\n".join(log.read_text().strip().splitlines()[-8:])
         raise RuntimeError(f"the engine exited {r.returncode} without an image:\n{tail}")
@@ -144,7 +144,7 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
             # into a path of its own, then published under a name nothing has: two prompts with
             # the same first six words and seed wrote one PNG, the second over the first, and an
             # engine that wrote nothing passed on the old PNG, its sidecar rewritten (#267)
-            with tempfile.TemporaryDirectory(prefix=".wb-image-", dir=out_dir) as tmp:
+            with tempfile.TemporaryDirectory(prefix=store.scratch(".wb-image-"), dir=out_dir) as tmp:
                 fresh = Path(tmp) / f"{media.slug(prompt, 'image')}-{s}.png"
                 values = {"prompt": prompt, "out": fresh, "width": size[0], "height": size[1], "seed": s}
                 t0 = time.time()

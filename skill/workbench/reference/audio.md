@@ -21,7 +21,8 @@ Never say a sound "sounds" good. Say what the checks show, and let the user's ea
    instruments, mood, the length, vocals or instrumental, and where it plays (a menu loop,
    credits).
 2. `wb audio "<script or description>" [--kind speech|sfx|music] --n 3 [--seconds S] [--voice V]
-   [--lyrics FILE] [--seed S]`. **Read every check line and look at every spectrogram.** Never
+   [--lyrics FILE] [--seed S]`, with Bash `run_in_background: true` (a batch can outrun Bash's
+   2 minutes; read its notification). **Read every check line and look at every spectrogram.** Never
    pick by filename.
 3. **Speech:** read the differences in brackets after the WER, not the number alone. The listener
    writes numbers as digits and spells odd names its own way ("twenty twenty six → 2026" is a

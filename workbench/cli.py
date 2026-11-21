@@ -2082,16 +2082,35 @@ def _maker_alive(pid: str, tag: str) -> bool:
     return not now or now == tag
 
 
+def _scratch_pid(name: str) -> str | None:
+    """The maker in a scratch directory's name, `<pid>` or `<pid>.<start tag>` (store.scratch,
+    or wb bench add's `.<case>.<pid>.tmp`), or None when it is no scratch directory."""
+    if pre := next((p for p in store.SCRATCH_PREFIXES if name.startswith(p)), None):
+        return name[len(pre):].split("-")[0]
+    if name.startswith(".") and name.endswith(".tmp") and name.count(".") >= 3:
+        return name[:-4].rsplit(".", 1)[1]
+    return None
+
+
+def _scratch_homes() -> list[Path]:
+    """Where scratch directories are made: the home; the bench's, its cases; and each default
+    output directory of wb image and wb audio (`.wb-image-`, `.wb-audio-`). A command killed at
+    Claude's Bash limit left them all (#589, the audit of 1.90)."""
+    home = store.home()
+    outs = [d for kind in ("images", "audio") if (home / kind).is_dir()
+            for d in sorted((home / kind).iterdir()) if d.is_dir() and not d.is_symlink()]
+    return [home, home / "bench", home / "bench" / "cases", *outs]
+
+
 def _drop_scratches() -> int:
-    """The scratch directories (store.SCRATCH_PREFIXES) SCRATCH_AGE old whose maker is gone (#376),
-    in the state directory and in bench/, where a killed `wb bench add` leaves its clones (#439)."""
+    """The scratch directories (_scratch_pid) SCRATCH_AGE old whose maker is gone (#376, #439,
+    #589): the home's, bench/'s, where a killed `wb bench add` leaves its clones, and the rest."""
     n = 0
-    tops = [p for p in (store.home(), store.home() / "bench") if p.is_dir() and not p.is_symlink()]
-    for d in sorted(d for top in tops for d in top.iterdir()):
-        pre = next((p for p in store.SCRATCH_PREFIXES if d.name.startswith(p)), None)
-        if not pre or not d.is_dir() or d.is_symlink():
+    for d in [d for h in _scratch_homes() if h.is_dir() for d in sorted(h.iterdir())]:
+        maker = _scratch_pid(d.name)
+        if maker is None or not d.is_dir() or d.is_symlink():
             continue
-        pid, _, tag = d.name[len(pre):].split("-")[0].partition(".")
+        pid, _, tag = maker.partition(".")
         try:
             old = time.time() - d.stat().st_mtime > store.SCRATCH_AGE
         except OSError:
@@ -2480,7 +2499,8 @@ def cmd_trial(a):
 def cmd_bench(a):
     """Replays of accepted tasks, graded by their hidden checks (bench.py)."""
     if a.bench_cmd == "add":
-        print("\n".join(bench.add(a.task, a.step, a.hidden, a.check, a.name)))
+        with _ends_cleanly():  # a kill at Claude's Bash limit: the clones and the tests go (#589)
+            print("\n".join(bench.add(a.task, a.step, a.hidden, a.check, a.name)))
     elif a.bench_cmd == "list":
         print("\n".join(bench.list_lines()))
     elif a.bench_cmd == "run":
@@ -2493,7 +2513,8 @@ def cmd_bench(a):
         if not a.yes:
             die("wb bench self runs Claude Code on the case and spends Claude tokens: add --yes")
         try:
-            row = bench.self_run(a.case, a.turns)
+            with _ends_cleanly():  # claude -p and the checkout go with it, and a row says so (#589)
+                row = bench.self_run(a.case, a.turns)
         except RuntimeError as e:
             die(str(e))
         store.append_jsonl(bench.runs_file(), row)
@@ -2943,8 +2964,11 @@ def cmd_image(a):
         die(f"--size {a.size!r}: WIDTHxHEIGHT, e.g. 1024x1024")
     out = Path(a.out) if a.out else store.home() / "images" / time.strftime("%Y%m%d-%H%M%S")
     try:
-        made = images.generate(a.prompt, out, n=a.n, size=(w, h), seed=a.seed, name=a.engine,
-                               refs=a.ref or [], say=lambda m: print(m, flush=True), wait=a.wait)
+        # a kill at Claude's Bash limit ends it as an error would: the engine's group killed, the
+        # GPU lease and the temp directory let go (#589, the audit of 1.90)
+        with _ends_cleanly():
+            made = images.generate(a.prompt, out, n=a.n, size=(w, h), seed=a.seed, name=a.engine,
+                                   refs=a.ref or [], say=lambda m: print(m, flush=True), wait=a.wait)
     except (KeyError, RuntimeError, OSError, subprocess.TimeoutExpired) as e:
         die(str(e).strip("'\""))
     print(f"{len(made)} image(s) in {out}: look at each before choosing; the .json beside each "
@@ -2965,9 +2989,10 @@ def cmd_audio(a):
             die(f"--lyrics {a.lyrics}: {e.strerror or e}")
     out = Path(a.out) if a.out else store.home() / "audio" / time.strftime("%Y%m%d-%H%M%S")
     try:
-        made = audio.generate(a.text, out, kind=a.kind, n=a.n, seconds=a.seconds, voice=a.voice,
-                              lyrics=lyrics.strip(), refs=a.ref or [], seed=a.seed, name=a.engine,
-                              check=not a.no_check, say=lambda m: print(m, flush=True), wait=a.wait)
+        with _ends_cleanly():  # as wb image: the engine, the lease, the unload, the temp (#589)
+            made = audio.generate(a.text, out, kind=a.kind, n=a.n, seconds=a.seconds, voice=a.voice,
+                                  lyrics=lyrics.strip(), refs=a.ref or [], seed=a.seed, name=a.engine,
+                                  check=not a.no_check, say=lambda m: print(m, flush=True), wait=a.wait)
     except (KeyError, RuntimeError, OSError, subprocess.TimeoutExpired) as e:
         die(str(e).strip("'\""))
     print(f"{len(made)} clip(s) in {out}: you can't hear them, so read each check line and look at "

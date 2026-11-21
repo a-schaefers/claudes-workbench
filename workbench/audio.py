@@ -97,8 +97,8 @@ def _command(e: dict, values: dict, refs: list[Path], log: Path) -> None:
     for r in refs:
         argv += [e["ref_arg"], str(r)]
     with open(log, "a") as f:
-        r = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
-                           timeout=float(e.get("timeout", 1800)))
+        r = media.run_group(argv, float(e.get("timeout", 1800)), stdin=subprocess.DEVNULL, stdout=f,
+                            stderr=subprocess.STDOUT)
     if r.returncode or not Path(values["out"]).is_file():
         tail = "\n".join(log.read_text().strip().splitlines()[-8:])
         raise RuntimeError(f"the engine exited {r.returncode} without audio:\n{tail}")
@@ -176,7 +176,7 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
                 s = seed + i
                 stem = f"{media.slug(text, kind)}-{s}"
                 # made in a directory of its own, then published under a name nothing has (#267)
-                with tempfile.TemporaryDirectory(prefix=".wb-audio-", dir=out_dir) as tmp:
+                with tempfile.TemporaryDirectory(prefix=store.scratch(".wb-audio-"), dir=out_dir) as tmp:
                     fresh = Path(tmp) / f"{stem}.wav"
                     values = {"text": text, "out": fresh, "seed": s, "seconds": seconds or "",
                               "voice": voice, "lyrics": lyrics}
@@ -468,8 +468,8 @@ def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
     name, e = ear
     if e.get("command"):
         argv = media.fill(e["command"], {"in": clip})
-        r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                           timeout=float(e.get("timeout", 600)))
+        r = media.run_group(argv, float(e.get("timeout", 600)), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         with open(log, "a") as f:
             f.write(r.stderr)
         if r.returncode:

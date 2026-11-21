@@ -6791,6 +6791,32 @@ class Images(Base):
         self.assertIn("fake: ", run_wb("image", "--list"))
         self.assertIn("ready", run_wb("image", "--list"))
 
+    def killed(self, argv: list[str], pidfile: Path) -> None:
+        """Run ``wb <argv>``, SIGTERM it (as Claude's Bash does at its 2 minutes) once its engine's
+        worker is running, and check the worker, the temp directory and the GPU lease went too."""
+        proc = subprocess.Popen([str(ROOT / "bin" / "wb"), *argv], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        end = time.monotonic() + 30
+        while not (pidfile.exists() and pidfile.read_text().strip()) and time.monotonic() < end:
+            time.sleep(0.1)
+        worker = int(pidfile.read_text())
+        self.addCleanup(lambda: subprocess.run(["kill", "-9", str(worker)], capture_output=True))
+        proc.terminate()
+        self.assertEqual(proc.wait(30), 128 + signal.SIGTERM)
+        self.assertTrue(wait_gone(worker, 10), "the engine's worker outlived wb")
+        gpu = store.read_json(store.home() / "gpu.json", {}) or {}
+        self.assertNotIn(str(proc.pid), gpu)                     # the lease let go of, not left
+
+    def test_a_killed_image_run_ends_its_engines_worker_and_leaves_no_temp_or_lease(self):
+        # #589, the audit of 1.90 (reproduced): SIGTERM 2 s into wb image with a wrapper engine
+        # left its `sleep 30` running, out/.wb-image-… behind, and gpu.json naming the dead pid
+        tmp = Path(self.tmp.name)
+        pidfile, eng = tmp / "worker.pid", tmp / "eng.sh"
+        eng.write_text(f"sleep 300 &\necho $! > {pidfile}\nwait\n")
+        self.engines({"slow": {"command": f"sh {eng} {{out}}"}})
+        self.killed(["image", "a red fox", "--n", "1", "--out", str(tmp / "out")], pidfile)
+        self.assertEqual(list((tmp / "out").glob(".wb-image-*")), [])
+
     def test_a_second_run_keeps_the_first_candidate_and_an_engine_that_writes_nothing_fails(self):
         # #267 (the audit of 1.2): two prompts with the same first six words and seed wrote one
         # PNG and sidecar, the second over the first; and an engine that exited 0 without writing
@@ -7035,6 +7061,16 @@ class Audio(Base):
         fake = Path(self.tmp.name) / "ear.py"
         fake.write_text(f"import sys\nopen(sys.argv[0] + '.got', 'w').write(sys.argv[1])\nprint({heard!r})\n")
         return fake
+
+    def test_a_killed_audio_run_ends_its_engines_worker_and_leaves_no_temp_or_lease(self):
+        # #589, the audit of 1.90: as wb image
+        tmp = Path(self.tmp.name)
+        pidfile, eng = tmp / "worker.pid", tmp / "eng.sh"
+        eng.write_text(f"sleep 300 &\necho $! > {pidfile}\nwait\n")
+        self.engines({"slow": {"command": f"sh {eng} {{out}}"}})
+        Images.killed(self, ["audio", "a bell", "--n", "1", "--no-check", "--out", str(tmp / "o")],
+                      pidfile)
+        self.assertEqual(list((tmp / "o").glob(".wb-audio-*")), [])
 
     def test_speech_candidates_carry_the_listeners_transcript_and_word_error_rate(self):
         tmp, tone, ear = Path(self.tmp.name), self.tone(), self.ear('{"text": "the gate is closed"}')
@@ -7810,6 +7846,26 @@ class Cleanup(Base):
         self.assertFalse((store.home() / "rules" / "t-merged").exists())
 
     def test_a_half_made_start_frees_its_name_and_gc_clears_it_and_its_scratches(self):
+
+    def test_gc_sweeps_what_a_killed_bench_add_image_or_audio_run_left(self):
+        # #589, the audit of 1.90: wb gc swept the home's top level only, so a bench add killed
+        # at Claude's Bash limit left its clone and its half-made case, and a killed image or
+        # audio run its temp directory, for good
+        home, gone = store.home(), 999999999
+        dead = [home / "bench" / f".base-{gone}-a", home / "bench" / f".check-{gone}-b",
+                home / "bench" / "cases" / f".case.{gone}.tmp",
+                home / "images" / "20261120-010203" / f".wb-image-{gone}-c",
+                home / "audio" / "20261120-010203" / f".wb-audio-{gone}-d"]
+        kept = [home / "bench" / f".base-{os.getpid()}-e",           # its maker alive
+                home / "bench" / "cases" / "case",                    # a case
+                home / "images" / "20261120-010203" / "fox"]          # not a scratch name
+        for d in dead + kept:
+            (d / "x").mkdir(parents=True)
+            os.utime(d, (time.time() - 7200, time.time() - 7200))
+        self.assertIn("5 scratch dir(s)", run_wb("gc"))
+        self.assertEqual([d.exists() for d in dead + kept], [False] * 5 + [True] * 3)
+
+    def test_a_start_killed_in_worktree_add_frees_its_name_and_gc_its_scratches(self):
         # #376 (the audit of 1.6): a wb start killed by Claude's Bash limit left tasks/<name>/
         # without a task.json, its branch and worktree, and the name was refused for good; killed
         # commands' scratch clones stayed in the state directory, counted against every new task

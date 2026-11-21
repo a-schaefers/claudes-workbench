@@ -10,7 +10,8 @@ asset at review), and make it once the GPU is free.
    lighting, the size the project needs, and what to avoid. Name the use ("a 64x64 icon on
    a flat background") so the framing fits.
 2. `wb image "<prompt>" --n 4 --size WxH [--seed S] [--ref img]` makes candidates (seeds S, S+1,
-   ...) and prints their paths. **Read every one**: look at it yourself, never pick by filename.
+   ...) and prints their paths. Run it with Bash `run_in_background: true` and read its
+   notification: a batch can outrun Bash's 2 minutes. **Read every one**: look at it yourself, never pick by filename.
 3. Keep one, or rewrite the prompt for what was wrong and go again. A seed you liked comes back
    with `--seed` and a changed prompt. Stop after three rounds and show the user the best.
 4. Copy the keeper into the project (resized or cropped as needed), commit it, and say which
