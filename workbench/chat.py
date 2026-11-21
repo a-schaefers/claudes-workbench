@@ -508,18 +508,50 @@ def push_key() -> str:
     return _keys[path]
 
 
+_seen_read: dict = {"key": None, "at": 0, "all": set(), "per": {}}  # what's been read of seen.jsonl
+_seen_lock = threading.Lock()  # the pusher and the page's requests read it from their own threads
+
+
+def _seen_update(p: Path, c: dict) -> dict:
+    """seen.jsonl read on from where the last call stopped (it is only appended to; another file
+    or a shorter one is read afresh), under _seen_lock: every push tick reread the whole file,
+    94 ms at 60,000 rows with nobody subscribed (#456)."""
+    try:
+        st = p.stat()
+    except FileNotFoundError:
+        c.update(key=None, at=0, all=set(), per={})
+        return c
+    key = (str(p), st.st_dev, st.st_ino)
+    if c["key"] != key or st.st_size < c["at"]:
+        c.update(key=key, at=0, all=set(), per={})
+    if st.st_size > c["at"]:
+        with open(p, "rb") as f:
+            f.seek(c["at"])
+            data = f.read()
+        end = data.rfind(b"\n") + 1  # a row still being written waits for its newline
+        for r in store._rows(data[:end]):
+            if not isinstance(r, dict):
+                continue
+            if r.get("endpoint"):
+                c["per"].setdefault(r.get("id"), set()).add(r["endpoint"])
+            else:
+                c["all"].add(r.get("id"))
+        c["at"] += end
+    return c
+
+
+# _seen and _pushed hand out the cache itself, not a copy (copying 60,000 ids a tick is what #456
+# removed): callers only look things up in it, which is safe while another thread adds.
 def _seen() -> set:
     """Ids no push is owed for: shown on a page (or pushed before pushes were counted per device)."""
-    return {r.get("id") for r in store.read_jsonl(chat_dir() / "seen.jsonl")[0] if not r.get("endpoint")}
+    with _seen_lock:
+        return _seen_update(chat_dir() / "seen.jsonl", _seen_read)["all"]
 
 
 def _pushed() -> dict[str, set]:
-    """Each id's devices (endpoints) that took its push."""
-    out: dict[str, set] = {}
-    for r in store.read_jsonl(chat_dir() / "seen.jsonl")[0]:
-        if r.get("endpoint"):
-            out.setdefault(r.get("id"), set()).add(r["endpoint"])
-    return out
+    """Each id's devices (endpoints) that took its push, or whose page showed it (#537)."""
+    with _seen_lock:
+        return _seen_update(chat_dir() / "seen.jsonl", _seen_read)["per"]
 
 
 def _transient(status: int) -> bool:
@@ -562,9 +594,11 @@ class Pusher:
     def tick(self, now: float | None = None) -> list[str]:
         """The ids pushed now, to at least one device."""
         now = now or store.now()
-        due = news(now)
         subs = [x["endpoint"] for x in webpush.subscriptions()]
-        if not due or not subs:
+        if not subs:  # before the news: nobody to tell, nothing to read (#456)
+            return []
+        due = news(now)
+        if not due:
             return []
         pushed = _pushed()
         due = [i for i in due if any(e not in pushed.get(i, ()) for e in subs)]  # owed to a device

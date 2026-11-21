@@ -11441,6 +11441,34 @@ class WebChat(Base):
         self.assertEqual(self.call("/api/seen", {"ids": [used["id"]]}, token=tok)[0], 200)
         self.assertEqual(pusher.tick(used["ts"] + chat.PUSH_DELAY + 1), [])
 
+    def test_an_idle_chat_reads_no_receipts_and_a_busy_one_only_the_new_ones(self):
+        # #456 (the 2026-11-20 audit, one local timing): 60,000 seen rows and nobody subscribed, and
+        # each push tick reread all 4 MB (94 ms)
+        chat = self.chat
+        from workbench import webpush as wp
+        with open(chat.chat_dir() / "seen.jsonl", "w") as f:
+            for i in range(60_000):
+                f.write(json.dumps({"id": f"m{i}", "ts": 1, "by": "page"}) + "\n")
+        hub = chat.Hub()
+        self.addCleanup(hub.close)
+        pusher = chat.Pusher(hub, send=lambda eps: {e: 201 for e in eps})
+        news = chat.send("Done", "claude")
+        with mock.patch.object(chat, "news", side_effect=AssertionError("read with nobody to tell")):
+            self.assertEqual(pusher.tick(news["ts"] + chat.PUSH_DELAY + 1), [])
+        wp.subscribe("https://web.push.apple.com/phone")
+        read = []
+        rows = chat.store._rows
+        with mock.patch.object(chat.store, "_rows", side_effect=lambda data: read.append(len(data)) or rows(data)):
+            self.assertEqual(pusher.tick(news["ts"] + chat.PUSH_DELAY + 1), [news["id"]])
+            first = sum(read)
+            read.clear()
+            chat.mark_seen(["late"], "page")
+            self.assertIn("late", chat._seen())
+            self.assertEqual(pusher.tick(news["ts"] + chat.PUSH_DELAY + 2), [])
+        self.assertGreater(first, 2_000_000)                                 # the whole file, once
+        self.assertLess(sum(read), 1000)                                     # then only what was added
+        self.assertIn("m59999", chat._seen())
+
     def test_a_plan_card_shows_its_own_sessions_plan_and_never_another_projects(self):
         # #253 (the audit of 1.2): with no plan text the card took the newest file in the plans
         # directory, so with two projects planning, A's card showed B's plan for revisions

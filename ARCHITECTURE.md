@@ -4397,7 +4397,10 @@ device has notifications on, with its own `endpoint`, so only its push is spared
 visible and unsubscribed reports nothing. Any visible tab counted for every device, so a desktop
 tab left open behind the terminal meant the phone was never notified (#537); the server's `Pusher` thread (woken by each change, and every `PUSH_DELAY`/2) sends
 one push to each device still owed Claude's messages and open dialogs that no page showed within
-`PUSH_DELAY` 10 s and that are under `PUSH_WINDOW` 15 min old (never a backlog), and marks them
+`PUSH_DELAY` 10 s and that are under `PUSH_WINDOW` 15 min old (never a backlog; with no device
+subscribed it works nothing out, and seen.jsonl is read on from where the last look stopped,
+`_seen_update` under `_seen_lock`: each tick reread the whole file, 94 ms at 60,000 rows with
+nobody subscribed, #456), and marks them
 `push` for each device that took it. A device its service failed for now (not reached, 429, 5xx:
 `_transient`) is tried again after `PUSH_RETRY` (30 s) while the news is in the window: every
 due push was marked sent whatever the services said, and a phone whose service was down for
