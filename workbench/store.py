@@ -106,7 +106,9 @@ def disk_full(e: BaseException) -> bool:
 
 
 def free_bytes(path: Path | None = None) -> int | None:
-    """Free space where the state directory lives (or ``path``), for the user; None if unknown."""
+    """Free space where the state directory lives (or ``path``), for the user; None if unknown.
+    On macOS the larger of statvfs's and what the volume has for important use (_important_free),
+    which counts the purgeable space macOS frees when asked."""
     p = Path(path or home())
     while not p.exists() and p != p.parent:
         p = p.parent
@@ -114,7 +116,48 @@ def free_bytes(path: Path | None = None) -> int | None:
         st = os.statvfs(p)
     except OSError:
         return None
-    return st.f_bavail * st.f_frsize
+    return max(st.f_bavail * st.f_frsize, _important_free(p) or 0)
+
+
+def _important_free(path: Path) -> int | None:
+    """The volume's available capacity for important usage (CoreFoundation's
+    kCFURLVolumeAvailableCapacityForImportantUsageKey, what Finder shows as Available), macOS only;
+    None elsewhere or when it can't say. On APFS statvfs leaves out purgeable space (local Time
+    Machine snapshots, iCloud Drive's optimized files, caches), which macOS frees under pressure: a
+    Mac with 1.5 GB by statvfs and 30 GB in Finder refused every wb start, and a task admitted
+    failed at its checkout (#852)."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        key = ctypes.c_void_p.in_dll(cf, "kCFURLVolumeAvailableCapacityForImportantUsageKey")
+        make = cf.CFURLCreateFromFileSystemRepresentation
+        make.restype, make.argtypes = ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_bool]
+        copy = cf.CFURLCopyResourcePropertyForKey
+        copy.restype = ctypes.c_bool
+        copy.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+        number = cf.CFNumberGetValue
+        number.restype, number.argtypes = ctypes.c_bool, [ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p]
+        cf.CFRelease.restype, cf.CFRelease.argtypes = None, [ctypes.c_void_p]
+        raw = os.fsencode(path)
+        url = make(None, raw, len(raw), True) if key.value else None
+        if not url:
+            return None
+        try:
+            val = ctypes.c_void_p()
+            if not copy(url, key, ctypes.byref(val), None) or not val.value:
+                return None
+            try:
+                out = ctypes.c_int64()
+                ok = number(val, 4, ctypes.byref(out))  # kCFNumberSInt64Type
+                return out.value if ok and out.value >= 0 else None
+            finally:
+                cf.CFRelease(val)
+        finally:
+            cf.CFRelease(url)
+    except (ImportError, OSError, AttributeError, ValueError, TypeError):
+        return None
 
 
 def noexec(path: Path | None = None) -> bool:

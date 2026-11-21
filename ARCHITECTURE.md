@@ -267,6 +267,12 @@ that, exits without raising. `reap` that can't write says so once per command on
 leaves the task for the first call that can; its notice names the free space when it is under
 `DISK_SPARE`. Any other command that meets a full disk prints one line naming it (`cli.main`).
 `wb doctor` prints what the state directory holds and what is free (BAD under `DISK_SPARE`).
+Free is `store.free_bytes`: statvfs's `f_bavail`, and on macOS the larger of that and the volume's
+capacity for important usage (`store._important_free`, CoreFoundation's
+`kCFURLVolumeAvailableCapacityForImportantUsageKey` through ctypes, what Finder calls Available):
+on APFS statvfs leaves out purgeable space (local Time Machine snapshots, iCloud Drive's optimized
+files), which macOS frees when asked, and a Mac with 1.5 GB by statvfs and 30 GB in Finder refused
+every start (#852).
 The refusal, `wb doctor` when space is short and `cli.main`'s full-disk line also name what
 history holds past 100 MB, with what frees it (`cli.history_held`: the archive, "wb gc trims its
 old logs"; wb bench's cases, "wb bench rm <case>"; its runs, "a new run trims old ones"): the

@@ -15681,6 +15681,23 @@ class DiskRoom(Base):
             self.start("t-unknown", "ok", "--queue")
         wait_phase("t-unknown", {"review"})
 
+    def test_on_macos_free_space_counts_what_the_system_would_purge(self):
+        # #852: on APFS statvfs leaves out purgeable space (local snapshots, iCloud's optimized
+        # files), so a Mac with 1.5 GB by statvfs and 30 GB in Finder refused every start
+        small = types.SimpleNamespace(f_bavail=1500, f_frsize=10**6)            # 1.5 GB
+        with mock.patch.object(store.os, "statvfs", return_value=small):
+            with mock.patch.object(store, "_important_free", return_value=30 * 10**9):
+                self.assertEqual(store.free_bytes(), 30 * 10**9)
+                self.assertIsNotNone(cli._disk_room(self.repo, "HEAD", {}))     # room: no refusal
+            with mock.patch.object(store, "_important_free", return_value=10**9):  # smaller: statvfs
+                self.assertEqual(store.free_bytes(), 1.5 * 10**9)
+            with mock.patch.object(store, "_important_free", return_value=None):
+                self.assertEqual(store.free_bytes(), 1.5 * 10**9)
+        if sys.platform == "darwin":                        # the real call, on the nightly's Mac
+            self.assertGreater(store._important_free(store.home().parent) or 0, 0)
+        else:
+            self.assertIsNone(store._important_free(store.home().parent))
+
     def test_the_disk_check_sizes_only_the_sparse_cone_and_fetches_nothing_in_a_blobless_clone(self):
         # #436 (the audit of v1.8): a cone of two files counted the whole tree's 6 MB, and in a
         # blobless clone each blob the count needed was fetched, one at a time
