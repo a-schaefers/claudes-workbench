@@ -804,8 +804,15 @@ to five times a task (#249, the audit of 1.2). `wb verify --setup` and `wb shot 
 each checkout as before; so does a task prepared before the paths were recorded, and one whose
 `prepared_paths` hold a virtualenv (`venv_in`): its `activate` and scripts name the worktree it
 was made in, so the copy ran the task's interpreter and code, and the base check and `wb verify`
-failed where the task passed (#325, the audit of 1.4). Failing there,
-the run's exit is `"setup failed"`.
+failed where the task passed (#325, the audit of 1.4); and one whose `prepared_paths` hold a build
+tree configured for the worktree (`build_source`: CMake's `CMakeCache.txt` `CMAKE_HOME_DIRECTORY`,
+Meson's `meson-info/meson-info.json`, in the path or one level inside): copied, its targets ran the
+candidate's code on the base, and `wb verify` said the regression already passed there (#424, the
+audit of 1.8). A scratch checkout whose copied build tree (from the worktree or `--copy`) was
+configured for another checkout's tracked sources, the user's or the worktree's, with nothing to
+make it afresh, is refused (`_foreign_builds`: "copy failed", "<path> is a build tree configured
+for <dir>…", naming `--setup`); a dependency's build whose source is ignored is the same in every
+checkout and passes. Failing there, the run's exit is `"setup failed"`.
 
 **The base check** (`_base_check`, `base_check`, before round 1 and the GPU): the acceptance
 command once on the untouched base, the same way but in a scratch checkout of the base

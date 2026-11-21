@@ -6840,6 +6840,40 @@ class Verify(Base):
             self.assertTrue(verify.looks_like_test(p), p)
         self.assertFalse(verify.looks_like_test("src/parse.go"))
 
+    def test_a_build_tree_naming_its_checkout_is_made_afresh_in_each_scratch_checkout(self):
+        # #424 (the audit of 1.8, reproduced with CMake): the worktree's build/ (configured by the
+        # setup, CMAKE_HOME_DIRECTORY the worktree) was copied to the base's checkout, its target
+        # ran the candidate's code there, and verify said the test already passed on the base
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        (self.repo / ".gitignore").write_text("build/\n")
+        g("add", "-A")
+        g("commit", "-qm", "ignore the build tree")
+        configure = ('mkdir -p build && printf "CMAKE_HOME_DIRECTORY:INTERNAL=%s\\n" "$PWD" '
+                     '> build/CMakeCache.txt && printf "%s" "$PWD" > build/src')
+        self.start("t-cmake", "ok", "--queue", "--setup", configure)
+        wait_phase("t-cmake", {"review"})
+        wt = store.Task("t-cmake").worktree
+        for p in ("calc.py", "tests/__init__.py", "tests/test_calc.py"):
+            (wt / p).parent.mkdir(exist_ok=True)
+            (wt / p).write_bytes((self.wt / p).read_bytes())
+        build = 'cd "$(cat build/src)" && python3 -m unittest tests.test_calc'  # as its target runs
+        out = run_wb("verify", "t-cmake", "--test", build)
+        self.assertIn("test_calc.py): proven", out)              # the base ran the base's code
+        # a build tree copied from the user's checkout, with no setup to make it afresh: said
+        (self.repo / "build").mkdir()
+        (self.repo / "build" / "CMakeCache.txt").write_text(
+            f"CMAKE_HOME_DIRECTORY:INTERNAL={self.repo}\n")
+        self.start("t-copied", "ok", "--queue", "--copy", "build")
+        wait_phase("t-copied", {"review"})
+        wt = store.Task("t-copied").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "test_x.py").write_text("")
+        out = run_wb("verify", "t-copied", "--test", "true")
+        self.assertIn("inconclusive", out)
+        self.assertIn("base: exit setup failed", out)
+        said = Path(verify_dir := store.Task("t-copied").dir / "verify" / "1", "base.txt").read_text()
+        self.assertIn(f"build is a build tree configured for {self.repo}", said, verify_dir)
+
     def test_the_scratch_checkouts_read_the_bytes_the_task_reads(self):
         # #426 (the audit of 1.8, reproduced): with the repo's own core.autocrlf the task read
         # CRLF, and the base check's and verify's clones read LF, failing on an untouched file

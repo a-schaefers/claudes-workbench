@@ -1036,9 +1036,16 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
     # A virtualenv names the checkout it was made in (pyvenv.cfg's home is fine, its activate
     # and its scripts' shebangs aren't): copied, the base check and wb verify ran the task's
     # worktree's interpreter and code, and failed where the task passed (#325, the audit of
-    # 1.4). Such a checkout is prepared afresh, the setup run in it.
-    if made and any(venv_in(prepared / p) for p in made):
+    # 1.4). Such a checkout is prepared afresh, the setup run in it. So is one holding a build
+    # tree configured for the worktree (CMake's CMakeCache.txt): copied, its targets ran the
+    # candidate's code on the base, and verify said the test already passed there (#424).
+    if made and any(venv_in(prepared / p) or _within(build_source(prepared / p), prepared)
+                    for p in made):
         made = None
+    # a scratch checkout (the base check's, wb verify's, wb shot's), not the task's own worktree
+    own = store.Task(task.name).worktree if getattr(task, "name", None) else prepared
+    scratch = own is None or os.path.realpath(wt) != os.path.realpath(own)
+    others = [repo, *(p for p in (prepared, own) if p)]
     try:
         for name in spec.get("siblings") or ():  # where the repo's own paths reach them (#261)
             if not (at := context.sibling_link(wt, name)).is_symlink():
@@ -1061,14 +1068,76 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
                         or not os.path.lexists(src)):
                     return "copy failed", f"prepared input {p} changed; use --setup for a fresh checkout"
                 _copy(src, dest)
-            return 0, ""
+            return _foreign_builds(wt, made, others)
         for p in spec.get("copy") or ():
             _copy(repo / p, wt / p)
+        if scratch and (code := _foreign_builds(wt, spec.get("copy") or (), others))[0] != 0:
+            return code
     except OSError as e:
         return "copy failed", str(e)
     if not (cmd := spec.get("setup")):
         return 0, ""
     return run_in_lane(task, cmd, SETUP_SECS)
+
+
+def build_source(path: Path) -> Path | None:
+    """The source directory the build tree at ``path``, or one level inside it, was configured
+    for, as its build system recorded it (absolute): CMake's CMakeCache.txt
+    (CMAKE_HOME_DIRECTORY), Meson's meson-info.json; else None."""
+    if not path.is_dir() or path.is_symlink():
+        return None
+    try:
+        dirs = [path, *sorted(d for d in path.iterdir() if d.is_dir() and not d.is_symlink())]
+    except OSError:
+        return None
+    for d in dirs:
+        try:
+            cache = d / "CMakeCache.txt"
+            if cache.is_file() and not cache.is_symlink():
+                with cache.open(errors="replace") as fh:
+                    for line in fh:
+                        if line.startswith("CMAKE_HOME_DIRECTORY:"):
+                            return Path(line.partition("=")[2].strip())
+            info = d / "meson-info" / "meson-info.json"
+            if info.is_file() and not info.is_symlink():
+                return Path(json.loads(info.read_text())["directories"]["source"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return None
+
+
+def _within(path: Path | None, root: Path) -> bool:
+    if path is None:
+        return False
+    p, r = os.path.realpath(path), os.path.realpath(root)
+    return p == r or p.startswith(r.rstrip("/") + "/")
+
+
+def _foreign_builds(checkout: Path, paths, others) -> tuple[int | str, str]:
+    """(0, "") unless a build tree among ``paths`` in ``checkout`` (a scratch one) was configured
+    for another checkout's tracked sources (the user's, the task's worktree): built there, it
+    compiles and runs that checkout's code, so a check of the base ran the candidate's (#424, the
+    audit of 1.8). A dependency's build whose source is ignored, the same everywhere, is fine."""
+    for p in paths:
+        src = build_source(checkout / p)
+        if src is None or _within(src, checkout):
+            continue
+        for root in others:
+            if not _within(src, root):
+                continue
+            rel = os.path.relpath(os.path.realpath(src), os.path.realpath(root))
+            try:
+                tracked = gitops.git(checkout, "ls-files", "-z", "--",
+                                     "." if rel == "." else f":(literal){rel}")
+            except gitops.GitError:
+                tracked = "?"
+            if tracked:
+                return "copy failed", (
+                    f"{p} is a build tree configured for {src}: here, its build would compile and "
+                    "run that checkout's code, not this one's. Make it in the setup command "
+                    "(wb start --setup; wb verify --setup and wb shot --setup run it in each "
+                    "checkout) rather than copying it")
+    return 0, ""
 
 
 def venv_in(path: Path) -> Path | None:
