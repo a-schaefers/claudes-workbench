@@ -2436,7 +2436,14 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
         now = raw
     else:
         asks = round_asks(task, n)  # ends with this round's own: instructions.md is written
-        now = raw if len(asks) < 2 else ASKED.format("\n\n".join(asks[:-1])).strip() + "\n\nNow:\n\n" + raw
+        # ... unless round n is the runner's nudge, which round_asks skips but for Claude's
+        # notes folded into it: dropping the last ask then dropped the newest real one, the
+        # review feedback, and the fresh session got the nudge alone and reported done (#859)
+        notes = task.round_dir(n) / FOLDED
+        own = (not (task.round_dir(n) / NUDGED).exists()
+               or (notes.is_file() and bool(notes.read_text().strip())))
+        prior = asks[:-1] if own else asks
+        now = raw if not prior else ASKED.format("\n\n".join(prior)).strip() + "\n\nNow:\n\n" + raw
     path.write_text(handoff_prompt(task, why, now))
     task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]] * bool(st.get("session")),
                     context=None, skills_told=None)  # a new session hears the skills again

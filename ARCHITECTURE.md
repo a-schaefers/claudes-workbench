@@ -1095,6 +1095,9 @@ session carried on): a round that starts fresh gets a nudge of its own, where it
 first long think (#681). A nudge round is marked `rounds/<n>/nudged` (`runner.NUDGED`), which
 `round_asks` skips (Claude's notes sent beside the nudge kept through `notes.md`): the nudge went
 to every later fresh session in the step as "What you were asked to do", put down to Claude (#681).
+A nudge round that itself starts fresh hands over every earlier ask, and the nudge under "Now":
+`_start_fresh` drops the last of `round_asks` as the round's own only when the round gave one
+(not nudged, or with Claude's notes), where it once dropped the feedback before the nudge (#859).
 
 A note still pending when the runner exits (sent as the round stopped, or before a stuck stop)
 is never delivered by it: the stuck report lists Claude's ("NOTE: not delivered…"), and the next

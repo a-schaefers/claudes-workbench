@@ -3943,6 +3943,35 @@ class Context(Base):
         runner._start_fresh(t, 4, "the last session was 70% full")  # a carry-on has its asks
         self.assertIn("> my last words", t.round_dir(4).joinpath("prompt.md").read_text())
 
+    def test_a_nudge_round_that_starts_fresh_still_carries_the_feedback_before_it(self):
+        # #859 (the third 2026-11-21 audit): round_asks skips a nudge round, and _start_fresh
+        # dropped the last ask as the round's own, the feedback: the fresh session got only
+        # "you have been thinking for 12 minutes", found the tests green and reported done
+        self.start("t-859", "ok", "--test", TEST_CMD)
+        wait_phase("t-859", {"review"})
+        t = store.Task("t-859")
+        from workbench import lessons
+        t.round_dir(2).mkdir(parents=True)
+        t.round_dir(2).joinpath("prompt.md").write_text(f"{lessons.FEEDBACK_HEAD} 1. RENAME foo TO bar")
+        t.set_status(round=2)
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "now": True, "by": "workbench",
+                                                   "text": runner.NUDGE.format(mins=12)})
+        runner._steer_round(t, 2, True)
+        runner._start_fresh(t, 3, "the last session was 70% full")
+        now = t.round_dir(3).joinpath("prompt.md").read_text().split("## Now")[1]
+        self.assertIn("RENAME foo TO bar", now)
+        self.assertIn("thinking for 12 minutes", now)              # the nudge itself still goes
+        # with Claude's note beside the nudge, the note is the round's own ask, said once
+        t.round_dir(4).mkdir(parents=True)
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "now": True, "by": "workbench",
+                                                   "text": runner.NUDGE.format(mins=12)})
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "now": True, "text": "Use v2."})
+        runner._steer_round(t, 3, True)
+        runner._start_fresh(t, 4, "the last session was 70% full")
+        now = t.round_dir(4).joinpath("prompt.md").read_text().split("## Now")[1]
+        self.assertIn("RENAME foo TO bar", now)
+        self.assertEqual(now.count("Use v2."), 1)
+
     def test_a_step_that_keeps_filling_up_is_stopped_after_a_few_handovers(self):
         # A session that changed a file early and then filled up reading handed over again and
         # again, for hours, with Claude told nothing (the 2026-11-16 audit).
