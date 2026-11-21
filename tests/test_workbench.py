@@ -6518,6 +6518,48 @@ class Bench(Base):
         self.assertIn("all 1 replay(s) already done (no --label): --label <name> runs them again", out)
         self.assertFalse(bench.driver())
 
+    def test_what_a_driver_killed_without_warning_left_is_closed_by_gc_or_the_next_run(self):
+        # #511 (the audit of 1.90): only replay's finally closed its task and removed its clone,
+        # so a SIGKILL, the OOM killer or a hard reset left both for good, and the replay's
+        # runner went on beside the next run's
+        from workbench import bench, models
+        self.accepted("t-src")
+        bench.add("t-src")
+
+        def killed() -> tuple[store.Task, Path]:
+            os.environ["FAKE_SCENARIO"] = "hang"
+            run = run_wb("bench", "run", "--model", "mimo").split()[2].rstrip(":")
+            d = bench.driver()
+            self.assertEqual((d["run"], d["start"]), (run, models._started(d["pid"])))
+            deadline = time.time() + 30
+            while time.time() < deadline and not (ts := [
+                    t for t in store.all_tasks() if t.spec.get("bench") and t.status.get("agent_pid")]):
+                time.sleep(0.2)
+            os.kill(d["pid"], signal.SIGKILL)
+            deadline = time.time() + 10
+            while time.time() < deadline and bench.driver():
+                time.sleep(0.1)
+            self.assertFalse(bench.driver())
+            clone = bench.home() / "runs" / run / ts[0].name / "repo"
+            self.assertTrue(cli.runner_alive(ts[0]) and clone.is_dir())    # left behind
+            return ts[0], clone
+
+        task, clone = killed()
+        out = run_wb("gc")
+        self.assertIn(f"closed 1 bench replay(s) whose driver died, with their clones: {task.name}", out)
+        self.assertEqual(task.status["phase"], "discarded")
+        self.assertFalse(cli.runner_alive(task) or clone.exists())
+        task, clone = killed()
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run = run_wb("bench", "run", "--model", "mimo").split()[2].rstrip(":")  # closes it first
+        self.assertEqual(task.status["phase"], "discarded")
+        self.assertFalse(cli.runner_alive(task) or clone.exists())
+        deadline = time.time() + 60
+        while time.time() < deadline and (bench.driver() or not bench.rows(run)):
+            time.sleep(0.3)
+        self.assertEqual([r["outcome"] for r in bench.rows(run)], ["passed"])
+        self.assertNotIn("bench replay", run_wb("gc"))                    # nothing left
+
     def test_the_report_says_why_replays_never_started_and_where_their_logs_are(self):
         # #89 (the 2026-11-18 audit): a run whose every replay failed to start said "no replays yet"
         from workbench import bench

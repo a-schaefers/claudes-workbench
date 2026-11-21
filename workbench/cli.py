@@ -2022,6 +2022,9 @@ def cmd_gc(a):
           f"{out['notices']} old notice(s) to notify.old.jsonl; removed {out['rules']} rules "
           f"dir(s), {out['runtime']} runtime dir(s), {out['scratch']} scratch dir(s), "
           f"{out['starts']} half-made start(s), {out['branches']} merged branch(es)")
+    if left := bench.sweep():  # not in gc(): a discard runs that, and this discards (#511)
+        print(f"closed {len(left)} bench replay(s) whose driver died, with their clones: "
+              + ", ".join(left[:5]))
 
 
 def _landed(task: store.Task) -> str | None:

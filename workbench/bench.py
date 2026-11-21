@@ -379,16 +379,44 @@ def wb_commit() -> str:
 
 
 def driver() -> dict:
-    """The driver running now ({pid, run}), or {}."""
+    """The driver running now ({pid, run, start}), or {}. `start` is when it started (#511): a
+    recycled pid of ours that runs the bench again isn't it."""
     d = store.read_json(home() / "driver.json", {}) or {}
     pid = d.get("pid")
-    if not isinstance(pid, int) or pid <= 0:
-        return {}
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    if not isinstance(pid, int) or pid <= 0 or not models._alive(pid, d.get("start")):
         return {}
     return d if models.runs(pid, "-m", "workbench.bench") else {}  # a recycled pid runs something else
+
+
+def sweep() -> list[str]:
+    """What a driver killed without warning (SIGKILL, the OOM killer, a hard reset) left: its
+    replay, not closed, and its clone. Only `replay`'s finally closed them, so each such run
+    left a task open for good and a full clone with its copied dependencies under
+    bench/runs/, and a runner that outlived its driver replayed beside the next run's (#511,
+    the audit of 1.90). Each replay not closed whose run's driver is gone is discarded (a live
+    runner stopped first) and each such run's clones removed; `wb gc` and `start` call it. The
+    replays' names."""
+    from . import cli  # cli imports this module
+    live = driver().get("run")
+    out = []
+    for t in store.all_tasks():
+        b = t.spec.get("bench")
+        if not isinstance(b, dict) or b.get("run") == live:
+            continue
+        if t.status.get("phase") not in store.CLOSED:
+            with open(os.devnull, "w") as quiet, redirect_stdout(quiet):
+                try:
+                    cli.cmd_discard(SimpleNamespace(name=t.name, reason="bench: its driver died",
+                                                    spec_gap=None, keep_branch=False))
+                except SystemExit:
+                    pass
+            out.append(t.name)
+        d = home() / "runs" / str(b.get("run")) / t.name
+        for left in (d / "repo", d / "tree"):  # tree/ for a sibling further up (_checkout_at)
+            if left.exists():
+                shutil.rmtree(left, ignore_errors=True)
+                out += [t.name] if t.name not in out else []
+    return out
 
 
 def stop_driver() -> int | None:
@@ -414,6 +442,10 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
     the report's lines."""
     if d := driver():
         raise RuntimeError(f"bench run {d.get('run')} is running (wb bench stop)")
+    sweep()  # a killed driver's replay, its runner perhaps still going (#511)
+    from . import cli  # cli imports this module
+    if alive := [t.name for t in store.all_tasks() if t.spec.get("bench") and cli.runner_alive(t)]:
+        raise RuntimeError(f"replay {alive[0]}'s runner still runs: wb discard {alive[0]}")
     have = cases()
     if not have:
         raise RuntimeError("no cases yet: wb bench add <accepted task>")
@@ -436,7 +468,11 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
         return None, [f"all {len(pairs) * repeat} replay(s) already done"
                       + (f" under label {label}" if label else " (no --label)")
                       + ": --label <name> runs them again"]
-    run = time.strftime("%m%d-%H%M%S")
+    run = stamp = time.strftime("%m%d-%H%M%S")
+    for n in range(2, 100):  # two runs in one second: the second's mkdir failed (#511's test)
+        if not (home() / "runs" / run).exists():
+            break
+        run = f"{stamp}-{n}"
     d = home() / "runs" / run
     d.mkdir(parents=True)
     store.write_json(d / "plan.json", {"run": run, "label": label or "", "pairs": pairs,
@@ -449,7 +485,8 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
         proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.bench", run], cwd=d,
                                 env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                 start_new_session=True)
-    store.write_json(home() / "driver.json", {"pid": proc.pid, "run": run})
+    store.write_json(home() / "driver.json", {"pid": proc.pid, "run": run,
+                                              "start": models._started(proc.pid)})
     return run, [f"bench run {run}: {len(pairs)} replay(s) × {repeat}"
                  + (f", label {label}" if label else "") + ", one at a time; real tasks go first",
                  f"follow: wb bench report --run {run}   stop: wb bench stop"]
