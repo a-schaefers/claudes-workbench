@@ -138,6 +138,15 @@ ALLOWED_COMMANDS = (
     "dune", "opam exec", "lein", "clojure", "clj", "rebar3", "nimble", "shards", "gleam", "elm",
     "mill", "scala-cli", "pod", "ant", "crystal", "nim", "erlc", "escript",
     "pushd", "popd", "printenv", ":", "ulimit", "local", "declare", "shift", "trap", "pgrep",
+    # and the ordinary tools #514 and #672 still missed (#830, the second 2026-11-21 audit):
+    # macOS's own (no sha256sum or nproc there), the wrappers _WRAPPERS already bounds, process
+    # and coreutils tools, native builds' (versioned compilers like python3.*), more ecosystems'
+    "shasum", "md5", "sysctl", "sw_vers", "stdbuf", "setsid", "pkill", "killall", "expr", "bc",
+    "truncate", "dd", "shuf", "cksum", "sha512sum", "flock",
+    "ldd", "readelf", "addr2line", "size", "gcov", "ccache", "sccache", "gfortran", "nvcc",
+    "mpirun", "gcc-*", "g++-*", "clang-*", "clang++-*",
+    "scons", "protoc", "ocaml", "iex", "ghci", "runghc", "irb", "gem", "luarocks", "busted",
+    "lua5.*", "cython", "maturin", "virtualenv", "sphinx-build", "mkdocs", "terraform", "corepack",
 )
 # A project's own tools and builds, by their usual relative paths (`./x` is allowed already).
 PROJECT_BINS = (".venv/bin/*", "venv/bin/*", "node_modules/.bin/*", "build/*", "target/debug/*",
@@ -160,6 +169,7 @@ ASK_FIRST = (
     "platformio pkg install *", "conan install *--requires*",
     "opam install *", "nimble install *", "gleam add *", "elm install *", "clojure -Ttools *",
     "clj -Ttools *",  # (#672)
+    "luarocks install *",  # (#830; `gem install *` above, now that `gem` itself is allowed)
     # fetch a package and run it
     "npx -y *", "npx --yes *", "npm exec *", "pnpm dlx *", "yarn dlx *", "bunx *", "uvx *",
     # their other spellings (the 2026-11-16 audit); a plain `npx <pkg>` runs only what the

@@ -1365,7 +1365,7 @@ one character (a space too), treats a trailing ` *` as optional (`npm install *`
 wins; no match means ask, which `--auto` allows. The rules, in order:
 1. deny `*`;
 2. allow `c *` (a bare `c` too) and `*=* c *` (`ASSIGN`: a variable set before it,
-   `PYTHONPATH=. pytest`) for each of `ALLOWED_COMMANDS` (about 270: the shell's builtins and
+   `PYTHONPATH=. pytest`) for each of `ALLOWED_COMMANDS` (about 320: the shell's builtins and
    everyday tools, files and text, archivers, builds and compilers, test runners, interpreters,
    package managers, `bash`/`sh`, `sqlite3`, `git` (the shim), and since #514 (the audit of 1.90)
    the toolchains the lane makes room for and the common runners and linters: `python3.*`,
@@ -1375,7 +1375,15 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    since #672 (each first use cost a question and a wake) more ecosystems' drivers, `dune`, `opam
    exec`, `lein`, `clojure`, `clj`, `rebar3`, `nimble`, `shards`, `gleam`, `elm`, `mill`,
    `scala-cli`, `pod`, `ant`, `crystal`, `nim`, `erlc`, `escript`, and the builtins `pushd`,
-   `popd`, `printenv`, `:`, `ulimit`, `local`, `declare`, `shift`, `trap`, with `pgrep`);
+   `popd`, `printenv`, `:`, `ulimit`, `local`, `declare`, `shift`, `trap`, with `pgrep`; and
+   since #830 (the second 2026-11-21 audit) macOS's `shasum`, `md5`, `sysctl`, `sw_vers`, the
+   wrappers `stdbuf` and `setsid`, `pkill`, `killall`, `expr`, `bc`, `truncate`, `dd`, `shuf`,
+   `cksum`, `sha512sum`, `flock`, native builds' `ldd`, `readelf`, `addr2line`, `size`, `gcov`,
+   `ccache`, `sccache`, `gfortran`, `nvcc`, `mpirun` and versioned compilers (`gcc-*`, `g++-*`,
+   `clang-*`, `clang++-*`, written like `python3.*`), and `scons`, `protoc`, `ocaml`, `iex`,
+   `ghci`, `runghc`, `irb`, `gem` (`gem install *` still asks), `luarocks` (`luarocks install
+   *` asks), `busted`, `lua5.*`, `cython`, `maturin`, `virtualenv`, `sphinx-build`, `mkdocs`,
+   `terraform`, `corepack`);
    not on it: `nix` (its builds go through the daemon's socket, outside the lane), `curl`, `wget`, `ssh`,
    `rsync`, `docker`, `systemctl`, `opencode`. OpenCode matches each simple command's raw text,
    so `FOO=1 ls` was refused while `ls` and `env FOO=1 ls` ran, and a small model copying the
@@ -1403,7 +1411,7 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `pipenv install *`, `pixi add *`, `conda install *`, `flutter pub add *`, `dart pub add *`,
    `pio pkg install *`, `conan install *--requires*`, `opam install *`, `nimble install *`
    (`nimble install -d` and `--depsOnly` allowed again), `gleam add *`, `elm install *`,
-   `clojure -Ttools *`, `clj -Ttools *`, …) and fetching a package to run it (`npx -y *`,
+   `clojure -Ttools *`, `clj -Ttools *`, `luarocks install *`, …) and fetching a package to run it (`npx -y *`,
    `npx --yes *`, `npm exec *`, `npm x *`, `npx -p *`, `npx --package *`, `pnpm dlx *`,
    `yarn dlx *`, `bunx *`, `bun x *`, `uvx *`, `uv tool run *`, `uv tool install *`,
    `uv run --with *`, `deno run *npm:*`, `deno run *jsr:*`). A plain `npx <pkg>` stays allowed

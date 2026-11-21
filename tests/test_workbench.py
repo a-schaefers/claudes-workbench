@@ -8571,6 +8571,33 @@ class Permission(Base):
                     "opam switch create 5.1", "nix build"):
             self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
 
+    def test_macos_coreutils_native_build_and_more_ecosystem_tools_run_without_asking(self):
+        # #830 (the second 2026-11-21 audit): macOS's shasum and sysctl, stdbuf and setsid,
+        # pkill, versioned compilers, gem and the like had no entry, so each first use cost a
+        # question and a wake
+        self.start("t-830", "ok")
+        wait_phase("t-830", {"review"})
+        task = store.Task("t-830")
+        rules = context.shell_rules(task)
+        for cmd in ("shasum -a 256 dist/app", "md5 -q x", "sysctl -n hw.ncpu", "sw_vers",
+                    "stdbuf -oL pytest", "setsid ./serve", "pkill -f devserver", "killall node",
+                    "expr 1 + 2", "echo '2*3' | bc", "truncate -s 0 log", "dd if=/dev/zero of=x count=1",
+                    "shuf -n 3 words", "cksum x", "sha512sum x", "flock /tmp/l make",
+                    "ldd build/app", "readelf -h a.out", "addr2line -e a.out 0x1", "size a.out",
+                    "gcov main.c", "ccache -s", "sccache --show-stats", "gfortran -o t t.f90",
+                    "nvcc -o k k.cu", "mpirun -n 2 ./t", "gcc-13 -O2 x.c", "g++-13 x.cc",
+                    "clang-18 x.c", "clang++-18 x.cc", "scons", "protoc --python_out=. x.proto",
+                    "ocaml t.ml", "iex -S mix", "ghci", "runghc T.hs", "irb", "gem build x.gemspec",
+                    "gem list", "luarocks make", "busted", "lua5.4 t.lua", "cython x.pyx",
+                    "maturin build", "virtualenv .venv", "sphinx-build docs out", "mkdocs build",
+                    "terraform validate", "corepack enable --install-directory ./bin"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        for cmd in ("gem install rails", "luarocks install busted"):    # a new dependency asks
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+        self.assertEqual(self.verdict(rules, "stdbuf -oL sudo x"), "deny")   # still the hard limit
+        layer = json.loads(runner.write_config_layer(task).read_text())   # still one string
+        self.assertNotIn("OPENCODE_DISABLE_PROJECT_CONFIG", runner.rules_env(layer))
+
     def test_git_by_path_is_refused_but_a_directory_named_git_is_not(self):
         # `*/git` refused `go test ./internal/git` whatever Claude allowed, and `time -p sudo`
         # matched only the allow rule `time *` (the 2026-11-16 audit)
