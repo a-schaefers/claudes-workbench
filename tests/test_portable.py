@@ -1651,6 +1651,7 @@ class Optimize(unittest.TestCase):
         srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.servers.append(srv)
+        self.tags = tags  # what /api/tags lists: a test may repoint a tag (#709)
         self.config({"ollama": {"options": {"baseURL": f"http://127.0.0.1:{srv.server_address[1]}/v1"},
                                 "models": {"m": entry or {"limit": {"context": window, "output": 4096},
                                                           "options": {"reasoningEffort": "none"}}}}}, extra)
@@ -1936,6 +1937,35 @@ class Optimize(unittest.TestCase):
             self.assertIn("measuring the GPU for 2 local model(s) (the GPU changed)", out[0])
             self.assertIn("a task you start goes first", out[0])
             self.assertNotIn("--all", popen.call_args[0][0])
+
+    def test_a_fit_is_due_again_when_its_models_window_or_weights_change_and_only_that_one(self):
+        # #709: the fit was keyed to the GPUs alone: an entry raised from 32K to 64K, or a tag
+        # repointed at other weights, kept its old fit and no run was due
+        from workbench import optimize
+        self.ollama(32768)
+        self.tags[0]["digest"] = "sha256:aaa"
+        gpu = [{"name": "Card A", "vram": 16e9}]
+        cfg_path = Path(os.environ["WB_OPENCODE_CONFIG"])
+
+        def window(n):
+            cfg = json.loads(cfg_path.read_text())
+            cfg["provider"]["ollama"]["models"]["m"]["limit"]["context"] = n
+            cfg_path.write_text(json.dumps(cfg))
+        with mock.patch.object(optimize.hardware, "gpus", lambda windows=True: gpu):
+            m = models.discover()["ollama/m"]
+            optimize._record(m.id, {**optimize.fit(m, 262144), "digest": optimize.digest(m)})
+            store.write_json(optimize.path(), {**optimize.state(), "done": 1, "stopped": None,
+                                               "hardware": optimize.fingerprint()})
+            self.assertEqual(optimize.due(), "")
+            window(65536)
+            self.assertEqual(optimize.due(), "ollama/m's window changed")
+            window(32768)
+            self.assertEqual(optimize.due(), "")
+            self.tags[0]["digest"] = "sha256:bbb"           # ollama pull m: other weights, one name
+            self.assertEqual(optimize.due(), "ollama/m's weights changed")
+            del optimize.state()["models"][m.id]["digest"]  # a fit from before: its window alone
+            rows = optimize.state()["models"]
+            self.assertEqual(optimize.stale(m, {k: v for k, v in rows[m.id].items() if k != "digest"}), "")
 
     def test_a_model_it_could_not_measure_is_remembered_and_not_due_again_each_session(self):
         # #583, the audit of 1.90: a model skipped (its remote server busy) left no row and was

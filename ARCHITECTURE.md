@@ -3469,14 +3469,16 @@ followed by `SELF_PROMPT` (the acceptance command, run before finishing).
 about the machine. A run takes a minute or two (62 s for three models on the 2026-11-18 card), so
 it runs on its own only where the user is told and expects a short wait, and only when it is due
 (`due`: never measured, the GPU changed (`fingerprint`: each GPU's name and memory), a remote
-server's models changed, a model came since (not one in `skipped` before its `retry_after`), or
-the last run was stopped): at the end of `wb setup`, and once per Claude Code session
+server's models changed, a model came since (not one in `skipped` before its `retry_after`), a
+model's fit is `stale` (the window its entry serves isn't the row's `window`, or its `/api/tags`
+digest isn't the row's `digest`: a fit keyed to the GPUs alone stood after the entry went from
+32K to 64K, or its tag was re-pulled as other weights, #709), or the last run was stopped): at the end of `wb setup`, and once per Claude Code session
 opened, after its first turn while quiet (the mod's `measureIfDue`, gated like the weekly check:
 `quietForJobs`, #541; `optimize.start` itself defers to a task holding the GPU; it toasts
 "workbench: measuring the GPU for N local model(s) (<why>): about M min; a task you start goes
 first" and wakes no one). `wb optimize start --if-due` is that check: quiet when nothing is due or
-a task holds the GPU (the next session tries again). Due for a new model only, it measures only
-the models it hasn't (`--all`, which a `start` without `--if-due` passes, measures every one).
+a task holds the GPU (the next session tries again). Due for a new or stale model only, it measures only
+those (each other fit still holds) (`--all`, which a `start` without `--if-due` passes, measures every one).
 A remote Ollama's models (`wb remote`) are measured too (#115), by the same `/api/ps` placement on
 their own card, while this machine's lease is held and that server's too (`GpuLease(None, HOLDER,
 wait=False, on=m)`, pool `gpu-<host>`): one whose server a task holds is skipped with a line ("a
@@ -5741,7 +5743,7 @@ $WB_HOME (~/.local/state/workbench)
   bench/runs.jsonl  driver.json  one row per replay; the driver's {pid, run, start}
                                  (bench.jsonl and bench/repos/ are the old suite's: nothing reads them)
   optimize.json  optimize.log    wb optimize: {pid, start, began, done, stopped, hardware (fingerprint: [name, vram] per GPU, then ["remote", root, [[name, size]…]] per remote Ollama),
-                                 secs_per_load, models: {<id>: {window, fits, spill, clamped, applied?, tried:
+                                 secs_per_load, models: {<id>: {window, fits, spill, clamped, applied?, digest? (its weights', #709), tried:
                                  [{window, size, vram, served}], ts}}, skipped: {<id>: {outcome (busy|failed|unreachable), why,
                                  ts, retry_after}} (#583), made: {<provider>/<name>: <source id>} (a variant
                                  apply made and hasn't registered yet: #266)}; the run's output
