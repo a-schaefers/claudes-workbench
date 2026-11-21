@@ -3181,7 +3181,11 @@ Ollama that answers while OpenCode has no provider at all.
 contains "microsoft"), `linux`. `gpus()`: `nvidia-smi` (`smi()`: from PATH, else WSL's `WSL_SMI`, `/usr/lib/wsl/lib/nvidia-smi`, which a systemd unit's PATH may lack; UUID, name, MiB total/used, driver; a name may hold commas) on Linux and
 WSL (`[N/A]` reads as unknown, except on ARM (`aarch64`/`arm64`: a DGX Spark, a Jetson), where
 the GPU shares the RAM (`shares_ram`): `unified` with `MemTotal`, and `ram_free` (`MemAvailable`) for the
-budget's reserve, the 2026-11-19 audit and #524; a line of fewer than
+budget's reserve, the 2026-11-19 audit and #524; with no row at all on ARM Linux, a Jetson
+(`_tegra`: `/etc/nv_tegra_release`, or `nvidia,tegra` in `/proc/device-tree/compatible`, named
+from its `model`) is that same entry, driver `nvidia (tegra)`: JetPack 5 has no nvidia-smi and
+its GPU is a platform device the DRM scan skips, so it read as no GPU, no budget, no reserve
+(#713); a line of fewer than
 five fields is skipped); WSL adds Windows' adapters (`_windows_gpus`: one `powershell.exe
 -EncodedCommand` of `WINDOWS_SCRIPT`, no quoting through the interop: `Win32_VideoController`'s
 names, each one's memory from its driver's registry key, `HardwareInformation.qwMemorySize` under

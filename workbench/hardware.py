@@ -59,6 +59,19 @@ def shares_ram() -> bool:
     return platform.machine().lower() in ("aarch64", "arm64")
 
 
+TEGRA_RELEASE = Path("/etc/nv_tegra_release")
+DEVICE_TREE = Path("/proc/device-tree")
+
+
+def _tegra() -> str | None:
+    """A Jetson's name (the device tree's model, else "NVIDIA Jetson") when this is one: L4T's
+    /etc/nv_tegra_release, or "nvidia,tegra" in the device tree's compatible; else None."""
+    compatible = _read(DEVICE_TREE / "compatible")
+    if not _read(TEGRA_RELEASE) and "nvidia,tegra" not in compatible:
+        return None
+    return _read(DEVICE_TREE / "model").strip("\0").strip() or "NVIDIA Jetson"
+
+
 def system() -> str:
     """linux, wsl, macos, or what Python calls the platform."""
     name = platform.system()
@@ -217,6 +230,15 @@ def gpus(windows: bool = True) -> list[dict]:
             g.update(vram=ram["ram"], ram_free=ram["ram_free"], unified=True, discrete=False,
                      memory="the RAM: nvidia-smi gives the GPU no memory of its own")
         found.append(g)
+    if not found and where == "linux" and shares_ram() and (tegra := _tegra()):
+        # JetPack 5 and earlier have no nvidia-smi, and the Tegra GPU is a platform device the
+        # DRM scan skips: a Jetson read as no GPU, so no budget, no reserve (#524) and no fit
+        # check on an 8 GB Orin Nano (#713). Its GPU is the RAM's, as nvidia-smi's [N/A] says
+        ram = memory()
+        if ram.get("ram"):
+            found.append({"name": tegra, "driver": "nvidia (tegra)", "vram": ram["ram"],
+                          "vram_used": None, "ram_free": ram["ram_free"], "unified": True,
+                          "discrete": False, "memory": "the RAM: a Jetson's GPU shares it"})
     if len({(g["name"], g["vram"]) for g in found}) > 1:
         # cards that differ: CUDA numbers them fastest first by default, which visible() guesses
         # from this (a query of its own: a driver that lacks the field fails the whole query)

@@ -16220,6 +16220,28 @@ class Hardware(unittest.TestCase):
         hw = self.fake("Linux", files=meminfo, runs=dict([spark]), machine="x86_64")
         self.assertIsNone(hw.gpus()[0]["vram"])  # an x86 card's [N/A] stays unknown
 
+    def test_a_jetson_without_nvidia_smi_is_its_ram_sharing_gpu_and_keeps_the_systems_reserve(self):
+        # #713: JetPack 5 has no nvidia-smi and the Tegra GPU is a platform device, so gpus()
+        # was empty: "GPU none found", no budget, and no fit check on an 8 GB Orin Nano
+        from workbench import models
+        jetson = {"/etc/nv_tegra_release": "# R35 (release), REVISION: 4.1",
+                  "/proc/device-tree/model": "NVIDIA Orin Nano Developer Kit\0",
+                  "/proc/meminfo": "MemTotal:        7800000 kB\nMemAvailable:    5000000 kB\n"}
+        hw = self.fake("Linux", files=jetson, machine="aarch64")
+        (g,) = hw.gpus()
+        self.assertEqual((g["name"], g["vram"], g["ram_free"], g["unified"]),
+                         ("NVIDIA Orin Nano Developer Kit", 7800000 * 1024, 5000000 * 1024, True))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}), \
+                mock.patch.object(models, "_get", lambda *a, **k: None):
+            budget, _, why = models.budget_devices()
+        self.assertEqual(budget, 5000000 * 1024)                  # the RAM less what the system uses
+        self.assertIn("less 2.9 GB the system uses", why)
+        self.assertEqual(self.fake("Linux", files={"/proc/device-tree/compatible": "nvidia,p3767\0nvidia,tegra234\0",
+                                                   **{k: v for k, v in jetson.items() if "tegra_release" not in k}},
+                                   machine="aarch64").gpus()[0]["name"], "NVIDIA Orin Nano Developer Kit")
+        self.assertEqual(self.fake("Linux", files={k: v for k, v in jetson.items() if "meminfo" in k},
+                                   machine="aarch64").gpus(), [])   # another ARM board: none
+
     def test_an_older_amd_card_that_names_no_memory_vendor_is_not_taken_for_an_apu(self):
         # #435: GCN cards (RX 470-590, Fury, R9 390) have no mem_info_vram_vendor, so an 8 GiB
         # RX 580 with 24 GiB GTT was made a unified 34.4 GB budget. Only an APU's hwmon has vddnb
