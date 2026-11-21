@@ -776,10 +776,12 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         return GitError(f"{what} {branch_name(task)} failed and was backed out: {why}")
 
     # --commit and --no-squash outrank a branch.<name>.mergeOptions of --no-commit or --squash,
-    # which left the merge pending while accept said merged (#190, the 2026-11-19 audit)
+    # which left the merge pending while accept said merged (#190, the 2026-11-19 audit). The
+    # squash says --ff: merge.ff=only refused it once the branch had moved, merge.ff=false every
+    # time ("cannot be used together", #429, the audit of 1.8)
     try:
         if how == "squash":  # no MERGE_HEAD to abort: backed out with reset --merge
-            git(repo, "merge", "--squash", "--no-commit", source)
+            git(repo, "merge", "--squash", "--ff", "--no-commit", source)
             committing([*NO_HOOKS, "commit", "--no-verify", "-q", "-C", source])
         else:
             committing(["merge", *(("--ff-only",) if how == "ff" else

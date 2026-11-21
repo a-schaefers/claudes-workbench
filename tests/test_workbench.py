@@ -1677,6 +1677,19 @@ class Lifecycle(Base):
         self.assertTrue(tip.startswith(gitops.merge(repo, "t", "main", how="ff")))
         self.assertEqual(git(repo, "rev-list", "--min-parents=2", "--count", "HEAD"), "0")
 
+    def test_a_squash_lands_under_merge_ff_only_and_merge_ff_false(self):
+        # #429 (the audit of 1.8, reproduced): merge.ff=only refused every squash once main had
+        # moved ("Not possible to fast-forward"), merge.ff=false every squash at all ("'--squash'
+        # and '--no-ff' cannot be used together"): the linear-history repos #352 was made for
+        for ff in ("only", "false"):
+            repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
+                                       task={b"b.txt": b"b\n"}, ignore={}, config=[("merge.ff", ff)])
+            head = gitops.merge(repo, "t", "main", how="squash")
+            self.assertEqual((repo / "b.txt").read_bytes(), b"b\n", ff)
+            self.assertEqual(g("rev-list", "--min-parents=2", "--count", "HEAD"), b"0\n", ff)
+            self.assertEqual(g("rev-parse", "--short", "HEAD").strip().decode(), head, ff)
+            self.assertEqual(g("status", "--porcelain"), b"", ff)
+
     def _signer(self, hang_on_merge: bool = False) -> Path:
         """A gpg.program that signs unattended with a made-up signature (git checks only the
         status line), or, `hang_on_merge`, waits on nobody for a commit with two parents: a
