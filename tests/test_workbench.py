@@ -6404,6 +6404,32 @@ class Lane(Base):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))  # lane off
         self.assertNotIn("SCCACHE_SERVER_PORT", runner.agent_env(task))
 
+    def test_a_mise_config_the_user_trusts_is_trusted_in_the_worktree_too(self):
+        # #674 (the 2026-11-21 audit): mise keeps trust per path, so in the worktree every shim
+        # failed with 'Config files in …/mise.toml are not trusted', and `mise trust` is outside
+        # the lane. A fake mise: `mise trust --show` prints what $FAKE_MISE_SHOW holds.
+        (self.repo / "mise.toml").write_text('[tools]\nnode = "22"\n')
+        subprocess.run(["git", "-C", str(self.repo), "add", "mise.toml"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "mise"], check=True)
+        bin_ = Path(self.tmp.name) / "mise-bin"
+        bin_.mkdir()
+        (bin_ / "mise").write_text('#!/bin/sh\n[ "$1 $2" = "trust --show" ] && cat "$FAKE_MISE_SHOW"\n')
+        (bin_ / "mise").chmod(0o755)
+        show = Path(self.tmp.name) / "show.txt"
+        show.write_text(f"{self.repo}: untrusted\n")
+        os.environ.update(PATH=f"{bin_}{os.pathsep}{os.environ['PATH']}", FAKE_MISE_SHOW=str(show))
+        out = self.start("t-mise", "ok")
+        self.assertIn(f"note: mise doesn't trust {self.repo}'s config", out)
+        wait_phase("t-mise", {"review"})
+        task = store.Task("t-mise")
+        self.assertNotIn("MISE_TRUSTED_CONFIG_PATHS", runner.agent_env(task))
+        show.write_text(f"{self.repo}: trusted\n/elsewhere: untrusted\n")  # not the repo's
+        with mock.patch.dict(os.environ, {"MISE_TRUSTED_CONFIG_PATHS": "/srv/mine"}):
+            env = runner.agent_env(task)
+        self.assertEqual(env["MISE_TRUSTED_CONFIG_PATHS"],
+                         f"/srv/mine{os.pathsep}{os.path.realpath(store.home())}")
+        self.assertTrue(task.worktree.resolve().is_relative_to(os.path.realpath(store.home())))
+
     def test_a_fresh_cargo_home_gets_its_caches_made_so_the_split_grants_them(self):
         # the 0.90 review: ~/.cargo split around bin/ and env granted only what existed, so a
         # fresh rustup install couldn't make registry/ and a git dependency couldn't make git/

@@ -1177,6 +1177,41 @@ def python_installs(task: store.Task) -> tuple[bool, bool]:
     return not kept and writable(task) is not None and lane.abi() > 0, bool(kept)
 
 
+# mise refuses a config it hasn't been told to trust outside a terminal, and trust is kept per
+# path (~/.local/state/mise/trusted-configs): the worktree, the base check's and wb verify's
+# checkouts are paths the user never trusted, so every mise shim the setup, the agent and the
+# tests ran failed ('Config files in …/mise.toml are not trusted'), and `mise trust` writes outside
+# the lane (#674, checked with mise 2026.11). The configs mise asks trust for (.tool-versions
+# isn't one):
+MISE_CONFIGS = ("mise.toml", ".mise.toml", "mise.local.toml", ".mise.local.toml",
+                ".config/mise.toml", ".config/mise/config.toml", ".mise/config.toml",
+                "mise/config.toml")
+
+
+def mise_trusted(task: store.Task, path: str | None = None) -> bool | None:
+    """Whether the user's checkout's mise config is trusted (`mise trust --show`, run outside the
+    lane); None when it has none, ``path`` has no `mise`, or mise can't say."""
+    repo = os.path.realpath(task.spec["repo"])
+    at = os.path.join(repo, task.spec["subdir"]) if task.spec.get("subdir") else repo
+    if not any(os.path.isfile(os.path.join(d, n)) for d in {repo, at} for n in MISE_CONFIGS):
+        return None
+    mise = shutil.which("mise", path=path)
+    if not mise:
+        return None
+    try:
+        out = subprocess.run([mise, "trust", "--show"], cwd=at, capture_output=True, text=True,
+                             timeout=10, stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    said = []
+    for line in out.splitlines():  # `~/src/app: trusted`, one line per directory
+        where, _, verdict = line.rpartition(": ")
+        real = os.path.realpath(os.path.expanduser(where.strip())) if where else ""
+        if verdict.strip() in ("trusted", "untrusted") and (real == repo or _under(real, repo)):
+            said.append(verdict.strip() == "trusted")
+    return all(said) if said else None
+
+
 def venv_line(task: store.Task, setup: bool) -> str:
     """For wb start: the active environments the agent leaves out, and how to give it its own."""
     envs = checkout_envs(task)

@@ -906,6 +906,10 @@ def cmd_start(a):
         print(f"note: {runner.proxy_line(proxies)}")
     if venvs := context.venv_line(task, bool(setup and setup.get("setup"))):  # #490
         print(f"note: {venvs}")
+    if context.mise_trusted(task) is False:  # #674
+        print(f"note: mise doesn't trust {repo}'s config (mise trust --show), so it trusts no "
+              "copy of it either: every mise shim fails in the agent's worktree, its setup and its "
+              f"tests; `mise trust` in {repo} first, if the task needs its tools")
     if a.backlog and hardware.system() == "wsl" and not any(  # once per backlog (#516)
             t.spec.get("backlog") == a.backlog for t in store.all_tasks() if t.name != a.name):
         print(f"note: {WSL_SLEEPS}")

@@ -418,6 +418,11 @@ def agent_env(task: store.Task, run: str = "") -> dict:
         # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
         env.pop("WSL_INTEROP", None)
         env["PATH"] = context.agent_path(env["PATH"])
+    # what the user trusts in their checkout, mise trusts in workbench's copies of it (#674):
+    # the worktree and the scratch checkouts all live under the state directory
+    if context.mise_trusted(task, env["PATH"]):
+        env["MISE_TRUSTED_CONFIG_PATHS"] = os.pathsep.join(
+            [*filter(None, [env.get("MISE_TRUSTED_CONFIG_PATHS")]), os.path.realpath(store.home())])
     # not the user's checkout's venv: the tests imported their checkout, not the worktree (#490)
     inside = set(context.python_env(task, env))
     # the real git found outside the worktree: the runner runs it (gitguard.install), outside
