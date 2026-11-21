@@ -7,6 +7,8 @@ wake, or a `wb … <name>` in one of its Bash calls. Only tasks this session sta
 the same way, in the turn it ran in, and its calls that name no task as the session's call before
 them. Planning before the spec, or talk that names no task, is charged to none.
 """
+import bisect
+import itertools
 import re
 import shlex
 from datetime import datetime
@@ -204,15 +206,20 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
     cost Claude nothing (#718)."""
     out = _charge(_events(store.read_jsonl(main)[0], names))
     seen = {c["id"] for c in out}
-    starts = [c["at"] for c in out]
+    # the session's call before a time: the latest in the transcript of those made at or before
+    # it (a prefix max over them sorted by time, since times are almost but not quite in order),
+    # by bisection: a scan of every session call per subagent row took 6.6 s at 8,000 calls and
+    # 30,000 subagent rows, on every accept and discard (#728)
+    order = sorted((c["at"], j) for j, c in enumerate(out) if c["at"] is not None)
+    times, latest = [t for t, _ in order], list(itertools.accumulate((j for _, j in order), max))
     for path in subagents:
         rows = [r for r in store.read_jsonl(path)[0]
                 if r.get("type") != "assistant" or (_ts(r) is not None
                                                     and (r.get("message") or {}).get("id") not in seen)]
         for c in _charge(_events(rows, names)):
             seen.add(c["id"])
-            i = max((j for j, s in enumerate(starts) if s is not None and s <= c["at"]), default=None)
-            parent = out[i] if i is not None else None
+            k = bisect.bisect_right(times, c["at"])
+            parent = out[latest[k - 1]] if k else None
             if not c["names"]:
                 if not (parent and parent["names"]):
                     continue

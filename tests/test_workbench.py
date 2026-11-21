@@ -10306,6 +10306,31 @@ class ClaudeSpend(Base):
         self.assertEqual((u["output"], u["turns"]), (10 + 20 + 30 + 40 + 50 + 60, 1))
         self.assertIsNone(spend.usage(store.Task("other")))   # its transcript read, never named
 
+    def test_a_long_session_with_many_subagent_rows_is_charged_in_well_under_a_second(self):
+        # #728: each subagent row scanned every session call for the one before it: 8,000 calls
+        # and 30,000 subagent rows took 6.6 s, on every accept and discard
+        from datetime import datetime, timezone
+        from workbench import spend
+
+        def iso(ts):
+            return datetime.fromtimestamp(1_800_000_000 + ts, timezone.utc).isoformat()
+        rows = [_turn("go", iso(0))]
+        for i in range(8000):
+            rows += _call(f"m{i}", iso(1 + i * 10), 1, "wb diff t-long" if i % 100 == 0 else None)
+        rows += _call("late", iso(5), 1000)          # out of order: still not the one before 1 s
+        main = self.transcript(rows)
+        sub = main.parent / self.SID / "subagents" / "agent-1.jsonl"
+        sub.parent.mkdir(parents=True)
+        sub.write_text("".join(json.dumps(r) + "\n" for i in range(30000)
+                               for r in _call(f"s{i}", iso(0.5 + i * 2.6), 2)))
+        began = time.monotonic()
+        got = spend.calls(main, [sub], {"t-long"})
+        self.assertLess(time.monotonic() - began, 3)  # about 0.3 s here
+        subs = {c["id"]: c for c in got if c["id"].startswith("s")}
+        self.assertNotIn("s0", subs)                  # before any session call: no one's
+        self.assertEqual(subs["s1"]["names"], {"t-long"})  # after m0, which named it
+        self.assertEqual(len(subs), 29999)
+
     def test_the_turns_after_a_clear_are_charged_to_the_task_too(self):
         # #451: /clear continues the process under a new session id and transcript, and only the
         # one wb start recorded was read: the review after it went uncounted

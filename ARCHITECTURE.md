@@ -503,7 +503,10 @@ session only:
   its turn, its `wb … <task>` calls name tasks, `CLOSING` and the reading before a `wb` apply),
   in the turn of the session's call before it; a subagent call that names no task is charged as
   that session call. Charged only that way, a task a subagent started, reviewed and accepted, in a
-  turn whose one session call was the Agent tool's, cost Claude nothing (#718).
+  turn whose one session call was the Agent tool's, cost Claude nothing (#718). The session's call
+  before a time is the latest in the transcript of those made at or before it, found by bisection
+  over them sorted by time (a prefix max: times are almost, not quite, in order); a scan of every
+  session call per subagent row took 6.6 s at 8,000 calls and 30,000 rows, on every close (#728).
 
 Charging whole turns was the first design and was wrong: one long autonomous turn that also ran a
 task put 5.5M cached tokens of other work on it (2026-11-17). What is missed: the accept's own
