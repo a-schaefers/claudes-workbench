@@ -1928,21 +1928,27 @@ def checkout(task: store.Task) -> bool:
 # running agent: a small machine swapped, base checks timed out "not checked", and a test server
 # on a fixed port failed EADDRINUSE in all but one clone, a base failure the base doesn't have
 # (#590, the audit of 1.90). Taken in queue order (task.json created_at), in locks/, which no
-# lane reads: prepare-<n>.lock the slots, prepare.json the queue.
+# lane reads: prepare-<n>.lock the slots, prepare.json the queue. Setups and base checks queue
+# apart (prepare-check-<n>.lock, prepare-check.json): one queue made a 5-second base check, held
+# to 120 s, wait out another task's 25-minute build, with the GPU idle (#868). Two base checks
+# (two test suites, a fixed port) still never run together, nor two setups.
 PREP_SLOTS = 1
+PREP_KINDS = {"setup": ("prepare", "setup"), "check": ("prepare-check", "base check")}
 
 
-def _prep_queue() -> Path:
-    return store.home() / "locks" / "prepare.json"
+def _prep_queue(kind: str = "setup") -> Path:
+    return store.home() / "locks" / f"{PREP_KINDS[kind][0]}.json"
 
 
 @contextlib.contextmanager
-def prep_turn(task: store.Task):
-    """Hold one of PREP_SLOTS, waiting behind the tasks queued before this one (status `last`
-    names the one it waits for). A holder that died lets go: the kernel drops its flock, and
-    its queue entry is passed over once its pid is gone."""
+def prep_turn(task: store.Task, kind: str = "setup"):
+    """Hold one of PREP_SLOTS for a setup or (``kind`` "check") a base check, waiting behind the
+    tasks queued for the same before this one (status `last` names the one it waits for). A
+    holder that died lets go: the kernel drops its flock, and its queue entry is passed over
+    once its pid is gone."""
     import fcntl
-    path = _prep_queue()
+    path = _prep_queue(kind)
+    stem, what = PREP_KINDS[kind]
     path.parent.mkdir(parents=True, exist_ok=True)
     me = str(os.getpid())
     mine = {"task": task.name, "since": task.spec.get("created_at") or store.now(),
@@ -1966,7 +1972,7 @@ def prep_turn(task: store.Task):
             waiting = [(pid, r) for _, pid, r in queue if not r.get("holding")]
             if waiting and waiting[0][0] == os.getpid():
                 for i in range(PREP_SLOTS):
-                    f = open(path.with_name(f"prepare-{i}.lock"), "a+")
+                    f = open(path.with_name(f"{stem}-{i}.lock"), "a+")
                     try:
                         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:
@@ -1978,7 +1984,7 @@ def prep_turn(task: store.Task):
                 ahead = next((r["task"] for _, pid, r in queue if r.get("holding")), None) or \
                     next((r["task"] for pid, r in waiting if pid != os.getpid()), None)
                 if ahead and ahead != said:
-                    task.set_status(phase="queued", last=f"waiting for {ahead}'s setup or base check "
+                    task.set_status(phase="queued", last=f"waiting for {ahead}'s {what} "
                                     "(one at a time on this machine)")
                     said = ahead
                 time.sleep(1)
@@ -2057,7 +2063,7 @@ def base_check(task: store.Task) -> dict | None:
     from . import verify  # verify imports this module
     timed: list[float] = []  # its scratch checkout and run, not the waits for the GPU or a turn (#779)
     code, output = verify.on_base(task, cmd, limit, say=lambda msg: task.set_status(last=msg),
-                                  turn=lambda: _timed(prep_turn(task), timed))  # one at a time, as setups (#590)
+                                  turn=lambda: _timed(prep_turn(task, "check"), timed))  # one at a time (#590), apart from setups (#868)
     task.dir.joinpath("base-tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     return {"ok": code == 0, "exit": code, "tail": clip_tail(output, 8, total=1500), "limit": limit,

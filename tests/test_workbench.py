@@ -3506,18 +3506,38 @@ class WorktreeSetup(Base):
             wait_phase(f"t-q{who}", {"review"}, timeout=60)
         # each line's first time is the setup or the base check: the round's tests, later,
         # run when they run
-        lines = list(dict.fromkeys(log.read_text().split()))
-        # each one's setup and its base check whole before another's begins, and a, b, c in order
-        opened = []
-        for x in lines[:12]:
-            what, who = x.rsplit("-", 1)
-            if what.endswith("-done"):
-                self.assertEqual(opened.pop(), (what.removesuffix("-done"), who), lines)
-            else:
-                self.assertEqual(opened, [], lines)          # nothing else running meanwhile
-                opened.append((what, who))
-        self.assertEqual([x.rsplit("-", 1)[1] for x in lines[:12:4]], ["a", "b", "c"])
-        self.assertEqual(json.loads((store.home() / "locks" / "prepare.json").read_text()), {})
+        lines = list(dict.fromkeys(log.read_text().split()))[:12]
+        # each setup whole before another's begins, each base check the same, a, b, c in order;
+        # a setup beside another task's base check is allowed (#868)
+        for kind in ("setup", "check"):
+            mine = [x for x in lines if x.split("-")[0] == kind]
+            opened = []
+            for x in mine:
+                what, who = x.rsplit("-", 1)
+                if what.endswith("-done"):
+                    self.assertEqual(opened.pop(), who, mine)
+                else:
+                    self.assertEqual(opened, [], mine)       # no other of its kind meanwhile
+                    opened.append(who)
+            self.assertEqual([x.rsplit("-", 1)[1] for x in mine[::2]], ["a", "b", "c"])
+        for name in ("prepare.json", "prepare-check.json"):
+            self.assertEqual(json.loads((store.home() / "locks" / name).read_text()), {})
+
+    def test_a_base_check_never_waits_behind_another_tasks_long_setup(self):
+        # #868 (the third 2026-11-21 audit): one queue held a 5-second base check, capped at
+        # 120 s, behind another task's 25-minute build, with the GPU idle meanwhile
+        log = Path(self.tmp.name) / "turns.log"
+        self.start("t-build", "ok", "--no-self-review", "--queue", "--setup",
+                   f"sleep 8; echo build-done >> {log}")
+        deadline = time.time() + 10
+        while "setting up" not in str(store.Task("t-build").status.get("last")) and time.time() < deadline:
+            time.sleep(0.1)
+        self.start("t-quick", "ok", "--no-self-review", "--queue", "--test",
+                   f"echo check-done >> {log}; test -f answer.txt")
+        wait_phase("t-quick", {"review"}, timeout=60)
+        wait_phase("t-build", {"review"}, timeout=60)
+        lines = log.read_text().split()                       # (the round's tests log too)
+        self.assertLess(lines.index("check-done"), lines.index("build-done"), lines)
 
     def test_a_task_whose_setup_failed_is_resumed_and_discarded_never_counts_against_its_model(self):
         # #581, the audit of 1.90: three discards of a lockfile problem scored the model 0/3 and

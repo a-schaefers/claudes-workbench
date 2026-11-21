@@ -764,11 +764,15 @@ outside `OPENCODE_TESTED`.
    `no_base_check`): the base check, before the GPU. Gated on round 1, a task that failed or was
    stopped before its first round (its server down at start, `wb stop` during the setup) and was
    then resumed into round 2 ran without one, and its report didn't say so (#510, the audit of
-   1.90). The setup and the base check each take a turn machine-wide (`runner.prep_turn`:
-   `PREP_SLOTS` 1 at a time, in queue order by task.json `created_at`; the queue in
-   `locks/prepare.json`, the slots `locks/prepare-<n>.lock`, flocks the kernel drops with a dead
-   holder, whose entry is passed over once its pid is gone), status `last` "waiting for <task>'s
-   setup or base check (one at a time on this machine)" meanwhile: run before the GPU lease, a
+   1.90). The setup and the base check each take a turn machine-wide, setups and base checks
+   in queues of their own (`runner.prep_turn(task, kind)`, `PREP_KINDS`: `PREP_SLOTS` 1 at a
+   time each, in queue order by task.json `created_at`; the queues in `locks/prepare.json` and
+   `locks/prepare-check.json`, the slots `locks/prepare-<n>.lock` and `prepare-check-<n>.lock`,
+   flocks the kernel drops with a dead holder, whose entry is passed over once its pid is gone),
+   status `last` "waiting for <task>'s setup" (or "base check") "(one at a time on this
+   machine)" meanwhile. One queue for both held a 5-second base check, capped at 120 s, behind
+   another task's 25-minute build with the GPU idle (#868); two base checks (two test suites, a
+   fixed port) still never run together. Run before the GPU lease, a
    batch of N queued tasks ran N installs and N test suites at once beside the running agent,
    which swapped a small machine, timed base checks out, and failed a test server on a fixed port
    in all but one clone (#590). A base check that needs the GPU (`--unload-for-tests`,
@@ -6514,8 +6518,9 @@ $WB_HOME (~/.local/state/workbench)
                                  lane reads; in the task's directory an agent held runner.lock, then
                                  status.lock, with flock, and every later runner exited at once, then
                                  the runner and wb stop froze at their next status write: the 0.90 review)
-  locks/prepare.json, prepare-<n>.lock  the setups' and base checks' queue ({pid: {task, since, start,
-                                 holding}}) and their turns, PREP_SLOTS of them (runner.prep_turn, #590)
+  locks/prepare.json, prepare-<n>.lock  the setups' queue ({pid: {task, since, start, holding}}) and
+                                 their turns, PREP_SLOTS of them (runner.prep_turn, #590)
+  locks/prepare-check.json, prepare-check-<n>.lock  the base checks' own, the same (#868)
   locks/signal-stop.lock         one runner at a time writing a shutdown's one notice (runner._signal_notice, #544)
   locks/skills.lock              one change to the skill library at a time, add to commit (skills._library_lock, #822)
   locks/config-<key>.lock        one read-modify-write at a time of a user's config file (store.config_lock:
