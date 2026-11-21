@@ -2405,6 +2405,9 @@ def remove_remote(host: str) -> tuple[str, list[str]]:
     if str(cfg.get("model") or "").startswith(pid + "/"):
         raise RuntimeError(f"{cfg['model']} is OpenCode's default model; wb models --set-default "
                            "picks another first")
+    if str(cfg.get("small_model") or "").startswith(pid + "/"):  # it was left naming it (#708)
+        raise RuntimeError(f"{cfg['small_model']} is OpenCode's small_model; set small_model in "
+                           f"{opencode_config_path()} to another model (or remove it) first")
     names = sorted(prov.get("models") or {})
     change = f'under "{key}" remove "{pid}"'
     with own_config(change) as (target, own):

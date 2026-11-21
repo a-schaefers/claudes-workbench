@@ -13170,6 +13170,17 @@ class ModelSet(Base):
         with self.assertRaises(SystemExit):
             run_wb("model", "retire", "ollama/qwen3.8-27b")
 
+    def test_retire_refuses_opencodes_small_model_too_and_says_which_field(self):
+        # #708: with model and small_model on different entries, retiring the small_model one
+        # deleted it and left small_model naming it for every other OpenCode session
+        cfg = self.config(); cfg["small_model"] = "ollama/qwen3.8-27b"
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "retire", "ollama/qwen3.8-27b")
+        self.assertIn("ollama/qwen3.8-27b is OpenCode's small_model; set small_model in", err.getvalue())
+        self.assertIn("qwen3.8-27b", self.config()["provider"]["ollama"]["models"])   # nothing changed
+
     def test_retire_with_delete_keeps_weights_another_alias_still_uses(self):
         # #333, the audit of 1.4: two aliases of one Ollama model, one the default; retiring the
         # other with --delete deleted the shared weights and the default read "not pulled"

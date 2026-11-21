@@ -3451,6 +3451,9 @@ def cmd_model(a):
     cfg = models.read_config()
     if cfg.get("model") == a.id:
         die(f"{a.id} is OpenCode's default model; wb models --set-default picks another first")
+    if cfg.get("small_model") == a.id:  # left naming it, other OpenCode sessions broke (#708)
+        die(f"{a.id} is OpenCode's small_model; set small_model in {models.opencode_config_path()} "
+            "to another model (or remove it) first")
     if name not in prov["models"]:
         die(f"{a.id} is not registered")
     if a.delete and prov["engine"] == "ollama":
