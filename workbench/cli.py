@@ -845,13 +845,26 @@ def _settle_proposals(task: store.Task, take: bool):
     --take-claude-md puts each over its file, else it is dropped. Around the commit, and undone
     when it fails: wb next dropped the proposal, then died on its commit, so a retry with
     --take-claude-md had nothing to take (#507, Claude's audit of 1.90). Said once it stands."""
-    done = []
+    done, local = [], {}
+    if take:  # a file git ignores is in no commit: the checkout's own copy takes it (#506)
+        for real, prop in runner.proposals(task.worktree):
+            rel = real.relative_to(task.worktree)
+            if not gitops.ignored(task.worktree, str(rel)):
+                continue
+            mine = Path(task.spec["repo"]) / rel
+            if mine.is_symlink() or not mine.parent.is_dir() or not gitops.ignored(
+                    mine.parent, mine.name):
+                raise gitops.GitError(
+                    f"git ignores {rel}, so no commit would hold the agent's proposal, and "
+                    f"{mine} can't take it ({'a link' if mine.is_symlink() else 'not a local file'}"
+                    f"): apply {prop} by hand, then accept without --take-claude-md")
+            local[real] = mine
     try:
         for real, prop in runner.proposals(task.worktree):
             was = (("link", os.readlink(real)) if real.is_symlink() else
                    ("file", real.read_bytes()) if real.is_file() else None)
             done.append((real, prop, prop.read_bytes(), was))
-            if take:
+            if take and real not in local:
                 prop.replace(real)
             else:
                 prop.unlink()
@@ -859,17 +872,26 @@ def _settle_proposals(task: store.Task, take: bool):
     except BaseException:
         for real, prop, data, was in reversed(done):
             prop.write_bytes(data)
-            if take:
+            if take and real not in local:
                 real.unlink(missing_ok=True)
                 if was and was[0] == "link":
                     os.symlink(was[1], real)
                 elif was:
                     real.write_bytes(was[1])
         raise
-    for real, _, _, _ in done:
+    for real, _, data, _ in done:
         rel = real.relative_to(task.worktree)
-        print(f"took the agent's proposed {rel}" if take else
-              f"dropped the agent's proposed {rel} (--take-claude-md takes it)")
+        if real in local:  # the commit stands: now the checkout's copy, which no commit holds
+            tmp = local[real].with_name(f".{local[real].name}.wb-{os.getpid()}")
+            tmp.write_bytes(data)
+            if local[real].exists():
+                shutil.copymode(local[real], tmp)
+            tmp.replace(local[real])
+            print(f"took the agent's proposed {rel}: written over {local[real]} (gitignored, "
+                  "so in no commit)")
+        else:
+            print(f"took the agent's proposed {rel}" if take else
+                  f"dropped the agent's proposed {rel} (--take-claude-md takes it)")
 
 
 @one_at_a_time

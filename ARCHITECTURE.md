@@ -1242,7 +1242,13 @@ diff, by literal path: an ordinary `schema.proposed` is code, shown and committe
 `--take-claude-md` puts each over its file, else it is dropped, so one is never committed as it
 is. A commit that fails puts every proposal (and the file it replaced) back, and the
 "took"/"dropped" lines come only once the commit stands: wb next dropped a proposal, then died
-on its commit, leaving a retry with `--take-claude-md` nothing to take (#507). Claude making each change itself was a call over its whole context on most tasks
+on its commit, leaving a retry with `--take-claude-md` nothing to take (#507). A proposal for a
+file git ignores (a local CLAUDE.md, the agents reading the checkout's copy) is diffed against
+the checkout's copy and taken over it once the commit stands ("written over <path> (gitignored,
+so in no commit)"); where that copy can't take it (a link, or not ignored there) `--take-claude-md`
+is refused before anything changes, naming the proposal to apply by hand: `add -A` skipped the
+ignored file, accept said "took", and the change went with the worktree (#506, Claude's audit of
+1.90). Claude making each change itself was a call over its whole context on most tasks
 (2026-11-18).
 
 **Git, read-only** (`gitguard.py`; *Git, commits and projects*). `runner.agent_env` writes a `git`

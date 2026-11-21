@@ -520,6 +520,49 @@ class Lifecycle(Base):
             self.assertNotIn("CLAUDE.md.proposed", files)
             self.assertEqual("CLAUDE.md" in files, kept)
 
+    def test_a_proposal_for_a_gitignored_claude_md_goes_over_the_checkouts_copy(self):
+        # #506 (Claude's audit of 1.90, reproduced): CLAUDE.md gitignored, the agent proposed a
+        # change; the review diffed it against nothing, accept --take-claude-md said "took" and
+        # `add -A` skipped the ignored file, so the change went with the worktree
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout
+        (self.repo / ".gitignore").write_text("CLAUDE.md\nAGENTS.md\n")
+        g("rm", "-q", "--cached", "CLAUDE.md")
+        g("add", ".gitignore")
+        g("commit", "-qm", "CLAUDE.md is local")
+        old = (self.repo / "CLAUDE.md").read_text()
+        self.start("t-ign", "ok")
+        wait_phase("t-ign", {"review"})
+        t = store.Task("t-ign")
+        prop = t.worktree / "CLAUDE.md.proposed"
+        prop.write_text(old + "Answers live in answer.txt.\n")
+        shown = runner.review_diff(t)
+        self.assertIn("+Answers live in answer.txt.", shown)
+        self.assertNotIn("+# repo", shown)                 # against the copy the agent read
+        out = run_wb("accept", "t-ign", "-m", "feat: answer", "--take-claude-md")
+        self.assertIn(f"took the agent's proposed CLAUDE.md: written over {self.repo / 'CLAUDE.md'}", out)
+        self.assertEqual((self.repo / "CLAUDE.md").read_text(), old + "Answers live in answer.txt.\n")
+        files = g("show", "--name-only", "--format=", "delegate/t-ign").split()
+        self.assertNotIn("CLAUDE.md", files)
+        self.assertNotIn("CLAUDE.md.proposed", files)
+        # where the checkout's copy can't take it (a link, as wb init makes AGENTS.md): refused,
+        # the proposal kept, and the way to apply it by hand named
+        (self.repo / "AGENTS.md").symlink_to("CLAUDE.md")
+        self.start("t-ign2", "ok")
+        wait_phase("t-ign2", {"review"})
+        t = store.Task("t-ign2")
+        prop = t.worktree / "AGENTS.md.proposed"
+        prop.write_text("# the agent's\n")
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("accept", "t-ign2", "-m", "feat: answer", "--take-claude-md")
+        self.assertIn("git ignores AGENTS.md", err.getvalue())
+        self.assertIn(str(prop), err.getvalue())
+        self.assertTrue(prop.is_file())
+        self.assertTrue((self.repo / "AGENTS.md").is_symlink())
+        self.assertIn("dropped the agent's proposed AGENTS.md",
+                      run_wb("accept", "t-ign2", "-m", "feat: answer"))
+
     def test_a_proposal_the_project_already_tracks_is_left_alone(self):
         # #321 (the audit of 1.4, reproduced): a CLAUDE.md.proposed committed before the task
         # was settled as the agent's, and accept deleted it, though wb diff never showed it
