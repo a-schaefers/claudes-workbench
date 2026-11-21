@@ -813,9 +813,11 @@ class Lifecycle(Base):
     def test_the_gpu_is_let_go_while_the_tests_run_and_while_the_server_is_down(self):
         # #257 (the audit of 1.2): all of drive ran under the lease, so queued tasks waited
         # through every test run and a 20-minute wait for a dead server, and a project's GPU
-        # tests ran beside the resident model
+        # tests ran beside the resident model. Tests that use the GPU (--unload-for-tests) hold
+        # it, its model unloaded: let go, a queued task's model ran beside them (#428)
         import fcntl
         with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-cpu", "fix", "--test", TEST_CMD, "--no-base-check")
             self.start("t-aside", "fix", "--test", TEST_CMD, "--no-base-check", "--unload-for-tests")
         lock = store.home() / "gpu.lock"
 
@@ -838,10 +840,15 @@ class Lifecycle(Base):
                 mock.patch.object(runner.models, "_unload", side_effect=lambda m: unloads.append(m.id)):
             # _fake off and no _down mock probed the model's real server: up here, absent in CI,
             # where drive waited out DOWN_WAIT and the job's 20 minutes (2026-11-20)
+            runner.drive(store.Task("t-cpu"))
+            self.assertEqual((seen, unloads), ([(True, {}), (True, {})], []))  # CPU tests: free
+            seen.clear(), loads.clear()
             runner.drive(store.Task("t-aside"))
         st = store.Task("t-aside").status
         self.assertEqual((st["phase"], st["round"]), ("review", 2))           # an auto-fix round between
-        self.assertEqual(seen, [(True, {}), (True, {})])                     # each test run: free
+        held = {str(os.getpid()): {"model": None, "task": "t-aside", "tests": True}}
+        self.assertEqual([(free, {p: {k: h[k] for k in ("model", "task", "tests")} for p, h in hs.items()})
+                          for free, hs in seen], [(False, held), (False, held)])  # held for the tests
         self.assertEqual(len(unloads), 2)                                    # --unload-for-tests
         self.assertEqual(loads, [True, True])                                # back on it for round 2
         self.assertEqual(runner.models.holders(), {})

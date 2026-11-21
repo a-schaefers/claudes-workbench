@@ -1394,7 +1394,7 @@ def admits(m: Model | None, held: dict) -> bool:
 
 def holders(home: Path | None = None, pool: str = "gpu") -> dict:
     """gpu.json's live entries (a remote server's: ``pool`` gpu-<host>): pid → {model, task,
-    start, waiting?}."""
+    start, waiting?, tests? (tests that use the GPU hold it: GpuLease.step_aside)}."""
     held = store.read_json((home or store.home()) / f"{pool}.json", {}) or {}
     return {p: h for p, h in held.items() if p.isdigit() and _alive(int(p), h.get("start"))}
 
@@ -1501,7 +1501,12 @@ class GpuLease:
         round) and a wait for its server (up to 20 minutes) ran under the lease, so queued tasks
         waited through them, and a project's own GPU tests ran beside the resident model, their
         out-of-memory failures sent back to the agent as its bug (#257, the audit of 1.2).
-        ``unload``: the model too, unless another holder runs it. `rejoin` before the next round."""
+        ``unload`` (tests that use the GPU, --unload-for-tests): the model too, unless another
+        holder runs it, and the lease stays held for the tests, an entry with no model (`tests`)
+        that nobody joins, so wb start refuses and a queued task waits: let go, a queued task was
+        admitted and ran a model round beside them, both allocating VRAM at once (#428, the audit
+        of 1.8). On a remote model's server the tests use none of its GPU: let go there.
+        `rejoin` before the next round."""
         if self.aside or not self.fh:
             return
         # The unload is decided and sent while this task still holds the lease, under the lock
@@ -1513,8 +1518,11 @@ class GpuLease:
             held.pop(self.me, None)
             if unload:
                 self._unload_unshared(held)
-            self._set(held)
-            fcntl.flock(self.fh, fcntl.LOCK_UN)
+            if unload and not (self.m and self.m.remote):
+                self._set({**held, self.me: {**self._entry(), "model": None, "tests": True}})
+            else:
+                self._set(held)
+                fcntl.flock(self.fh, fcntl.LOCK_UN)
             self.aside = True
 
     def _unload_unshared(self, held: dict) -> None:
