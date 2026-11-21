@@ -327,8 +327,21 @@ class Top:
                 except OSError:
                     pass  # a task removed mid-tick; a full disk reaps on a later pass
 
+    def _owners(self, found: dict) -> dict[str, int]:
+        """How many tasks are in phase running on each local server root."""
+        n: dict[str, int] = {}
+        for _, spec, st in self._tasks():
+            m = found.get(spec.get("model") or "")
+            if st.get("phase") == "running" and m and not m.remote:
+                n[m.root] = n.get(m.root, 0) + 1
+        return n
+
     def running(self, found: dict, now: float) -> list[dict]:
         out = []
+        # a server's live rate is a task's only when it is the one task running on that server: a
+        # queued, testing or asking task, or one of two running there, claimed whatever the server
+        # was writing, someone else's request too (#548). Unclaimed, it goes on the rack (rack_now)
+        owners = self._owners(found)
         for d, spec, st in self._tasks():
             if st.get("phase") not in LIVE:
                 continue
@@ -342,7 +355,8 @@ class Top:
                 r["round_s"] = round(now - st["round_started_at"], 1)
             if m and m.remote:
                 r["remote"] = True
-            live = self.live.get(m.root) if m and not m.remote else None
+            live = self.live.get(m.root) if m and not m.remote and st["phase"] == "running" \
+                and owners.get(m.root) == 1 else None
             if live and live.get("state") not in (None, "idle"):
                 r["server"] = live
                 if isinstance(live.get("tok_s"), (int, float)):
@@ -486,9 +500,22 @@ class Top:
             if h.get("model") and h.get("task"):
                 held.setdefault(h["model"], []).append(h["task"])
         loads = self._loads()
+        # a busy server whose rate no task row claimed (two running there, or a request from outside
+        # workbench) shows it once, on its first model's row, the resident one first (#548)
+        owners = self._owners(self.found or {})
+        unclaimed = {root: live for root, live in self.live.items()
+                     if live.get("state") not in (None, "idle") and owners.get(root) != 1}
+        rows = sorted(self.rack, key=lambda r: r.get("state") != "resident")
+        shown: dict[str, str] = {}
+        for r in rows:
+            m = (self.found or {}).get(r["model"])
+            if m and m.root in unclaimed and m.root not in shown:
+                shown[m.root] = r["model"]
         out = []
         for r in self.rack:
             r = dict(r)
+            if (m := (self.found or {}).get(r["model"])) and shown.get(m.root) == r["model"]:
+                r["server"] = unclaimed[m.root]
             sp = router.speed(r["model"])
             if sp.get("write"):
                 r["write_tok_s"] = round(sp["write"], 1)
@@ -608,6 +635,8 @@ def lines(snap: dict) -> list[list[tuple[str, str]]]:
                  f"reads ~{r['read_tok_s']}" if r.get("read_tok_s") else "",
                  f"loads ~{_secs(r['load_s'])}" if r.get("load_s") else ""]
         row.append(("dim", " · ".join(f for f in facts if f)))
+        if isinstance((r.get("server") or {}).get("tok_s"), (int, float)):
+            row.append(("", f"  server {r['server']['tok_s']:.0f} tok/s live"))
         if r.get("tasks"):
             row.append(("", "  ← " + ", ".join(p(t) for t in r["tasks"])))
         if r.get("why") and state != "remote":

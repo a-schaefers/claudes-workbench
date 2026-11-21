@@ -2214,18 +2214,24 @@ never 0):
   GPU)" (or "RAM" beside GPU rows), ram: true, used, total}` when no GPU row says its memory;
 - `running` (queued, running, testing, asking): `[{task, model, label, phase, round, round_s,
   tok_s, tok_s_from, read_tok_s, read_from, context_used, context_window, context_pct, last,
-  remote?, server?}]`. `tok_s_from` is `live` (the server's `live.tok_s`) or `last call`: the
+  remote?, server?}]`. `tok_s_from` is `live` (the server's `live.tok_s`, given only to a task in
+  phase `running` that is the one running task on that server: a queued, testing or asking task,
+  one of two running there, or an idle task while someone outside workbench used the server
+  claimed its rate, #548) or `last call`: the
   newest step's output over the time since the step before it (or the round's start), a floor,
   since that time holds the prompt's reading and the tools' runs; `read_tok_s` is the model's
   median here (`read_from: "median"`); `server` is the `live` object as the server gave it.
   There is no first-token time: OpenCode's events carry none, and the session export that has
   one is not run.
 - `rack` (every discovered model): `[{model, label, state, why?, gpu_bytes?, cpu_bytes?,
-  write_tok_s?, read_tok_s?, load_s?, tasks?}]`, `state` one of `resident` (all on the GPU),
+  write_tok_s?, read_tok_s?, load_s?, tasks?, server?}]`, `state` one of `resident` (all on the GPU),
   `split` (Ollama's `size_vram` under its `size`: part on the CPU), `cpu` (`size_vram` 0 where no
   GPU row says a memory size: all in RAM, `cpu_bytes`, the normal state of a CPU-only machine,
   shown as `split 0.0 GB GPU` in the warning colour before #551), `idle`, `can't run` (with
-  status's `why`), `remote` (another machine: no telemetry); `tasks` the lease holders on it.
+  status's `why`), `remote` (another machine: no telemetry); `tasks` the lease holders on it;
+  `server`, a busy server's `live` object no task row claimed (two running there, or a request
+  from outside), on one of its models' rows, the resident one first (the terminal: `server N
+  tok/s live`; the pane doesn't draw it).
 - `queue`: the lease's waiters, in line by `since` (the task's start): `[{task, model, since,
   waited_s, pool?}]`; `waited_s` is how long this wait has lasted (gpu.json `waiting_since`), not
   the task's age, which a task sent back for another round showed as hours ten seconds in (#573);

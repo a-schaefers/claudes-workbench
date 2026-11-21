@@ -12748,6 +12748,49 @@ class Top(Base):
         q = self.top(Path(self.tmp.name)).queue({"gpu": held}, now)
         self.assertEqual([(x["task"], x["waited_s"]) for x in q], [("old", 10.0), ("later", 300.0)])
 
+    def test_a_servers_live_rate_is_a_tasks_only_when_it_is_the_one_running_there(self):
+        # #548: three tasks on one llama-server (running, queued on a second alias, testing) all
+        # read "51 tok/s live"; with two running, each claimed the other's rate
+        from workbench import top
+        now = time.time()
+        root = "http://127.0.0.1:8080"
+        mk = lambda mid: types.SimpleNamespace(id=mid, root=root, remote=False, label=mid,  # noqa: E731
+                                               engine="llama.cpp", config={})
+        found = {"local/a": mk("local/a"), "local/b": mk("local/b")}
+        t = self.top(Path(self.tmp.name))
+        t.found = found
+        t.rack = [{"model": "local/a", "label": "local/a", "state": "idle"},
+                  {"model": "local/b", "label": "local/b", "state": "resident"}]
+        t.live = {root: {"state": "generating", "tok_s": 51.0}}
+
+        def tasks(**phases):
+            shutil.rmtree(store.tasks_dir(), ignore_errors=True)
+            for name, (mid, phase) in phases.items():
+                d = store.tasks_dir() / name
+                d.mkdir(parents=True)
+                store.write_json(d / "task.json", {"model": mid})
+                store.write_json(d / "status.json", {"phase": phase, "round": 1, "updated_at": now})
+            t.files = top._Files()
+            return {r["task"]: r for r in t.running(found, now)}, \
+                {r["model"]: r for r in t.rack_now({})}
+
+        run, rack = tasks(writer=("local/a", "running"), later=("local/b", "queued"),
+                          checks=("local/a", "testing"))
+        self.assertEqual((run["writer"]["tok_s"], run["writer"]["tok_s_from"]), (51.0, "live"))
+        for name in ("later", "checks"):
+            self.assertNotIn("server", run[name])
+            self.assertNotEqual(run[name].get("tok_s_from"), "live")
+        self.assertFalse(any("server" in r for r in rack.values()))  # the running task has it
+        run, rack = tasks(one=("local/a", "running"), two=("local/b", "running"))
+        self.assertFalse(any("server" in r or r.get("tok_s_from") == "live" for r in run.values()))
+        self.assertEqual([m for m, r in rack.items() if "server" in r], ["local/b"])  # once, the resident's
+        run, rack = tasks(later=("local/a", "queued"))  # someone outside workbench is generating
+        self.assertNotIn("server", run["later"])
+        self.assertEqual([m for m, r in rack.items() if "server" in r], ["local/b"])
+        self.assertIn("server 51 tok/s live", top.render(
+            {"ts": now, "every": 2, "gpus": [], "running": list(run.values()),
+             "rack": list(rack.values()), "queue": []}, 200, color=False))
+
     def test_the_default_tick_is_stats_json_every_else_two_seconds(self):
         from workbench import top
         self.assertEqual(top.default_every(), 2)
