@@ -3028,6 +3028,14 @@ def cmd_events(a):
                     return
 
 
+def cmd_top(a):
+    """A live feed of the machine: GPUs, running tasks, the rack of models, the GPU's queue."""
+    from . import top
+    if a.every is not None and not a.every > 0:
+        die("--every takes a number of seconds above 0")
+    top.main(every=a.every, as_json=a.json)
+
+
 def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
     if a.port is None:  # named: that port; else the running server's, else the default (#349)
@@ -4025,6 +4033,12 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_scout)
     s = sub.add_parser("events", help="print a line whenever workbench's state changes (the mod's ears)")
     s.set_defaults(f=cmd_events)
+    s = sub.add_parser("top", help="a live view of the GPUs, the running tasks, the models and the "
+                       "GPU's queue (q quits)")
+    s.add_argument("--json", action="store_true", help="one JSON object per tick, until the parent exits")
+    s.add_argument("--every", type=float, metavar="S",
+                   help="seconds between ticks (default: stats.json every, else 2)")
+    s.set_defaults(f=cmd_top)
     s = sub.add_parser("chat", help="the web chat: turn it on or off (on starts a server; kept as "
                        "left), serve it, its link, reply to the user there, "
                        "the thread (log), receipts (ack, claim), what waits (pending), permission "

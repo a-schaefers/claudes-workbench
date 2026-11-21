@@ -1770,6 +1770,62 @@ rule and `clock` under the speech, and uses `activity` as the apprentice's speec
 `work` when it starts `Writing` or `Running`, else `think`). A new style needs an
 entry in the mod's `LINE_STYLE`; changing the shape needs a new `live-1` tag.
 
+### wb top
+
+`workbench/top.py` (#407): what this machine is doing, for anyone without the mod's pane, and a
+feed for whatever draws one (`--json`). One long-lived process, like `wb events`, cheap enough to
+tick every 2 s (`--every S`; default stats.json `every`, else `EVERY` 2), and nothing runs when
+nobody looks: it exits when its parent process goes (checked each tick), and quietly (exit 0) on
+SIGTERM, SIGHUP, a closed pipe, `q` or Ctrl-C, killing its nvidia-smi child. Never a model call,
+a load or an `opencode session export`.
+
+Each tick reads, cheapest first:
+- **GPUs**: sysfs per card (`hardware.drm_cards`, connectors skipped, one entry per PCI slot):
+  `gpu_busy_percent`, `mem_info_vram_used`/`_total` (an amdgpu APU without a VRAM vendor adds
+  its GTT, `unified`), the card's hwmon watts (`hardware.card_watts`, the readers `gpu_power_w`
+  uses); the card's name from lspci once at start (`card_name`), never per tick. NVIDIA: one
+  `nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu,power.draw
+  --format=csv,noheader,nounits -lms <ms>` for the life of the command (`SmiStream`, found by
+  `hardware.smi_path`: PATH, else WSL's), read line by line as it prints; a row older than three
+  intervals drops out. macOS: the GPUs from system_profiler once (no VRAM used, no busy %); WSL
+  without NVIDIA: Windows' adapter names once; no GPU at all: the RAM, from /proc/meminfo.
+- **Tasks**: every task's task.json and status.json, re-read only when one changes (`_Files`, by
+  mtime and size), and a running task's newest `step` events (the last 64 KiB of events.jsonl).
+- **The lease**: gpu.json and each remote pool's `gpu-<host>.json` through `models.holders` (dead
+  pids dropped); `speed.json` through `router.speed`.
+- **Every `PROBE_EVERY` (5 s), not every tick**: `models.discover()`, one `/api/tags` and one
+  `/api/ps` per local Ollama, `models.status` for the other servers (their `/v1/models`), and the
+  `/metrics` `live` object of each running task's server other than Ollama (which has none). A
+  model on another machine is not asked: no telemetry. Probes to this machine skip HTTP proxies
+  (`models._open`).
+- **Typical load**: the median of the tasks' status `load_secs` per model, recomputed every
+  `LOAD_EVERY` (300 s).
+
+`--json` prints one object per tick (sizes in bytes; a field the platform can't give is left out,
+never 0):
+- `ts`, `every`;
+- `gpus`: `[{index, name, driver, used, total, busy (%), watts, unified?}]`, or `[{name: "RAM (no
+  GPU)", ram: true, used, total}]`;
+- `running` (queued, running, testing, asking): `[{task, model, label, phase, round, round_s,
+  tok_s, tok_s_from, read_tok_s, read_from, context_used, context_window, context_pct, last,
+  remote?, server?}]`. `tok_s_from` is `live` (the server's `live.tok_s`) or `last call`: the
+  newest step's output over the time since the step before it (or the round's start), a floor,
+  since that time holds the prompt's reading and the tools' runs; `read_tok_s` is the model's
+  median here (`read_from: "median"`); `server` is the `live` object as the server gave it.
+  There is no first-token time: OpenCode's events carry none, and the session export that has
+  one is not run.
+- `rack` (every discovered model): `[{model, label, state, why?, gpu_bytes?, cpu_bytes?,
+  write_tok_s?, read_tok_s?, load_s?, tasks?}]`, `state` one of `resident` (all on the GPU),
+  `split` (Ollama's `size_vram` under its `size`: part on the CPU), `idle`, `can't run` (with
+  status's `why`), `remote` (another machine: no telemetry); `tasks` the lease holders on it.
+- `queue`: the lease's waiters, oldest first: `[{task, model, since, waited_s, pool?}]` (`pool`
+  for a remote server's).
+
+On a terminal (without `--json`) the same view fills the alternate screen and is redrawn in place
+each tick: bars in eighths (`▏▎▍▌▋▊▉█`) for VRAM and busy, models by their `label`, the card's
+short name (lspci's last bracket), colour only there; stdin in cbreak mode for `q`, restored on
+exit. Not on a terminal: one plain pass, then exit (as `wb watch --once`).
+
 ## Models: found, loaded, chosen
 
 Code: `workbench/models.py` (discovery, status, residency, the GPU lease, adding and retiring),
@@ -3943,6 +3999,7 @@ Every waiter and its bounded wake (a timeout to re-check what the kernel can't s
 | `ask_reviewer` | `ask/` | 60 s, until the ask timeout |
 | the chat `Hub` | `chat/` and the listener's pidfd | 60 s |
 | `wb stop` / `takeover` | `wait_exit(pid, 15)` | |
+| `wb top` | `select` on its nvidia-smi stream and, on a terminal, the keys | each tick (`--every`), when it also checks its parent |
 
 `wb events` prints `{"hello": <its pid>}` (the mod's chat listener identity), then `{"changed":
 [paths relative to $WB_HOME]}` for each batch of changes, dropping names
@@ -4009,6 +4066,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, questions, answers, stops, auto-fixes, rounds, tests, errors. `-f` follows until the task needs Claude or is closed, looking at the phase before each wait (on a finished task it returns at once: it waited 30 s, #90) and printing the events that came with it. |
 | `wb report <task>` | `--round N` | The round's summary.md. |
 | `wb diff <task> [paths…]` | `--stat`, `--all` | The worktree against the task's base, or after `wb next` against the last committed step (`--all`: the whole branch); new files included. |
+| `wb top` | `--json` (one object per tick, until its parent exits), `--every S` (stats.json `every`, else 2) | A live view of the machine (*Seeing what the agent does*, `wb top`): each GPU's memory, busy % and watts, the running tasks, every model (the rack) and the GPU lease's queue; on a terminal redrawn in place, `q` or Ctrl-C quits; elsewhere one plain pass. Never a model call, a load or a session export. |
 | `wb events` | | `{"hello": pid}`, then `{"changed": [paths]}` whenever `$WB_HOME` changes (not tasks' worktrees and rounds, closed tasks, `rules/`, `imports/`, `images/`, `audio/`, `runner.log`, `*.lock`, `*.tmp`, dotfiles); reaps dead runners once a minute; exits when its parent does. The mod's ears. |
 
 ### Models, skills, lessons, notes
@@ -4070,6 +4128,7 @@ $WB_HOME (~/.local/state/workbench)
   gpu.lock  gpu.json  gpu.admit  the GPU lease: the lock, who holds or waits for it, the admission lock,
   gpu.load                       and the lock that takes model loads one at a time
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
+  stats.json                     optional: {every, …}; wb top reads `every` (seconds between ticks; none or not a positive number: 2)
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
   update.json                    wb update: when origin was last asked, how far behind this copy was
   bench/cases/<case>/            case.json  spec.md  base.bundle  hidden/<path>…  reference.patch
@@ -4625,6 +4684,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **A model server's API fields** (`models.server_facts`: LM Studio, llama-server, vLLM/SGLang;
   `ollama_served_context`, `weights` for Ollama) → the `Real` tests in `tests/test_portable.py`
   that imitate them, and *Running your own server* where it says what each server needs set.
+- **The status keys and event fields `wb top` reads** (`live_used`, `window`, `round`,
+  `round_started_at`, `load_secs`, `last`; a `step` row's `ts`, `round`, `out`; gpu.json's
+  `waiting`, `since`) → `top.py` and the Top tests; its `--json` shape → *wb top* here.
 - **A git call on a task's worktree** → through `gitops.git` (pinned to the recorded git dir, no
   hooks), never `git -C <worktree>` by hand; parsed output → a porcelain or `-z` form.
 - **Permissions or the config layer** (`context.py`, `write_config_layer`) → the real-OpenCode

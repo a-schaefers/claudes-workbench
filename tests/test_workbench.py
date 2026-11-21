@@ -8880,6 +8880,193 @@ class WebChat(Base):
         self.assertIn("Claude: Step 2 is in review.", run_wb("chat", "log"))
 
 
+FAKE_SMI = """import os, sys, time
+with open(os.environ["FAKE_SMI_LOG"], "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\\n")
+if "--query-gpu=index,name" in sys.argv:
+    print("0, NVIDIA Fake 4090\\n1, NVIDIA Fake Old")
+    sys.exit()
+ms = int(sys.argv[sys.argv.index("-lms") + 1])
+with open(os.environ["FAKE_SMI_PID"], "w") as f:
+    f.write(str(os.getpid()))
+while True:
+    print("0, 1024, 24564, 37, 215.50")
+    print("1, [N/A], [N/A], [N/A], [N/A]", flush=True)
+    time.sleep(ms / 1000)
+"""
+
+
+class Top(Base):
+    """wb top (#407): a live feed read from files, sysfs and one nvidia-smi stream."""
+
+    def fake_sys(self) -> Path:
+        drm = Path(self.tmp.name, "drm")
+        card0 = drm / "card0" / "device"
+        files = {card0 / "uevent": "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:03:00.0\nPCI_ID=1002:7550\n",
+                 card0 / "gpu_busy_percent": "97\n", card0 / "mem_info_vram_used": str(12 * 2 ** 30),
+                 card0 / "mem_info_vram_total": str(16 * 2 ** 30), card0 / "mem_info_vram_vendor": "samsung",
+                 card0 / "hwmon" / "hwmon3" / "power1_average": "212000000\n",
+                 # a connector, not a card
+                 drm / "card0-DP-1" / "device" / "uevent": "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:03:00.0\n",
+                 # a card that says nothing but its driver: nothing made up for it
+                 drm / "card1" / "device" / "uevent": "DRIVER=i915\nPCI_SLOT_NAME=0000:00:02.0\n"}
+        for path, text in files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        return drm
+
+    def fake_smi(self) -> Path:
+        bindir = Path(self.tmp.name, "bin")
+        bindir.mkdir(exist_ok=True)
+        smi = bindir / "nvidia-smi"
+        smi.write_text(f"#!{sys.executable}\n{FAKE_SMI}")
+        smi.chmod(0o755)
+        os.environ.update(PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}",
+                          FAKE_SMI_LOG=str(bindir / "log"), FAKE_SMI_PID=str(bindir / "pid"))
+        return bindir
+
+    def top(self, drm, smi=None):
+        from workbench import top
+        run = hardware._run if smi else lambda *argv: ""  # no lspci: the PCI id instead
+        with mock.patch.object(hardware, "system", lambda: "linux"), \
+                mock.patch.object(hardware, "smi_path", lambda: smi), \
+                mock.patch.object(hardware, "_run", run):
+            return top.Top(2, drm=drm)
+
+    def test_the_sysfs_readers_give_busy_vram_and_watts_and_leave_out_what_a_card_lacks(self):
+        drm = self.fake_sys()
+        cards = hardware.drm_cards(drm)
+        self.assertEqual([c["card"] for c in cards], ["card0", "card1"])
+        dev = cards[0]["dev"]
+        self.assertEqual(hardware.gpu_busy(dev), 97)
+        self.assertEqual(hardware.vram(dev), (12 * 2 ** 30, 16 * 2 ** 30))
+        self.assertEqual(hardware.card_watts(dev), 212.0)
+        self.assertEqual((hardware.gpu_busy(cards[1]["dev"]), hardware.vram(cards[1]["dev"]),
+                          hardware.card_watts(cards[1]["dev"])), (None, (None, None), None))
+        t = self.top(drm)
+        self.assertEqual(t.gpus(), [
+            {"index": 0, "name": "1002:7550", "driver": "amdgpu", "used": 12 * 2 ** 30,
+             "total": 16 * 2 ** 30, "busy": 97, "watts": 212.0},
+            {"index": 1, "name": "card1", "driver": "i915"}])  # absent, not zero
+
+    def test_with_no_gpu_it_shows_the_ram(self):
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        (g,) = self.top(drm).gpus()
+        self.assertTrue(g["ram"])
+        self.assertGreater(g["total"], 0)
+        self.assertLessEqual(g["used"], g["total"])
+
+    def test_nvidia_comes_from_one_long_lived_nvidia_smi_and_n_a_is_left_out(self):
+        bindir = self.fake_smi()
+        t = self.top(Path(self.tmp.name, "nodrm"), smi=str(bindir / "nvidia-smi"))
+        try:
+            deadline = time.time() + 10
+            while len(t.gpus()) < 2 and time.time() < deadline:
+                time.sleep(0.05)
+            for _ in range(3):
+                gpus = t.gpus()
+                time.sleep(0.1)
+            self.assertEqual(gpus, [
+                {"name": "NVIDIA Fake 4090", "driver": "nvidia", "index": 0, "used": 1024 * 2 ** 20,
+                 "total": 24564 * 2 ** 20, "busy": 37, "watts": 215.5},
+                {"name": "NVIDIA Fake Old", "driver": "nvidia", "index": 1}])
+            pid = int((bindir / "pid").read_text())
+        finally:
+            t.close()
+        self.assertTrue(wait_gone(pid))
+        calls = (bindir / "log").read_text().splitlines()
+        self.assertEqual([c for c in calls if "-lms" in c],
+                         ["--query-gpu=index,memory.used,memory.total,utilization.gpu,power.draw "
+                          "--format=csv,noheader,nounits -lms 2000"])  # one stream, not one per tick
+
+    def test_a_tick_names_the_running_tasks_the_rack_and_the_queue(self):
+        from workbench import models, top
+        now = time.time()
+        mimo = "ollama/mimo-v2.6:9b-q8_0"
+        for name, phase, extra in (("busy", "running", {
+                "round": 2, "round_started_at": now - 30, "session": "s1", "window": 32768,
+                "live_used": {"session": "s1", "used": 8192}, "last": "edit answer.txt"}),
+                ("old1", "accepted", {"load_secs": 8}), ("old2", "discarded", {"load_secs": 12})):
+            d = store.tasks_dir() / name
+            d.mkdir(parents=True)
+            store.write_json(d / "task.json", {"model": mimo, "created_at": now - 60})
+            store.write_json(d / "status.json", {"phase": phase, **extra})
+        for row in ({"ts": now - 20, "round": 2, "kind": "step", "in": 4000, "out": 100, "cache": 0},
+                    {"ts": now - 10, "round": 2, "kind": "step", "in": 300, "out": 400, "cache": 4000}):
+            store.append_jsonl(store.tasks_dir() / "busy" / "events.jsonl", row)
+        store.write_json(store.home() / "speed.json", {mimo: {"write": [40, 44], "read": [900]}})
+        waiter = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(waiter.wait)
+        self.addCleanup(waiter.kill)
+        store.write_json(store.home() / "gpu.json", {
+            str(os.getpid()): {"model": mimo, "task": "busy", "since": now - 60,
+                               "start": models._started(os.getpid())},
+            str(waiter.pid): {"model": mimo, "task": "later", "since": now - 5, "waiting": True,
+                              "start": models._started(waiter.pid)}})
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        snap = self.top(drm).tick()
+        self.assertEqual(sorted(snap), ["every", "gpus", "queue", "rack", "running", "ts"])
+        (r,) = snap["running"]
+        self.assertEqual({k: r[k] for k in ("task", "model", "label", "phase", "round", "tok_s",
+                                             "tok_s_from", "read_tok_s", "context_used",
+                                             "context_window", "context_pct")},
+                         {"task": "busy", "model": mimo, "label": "MiMo", "phase": "running",
+                          "round": 2, "tok_s": 40.0, "tok_s_from": "last call", "read_tok_s": 900,
+                          "context_used": 8192, "context_window": 32768, "context_pct": 25})
+        self.assertAlmostEqual(r["round_s"], 30, delta=5)
+        rack = {x["model"]: x for x in snap["rack"]}
+        self.assertEqual(rack[mimo], {"model": mimo, "label": "MiMo", "state": "resident",
+                                      "write_tok_s": 42.0, "read_tok_s": 900, "load_s": 10.0,
+                                      "tasks": ["busy"]})
+        self.assertNotIn("write_tok_s", rack["ollama/qwen3.8-27b"])  # unmeasured: absent
+        self.assertEqual([(q["task"], q["model"]) for q in snap["queue"]], [("later", mimo)])
+        json.dumps(snap)
+        text = top.render(snap, 200, color=False)
+        for word in ("RUNNING", "busy", "40 tok/s (last call)", "RACK", "MiMo", "QUEUE", "later"):
+            self.assertIn(word, text)
+
+    def test_the_default_tick_is_stats_json_every_else_two_seconds(self):
+        from workbench import top
+        self.assertEqual(top.default_every(), 2)
+        (store.home() / "stats.json").write_text('{"every": 5, "live": true}')
+        self.assertEqual(top.default_every(), 5)
+        (store.home() / "stats.json").write_text('{"every": "often"}')
+        self.assertEqual(top.default_every(), 2)
+
+    def test_off_a_terminal_it_prints_one_pass_and_exits(self):
+        with mock.patch.object(hardware, "smi_path", lambda: None):
+            out = run_wb("top")
+        for word in ("wb top", "RUNNING", "RACK", "QUEUE"):
+            self.assertIn(word, out)
+        self.assertNotIn("\033", out)
+
+    def test_it_exits_when_its_parent_goes_and_takes_nvidia_smi_with_it(self):
+        bindir = self.fake_smi()
+        out = Path(self.tmp.name, "top.jsonl")
+        # the shell waits for the first line, so wb top has its parent's pid before the shell goes
+        sh = subprocess.run(["sh", "-c", '"$0" top --json --every 0.2 > "$1" 2>&1 & '
+                             'while [ ! -s "$1" ]; do sleep 0.05; done; echo $!',
+                             str(ROOT / "bin" / "wb"), str(out)], capture_output=True, text=True, timeout=30)
+        pid = int(sh.stdout.strip())
+        self.assertTrue(wait_gone(pid, 10), "wb top outlived its parent")
+        deadline = time.time() + 5
+        while not (bindir / "pid").exists() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(wait_gone(int((bindir / "pid").read_text()), 10), "nvidia-smi outlived wb top")
+        first = json.loads(out.read_text().splitlines()[0])
+        self.assertEqual(sorted(first), ["every", "gpus", "queue", "rack", "running", "ts"])
+
+    def test_sigterm_ends_it_quietly(self):
+        p = subprocess.Popen([str(ROOT / "bin" / "wb"), "top", "--json", "--every", "0.2"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertIn('"gpus"', p.stdout.readline())
+        p.send_signal(signal.SIGTERM)
+        _, err = p.communicate(timeout=10)
+        self.assertEqual((p.returncode, err), (0, ""))
+
+
 class Hardware(unittest.TestCase):
     """wb scout's hardware report off Linux: each platform's own sources, faked here."""
 

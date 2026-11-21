@@ -232,13 +232,31 @@ def visible(devs: list[dict], env: dict) -> tuple[list[dict], list[str]]:
 _ENERGY: dict = {}  # hwmon energy1_input path → (monotonic seconds, microjoules) at the last reading
 
 
-def gpu_power_w(drm: Path = Path("/sys/class/drm")) -> float | None:
+def _hwmon_watts(mon: Path) -> float | None:
+    """One hwmon directory's power draw in watts: power1_average, else power1_input (amdgpu
+    generations with no average), else the average since the last call from its energy1_input
+    counter (Intel's i915 and xe publish only that); None when it reports none of them. A
+    counter's first reading, and one that went back (wrapped or reset), gives 0 for that interval."""
+    for name in ("power1_average", "power1_input"):
+        try:
+            return int(_read(mon / name)) / 1e6
+        except ValueError:
+            continue  # missing, a card reporting nothing, or non-numeric text
+    try:
+        uj = int(_read(mon / "energy1_input"))
+    except ValueError:
+        return None
+    now, key = time.monotonic(), str(mon / "energy1_input")
+    last, _ENERGY[key] = _ENERGY.get(key), (now, uj)
+    if last and uj >= last[1] and now > last[0]:
+        return (uj - last[1]) / 1e6 / (now - last[0])
+    return 0.0
+
+
+def gpu_power_w(drm: Path = DRM) -> float | None:
     """Power draw of the discrete cards, in watts: nvidia-smi's power.draw, else each card's
-    hwmon power1_average, power1_input (amdgpu generations with no average), or the average over
-    the time since the last call from its energy1_input counter (Intel's i915 and xe publish only
-    that): read from power1_average alone, those cards' energy stayed 0 and the savings said it
-    wasn't measured (#271, the audit of 1.2). A counter's first reading, and one that went back
-    (wrapped or reset), gives nothing for that interval."""
+    hwmon (_hwmon_watts): read from power1_average alone, Intel's cards' energy stayed 0 and the
+    savings said it wasn't measured (#271, the audit of 1.2)."""
     if system() == "macos":
         return None
     total = 0.0
@@ -255,23 +273,75 @@ def gpu_power_w(drm: Path = Path("/sys/class/drm")) -> float | None:
     for mon in sorted(drm.glob("card[0-9]*/device/hwmon/hwmon*")):
         if "-" in mon.parent.parent.parent.name:  # a connector (card0-DP-1), not a card
             continue
-        for name in ("power1_average", "power1_input"):
-            try:
-                total += int(_read(mon / name)) / 1e6
-                found = True
-                break
-            except ValueError:
-                continue  # missing, a card reporting nothing, or non-numeric text
-        else:
-            try:
-                uj = int(_read(mon / "energy1_input"))
-            except ValueError:
-                continue
-            now, key = time.monotonic(), str(mon / "energy1_input")
-            last, _ENERGY[key] = _ENERGY.get(key), (now, uj)
+        w = _hwmon_watts(mon)
+        if w is not None:
             found = True
-            if last and uj >= last[1] and now > last[0]:
-                total += (uj - last[1]) / 1e6 / (now - last[0])
+            total += w
+    return round(total, 1) if found and total else None
+
+
+# ---- per-card readers for wb top: plain sysfs reads, cheap enough for every tick ----
+
+def smi_path() -> str | None:
+    """The nvidia-smi this machine has (PATH, else WSL's), or None: wb top streams from it."""
+    return shutil.which("nvidia-smi") or (WSL_SMI if os.path.isfile(WSL_SMI) else None)
+
+
+def drm_cards(drm: Path = DRM) -> list[dict]:
+    """Each display card under ``drm`` once (by PCI slot; connectors skipped): ``card`` (card0),
+    ``dev`` (its device directory), ``slot``, ``driver``, ``pci_id``. No lspci (card_name does
+    that, once): wb top reads these every tick."""
+    found, seen = [], set()
+    for dev in sorted(drm.glob("card[0-9]*/device")):
+        if "-" in dev.parent.name:  # a connector (card0-DP-1), not a card
+            continue
+        uevent = dict(x.split("=", 1) for x in _read(dev / "uevent").splitlines() if "=" in x)
+        slot = uevent.get("PCI_SLOT_NAME") or dev.parent.name
+        if slot in seen:
+            continue
+        seen.add(slot)
+        found.append({"card": dev.parent.name, "dev": dev, "slot": slot,
+                      "driver": uevent.get("DRIVER", ""), "pci_id": uevent.get("PCI_ID", "")})
+    return found
+
+
+def card_name(card: dict) -> str:
+    """The card's name from lspci, else its PCI id: once per card, not per tick."""
+    return (_run("lspci", "-s", card["slot"]).partition(": ")[2] if card.get("slot") else "") \
+        or card.get("pci_id") or card.get("card") or "unknown"
+
+
+def _num(text: str) -> int | None:
+    return int(text) if text.isdigit() else None
+
+
+def gpu_busy(dev: Path) -> int | None:
+    """The card's busy percentage (amdgpu's and xe's gpu_busy_percent), None where it has none."""
+    return _num(_read(dev / "gpu_busy_percent"))
+
+
+def vram(dev: Path) -> tuple[int | None, int | None]:
+    """(used, total) bytes of the card's VRAM from mem_info_vram_*, None each where not said."""
+    return _num(_read(dev / "mem_info_vram_used")), _num(_read(dev / "mem_info_vram_total"))
+
+
+def gtt(dev: Path) -> tuple[int | None, int | None]:
+    """(used, total) bytes of the system RAM an amdgpu card maps (GTT): an APU's models live there."""
+    return _num(_read(dev / "mem_info_gtt_used")), _num(_read(dev / "mem_info_gtt_total"))
+
+
+def discrete(dev: Path) -> bool:
+    """Memory of its own: only a card's VRAM has a vendor (gpus' rule)."""
+    return bool(_read(dev / "mem_info_vram_vendor"))
+
+
+def card_watts(dev: Path) -> float | None:
+    """One card's power draw from its hwmon, in watts; None when it reports none."""
+    total, found = 0.0, False
+    for mon in sorted(dev.glob("hwmon/hwmon*")):
+        w = _hwmon_watts(mon)
+        if w is not None:
+            found, total = True, total + w
     return round(total, 1) if found and total else None
 
 
