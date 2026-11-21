@@ -1993,7 +1993,8 @@ const TICK = {
   queue: [{ task: 'later', model: 'ollama/n', waited_s: 30 }],
 }
 
-test('the live view runs wb top only while the Stats tab is on screen with Live view on, and ends it when left', async ($, on) => {
+test('the live view runs wb top only while the Stats tab is on screen with Live view on, and ends it when left', { timeoutMs: 20_000 }, async ($, on) => {
+  // the kit's 5 s default timed it out on a loaded machine (#546)
   // #408: hidden, minimized, another tab or Live view off: no child at all
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = { '/wb/results.jsonl': '' }
@@ -2096,6 +2097,51 @@ test('the history keeps its last feed when a read fails, and says it is not upda
   expect(statsLines(null, 'timed out')).toEqual([{ label: '', text: 'History unavailable: timed out (wb stats --json)' }])
   expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1 } } }, 'timed out'))
     .toEqual([{ label: '', text: 'Not updated: timed out (wb stats --json)' }, { label: 'This week', text: '1 task · 1 landed' }])
+})
+
+test('a poll and tab presses at once start one wb top, and leaving ends every one started (#546)', { timeoutMs: 20_000 }, async ($, on) => {
+  // two syncTops at once both saw no child across the clock's await and both spawned; only the
+  // second was ended by a close, the first ran on beside the next one, and both fed the sparkline
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '' }
+  const pane = fakeTasks(on, files, [], true, [], false)
+  let starts = 0, ends = 0, most = 0
+  on('process.spawn', async function* (_: any, e: any) {
+    if (e.argv[1] !== 'top') {
+      yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+      await new Promise(() => {})
+    }
+    starts += 1
+    most = Math.max(most, starts - ends)
+    const stall = starts === 2                                           // the second is slow to print
+    try {
+      for (;;) {
+        yield { stream: 'stdout', text: JSON.stringify(TICK) + '\n' }
+        await new Promise(r => setTimeout(r, stall ? 60 : 5))
+      }
+    } finally {
+      ends += 1
+    }
+  })
+  on('process.run', (_: any, e: any) => ({ value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ tasks: 0 }) : '', stderr: '' } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  await clock.advance(31_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await Promise.all([ui.press({ key: 'tab-stats' }), ui.press({ key: 'tab-stats' }), clock.advance(31_000)])
+  await new Promise(r => setTimeout(r, 40))
+  expect(starts).toBe(1)
+  for (let i = 0; i < 3; i++) {                                          // away and back at once, over and over
+    await Promise.all([ui.press({ key: 'tab-tasks' }), ui.press({ key: 'tab-stats' })])
+    await Promise.all([ui.press({ key: 'tab-stats' }), clock.advance(31_000)])
+    await new Promise(r => setTimeout(r, 150))
+    expect(starts - ends).toBeLessThanOrEqual(1)                         // never one left running beside it
+  }
+  await ui.press({ key: 'tab-tasks' })
+  await new Promise(r => setTimeout(r, 150))
+  expect(starts - ends).toBe(0)                                          // each one started is ended
+  expect(most).toBeLessThanOrEqual(2)                                    // one ending as the next starts, no more
+  await ui.unmount()
 })
 
 test('a card wb top knows but has no reading for says so, not nothing (#547)', () => {

@@ -2034,11 +2034,15 @@ nothing until a surface attaches.
   tab opened, the last `BUSY_KEEP` 60 samples, in memory only), a line per running task (phase,
   round, its time, tok/s, said `(last call)` when not live, context %), the rack (one line per
   model: resident, split, cpu, idle or can't run, where its memory is, its speeds and load time, the
-  tasks on it) and the queue. One child (`runTop`), started by `syncTop` only while the tab is
-  shown, the pane not minimized and Live view on, checked at each poll, a tab's press, a
-  minimize, a bring-back and a Stats pick; it ends (`stopTop`, `return()` on the stream) the
+  tasks on it) and the queue. One child (`runTop`, read by `pumpTop`), started by `syncTop` only
+  while the tab is shown, the pane not minimized and Live view on, checked at each poll, a tab's
+  press, a minimize, a bring-back and a Stats pick; it ends (`stopTop`, `return()` on the stream) the
   moment any of those stops holding, and its own loop checks again at each line, so a pane put
-  away by the engine ends it within a tick. One that ended by itself is tried again after
+  away by the engine ends it within a tick. `syncTop` does its awaits first and then checks and
+  spawns with none between (`runTop` claims `mem.top` synchronously), and gives up when
+  `mem.topGen` (bumped by each start and stop) moved meanwhile; `stopTop` ends every child in
+  `mem.topKids`, not only the newest: a poll and a tab press at once started two, and a close
+  ended only the second (#546). One that ended by itself is tried again after
   `TOP_RETRY_MS` 30 s, doubling to `RETRY_MAX_MS` 10 min until a tick comes; from its second run in
   a row with no tick, **Now** says why (the last line of its stderr: "This machine can't be read:
   …"), where "Reading this machine…" was all it ever said (#553). Live view off: no child, no **Now**. The newest tick is the `top` atom

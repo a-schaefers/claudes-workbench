@@ -591,22 +591,36 @@ async function topWanted($: any): Promise<boolean> {
 
 // Starts or ends the live view's child to match topWanted: at each poll, on a tab's press, a
 // minimize and a Live view pick, and on each line it prints (so leaving the tab ends it within a
-// tick, whatever else happens)
+// tick, whatever else happens). Every await comes first and the check and the spawn after them,
+// with none between: a poll and a tab press at once both saw no child across the clock's await,
+// both started one, and only the second was ever ended by a close (#546)
 async function syncTop($: any) {
+  const gen = mem.topGen
+  const now = await $.clock.now()
   const want = await topWanted($)
-  if (want && !mem.top && (await $.clock.now()) >= mem.topRetryAt) void runTop($)
-  else if (!want && mem.top) stopTop()
+  if (gen !== mem.topGen) return // started or stopped meanwhile: that call's view is newer
+  if (want && !mem.top && now >= mem.topRetryAt) runTop($)
+  else if (!want && (mem.top || mem.topKids.size)) stopTop()
 }
 
 function stopTop() {
-  const child = mem.top
   mem.top = null
-  try { void child?.return?.(undefined)?.catch?.(() => {}) } catch { /* already ended */ }
+  mem.topGen += 1
+  for (const child of mem.topKids)
+    try { void child?.return?.(undefined)?.catch?.(() => {}) } catch { /* already ended */ }
+  mem.topKids.clear()
 }
 
-async function runTop($: any) {
+// Starts the child and claims it at once (mem.top, mem.topKids), before any await; pumpTop reads it
+function runTop($: any) {
+  mem.topGen += 1
   const child = $.process.spawn({ argv: [mem.wb, 'top', '--json'] })
   mem.top = child
+  mem.topKids.add(child)
+  void pumpTop($, child)
+}
+
+async function pumpTop($: any, child: any) {
   await update($, topNow, () => ({ snap: null, busy: {} })) // the sparkline starts as the tab opens
   let buf = '', err = '', ticked = false
   try {
@@ -631,12 +645,14 @@ async function runTop($: any) {
           return { snap, busy }
         })
       }
+      if (!mem.topKids.has(child)) break // stopped meanwhile: its lines aren't the view's
       if (!(await topWanted($))) break // off screen now: leaving the loop ends the child
     }
   } catch (e) {
     err ||= String(e) // it could not start, or its stream closed: tried again after a while
   }
-  if (mem.top === child) { // it ended by itself, not by stopTop: not again at once, and why
+  const mine = mem.topKids.delete(child)
+  if (mine && mem.top === child) { // it ended by itself, not by stopTop: not again at once, and why
     mem.top = null
     if (!ticked) mem.topFails += 1
     mem.topWhy = brief(err) || 'it ended'
@@ -941,6 +957,8 @@ const mem = {
   topFails: 0, // `wb top` runs in a row that ended with no tick: said under Now from the second
   topBackoff: 0, // the wait before the next try, doubling
   top: null as any, // the `wb top --json` child while the live view runs (syncTop)
+  topKids: new Set<any>(), // every child started and not yet ended: stopTop ends them all (#546)
+  topGen: 0, // bumped by each start and stop: a syncTop whose awaits saw it change starts nothing
   topRetryAt: 0, // not before then, after one ended by itself
   price: null as number | null, // the electricity price wb says is set (`wb savings --json`)
   cwd: '', // the session's directory, resolved: which old tasks are this session's (mine)
