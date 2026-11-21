@@ -6309,6 +6309,29 @@ class Lane(Base):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(len(git("rev-parse", "--short", "HEAD").stdout.strip()), 9)  # kept
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock: the kernel refuses the reads")
+    @home_outside_the_lane
+    def test_a_ros_overlay_under_the_home_on_pythonpath_and_ld_library_path_stays_readable(self):
+        # #667 (the 2026-11-21 audit): ~/ros2_ws/install was left out of the read lane, so
+        # `import my_msgs` raised PermissionError and its libraries couldn't be opened
+        home = self.fake_home()
+        site = home / "ros2_ws/install/my_msgs/lib/python3/site-packages"
+        libs = home / "ros2_ws/install/my_msgs/lib"
+        (site / "my_msgs").mkdir(parents=True)
+        (site / "my_msgs" / "__init__.py").write_text("OK = 1\n")
+        (libs / "libmy_msgs.so").write_text("elf")
+        (home / ".ssh").mkdir()
+        (home / ".ssh" / "id_ed25519").write_text("key")
+        (home / "letters.txt").write_text("private")
+        os.environ.update(WB_USER_PYTHONPATH=str(site), LD_LIBRARY_PATH=f"{libs}:{home}",
+                          AMENT_PREFIX_PATH=f"{home / 'ros2_ws/install/my_msgs'}:/",
+                          CMAKE_PREFIX_PATH=str(home / ".ssh"))   # never ~, /, or a secret
+        task = self.bare_task("t-ros", self.repo)
+        self.assertEqual(self.reads_in_lane(task, [site / "my_msgs" / "__init__.py",
+                                                   libs / "libmy_msgs.so", home / "letters.txt",
+                                                   home / ".ssh" / "id_ed25519"]),
+                         ["read", "read", "refused", "refused"])
+
     def test_a_fresh_cargo_home_gets_its_caches_made_so_the_split_grants_them(self):
         # the 0.90 review: ~/.cargo split around bin/ and env granted only what existed, so a
         # fresh rustup install couldn't make registry/ and a git dependency couldn't make git/

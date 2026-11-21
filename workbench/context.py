@@ -714,6 +714,26 @@ def sdk_roots(hidden: set[str]) -> set[str]:
             and not any(h == r or _under(h, r) or _under(r, h) for h in hidden)}
 
 
+# The search paths the user's shell exports for a workspace outside the repo: a ROS 2 overlay
+# (~/ros2_ws/install, PYTHONPATH and AMENT_PREFIX_PATH from its setup.bash), a src tree, Spack.
+# python_path hands the agent PYTHONPATH, but the read lane kept nothing of it under a non-dot
+# home directory, so `import my_msgs` raised PermissionError and a library on LD_LIBRARY_PATH
+# "cannot open shared object file" (#667, the 2026-11-21 audit). Read-only, like sdk_roots.
+SEARCH_PATH_VARS = ("PYTHONPATH", "LD_LIBRARY_PATH", "AMENT_PREFIX_PATH", "CMAKE_PREFIX_PATH",
+                    "PKG_CONFIG_PATH")
+
+
+def search_roots(hidden: set[str]) -> set[str]:
+    """The absolute directories on SEARCH_PATH_VARS (and the user's PYTHONPATH a detached runner
+    keeps, USER_PYTHONPATH) that exist, real paths: never `/`, the home directory or a place
+    holding or inside a secret."""
+    home = os.path.realpath(Path.home())
+    paths = [d for v in (*SEARCH_PATH_VARS, USER_PYTHONPATH) for d in (os.environ.get(v) or "").split(os.pathsep)]
+    real = {os.path.realpath(p) for p in paths if p and os.path.isabs(p) and os.path.isdir(p)}
+    return {r for r in real if r not in ("/", home)
+            and not any(h == r or _under(h, r) or _under(r, h) for h in hidden)}
+
+
 # the toolchains `wb doctor` checks for snaps
 TOOLCHAINS = ("go", "node", "npm", "npx", "yarn", "pnpm", "dotnet", "java", "cmake", "flutter",
               "dart", "kotlin", "cargo", "rustc", "python3", "opencode")
@@ -1262,7 +1282,7 @@ def readable(task: store.Task) -> list[str] | None:
     keep = {os.path.realpath(p) for p in (task.spec.get("repo"), PKG_ROOT, *lane,  # PKG_ROOT:
                                           *lane_paths(task), *siblings(task))  # the git shim,
             if p}                                                              # the ask server
-    keep |= tool_roots(hidden) | sdk_roots(hidden)
+    keep |= tool_roots(hidden) | sdk_roots(hidden) | search_roots(hidden)
     # OpenCode's global config where OPENCODE_CONFIG_DIR keeps it, outside the dotfiles: the
     # agent's OpenCode loads it itself (#370, the audit of 1.6)
     if os.environ.get("OPENCODE_CONFIG_DIR"):

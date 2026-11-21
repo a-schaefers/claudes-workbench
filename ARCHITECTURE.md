@@ -1396,7 +1396,12 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `JAVA_HOME`, `FLUTTER_ROOT`, `DOTNET_ROOT`, and
   `SDK_DEFAULTS`, Android Studio's `~/Android/Sdk` and macOS's `~/Library/Android/sdk`: with only
   `platform-tools` on PATH, Gradle couldn't open `platforms/*/android.jar` and every Android build
-  failed, #437, the audit of 1.8), not the user's documents or other projects. On WSL (`hardware.system()`), never the
+  failed, #437, the audit of 1.8), the directories the user's search paths name
+  (`search_roots`: `SEARCH_PATH_VARS`, `PYTHONPATH` (the user's, `WB_USER_PYTHONPATH` in a detached
+  runner), `LD_LIBRARY_PATH`, `AMENT_PREFIX_PATH`, `CMAKE_PREFIX_PATH`, `PKG_CONFIG_PATH`; never
+  `/`, the home directory or one holding or inside a secret: a ROS 2 overlay in
+  `~/ros2_ws/install` was hidden, so `import my_msgs` raised PermissionError, #667), not the
+  user's documents or other projects. On WSL (`hardware.system()`), never the
   Windows drives either (`windows_drives`: the DrvFs mounts in `/proc/self/mounts`, and any
   `/mnt/<letter>`): a Windows program runs through interop as a Windows process, as the user,
   outside Landlock and no-new-privileges, and the 0.90 review found the Windows PATH (System32,
