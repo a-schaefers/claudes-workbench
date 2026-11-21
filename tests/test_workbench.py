@@ -8473,6 +8473,23 @@ class Bench(Base):
         bench.bundle(shallow, "HEAD", dest)                   # whole again: it bundles and clones
         gitops.git(self.tmp.name, "clone", "-q", "-b", "main", str(dest), str(shallow) + "-c")
 
+    def test_a_case_hides_the_golden_file_its_test_reads_beside_the_test(self):
+        # #500 (the audit of 1.90): bench's own test pattern left Go's testdata/ out of the hidden
+        # checks, so the base failed for lack of the golden file and a replay passed only if the
+        # agent wrote it too
+        from workbench import bench
+        self.start("t-gold", "ok", "--test", "sh tests/check.sh")
+        wait_phase("t-gold", {"review"})
+        wt = store.Task("t-gold").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qxf testdata/answer.golden answer.txt\n")
+        (wt / "testdata").mkdir()
+        (wt / "testdata" / "answer.golden").write_text("42\n")
+        run_wb("accept", "t-gold", "-m", "feat: the answer")
+        out = run_wb("bench", "add", "t-gold")
+        self.assertIn("testdata/answer.golden", out)
+        self.assertTrue((bench.case_dir("t-gold") / "hidden" / "testdata" / "answer.golden").is_file())
+
     def test_a_case_keeps_the_tasks_setup_and_grants_for_its_checks_and_replays(self):
         # #250 (the audit of 1.2): a task's --setup made an ignored stamp its tests need, and
         # bench add rejected the accepted commit itself, its scratch clone without the stamp;

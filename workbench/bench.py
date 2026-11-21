@@ -27,7 +27,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import ask_mcp, context, gitops, media, models, router, runner, spend, store
+from . import ask_mcp, context, gitops, media, models, router, runner, spend, store, verify
 from .runner import PKG_ROOT
 from .watch import Watcher
 
@@ -39,7 +39,6 @@ REFUSED = ("No reviewer is available in this run, so nothing outside the everyda
 FOLD = "\n---\nHow to work"
 TEST_LINE = re.compile(r"^- The acceptance command is `(.+)`\. Run it", re.M)
 STEP_HEAD = re.compile(r"\AStep (\d+) of this task is done and committed \([^)]*\)\. The next step:\n\n")
-TESTISH = re.compile(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_[^/]+$|_test\.[^/.]+$|\.(test|spec)\.[^/]+$")
 BASE_CHECK_SECS = 120  # the hidden checks on the base, at add time; past this, not checked
 
 
@@ -287,7 +286,10 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         raise RuntimeError(f"step {step} had no acceptance command: nothing to grade a replay by")
     changed = gitops.git(repo, "diff", "--name-only", "--no-renames", "--diff-filter=AM", base, ref
                          ).splitlines()
-    picked = hidden if hidden is not None else [p for p in changed if TESTISH.search(p)]
+    # the tests and the data they read (Go's testdata/, fixtures/, golden files, Jest snapshots),
+    # verify's one pattern: a golden file left out of hidden/ failed the base for lack of it and
+    # passed a replay only when the agent wrote it (#500, the audit of 1.90)
+    picked = hidden if hidden is not None else [p for p in changed if verify.looks_like_test(p)]
     for p in picked:
         if not _safe(p):
             raise RuntimeError(f"{p}: a hidden check is a path inside the repo")

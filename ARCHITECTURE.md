@@ -3021,8 +3021,9 @@ own commit was rejected, and its grants, deleted with its rules at the close, we
   command, from the protocol's `- The acceptance command is` line (`TEST_LINE`; `wb next --test`
   can change it per step);
 - the hidden checks: `--hidden` paths, by default the files the step added or changed that look
-  like tests (`TESTISH`: under `tests/`, `test/`, `spec/`, `__tests__/`, or `test_*`, `*_test.*`,
-  `*.test.*`, `*.spec.*`), copied from the reference into `hidden/` with their Git mode (a
+  like tests or the data a test reads (`verify.looks_like_test`, the one pattern `wb verify` uses
+  too: under `tests/`, `test/`, `spec/`, `__tests__/`, `testdata/`, `fixtures/`, `__snapshots__/`,
+  `golden/`, or `test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*.snap`; #500), copied from the reference into `hidden/` with their Git mode (a
   100755 file stays executable: written at 0644, an executable `./test_check.sh` exited 126 on the
   right answer, #346), and overlaid with it on the base, the reference and every replay alike
   (`overlay`); and `--check`, a command that must pass too;
