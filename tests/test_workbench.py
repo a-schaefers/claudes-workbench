@@ -7097,6 +7097,20 @@ class Audio(Base):
                 found = audio.inspect(quiet, "sfx", draw=False)
                 self.assertTrue(found["silent"])
 
+    def test_the_word_error_rate_counts_the_fewest_edits_among_repeated_words(self):
+        # #593 (Codex's audit of 1.8 → 1.90): difflib paired an insert with a delete, so one wrong
+        # word in "go go go go" scored 100% with the wrong differences, and the 100% cap made an
+        # insertion-heavy reading look like a lighter one
+        self.assertEqual(audio.wer("go go go go", "go now go go"), 0.25)
+        self.assertEqual(audio.differences("go go go go", "go now go go"), ["go → now"])
+        self.assertEqual(audio.wer("la la la la", "la la now la"), 0.25)
+        self.assertEqual(audio.wer("go go go go", "go go go now"), 0.25)
+        heavy = audio.wer("one two three", "one two three four five six seven")
+        self.assertAlmostEqual(heavy, 4 / 3, places=3)
+        self.assertGreater(heavy, audio.wer("one two three", "one two three four five"))
+        self.assertEqual(audio.wer("the cat sat on the mat", "the cat on the the mat"), 0.333)
+        self.assertEqual(audio.wer("one two", ""), 1.0)
+
     def test_an_engine_refuses_what_it_has_no_slot_for_and_the_wrong_kind(self):
         tmp, tone = Path(self.tmp.name), self.tone()
         self.engines({"tts": {"command": f"{sys.executable} {tone} --out {{out}}", "gpu": False,

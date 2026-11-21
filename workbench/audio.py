@@ -308,33 +308,61 @@ def words(text: str) -> list[str]:
     return re.findall(r"[\w']+", text.lower().replace("’", "'"))
 
 
-def _spans(script: str, heard: str) -> tuple[int, list[tuple[str, str]]]:
-    """The script's words and where the listener heard something else, as (script, heard)
-    spans. A span that differs only in spacing or apostrophes ("boatswain's", "boat swain's") is
-    a match: the first real run (#396) counted a perfect take of it as a miss."""
-    import difflib
+def _align(ref: list[str], hyp: list[str]) -> list[tuple[list[str], list[str], int]]:
+    """The fewest edits (substitutions, deletions, insertions) from ``ref`` to ``hyp``, as runs
+    of (script words, heard words, edits): 0 edits for a matched word, else a whole stretch of
+    edits. difflib's longest-block matching paired an insert with a delete among repeated
+    words: one wrong word in "go go go go" scored 100% (#593)."""
+    n, m = len(ref), len(hyp)
+    d = [list(range(m + 1))] + [[i] + [0] * m for i in range(1, n + 1)]
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            d[i][j] = min(d[i - 1][j - 1] + (ref[i - 1] != hyp[j - 1]), d[i - 1][j] + 1, d[i][j - 1] + 1)
+    steps, i, j = [], n, m
+    while i or j:  # back from the end: a match or substitution first, then a deletion
+        if i and j and d[i][j] == d[i - 1][j - 1] + (ref[i - 1] != hyp[j - 1]):
+            steps.append((ref[i - 1] == hyp[j - 1], [ref[i - 1]], [hyp[j - 1]]))
+            i, j = i - 1, j - 1
+        elif i and d[i][j] == d[i - 1][j] + 1:
+            steps.append((False, [ref[i - 1]], []))
+            i -= 1
+        else:
+            steps.append((False, [], [hyp[j - 1]]))
+            j -= 1
+    runs: list[list] = []
+    for same, a, b in reversed(steps):
+        if same or not runs or not runs[-1][2]:
+            runs.append([a, b, 0 if same else 1])
+        else:  # this edit extends the stretch before it
+            runs[-1] = [runs[-1][0] + a, runs[-1][1] + b, runs[-1][2] + 1]
+    return [tuple(r) for r in runs]
+
+
+def _spans(script: str, heard: str) -> tuple[int, list[tuple[str, str, int]]]:
+    """The script's words and where the listener heard something else, as (script, heard,
+    edits) spans. A span that differs only in spacing or apostrophes ("boatswain's", "boat
+    swain's") is a match: the first real run (#396) counted a perfect take of it as a miss."""
     ref, hyp = words(script), words(heard)
     flat = lambda ws: "".join(ws).replace("'", "")  # noqa: E731
-    spans = []
-    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ref, hyp, autojunk=False).get_opcodes():
-        if op != "equal" and flat(ref[i1:i2]) != flat(hyp[j1:j2]):
-            spans.append((" ".join(ref[i1:i2]), " ".join(hyp[j1:j2])))
+    spans = [(" ".join(a), " ".join(b), k) for a, b, k in _align(ref, hyp)
+             if k and flat(a) != flat(b)]
     return len(ref), spans
 
 
 def wer(script: str, heard: str) -> float:
-    """Word error rate: the words in the spans heard differently, over the script's length.
-    Read it with `differences`: a listener writes "2026" for "twenty twenty-six", and Claude can
-    tell that from a fumble only by seeing the words."""
+    """Word error rate: substitutions, deletions and insertions over the script's length, not
+    capped (a reading twice as long as the script ranks below a lighter one). Read it with
+    `differences`: a listener writes "2026" for "twenty twenty-six", and Claude can tell that
+    from a fumble only by seeing the words."""
     n, spans = _spans(script, heard)
     if not n:
         return 0.0 if not words(heard) else 1.0
-    return round(min(1.0, sum(max(len(a.split()), len(b.split())) for a, b in spans) / n), 3)
+    return round(sum(k for _, _, k in spans) / n, 3)
 
 
 def differences(script: str, heard: str, most: int = 4) -> list[str]:
     """Up to ``most`` spans as 'script → heard' ('…→ (nothing)' for a skipped stretch)."""
-    return [f"{a or '(nothing)'} → {b or '(nothing)'}" for a, b in _spans(script, heard)[1][:most]]
+    return [f"{a or '(nothing)'} → {b or '(nothing)'}" for a, b, _ in _spans(script, heard)[1][:most]]
 
 
 def _multipart(fields: dict, file: Path) -> tuple[bytes, str]:

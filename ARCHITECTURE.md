@@ -3607,10 +3607,13 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   take clipped on one channel read clean, one with a channel inverted read SILENT (the downmix
   cancelled it), and clipping above 8 kHz was filtered out (#586). `levels` reads 50 ms blocks: silence is below `SILENT_DB` (-50 dBFS), a gap is
   `GAP_SECS` (1 s) or more between sounds, and a sample at 0.999 of full scale or more counts as
-  clipped. `_spans` aligns the script's words with the heard ones (`difflib`, lower case) and keeps
-  the spans heard differently, except those that differ only in spacing or apostrophes
-  ("boatswain's", "Boat Swain's"); `wer` is their words over the script's, `differences` the
-  first four as `script → heard`. The line shows both, because a WER alone misled on the first
+  clipped. `_spans` aligns the script's words with the heard ones (`_align`: the fewest word
+  edits, Levenshtein with a backtrace, lower case) and keeps each stretch of edits as a span,
+  except those that differ only in spacing or apostrophes ("boatswain's", "Boat Swain's"); `wer`
+  is the substitutions, deletions and insertions over the script's words, not capped at 100%,
+  `differences` the first four spans as `script → heard`. `difflib` paired an insert with a
+  delete among repeated words: one wrong word in "go go go go" scored 100%, its differences
+  wrong too (#593). The line shows both, because a WER alone misled on the first
   real run (#396): a perfect "Twenty twenty-six" read 30%, the listener having written "2026". A listener that fails is reported on the
   line, not raised.
 - The line reads `3.4 s (asked 3) · peak -1.2 dBFS · -16 LUFS · lead 0.1 s, tail 0.3 s · gaps … ·
