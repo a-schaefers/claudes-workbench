@@ -2349,9 +2349,8 @@ def _rotate_notices(days: float) -> int:
         if old:
             with open(path.with_name("notify.old.jsonl"), "ab") as fh:
                 fh.write(b"".join(map(line, old)))
-            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            tmp.write_bytes(b"".join(map(line, kept)))
-            os.replace(tmp, path)
+                store._synced(fh)  # on the disk before they leave notify.jsonl
+            store.replace_bytes(path, b"".join(map(line, kept)))  # synced (#734)
     return len(old)
 
 
@@ -3057,7 +3056,7 @@ NOTES_MAX, NOTE_CHARS = 20, 300  # the mod puts them in every workbench-mode pro
 
 def _notes() -> list[str]:
     try:
-        text = (store.home() / "notes.md").read_text()
+        text = (store.home() / "notes.md").read_text(encoding="utf-8")
     except FileNotFoundError:
         return []
     notes = []
@@ -3095,10 +3094,7 @@ def cmd_notes(a):
             for n in gone:
                 del notes[n - 1]
         if a.action:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(f".notes.md.{os.getpid()}.tmp")
-            tmp.write_text("".join(f"- {n}\n" for n in notes))
-            os.replace(tmp, path)
+            store.replace_bytes(path, "".join(f"- {n}\n" for n in notes).encode("utf-8"))  # #734
     if not notes:
         print("no notes yet: wb notes add \"<what the user wants, in any project>\"")
     for i, n in enumerate(notes, 1):

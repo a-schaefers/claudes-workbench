@@ -262,6 +262,24 @@ def write_json(path: Path, data) -> None:
         raise
 
 
+def replace_bytes(path: Path, data: bytes) -> None:
+    """``path``'s whole contents replaced by ``data`` as write_json does: a name of its own,
+    synced, then renamed into place. results.jsonl (wb trial), notify.jsonl (the daily gc), a
+    task's `acked` and notes.md were renamed unsynced under a pid-only name, so a crash soon after
+    could leave the router's whole history or every pending notice empty (#734, the 2026-11-21
+    audit)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
+    try:
+        with open(tmp, "xb") as fh:
+            fh.write(data)
+            _synced(fh)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _synced(fh) -> None:
     """The file's data on the disk before a rename puts it in place: renamed unsynced, a power
     loss on XFS (RHEL's default) or ext4 without auto_da_alloc can leave task.json or
@@ -438,11 +456,9 @@ def mark_trials(names: set[str]) -> list[str]:
         rows = read_jsonl(path)[0]
         hit = [r["task"] for r in rows if r.get("task") in names and not r.get("trial")]
         if hit:
-            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            tmp.write_text("".join(json.dumps({**r, "trial": True} if r.get("task") in names else r,
-                                              ensure_ascii=False) + "\n" for r in rows),
-                           encoding="utf-8")
-            os.replace(tmp, path)
+            replace_bytes(path, "".join(json.dumps({**r, "trial": True} if r.get("task") in names
+                                                   else r, ensure_ascii=False) + "\n"
+                                        for r in rows).encode("utf-8"))  # #734
     return sorted(set(hit))
 
 
@@ -598,10 +614,7 @@ def write_ack(task: "Task", ts: float) -> None:
     """Task's `acked` mark, replaced whole: the mod and wb wait read it on every poll, and a read
     between a truncate and the write (or a write that failed after it) saw 0, every old notice
     news again (the 2026-11-16 audit)."""
-    f = task.dir / "acked"
-    tmp = f.with_name(f".acked.{os.getpid()}.tmp")
-    tmp.write_text(str(ts))
-    os.replace(tmp, f)
+    replace_bytes(task.dir / "acked", str(ts).encode())  # synced: read back empty, all news (#734)
 
 
 def all_tasks(archived: bool = False):

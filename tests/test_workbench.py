@@ -8532,6 +8532,38 @@ class Cleanup(Base):
             store.write_through(Path(self.tmp.name) / "c.json", {"a": 1})
         self.assertEqual(calls, ["fsync", "replace"] * 2)
 
+    def test_the_whole_file_rewrites_reach_the_disk_before_they_replace_the_old_ones(self):
+        # #734 (the 2026-11-21 audit): wb trial's results.jsonl, the gc's notify.jsonl, a task's
+        # acked and notes.md were renamed into place unsynced, so a crash could empty them
+        self.start("t-sync", "ok")
+        wait_phase("t-sync", {"review"})
+        run_wb("discard", "t-sync")
+        task = store.Task("t-sync")
+        task.notify("review", "old news")
+        rows = store.read_jsonl(store.home() / "notify.jsonl")[0]
+        for r in rows:
+            r["ts"] -= 30 * 86400                                     # handled, and old
+        (store.home() / "notify.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        synced, replaced = set(), []
+        real_sync, real_replace = store._synced, os.replace
+
+        def sync(fh):
+            synced.add(os.path.realpath(fh.name))
+            real_sync(fh)
+
+        def replace(a, b):
+            replaced.append((os.path.basename(b), os.path.realpath(a) in synced))
+            real_replace(a, b)
+        with mock.patch.object(store, "_synced", sync), mock.patch("os.replace", replace):
+            run_wb("trial", "t-sync")
+            store.write_ack(task, 5.0)
+            run_wb("notes", "add", "keep the specs short")
+            self.assertGreater(cli._rotate_notices(7), 0)
+        got = dict(replaced)
+        for name in ("results.jsonl", "acked", "notes.md", "notify.jsonl"):
+            self.assertIs(got.get(name), True, (name, replaced))
+        self.assertEqual(store.read_jsonl(store.home() / "results.jsonl")[0][-1].get("trial"), True)
+
     def test_a_task_json_emptied_by_a_power_loss_fails_the_task_saying_so(self):
         # #475: read as {}, task.spec["model"] raised a bare KeyError, and the runner died
         # without a word inside its own failure report

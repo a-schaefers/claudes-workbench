@@ -5670,7 +5670,12 @@ runs from the package's directory, look for it there: the 2026-11-16 audit; a re
 1.4). `write_json` writes `.<name>.<pid>.<random>.tmp` beside the file (created exclusively, so two threads never share one: the 2026-11-19 audit) and renames it
 after an fsync (`store._synced`, `write_through` too: renamed unsynced, a power loss on XFS or
 ext4 without `auto_da_alloc` could leave `task.json` or `status.json` empty, #475, the audit of
-1.8), replacing a symlink with a plain file, which is right for the state directory. `Task.spec`
+1.8), replacing a symlink with a plain file, which is right for the state directory.
+`replace_bytes(path, data)` does the same for a file rewritten whole that isn't JSON: `mark_trials`'
+results.jsonl, the daily gc's notify.jsonl (`cli._rotate_notices`, notify.old.jsonl's append synced
+first), a task's `acked` (`write_ack`) and notes.md; renamed unsynced under a pid-only name, a crash
+soon after could empty the router's whole history or every pending notice (#734, the 2026-11-21
+audit). `Task.spec`
 is a `store.Record`: a key `task.json` lacks raises `store.Damaged` (a `KeyError` to the code
 reading it, a `RuntimeError` to `cli.main`), "task <t>'s task.json is damaged (it has no
 'model'…)", and the runner fails the task with that line (`_load_failed`), not a crash. The
@@ -5825,7 +5830,7 @@ hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_
 
 **Other formats.**
 - `steer.jsonl`: `{ts, text, now}`. `acked`: a float timestamp as text, replaced whole
-  (`cli._write_ack`: a temp file renamed over it), since the mod and `wb wait` read it every poll
+  (`store.write_ack`: a synced temp file renamed over it, `replace_bytes`), since the mod and `wb wait` read it every poll
   and a read between a truncate and the write saw 0.
 - `ask/<id>.json`: `{id, ts, round, question, context, command?, path?}` (the agent's: the runner
   checks it); `<id>.answer`: the text (`ask_mcp.write_answer`), `NO_ANSWER` for one the runner
