@@ -939,7 +939,13 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
   session (`session export` lists a completed compaction) → fresh; the session's last assistant
   message that counted any tokens (`context_state`: one whose counts are all 0, an aborted step,
   is passed over, #481) carried `fresh_at` or more of the window (input + cache read + cache write + output + reasoning) →
-  fresh. This check doesn't look at whether files changed. When the export fails (a 30 s
+  fresh, unless the mid-round rule says a successor has no room (`no_room`, #781: the session
+  changed nothing, `session_floor` unset, or its floor sits less than `HANDOVER_ROOM` below the
+  handover point; not on a step's first round, whose reading is its own): then it carries on,
+  OpenCode's compaction the backstop, and the round report's context line says "the next round
+  carries on in this session" (judged as the step's next round, `full_session`). Ignored between
+  rounds, every auto-fix and feedback round on a small window re-read the same files and filled
+  up again. When the export fails (a 30 s
   timeout, a busy store: `transcript.export(sid, strict=True)` is None), the round's last
   `step_finish` count stands in (status `live_used`, when it is this session's), compactions are
   taken as none, and an `export` event says so: an empty export once read as an empty session, so
@@ -1167,7 +1173,7 @@ again: that cost a whole restart in one task of two (the 2026-11-17 measurement)
 1. `task X · label · round n · M.m min · local tokens IN in / OUT out` (this round; input
    excludes cache reads). Ahead of it in the review notice and `summary.md`, `auto-fix skipped:
    <cause>` when `not_the_code` kept the failure from the agent.
-2. `agent context: U.UK of WK (P%)[, compacted Nx][; the next round starts a fresh session]`.
+2. `agent context: U.UK of WK (P%)[, compacted Nx][; the next round starts a fresh session | ; the next round carries on in this session: …]` (#781).
 3. `STOPPED: why` or `opencode exited N (see …/runner.log)`, when either; then, past the first
    step, `steps 1-N committed on delegate/<task> (wb next): wb discard <task> drops this step and
    keeps that branch; to land them instead, …` (`steps_line`: reset the worktree, `wb accept

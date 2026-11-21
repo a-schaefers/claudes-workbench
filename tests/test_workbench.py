@@ -3890,6 +3890,26 @@ class Context(Base):
         self.assertIn("reached 76% of its window and had read 51% before its first change",
                       rows[0]["text"])
 
+    def test_a_full_session_whose_reading_leaves_a_successor_no_room_carries_on_into_the_next_round(self):
+        # #781 (the second 2026-11-21 audit): mid-round such a session carried on, but between
+        # rounds fresh_reason replaced it, and each auto-fix round re-read the same 17K and
+        # filled up again
+        os.environ["FAKE_FILL"] = "25000"                   # the export: 76% of the 32K window
+        self.start("t-781", "floor", "--auto-fix", "1", "--no-base-check", "--test", "exit 1")
+        st = wait_phase("t-781", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["session_floor"]), ("review", 2, 17000))
+        first, second = self.runs()[:2]
+        self.assertTrue(second["session"])                  # the same session, not a re-read
+        self.assertEqual(second["prompt"].split("\n")[0][:30], "The acceptance tests fail. Com")
+        report = store.Task("t-781").round_dir(2).joinpath("summary.md").read_text()
+        self.assertIn("the next round carries on in this session", report)
+        task = store.Task("t-781")
+        self.assertIsNone(runner.fresh_reason(task, {**task.status, "round": 3}))
+        # a new step's reading is its own (wb next), and a compacted session still goes fresh
+        self.assertIsNotNone(runner.fresh_reason(task, {**task.status, "round": 3, "step_round": 3}))
+        os.environ["FAKE_COMPACTED"] = "1"
+        self.assertEqual(runner.fresh_reason(task, {**task.status, "round": 3}), runner.COMPACTED)
+
     def test_a_stopped_task_resumes_in_a_fresh_session_without_a_review_round(self):
         self.start("t-c8", "hang", "--test", TEST_CMD)
         deadline = time.time() + 30

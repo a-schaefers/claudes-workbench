@@ -2044,10 +2044,15 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
              f" · local tokens {rnd['tok_in']} in / {rnd['tok_out']} out"]
     c = context_state(task)
     if c.get("used") and c.get("window"):
+        after = {**st, "round": n + 1}  # judged as the step's next round is (#781)
         lines.append(f"agent context: {c['used'] / 1000:.1f}K of {c['window'] // 1024}K "
                      f"({100 * c['used'] // c['window']}%)"
                      + (f", compacted {c['compactions']}x" if c.get("compactions") else "")
-                     + ("; the next round starts a fresh session" if fresh_reason(task) else ""))
+                     + ("; the next round starts a fresh session" if fresh_reason(task, after) else
+                        "; the next round carries on in this session: a fresh one would re-read "
+                        "what it read and have little room to work"
+                        if full_session(task, after, c) and no_room(task, after, c["window"])
+                        else ""))
     full = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0]
             if e.get("kind") == "reading_full" and e.get("round") == n]
     if full:
@@ -2194,10 +2199,28 @@ def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
     c = context_state(task)
     if c.get("compactions"):
         return COMPACTED
-    if c.get("used") and c.get("window") and c["used"] >= tuning.value(task, "fresh_at") * c["window"]:
+    if full_session(task, st, c) and not no_room(task, st, c["window"]):
         return (f"the last session was {100 * c['used'] // c['window']}% full "
                 f"({c['used'] / 1000:.1f}K of {c['window'] // 1024}K tokens)")
     return None
+
+
+def full_session(task: store.Task, st: dict, c: dict) -> bool:
+    """Whether the session's context (`context_state`) reached the handover point."""
+    return bool(c.get("used") and c.get("window")
+                and c["used"] >= tuning.value(task, "fresh_at") * c["window"])
+
+
+def no_room(task: store.Task, st: dict, window: int) -> bool:
+    """Whether a fresh session in this step would re-read what this one read before its first
+    change (status `session_floor`; all of it when it changed nothing) and be left less than
+    HANDOVER_ROOM to work: the mid-round rule, between rounds too. Ignored there, every auto-fix
+    and feedback round on a small window paid the re-read and filled up again (#781). Not on a
+    step's first round (wb next): the new step's reading is its own."""
+    if (st.get("step_round") or 1) >= st.get("round", 1):
+        return False
+    floor = st.get("session_floor")
+    return floor is None or tuning.value(task, "fresh_at") * window - floor < HANDOVER_ROOM * window
 
 
 ANSWERS_MAX = 4000  # characters of Claude's answers a fresh session carries; the latest first kept
