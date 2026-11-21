@@ -334,7 +334,9 @@ def _hwmon_watts(mon: Path) -> float | None:
 def gpu_power_w(drm: Path = DRM) -> float | None:
     """Power draw of the discrete cards, in watts: nvidia-smi's power.draw, else each card's
     hwmon (_hwmon_watts): read from power1_average alone, Intel's cards' energy stayed 0 and the
-    savings said it wasn't measured (#271, the audit of 1.2)."""
+    savings said it wasn't measured (#271, the audit of 1.2). An APU's hwmon (apu) is the whole
+    package's, its CPU cores too, so beside a card that isn't one it is left out: a Ryzen iGPU
+    beside a Radeon counted the agent's builds and tests as GPU energy (#706)."""
     if system() == "macos":
         return None
     total = 0.0
@@ -347,15 +349,17 @@ def gpu_power_w(drm: Path = DRM) -> float | None:
         nvidia = True  # at least one card reported a value
     if nvidia:
         return round(total, 1)
-    found = False
+    read = []  # (an APU's, watts) per card's hwmon
     for mon in sorted(drm.glob("card[0-9]*/device/hwmon/hwmon*")):
         if "-" in mon.parent.parent.parent.name:  # a connector (card0-DP-1), not a card
             continue
         w = _hwmon_watts(mon)
         if w is not None:
-            found = True
-            total += w
-    return round(total, 1) if found and total else None
+            read.append((apu(mon.parent.parent) is True, w))
+    if any(not is_apu for is_apu, _ in read):
+        read = [r for r in read if not r[0]]
+    total = sum(w for _, w in read)
+    return round(total, 1) if read and total else None
 
 
 # ---- per-card readers for wb top: plain sysfs reads, cheap enough for every tick ----

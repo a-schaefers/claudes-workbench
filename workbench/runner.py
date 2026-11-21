@@ -1129,7 +1129,10 @@ POWER_EVERY = 10  # seconds between GPU power samples: fine enough for a round, 
 class _Power(threading.Thread):
     """Samples the GPU's power draw every POWER_EVERY seconds while OpenCode runs a round and
     integrates it into watt-hours (the tests after it aren't counted). A None reading adds nothing
-    for that interval. It is the whole GPU's draw: tasks sharing the GPU each count all of it."""
+    for that interval. Each reading is the whole GPU's draw, so the watt-hours take this task's
+    share of it: the draw over the live tasks holding the lease (`sharers`). Two tasks sharing a
+    300 W GPU for an hour each counted 300 Wh, and the week's energy and its cost doubled (#706).
+    The mean and peak stay the whole GPU's draw."""
 
     def __init__(self):
         super().__init__(daemon=True)
@@ -1161,10 +1164,21 @@ class _Power(threading.Thread):
         watts = hardware.gpu_power_w()
         if watts is not None:
             self.w_sum, self.n, self.peak = self.w_sum + watts, self.n + 1, max(self.peak, watts)
+            watts /= sharers()
         return watts
 
     def stop(self):
         self.done.set()
+
+
+def sharers() -> int:
+    """How many tasks hold this machine's GPU lease now (models.holders, those not waiting: one
+    task's GPU tests are one task), at least 1: the share of the draw each one's energy counts."""
+    try:
+        held = models.holders()
+    except OSError:
+        return 1
+    return max(1, len({h.get("task") or pid for pid, h in held.items() if not h.get("waiting")}))
 
 
 # Shells OpenCode won't run a command in (it takes $SHELL, else bash): not POSIX `-c` shells

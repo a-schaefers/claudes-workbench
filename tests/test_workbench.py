@@ -10694,6 +10694,20 @@ class Savings(Base):
         self.assertAlmostEqual(p.wh, 150 * 40 / 3600, places=9)
         self.assertIs(p.clock, time.monotonic)
 
+    def test_tasks_sharing_the_gpu_each_count_their_share_of_its_draw(self):
+        # #706: two tasks on one 300 W GPU for an hour each added 300 Wh: the week said 600 Wh
+        held = {"101": {"task": "t-a"}, "102": {"task": "t-b"}, "103": {"task": "t-c", "waiting": True},
+                "104": {"task": "t-a", "tests": True}}   # t-a's GPU tests are still t-a
+        with mock.patch.object(hardware, "gpu_power_w", return_value=300.0), \
+                mock.patch.object(runner.models, "holders", lambda *a, **k: held):
+            p = runner._Power()
+            for t in range(0, 3601, 10):   # an hour, sampled every 10 s
+                p.step(float(t))
+        self.assertAlmostEqual(p.wh, 150.0, places=6)   # half of 300 Wh
+        self.assertEqual((p.w_sum / p.n, p.peak), (300.0, 300.0))   # the GPU's own draw
+        with mock.patch.object(runner.models, "holders", lambda *a, **k: {}):
+            self.assertEqual(runner.sharers(), 1)
+
     def test_accepted_row_records_energy_and_diff_and_discarded_row_neither(self):
         from workbench import store, results
         # the runner copies the user's CLAUDE.md; in the suite that is an empty fake home,
@@ -16233,6 +16247,23 @@ class Hardware(unittest.TestCase):
                 self.assertEqual(hardware.gpu_power_w(Path(d)), 80.0)
                 (intel / "energy1_input").write_text("5\n")             # wrapped: nothing for it
                 self.assertEqual(hardware.gpu_power_w(Path(d)), 50.0)
+
+    def test_gpu_power_leaves_an_apus_package_power_out_beside_a_card(self):
+        # #706: a Ryzen iGPU's power1_average is the whole package's, CPU cores too, and was
+        # added to the Radeon's: the agent's builds and tests counted as GPU energy
+        from workbench import hardware
+        with tempfile.TemporaryDirectory() as d:
+            for card, mon, watts, label in (("card0", "hwmon3", "45000000", "vddnb"),
+                                            ("card1", "hwmon4", "200000000", "vddgfx")):
+                path = Path(d, card, "device", "hwmon", mon)
+                path.mkdir(parents=True)
+                (path / "power1_average").write_text(watts)
+                (path / "in1_label").write_text(label)
+            with mock.patch("platform.system", lambda: "Linux"), \
+                    mock.patch("workbench.hardware._run", lambda *argv: ""):
+                self.assertEqual(hardware.gpu_power_w(Path(d)), 200.0)
+                shutil.rmtree(Path(d, "card1"))
+                self.assertEqual(hardware.gpu_power_w(Path(d)), 45.0)   # an APU alone: all it has
 
     def test_gpu_power_nvidia_adds_every_card_and_skips_n_a(self):
         from workbench import hardware

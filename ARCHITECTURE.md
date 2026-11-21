@@ -582,8 +582,11 @@ fake models, `WB_FAKE_MODELS`, which would read this machine's GPU; a None readi
 nothing; the tests after the round aren't counted). Its intervals are on the monotonic clock,
 and one past `FROZEN_SECS` (60 s: a suspend that clock still counted, as WSL2's may) or
 backwards adds nothing (`_Power.step`): on the wall clock an 8-hour suspend mid-round added
-1.2 kWh of a 150 W GPU to `gpu_wh`, the results row and `wb savings`' cost (#559). It is the whole GPU's draw, so tasks sharing
-the GPU each count all of it. The size: `gitops.footprint` gives `files`, `lines` (added) and
+1.2 kWh of a 150 W GPU to `gpu_wh`, the results row and `wb savings`' cost (#559). A reading is
+the whole GPU's draw, so each one adds this task's share: the draw over `runner.sharers()`, the
+tasks holding the lease and not waiting (`models.holders`, a task's GPU tests one task with it):
+two tasks sharing a 300 W GPU for an hour each counted 300 Wh, and the period's energy and cost
+doubled (#706). The mean and peak (`gpu_w_*`) stay the GPU's own draw. The size: `gitops.footprint` gives `files`, `lines` (added) and
 `removed`; each step records them (`results.step`), and an accepted task's row sums them as
 `diff`.
 
@@ -3211,7 +3214,9 @@ average), in microwatts, else the average since the last call from its `energy1_
 microjoules (Intel's i915 and xe publish only that; `_ENERGY` keeps each counter's last reading,
 and a first reading or one that went back gives nothing for that interval). A connector,
 `card0-DP-1`, is skipped. Read from `power1_average` alone, those cards' energy stayed 0 and the
-savings said it wasn't measured (#271, the audit of 1.2). It is the GPU energy each task's
+savings said it wasn't measured (#271, the audit of 1.2). An APU's hwmon (`apu`) is its whole
+package's, CPU cores too, so beside a card that isn't one it is left out; alone it is all there
+is (#706). It is the GPU energy each task's
 savings line shows.
 `memory()`: `/proc/meminfo` or `vm_stat`/`vm.swapusage`. `cpu()`, `ollama_settings()` (the
 environment of the Ollama that runs here and where it was read, `""` when nothing could say;
@@ -5913,7 +5918,7 @@ check-ins off), not `wb start`'s.
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
 | `live_used` | `{session, used}`: the context the round's last `step_finish` carried (input + cache + output + reasoning, #644), what the between-rounds check uses when the session export fails (#262) |
-| `gpu_wh` | the GPU energy its rounds used so far, in Wh (the runner's `_Power`; absent for a remote model or no reading) |
+| `gpu_wh` | the GPU energy its rounds used so far, in Wh (the runner's `_Power`, its share while tasks share the GPU: #706; absent for a remote model or no reading) |
 | `gpu_w_sum`, `gpu_w_n`, `gpu_w_peak` | the same sampler's readings in watts: their sum, count and peak, for the row's `gpu_w` (*Stats recording*) |
 | `speeds` | `{write, read, ttft}`: this task's own samples (`router.speed_samples`), the newest `TASK_SPEED_KEEP` 200 of each, with stats recording on |
 | `guards` | `{<guard>: n}`: the guards that stopped its rounds, with stats recording on (*Stats recording*) |
