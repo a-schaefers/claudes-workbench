@@ -1265,6 +1265,14 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
     t0 = time.time()
     if not away and not _room_beside(m):
         free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
+    others = box_others(m, keep) if away else []
+    host = urlparse(m.root).hostname
+    if others:  # another client's model on the box: not evicted in the middle of its request
+        _wait_unused({m.root: others}, warn,
+                     said=(f"on {host} is answering another client's requests: waiting up to "
+                           f"{INFLIGHT_WAIT // 60} min for it to go idle before loading {m.name} "
+                           f"({BOX_SHARED})"),
+                     then=f"loading {m.name} anyway")
     if m.engine == "ollama":
         if respread:
             # Ollama never re-places a loaded runner: a generate with the same options reuses
@@ -1276,6 +1284,9 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
               timeout=START_TIMEOUT)
         _placement(m, warn)
+        if others and (gone := [n for n in others if not _matches(n, set(_ollama_loaded(m.root)))]):
+            warn(f"loading {m.name} on {host} unloaded {', '.join(gone)}, which another client "
+                 f"of the box had loaded: {BOX_SHARED}")
     elif not status(m)["resident"]:
         if not m.start:
             raise RuntimeError(f"{m.id} is not running and has no start command")
@@ -1628,16 +1639,18 @@ def _in_use(doomed: dict, watch: float | None = None) -> set:
     return busy
 
 
-def _wait_unused(doomed: dict, warn) -> None:
+def _wait_unused(doomed: dict, warn, said: str = "", then: str = "unloading it") -> None:
     """Wait, up to INFLIGHT_WAIT, while a model free_gpu would unload is answering requests that
     aren't this account's tasks' (they are kept): unloading it between someone's requests made
-    them reload it on the next (#378). It is unloaded after, used or not: the GPU is the task's."""
+    them reload it on the next (#378). It is unloaded after, used or not: the GPU is the task's.
+    ``said``, ``then``: the warning's words, for another client's model on a wb remote box (#812)."""
     due = time.monotonic() + INFLIGHT_POLL
     busy = _in_use(doomed)
     if not busy:
         return
     names = ", ".join(sorted({n for _, n in busy}))
-    warn(f"{names} on ollama is answering requests that aren't this account's tasks (another "
+    warn(f"{names} {said}" if said else
+         f"{names} on ollama is answering requests that aren't this account's tasks (another "
          f"user's wb, Open WebUI, an editor): waiting up to {INFLIGHT_WAIT // 60} min for it to go "
          "idle before unloading it (models.json keep_loaded leaves a model loaded)")
     deadline = time.monotonic() + INFLIGHT_WAIT
@@ -1648,7 +1661,28 @@ def _wait_unused(doomed: dict, warn) -> None:
                        min(INFLIGHT_WATCH, max(deadline - time.monotonic(), 0)))
     if busy:
         names = ", ".join(sorted({n for _, n in busy}))
-        warn(f"{names} on ollama was still in use after {INFLIGHT_WAIT // 60} min: unloading it")
+        warn(f"{names} on ollama was still in use after {INFLIGHT_WAIT // 60} min: {then}")
+
+
+# Clients of one wb remote box don't share a lease: each one's gpu-<host>.json is in its own
+# lease_dir, so a laptop's and a desktop's tasks on one box each loaded their model, Ollama
+# evicted the other's to serve each request, and both paid a reload on most requests, the cause
+# never named (#812). So before a load there, a model another client is using is waited for
+# (not evicted mid-request), and one the load evicted anyway is named.
+BOX_SHARED = ("clients of one wb remote box don't share a GPU lease, so their models may swap on "
+              "every request: run them at different times, or on models that fit the box together")
+
+
+def box_others(m: Model, keep=()) -> list[str]:
+    """The models a wb remote box (``m``'s Ollama on another machine) has loaded that this
+    client's task isn't using: ``m`` and the models ``keep`` names aside, and keep_loaded's.
+    Another client's, or the box's own. [] when it doesn't answer, and for a local model."""
+    if m.engine != "ollama" or not m.remote or same_gpu(m) or _fake():
+        return []
+    held, found = keep_loaded(), discover()
+    ours = [m, *(o for o in (found.get(k) for k in keep) if o)]
+    return [n for n in _ollama_loaded(m.root) if n and not _kept_name(n, held)
+            and not any(o.server == m.server and _matches(o.name, {n}) for o in ours)]
 
 
 def unheld_loaded(skip=()) -> list[str]:

@@ -1302,6 +1302,44 @@ class Real(unittest.TestCase):
         self.assertIn(f"{jan} answers (usually Jan): qwen-coder", lines[-2])
         self.assertIn(f"127.0.0.1:{keyed} answers (usually LM Studio): it wants an API key", lines[-1])
 
+    def test_a_wb_remote_box_waits_for_another_clients_model_and_names_one_its_load_evicted(self):
+        # #812: two machines' tasks on one wb remote box each took their own lease, so each load
+        # evicted the other client's model, mid-request, and the cause was never named
+        loaded, posts = [{"name": "theirs", "size": 10, "size_vram": 10,
+                          "expires_at": "2020-01-01T00:00:00Z"}], []           # past: answering
+        srv, port = fake_ollama(loaded, ["x", "theirs", "emb"], posts)
+        self.servers.append(srv)
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"x": {}}}},
+                    {"box": {"local": True}})
+        warned = []
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "INFLIGHT_WAIT", 0), mock.patch.object(models, "INFLIGHT_WATCH", 0):
+            x = models.discover()["box/x"]
+            self.assertTrue(x.remote)
+            self.assertEqual(models.box_others(x), ["theirs"])
+            models.make_resident(x, say=lambda *_: None, warn=warned.append)
+            self.assertIn("theirs on 127.0.0.1 is answering another client's requests", warned[0])
+            self.assertIn("don't share a GPU lease", warned[0])
+            self.assertIn("still in use after 0 min: loading x anyway", warned[1])
+            self.assertEqual([p["model"] for p in posts], ["x"])              # theirs left loaded
+            self.assertEqual(len(warned), 2)                                  # and not evicted
+            models._unload(x)
+            loaded[:] = [{"name": "theirs", "size": 10, "size_vram": 10}, {"name": "emb", "size": 1}]
+            Path(os.environ["WB_MODELS"]).write_text(json.dumps({"box": {"local": True}, "keep_loaded": ["emb"]}))
+            self.assertEqual(models.box_others(models.discover()["box/x"]), ["theirs"])  # emb: the user's
+            real_post, warned[:] = models._post, []
+
+            def evicting(url, body, timeout=600):
+                loaded[:] = [r for r in loaded if r["name"] != "theirs"]
+                return real_post(url, body, timeout)
+            with mock.patch.object(models, "_post", evicting):
+                models.make_resident(models.discover()["box/x"], say=lambda *_: None, warn=warned.append)
+            self.assertEqual(len(warned), 1)
+            self.assertIn("loading x on 127.0.0.1 unloaded theirs, which another client of the box had loaded",
+                          warned[0])
+            local = models.Model(id="o/x", provider="o", name="x", base_url=x.base_url, engine="ollama", label="o/x")
+            self.assertEqual(models.box_others(local), [])                    # this machine's: free_gpu's
+
     def test_lm_studio_says_each_models_size_window_and_tool_training(self):
         from workbench import cli
         lms = self.server({"/api/v1/models": {"models": [

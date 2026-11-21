@@ -1067,6 +1067,9 @@ def cmd_start(a):
         print(f"note: it runs beside {holding} on the GPU (their models fit together)")
     elif not state["resident"]:
         print("note: the runner loads it onto the GPU first, unloading what is there")
+    if state["available"] and (others := models.box_others(m)):  # another machine's task on the same box (#812)
+        print(f"note: {urlparse(m.root).hostname} has {', '.join(others)} loaded, which no task here "
+              f"runs: {models.BOX_SHARED}")
     measured = (optimize.state().get("models") or {}).get(m.id)
     if measured and (fit := optimize.advice(m.id, measured)):
         print(f"note: {fit} (ask the user first: it adds to their OpenCode config)")

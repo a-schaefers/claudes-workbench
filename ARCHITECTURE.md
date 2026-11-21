@@ -2777,7 +2777,15 @@ A gaming PC can do the work for a laptop.
    serves); `wb remote <pc> --remove` undoes it.
 
 Tasks on the PC take turns on its GPU, apart from the laptop's, and `wb optimize` measures its
-models too. Their energy isn't measured, and the savings lines say so. A second machine adds a
+models too. The turns are this client's only: each client's remote lease (`gpu-<host>.json`) sits
+in its own lease directory, so two machines (or two users) on one box, or the box's own wb tasks,
+don't wait for each other, and when their models don't fit the box together Ollama swaps them on
+most requests. What a client does about it (`models.box_others`, `BOX_SHARED`, #812): before
+loading its model on the box, a model loaded there that its task doesn't run (keep_loaded's
+aside) and that is answering requests (`_in_use`, as for a shared Ollama here) is waited for, up
+to `INFLIGHT_WAIT` 10 min, instead of evicted mid-request; a model the load evicted anyway is
+named in a `gpu` event; and `wb start` notes the models the box has loaded for someone else. Run
+such tasks at different times, or on models that fit the box together. Their energy isn't measured, and the savings lines say so. A second machine adds a
 model beside this one's; it doesn't make one model faster. Another server there (llama.cpp, LM
 Studio, vLLM): give its provider `"local": true` in `~/.config/workbench/models.json`, then `wb
 model add <provider>/<model> --url <baseURL>`. Ollama's cloud models (`:cloud`) run on ollama.com
