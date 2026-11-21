@@ -625,7 +625,10 @@ the working files and staging area. Use `--include` to approve those files after
 **`run_round(task, n)`.** Writes the config layer and the agent's environment (*What the agent
 knows*), prepends the skills note (`skills_note`) to the prompt argument (not to `prompt.md`),
 wraps the command in the lane, and starts it in its own process group (so a stop takes the MCP
-server too), stdin `/dev/null`, stderr to `runner.log`. A reader thread queues stdout lines; a
+server too), stdin `/dev/null`, stderr to `runner.log`. A reader thread (`_reader`) queues stdout
+lines, decoded as UTF-8 with a byte that isn't shown as U+FFFD, and its end marker however it
+ends: one Latin-1 byte (a plugin's print) once killed it, and the finished agent went unseen
+until the silence timeout stopped the round as "no first output" (#440); a
 steer bell (`_steer_bell`, a `Watcher` on the task directory and `ask/`) queues a wake when
 `steer.jsonl` or an ask file changes; each tick relays the agent's questions (`ask_mcp.relay`). The loop wakes on a line or every 5 s. Per line: `events.normalize` (dropping the rest),
 the session id from the first `sessionID`, the tool tally and `status.last`, every text kept, and
@@ -5129,7 +5132,8 @@ prompt}` to `FAKE_RUNS`; `FAKE_LATE` pauses before its first event (a model read
 line; `FAKE_BG` (a file) starts a `sleep` in a session of its own, left running, and writes its pid
 there (what `sweep` must end); `FAKE_STRAY` first prints lines that are JSON but not events
 (`42`, a list, `null`) and events whose parts have the wrong shape; `FAKE_SURROGATE` first
-a `read` and a `text` event carrying a lone surrogate escape; `FAKE_LINGER` closes its
+a `read` and a `text` event carrying a lone surrogate escape; `FAKE_LATIN1` first a line
+that isn't UTF-8; `FAKE_LINGER` closes its
 output after its last event and stays alive. Scenarios (`FAKE_SCENARIO`): `ok` (writes 42), `fix` (41 in a new session, 42 when
 continued: an auto-fix round passes), `loop` (the repeat guard stops it), `hang`, `crash` (exit 1,
 no events; with `FAKE_DOWN`, a file, it creates it the first time, taking the model server down
