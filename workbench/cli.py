@@ -447,7 +447,7 @@ def _worktree_problem(task: store.Task) -> str | None:
     the branch; discard --keep-branch keeps them. Or its repository is nowhere (moved, renamed:
     not even a main worktree of its git dir): wb feedback, next and resume sent a runner that
     crashed and never named wb relocate, as accept's _repo does (#776)."""
-    if not gitops.repo_of(task.spec).is_dir():
+    if task.spec.get("repo") and not gitops.repo_of(task.spec).is_dir():  # damaged: the runner says (#475)
         return (f"{task.spec['repo']} moved or was deleted: wb relocate {task.name} --repo <its "
                 "new path>, then try again")
     if task.worktree.is_dir():
@@ -4425,7 +4425,9 @@ def cmd_try(a):
     try:
         # the copy and its init inside: wb init refusing (no git identity, a home that is a
         # git repo) left try/<n> behind, one more at each retry (#530)
-        shutil.copytree(TRY / "project", d)
+        # without Python's caches: one left in the clone's sample (its tests run in place) made
+        # wb init refuse the copy as generated files (2026-11-21)
+        shutil.copytree(TRY / "project", d, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         with redirect_stdout(io.StringIO()):
             cmd_init(argparse.Namespace(dir=str(d)))
         s = parser().parse_args(argv)

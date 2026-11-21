@@ -12712,6 +12712,20 @@ class Notes(Base):
 
 
 class Try(Base):
+    def test_wb_try_leaves_pythons_caches_in_the_clones_sample_behind(self):
+        # 2026-11-21: a run of the sample's tests in place left __pycache__ in the clone's copy,
+        # and wb init refused the sample as installed or generated files: wb try never started
+        src = Path(self.tmp.name) / "try-src"
+        shutil.copytree(cli.TRY, src)
+        for d in (src / "project", src / "project" / "tests"):
+            (d / "__pycache__").mkdir(exist_ok=True)
+            (d / "__pycache__" / "x.cpython-311.pyc").write_bytes(b"\0")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        with mock.patch.object(cli, "TRY", src):
+            run_wb("try", "--model", "mimo")
+        self.assertFalse(list((cli.try_dir() / "1").rglob("__pycache__")))
+        wait_phase("try-1", {"review"})
+
     def test_wb_try_starts_the_sample_and_its_hidden_check_fails_until_median_is_written(self):
         # #112: a sample task that proves the setup, graded by a check the agent never sees
         os.environ["FAKE_SCENARIO"] = "ok"
