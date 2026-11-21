@@ -1,6 +1,7 @@
 """OpenCode's `run --format json` events, reduced to what a person or a reviewer needs to see,
 and the detector that decides a run is going nowhere.
 """
+import hashlib
 import json
 import os
 from collections import deque
@@ -44,8 +45,11 @@ def normalize(raw: dict, round_no: int):
         inp = state.get("input") if isinstance(state.get("input"), dict) else {}
         if tool in EDIT_TOOLS and (inp.get("filePath") or inp.get("path")):
             row["path"] = str(inp.get("filePath") or inp.get("path"))  # whole: brief is cut at 90
-        # The signature is what "the same call again" means to the stuck detector.
-        row["sig"] = f"{tool}:{json.dumps(state.get('input'), sort_keys=True)[:400]}"
+        # The signature is what "the same call again" means to the stuck detector: the whole
+        # input. Cut to its first 400 characters, `content` sorting before `filePath`, four new
+        # files opening with one licence header were "the same call 4 times" (#497).
+        whole = json.dumps(state.get("input"), sort_keys=True, default=str)
+        row["sig"] = f"{tool}:{hashlib.sha1(whole.encode(errors='replace')).hexdigest()}"
         return row
     if kind == "text":
         return {"ts": ts, "round": round_no, "kind": "text", "text": str(part.get("text") or "")}
