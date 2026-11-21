@@ -99,7 +99,7 @@ dependencies. No packaging: it runs from the clone.
   on every git call.
 - `gitops.py`: worktrees and branches, the review diff (intent-to-add, so new files show),
   `mark` (has the worktree changed), commits (no hooks), the repo's stack. Calls on a task's
-  worktree are pinned to its recorded git dir (`rules/<task>/gitdir.json`).
+  worktree are pinned to its git dir (`gitdir.json`).
 - `results.py`: results.jsonl rows (`record`), each step's size and fit (`step`), `wb stats`,
   Claude's spec record (`spec_gap_line`). Read rows through `store.results()`, which leaves out
   trials.
@@ -193,7 +193,7 @@ Plain files under `$WB_HOME` (`~/.local/state/workbench`); the tree and formats:
 notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json stats.json tuning.json speed.json gpu*.{lock,json,admit,load}
 scout.json update.json watch.json optimize.json gc.json wsl-gpus.json archive/ imports/ images/ audio/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch,open,port}.json
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
-rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)
+rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json submodules.json (no lane)
 locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)
 tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt setup.txt runner.log
                (the lane: worktree/, ask/)

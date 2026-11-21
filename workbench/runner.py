@@ -1467,6 +1467,20 @@ def _base_check(task: store.Task) -> None:
                     round=task.status.get("round", 1))
 
 
+def steps_line(task: store.Task) -> str | None:
+    """For a stuck or failed step past the first: the steps `wb next` committed are approved
+    work, which wb discard keeps on the branch, and how to land them instead. A discard once
+    force-deleted them with the step that stuck (#494, the audit of 1.90)."""
+    steps = task.status.get("steps", 1)
+    if steps <= 1:
+        return None
+    wt, one = shlex.quote(str(task.worktree)), steps == 2
+    return (f"{'step 1' if one else f'steps 1-{steps - 1}'} committed on {task.spec['branch']} "
+            f"(wb next): wb discard {task.name} drops this step and keeps that branch; to land "
+            f"{'it' if one else 'them'} instead, drop this step's edits "
+            f"(git -C {wt} reset -q --hard && git -C {wt} clean -fdq) and wb accept {task.name} --force")
+
+
 def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     """The compact report Claude reads; kept short on purpose, the diff is fetched separately."""
     spec, st = task.spec, task.status
@@ -1490,6 +1504,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         why = rnd["retries"][-1]
         lines.append(f"OpenCode resent {len(rnd['retries'])} request(s) to the model's server: {why}"
                      + ("; it cut the request at the provider's timeout" if "Timed out" in why else ""))
+    if (rnd["stuck"] or rnd["exit"] not in (0, None)) and (kept := steps_line(task)):
+        lines.append(kept)
     if rnd["exit"] == 0 and not (ask_mcp.ask_dir(task) / ask_mcp.LISTED).exists():
         # an OpenCode that stopped loading the server would leave the agent no way to ask, and
         # nothing said so (the 2026-11-19 audit)
@@ -1532,7 +1548,11 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
                      ".claude/ are yours to write; keep, rewrite or revert them")
     if nested := gitops.nested_repos(task.worktree):
         lines.append(gitops.nested_line(nested))
-    stat = gitops.diff(task.worktree, spec["base"], stat=True).splitlines()
+    lines += [f"NOTE: {e}" for e in gitops.submodule_edits(task.worktree)]  # #419
+    try:  # a git that refuses the diff costs the report a line, not the task (#493)
+        stat = gitops.diff(task.worktree, spec["base"], stat=True).splitlines()
+    except gitops.GitError as e:
+        stat = [f"(no diffstat: {(str(e).splitlines() or [''])[0][:300]})"]
     if stat:
         lines.append(stat[-1].strip())
     return "\n".join(lines)
@@ -2163,9 +2183,10 @@ def main():
             task.event({"ts": store.now(), "round": st.get("round"), "kind": "stopped",
                         "by": "signal", "text": SIGNAL_STOP})
             task.set_status(phase="stuck", last=SIGNAL_STOP)
+            kept = steps_line(task)
             task.notify("stuck", f"task {task.name}: {SIGNAL_STOP}. wb resume {task.name} "
-                        f"continues it in a fresh session, wb discard {task.name} drops it",
-                        round=st.get("round"))
+                        f"continues it in a fresh session, wb discard {task.name} drops it"
+                        + (f"\n{kept}" if kept else ""), round=st.get("round"))
     except Exception as e:
         err = traceback.format_exc()
         full = store.disk_full(e)

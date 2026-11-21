@@ -657,9 +657,16 @@ def cmd_start(a):
     try:
         wt = context.tree(task.dir, repo, setup.get("siblings"), "worktree")  # #261
         wt.parent.mkdir(parents=True, exist_ok=True)
-        store.write_json(task.dir / STARTING, {"repo": str(repo), "worktree": str(wt),
-                                               "pid": os.getpid(), "at": store.now()})
-        base = gitops.create_worktree(repo, a.name, wt, a.base)
+        # the branch this start makes, and at which commit, only when there is none yet: gc
+        # deleted a delegate/<task> an earlier task had left, unmerged, after a start killed
+        # before its worktree (#416, the audit of 1.8)
+        commit = gitops.base_commit(repo, a.base)
+        mine = not gitops.git(repo, "rev-parse", "--verify", "-q",
+                              f"refs/heads/{gitops.branch_name(a.name)}", check=False).strip()
+        store.write_json(task.dir / STARTING, {
+            "repo": str(repo), "worktree": str(wt), "pid": os.getpid(), "at": store.now(),
+            **({"branch": gitops.branch_name(a.name), "branch_at": commit} if mine else {})})
+        base = gitops.create_worktree(repo, a.name, wt, commit or a.base)
     except gitops.GitError as e:
         shutil.rmtree(task.dir, ignore_errors=True)  # create_worktree removed its own leftovers
         die(str(e))
@@ -1941,7 +1948,9 @@ def _dead_start(task: store.Task) -> dict | None:
 
 def _drop_start(task: store.Task, info: dict) -> None:
     """Undo a half-made start: its worktree and registration, its branch (it holds no work: the
-    agent never ran), its directory and its rules."""
+    agent never ran), its directory and its rules. The branch only when starting.json says this
+    start made it, and only while it still points at the commit it was made at: an earlier
+    task's branch, or one moved since, stays (#416)."""
     repo = Path(info.get("repo") or "/nonexistent")
     if repo.is_dir():
         if info.get("worktree"):
@@ -1951,7 +1960,8 @@ def _drop_start(task: store.Task, info: dict) -> None:
             gitops.git(repo, "worktree", "unlock", info["worktree"], check=False)
             gitops.remove_worktree(repo, Path(info["worktree"]))
         gitops.git(repo, "worktree", "prune", check=False)
-        gitops.delete_branch(repo, task.name)
+        if info.get("branch") == gitops.branch_name(task.name) and info.get("branch_at"):
+            gitops.delete_branch(repo, task.name, at=info["branch_at"])
     gitops._rmtree(task.dir)
     shutil.rmtree(context.rules_dir(task), ignore_errors=True)
 
@@ -2120,9 +2130,25 @@ def cmd_discard(a):
     if warn := gitops.remove_worktree(repo, task.worktree):  # never stops a discard (the audit)
         print(f"wb: {warn}", file=sys.stderr)
     context.drop_runtime_dir(task)
-    kept = a.keep_branch or not repo.is_dir()
-    if not kept:
-        gitops.delete_branch(repo, a.name)
+    branch, said = spec["branch"], ""
+    if a.keep_branch:
+        pass
+    elif not repo.is_dir():
+        said = f"; {repo} is gone, so its branch with it"
+    elif tip := gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}",
+                           check=False).strip():
+        task.set_status(tip=tip)  # before any delete: the commits stay findable (#494)
+        # the steps wb next committed (or Claude's own, after a takeover) were approved: force-
+        # deleted with the step that stuck, they were reachable from no ref (#494, the audit)
+        past = gitops.git(repo, "rev-list", "--count", f"{spec['base']}..{tip}", check=False).strip()
+        if past.isdigit() and int(past) and not a.drop_steps:
+            git_c = f"git -C {shlex.quote(str(repo))}"
+            said = (f"; branch {branch} kept: its {past} commit(s) past the base are approved "
+                    f"steps. {git_c} merge {branch} lands them; {git_c} branch -D {branch} "
+                    "drops them (wb discard --drop-steps deletes it at once)")
+        else:
+            gitops.delete_branch(repo, a.name, at=tip)
+            said = f"; branch {branch} deleted (was {tip[:8]})"
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None,
                     unrecorded={"outcome": "discarded", "step": measured,
                                 "extra": {"reason": a.reason}})
@@ -2130,8 +2156,7 @@ def cmd_discard(a):
     task.set_status(unrecorded=None)
     _ack_all(task)
     _closed(task)
-    print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"
-                                   if not kept else f"; {repo} is gone, so its branch with it"))
+    print(f"discarded {a.name}{said}")
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(lessons.nudge(task, "discarded"))
 
@@ -4100,6 +4125,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--spec-gap", action="append", metavar="WHAT",
                    help="the spec's part in it: what it missed (repeatable)")
     s.add_argument("--keep-branch", action="store_true")
+    s.add_argument("--drop-steps", action="store_true",
+                   help="delete the branch even when it holds steps wb next committed")
     s.set_defaults(f=cmd_discard)
     s = sub.add_parser("models", help="the local models, and which the router picks per task size")
     s.add_argument("--set-default", action="store_true",

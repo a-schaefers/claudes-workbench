@@ -551,6 +551,36 @@ class Lifecycle(Base):
                              capture_output=True, text=True).stdout
         self.assertTrue(row.startswith("100755"), row)                # is what lands
 
+    @unittest.skipIf(gitops._case_folds(tempfile.gettempdir()) is not False,
+                     "the temp directory folds case: no mismatch to make")
+    def test_a_case_only_rename_and_a_case_twin_land_where_the_repo_says_ignorecase(self):
+        # #492 (the audit of 1.90, reproduced): the repo said core.ignorecase=true (made by Git
+        # for Windows on /mnt/c, or on macOS) and the task's worktree is on a case-sensitive
+        # state directory: the rename showed as a deletion alone, OTHER.PY beside other.py as
+        # nothing, and accept committed the deletion and removed the worktree with the new names
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        (self.repo / "other.py").write_text("other\n")
+        g("add", "other.py")
+        g("commit", "-qm", "other")
+        g("config", "core.ignorecase", "true")
+        self.start("t-case", "ok", "--test", TEST_CMD)
+        wait_phase("t-case", {"review"})
+        t = store.Task("t-case")
+        (t.worktree / "README.md").rename(t.worktree / "Readme.md")
+        (t.worktree / "OTHER.PY").write_text("shouted\n")
+        files, shown = gitops.changed(t.worktree), runner.review_diff(t)
+        for name in ("Readme.md", "OTHER.PY"):
+            self.assertIn(name, files)
+            self.assertIn(name, shown)                                # what Claude reviews
+        run_wb("accept", "t-case", "-m", "feat: case")
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "--name-only", "delegate/t-case"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("Readme.md", tree)                              # is what lands
+        self.assertIn("OTHER.PY", tree)
+        self.assertIn("other.py", tree)
+        self.assertNotIn("README.md", tree)
+
     def test_a_proposed_claude_md_is_shown_as_a_diff_and_taken_only_when_claude_says(self):
         # Claude making each CLAUDE.md change itself was a call over its whole context on most
         # tasks (2026-11-18): the agent proposes the file, accept takes it
@@ -2517,6 +2547,34 @@ class WorktreeSetup(Base):
         self.assertEqual(st["phase"], "review")
         self.assertNotIn("huge", gitops.changed(wt))                       # not a deletion
 
+    def test_a_new_directory_outside_the_sparse_cone_is_reported_verified_and_accepted(self):
+        # #493 (the audit of 1.90, reproduced): a file made outside the cone (a new package) made
+        # `git add -A -N` exit 1, the round report crashed the runner, and wb diff, verify, next
+        # and accept died on the same refusal
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        for d in ("app", "huge"):
+            (self.repo / d).mkdir()
+            (self.repo / d / "f.txt").write_text(d)
+        g("add", "app", "huge")
+        g("commit", "-qm", "two packages")
+        g("sparse-checkout", "set", "--cone", "app")
+        made = "mkdir -p tools && echo helper > tools/helper.py && "  # in the lane, as the agent would
+        self.start("t-cone", "ok", "--test", made + TEST_CMD, "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-cone", {"review", "failed"})
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        report = run_wb("report", "t-cone")
+        self.assertIn("tools/helper.py", report)
+        self.assertIn("2 files changed", report)
+        self.assertIn("+helper", run_wb("diff", "t-cone"))
+        out = run_wb("verify", "t-cone", "--test", "test -f tools/helper.py", "--files", "tools/helper.py")
+        self.assertIn("proven", out)
+        run_wb("accept", "t-cone", "-m", "feat: a helper")
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only",
+                               "delegate/t-cone"], capture_output=True, text=True).stdout.split()
+        self.assertIn("tools/helper.py", tree)
+        self.assertIn("huge/f.txt", tree)                                  # outside it: not deleted
+
     def test_copy_brings_an_ignored_path_from_the_checkout_and_refuses_secrets_and_tracked_files(self):
         self.ignore("vendor/", ".env", "local.cfg")
         (self.repo / "vendor").mkdir()
@@ -2938,6 +2996,40 @@ class Context(Base):
             run_wb("discard", "t-n")
         self.assertTrue(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "delegate/t-n"],
                                        capture_output=True).returncode == 0)
+
+    def test_discarding_a_stuck_later_step_keeps_the_steps_wb_next_committed(self):
+        # #494 (the audit of 1.90): steps landed with wb next, a later one stuck, and the
+        # discard the notice suggested force-deleted the branch, the approved steps on no ref
+        tip = lambda name: subprocess.run(  # noqa: E731
+            ["git", "-C", str(self.repo), "rev-parse", "--verify", "-q", f"refs/heads/delegate/{name}"],
+            capture_output=True, text=True).stdout.strip()
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also write the question to question.txt.\n")
+        step1 = {}
+        for name in ("t-dk", "t-dd"):
+            self.start(name, "ok", "--test", TEST_CMD, "--auto-fix", "0")
+            wait_phase(name, {"review"})
+            os.environ["FAKE_SCENARIO"] = "loop"       # step 2 sticks
+            run_wb("next", name, "--spec", str(step2), "-m", "feat: the answer")
+            step1[name] = tip(name)
+            st = wait_phase(name, {"stuck"})
+            os.environ["FAKE_SCENARIO"] = "ok"
+            report = store.Task(name).round_dir(st["round"]).joinpath("summary.md").read_text()
+            self.assertIn(f"step 1 committed on delegate/{name} (wb next): wb discard {name} drops "
+                          "this step and keeps that branch", report)
+            self.assertIn(f"wb accept {name} --force", report)
+        out = run_wb("discard", "t-dk", "--reason", "step 2 stuck")
+        self.assertIn("branch delegate/t-dk kept: its 1 commit(s) past the base are approved steps", out)
+        self.assertEqual(tip("t-dk"), step1["t-dk"])
+        self.assertEqual(store.Task("t-dk").status["tip"], step1["t-dk"])
+        out = run_wb("discard", "t-dd", "--drop-steps")  # asked for: deleted, the tip said and kept
+        self.assertRegex(out, r"branch delegate/t-dd deleted \(was [0-9a-f]{8}\)")
+        self.assertEqual(tip("t-dd"), "")
+        self.assertEqual(store.Task("t-dd").status["tip"], step1["t-dd"])
+        self.start("t-d1", "ok")                         # one step, nothing committed: deleted
+        wait_phase("t-d1", {"review"})
+        self.assertIn("branch delegate/t-d1 deleted", run_wb("discard", "t-d1"))
+        self.assertEqual(tip("t-d1"), "")
 
 
     def test_a_wb_next_interrupted_after_its_commit_advances_once_when_retried(self):
@@ -6441,6 +6533,62 @@ class Cleanup(Base):
         self.assertNotIn("t-half2", g("worktree", "list"))
         self.assertTrue(store.Task("t-half").exists)    # a real task is no half-made start
 
+    def test_gc_deletes_only_the_branch_a_killed_start_made_and_only_where_it_made_it(self):
+        # #416 (the audit of 1.8, reproduced): an unmerged delegate/<task> holding a commit of its
+        # own, left by an earlier task; a wb start under that name killed before its worktree was
+        # made, and wb gc deleted the branch, the commit then reachable from no ref
+        real = shutil.which("git")
+
+        def killed_start(name, where):  # killed while git sleeps in `where`
+            shim = Path(self.tmp.name) / f"slow-git-{name}"
+            shim.mkdir()
+            after = "worktree add" in where  # the branch is made, then it sleeps
+            (shim / "git").write_text(f'#!/bin/sh\ncase " $* " in *" {where} "*) '
+                                      + (f'{real} "$@"; sleep 300;;' if after else 'sleep 300;;')
+                                      + f' esac\nexec {real} "$@"\n')
+            (shim / "git").chmod(0o755)
+            proc = subprocess.Popen([str(ROOT / "bin" / "wb"), "start", name, "--spec",
+                                     str(self.spec), "--repo", str(self.repo), "--model", "mimo"],
+                                    env={**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"},
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    start_new_session=True)
+            starting = store.Task(name).dir / cli.STARTING
+            end = time.monotonic() + 60
+            while time.monotonic() < end and not (
+                    starting.exists() and (not after or name in self.git("worktree", "list").stdout)):
+                time.sleep(0.1)
+            time.sleep(0.5)  # into the sleep
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            self.assertTrue(starting.exists())
+
+        def tip(name):
+            return self.git("rev-parse", "--verify", "-q", f"refs/heads/delegate/{name}").stdout.strip()
+
+        # before the branch: an earlier task's delegate/t-partial, with a commit nothing else has
+        self.git("checkout", "-q", "-b", "delegate/t-partial")
+        (self.repo / "work.txt").write_text("unmerged work\n")
+        self.git("add", "work.txt")
+        self.git("commit", "-qm", "unmerged work")
+        held = tip("t-partial")
+        self.git("checkout", "-q", "main")
+        killed_start("t-partial", "branch --list")       # create_worktree's check: none made yet
+        # after it: the branch this start made, then moved on by someone else
+        killed_start("t-moved", "worktree add")
+        base = tip("t-moved")
+        moved = self.git("commit-tree", "-p", base, "-m", "moved on", f"{base}^{{tree}}").stdout.strip()
+        self.git("update-ref", "refs/heads/delegate/t-moved", moved, base)
+        self.assertIn("2 half-made start(s)", run_wb("gc"))
+        self.assertEqual(tip("t-partial"), held)          # not this start's: kept
+        self.assertEqual(tip("t-moved"), moved)           # this start's, but moved: kept
+        self.assertNotIn("t-moved", self.git("worktree", "list").stdout)  # its worktree went
+        self.assertFalse(store.Task("t-partial").dir.exists())
+        # and one the start made and nothing moved goes (as #376's test sees, from the record)
+        killed_start("t-made", "worktree add")
+        self.assertTrue(tip("t-made"))
+        self.assertIn("1 half-made start(s)", run_wb("gc"))
+        self.assertEqual(tip("t-made"), "")
+
     def test_wb_gc_deletes_branches_merged_before_and_keeps_the_rest(self):
         self.start("t-old", "ok")
         wait_phase("t-old", {"review"})
@@ -9078,6 +9226,52 @@ class Projects(Base):
         self.assertIn("note: submodules (vendor/lib/deps/inner) are empty",
                       self.start("t-nest2", "ok"))
         wait_phase("t-nest2", {"review"})
+
+    def test_an_edit_inside_a_filled_submodule_is_reported_and_refused_at_accept(self):
+        # #419 (the audit of 1.8, reproduced): `sed -i` replaced a read-only file of a filled
+        # submodule through its directory, the tests passed on it, the review diff showed only
+        # the top-level change, and after wb accept --merge the submodule had its old contents
+        tmp = Path(self.tmp.name)
+        commit = ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm"]
+        file_ok = ["-c", "protocol.file.allow=always"]
+        inner, lib = tmp / "inner", tmp / "lib"
+        for d in (inner, lib):
+            subprocess.run(["git", "init", "-q", str(d)], check=True)
+        (inner / "in.c").write_text("int y;\n")
+        subprocess.run(["git", "-C", str(inner), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(inner), *commit, "inner"], check=True)
+        (lib / "lib.c").write_text("int x;\n")
+        (lib / ".gitignore").write_text("*.o\n")
+        subprocess.run(["git", "-C", str(lib), *file_ok, "submodule", "add", "-q", str(inner),
+                        "deps/inner"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), *commit, "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g(*file_ok, "submodule", "add", "-q", str(lib), "vendor/lib")
+        g(*file_ok, "submodule", "update", "-q", "--init", "--recursive")
+        g("commit", "-qm", "a submodule with its own")
+        edits = ("cd vendor/lib && printf 'int z;\\n' > lib.tmp && mv -f lib.tmp lib.c && "  # as sed -i does
+                 "echo new > new.c && echo built > lib.o && rm -f deps/inner/in.c && cd ../.. && ")
+        self.start("t-subedit", "ok", "--test", edits + TEST_CMD, "--no-base-check")
+        st = wait_phase("t-subedit", {"review"})
+        self.assertIs(st["tests"]["ok"], True)                # the tests pass on the edit
+        report = run_wb("report", "t-subedit")
+        self.assertIn("NOTE: edits in submodule vendor/lib can't land: lib.c, new.c.", report)
+        self.assertIn("NOTE: edits in submodule vendor/lib/deps/inner can't land: in.c.", report)
+        self.assertNotIn("lib.o", report.split("files changed:")[1])  # ignored there: build output
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-subedit", "-m", "feat: answer", "--merge")
+        self.assertIn("not committed: edits in submodule vendor/lib can't land", err.getvalue())
+        self.assertEqual(store.Task("t-subedit").status["phase"], "review")
+        # undone: it lands
+        sub = store.Task("t-subedit").worktree / "vendor/lib"
+        (sub / "lib.c").write_text("int x;\n")
+        (sub / "new.c").unlink()
+        (sub / "deps/inner/in.c").write_text("int y;\n")
+        self.assertEqual(gitops.submodule_edits(store.Task("t-subedit").worktree), [])
+        self.assertIn("merged", run_wb("accept", "t-subedit", "-m", "feat: answer", "--merge"))
 
     @unittest.skipUnless(GIT_LFS, "needs git-lfs")
     def test_git_lfs_files_are_data_in_the_scratch_checkouts_and_count_at_their_size(self):
