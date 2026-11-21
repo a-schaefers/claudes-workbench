@@ -9227,6 +9227,52 @@ class Projects(Base):
                       self.start("t-nest2", "ok"))
         wait_phase("t-nest2", {"review"})
 
+    def test_an_edit_inside_a_filled_submodule_is_reported_and_refused_at_accept(self):
+        # #419 (the audit of 1.8, reproduced): `sed -i` replaced a read-only file of a filled
+        # submodule through its directory, the tests passed on it, the review diff showed only
+        # the top-level change, and after wb accept --merge the submodule had its old contents
+        tmp = Path(self.tmp.name)
+        commit = ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm"]
+        file_ok = ["-c", "protocol.file.allow=always"]
+        inner, lib = tmp / "inner", tmp / "lib"
+        for d in (inner, lib):
+            subprocess.run(["git", "init", "-q", str(d)], check=True)
+        (inner / "in.c").write_text("int y;\n")
+        subprocess.run(["git", "-C", str(inner), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(inner), *commit, "inner"], check=True)
+        (lib / "lib.c").write_text("int x;\n")
+        (lib / ".gitignore").write_text("*.o\n")
+        subprocess.run(["git", "-C", str(lib), *file_ok, "submodule", "add", "-q", str(inner),
+                        "deps/inner"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), *commit, "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g(*file_ok, "submodule", "add", "-q", str(lib), "vendor/lib")
+        g(*file_ok, "submodule", "update", "-q", "--init", "--recursive")
+        g("commit", "-qm", "a submodule with its own")
+        edits = ("cd vendor/lib && printf 'int z;\\n' > lib.tmp && mv -f lib.tmp lib.c && "  # as sed -i does
+                 "echo new > new.c && echo built > lib.o && rm -f deps/inner/in.c && cd ../.. && ")
+        self.start("t-subedit", "ok", "--test", edits + TEST_CMD, "--no-base-check")
+        st = wait_phase("t-subedit", {"review"})
+        self.assertIs(st["tests"]["ok"], True)                # the tests pass on the edit
+        report = run_wb("report", "t-subedit")
+        self.assertIn("NOTE: edits in submodule vendor/lib can't land: lib.c, new.c.", report)
+        self.assertIn("NOTE: edits in submodule vendor/lib/deps/inner can't land: in.c.", report)
+        self.assertNotIn("lib.o", report.split("files changed:")[1])  # ignored there: build output
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-subedit", "-m", "feat: answer", "--merge")
+        self.assertIn("not committed: edits in submodule vendor/lib can't land", err.getvalue())
+        self.assertEqual(store.Task("t-subedit").status["phase"], "review")
+        # undone: it lands
+        sub = store.Task("t-subedit").worktree / "vendor/lib"
+        (sub / "lib.c").write_text("int x;\n")
+        (sub / "new.c").unlink()
+        (sub / "deps/inner/in.c").write_text("int y;\n")
+        self.assertEqual(gitops.submodule_edits(store.Task("t-subedit").worktree), [])
+        self.assertIn("merged", run_wb("accept", "t-subedit", "-m", "feat: answer", "--merge"))
+
     @unittest.skipUnless(GIT_LFS, "needs git-lfs")
     def test_git_lfs_files_are_data_in_the_scratch_checkouts_and_count_at_their_size(self):
         # #382 (the audit of 1.6): a --shared scratch clone has none of the repo's local config,

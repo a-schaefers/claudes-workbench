@@ -1548,6 +1548,7 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
                      ".claude/ are yours to write; keep, rewrite or revert them")
     if nested := gitops.nested_repos(task.worktree):
         lines.append(gitops.nested_line(nested))
+    lines += [f"NOTE: {e}" for e in gitops.submodule_edits(task.worktree)]  # #419
     try:  # a git that refuses the diff costs the report a line, not the task (#493)
         stat = gitops.diff(task.worktree, spec["base"], stat=True).splitlines()
     except gitops.GitError as e:

@@ -313,6 +313,9 @@ def submodules(repo: Path, commit: str) -> list[str]:
     return [line.split(" ", 1)[1] for line in out.splitlines() if " " in line]
 
 
+SUBMODULES = "submodules.json"  # rules/<task>/: the submodules filled in its worktree (#419)
+
+
 def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
     """Each submodule of ``commit`` filled in ``checkout`` (a task's worktree or a scratch one)
     with its files at the commit ``commit`` records, from the user's own checkout of it: written
@@ -323,7 +326,16 @@ def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
     audit of 1.4). A directory already holding files is left as it is. A submodule's own
     submodules are filled the same way, from the user's checkout of each inside it, and the ones
     it couldn't fill come back by their whole path: only the top `.gitmodules` was read, and a
-    nested one stayed an empty directory (#383, the audit of 1.6)."""
+    nested one stayed an empty directory (#383, the audit of 1.6). In a task's worktree each one
+    filled is recorded (SUBMODULES, beside gitdir.json, with its index: submodule_edits)."""
+    rec, filled = _record(checkout), []
+    left = _fill(repo, commit, checkout, rec.parent if rec else None, filled, "")
+    if rec is not None and filled:
+        store.write_json(rec.with_name(SUBMODULES), filled)
+    return left
+
+
+def _fill(repo: Path, commit: str, checkout: Path, keep: Path | None, filled: list, at: str) -> list[str]:
     left = []
     for path in submodules(repo, commit):
         row = git(repo, "ls-tree", commit, "--", path, check=False).split()
@@ -345,13 +357,63 @@ def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
             except (GitError, OSError):
                 left.append(path)
                 continue
-        for root, _, files in os.walk(dest):
-            for name in files:
-                f = os.path.join(root, name)
-                if not os.path.islink(f):
-                    os.chmod(f, os.stat(f).st_mode & ~0o222)
-        left += [f"{path}/{p}" for p in fill_submodules(src, sha, dest)]
+            for root, _, files in os.walk(dest):
+                for name in files:
+                    f = os.path.join(root, name)
+                    if not os.path.islink(f):
+                        os.chmod(f, os.stat(f).st_mode & ~0o222)
+            if keep is not None:  # its index, the files' stat info fresh, for submodule_edits
+                _run(src, (f"--work-tree={dest}", "update-index", "-q", "--refresh"), env=env,
+                     check=False)
+                name = f"submodule-{len(filled)}.index"
+                with contextlib.suppress(OSError):
+                    shutil.copyfile(env["GIT_INDEX_FILE"], keep / name)
+                filled.append({"path": at + path, "src": str(src), "sha": sha, "index": name})
+        left += [f"{path}/{p}" for p in _fill(src, sha, dest, keep, filled, f"{at}{path}/")]
     return left
+
+
+def submodule_edits(worktree: Path) -> list[str]:
+    """For each submodule fill_submodules filled in a task's worktree whose files no longer match
+    its commit (changed, deleted, new and not ignored): why it can't land. The gitlink keeps them
+    out of the diff and the commit, and read-only files stop no `sed -i`, which replaces a file
+    through its directory: an edit the tests passed on vanished at wb accept (#419, the audit of
+    1.8). Checked with the user's checkout of it as git dir and a copy of the index made at fill
+    time, so the agent's files are only read; a submodule that can't be checked is left out."""
+    rec = _record(worktree)
+    subs = store.read_json(rec.with_name(SUBMODULES), []) if rec else []
+    out = []
+    for sub in subs if isinstance(subs, list) else []:
+        dest = Path(worktree) / sub["path"]
+        if not dest.is_dir() or dest.is_symlink():
+            out.append(_edit_line(sub, ["the directory itself, removed or replaced"]))
+            continue
+        store.home().mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=store.scratch(".submodule-"), dir=store.home()) as scratch:
+            env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+            opts = (*NO_HOOKS, "-c", "core.fsmonitor=false", f"--work-tree={dest}")
+            try:
+                try:
+                    shutil.copyfile(rec.parent / sub["index"], env["GIT_INDEX_FILE"])
+                except OSError:
+                    _run(sub["src"], ("read-tree", sub["sha"]), env=env)
+                _run(sub["src"], (*opts, "update-index", "-q", "--refresh"), env=env, check=False)
+                changed = _run(sub["src"], (*opts, "diff-files", "--name-only", "-z",
+                                            "--ignore-submodules=all"), env=env).stdout
+                new = _run(sub["src"], (*opts, "ls-files", "--others", "--exclude-standard", "-z"),
+                           env=env).stdout
+            except (GitError, OSError):
+                continue
+        files = [os.fsdecode(f) for f in (changed + new).split(b"\0") if f]
+        if files:
+            out.append(_edit_line(sub, files))
+    return out
+
+
+def _edit_line(sub: dict, files: list[str]) -> str:
+    return (f"edits in submodule {sub['path']} can't land: {', '.join(brief(files))}. Its files "
+            f"are a copy of its commit {sub['sha'][:8]}, which the gitlink keeps out of the diff "
+            "and the commit: undo them (or make the change in the submodule's own repository)")
 
 
 def nested_repos(worktree: Path) -> list[str]:
@@ -631,6 +693,8 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
     if nested := nested_repos(worktree):
         raise GitError(f"{', '.join(nested)}: a git repository of its own, so not committed: "
                        "remove its .git or gitignore it, then try again")
+    if edits := submodule_edits(worktree):  # they would vanish with the worktree (#419)
+        raise GitError("not committed: " + "; ".join(edits))
     if not include and (why := _bulk(worktree, snapshot(worktree))):
         raise GitError(f"not committed: {why}. Build output? Gitignore or remove it in "
                        f"{worktree}, or --include to commit it anyway")
