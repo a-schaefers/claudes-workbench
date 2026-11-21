@@ -4580,7 +4580,8 @@ def ollama_line() -> str:
     env, source = hardware.ollama_settings()
     if source:
         knobs = ", ".join(f"{k}={env[k]}" for k in hardware.OLLAMA_KNOBS if env.get(k))
-        return f"ollama's settings: from {source}" + (f" ({knobs})" if knobs else " (Ollama's defaults)")
+        return f"ollama's settings: from {source}" + (
+            f" ({knobs})" if knobs else "" if hardware.UNREAD in source else " (Ollama's defaults)")
     return ("ollama's settings unknown: no ollama process here wb may read, no systemd unit, no "
             "ollama container (Ollama for Windows, another user's, a container docker won't show), so "
             "OLLAMA_NUM_PARALLEL, OLLAMA_MAX_LOADED_MODELS and the GPU masks are guessed from wb's own "

@@ -17869,6 +17869,55 @@ class Hardware(unittest.TestCase):
         self.assertEqual(hw.ollama_context(), (None, "32k"))
         self.assertIn("OLLAMA_CONTEXT_LENGTH='32k' isn't a number", "\n".join(hw.report()))
 
+    def test_a_units_environment_files_are_read_and_one_it_cant_read_is_said(self):
+        # #804: ollama.service's EnvironmentFile=/etc/default/ollama went unread (systemctl's
+        # Environment leaves it out), and wb doctor said "Ollama's defaults"
+        from types import SimpleNamespace
+        from workbench import cli
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        (d / "ollama").write_text('# the GPU this server gets\nCUDA_VISIBLE_DEVICES=0\n'
+                                  'OLLAMA_NUM_PARALLEL="2"\n; a comment\nOLLAMA_MODELS=/srv/m\n')
+        unit = ("LoadState=loaded\nActiveState=active\n"
+                "Environment=OLLAMA_NUM_PARALLEL=1 OLLAMA_HOST=0.0.0.0\n"
+                f"EnvironmentFiles={d / 'ollama'} (ignore_errors=no)\n"
+                f"EnvironmentFiles={d / 'optional'} (ignore_errors=yes)")
+        hw = self.fake("Linux", runs={("systemctl",): unit})
+        env, source = hw.ollama_settings()
+        self.assertEqual((env["CUDA_VISIBLE_DEVICES"], env["OLLAMA_NUM_PARALLEL"], env["OLLAMA_HOST"],
+                          env["OLLAMA_MODELS"]), ("0", "2", "0.0.0.0", "/srv/m"))  # the file's over
+        self.assertEqual(source, f"systemd's ollama unit and {d / 'ollama'}")
+        hw = self.fake("Linux", runs={("systemctl",): "LoadState=loaded\nActiveState=active\n"
+                                      f"EnvironmentFiles={d / 'gone'} (ignore_errors=no)"})
+        env, source = hw.ollama_settings()
+        self.assertIn(f"{d / 'gone'} unreadable, so its settings may be missing", source)
+        local = {"o/m": SimpleNamespace(engine="ollama", remote=False)}
+        with mock.patch.object(cli.models, "_fake", lambda: False), \
+                mock.patch.object(cli.models, "discover", lambda: local):
+            self.assertNotIn("Ollama's defaults", cli.ollama_line())
+            self.assertIn("may be missing", cli.ollama_line())
+
+    def test_ollamas_settings_on_macos_come_from_its_process_else_its_brew_service(self):
+        # #804: with no /proc, `OLLAMA_NUM_PARALLEL=4 ollama serve` went unread, and two tasks on
+        # one model were refused sharing
+        serve = "/Applications/Ollama.app/Contents/Resources/ollama serve"
+        hw = self.fake("Darwin", runs={
+            ("ps", "-axo"): f"  77 /usr/bin/login -f\n 412 {serve}\n 900 /opt/homebrew/bin/ollama serve",
+            ("ps", "-wwE", "-o", "command=", "-p", "412"):
+                f"{serve} PATH=/usr/bin HOME=/Users/a OLLAMA_NUM_PARALLEL=4 OLLAMA_MAX_LOADED_MODELS=2",
+            ("ps", "-wwE", "-o", "command=", "-p", "900"): "/opt/homebrew/bin/ollama serve"})  # another user's
+        env, source = hw.ollama_settings()
+        self.assertEqual((env["OLLAMA_NUM_PARALLEL"], env["OLLAMA_MAX_LOADED_MODELS"], source),
+                         ("4", "2", "the running ollama's environment (pid 412)"))
+        self.assertEqual(len(hw._ollama_processes()), 1)
+        hw = self.fake("Darwin", runs={("launchctl", "print"): (
+            "gui/501/homebrew.mxcl.ollama = {\n\tactive count = 0\n\tenvironment = {\n"
+            "\t\tOLLAMA_CONTEXT_LENGTH => 32768\n\t\tOLLAMA_FLASH_ATTENTION => 1\n\t}\n}")})
+        env, source = hw.ollama_settings()
+        self.assertEqual((env["OLLAMA_CONTEXT_LENGTH"], source),
+                         ("32768", "launchd's homebrew.mxcl.ollama, not running"))
+        self.assertNotIn("OLLAMA_FLASH_ATTENTION", env)
+
     def test_the_cards_ollama_may_see_come_from_its_service_alone_else_the_callers_environment(self):
         # #379 (the audit of 1.6): wb's own environment filled in what the unit left unset, which
         # a systemd service never reads
