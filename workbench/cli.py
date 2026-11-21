@@ -3130,9 +3130,10 @@ def cmd_chat(a):
         who = chat.who_answers(a.port)
         if who == "workbench":
             print(f"web chat on: {chat.url(a.port)}")
-        elif who == "other":  # its link would open someone else's page (#200)
-            die(f"web chat on, but another program answers on port {a.port}: wb chat on --port "
-                "<free port> (and the same --port in chat.json's service, if any)")
+        elif who == "other":  # its link would open someone else's page (#200), or 401 (#554)
+            die(f"web chat on, but another account's chat (or another program, or a server still on "
+                f"a replaced token) answers on port {a.port}: wb chat on --port <free port> (and "
+                "the same --port in chat.json's service, if any)")
         else:
             pid = chat.start(a.port)
             log = chat.chat_dir() / "serve.log"

@@ -10422,7 +10422,8 @@ class WebChat(Base):
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit):
             run_wb("chat", "on", "--port", str(port))
-        self.assertIn(f"another program answers on port {port}", err.getvalue())
+        self.assertIn(f"or another program, or a server still on a replaced token) answers on port {port}",
+                      err.getvalue())
         dead = subprocess.Popen([sys.executable, "-c", "raise SystemExit(1)"])  # a server that dies
         with socket.socket() as sk:
             sk.bind(("127.0.0.1", 0))
@@ -10447,6 +10448,31 @@ class WebChat(Base):
         self.assertFalse(self.chat._connects("0.0.0.0", port))           # nothing on IPv4
         self.assertEqual(self.chat.who_answers(port), "workbench")
         self.assertTrue(self.chat.running(port))
+
+    def test_wb_chat_on_never_takes_another_accounts_chat_for_its_own(self):
+        # #554 (the 2026-11-20 audit): the mark said only "a wb chat", so on a shared machine B's
+        # wb chat on printed a link to A's server that B's token got 401 on, and off named A's unit
+        mine = os.environ["WB_CHAT_TOKEN"]
+        os.environ["WB_CHAT_TOKEN"] = str(Path(self.tmp.name) / "a-chat-token")     # account A
+        try:
+            servers, _ = self.chat.make_servers(0, ["127.0.0.1"])
+        finally:
+            os.environ["WB_CHAT_TOKEN"] = mine                                     # back to B
+        theirs = servers[0]
+        threading.Thread(target=theirs.serve_forever, daemon=True).start()
+        self.addCleanup(theirs.RequestHandlerClass.hub.close)
+        self.addCleanup(theirs.server_close)
+        self.addCleanup(theirs.shutdown)
+        port = theirs.server_address[1]
+        self.assertEqual(self.chat.who_answers(self.port), "workbench")           # B's own
+        self.assertEqual(self.chat.who_answers(port), "other")
+        self.assertFalse(self.chat.running(port))
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("chat", "on", "--port", str(port))
+        self.assertIn(f"another account's chat", err.getvalue())
+        self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
+        self.assertEqual(run_wb("chat", "off", "--port", str(port)).strip(), "web chat off")  # no unit named
 
     def test_a_chat_on_an_address_that_comes_and_goes_rebinds_in_place_when_it_changes(self):
         # #200 (the 2026-11-19 audit): with bind ["tailscale"] the plan was loopback while the

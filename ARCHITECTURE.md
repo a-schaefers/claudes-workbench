@@ -3798,9 +3798,13 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   nothing answers on the port at an address the plan binds (a wildcard probed at its family's
   loopback, `chat._probe`: `::` at `::1`, since an IPv6-only socket, bindv6only=1, never answered
   the 127.0.0.1 it was probed at and a healthy chat looked down, #450) (`chat.who_answers`: a GET whose
-  response carries `X-Workbench-Chat: 1`, `chat.MARK`, which every response of the server has, is
-  the chat; anything else answering is another program, and `wb chat on` refuses with the port
-  named), then waits up to `START_WAIT` 10 s for it to answer (`chat.wait_up`; one that exits,
+  response carries `X-Workbench-Chat: <identity>`, `chat.MARK`, which every response of the server
+  has, is this account's chat when the value is `chat.identity(token)`, an HMAC-SHA256 of a fixed
+  string keyed by the token (32 hex characters, nothing of the token given away); anything else
+  answering, another account's chat or a server still on a replaced token included, is "other",
+  and `wb chat on` refuses with the port named, while `wb chat off` names no systemd unit. A bare
+  `1` said only "a wb chat", so on a shared machine one account's `wb chat on` showed a link to
+  another's server that its token got 401 on, #554), then waits up to `START_WAIT` 10 s for it to answer (`chat.wait_up`; one that exits,
   the port taken, fails at once with serve.log's last line). A bare connect counted any program
   on the port as the chat, and a fixed half second said started either way (#200, the
   2026-11-19 audit); `chat.running` is `who_answers == "workbench"`. `wb chat off` stops

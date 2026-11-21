@@ -706,16 +706,26 @@ def set_on(on: bool) -> None:
 MARK = "X-Workbench-Chat"  # on every response: how wb chat on knows its own server
 
 
+def identity(secret: str) -> str:
+    """MARK's value: an HMAC of a fixed string keyed by the server's token, so it names whose chat
+    this is and gives away nothing of the token. A bare "1" said only "a wb chat": on a shared
+    machine another account's `wb chat on` took the first's server for its own and showed a link
+    its token got 401 on (#554)."""
+    return hmac.new(secret.encode(), b"workbench web chat", "sha256").hexdigest()[:32]
+
+
 def who_answers(port: int) -> str | None:
-    """Who answers on the port at an address this machine's plan binds: "workbench" (its
-    responses carry MARK), "other", or None. A bare connect counted any program there as the
-    chat, and `wb chat on` showed a link to it (#200, the 2026-11-19 audit)."""
-    found = None
+    """Who answers on the port at an address this machine's plan binds: "workbench" (this
+    account's chat: its responses carry MARK keyed by this token), "other" (another program,
+    another account's chat, or one holding a token since replaced), or None. A bare connect
+    counted any program there as the chat, and `wb chat on` showed a link to it (#200, the
+    2026-11-19 audit)."""
+    found, mine = None, identity(token())
     for addr in plan()["binds"]:
         conn = http.client.HTTPConnection(_probe(addr), port, timeout=2)
         try:
             conn.request("GET", "/manifest.webmanifest", headers={"Host": "localhost"})
-            if conn.getresponse().getheader(MARK) == "1":
+            if hmac.compare_digest(conn.getresponse().getheader(MARK) or "", mine):
                 return "workbench"
             found = "other"
         except (OSError, http.client.HTTPException):
@@ -924,7 +934,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _security_headers(self) -> None:
-        self.send_header(MARK, "1")
+        self.send_header(MARK, identity(self.secret))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
