@@ -54,7 +54,7 @@ from . import hardware, store
 from .watch import Watcher
 
 LOCAL_HOSTS = {"localhost", "0.0.0.0", "host.docker.internal"}
-OLLAMA_PORT = 11434  # Ollama's default: the guess while its server is down
+OLLAMA_PORT = hardware.OLLAMA_PORT  # Ollama's default: the guess while its server is down
 START_TIMEOUT = 20 * 60  # a big model server's first start can take minutes
 START_GRACE = 10  # after a start command fails: another process may be bringing the server up
 
@@ -84,12 +84,35 @@ class Model:
 
     @property
     def root(self) -> str:
-        return self.base_url.rstrip("/").removesuffix("/v1")
+        return server_root(self.base_url)
+
+    @property
+    def openai_base(self) -> str:
+        return openai_base(self.base_url)
 
     @property
     def server(self) -> tuple:
         """The server behind the baseURL, one key however its host is spelled (server_key)."""
         return server_key(self.base_url, self.remote)
+
+
+def openai_base(url: str) -> str:
+    """Where the server behind a baseURL has its OpenAI API: the baseURL, or <root>/v1 for a
+    native Ollama SDK's `…/api` one (#585)."""
+    base = url.rstrip("/")
+    return f"{server_root(url)}/v1" if base.endswith("/api") else base
+
+
+def server_root(url: str) -> str:
+    """The server behind a provider's baseURL: without its trailing `/v1` (the OpenAI API), or
+    `/api`, a native Ollama SDK's base (ollama-ai-provider). Only `/v1` was stripped, so such a
+    provider probed `/api/api/version`, read as a server not running, and one Ollama through both
+    counted as two servers (#585, the audit of 1.90)."""
+    base = url.rstrip("/")
+    for tail in ("/v1", "/api"):
+        if base.endswith(tail):
+            return base[:-len(tail)]
+    return base
 
 
 def server_key(url: str, remote: bool = False) -> tuple:
@@ -102,7 +125,7 @@ def server_key(url: str, remote: bool = False) -> tuple:
     here = not remote and _this_host(u.hostname)
     return ("this host" if here else (u.hostname or "").lower(),
             u.port or (443 if u.scheme == "https" else 80),
-            u.path.rstrip("/").removesuffix("/v1"))
+            urlparse(server_root(url)).path)
 
 
 def _config_dir() -> Path:
@@ -435,7 +458,7 @@ def _engine(url: str, over: dict, pid: str = "") -> str:
     the server has given one."""
     if over.get("engine") in ("ollama", "server"):
         return over["engine"]
-    root = url.rstrip("/").removesuffix("/v1")
+    root = server_root(url)
     if root in _ENGINES:
         return _ENGINES[root]
     guess = "ollama" if urlparse(url).port == OLLAMA_PORT or "ollama" in pid.lower() else "server"
@@ -505,7 +528,7 @@ def engine_note(pid: str, url: str, over: dict) -> str:
 def engine_known(url: str, over: dict) -> bool:
     """Whether the engine was said (models.json) or probed, not guessed while the server is down."""
     return _fake() or over.get("engine") in ("ollama", "server") or \
-        url.rstrip("/").removesuffix("/v1") in _ENGINES
+        server_root(url) in _ENGINES
 
 
 _TEMPLATE = re.compile(r"\{(env|file):([^}]*)\}")
@@ -579,13 +602,19 @@ def _local_providers(cfg: dict, extra: dict, dirs: dict | None = None):
             raw = str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "")
             key = _expand(raw, base=(dirs or {}).get(pid)) if raw else auth_key(pid)  # #336
             if key:
-                _KEYS[url.rstrip("/").removesuffix("/v1")] = key
+                _KEYS[server_root(url)] = key
             yield pid, prov, url, _engine(url, extra.get(pid) or {}, pid), remote
+
+
+def configured_providers() -> list[tuple]:
+    """(provider id, its config, its baseURL, why discovery skips it or "", remote) for every
+    provider with a baseURL, disabled or not: what another entry may still need (#458)."""
+    return list(_scan(read_config(), _overrides()))
 
 
 def skipped_providers() -> list[tuple[str, str]]:
     """(provider id, why) for each provider with a baseURL that discovery leaves out."""
-    return [(pid, why) for pid, _, _, why, _ in _scan(read_config(), _overrides()) if why]
+    return [(pid, why) for pid, _, _, why, _ in configured_providers() if why]
 
 
 def why_none() -> str:
@@ -800,11 +829,12 @@ def small_window_why(ctx: int) -> str:
 
 
 def _catalog(m: Model, catalog: dict | None):
-    """A server's GET {base_url}/models: the body (a dict, else None) or the HTTPError's code.
-    ``catalog``: one probe's answers by (base_url, api_key), shared by every entry on that server,
+    """A server's GET {openai_base}/models (a native Ollama SDK's `…/api` base asks <root>/v1,
+    #585): the body (a dict, else None) or the HTTPError's code.
+    ``catalog``: one probe's answers by (openai_base, api_key), shared by every entry on that server,
     so its aliases ask it once: wb top sent 8 requests for 8 aliases each probe, one after
     another, 2 s each on a server that stalled (#561)."""
-    key = (m.base_url.rstrip('/'), m.api_key or "")
+    key = (m.openai_base, m.api_key or "")
     if catalog is not None and key in catalog:
         return catalog[key]
     auth = {"Authorization": f"Bearer {m.api_key}"} if m.api_key else {}
@@ -866,10 +896,16 @@ def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
         # one listed model: llama-server answers to any name; several: it routes by name
         rows = [x for x in (body.get("data") or []) if isinstance(x, dict)]
         served = {x.get("id") for x in rows}
+        # LM Studio with just-in-time loading off lists only what is loaded: with A loaded, B
+        # read "the server serves A: set the entry's id to A", which pointed B at A, though LM
+        # Studio has B and wb loads it (#462, the audit of 1.8). Asked before a verdict only.
+        unloaded = {"available": True, "resident": False, "why": "in LM Studio, not loaded (wb loads it)"}
         if isinstance(body.get("data"), list) and not served:  # it read as running (#256)
-            return _no("the server answers but lists no model: load it there")
+            return unloaded if lmstudio_unloaded(m) else \
+                _no("the server answers but lists no model: load it there")
         if len(served) > 1 and m.name not in served:
-            return _no(f"the server lists {len(served)} models, not {m.name}")
+            return unloaded if lmstudio_unloaded(m) else \
+                _no(f"the server lists {len(served)} models, not {m.name}")
         sid = str(next(iter(served))) if len(served) == 1 else ""
         # vLLM, SGLang and TGI refuse any other name with a 404: the round died at its first
         # request as "opencode exited 1", and a vLLM name is a long HF path, easy to miss (#256,
@@ -879,7 +915,8 @@ def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
         # id, so studio/coder read as serving personal/coder (#339, the audit of 1.4)
         same = sid == m.name or (llamacpp and _serves(sid, m.name))
         if sid and not same and not llamacpp and not (m.start and _contended(m)):
-            return _no(f"the server serves {sid}, not {m.name}: set the entry's id to {sid}")
+            return unloaded if lmstudio_unloaded(m) else \
+                _no(f"the server serves {sid}, not {m.name}: set the entry's id to {sid}")
         if sid and m.start and _contended(m) and not same:
             # the task would run on the other model, recorded under this one (the 2026-11-16 audit)
             owners = _owners(m, sid)
@@ -1037,9 +1074,41 @@ def freed(m: Model, keep=()) -> bool:
         for o in discover().values()))
 
 
+# Prometheus gauges of requests being answered: llama-server's (--metrics), vLLM's
+BUSY_GAUGES = ("llamacpp:requests_processing", "vllm:num_requests_running")
+
+
 def _server_idle(m: Model) -> bool:
-    live = (_get(f"{m.root}/metrics", timeout=2) or {}).get("live") or {}
-    return live.get("state", "idle") == "idle"  # servers without metrics count as idle
+    """Whether a server answers nobody now, so free_gpu may stop it. llama-server's /slots
+    (`is_processing`), else /metrics: a JSON `live.state`, or Prometheus text with a BUSY_GAUGES
+    gauge above 0. Only the JSON was read, and llama-server and vLLM serve Prometheus text, read
+    as idle: a server was stopped mid-reply to an editor or Open WebUI (#465, the audit of 1.8).
+    A server that says none of these counts as idle."""
+    slots = _ask(f"{m.root}/slots", m.api_key)
+    if isinstance(slots, list):
+        return not any(isinstance(x, dict) and x.get("is_processing") for x in slots)
+    req = urllib.request.Request(f"{m.root}/metrics",
+                                 headers={"Authorization": f"Bearer {m.api_key}"} if m.api_key else {})
+    try:
+        with _open(req, timeout=2) as r:
+            text = r.read(1 << 20).decode(errors="replace")
+    except Exception:
+        return True
+    try:
+        body = json.loads(text)
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        live = body.get("live") if isinstance(body.get("live"), dict) else {}
+        return live.get("state", "idle") == "idle"
+    for line in text.splitlines():
+        if line.split("{", 1)[0].split(" ", 1)[0] in BUSY_GAUGES:
+            try:
+                if float(line.rsplit(None, 1)[-1]) > 0:
+                    return False
+            except ValueError:
+                pass
+    return True
 
 
 def _ollama_loaded(root: str) -> list[str]:
@@ -1074,14 +1143,14 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         # the audit of 1.4). Load it here with the window OpenCode is told.
         t0 = time.time()
         if not m.remote and not _room_beside(m):
-            free_gpu(keep={m.id, *keep}, say=say, warn=warn)
+            free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
         _lmstudio_load(m, key, say)
         return time.time() - t0
     if st["resident"] and (m.remote or not _others_resident(m, keep) or _room_beside(m)):
         return 0.0
     t0 = time.time()
     if not m.remote and not _room_beside(m):
-        free_gpu(keep={m.id, *keep}, say=say, warn=warn)
+        free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
     if m.engine == "ollama":
         say(f"loading {m.name} into ollama")
         _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
@@ -1180,17 +1249,33 @@ def keep_loaded() -> set[str]:
 
 
 def _kept_name(name: str, held: set[str]) -> bool:
-    return any(_matches(name, {k.split("/", 1)[-1]}) or _matches(k.split("/", 1)[-1], {name})
-               for k in held)
+    """Whether the Ollama name ``name`` is one keep_loaded lists: as an Ollama name, whole
+    (`hf.co/<org>/<repo>:Q4_K_M`, `user/model:tag`), or as an OpenCode id, `<provider>/<key>`,
+    whose entry's id (an alias) or key is the name. Untagged is `:latest` either way. Cut at its
+    first `/` whatever it was, a namespaced name never matched itself, and `mannix/llama3:8b` kept
+    `llama3:8b`, another model (#461, the audit of 1.8)."""
+    provs = _providers_of(read_config())
+    bare = lambda n: n if ":" in n.rsplit("/", 1)[-1] else n + ":latest"  # noqa: E731
+    want = set()
+    for k in held:
+        want.add(bare(k))
+        pid, _, key = k.partition("/")
+        if key and pid in provs:
+            spec = ((provs[pid] or {}).get("models") or {}).get(key) or {}
+            want.add(bare(str(spec.get("id") or key) if isinstance(spec, dict) else key))
+    return bare(name) in want
 
 
-def free_gpu(keep=(), say=print, warn=None) -> None:
+def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
     """Stop every model server and unload every Ollama model holding the GPU, except the models
     in ``keep`` (ids): the task's own, and those of tasks running beside it; and those the user
-    keeps loaded (keep_loaded)."""
+    keeps loaded (keep_loaded). ``of``: the model the GPU is freed for; an Ollama known to use
+    only other cards than its server's (apart) keeps its models: every server's were unloaded,
+    so with one Ollama per GPU a task on one card emptied the other (#460, the audit of 1.8)."""
     warn = warn or say
     if _fake():
         return
+    seen: dict = {}
     held = keep_loaded()
     local = [o for o in discover().values() if not o.remote]  # another host's GPU isn't ours to free
     kept = [o for o in local if o.id in keep or o.id in held]
@@ -1205,8 +1290,8 @@ def free_gpu(keep=(), say=print, warn=None) -> None:
             warn(f"{other.id} is running and wb can't stop it (no stop command in "
                  f"{overrides_path().name}); it may hold GPU memory")
             continue
-        deadline = time.time() + 600
-        while not _server_idle(other) and time.time() < deadline:  # never cut off someone's reply
+        deadline = time.monotonic() + INFLIGHT_WAIT
+        while not _server_idle(other) and time.monotonic() < deadline:  # never cut off a reply
             time.sleep(5)
         say(f"stopping {other.id}")
         try:
@@ -1221,7 +1306,8 @@ def free_gpu(keep=(), say=print, warn=None) -> None:
     doomed = {root: [name for name in _ollama_loaded(root)  # every model Ollama has loaded,
                      if not any(o.server == key and _matches(o.name, {name}) for o in kept_ollama)
                      and not _kept_name(name, held)]  # ours or another tool's
-              for key, root in _roots(o for o in local if o.engine == "ollama").items()}
+              for key, root in _roots(o for o in local if o.engine == "ollama").items()
+              if of is None or not apart(of.root, root, seen)}
     _wait_unused(doomed, warn)
     for root, names in doomed.items():
         for name in names:
@@ -1240,6 +1326,10 @@ def free_gpu(keep=(), say=print, warn=None) -> None:
 # and both paid a reload on every request (#378, the audit of 1.6).
 INFLIGHT_WATCH = 10   # seconds free_gpu watches /api/ps for a request on what it would unload
 INFLIGHT_WAIT = 600   # at most this long waiting for one in use, as for a server's reply
+# At least this long between two looks at /api/ps while waiting: a model whose stamp had passed
+# is busy at once, so each watch returned without a sleep and the wait asked again back to back
+# (1,137 requests in 0.25 s: #459, the audit of 1.8)
+INFLIGHT_POLL = 1.0
 
 
 def _stamps(doomed: dict) -> dict:
@@ -1275,6 +1365,7 @@ def _wait_unused(doomed: dict, warn) -> None:
     """Wait, up to INFLIGHT_WAIT, while a model free_gpu would unload is answering requests that
     aren't this account's tasks' (they are kept): unloading it between someone's requests made
     them reload it on the next (#378). It is unloaded after, used or not: the GPU is the task's."""
+    due = time.monotonic() + INFLIGHT_POLL
     busy = _in_use(doomed)
     if not busy:
         return
@@ -1284,6 +1375,8 @@ def _wait_unused(doomed: dict, warn) -> None:
          "idle before unloading it (models.json keep_loaded leaves a model loaded)")
     deadline = time.monotonic() + INFLIGHT_WAIT
     while busy and time.monotonic() < deadline:
+        time.sleep(max(min(due, deadline) - time.monotonic(), 0))
+        due = time.monotonic() + INFLIGHT_POLL
         busy = _in_use({root: [n for r, n in busy if r == root] for root in doomed},
                        min(INFLIGHT_WATCH, max(deadline - time.monotonic(), 0)))
     if busy:
@@ -1308,8 +1401,9 @@ def unheld_loaded(skip=()) -> list[str]:
 
 
 def _others_resident(m: Model, keep=()) -> bool:
-    """Whether anything free_gpu would let go of holds the GPU beside ``m``."""
-    held = keep_loaded()
+    """Whether anything free_gpu would let go of holds the GPU beside ``m``: an Ollama on other
+    cards (apart) isn't asked, as free_gpu leaves it be."""
+    held, seen = keep_loaded(), {}
     local = [o for o in discover().values() if not o.remote]
     ours = [m, *(o for o in local if o.id in keep or o.id in held)]
     if any(o.engine == "server" and o.stop and o.server not in {x.server for x in ours}
@@ -1318,7 +1412,7 @@ def _others_resident(m: Model, keep=()) -> bool:
     return any(not any(o.engine == "ollama" and o.server == key and _matches(o.name, {n}) for o in ours)
                and not _kept_name(n, held)
                for key, root in _roots(o for o in local if o.engine == "ollama").items()
-               for n in _ollama_loaded(root))
+               if not apart(m.root, root, seen) for n in _ollama_loaded(root))
 
 
 def _room_beside(m: Model) -> bool:
@@ -1327,14 +1421,16 @@ def _room_beside(m: Model) -> bool:
     fit (the 2026-11-19 audit). Only for Ollama, under a known budget (gpu_budget), with no other
     server resident (whose memory nothing here measures), ``m`` all in VRAM if it is loaded, and
     Ollama's own limit on loaded models (OLLAMA_MAX_LOADED_MODELS) not reached."""
-    budget = gpu_budget()
+    budget = gpu_budget(m.root)
     if m.engine != "ollama" or not budget:
         return False
     local = [o for o in discover().values() if not o.remote]
     if any(o.engine == "server" and status(o)["resident"] for o in local):
         return False
-    used, here, mine = 0, [], False
+    used, here, mine, seen = 0, [], False, {}
     for key, root in _roots(o for o in local if o.engine == "ollama").items():
+        if apart(m.root, root, seen):
+            continue  # another card's models take none of m's budget (#460)
         for x in (_get(f"{root}/api/ps") or {}).get("models", []):
             if key == m.server and _matches(m.name, {x.get("name")}):
                 if not x.get("size") or x.get("size_vram") != x["size"]:
@@ -1344,8 +1440,7 @@ def _room_beside(m: Model) -> bool:
             used += x.get("size") or 0
             if key == m.server:
                 here.append(x)
-    most = hardware.ollama_env().get("OLLAMA_MAX_LOADED_MODELS") or ""
-    if not mine and len(here) + 1 > (int(most) if most.isdigit() and int(most) else OLLAMA_MAX_LOADED):
+    if not mine and len(here) + 1 > max_loaded(m.root):
         return False
     n = need(m)
     return bool(n) and used + n <= SHARE_AT * budget
@@ -1371,25 +1466,37 @@ OLLAMA_MAX_LOADED = 3  # Ollama's own default (3 per GPU) when OLLAMA_MAX_LOADED
 QUEUE_POLL = 1.0  # a queued task looks again this often; gpu.json changing wakes it sooner
 
 
+def max_loaded(root: str | None = None) -> int:
+    """How many models the Ollama at ``root`` keeps loaded at once: OLLAMA_MAX_LOADED_MODELS, else
+    (0 or unset) Ollama's default of OLLAMA_MAX_LOADED per GPU it may use (server/sched.go:
+    defaultModelsPerGPU * len(gpus)), one when none is counted. Read as 3 in all, a fourth task on
+    a 2-4 GPU box was refused sharing and the others' models unloaded (#466, the audit of 1.8)."""
+    most = (hardware.ollama_env_at(root).get("OLLAMA_MAX_LOADED_MODELS") or "").strip()
+    if most.isdigit() and int(most):
+        return int(most)
+    return OLLAMA_MAX_LOADED * max(len(budget_devices(root)[1]), 1)
+
+
 def unified_default(ram: int) -> int:
     """What macOS lets the GPU wire of ``ram`` bytes of unified memory, by default."""
     return ram * 2 // 3 if ram <= UNIFIED_SMALL else ram * 3 // 4
 
 
-def system_reserve(g: dict) -> int:
+def system_reserve(g: dict, root: str | None = None) -> int:
     """Bytes of a RAM-sharing NVIDIA GPU's memory (hardware.gpus: a Jetson's, a DGX Spark's) the
     system keeps: what was in use when hardware read it, less the models this machine's Ollama
-    has loaded (theirs is the GPU's), and never under SYSTEM_FLOOR. All of MemTotal passed a
-    6.5 GB model as fitting an 8 GB Orin Nano whose desktop held 2 GB (#524). Another server's
-    loaded model counts as the system's: too little room only stops sharing."""
+    (the one at ``root``, else ollama_root_here) has loaded (theirs is the GPU's), and never under
+    SYSTEM_FLOOR. All of MemTotal passed a 6.5 GB model as fitting an 8 GB Orin Nano whose desktop
+    held 2 GB (#524). Another server's loaded model counts as the system's: too little room only
+    stops sharing."""
     if g.get("ram_free") is None:
         return SYSTEM_FLOOR
     loaded = sum(int(x.get("size") or 0) for x in
-                 (_get(f"{ollama_root_here()}/api/ps", timeout=1.0) or {}).get("models") or [])
+                 (_get(f"{root or ollama_root_here()}/api/ps", timeout=1.0) or {}).get("models") or [])
     return max(SYSTEM_FLOOR, (g.get("vram") or 0) - g["ram_free"] - loaded)
 
 
-def budget_devices() -> tuple[int | None, list[dict], str]:
+def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str]:
     """Bytes of GPU memory models can use (None when the machine can't say: then no sharing),
     the devices that make it up, and where the number comes from (wb doctor and wb scout say it).
     models.json's `gpu_gb` sets it by hand, for hardware this can't read. One runtime serves a
@@ -1400,7 +1507,8 @@ def budget_devices() -> tuple[int | None, list[dict], str]:
     those count: an AMD APU's carve-out never outranks or adds to a card (the 0.90 review: a
     16 GiB Radeon 780M carve-out beside an 8 GiB RTX became the budget, a 4 GiB one was added to
     an RX 7600S's 8). With none known, as before. Only the devices Ollama's environment lets it
-    see count (hardware.visible). Apple Silicon: iogpu.wired_limit_mb, else macOS's default
+    see count (hardware.visible): the one serving ``root`` when several run here, one per GPU
+    (hardware.ollama_env_at: #460). Apple Silicon: iogpu.wired_limit_mb, else macOS's default
     share; an APU: its carve-out and GTT, as hardware.gpus found; an NVIDIA GPU that shares the
     RAM (a DGX Spark, a Jetson): the RAM less what the system uses (system_reserve, #524)."""
     hand = _overrides().get("gpu_gb")
@@ -1416,7 +1524,7 @@ def budget_devices() -> tuple[int | None, list[dict], str]:
     devs = hardware.gpus(windows=False)  # WSL's Windows names carry no VRAM: skip PowerShell
     notes = []
     if any((g.get("driver") or "").split(" ")[0] in ("nvidia", "amdgpu") for g in devs):
-        devs, notes = hardware.visible(devs, hardware.ollama_env())
+        devs, notes = hardware.visible(devs, hardware.ollama_env_at(root))
     if any(g.get("discrete") and g.get("vram") for g in devs):
         devs = [g for g in devs if g.get("discrete")]
     groups: dict[str, list] = {}
@@ -1425,7 +1533,7 @@ def budget_devices() -> tuple[int | None, list[dict], str]:
             usable = g.get("wired_limit") or unified_default(g.get("vram") or 0)
             how = "iogpu.wired_limit_mb" if g.get("wired_limit") else "macOS's default share of the RAM"
         elif g.get("unified") and (g.get("driver") or "").startswith("nvidia"):
-            keep = system_reserve(g)
+            keep = system_reserve(g, root)
             usable = max(0, (g.get("vram") or 0) - keep)
             how = f"{g['memory']}, less {hardware.size(keep)} the system uses"
         elif g.get("unified"):
@@ -1447,9 +1555,35 @@ def budget_devices() -> tuple[int | None, list[dict], str]:
             why + "".join(f", as {n} leaves it" for n in notes))
 
 
-def gpu_budget() -> int | None:
-    """Bytes of GPU memory models can use, or None when the machine can't say (budget_devices)."""
-    return budget_devices()[0]
+def gpu_budget(root: str | None = None) -> int | None:
+    """Bytes of GPU memory models can use, or None when the machine can't say (budget_devices):
+    those of the Ollama at ``root``, when given."""
+    return budget_devices(root)[0]
+
+
+def server_devices(root: str | None) -> frozenset | None:
+    """The cards the Ollama at ``root`` may use (their UUIDs, else driver, name and size), when
+    that is surely its own: hardware.ollama_matched found its process among several. None when
+    unknown (one server readable, a container's, gpu_gb set by hand, no card named), and an
+    unknown server is taken to share every card with every other, as all were before #460."""
+    if not root or _fake() or _overrides().get("gpu_gb") is not None \
+            or hardware.ollama_matched(root) is None:
+        return None
+    devs = budget_devices(root)[1]
+    return frozenset(g.get("uuid") or f"{g.get('driver')}|{g.get('name')}|{g.get('vram')}"
+                     for g in devs) or None
+
+
+def apart(root: str | None, other: str | None, seen: dict | None = None) -> bool:
+    """Whether the Ollama servers at ``root`` and ``other`` are known to use no card in common
+    (server_devices), so one's models never take the other's memory: one Ollama per GPU (#460).
+    Unknown is never apart. ``seen``: root → server_devices, asked once per call."""
+    seen = {} if seen is None else seen
+    for r in (root, other):
+        if r not in seen:
+            seen[r] = server_devices(r)
+    a, b = seen[root], seen[other]
+    return a is not None and b is not None and not a & b
 
 
 def need(m: Model) -> int:
@@ -1483,17 +1617,20 @@ def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
     if not budget or not running or m.engine != "ollama" or m.remote or \
             any(o.engine != "ollama" or o.remote for o in running):
         return False
-    env = hardware.ollama_env()
+    env = hardware.ollama_env_at(m.root)  # its own server's settings (#460)
     if same := sum(_key(o) == _key(m) for o in running):
         # one slot each: a value of 2 once admitted any number, and a third task's requests
         # queued inside Ollama while its silence budget ran (the 2026-11-19 audit)
         par = env.get("OLLAMA_NUM_PARALLEL") or ""
         return par.isdigit() and same + 1 <= int(par)
     distinct = {_key(o): o for o in running}
-    most = env.get("OLLAMA_MAX_LOADED_MODELS") or ""  # 0 or unset: Ollama's default
-    if len(distinct) + 1 > (int(most) if most.isdigit() and int(most) else OLLAMA_MAX_LOADED):
+    # its limit is its own server's: models another Ollama holds aren't counted against it
+    if sum(k[0] == m.server for k in distinct) + 1 > max_loaded(m.root):
         return False
-    sizes = [need(o) for o in distinct.values()] + [need(m)]
+    # only what may sit on m's cards takes its budget: summed with another card's models, two
+    # tasks on one Ollama per GPU were refused sharing that fit (#460)
+    seen: dict = {}
+    sizes = [need(o) for o in distinct.values() if not apart(m.root, o.root, seen)] + [need(m)]
     return all(sizes) and sum(sizes) <= SHARE_AT * budget
 
 
@@ -1508,7 +1645,7 @@ def admits(m: Model | None, held: dict) -> bool:
         return False
     found = discover()
     running = [o for o in (found.get(h.get("model") or "") for h in held.values()) if o]
-    return len(running) == len(held) and can_share(m, running, gpu_budget())
+    return len(running) == len(held) and can_share(m, running, gpu_budget(m.root))
 
 
 def holders(home: Path | None = None, pool: str = "gpu") -> dict:
@@ -1851,7 +1988,7 @@ def providers() -> dict[str, dict]:
     def key(pid, prov):
         raw = str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "")
         return _expand(raw, base=dirs.get(pid)) if raw else auth_key(pid)   # #336, the audit of 1.4
-    return {pid: {"root": url.rstrip("/").removesuffix("/v1"), "url": url,
+    return {pid: {"root": server_root(url), "url": url,
                   "models": prov.get("models") or {}, "engine": engine,
                   "key": key(pid, prov),
                   "engine_known": engine_known(url, extra.get(pid) or {}),

@@ -2,7 +2,7 @@
 // real `wb chat serve`, and `wb chat` on the Claude side. Run: node tests/e2e_chat.mjs
 // Needs Playwright: PLAYWRIGHT=/path/to/node_modules/playwright (it isn't a workbench dependency).
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, copyFileSync, readFileSync, existsSync, rmSync, statSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, copyFileSync, readFileSync, readdirSync, existsSync, rmSync, statSync, utimesSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createServer, connect as dial } from 'node:net'
 import { runInNewContext } from 'node:vm'
@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const pw = createRequire(import.meta.url)(process.env.PLAYWRIGHT || 'playwright')
 const home = mkdtempSync(join(tmpdir(), 'wbchat-'))
-const env = { ...process.env, WB_HOME: join(home, 'state'), WB_CHAT_TOKEN: join(home, 'token') }
+const env = { ...process.env, WB_HOME: join(home, 'state'), WB_CHAT_TOKEN: join(home, 'token'),
+  WB_CHAT_CONFIG: join(home, 'chat.json') }  // not the user's
 // a system Chromium when there is one (CHROMIUM names another), else Playwright's own
 const CHROMIUM = process.env.CHROMIUM || (existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : '')
 const PORT = Number(process.env.WB_E2E_PORT || 13371)
@@ -56,6 +57,7 @@ async function run(engine, device) {
   writeFileSync(join(home, 'state/chat/receipts.jsonl'), '')
   writeFileSync(join(home, 'state/chat/asks.jsonl'), '')
   writeFileSync(join(home, 'state/chat/listener.json'), '{}')
+  rmSync(join(home, 'state/chat/open.json'), { force: true })  // the last engine's unread, rebuilt from the files
   writeFileSync(join(home, 'state/results.jsonl'), '')
   const token = readFileSync(env.WB_CHAT_TOKEN, 'utf8').trim()
   startServer(); await sleep(800)
@@ -513,6 +515,51 @@ async function run(engine, device) {
     const again = messages().filter(m => m.text === 'run the backlog overnight').at(-1)
     if (Date.now() / 1000 - again.ts > 60) throw new Error('not sent as a new message')
     await until(async () => (await page.locator('.row.user', { hasText: 'run the backlog overnight' }).last().locator('.meta').textContent()).includes('Delivered'))
+  })
+  await check('a photo attached, the page reloaded before sending: the chip is back, nothing uploaded twice; one message with one path reaches Claude', async () => {
+    // #623, the owner (2026-11-20): never a file uploaded twice by a refresh
+    const puts = []
+    const count = r => { if (r.method() === 'PUT' && r.url().includes('/api/upload/')) puts.push(r.url()) }
+    page.on('request', count)
+    const png = readFileSync(join(ROOT, 'workbench/chat_static/icon-192.png'))
+    const uploads = () => existsSync(join(home, 'state/chat/uploads')) ? readdirSync(join(home, 'state/chat/uploads')) : []
+    const before = uploads().length
+    await page.setInputFiles('#pick', { name: 'photo.png', mimeType: 'image/png', buffer: png })
+    await until(async () => (await page.locator('#tray .att.done').count()) === 1)
+    await page.fill('#input', 'what is this?')
+    await page.reload()
+    await until(async () => (await page.locator('#tray .att.done').count()) === 1)
+    await until(() => page.$eval('#tray .face', i => i.complete && i.naturalWidth > 0))
+    if ((await page.inputValue('#input')) !== 'what is this?') throw new Error('the words were lost')
+    if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('the page scrolls sideways')
+    await sleep(1000)
+    if (puts.length !== 1 || uploads().length !== before + 1) throw new Error(`uploaded ${puts.length} times, ${uploads().length - before} stored`)
+    await page.click('#send')
+    await until(() => messages().some(m => m.files))
+    await until(async () => (await page.locator('#tray').isHidden()))
+    await sleep(1000)
+    const sent = messages().filter(m => m.files)
+    if (sent.length !== 1 || sent[0].text !== 'what is this?' || sent[0].files.length !== 1) throw new Error(JSON.stringify(sent))
+    const got = wb('chat', 'pending').trim().split('\n').map(l => JSON.parse(l)).filter(m => m.files)  // what the mod delivers
+    if (got.length !== 1 || got[0].files.length !== 1) throw new Error('Claude gets ' + JSON.stringify(got))
+    if (!readFileSync(got[0].files[0].path).equals(png)) throw new Error('not the bytes sent')
+    if (puts.length !== 1) throw new Error(`uploaded ${puts.length} times`)
+    page.off('request', count)
+    await until(() => page.$eval('.row.user .files .pic img', i => i.complete && i.naturalWidth > 0))
+    await page.click('.row.user .files .pic')
+    await until(async () => (await page.locator('.viewer img').count()) === 1)
+    await page.click('.viewer')
+    await until(async () => (await page.locator('.viewer').count()) === 0)
+  })
+  await check('a file over the limit is refused on its chip, and ✕ drops it', async () => {
+    writeFileSync(env.WB_CHAT_CONFIG, JSON.stringify({ upload_mb: 0.001 }))
+    try {
+      await page.setInputFiles('#pick', { name: 'big.txt', mimeType: 'text/plain', buffer: Buffer.alloc(4096, 97) })
+      await until(async () => ((await page.locator('#tray .att.refused').textContent()) || '').includes('too big: 4 KB, the limit is 1 KB'))
+      if (!(await page.locator('#send').isDisabled())) throw new Error('Send is on with nothing to send')
+      await page.click('#tray .att .x')
+      await until(async () => await page.locator('#tray').isHidden())
+    } finally { writeFileSync(env.WB_CHAT_CONFIG, '{}') }
   })
   await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
   await browser.close()

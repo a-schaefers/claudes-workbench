@@ -53,7 +53,11 @@ class Stopped(BaseException):  # not an Exception: no `except Exception` on the 
     pass
 
 
+SIGNALLED: list = []  # when the SIGTERM came: a shutdown's runners are batched by it (#544)
+
+
 def _on_term(signum, frame):
+    SIGNALLED.append(time.time())
     signal.signal(signal.SIGTERM, signal.SIG_IGN)  # one stop is enough: a second (systemd sends
     proc = CURRENT.get("proc")                      # more) must not cut the cleanup short
     if proc and proc.poll() is None:
@@ -123,6 +127,25 @@ def fresh_ceiling(cfg: dict) -> float | None:
         return None
     usable = lim.get("input") or window - (lim.get("output") or 0)
     return (usable - buf) / window
+
+
+def handover_warning(cfg: dict) -> str:
+    """What to say of an entry whose output cap puts OpenCode's compaction before the earliest
+    handover point (fresh_ceiling under every fresh_at value), or "". Nothing said so, and every
+    long step compacted, the small-model summary the handover exists to avoid (#595, the audit of
+    1.90). Under HANDOVER_ROOM no successor has room, so no handover fits at all."""
+    top = fresh_ceiling(cfg)
+    lo = min(tuning.KNOBS["fresh_at"].values)
+    if top is None or top >= lo:
+        return ""
+    lim, opts = cfg.get("limit") or {}, cfg.get("options") or {}
+    caps = ", ".join(f"{k} {v}" for k, v in (("limit.output", lim.get("output")),
+                                             ("options.max_tokens", opts.get("max_tokens"))) if v)
+    return (f"its output cap ({caps} of a {lim['context'] // 1024}K window) puts OpenCode's "
+            f"compaction at {max(top, 0):.0%} of the window, before the earliest handover point "
+            f"({lo:.0%}): " + ("no handover fits, so long steps compact" if top < HANDOVER_ROOM else
+                               f"handovers come at {top - tuning.CEILING_MARGIN:.0%}, with little room")
+            + "; lower limit.output and options.max_tokens")
 
 
 # OpenCode 2.3 gives every provider a 300 s wait for the response headers (`headerTimeout`) and
@@ -2191,7 +2214,8 @@ def _rejoin(task: store.Task, lease) -> None:
 
 def drive(task: store.Task) -> None:
     # infra: why the machine, not the agent, failed the task's last run (wb bench grades none of it)
-    task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid(), infra=None)
+    task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid(), infra=None,
+                    boot=store.boot_id())  # a later boot reaps it as a restart's (cli.reap)
     say = lambda msg: task.set_status(last=msg)  # noqa: E731
     try:
         m = models.resolve(task.spec["model"])
@@ -2244,6 +2268,7 @@ def drive(task: store.Task) -> None:
                     return _load_failed(task, e)
             first = False
             n = task.status["round"]
+            _early_notes(task, n)
             why = fresh_reason(task) if n > 1 else None
             keep = task.status.get("context") == "keep"
             if why:
@@ -2435,6 +2460,17 @@ def _undelivered(task: store.Task) -> str:
             + " | ".join(r["text"].strip().replace("\n", " ")[:200] for r in notes)) if notes else ""
 
 
+def _early_notes(task: store.Task, n: int) -> None:
+    """Notes that came in before the round began (queued for the GPU, its model or the base
+    check, or while the model reloaded) go with its prompt, as `wb steer` promises: they once
+    waited for the round to end and came as a round of their own (#452)."""
+    if not (notes := pending_steer(task)):
+        return
+    path = task.round_dir(n).joinpath("prompt.md")
+    path.write_text(path.read_text().rstrip() + "\n\n" + steer_prompt(notes, False))
+    task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(notes))
+
+
 def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
     notes = pending_steer(task)
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
@@ -2479,6 +2515,49 @@ def _updated(task: store.Task) -> bool:
 # (status `stopping`, cli._stop_runner); any other leaves the task stuck, with a notice, so it
 # doesn't sit in a live phase that nothing will ever end (the 2026-11-16 audit).
 SIGNAL_STOP = "the runner was stopped by a signal (a shutdown, a logout or a kill), not by Claude"
+# A shutdown or logout signals every runner at once: each raised a stuck notice of its own, and
+# the mod woke Claude once a task (#544). A runner stopped by a signal waits, up to this long
+# after its own signal, while another task of its session still runs, so the others stop too
+# (past _stop's 10 s wait on an agent); then one notice names every task of the session the
+# signal stopped then (within the same span), raised on the first started, the rest acknowledged.
+SIGNAL_SETTLE = 12
+
+
+def _signal_notice(task: store.Task, at: float) -> None:
+    owner = store.owner(task)
+    ours = lambda: [t for t in store.all_tasks() if store.owner(t) == owner]  # noqa: E731
+    deadline = at + SIGNAL_SETTLE
+    while time.time() < deadline and any(
+            t.name != task.name and t.status.get("phase") in store.ACTIVE
+            and not t.status.get("stopping") and t.status.get("pid")
+            and models.runs(t.status["pid"], "workbench.runner", t.name) for t in ours()):
+        time.sleep(0.25)
+    with store.locked(store.home() / "locks" / "signal-stop.lock"):  # one writer per batch
+        named = {n for r in store.notices() if r["kind"] == "stuck" and r["ts"] >= at - SIGNAL_SETTLE
+                 for n in (r.get("tasks") if isinstance(r.get("tasks"), list) else ())}
+        if task.name in named:
+            return  # another runner's notice named this one
+        batch = [t for t in ours() if t.name not in named and t.status.get("phase") == "stuck"
+                 and t.status.get("last") == SIGNAL_STOP
+                 and abs((t.status.get("signalled") or 0) - at) <= SIGNAL_SETTLE]
+        if task.name not in (t.name for t in batch):
+            batch.append(task)  # resumed meanwhile, or no owner known: its own notice still
+        names, where = [t.name for t in batch], owner[1]
+        ts = store.now()
+        # the steps `wb next` committed, which a discard keeps (#494), for each task they are in
+        kept = [line for t in batch if (line := steps_line(t))]
+        batch[0].notify("stuck", (
+            f"task {task.name}: {SIGNAL_STOP}. wb resume {task.name} continues it in a fresh "
+            f"session, wb discard {task.name} drops it" if len(batch) == 1 else
+            f"{len(batch)} tasks' runners were stopped by a signal (a shutdown, a logout or a "
+            f"kill), not by Claude: {', '.join(names)}. wb resume --all"
+            + (f" --repo {shlex.quote(where)}" if where else "")
+            + " continues them in the order they were started")
+            + "".join(f"\n{k}" for k in kept),
+            round=batch[0].status.get("round"), ts=ts, tasks=names,
+            cause="signal")  # not the step's size (#582)
+        for t in batch[1:]:
+            store.write_ack(t, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
 
 
 def lock_file(name: str, kind: str):
@@ -2529,12 +2608,9 @@ def main():
         else:
             task.event({"ts": store.now(), "round": st.get("round"), "kind": "stopped",
                         "by": "signal", "text": SIGNAL_STOP})
-            task.set_status(phase="stuck", last=SIGNAL_STOP)
-            kept = steps_line(task)
-            task.notify("stuck", f"task {task.name}: {SIGNAL_STOP}. wb resume {task.name} "
-                        f"continues it in a fresh session, wb discard {task.name} drops it"
-                        + (f"\n{kept}" if kept else ""),
-                        round=st.get("round"), cause="signal")  # not the step's size (#582)
+            at = SIGNALLED[0] if SIGNALLED else time.time()
+            task.set_status(phase="stuck", last=SIGNAL_STOP, signalled=at)
+            _signal_notice(task, at)
     except Exception as e:
         err = traceback.format_exc()
         full = store.disk_full(e)

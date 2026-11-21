@@ -87,7 +87,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-6',
+  shape: 'tasks-7',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -159,10 +159,29 @@ const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web
 export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: WbTask) => boolean): boolean {
   if (!webAt) return false
   if (now - webAt < AWAY_MS) return true
-  return list.some(t => t.backlog && isMine(t) && (ACTIVE.has(t.phase) || NEEDS.has(t.phase)))
+  return list.some(t => t.backlog && isMine(t) && (ACTIVE.has(t.phase) || waitsOnClaude(t)))
+}
+// Whether the weekly model check and the automatic optimize may run: no task anywhere active (the
+// GPU's, and a check's question beside a running task's), and none of this session's waiting on
+// Claude lately. Any task open at any age once gated both, so one stuck, failed or unreviewed
+// task left after a quit stopped them for good (#541); one idle past REWAKE_MAX_MS waits for a
+// session long gone, as rewake judges it; a parked one waits for no one.
+export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) => boolean): boolean {
+  return !list.some(t => ACTIVE.has(t.phase) ||
+    (waitsOnClaude(t) && isMine(t) && now - t.updatedAt <= REWAKE_MAX_MS))
 }
 async function away($: any, st: WbChat): Promise<boolean> {
   return awayNow(st.webAt, await $.clock.now(), await read($, tasks), mine)
+}
+// Said in the context blocks while away, and in each wake while away (#540): those blocks come once
+// per conversation, so a user who went to the web chat later was never told of, and a task's
+// news reached only the terminal they had left.
+const AWAY_NOTE =
+  'The user is away from the terminal and last wrote from the web chat. Tell them ' +
+  'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
+  '`wb chat log` shows the thread. Typing in the terminal again ends this.'
+async function awayToo($: any, text: string): Promise<string> {
+  return (await away($, await read($, chat))) ? `${text}\n\n${AWAY_NOTE}` : text
 }
 const WEB = '[web chat]'
 // Only for a delivery into a running turn, which the engine frames as another session's message:
@@ -171,8 +190,22 @@ const WEB_NOTE =
   '(The user wrote this in the web chat; the workbench mod delivered it into your running turn. ' +
   'Answer as /workbench\'s "The web chat" says: `wb chat reply --text "…"`.)'
 
+// A web message's attachments (#623), one line each after the user's words, so Claude can Read
+// each file wb chat saved on this machine (an image is seen, a PDF or text read)
+export function attachedLines(files: unknown): string {
+  if (!Array.isArray(files)) return ''
+  const size = (n: number) => n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${Math.round(n / 1024)} KB`
+    : `${(n / 1024 / 1024).toFixed(1)} MB`
+  return files.flatMap(f => f && typeof f === 'object' && typeof f.path === 'string'
+    ? [`\n[attached: ${f.path} (${size(Number(f.size) || 0)}, ${String(f.type || 'unknown type')})]`] : []).join('')
+}
+
 const ACTIVE = new Set(['queued', 'running', 'testing', 'asking'])
 const NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])
+// Waiting on Claude, unless parked: stopped by /workbench-quit (`wb stop --all`, status `parked`),
+// which the status line, rewake, the boundary and the jobs' gate don't count. It stayed "awaiting
+// review" and kept the weekly check off for good (#541); the pane and `wb status --all` still show it.
+const waitsOnClaude = (t: WbTask) => NEEDS.has(t.phase) && !t.parked
 const COLOR: Record<string, string> = {
   queued: 'subtle', running: 'claude', testing: 'suggestion', asking: 'warning',
   review: 'success', stuck: 'error', failed: 'error', accepted: 'inactive', discarded: 'inactive',
@@ -317,7 +350,29 @@ const NEXT: Record<string, (n: string, id?: string) => string> = {
     `(progress, time, anything off), and log the same with \`wb note ${n} --text "…"\`. ` +
     `If it is heading the wrong way, \`wb steer ${n}\` (\`--now\` to interrupt). Keep it short.`,
 }
+// One notice for the tasks a restart or a shutdown interrupted (its `tasks`: cli._restart_notice,
+// runner._signal_notice). Nothing went wrong in them, yet the wake ended with the failure's
+// `wb log`, feedback or discard after the notice's own `wb resume --all` line (#544).
+const BATCH_NEXT = (names: string[]) => names.length > 1
+  ? 'Nothing went wrong in the tasks themselves: the `wb resume --all` line above continues ' +
+    'them all, in the order they were started (`wb resume <name>` one, `wb discard <name>` drops one).'
+  : `Nothing went wrong in the task itself: \`wb resume ${names[0]}\` continues it in a fresh ` +
+    `session, \`wb discard ${names[0]}\` drops it.`
+const batchOf = (row: Row): string[] | null =>
+  Array.isArray(row.tasks) && row.tasks.length ? row.tasks.map(String) : null
 const RUNNING = new Set(['queued', 'running', 'testing'])
+
+// A question delivered into a running turn (#542): the engine frames it as another session's
+// message, so one line says whose it is and that it can't wait for the turn to end.
+const MIDTURN_NOTE = '(The workbench mod delivered this into your running turn: the agent is ' +
+  'blocked until it is answered, and gives up after a while. Answer it now, then carry on.)'
+// ask_mcp.NO_ANSWER's opening: what the runner answers a question nobody answered in time
+const NO_ANSWER = 'No answer arrived in time.'
+// A question held for a turn that could not take it, which then timed out: said after the turn
+// rather than acknowledged in silence (#542)
+const MISSED_NOTE = (n: string) => `No answer reached it in time (you were busy in a turn), so the ` +
+  `agent went on with its own assumption and states it in its summary. Check that assumption ` +
+  `when you review, or \`wb steer ${n} --text "…"\` now if it is wrong.`
 
 // /workbench run again with the mode already on and no task: the pane is back, and Claude needn't
 // reread the skill to say so.
@@ -475,16 +530,26 @@ const EVERY_STOPS: [string, string, string][] = [
   ['2', '2 s (default)', 'How often the live view samples the GPU, the tasks and the models.'],
   ['5', '5 s', 'How often the live view samples the GPU, the tasks and the models.'],
 ]
+const PROGRESS_OFF: [string, string, string] = ['off', 'Off (default)', 'No progress checks: each one wakes Claude, which spends its tokens.']
 const PROGRESS_STOPS: [string, string, string][] = [
-  ['off', 'Off (default)', 'No progress checks: each one wakes Claude, which spends its tokens.'],
+  PROGRESS_OFF,
   ['on', 'On', 'A task past its typical length gets a check and one recommendation, waking Claude.'],
 ]
+// With a threshold set (`wb progress on --after N`, kept through the row's bare on/off) On says
+// it: the typical length it named instead was the wrong one (#578)
+function progressStops(after: number): [string, string, string][] {
+  if (!after) return PROGRESS_STOPS
+  return [PROGRESS_OFF, ['on', `On, after ${after} min`,
+    `A task past ${after} min of active work gets a check and one recommendation, waking Claude.`]]
+}
 const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress):/ // the rows whose ring the pane follows
 
 // One settings row: a Button naming the choice, which opens its options under it, each a Button
 // (a click, or Enter on the ring), the chosen one marked. Under them the sentence of the option
 // the ring is on, else the chosen one's; the pointer on an option lays its own over it (a hover
-// reveal: no hook runs on hover). A pick folds the row again, which redraws it.
+// reveal: no hook runs on hover). A pick folds the row again, which redraws it; the option
+// already chosen only folds it, running nothing (#578: picking On again ran a bare
+// `wb progress on`, which then dropped a `--after` threshold).
 function settingRow(kit: Row, $: any, name: string, title: string, stops: [string, string, string][],
   value: string, view: WbPane, pick: (value: string) => Promise<unknown>) {
   const { Box, Text, Button } = kit
@@ -499,7 +564,7 @@ function settingRow(kit: Row, $: any, name: string, title: string, stops: [strin
       {stops.map(([v, label]) => (
         <Button key={`${name}:${v}`} label={`  ${v === chosen[0] ? '❯' : ' '} ${label}`} plain dimColor={v !== chosen[0]}
           hover={{ scope: `wb-${name}-${v}` }}
-          onPress={() => { void pick(v).then(() => update($, pane, p => ({ ...p, open: '', focus: '' }))) }} />
+          onPress={() => { void (v === chosen?.[0] ? Promise.resolve() : pick(v)).then(() => update($, pane, p => ({ ...p, open: '', focus: '' }))) }} />
       ))}
       <Box key={`${name}-says`}>
         <Text dimColor>{`    ${ringed[2].padEnd(width)}`}</Text>
@@ -531,8 +596,13 @@ async function statsSettings($: any): Promise<{ recording: boolean; live: boolea
   return { recording: on(d?.recording), live: on(d?.live), every: [1, 2, 5].includes(d?.every) ? d.every : 2 }
 }
 
-async function progressOn($: any): Promise<boolean> {
-  try { return JSON.parse(await $.fs.read(`${mem.root}/progress.json`)).on === true } catch { return false }
+// progress.json as wb reads it (progress.py): on only when it says so; a fixed threshold when
+// `after` is a number other than 0 (wb's falsy), else 0
+async function progressSettings($: any): Promise<{ on: boolean; after: number }> {
+  let d: any = {}
+  try { d = JSON.parse(await $.fs.read(`${mem.root}/progress.json`)) } catch { /* off */ }
+  const after = typeof d?.after === 'number' && Number.isFinite(d.after) ? d.after : 0
+  return { on: d?.on === true, after }
 }
 
 // The Stats tab's history: `wb stats --json`, only while the tab is shown, and only when what it
@@ -746,31 +816,168 @@ export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; 
 }
 
 // The commands that hand work out: run as a command, not merely written down. #409 (2026-11-20):
-// a Python patch whose string held "split it (wb next)" turned a session's workbench mode on, so a
-// heredoc's body, a quoted string and a comment are dropped first, and only a simple command's
-// own word counts (after `;`, `&&`, `||`, `|`, `&`, a newline, `(`, `$(`, `{`, a backtick; past
-// `VAR=x`, `env`, `time`, `nohup`, `exec`, `command`): `wb` or a path ending in `/wb`.
-const HANDS_OUT = new Set(['start', 'next', 'feedback', 'steer', 'answer'])
-const PREFIXES = new Set(['env', 'time', 'nohup', 'exec', 'command'])
-export function delegates(command: string): boolean {
-  let text = command
-  // heredoc bodies: from the line after `<<TAG` (`<<-`, quoted or not) to the line that is TAG
-  for (;;) {
-    const m = /<<-?\s*(['"]?)([A-Za-z_][\w]*)\1/.exec(text)
-    if (!m) break
-    const lineEnd = text.indexOf('\n', m.index)
-    const head = text.slice(0, m.index)
-    if (lineEnd < 0) { text = head; break }
-    const rest = text.slice(lineEnd + 1)
-    const end = new RegExp(`^\\t*${m[2]}[ \\t]*$`, 'm').exec(rest)
-    text = head + ' Q' + text.slice(m.index + m[0].length, lineEnd + 1) + (end ? rest.slice(end.index + end[0].length) : '')
+// a Python patch whose string held "split it (wb next)" turned a session's workbench mode on. So
+// the command is read as bash reads it (#560, the text matcher before it disagreed both ways: it
+// missed `"…/bin/wb" start`, `if wb start`, `! wb start`, `echo "$(wb start)"`, `timeout 60 wb
+// start`, anything after a `<<<` here-string, and `wb resume`, and took `echo foo \; wb start` for
+// two commands): heredoc bodies and comments dropped, quotes and backslashes undone within a word,
+// a `$(…)` or backtick inside double quotes read as the commands it runs, and only a simple
+// command's own word counts, past `VAR=x`, the reserved words and the wrappers (with their
+// options): `wb` or a path ending in `/wb`.
+const HANDS_OUT = new Set(['start', 'next', 'feedback', 'steer', 'answer', 'resume'])
+const RESERVED = new Set(['if', 'then', 'elif', 'else', 'while', 'until', 'do', '!', '{'])
+// A wrapper that runs the rest: the options of it that take a value, and the words it takes
+// before the command (timeout's duration)
+const PREFIXES: Record<string, [string[], number]> = {
+  env: [['-u', '-C', '-S', '--unset', '--chdir', '--split-string'], 0],
+  time: [['-f', '-o', '--format', '--output'], 0],
+  nohup: [[], 0], exec: [['-a'], 0], command: [[], 0],
+  timeout: [['-s', '-k', '--signal', '--kill-after'], 1],
+  nice: [['-n', '--adjustment'], 0], ionice: [['-c', '-n', '--class', '--classdata'], 0],
+  stdbuf: [['-i', '-o', '-e', '--input', '--output', '--error'], 0],
+}
+
+// Where the `(` at `open` closes, quotes skipped (the end when it never does)
+function closing(src: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < src.length; i++) {
+    const c = src[i]
+    if (c === '\\') i++
+    else if (c === "'") { const j = src.indexOf("'", i + 1); i = j < 0 ? src.length : j }
+    else if (c === '(') depth++
+    else if (c === ')' && --depth === 0) return i
   }
-  // quoted strings and comments, each left as one word so the words around them stay apart
-  text = text.replace(/'[^']*'|"(?:[^"\\]|\\.)*"|(^|[\s;&|(])#[^\n]*/g, (q, pre) => (pre !== undefined ? `${pre} ` : ' Q '))
-  for (const part of text.split(/\$\(|&&|\|\||[;&|\n(){}`]/)) {
-    const words = part.trim().split(/\s+/).filter(Boolean)
+  return src.length
+}
+
+// The commands an unquoted heredoc's body runs: its `$(…)` and backticks (`\\` escapes)
+function expansions(body: string): string[][] {
+  const out: string[][] = []
+  for (let j = 0; j < body.length; j++) {
+    if (body[j] === '\\') j++
+    else if (body[j] === '$' && body[j + 1] === '(') {
+      const k = closing(body, j + 1)
+      out.push(...simpleCommands(body.slice(j + 2, k)))
+      j = k
+    } else if (body[j] === '`') {
+      const k = body.indexOf('`', j + 1)
+      const end = k < 0 ? body.length : k
+      out.push(...simpleCommands(body.slice(j + 1, end)))
+      j = end
+    }
+  }
+  return out
+}
+
+// The simple commands a bash command line runs, each as its words (quotes undone)
+function simpleCommands(src: string): string[][] {
+  const out: string[][] = []
+  let words: string[] = []
+  let word: string | null = null // null: between words
+  const heredocs: { tag: string; strip: boolean; quoted: boolean }[] = []
+  const endWord = () => { if (word !== null) words.push(word); word = null }
+  const endCommand = () => { endWord(); if (words.length) out.push(words); words = [] }
+  const n = src.length
+  let i = 0
+  while (i < n) {
+    const c = src[i]!
+    if (c === '\\') {
+      if (src[i + 1] !== '\n') word = (word ?? '') + (src[i + 1] ?? '') // `\;` is a `;` in a word
+      i += 2
+    } else if (c === "'") {
+      const j = src.indexOf("'", i + 1)
+      const end = j < 0 ? n : j
+      word = (word ?? '') + src.slice(i + 1, end)
+      i = end + 1
+    } else if (c === '"') {
+      let j = i + 1
+      let text = ''
+      while (j < n && src[j] !== '"') {
+        if (src[j] === '\\') { text += src[j + 1] ?? ''; j += 2 }
+        else if (src[j] === '$' && src[j + 1] === '(') {
+          const k = closing(src, j + 1)
+          out.push(...simpleCommands(src.slice(j + 2, k)))
+          j = k + 1
+        } else if (src[j] === '`') {
+          const k = src.indexOf('`', j + 1)
+          const end = k < 0 ? n : k
+          out.push(...simpleCommands(src.slice(j + 1, end)))
+          j = end + 1
+        } else text += src[j++]
+      }
+      word = (word ?? '') + text
+      i = j + 1
+    } else if (c === '#' && word === null) { // a comment, to the line's end
+      const j = src.indexOf('\n', i)
+      i = j < 0 ? n : j
+    } else if (c === '\n') {
+      endCommand()
+      i++
+      for (const h of heredocs) { // their bodies start on the next line: up to the line that is the tag
+        let body = ''
+        while (i < n) {
+          const j = src.indexOf('\n', i)
+          const line = src.slice(i, j < 0 ? n : j)
+          i = j < 0 ? n : j + 1
+          if ((h.strip ? line.replace(/^\t+/, '') : line) === h.tag) break
+          body += `${line}\n`
+        }
+        if (!h.quoted) out.push(...expansions(body)) // text, but `$(…)` in it runs
+      }
+      heredocs.length = 0
+    } else if (c === '<' && src.startsWith('<<<', i)) { // a here-string: its word follows
+      endWord()
+      i += 3
+    } else if (c === '<' && src[i + 1] === '<') { // a heredoc: its tag, quotes undone
+      endWord()
+      let j = i + 2
+      const strip = src[j] === '-'
+      if (strip) j++
+      while (src[j] === ' ' || src[j] === '\t') j++
+      const m = /^(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()'"]+))/.exec(src.slice(j))
+      if (m) heredocs.push({ tag: m[1] ?? m[2] ?? m[3]!, strip, quoted: m[3] === undefined || m[0].startsWith('\\') })
+      i = j + (m ? m[0].length : 0)
+    } else if (c === '$' && src[i + 1] === '{') { // ${…}: part of the word
+      const j = src.indexOf('}', i)
+      const end = j < 0 ? n : j
+      word = (word ?? '') + src.slice(i, end + 1)
+      i = end + 1
+    } else if (c === '$' && src[i + 1] === '(') { // $(…): the commands inside are commands too
+      endCommand()
+      i += 2
+    } else if (';&|()`'.includes(c)) {
+      endCommand()
+      i++
+    } else if (c === ' ' || c === '\t' || c === '<' || c === '>') {
+      endWord()
+      i++
+    } else {
+      word = (word ?? '') + c
+      i++
+    }
+  }
+  endCommand()
+  return out
+}
+
+export function delegates(command: string): boolean {
+  for (const words of simpleCommands(command)) {
     let i = 0
-    while (i < words.length && (/^[A-Za-z_]\w*=/.test(words[i] ?? '') || PREFIXES.has(words[i] ?? ''))) i++
+    for (;;) {
+      const w = words[i] ?? ''
+      if (/^[A-Za-z_]\w*=/.test(w) || RESERVED.has(w)) { i++; continue }
+      const prefix = PREFIXES[w]
+      if (!prefix) break
+      i++
+      let positional = prefix[1]
+      while (i < words.length) {
+        const o = words[i]!
+        if (o === '--') { i++; break }
+        if (o.startsWith('-') && o.length > 1) { i += prefix[0].includes(o) ? 2 : 1; continue }
+        if (positional > 0) { positional--; i++; continue }
+        break
+      }
+    }
     const cmd = words[i] ?? ''
     if ((cmd === 'wb' || cmd.endsWith('/wb')) && HANDS_OUT.has(words[i + 1] ?? '')) return true
   }
@@ -944,6 +1151,50 @@ const WAKE_OFF_NOTE =
   'when it is ready; pick it up when they ask (`wb report <name>`), and wait (`wb wait <name>`) ' +
   'only if they ask you to.'
 
+// Back to "Let Claude decide" after a rule the conversation was given (#540)
+const CODING_DECIDE = 'Claude coding is now "Let Claude decide" (the user\'s choice; `wb coding` shows it): ' +
+  'the earlier Claude coding rule no longer applies; work as the /workbench skill says.'
+
+// What this conversation was told of the rules that depend on the state (#540): the user's notes,
+// that wakes are off, the Claude-coding rule. prompt.context fires once per conversation, at its
+// first message (again after a compaction or /clear), and a block the engine doesn't route can't
+// be added later: a session that entered workbench mode afterwards got no notes and no wake-off
+// note, and a coding change from the pane reached only the file-tool gates.
+type Said = { notes: string; wakeOff: boolean; coding: string }
+
+async function wanted($: any, delegating: boolean, notesToo = true): Promise<Said> {
+  const notes = delegating && notesToo ? (await $.fs.read(`${mem.root}/notes.md`).catch(() => '')).trim() : ''
+  const any = delegating || mem.open.size > 0
+  return { notes, wakeOff: !mem.wake && any, coding: any ? await codingMode($) : 'decide' }
+}
+
+// The rules this conversation lacks now, as text, counted as said. Notes come once (Claude adds
+// them itself, `wb notes add`); the coding rule again whenever it changes. Without a context block
+// answered in this load (a reload), nothing is known of what it holds: it is all still to say.
+async function unsaid($: any, delegating: boolean): Promise<string[]> {
+  const want = await wanted($, delegating, !mem.said?.notes) // said once: not read at every poll
+  const was = mem.said ?? { notes: '', wakeOff: false, coding: 'decide' } // after the await: no other caller in between
+  const out: string[] = []
+  if (want.notes && !was.notes) out.push(NOTES_NOTE(want.notes))
+  if (want.wakeOff && !was.wakeOff) out.push(WAKE_OFF_NOTE)
+  const any = delegating || mem.open.size > 0 // out of the mode with nothing open: nothing changes
+  if (any && want.coding !== was.coding) out.push(want.coding === 'decide' ? CODING_DECIDE : CODING_RULES[want.coding])
+  mem.said = { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding }
+  return out
+}
+
+// Mid-conversation, a rule the conversation lacks goes in as a row the model reads, starting no
+// turn; refused (an older Claude Code, a policy), a turn of its own.
+async function sayRules($: any, delegating: boolean) {
+  if (!mem.said) return // no context answered yet: the first message's blocks will say it
+  const lines = await unsaid($, delegating)
+  if (!lines.length) return
+  const text = `[workbench] ${lines.join('\n\n')}`
+  const r = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
+    .catch((err: unknown) => ({ deny: String(err) }))
+  if (r?.deny) mem.queued.push(`${text}\n\nNothing to do now; reply in one line.`)
+}
+
 // The module's own memory: reset by a reload, which runs register and session.start again.
 const mem = {
   wake: true,
@@ -983,6 +1234,9 @@ const mem = {
   probe: null as null | { at: number; said: ProbeState }, // wb's last word on the probe experiment (probeStatus)
   queuedRetryAt: 0, // a queued turn the engine dropped is tried again from then
   open: new Set<string>(), // this session's delegated tasks open at the last poll
+  heldAsks: new Set<string>(), // questions (task:ts) held for a turn that could not take them (#542)
+  said: null as Said | null, // what the conversation was told of the state's rules (#540); null: no context yet
+  skillTurn: false, // /workbench's text said them in this turn: the context block computed after it doesn't
   delegated: false, // workbench mode was on in this load (a hand-back's compaction still keeps the state)
   turnEndedAt: 0, // when Claude's last main-loop turn ended
   follow: true, // the pane sticks to the newest lines until the person scrolls up
@@ -1174,6 +1428,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), session: String(sp.session ?? ''),
       claude_pid: Number(sp.claude_pid ?? 0), claude_start: String(sp.claude_start ?? ''),
       backlog: String(sp.backlog ?? ''),
+      parked: phase === 'stuck' && !!st.parked,
       allowed: allowedLine((await readJson($, `${base}/coding.json`)).allowed),
     })
   }
@@ -1463,18 +1718,20 @@ async function poll($: any) {
     if ([...mem.open].some(name => !open.has(name))) mem.savingsAt = 0 // one closed: its row is new
     if (!on) mem.boundary = false
     mem.open = open
-    if (mem.boundary && !mem.busy && !list.some(t => NEEDS.has(t.phase) && mine(t))) {
+    await sayRules($, on)
+    if (mem.boundary && !mem.busy && !list.some(t => waitsOnClaude(t) && mine(t))) {
       mem.boundary = false
       await compactAtBoundary($)
     }
     // the weekly check needs wb to run (`wb events` said hello) and a quiet minute after a turn
-    if (mem.sawTurn && mem.earsOk && !mem.busy && !mem.scoutAsked && !list.some(isOpen) &&
+    const quiet = quietForJobs(list, now, mine)
+    if (mem.sawTurn && mem.earsOk && !mem.busy && !mem.scoutAsked && quiet &&
       now - mem.turnEndedAt >= SCOUT_QUIET_MS) await scoutIfDue($, now)
     if (mem.sawTurn && mem.earsOk && !mem.updateAsked) {
       mem.updateAsked = true
       void checkUpdate($) // off the poll's path: a stalled fetch held every wake (the 2026-11-16 audit)
     }
-    if (mem.sawTurn && mem.earsOk && !mem.optimizeAsked && !list.some(isOpen)) {
+    if (mem.sawTurn && mem.earsOk && !mem.optimizeAsked && quiet) {
       mem.optimizeAsked = true
       void measureIfDue($)
     }
@@ -1713,7 +1970,7 @@ async function listen($: any, now: number) {
     const about = !a ? ''
       : a.audio ? `(keeps take ${Number(a.n)} of the shortlist: ${String(a.path ?? a.name ?? '')}) `
       : `(about ${String(a.task)}, step ${Number(a.step)}, screenshots ${Number(a.n)}) `
-    const text = `${WEB} ${about}${String(m.text ?? '')}`
+    const text = `${WEB} ${about}${String(m.text ?? '')}${attachedLines(m.files)}`
     // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is
     // refused, as a prompt of its own (which waits for the turn to end).
     if (mem.busy) {
@@ -1784,7 +2041,8 @@ async function deliver($: any, now: number) {
   for (const row of parseLines(file.text)) {
     // Every notice counts for rewake, however old: a notice delivered before a reload (or by
     // another session) is news Claude had, not a lost one (the 2026-11-16 audit).
-    mem.noticed.set(row.task, Math.max(mem.noticed.get(row.task) ?? 0, row.ts))
+    // a batch's notice is news for each task it names (acked with it), or rewake woke for the rest
+    for (const n of [row.task, ...(batchOf(row) ?? [])]) mem.noticed.set(n, Math.max(mem.noticed.get(n) ?? 0, row.ts))
     if (row.ts * 1000 < Math.max(mem.startedAt, now) - OLDEST_WAKE_MS) continue
     due.set(row.task, [...(due.get(row.task) ?? []).filter(r => r.kind === 'question'), row])
   }
@@ -1810,26 +2068,61 @@ async function deliver($: any, now: number) {
           // dropped (timed out, its round ended or stopped) woke Claude for nobody (the 0.90 review)
           ? status.phase === 'asking' && await asking($, name, String(row.id))
           : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
-      const headline = HEADLINE[row.kind] ?? row.kind
+      const batch = batchOf(row)
+      const headline = batch ? (batch.length > 1 ? `and ${batch.length - 1} more were interrupted`
+        : 'was interrupted') : HEADLINE[row.kind] ?? row.kind
       const key = `${name}:${row.ts}`
       if (current && !mem.toasted.has(key)) {
         mem.toasted.add(key)
         $.ui.toast(`workbench: ${name} ${headline}`)
       }
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
-      if (mem.busy && current) { // deliver once the turn ends
+      // a batch's wake ends with its resume, not the failure's next step (#544)
+      const next = batch ? BATCH_NEXT(batch) : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
+      const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
+        : `Task \`${name}\` ${headline}`
+      const text = `[workbench] ${who}.\n\n${row.text}\n\n${next}`
+      if (mem.busy && current) {
+        // A question can't wait for the turn to end: its agent is blocked, and after the ask
+        // timeout it guesses (a 20-minute review turn, #542). It goes into the running turn, as
+        // a web message does; refused, it is held like the rest, which deliver once the turn ends.
+        if (row.kind === 'question') {
+          await $.fs.write(ackPath, String(row.ts)) // acknowledge before sending: never twice
+          if (await intoTurn($, text)) {
+            acked = row.ts
+            continue
+          }
+          await $.fs.write(ackPath, String(acked))
+          mem.heldAsks.add(key)
+        }
         held = true
         continue
       }
       const prev = acked
       await $.fs.write(ackPath, String(row.ts)) // acknowledge before waking: never wake twice
       acked = row.ts
-      if (!current) continue
-      const next = (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
-      void wake($, name, `[workbench] Task \`${name}\` ${headline}.\n\n${row.text}\n\n${next}`, prev, row.ts)
+      if (!current) {
+        // held through the turn and timed out unseen: said, not acknowledged in silence (#542)
+        if (mem.heldAsks.delete(key) && row.id && (ACTIVE.has(status.phase) || NEEDS.has(status.phase))
+          && (await $.fs.read(`${root}/tasks/${name}/ask/${row.id}.answer`).catch(() => '')).startsWith(NO_ANSWER)) {
+          void wake($, name, `[workbench] Task \`${name}\` asked a question while you were busy.\n\n${row.text}\n\n` +
+            MISSED_NOTE(name), prev, row.ts)
+        }
+        continue
+      }
+      mem.heldAsks.delete(key)
+      void wake($, name, text, prev, row.ts)
     }
   }
   if (!held) mem.lastNotify = file.key
+}
+
+// Into the running turn, as a message typed mid-turn would be (`listen` does the same for the web
+// chat): whether the engine took it.
+async function intoTurn($: any, text: string): Promise<boolean> {
+  const r = await $.session.send({ to: { sessionId: await $.session.id() }, text: `${await awayToo($, text)}\n\n${MIDTURN_NOTE}` })
+    .catch(() => ({ isDelivered: false }))
+  return !!r?.isDelivered
 }
 
 // Whether a question is still open: asked (ask/<id>.json) and not answered.
@@ -1843,7 +2136,7 @@ async function asking($: any, name: string, id: string): Promise<boolean> {
 // lost for good (the 2026-11-16 audit): the mark goes back, unless something acted on the task
 // since, and rewake tries again after a minute.
 async function wake($: any, name: string, text: string, prev: number, ts: number) {
-  const r = await $.prompt.submit({ text }).catch((err: unknown) => ({ drop: String(err) }))
+  const r = await $.prompt.submit({ text: await awayToo($, text) }).catch((err: unknown) => ({ drop: String(err) }))
   if (!r?.drop) return
   mem.dropped.set(name, await $.clock.now())
   const ackPath = `${mem.root}/tasks/${name}/acked`
@@ -1860,7 +2153,7 @@ const REWAKE_MAX_MS = 12 * 3600_000 // older than this, it waited for a session 
 async function rewake($: any, now: number, list: WbTask[]) {
   if (mem.busy || !mem.wake) return
   for (const t of list) {
-    if (!NEEDS.has(t.phase) || !mine(t) || now - t.updatedAt < REWAKE_MS || now - t.updatedAt > REWAKE_MAX_MS) continue
+    if (!waitsOnClaude(t) || !mine(t) || now - t.updatedAt < REWAKE_MS || now - t.updatedAt > REWAKE_MAX_MS) continue
     if (now - (mem.dropped.get(t.name) ?? 0) < REWAKE_MS) continue // dropped: once a minute
     const ackPath = `${mem.root}/tasks/${t.name}/acked`
     const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
@@ -1958,12 +2251,28 @@ function taskParts(list: WbTask[], on: boolean) {
   const shown = on ? list : list.filter(t => mine(t))
   const live = shown.filter(t => ACTIVE.has(t.phase) && t.phase !== 'asking')
   const asking = shown.filter(t => t.phase === 'asking')
-  const waiting = shown.filter(t => NEEDS.has(t.phase) && t.phase !== 'asking')
+  const waiting = shown.filter(t => waitsOnClaude(t) && t.phase !== 'asking')
   return { live, parts: [
     ...live.map(t => `${t.name} ${t.phase} r${t.round}`),
     ...asking.map(t => `${t.name} asks`),
     ...(waiting.length ? [`${waiting.length} awaiting review`] : []),
   ] }
+}
+
+// A path variable as wb reads it (store.absolute_env: os.path.abspath(os.path.expanduser(v))):
+// `~` expanded, relative to the directory wb runs in (the session's, where $.process.run starts
+// it), `.`, `..` and repeated or trailing slashes gone. settings.json's `env` passes WB_HOME
+// literally, and the mod took `~/state/wb` as given: the pane stayed empty and no wake came; a
+// trailing slash made `…/workbench//tasks/`, and the Claude-coding guard never matched (#454).
+export function absolutePath(v: string, home: string, cwd: string): string {
+  let p = v === '~' ? home : v.startsWith('~/') ? `${home}${v.slice(1)}` : v
+  if (!p.startsWith('/')) p = `${cwd}/${p}`
+  const out: string[] = []
+  for (const part of p.split('/')) {
+    if (part === '..') out.pop()
+    else if (part && part !== '.') out.push(part)
+  }
+  return `/${out.join('/')}`
 }
 
 // The task /workbench was given, as the skill's text has it after expansion ("**First task:**
@@ -1976,11 +2285,15 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const home = await $.env.get('HOME')
     const wbHome = await $.env.get('WB_HOME')
-    mem.root = wbHome || `${home}/.local/state/workbench`
+    const real = async (p: string) => (await $.fs.stat(p, { resolve: true }).catch(() => undefined))?.realPath ?? p
+    mem.cwd = await real(e.cwd)
+    const abs = (v: string) => absolutePath(v, home ?? '', mem.cwd) // as wb reads it (#454)
+    mem.root = wbHome ? abs(wbHome) : `${home}/.local/state/workbench`
     mem.wb = (await $.env.get('WB_BIN')) || 'wb'
-    mem.skill = `${(await $.env.get('CLAUDE_CONFIG_DIR')) || `${home}/.claude`}/skills/workbench/SKILL.md`
-    const priced = (await $.env.get('WB_SAVINGS')) || `${home}/.config/workbench/savings.json`
-    mem.savingsFile = priced.startsWith('~/') ? `${home}${priced.slice(1)}` : priced
+    const config = await $.env.get('CLAUDE_CONFIG_DIR')
+    mem.skill = `${config ? abs(config) : `${home}/.claude`}/skills/workbench/SKILL.md`
+    const priced = await $.env.get('WB_SAVINGS')
+    mem.savingsFile = priced ? abs(priced) : `${home}/.config/workbench/savings.json`
     mem.startedAt = await $.clock.now()
     // 2026-11-17: /delegate became /workbench. A copy updated across it still has only the old
     // skill link, which now leads nowhere: wb setup makes the new one and drops the old.
@@ -2011,8 +2324,6 @@ export const register: Register = (on, options) => {
       name: HAND_BACK,
       description: 'Stop this session\'s agents and hand their tasks back to Claude to finish',
     })
-    const real = async (p: string) => (await $.fs.stat(p, { resolve: true }).catch(() => undefined))?.realPath ?? p
-    mem.cwd = await real(e.cwd)
     // the file system ignores case when the directory is there with every letter's case swapped
     const swapped = [...mem.cwd].map(c => c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()).join('')
     mem.fold = swapped !== mem.cwd && !!(await $.fs.stat(swapped).catch(() => undefined))
@@ -2083,11 +2394,17 @@ export const register: Register = (on, options) => {
   on('skill.prompt', { skill: SKILL }, async ($, e, next) => {
     if (e.path) mem.skill = e.path
     const again = (await read($, chat)).delegating
+    // what the context block doesn't carry yet goes with the skill's text: before the poll the
+    // mode starts, which would say it as a row of its own (#540)
+    const extra = await unsaid($, true)
+    if (extra.length) mem.skillTurn = true
+    const add = (text: string) => extra.length ? `${text}\n\n${extra.join('\n\n')}` : text
     mem.paneOpened = true // before the poll workbenchMode starts, which would open it too
     await workbenchMode($, true)
     await showPane($)
-    if (again && !firstTask(e.text)) return { text: AGAIN_NOTE(mem.skill) }
-    return next(e)
+    if (again && !firstTask(e.text)) return { text: add(AGAIN_NOTE(mem.skill)) }
+    const r = await next(e)
+    return { ...r, text: add(r.text) }
   })
 
   // Typed in the terminal: the user is back, so answers go here again
@@ -2141,6 +2458,7 @@ export const register: Register = (on, options) => {
   // that delegated in this load, with a task of its own open. Any session's compaction got it
   // (the 2026-11-16 audit).
   on('session.compact', async ($, e, next) => {
+    if (!e.agentId) mem.skillTurn = false // the blocks computed after it say everything again
     if (e.agentId || !mem.open.size || e.instructions?.includes(KEEP_ON_COMPACT)) return next(e)
     if (!mem.delegated && !(await read($, chat)).delegating) return next(e)
     return next({ ...e, instructions: [e.instructions, KEEP_ON_COMPACT].filter(Boolean).join('\n\n') })
@@ -2154,17 +2472,15 @@ export const register: Register = (on, options) => {
     const isAway = await away($, st)
     const blocks = [...r.blocks]
     if (st.delegating) blocks.push({ name: 'workbench-mode', text: MODE_NOTE(mem.skill) })
-    const coding = st.delegating || mem.open.size ? await codingMode($) : 'decide'
-    if (coding !== 'decide') blocks.push({ name: 'claude-coding', text: CODING_RULES[coding] })
-    const notes = st.delegating ? (await $.fs.read(`${mem.root}/notes.md`).catch(() => '')).trim() : ''
-    if (notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(notes) })
-    if (isAway) blocks.push({
-      name: 'web-chat',
-      text: 'The user is away from the terminal and last wrote from the web chat. Tell them ' +
-        'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
-        '`wb chat log` shows the thread. Typing in the terminal again ends this.',
-    })
-    if (!mem.wake && (st.delegating || mem.open.size)) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
+    const want = await wanted($, st.delegating)
+    // /workbench as the first message said them in its text already (#540)
+    const had = mem.skillTurn ? mem.said : null
+    mem.skillTurn = false
+    mem.said = want
+    if (want.coding !== 'decide' && had?.coding !== want.coding) blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
+    if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
+    if (isAway) blocks.push({ name: 'web-chat', text: AWAY_NOTE })
+    if (want.wakeOff && !had?.wakeOff) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
     const { ok, out: status } = await runWb($, ['status', ...(await scope($))])
     if (!ok) warnOnce($, 'status', `wb status failed: ${brief(status)}; wb doctor`)
     if (!ok || status.startsWith('no open tasks')) return { blocks }
@@ -2192,6 +2508,7 @@ export const register: Register = (on, options) => {
       for (const id of mem.asksOpen) void runWb($, ['chat', 'answer', id, 'expired', '--by', 'interrupted'], 15_000)
       mem.asksOpen.clear()
       mem.busy = false
+      mem.skillTurn = false
       mem.sawTurn = true
       mem.turnEndedAt = await $.clock.now()
       void poll($) // held wakes and chat messages go now, not at the next tick
@@ -2278,6 +2595,7 @@ export const register: Register = (on, options) => {
     if (view.tab === 'settings') {
       const st = await statsSettings($)
       const probe = await probeStatus($)
+      const prog = await progressSettings($)
       const picked = (args: string[]) => runWb($, args).then(() => { void refreshStats($, true); void syncTop($) })
       return (
         <Box flexDirection="column">
@@ -2294,7 +2612,7 @@ export const register: Register = (on, options) => {
               v => picked(['stats', 'set', 'live', v]))}
             {settingRow(kit, $, 'every', 'Live refresh', EVERY_STOPS, String(st.every), view,
               v => picked(['stats', 'set', 'every', v]))}
-            {settingRow(kit, $, 'progress', 'Progress checks', PROGRESS_STOPS, (await progressOn($)) ? 'on' : 'off', view,
+            {settingRow(kit, $, 'progress', 'Progress checks', progressStops(prog.after), prog.on ? 'on' : 'off', view,
               v => runWb($, ['progress', v]))}
             <kit.Input key="price" label="▸ Electricity price per kWh: " value={mem.price ? String(mem.price) : ''}
               placeholder="not set (energy shows in Wh)" submitLabel="set" onSubmit={(v: string) => { void setPrice($, v) }} />

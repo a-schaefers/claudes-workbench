@@ -123,7 +123,7 @@ def spawn_runner(task: store.Task) -> int:
     _coding_used(task)  # work handed (back) to the agent: Claude's allowance, if any, is spent
     env = context.detached_env()  # the user's PYTHONPATH kept for the agent (#512)
     env.pop("WB_TASK", None)  # the agent's mark (runner.sweep kills what carries it), not the runner's
-    task.set_status(stopping=None)  # a stop wb made earlier says nothing about this runner
+    task.set_status(stopping=None, parked=None)  # a stop wb made earlier says nothing about this runner
     with open(task.dir / "runner.log", "a") as log:
         # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
         # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
@@ -285,17 +285,28 @@ def runner_alive(task: store.Task) -> bool:
 REAP_GRACE = 15
 _DISK_SAID: list = []
 RUNNER_DIED = "the runner died (see runner.log)"
+# A runner recorded under another boot (status `boot`, store.boot_id): a restart ended it. After
+# one, every live task was failed with a wake of its own guessing why, and resumed one at a
+# time (#544): one notice now names them all, and `wb resume --all` continues them.
+RESTARTED = "interrupted by a restart (the machine started again under it)"
 
 
-def reap(task: store.Task) -> bool:
-    """Fail a live task whose runner is dead; True when this call did it."""
+def _restarted(st: dict) -> bool:
+    return bool(st.get("boot")) and store.boot_id() not in (None, st["boot"])
+
+
+def reap(task: store.Task, quiet: bool = False) -> bool:
+    """Fail a live task whose runner is dead; True when this call did it. quiet: no notice (a
+    restart's batch, which one notice names)."""
     agent = task.status.get("agent_pid")
+    restart = _restarted(task.status)
     try:
         st = task.set_status_if(  # one reaper wins: two waiters, one notice
             lambda st: st.get("phase") in LIVE and not runner_alive(task)
             and time.time() - (st.get("updated_at") or 0) >= REAP_GRACE,
-            phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None, asking=None,
-            infra="runner died")  # the machine's: wb bench grades none of it (#508)
+            phase="failed", last=RESTARTED if restart else RUNNER_DIED, pid=None,
+            agent_pid=None, asking=None,  # infra: the machine's, wb bench grades none of it (#508)
+            infra="restart" if restart else "runner died")
     except OSError as e:
         if not store.disk_full(e):
             raise
@@ -319,7 +330,11 @@ def reap(task: store.Task) -> bool:
     runner.sweep(task)
     ask_mcp.close_all(task)  # and its questions, which nothing will relay (the 0.90 review)
     task.event({"ts": store.now(), "round": st.get("round"), "kind": "error",
-                "text": "the runner died without a report"})
+                "text": "the runner was " + RESTARTED if restart else "the runner died without a report"})
+    if restart:
+        if not quiet:
+            _restart_notice(task)
+        return True
     free = store.free_bytes()
     full = free is not None and free < DISK_SPARE  # a full disk is the likely why (#342)
     task.notify("failed", f"task {task.name}: the runner died without a report (killed, out of "
@@ -329,16 +344,45 @@ def reap(task: store.Task) -> bool:
     return True
 
 
-def _need_worktree(task: store.Task) -> None:
-    """A worktree removed by hand turned the next round into a runner crash (the 2026-11-16
-    audit). Its committed steps are on the branch; discard --keep-branch keeps them."""
-    if not task.worktree.is_dir() and not runner.checked_out(task):
-        die(f"{task.name} never got its worktree (its checkout didn't finish): wb discard "
-            f"{task.name}, then start the task again under a new name")
-    if not task.worktree.is_dir():
-        die(f"{task.name}'s worktree is gone ({task.worktree}): its committed work is on branch "
+_owner = store.owner
+
+
+def _restart_notice(task: store.Task) -> None:
+    """One notice for the tasks one restart interrupted in task's session (its others reaped
+    here, quietly), raised on the first started, the rest acknowledged with it: the mod woke
+    Claude once per task (#544)."""
+    batch = [t for t in store.all_tasks() if t.name == task.name or (
+        _owner(t) == _owner(task) and t.status.get("phase") in LIVE
+        and _restarted(t.status) and reap(t, quiet=True))]
+    ts, where = store.now(), _owner(task)[1]
+    batch[0].notify("failed", (f"task {task.name}: {RESTARTED}" if len(batch) == 1 else
+                               f"{len(batch)} tasks were {RESTARTED.replace('it)', 'them)')}: "
+                               + ", ".join(t.name for t in batch))
+                    + ". wb resume --all" + (f" --repo {shlex.quote(where)}" if where else "")
+                    + " continues them in the order they were started (one that never ran a "
+                    "round starts it again)", round=batch[0].status.get("round"), ts=ts,
+                    tasks=[t.name for t in batch], cause="died")  # not the step's size (#582)
+    for t in batch[1:]:
+        _write_ack(t, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
+
+
+def _worktree_problem(task: store.Task) -> str | None:
+    """Why the task can't go on where it stands, its worktree missing. A worktree removed by hand
+    turned the next round into a runner crash (the 2026-11-16 audit). Its committed steps are on
+    the branch; discard --keep-branch keeps them."""
+    if task.worktree.is_dir():
+        return None
+    if not runner.checked_out(task):
+        return (f"{task.name} never got its worktree (its checkout didn't finish): wb discard "
+                f"{task.name}, then start the task again under a new name")
+    return (f"{task.name}'s worktree is gone ({task.worktree}): its committed work is on branch "
             f"{task.spec.get('branch')}; wb discard {task.name} --keep-branch drops the task and "
             "keeps the branch")
+
+
+def _need_worktree(task: store.Task) -> None:
+    if why := _worktree_problem(task):
+        die(why)
 
 
 def _stale_notes(task: store.Task) -> list[dict]:
@@ -894,6 +938,8 @@ def cmd_start(a):
     measured = (optimize.state().get("models") or {}).get(m.id)
     if measured and (fit := optimize.advice(m.id, measured)):
         print(f"note: {fit} (ask the user first: it adds to their OpenCode config)")
+    if gap := runner.handover_warning(m.config):  # #595
+        print(f"note: {m.id}: {gap}")
     print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
 
 
@@ -1138,14 +1184,7 @@ def _ack_file(task):
     return task.dir / "acked"
 
 
-def _write_ack(task, ts: float) -> None:
-    """The mark replaced whole: the mod and wb wait read it on every poll, and a read between a
-    truncate and the write (or a write that failed after it) saw 0, every old notice news again
-    (the 2026-11-16 audit)."""
-    f = _ack_file(task)
-    tmp = f.with_name(f".acked.{os.getpid()}.tmp")
-    tmp.write_text(str(ts))
-    os.replace(tmp, f)
+_write_ack = store.write_ack  # the runner writes one too (a shutdown's batch, #544)
 
 
 def _acked(task):
@@ -1361,8 +1400,14 @@ def cmd_status(a):
                                            if a.all or (t.status.get("phase") not in store.CLOSED
                                                         and not t.spec.get("bench"))]
     tasks, others = (tasks, []) if a.name else _scope(tasks, a.repo, a.session)
+    parked = [] if a.name or a.all else [t for t in tasks if store.parked(t.status)]
+    tasks = [t for t in tasks if t not in parked]
+    others = [t for t in others if a.all or not store.parked(t.status)]
+    parked_line = (f"parked by wb stop --all (/workbench-quit): {', '.join(t.name for t in parked)}; "
+                   "leave them unless the user asks (wb status --all lists them)") if parked else None
     if not tasks:
         print("no open tasks" + ("" if a.all else " (wb status --all shows closed ones)"))
+        _say(parked_line)
         _say(_others_line(others, "open elsewhere"))
         return
     print(f"{'task':22} {'phase':9} {'rnd':>3} {'model':16} {'age':>5} {'idle':>5}  last")
@@ -1370,7 +1415,7 @@ def cmd_status(a):
         if t.status.get("phase") in LIVE:
             reap(t)
         st, sp = t.status, t.spec
-        phase = st.get("phase", "?")
+        phase = "parked" if store.parked(st) else st.get("phase", "?")
         if phase in store.ACTIVE and not runner_alive(t) and phase != "asking":
             phase += "?"  # the runner died seconds ago (reap waits REAP_GRACE)
         short = sp.get("model", "").split("/")[-1][:16]
@@ -1379,6 +1424,7 @@ def cmd_status(a):
               f"{(st.get('last') or '')[:70]}")
     if a.name and tasks[0].worktree.is_dir():
         print(f"worktree: {tasks[0].worktree}")
+    _say(parked_line)
     _say(_others_line(others, "open elsewhere"))
 
 
@@ -1493,7 +1539,8 @@ def stop_everything(tasks=None) -> list[str]:
             _stop_runner(t)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": "bail out: stopped by the user"})
-            t.set_status(phase="stuck", last="bail out: stopped", pid=None)
+            t.set_status(phase="stuck", last="bail out: stopped", pid=None,
+                         parked=store.now())  # out of the status line and new sessions (#541)
             _ack_all(t)
             stopped.append(f"{t.name} (worktree kept: {t.worktree})")
     return stopped
@@ -1523,19 +1570,78 @@ def cmd_stop(a):
           "corrections, wb discard drops it")
 
 
+# What `wb resume --all` continues: tasks interrupted from outside, not those stopped for a
+# reason of their own (a guard, a crash, a failed load), which want Claude's look first (#544)
+INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP)
+
+
 @one_at_a_time
 def cmd_resume(a):
     """Continue a task Claude stopped (wb stop) where the work stands: a fresh session, handed
-    the task, the work so far and what the step's rounds asked. Not a review round."""
-    task = need(a.name)
-    reap(task)
+    the task, the work so far and what the step's rounds asked. Not a review round. --all: every
+    task in scope a restart, a kill or a signal interrupted, in the order they were started."""
+    if a.name and a.all:
+        die("give a task or --all, not both")
+    if (a.repo or a.session or a.backlog) and not a.all:
+        die("--repo, --session and --backlog go with --all")
+    if not a.all:
+        if not a.name:
+            die("name a task, or --all")
+        return _resume(need(a.name))
+    tasks = [t for t in store.all_tasks() if t.status.get("phase") in LIVE + ("stuck", "failed")]
+    for t in tasks:
+        reap(t)
+    tasks = [t for t in tasks if t.status.get("phase") in ("stuck", "failed")
+             and t.status.get("last") in INTERRUPTED and not runner_alive(t)
+             and (not a.backlog or t.spec.get("backlog") == a.backlog)]
+    tasks, _ = _scope(tasks, a.repo, a.session)
+    if not tasks:
+        print("nothing to resume: no task in scope was interrupted (a restart, a kill or a signal)")
+        return
+    for t in tasks:  # all_tasks' order: the order they were started, which the GPU queue follows
+        if not _rechecks_out(t) and (why := _worktree_problem(t)):
+            print(why)  # as _resume would say it, without ending the batch
+            continue
+        with store.locked(runner.lock_file(t.name, "cmd")):  # as one_at_a_time, task by task
+            _resume(t)
+
+
+def _first_round(st: dict) -> bool:
+    """It never ran a round: queued behind the GPU, its model, its checkout or the base check."""
+    return st.get("round", 1) == 1 and not st.get("round_started_at") and not st.get("session")
+
+
+def _rechecks_out(task: store.Task) -> bool:
+    """A task interrupted from outside before its checkout finished: its runner makes the
+    checkout again from nothing (runner.checkout), so it resumes at round 1 (#529, #544). One
+    whose checkout failed still goes through wb discard."""
     st = task.status
+    return _first_round(st) and not runner.checked_out(task) and st.get("last") in INTERRUPTED
+
+
+def _resume(task: store.Task) -> None:
+    reap(task)
+    st, name = task.status, task.name
     if st.get("phase") not in ("stuck", "failed"):
-        die(f"{a.name} is {st.get('phase')}; wb resume continues a stopped task")
+        die(f"{name} is {st.get('phase')}; wb resume continues a stopped task")
     if runner_alive(task):
-        die(f"{a.name}'s runner is still running")
-    _need_worktree(task)
+        die(f"{name}'s runner is still running")
+    if not _rechecks_out(task):
+        _need_worktree(task)
     n = st.get("round", 1)
+    if _first_round(st):
+        # it never ran a round (queued behind the GPU, its model or the base check): round 1
+        # again, its prompt as wb start wrote it, not "Claude stopped your last session…"
+        handled = store.now()
+        gpu = _gpu_note(task)
+        task.set_status(phase="queued", last="resumed by the reviewer")
+        task.event({"ts": store.now(), "round": 1, "kind": "resumed",
+                    "text": "Claude resumed the task: it starts its first round again"})
+        spawn_runner(task)
+        _ack_all(task, upto=handled)
+        print(f"resumed {name}: its first round, which it never ran")
+        _say(gpu)
+        return
     asks = runner.round_asks(task, n)
     notes = _stale_notes(task)  # resume means carry on: a note never delivered still applies
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
@@ -1549,7 +1655,7 @@ def cmd_resume(a):
                 "text": "Claude resumed the task in a fresh session"})
     spawn_runner(task)
     _ack_all(task, upto=handled)  # the stuck or failed notice is handled: wb wait must not hand it out again
-    print(f"resumed {a.name} in a fresh session (round {n + 1})")
+    print(f"resumed {name} in a fresh session (round {n + 1})")
     _say(gpu)
     _say(lessons.nudge(task))
 
@@ -1675,7 +1781,7 @@ def cmd_progress(a):
             die("progress checks are off: wb progress on --after MIN")
         a.state = "on"
     if a.state:
-        progress.set_enabled(a.state == "on", a.after if a.state == "on" else None)
+        progress.set_enabled(a.state == "on", a.after)  # --after kept unless given (0 clears it, #578)
     s = progress.settings()
     print("progress checks: " + (f"on: a task past {s['after']:g} min of active work" if s.get("after")
                                   else "on: a task past its typical length of active work")
@@ -2173,7 +2279,8 @@ def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
     """What history leaves behind (the 2026-11-19 audit, finding 18): closed tasks archived after
     ``days`` (store.archive), handled notices older than that moved to notify.old.jsonl, the
     rules of closed or vanished tasks, stale runtime directories, and with ``branches`` the
-    delegate branches of tasks accepted and merged (wb gc). The counts of each."""
+    delegate branches of tasks accepted and merged (wb gc), and the web chat's uploads past
+    ``days`` once their message is read. The counts of each."""
     out = {"archived": len(store.archive(days)), "notices": _rotate_notices(days)}
     rules = store.home() / "rules"
     out["rules"] = 0
@@ -2192,6 +2299,7 @@ def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
         if store.NAME_RE.match(d.name) and (half := _dead_start(t)) is not None:
             _drop_start(t, half)
             out["starts"] += 1
+    out["uploads"] = chat.drop_old_uploads(days)  # the web chat's attachments, once delivered (#623)
     out["branches"] = _merged_branches() if branches else 0
     store.write_json(store.home() / "gc.json", {"at": store.now(), **out})
     return out
@@ -2256,7 +2364,8 @@ def cmd_gc(a):
     print(f"archived {out['archived']} task(s) closed over {a.days:g} days ago; moved "
           f"{out['notices']} old notice(s) to notify.old.jsonl; removed {out['rules']} rules "
           f"dir(s), {out['runtime']} runtime dir(s), {out['scratch']} scratch dir(s), "
-          f"{out['starts']} half-made start(s), {out['branches']} merged branch(es)")
+          f"{out['starts']} half-made start(s), {out['uploads']} web chat upload(s), "
+          f"{out['branches']} merged branch(es)")
     if left := bench.sweep():  # not in gc(): a discard runs that, and this discards (#511)
         print(f"closed {len(left)} bench replay(s) whose driver died, with their clones: "
               + ", ".join(left[:5]))
@@ -2678,14 +2787,15 @@ def cmd_scout(a):
             print(f"  {pid}: Ollama isn't answering at {prov['root']}, so what it has and serves is unknown")
         installed = {x["name"]: x for x in models.ollama_installed(prov["root"])} if up else {}
         other = prov["engine"] != "ollama" and not models._fake() and \
-            models._ask(f"{prov['url'].rstrip('/')}/models", prov["key"], timeout=1) is not None
-        for name in prov["models"]:
+            models._ask(f"{models.openai_base(prov['url'])}/models", prov["key"], timeout=1) is not None
+        for name, e in prov["models"].items():
             m = registered.get(f"{pid}/{name}")
-            disk = installed.get(name) or installed.get(f"{name}:latest") or {}
-            said = models.server_facts(prov["root"], name, prov["key"]) if other else {}
+            asked = served_name(name, e)  # the server's name for it: an alias's id (#588)
+            disk = installed.get(asked) or installed.get(f"{asked}:latest") or {}
+            said = models.server_facts(prov["root"], asked, prov["key"]) if other else {}
             if said.get("weights"):
                 disk = {"size": said["weights"]}
-            served = models.ollama_served_context(prov["root"], name) if up else said.get("context")
+            served = models.ollama_served_context(prov["root"], asked) if up else said.get("context")
             ctx = ((m.config.get("limit") or {}).get("context") or 0) if m else 0
             facts = " · ".join(x for x in (
                 f"{hardware.size(disk.get('size'))} on disk" if disk.get("size") else "",
@@ -2700,8 +2810,8 @@ def cmd_scout(a):
             print(f"  {pid}/{name}: {facts or prov['engine']} · {used}"
                   + (f" · bench: {replayed}" if replayed else "")
                   + (f"\n    slice: {router.slice(m).line()}" if m else ""))
-        extra = [x for x in installed if x not in prov["models"] and x.removesuffix(":latest")
-                 not in prov["models"]]
+        names = {served_name(n, e).removesuffix(":latest") for n, e in prov["models"].items()}
+        extra = [x for x in installed if x.removesuffix(":latest") not in names]
         local = [x for x in extra if not installed[x]["cloud"]]
         if local:
             print(f"  installed in {pid} but not registered: " + ", ".join(
@@ -2722,15 +2832,20 @@ def cmd_scout(a):
           "and when done: wb scout --done --notes \"…\"")
 
 
+def served_name(key: str, entry) -> str:
+    """The name the server knows a config entry by: its `id` (an alias, #203), else its key."""
+    return str((entry.get("id") if isinstance(entry, dict) else None) or key)
+
+
 def server_lines(provs: dict) -> list[str]:
     """wb scout's view of the model servers on this machine, whichever they are: the commands on
     PATH, and each default port that answers, with whether OpenCode has a provider for it."""
     on_path, answering = models.servers_here()
-    roots = {p["root"].rstrip("/") for p in provs.values()}
+    keys = {models.server_key(p.get("url") or p["root"]) for p in provs.values()}  # ::1, a LAN IP (#588)
     lines = [f"  on PATH: {', '.join(on_path)}"] if on_path else []
     for x in answering:
         listed = ", ".join(x["models"][:8]) + (", ..." if len(x["models"]) > 8 else "") or "no models"
-        known = (x["root"] in roots or x["root"].replace("127.0.0.1", "localhost") in roots)
+        known = models.server_key(x["root"]) in keys
         lines.append(f"  {x['root']} answers (usually {x['usually']}): {listed}" + (
             "" if known else f"; OpenCode has no provider for it (wb model add <provider>/<model> "
                              f"--url {x['root']}/v1 --context N)"))
@@ -2803,7 +2918,8 @@ def cmd_skill(a):
         if a.name in personal:
             die(f"{a.name} is the name of one of the user's own skills; pick another")
         try:
-            verb, warns = skills.add(Path(a.source), a.name, a.message, a.origin or "")
+            verb, warns = skills.add(Path(a.source), a.name, a.message, a.origin or "",
+                                     tuple(a.reviewed or ()))
         except (ValueError, OSError, RuntimeError) as e:  # a copy or git failure too (#604)
             die(f"not added: {_skill_failure(e)}")
         print(f"{verb} {a.name}" + "".join(f"\nwarning: {w}" for w in warns + _one_project(a.lesson, a.name))
@@ -3101,6 +3217,8 @@ def cmd_model(a):
             if provs else f"no local provider: {models.why_none()}")
     prov = provs[provider]
     if a.action == "add":
+        # the server's name for it: an existing alias's id, not its key (#588, the audit of 1.90)
+        asked = served_name(name, prov["models"].get(name))
         if prov["problem"]:
             die(f"provider {provider}: {prov['problem']}")
         _say(prov.get("engine_note"))  # an Ollama emulator, driven as a server (#580)
@@ -3116,7 +3234,7 @@ def cmd_model(a):
             # (the 2026-11-16 audit)
             die(f"Ollama isn't answering at {prov['root']}: start it (ollama serve, or its "
                 "service or app), then retry")
-        if prov["engine"] == "ollama" and models.ollama_cloud(prov["root"], name) \
+        if prov["engine"] == "ollama" and models.ollama_cloud(prov["root"], asked) \
                 and not models.cloud_allowed(a.id):
             die(f"{a.id} is an Ollama cloud model: it runs on ollama.com, off this machine. To hand "
                 f"it work anyway, give it \"local\": true in {models.overrides_path()} first")
@@ -3124,22 +3242,26 @@ def cmd_model(a):
             if prov["engine"] != "ollama":
                 die(f"{provider} is not an Ollama provider; install the model the server's own way")
             try:
-                models.ollama_pull(prov["root"], name, say=lambda m: print(m, flush=True))
+                models.ollama_pull(prov["root"], asked, say=lambda m: print(m, flush=True))
             except (OSError, RuntimeError, ValueError) as e:  # URLError and HTTPError are OSErrors
-                die(f"pulling {name} failed: {getattr(e, 'reason', e)}")
+                die(f"pulling {asked} failed: {getattr(e, 'reason', e)}")
         try:
-            facts = models.ollama_show(prov["root"], name) if prov["engine"] == "ollama" else {}
+            facts = models.ollama_show(prov["root"], asked) if prov["engine"] == "ollama" else {}
         except Exception as e:
-            die(f"{provider} can't describe {name} ({e}): is it pulled? (--pull downloads it)")
+            die(f"{provider} can't describe {asked} ({e}): is it pulled? (--pull downloads it)")
         caps = facts.get("capabilities") or []
         # the context the server actually serves: what it says it gives this model, else what
         # this provider's other models are set to. Never Ollama's trained length: it serves its
         # own small default then, and the prompt was cut off silently (the 2026-11-16 audit)
         other = {} if prov["engine"] == "ollama" or models._fake() else \
-            models.server_facts(prov["root"], name, prov["key"])
-        served = models.ollama_served_context(prov["root"], name) if prov["engine"] == "ollama" \
+            models.server_facts(prov["root"], asked, prov["key"])
+        served = models.ollama_served_context(prov["root"], asked) if prov["engine"] == "ollama" \
             else other.get("context")
-        siblings = [(e.get("limit") or {}).get("context") for e in prov["models"].values()]
+        # never a sibling's window for Ollama: it serves each model its own (a `wb optimize`
+        # variant's 64K is its Modelfile's), and llama3.1:8b beside qwen3:8b-64k was registered
+        # 64K while Ollama served its default (#464, the audit of 1.8)
+        siblings = [] if prov["engine"] == "ollama" else \
+            [(e.get("limit") or {}).get("context") for e in prov["models"].values()]
         ctx = a.context or served or next((c for c in siblings if c), None)
         if prov["engine"] == "ollama":
             if not ctx:
@@ -3193,8 +3315,10 @@ def cmd_model(a):
             return w if ":" in w else w + ":latest"  # Ollama's own name for an untagged model
         mine = weights(name, prov["models"][name])
         here = models.server_key(prov["url"])  # localhost and 127.0.0.1 are one Ollama (#368)
-        sharing = [f"{pid}/{n}" for pid, p in provs.items() if p["engine"] == "ollama"
-                   and models.server_key(p["url"]) == here for n, e in p["models"].items()
+        # every provider the config has, disabled ones too: one left out of disabled_providers
+        # again would have to pull the weights again (#458, the audit of 1.8)
+        sharing = [f"{pid}/{n}" for pid, p, url, _, _ in models.configured_providers()
+                   if models.server_key(url) == here for n, e in (p.get("models") or {}).items()
                    if (pid, n) != (provider, name) and weights(n, e) == mine]
         if sharing:
             die(f"--delete would delete the weights {', '.join(sharing)} also use ({mine}): "
@@ -3516,7 +3640,8 @@ def cmd_chat(a):
     else:  # log
         for r in chat.thread()[-a.n:]:
             who = "you" if r["from"] == "user" else "Claude"
-            print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}")
+            files = "".join(f" [attached: {f.get('path')}]" for f in r.get("files") or [] if isinstance(f, dict))
+            print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}{files}")
         lst = chat.listener()
         print(f"listening: {lst['cwd']}" if lst else "no session is listening")
 
@@ -3889,6 +4014,24 @@ def ollama_line() -> str:
             f"{models.overrides_path().name}'s gpu_gb sets the GPU budget and each model's vram_gb its size")
 
 
+# A task waiting on Claude this long was left (a quit, a reboot, a project put down): nothing
+# else ever named it, and one such gated the weekly check for good (#541). wb doctor does.
+IDLE_DAYS = 3
+
+
+def idle_line() -> str | None:
+    """The tasks waiting on Claude (review, stuck, failed, asking) untouched for IDLE_DAYS+."""
+    cutoff = time.time() - IDLE_DAYS * 86400
+    old = [t for t in store.all_tasks() if t.status.get("phase") in store.NEEDS_CLAUDE
+           and not t.spec.get("bench") and (t.status.get("updated_at") or 0) < cutoff]
+    if not old:
+        return None
+    said = ", ".join(f"{t.name} ({t.status['phase']} {int((time.time() - (t.status.get('updated_at') or 0)) // 86400)}d"
+                     + (", parked" if store.parked(t.status) else "") + ")" for t in old)
+    return (f"waiting on Claude for {IDLE_DAYS}+ days: {said}: wb resume <name> continues a stuck "
+            "or failed one, wb report <name> shows where one stands, wb discard <name> drops one")
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -3995,14 +4138,17 @@ def cmd_doctor(a):
         ollama = prov["engine"] == "ollama"
         for name, e in prov["models"].items():
             said = (e.get("limit") or {}).get("context")
+            asked = served_name(name, e)  # the server's name for it: an alias's id (#588)
             if not said and f"{pid}/{name}" in found:  # it passed, and the runner never handed
                 # over (the 2026-11-16 audit)
                 line(False, f"{pid}/{name} has no limit.context, so its tasks never hand over and "
                      "nothing compacts before the server cuts them off: wb model add "
                      f"{pid}/{name}" + ("" if ollama else " --context N (the window it serves)"))
+            if said and (gap := runner.handover_warning(e)):  # any server (#595)
+                print(f"--  {pid}/{name}: {gap}")
             if not ollama:
                 # only a server running this model is asked: a down one cost seconds a model
-                served = models.server_facts(prov["root"], name, prov["key"])["context"] \
+                served = models.server_facts(prov["root"], asked, prov["key"])["context"] \
                     if (states.get(f"{pid}/{name}") or {}).get("resident") else None
                 if said and served and said > served:
                     line(False, f"{pid}/{name} says a {said // 1024}K context but the server serves "
@@ -4022,7 +4168,7 @@ def cmd_doctor(a):
                 print(f"--  {fit}")
             if prov["root"] in down:
                 continue
-            served = models.ollama_served_context(prov["root"], name)
+            served = models.ollama_served_context(prov["root"], asked)
             if said and not served:  # a stock Ollama serves 4K-8K (the 2026-11-16 audit)
                 print(f"--  {pid}/{name}: Ollama's served context is unknown (not loaded, no num_ctx, "
                       f"no OLLAMA_CONTEXT_LENGTH); its default may be below the entry's "
@@ -4051,6 +4197,8 @@ def cmd_doctor(a):
                  f"{store.gb(held)}, with {store.gb(free)} free"
                  + ("" if free >= DISK_SPARE else ": a task's writes fail on a full disk; wb "
                     "discard an open task, or free some"))
+    if idle := idle_line():
+        print("--  " + idle)
     print("--  " + gpu_line())  # informs only: a CPU-only machine isn't broken
     if said := ollama_line():
         print("--  " + said)
@@ -4115,6 +4263,10 @@ def cmd_doctor(a):
 def main(argv=None):
     store.absolute_env()  # before anything reads a path from the environment or a child inherits it
     a = parser().parse_args(argv)
+    try:
+        store.note_claude_session()  # which sessions a /clear gave this process (spend.usage)
+    except OSError:
+        pass  # a measurement's record never stops a command
     try:
         a.f(a)
     except RuntimeError as e:  # wb's own failures (git, a config that doesn't parse): a message
@@ -4253,6 +4405,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--message", "-m", required=True, help="why: what review taught")
     x.add_argument("--source", dest="origin", help="where an imported skill came from (url@commit, license)")
     x.add_argument("--lesson", action="append", metavar="ID", help="the lessons this takes in (wb lessons)")
+    x.add_argument("--reviewed", action="append", metavar="RULE", help="a scan rule whose critical "
+                   "findings you have read and judged safe: they pass, recorded in the commit (repeatable)")
     x = ss.add_parser("patch", help="fix one passage of a skill in place")
     x.add_argument("name")
     x.add_argument("--old", help="the passage to replace (it must occur exactly once)")
@@ -4378,7 +4532,8 @@ def parser() -> argparse.ArgumentParser:
                        "typical length of active work gets a check and a recommendation")
     s.add_argument("state", nargs="?", choices=["on", "off"])
     s.add_argument("--after", type=float, metavar="MIN", help="check after this many minutes of "
-                   "active work (default: the task's typical length on its model)")
+                   "active work (default: the task's typical length on its model); kept until "
+                   "given again, 0 clears it")
     s.set_defaults(f=cmd_progress)
     s = sub.add_parser("note", help="Claude's captain's-log line in the task's transcript")
     s.add_argument("name"); s.add_argument("--text", required=True); s.set_defaults(f=cmd_note)
@@ -4441,7 +4596,14 @@ def parser() -> argparse.ArgumentParser:
                    help="with --all: only those of Claude Code session ID (repeatable)")
     s.set_defaults(f=cmd_stop)
     s = sub.add_parser("resume", help="continue a stopped task in a fresh session (not a review round)")
-    s.add_argument("name"); s.set_defaults(f=cmd_resume)
+    s.add_argument("name", nargs="?")
+    s.add_argument("--all", action="store_true", help="every task a restart, a kill or a signal "
+                   "interrupted, in the order they were started")
+    s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
+    s.add_argument("--session", action="append", metavar="ID",
+                   help="with --all: only those of Claude Code session ID (repeatable)")
+    s.add_argument("--backlog", metavar="NAME", help="with --all: only that backlog's")
+    s.set_defaults(f=cmd_resume)
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")
     s.add_argument("name"); s.add_argument("--message", "-m", required=True)
     s.add_argument("--merge", action="store_true"); s.add_argument("--force", action="store_true")

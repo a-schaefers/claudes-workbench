@@ -76,8 +76,9 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
 - **Claude coding** (the user's choice, `wb coding`): when you may write a task's code yourself,
   a one-line fix in review or `wb takeover` alike. "Let Claude decide" (the default) is this
   skill as written. Otherwise a `claude-coding` context block gives the rule: "Ask me first", or
-  "Only when I say". It covers shell edits too; the mod refuses your file edits in a task's
-  worktree, and `wb takeover`, until the user's yes is recorded (`wb coding allow`). The user
+  "Only when I say"; a later change comes as a `[workbench]` note with the new rule. It covers
+  shell edits too; the mod refuses your file edits in a task's worktree, and `wb takeover`,
+  until the user's yes is recorded (`wb coding allow`). The user
   may grant one task an exception ahead (`--when "<condition>"`): show them the task, the
   condition and the exact edit first; once used, `wb coding used <task> --did "…"`, then hand
   the testing back with `wb feedback`.
@@ -286,7 +287,8 @@ Once the tests pass, the agent checks its own change against your review checks 
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
 the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck,
-failed) — end your turn and wait for it. Without the mod, run `wb wait <name>` with Bash
+failed) — end your turn and wait for it; an agent's question can't wait, so it reaches you
+mid-turn too: answer it then. Without the mod, run `wb wait <name>` with Bash
 `run_in_background: true` and act on its notification. If the context says wakes are off (the
 plugin's wake setting), none will come: tell the user it runs, and wait only if they ask.
 A session is woken only for its own tasks (those `wb start` ran in it, wherever; one started by
@@ -308,7 +310,9 @@ heading the wrong way, act on it. Notes are instructions, like feedback: concret
 - `wb takeover <name>`: you finish it in the worktree, uncommitted, then `wb accept` (or hand it
   back with `wb feedback`): for when explaining would cost more than doing.
 - `wb stop <name>`; `wb resume <name>` continues it in a fresh session (also after "the runner
-  died" or "stopped by a signal").
+  died" or "stopped by a signal"). After a restart or a shutdown one notice names every task it
+  interrupted:
+  `wb resume --all --repo <dir>`, as it says.
 - A `PERMISSION` question (a command or a directory): lean to yes for what the task needs (`wb
   allow <name> "<pattern>"`, `--path <dir>`), no to what reaches outside it.
 Before acting on one of these the first time in a session, read `reference/driving.md` beside
@@ -328,7 +332,8 @@ Tasks listed as left alone belong to another live session: leave them unless ask
 Without the mod, the user may ask for the same in words; run those commands then.
 
 **The web chat.** A prompt that is just `[web chat] <their words>` is the user on their phone,
-with the same authority as here: reply there with `wb chat reply --text "…"`, short; read
+with the same authority as here (`[attached: <path> …]` lines are their files: Read them): reply
+there with `wb chat reply --text "…"`, short; read
 `reference/driving.md` (the web chat) before your first reply.
 
 **Check-ins.** Off unless `--checkin MIN`; a task also wakes you on trouble (a nudge, repeated
@@ -453,7 +458,7 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   run again.
 - `wb discard <name> --reason "…"` drops it (a branch holding steps `wb next` committed is kept;
   `--drop-steps` deletes it too). `wb status` lists open tasks (e.g. after a context
-  reset); `wb stats` compares the models on finished work.
+  reset; tasks a /workbench-quit parked only by name: leave them unless the user asks); `wb stats` compares the models on finished work.
 - **Keep the good ones as bench cases.** An accepted step whose spec pinned the names its tests
   call, and whose tests fail on its base and pass in the agent's lane (one that commits or writes
   outside it never can: add refuses it), is a case: `wb bench add <name>` (`--step N` for a

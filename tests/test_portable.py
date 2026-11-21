@@ -4,6 +4,7 @@ import ctypes.util
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+import contextlib
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -183,6 +185,26 @@ class Real(unittest.TestCase):
         self.assertEqual(found["s/coder"].engine, "server")
         self.assertEqual(models.status(found["o/m"])["why"], "m is not pulled")
 
+    def test_a_native_ollama_sdk_provider_with_an_api_base_is_ollama(self):
+        # #585 (the audit of 1.90): only /v1 was stripped, so a baseURL ending in /api probed
+        # /api/api/version, read as a server "not running, and no start command"
+        posts = []
+        srv, port = fake_ollama([], ["coder"], posts)
+        self.servers.append(srv)
+        self.config({"nat": {"npm": "ollama-ai-provider-v2",
+                             "options": {"baseURL": f"http://127.0.0.1:{port}/api"}, "models": {"coder": {}}},
+                     "oai": {"options": {"baseURL": f"http://localhost:{port}/v1"}, "models": {"coder": {}}}})
+        found = models.discover()
+        nat = found["nat/coder"]
+        self.assertEqual((nat.engine, nat.root), ("ollama", f"http://127.0.0.1:{port}"))
+        self.assertEqual(models.status(nat), {"available": True, "resident": False, "why": "pulled"})
+        self.assertEqual(nat.server, found["oai/coder"].server)       # one Ollama, not two
+        self.assertEqual(nat.openai_base, f"http://127.0.0.1:{port}/v1")
+        self.assertEqual(models.providers()["nat"]["root"], f"http://127.0.0.1:{port}")
+        self.config({"nat": {"npm": "ollama-ai-provider-v2", "options": {
+            "baseURL": f"http://127.0.0.1:{port}/api"}, "models": {"coder": {}}}}, {"nat": {"engine": "ollama"}})
+        self.assertTrue(models.status(models.discover()["nat/coder"])["available"])
+
     def test_a_down_server_on_ollamas_port_is_taken_for_ollama_and_the_override_wins(self):
         self.config({"o": {"options": {"baseURL": "http://127.0.0.1:11434/v1"}, "models": {"m": {}}},
                      "x": {"options": {"baseURL": "http://127.0.0.1:1/v1"}, "models": {"m": {}}}},
@@ -297,6 +319,84 @@ class Real(unittest.TestCase):
                      "b": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"y": {}}}})
         return models.discover(), posts
 
+    def per_gpu(self, loaded_a, loaded_b, cuda=("0", "1")):
+        """Two fake Ollamas, one per card: a/* on GPU 0 (its OLLAMA_HOST on a's port), b/* on
+        GPU 1, each `ollama serve` in a fake /proc with its CUDA_VISIBLE_DEVICES (None: unset)."""
+        posts_a, posts_b = [], []
+        srv_a, port_a = fake_ollama(loaded_a, [x["name"] for x in loaded_a] + ["x"], posts_a)
+        srv_b, port_b = fake_ollama(loaded_b, [x["name"] for x in loaded_b], posts_b)
+        self.servers += [srv_a, srv_b]
+        self.config({"a": {"options": {"baseURL": f"http://127.0.0.1:{port_a}/v1"},
+                           "models": {"x": {}, "chat": {}}},
+                     "b": {"options": {"baseURL": f"http://127.0.0.1:{port_b}/v1"}, "models": {"y": {}}}},
+                    {"a/x": {"vram_gb": 4}})
+        proc = Path(self.tmp.name, "proc")
+        for pid, port, dev in (("100", port_a, cuda[0]), ("200", port_b, cuda[1])):
+            d = proc / pid
+            (d / "ns").mkdir(parents=True)
+            (d / "comm").write_text("ollama\n")
+            (d / "cmdline").write_bytes(b"ollama\0serve\0")
+            env = [f"OLLAMA_HOST=127.0.0.1:{port}"] + ([f"CUDA_VISIBLE_DEVICES={dev}"] if dev else [])
+            (d / "environ").write_bytes("\0".join(env).encode() + b"\0")
+            os.symlink("mnt:[1]", d / "ns" / "mnt")
+        (proc / "self" / "ns").mkdir(parents=True)
+        os.symlink("mnt:[1]", proc / "self" / "ns" / "mnt")
+        cards = [{"name": "RTX 3090", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30,
+                  "discrete": True, "uuid": f"GPU-{i}{i}"} for i in (0, 1)]
+        for patch in (mock.patch.object(models.hardware, "PROC", proc),
+                      mock.patch.object(models.hardware, "_run", lambda *a, **k: ""),
+                      mock.patch.object(models.hardware, "gpus", lambda windows=True: cards)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        return models.discover(), posts_a, posts_b
+
+    def test_with_one_ollama_per_gpu_freeing_one_card_leaves_the_other_cards_models_loaded(self):
+        # #460 (the audit of 1.8): free_gpu unloaded every Ollama's models, so a task on GPU 0's
+        # server emptied GPU 1's too, where they took none of its memory
+        gb = 10 ** 9
+        on_a = [{"name": "chat", "size": 18 * gb, "size_vram": 18 * gb}]
+        found, posts_a, posts_b = self.per_gpu(on_a, [{"name": "y", "size": 18 * gb, "size_vram": 18 * gb}])
+        x, y = found["a/x"], found["b/y"]
+        self.assertTrue(models.apart(x.root, y.root))
+        self.assertFalse(models.apart(x.root, x.root))
+        self.assertFalse(models._others_resident(found["a/chat"]))   # y is on the other card
+        self.assertTrue(models._room_beside(x))     # 18 + 4 of GPU 0's 23.2: y's 18 aren't on it
+        models.free_gpu(keep={"a/x"}, say=lambda m: None, of=x)
+        self.assertEqual([p["model"] for p in posts_a], ["chat"])
+        self.assertEqual(posts_b, [])
+        # can_share counts what sits on its own card: 15 + 15 on two cards of 24, not 30 on one
+        big = lambda m: models.Model(id=m.id, provider=m.provider, name=m.name,  # noqa: E731
+                                     base_url=m.base_url, engine="ollama", label=m.id,
+                                     extra={"vram_gb": 15})
+        self.assertTrue(models.can_share(big(x), [big(y)], models.gpu_budget(x.root)))
+        self.assertFalse(models.can_share(big(x), [big(found["a/chat"])], models.gpu_budget(x.root)))
+        on_a.append({"name": "chat", "size": 18 * gb, "size_vram": 18 * gb})
+        posts_a.clear()
+        models.make_resident(big(x), say=lambda m: None)   # no room beside chat: GPU 0 is freed
+        self.assertEqual([p["model"] for p in posts_a], ["chat", "x"])
+        self.assertEqual(posts_b, [])
+        models.free_gpu(say=lambda m: None)           # the whole GPU (wb image): every card
+        self.assertEqual([p["model"] for p in posts_b], ["y"])
+
+    def test_with_the_ollamas_cards_unknown_freeing_the_gpu_empties_every_server_as_before(self):
+        # #460: devices not known for sure are taken to be shared, as every server was before
+        gb = 10 ** 9
+        found, posts_a, posts_b = self.per_gpu([{"name": "chat", "size": 18 * gb, "size_vram": 18 * gb}],
+                                               [{"name": "y", "size": 18 * gb, "size_vram": 18 * gb}],
+                                               cuda=("0", None))  # b's server sees both cards
+        x, y = found["a/x"], found["b/y"]
+        self.assertFalse(models.apart(x.root, y.root))
+        self.assertFalse(models._room_beside(x))
+        models.free_gpu(keep={"a/x"}, say=lambda m: None, of=x)
+        self.assertEqual([p["model"] for p in posts_a + posts_b], ["chat", "y"])
+        big = lambda m: models.Model(id=m.id, provider=m.provider, name=m.name,  # noqa: E731
+                                     base_url=m.base_url, engine="ollama", label=m.id,
+                                     extra={"vram_gb": 15})
+        self.assertFalse(models.can_share(big(x), [big(y)], models.gpu_budget(x.root)))
+        shutil.rmtree(Path(self.tmp.name, "proc", "200"))  # one process readable: not sure
+        self.assertIsNone(models.server_devices(x.root))
+        self.assertFalse(models.apart(x.root, y.root))      # unknown is never apart
+
     def test_one_ollama_under_two_host_spellings_is_one_server(self):
         # free_gpu unloaded the very models it was told to keep (the 2026-11-16 audit)
         found, posts = self.own([{"name": "x", "size": 10, "size_vram": 10},
@@ -330,7 +430,8 @@ class Real(unittest.TestCase):
         models.make_resident(x(), say=lambda m: None)
         self.assertEqual([(p["model"], p.get("keep_alive")) for p in posts], [("chat", 0), ("x", "30m")])
         posts.clear()
-        over(gpu_gb=1, keep_loaded=["ollama/emb"])  # no room, but only a kept model beside x
+        over(gpu_gb=1, keep_loaded=["b/emb"])  # no room, but only a kept model beside x (by id:
+        # the provider must be one the config has, or it's a namespaced Ollama name, #461)
         self.assertEqual(models.make_resident(x(), say=lambda m: None), 0.0)
         models.free_gpu(keep={"a/x"}, say=lambda m: None)
         self.assertEqual(posts, [])
@@ -345,6 +446,55 @@ class Real(unittest.TestCase):
         posts.clear()
         models.make_resident(x(), say=lambda m: None)
         self.assertEqual([p["model"] for p in posts], ["chat", "x"])
+
+    def test_a_llama_server_or_vllm_answering_a_request_is_not_idle(self):
+        # #465 (the audit of 1.8): only a JSON /metrics `live.state` was read; llama-server and
+        # vLLM serve Prometheus text, read as idle, so free_gpu stopped one mid-reply
+        pages = {}
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = pages.get(self.path)
+                self.send_response(200 if body is not None else 404)
+                self.end_headers()
+                self.wfile.write((body if isinstance(body, str) else json.dumps(body or {})).encode())
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.servers.append(srv)
+        m = models.Model(id="s/m", provider="s", name="m", engine="server", label="s/m",
+                         base_url=f"http://127.0.0.1:{srv.server_address[1]}/v1")
+        prom = lambda name, n: (f"# HELP {name} running\n# TYPE {name} gauge\n"  # noqa: E731
+                                f'{name}{{model_name="m"}} {n}\n')
+        cases = [({"/slots": [{"id": 0, "is_processing": False}, {"id": 1, "is_processing": True}]}, False),
+                 ({"/slots": [{"id": 0, "is_processing": False}]}, True),
+                 ({"/metrics": prom("llamacpp:requests_processing", "1")}, False),
+                 ({"/metrics": prom("vllm:num_requests_running", "2.0")}, False),
+                 ({"/metrics": prom("vllm:num_requests_running", "0.0")}, True),
+                 ({"/metrics": {"live": {"state": "generating"}}}, False),
+                 ({}, True)]                                   # says nothing: idle, as before
+        for page, idle in cases:
+            pages.clear()
+            pages.update(page)
+            self.assertEqual(models._server_idle(m), idle, page)
+
+    def test_keep_loaded_keeps_namespaced_ollama_names_and_only_them(self):
+        # #461 (the audit of 1.8, reproduced): cut at the first `/`, a kept hf.co/... name never
+        # matched itself, mannix/llama3:8b kept llama3:8b, and acme/coder missed acme/coder:latest
+        hf = "hf.co/nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M"
+        loaded = [{"name": n, "size": 10, "size_vram": 10}
+                  for n in (hf, "llama3:8b", "mannix/llama3:8b", "acme/coder:latest", "big:1b")]
+        found, posts = self.own(loaded, ["x"])
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["a"]["models"]["emb"] = {"id": "big:1b"}       # an alias, by its id
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps(
+            {"keep_loaded": [hf, "mannix/llama3:8b", "acme/coder", "a/emb"]}))
+        self.assertTrue(models._kept_name(hf, models.keep_loaded()))
+        self.assertFalse(models._kept_name("llama3:8b", models.keep_loaded()))
+        with mock.patch.object(models, "INFLIGHT_WATCH", 0):
+            models.free_gpu(say=lambda m: None)
+        self.assertEqual([p["model"] for p in posts], ["llama3:8b"])   # only the one not kept
 
     def test_a_model_answering_someone_else_is_left_until_it_goes_idle_then_unloaded(self):
         # #378 (the audit of 1.6): on a system Ollama two accounts share, each one's runner
@@ -383,6 +533,39 @@ class Real(unittest.TestCase):
         self.assertIn("long on ollama was still in use after", warned[-1])
         self.assertEqual([p["model"] for p in posts], ["long"])   # the GPU is the task's after all
         self.assertFalse(models._in_use({"r": []}))            # nothing to watch: no wait at all
+
+    def test_waiting_for_someone_elses_request_asks_ollama_at_most_once_a_second(self):
+        # #459 (the audit of 1.8, reproduced): a stamp already past is busy at once, so each
+        # watch returned without a sleep and the wait asked /api/ps back to back, 1,137 times
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        long = {"name": "long", "size": 10, "size_vram": 10, "expires_at": at(-60)}
+        found, _ = self.own([long], [])
+        root = found["a/x"].root
+        asked = []
+        real = models._get
+        def counting(url, timeout=2.5):
+            if url.endswith("/api/ps"):
+                asked.append(time.monotonic())
+            return real(url, timeout)
+        def per_second():
+            return len(asked) / max(asked[-1] - asked[0], 1)
+        with mock.patch.object(models, "_get", counting), \
+                mock.patch.object(models, "INFLIGHT_WATCH", 0.25), \
+                mock.patch.object(models, "INFLIGHT_WAIT", 3):
+            models._wait_unused({root: ["long"]}, warn=lambda m: None)        # busy throughout
+            self.assertLessEqual(per_second(), 2)
+            asked.clear()
+            threading.Timer(1.2, lambda: long.update(expires_at=at(300))).start()  # goes idle
+            began = time.monotonic()
+            models._wait_unused({root: ["long"]}, warn=lambda m: None)
+            self.assertLess(time.monotonic() - began, 2.9)     # it saw the quiet and stopped
+            self.assertLessEqual(len(asked), 8)
+            asked.clear()
+            long["expires_at"] = at(-60)
+            srv = self.servers.pop()
+            threading.Timer(0.5, lambda: (srv.shutdown(), srv.server_close())).start()  # goes away
+            models._wait_unused({root: ["long"]}, warn=lambda m: None)
+            self.assertLessEqual(per_second(), 2)
 
     def test_a_server_the_user_keeps_loaded_is_never_stopped(self):
         srv = self.server({"/v1/models": {"data": [{"id": "m"}]}})
@@ -723,6 +906,28 @@ class Real(unittest.TestCase):
 
     # only Ollama's API was read: on any other server the router ranked models without their
     # sizes, checked no fit, and every window had to be typed in (2026-11-17)
+    def test_lm_studio_without_just_in_time_loading_has_a_model_it_hasnt_loaded(self):
+        # #462 (the audit of 1.8, reproduced): JIT off lists only loaded models on /v1/models, so
+        # with a loaded, b read "the server serves a, not b: set the entry's id to a"
+        rows = lambda *loaded: {"models": [  # noqa: E731
+            {"key": k, "loaded_instances": [{"id": k}] if k in loaded else []} for k in ("a", "b", "c")]}
+        state = {"v1": {"data": [{"id": "a"}]}, "lms": rows("a")}
+        lms = self.server({"/v1/models": lambda h: state["v1"], "/api/v1/models": lambda h: state["lms"]})
+        plain = self.server({"/v1/models": {"data": [{"id": "a"}]}})     # not LM Studio
+        self.config({"lms": {"options": {"baseURL": lms + "/v1"}, "models": {"a": {}, "b": {}, "z": {}}},
+                     "srv": {"options": {"baseURL": plain + "/v1"}, "models": {"b": {}}}},
+                    {"lms": {"engine": "server"}, "srv": {"engine": "server"}})
+        found = models.discover()
+        self.assertEqual(models.status(found["lms/b"]),
+                         {"available": True, "resident": False, "why": "in LM Studio, not loaded (wb loads it)"})
+        self.assertTrue(models.status(found["lms/a"])["resident"])
+        self.assertIn("set the entry's id to a", models.status(found["lms/z"])["why"])  # LM Studio lacks z
+        self.assertIn("set the entry's id to a", models.status(found["srv/b"])["why"])
+        state.update(v1={"data": [{"id": "a"}, {"id": "c"}]}, lms=rows("a", "c"))  # two loaded
+        self.assertTrue(models.status(found["lms/b"])["available"])
+        state.update(v1={"data": []}, lms=rows())                               # none loaded
+        self.assertTrue(models.status(found["lms/b"])["available"])
+
     def test_lm_studio_says_each_models_size_window_and_tool_training(self):
         from workbench import cli
         lms = self.server({"/api/v1/models": {"models": [
@@ -830,6 +1035,67 @@ class Real(unittest.TestCase):
         with self.assertRaises(SystemExit), redirect_stdout(out):
             cli.main(["doctor"])
         self.assertIn("BAD v/coder says a 128K context but the server serves 32K", out.getvalue())
+
+    def test_doctor_scout_and_add_ask_ollama_by_an_aliased_entrys_id(self):
+        # #588 (the audit of 1.90): `ollama/coder` with id qwen3-coder:30b; doctor asked Ollama
+        # about `coder`, fell back to OLLAMA_CONTEXT_LENGTH and said BAD, its advice (wb model add
+        # ollama/coder --context …) died on a 404, and scout listed qwen3-coder:30b as unregistered
+        from workbench import cli
+        tag = "qwen3-coder:30b"
+        class H(BaseHTTPRequestHandler):
+            def reply(self, code, body):
+                self.send_response(code)
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode())
+            def do_GET(self):
+                body = {"/api/version": {"version": "0.40.0"},
+                        "/api/tags": {"models": [{"name": tag, "size": 18_000_000_000}]},
+                        "/api/ps": {"models": []}}.get(self.path)
+                self.reply(200 if body is not None else 404, body or {})
+            def do_POST(self):
+                asked = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["model"]
+                if self.path != "/api/show" or asked != tag:
+                    return self.reply(404, {"error": f"model '{asked}' not found"})
+                self.reply(200, {"capabilities": ["tools"], "parameters": "num_ctx 65536",
+                                 "model_info": {"qwen3.context_length": 262144}})
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.servers.append(srv)
+        entry = {"id": tag, "limit": {"context": 65536, "output": 8192}, "options": {"max_tokens": 16384}}
+        self.config({"ollama": {"options": {"baseURL": f"http://127.0.0.1:{srv.server_address[1]}/v1"},
+                                "models": {"coder": entry}}})
+        out = io.StringIO()
+        with mock.patch.object(models.hardware, "ollama_env", return_value={"OLLAMA_CONTEXT_LENGTH": "32768"}), \
+                mock.patch.object(models.hardware, "ollama_context", return_value=(32768, "32768")), \
+                contextlib.suppress(SystemExit), redirect_stdout(out):
+            cli.main(["doctor"])
+        self.assertNotIn("Ollama serves 32K", out.getvalue())
+        self.assertNotIn("served context is unknown", out.getvalue())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["model", "add", "ollama/coder"])          # no 404: it asks for the id
+        self.assertIn("registered ollama/coder", out.getvalue())
+        self.assertIn("64K context", out.getvalue())
+        saved = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]["ollama"]["models"]
+        self.assertEqual(saved["coder"]["id"], tag)              # the alias stays an alias
+        out = io.StringIO()
+        tmp = Path(self.tmp.name)
+        with mock.patch.dict(os.environ, {"WB_SKILLS": str(tmp / "skills"), "WB_IMAGES": str(tmp / "i.json"),
+                                          "WB_AUDIO": str(tmp / "a.json")}), \
+                mock.patch.object(cli.hardware, "report", return_value=[]), \
+                mock.patch.object(cli, "ollama_line", return_value=""), \
+                mock.patch.object(cli.models, "servers_here", return_value=([], [])), redirect_stdout(out):
+            cli.main(["scout"])
+        self.assertNotIn("installed in ollama but not registered", out.getvalue())
+        self.assertIn("ollama/coder: 18.0 GB on disk · 64K context · Ollama serves 64K", out.getvalue())
+        ipv6 = (["llama-server"], [{"root": "http://[::1]:8080", "usually": "llama-server", "models": ["m"]}])
+        with mock.patch.object(cli.models, "servers_here", return_value=ipv6):
+            lines = cli.server_lines({"ls": {"root": "http://127.0.0.1:8080", "url": "http://[::1]:8080/v1"}})
+            self.assertNotIn("no provider", lines[1])           # ::1 is this machine too
+            lines = cli.server_lines({"ls": {"root": "http://localhost:8080", "url": "http://localhost:8080/v1"}})
+            self.assertNotIn("no provider", lines[1])
 
     def test_a_down_ollama_is_named_by_add_and_retire_without_a_traceback(self):
         # the 2026-11-16 audit: --pull died in a urllib traceback, a describe blamed a missing

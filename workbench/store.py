@@ -50,6 +50,14 @@ NEEDS_CLAUDE = {"review", "stuck", "failed", "asking"}
 CLOSED = {"accepted", "discarded"}
 
 
+def parked(st: dict) -> bool:
+    """A task `wb stop --all` (the mod's /workbench-quit) stopped and nothing has picked up since:
+    the status line, the session's open-tasks block and `wb status` leave it out, `wb status
+    --all` lists it. It stayed "awaiting review" and each new conversation was told to pick it up,
+    against the quit (#541). spawn_runner clears the mark; any other phase isn't parked."""
+    return st.get("phase") == "stuck" and bool(st.get("parked"))
+
+
 # The environment variables that name a path. A relative one, or one with a `~` no shell expanded
 # (a systemd unit, settings.json's env), meant one place to wb and another to the runner, which
 # runs from the package's directory: the task was written under the cwd and looked for under the
@@ -175,6 +183,64 @@ def loads(text):
     """json.loads for text from outside workbench (OpenCode's output, the agent's files), its
     strings scrubbed so they can be written back out."""
     return scrub(json.loads(text))
+
+
+def note_claude_session() -> None:
+    """Record the Claude Code session a `wb` call runs in under its process
+    (claude-sessions/<CLAUDE_PID>: "<ts> <session id>" lines), once per id. /clear starts a new
+    session id and transcript in the same process, and spend.usage read only the one `wb start`
+    recorded: the review turns after a /clear went uncounted (#451)."""
+    sid, pid = os.environ.get("CLAUDE_CODE_SESSION_ID", ""), os.environ.get("CLAUDE_PID", "")
+    if not sid or not pid.isdigit() or not re.fullmatch(r"[\w-]{1,128}", sid):
+        return
+    path = home() / "claude-sessions" / pid
+    try:
+        if sid in path.read_text().split()[1::2]:
+            return
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        f.write(f"{now()} {sid}\n")
+
+
+def claude_sessions(pid, since: float = 0) -> list[str]:
+    """The session ids Claude Code process `pid` ran `wb` in from `since` on, first seen first."""
+    try:
+        words = (home() / "claude-sessions" / str(int(pid))).read_text().split()
+    except (OSError, TypeError, ValueError):
+        return []
+    out = []
+    for ts, sid in zip(words[::2], words[1::2]):
+        try:
+            if float(ts) >= since and sid not in out:
+                out.append(sid)
+        except ValueError:
+            continue
+    return out
+
+
+_BOOT: list = []
+
+
+def boot_id() -> str | None:
+    """This boot of the machine: Linux's (and WSL2's VM's) random boot_id, macOS's boot time; None
+    where neither is known. The runner records it (status `boot`): a runner recorded under another
+    boot was ended by a restart, which kills it without a word (#544)."""
+    if not _BOOT:
+        boot = None
+        try:
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip() or None
+        except OSError:
+            import subprocess
+            try:  # "{ sec = 1732000000, usec = 123456 } Wed Nov 20 …"
+                out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True,
+                                     text=True, timeout=5).stdout
+                boot = (m := re.search(r"sec = (\d+)", out)) and m.group(1)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        _BOOT.append(boot)
+    return _BOOT[0]
 
 
 def write_json(path: Path, data) -> None:
@@ -519,6 +585,22 @@ def scratch(prefix: str) -> str:
 def _start_tag(pid: int) -> str:
     from . import models  # only here: models imports store
     return models.start_tag(pid)
+
+
+def owner(t: "Task") -> tuple:
+    """Whose task it is, as one restart or shutdown's batch is judged (#544): the Claude Code
+    session `wb start` ran in and the directory it ran in (else the repo)."""
+    return t.spec.get("session"), t.spec.get("cwd") or t.spec.get("repo")
+
+
+def write_ack(task: "Task", ts: float) -> None:
+    """Task's `acked` mark, replaced whole: the mod and wb wait read it on every poll, and a read
+    between a truncate and the write (or a write that failed after it) saw 0, every old notice
+    news again (the 2026-11-16 audit)."""
+    f = task.dir / "acked"
+    tmp = f.with_name(f".acked.{os.getpid()}.tmp")
+    tmp.write_text(str(ts))
+    os.replace(tmp, f)
 
 
 def all_tasks(archived: bool = False):

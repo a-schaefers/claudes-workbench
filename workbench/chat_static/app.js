@@ -185,7 +185,7 @@
   function items() {
     const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean))
     const pending = outbox.filter(o => !onServer.has(o.cid))
-      .map(o => ({ id: 'local-' + o.cid, cid: o.cid, from: 'user', text: o.text, ts: o.ts, local: true, error: o.error, about: o.about }))
+      .map(o => ({ id: 'local-' + o.cid, cid: o.cid, from: 'user', text: o.text, ts: o.ts, local: true, error: o.error, about: o.about, files: o.files }))
     // permission prompts sit in the thread where they were asked
     const asks = state.asks.map(a => ({ id: a.id, from: 'ask', ts: a.ts, ask: a }))
     return [...state.messages, ...asks].sort((x, y) => x.ts - y.ts).concat(pending)
@@ -221,11 +221,13 @@
         const b = document.createElement('button'); b.textContent = 'retry'
         b.onclick = () => { const o = outbox.find(x => x.cid === m.cid); if (o) { delete o.error; keep(o) } flush(true); render() }
         const d = document.createElement('button'); d.textContent = 'delete'
-        d.onclick = () => { drop(m.cid); render() }
+        d.onclick = () => { forgetFiles(outbox.find(x => x.cid === m.cid)); drop(m.cid); render() }
         const ed = document.createElement('button'); ed.textContent = 'edit'
         ed.onclick = () => {
           drop(m.cid)
-          input.value = m.text; save(K.draft, m.text); grow(); sendBtn.disabled = false
+          for (const f of m.files || []) if (!draft.some(d => d.id === f.id)) draft.push({ ...f, mod: 0, state: 'up' })
+          keepDraft(); drawTray(); pump()
+          input.value = m.text; save(K.draft, m.text); grow(); armSend()
           render(); input.focus()
         }
         meta.append(b, span('', ' · '), ed, span('', ' · '), d)
@@ -239,7 +241,7 @@
       const h = Math.round((state.expire || 21600) / 3600)
       meta.append(span('', `Not passed to Claude (over ${h} h old) · ` + clock(m.ts) + ' · '))
       const b = document.createElement('button'); b.textContent = 'send again'
-      b.onclick = () => { b.disabled = true; resend(m.text) }
+      b.onclick = () => { b.disabled = true; resend(m) }
       meta.append(b)
     } else meta.append(span('tick', '✓'), span('', (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ')
       + clock(m.ts)))
@@ -247,7 +249,7 @@
   }
 
   for (const chip of document.querySelectorAll('.chip')) {
-    chip.addEventListener('click', () => { input.value = chip.textContent; grow(); sendBtn.disabled = false; input.focus() })
+    chip.addEventListener('click', () => { input.value = chip.textContent; grow(); armSend(); input.focus() })
   }
 
   function render() {
@@ -469,6 +471,7 @@
     const row = document.createElement('div')
     const b = document.createElement('div'); b.className = 'bubble'
     if (m.about) row.append(span('about-tag', aboutTag(m.about)))
+    if (m.files && m.files.length) row.append(makeFiles(m.files))
     if (m.from === 'user') b.textContent = m.text
     else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) {
       if (!seen.has(m.id) && !firstVisit && document.hidden) { unread++; document.title = `(${unread}) Workbench` }
@@ -477,7 +480,7 @@
       b.classList.add('flowing'); flows.set(m.id, { text: m.text, shown: 0, el: b })
       if (!flowTimer) flowTimer = setInterval(flowTick, FLOW_MS)
     }
-    row.append(b)
+    if (m.from !== 'user' || m.text) row.append(b)
     if (m.shots) row.append(makeShots(m.shots))
     if (m.audio) row.append(makeListen(m.audio))
     row.append(document.createElement('div'))
@@ -526,12 +529,12 @@
     if (s.build) build = s.build
     live = true
     save(K.thread, (s.messages || []).slice(-50))
-    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0 }
+    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null }
     if (!sheet.hidden) drawSettings()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()
     const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean))
-    for (const o of outItems()) if (onServer.has(o.cid)) drop(o.cid)
+    for (const o of outItems()) if (onServer.has(o.cid)) { forgetFiles(o); drop(o.cid) }
     render()
   }
   function reloadOnce() {
@@ -706,24 +709,257 @@
     if (t && !t.moved && Date.now() - t.at < 500 && typing() && !t.target.closest?.(TAPPABLE)) input.blur()
   }, { passive: true })
 
+  // ---- attachments (#623): picked, uploaded once by the id each got when picked, sent by id ----
+  // The owner (2026-11-20, from the phone): simple, and never a file uploaded twice by a refresh.
+  // The draft's files (wb-chat-files: [{id, name, size, type, mod, state: up|retry|done|refused,
+  // why?}]) outlive a reload, their bytes in IndexedDB until the message carrying them lands; before
+  // it sends a byte the page asks whether the computer has the id, and the computer stores an id
+  // once whatever is sent again (chat.save_upload)
+  const FILES = 'wb-chat-files'
+  const MiB = 1 << 20
+  const STALL_MS = 30000  // an upload with no progress this long is dropped and tried again
+  const limits = () => state.uploads || { file: 25 * MiB, message: 50 * MiB, files: 10 }
+  const fmtSize = n => n < 1024 ? n + ' B' : n < MiB ? Math.round(n / 1024) + ' KB' : (n / MiB).toFixed(n < 10 * MiB ? 1 : 0) + ' MB'
+  const isPic = t => /^image\/(png|jpeg|gif|webp|avif)$/.test(t || '')
+  const extOf = name => ((/\.([A-Za-z0-9]{1,4})$/.exec(name || '') || [])[1] || 'file')
+  const bytes = new Map()  // id → the picked File, while this page holds it
+  const db = (() => {      // the bytes across a reload; where IndexedDB is missing, memory alone
+    let opened = null
+    const open = () => opened || (opened = new Promise((res, rej) => {
+      const r = indexedDB.open('wb-chat', 1)
+      r.onupgradeneeded = () => r.result.createObjectStore('files')
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error)
+    }))
+    const run = async (mode, fn) => {
+      const t = (await open()).transaction('files', mode), req = fn(t.objectStore('files'))
+      return new Promise((res, rej) => { t.oncomplete = () => res(req.result); t.onerror = t.onabort = () => rej(t.error) })
+    }
+    return {
+      put: (k, v) => run('readwrite', s => s.put(v, k)).catch(() => {}),
+      get: k => run('readonly', s => s.get(k)).catch(() => undefined),
+      del: k => run('readwrite', s => s.delete(k)).catch(() => {}),
+    }
+  })()
+  let draft = (load(FILES, []) || []).filter(d => d && d.id)
+  const keepDraft = () => save(FILES, draft)
+  const sendable = () => draft.filter(d => d.state !== 'refused')
+  function armSend() { sendBtn.disabled = !(input.value.trim() || sendable().length) }
+
+  class Refused extends Error {}
+  const inflight = new Map(), progress = new Map()
+  function upload(f) {  // resolves once the computer has file f ({id, name, size, type})
+    if (inflight.has(f.id)) return inflight.get(f.id)
+    const p = (async () => {
+      const r = await fetch('/api/upload/' + encodeURIComponent(f.id), { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+      if (r.ok) return                                   // already there: not a byte again
+      if (r.status === 401) { keyless('That key was not accepted.'); throw new Error('key') }
+      if (r.status !== 404) throw new Error('HTTP ' + r.status)
+      const blob = bytes.get(f.id) || await db.get(f.id)
+      if (!blob) throw new Refused('no longer on this device: pick it again')
+      await put(f, blob)
+    })().finally(() => inflight.delete(f.id))
+    inflight.set(f.id, p)
+    return p
+  }
+  function put(f, blob) {  // XHR, for its upload progress; fetch has none
+    return new Promise((resolve, reject) => {
+      const x = new XMLHttpRequest()
+      let dog = 0
+      const pet = () => { clearTimeout(dog); dog = setTimeout(() => x.abort(), STALL_MS) }
+      x.open('PUT', '/api/upload/' + encodeURIComponent(f.id))
+      x.setRequestHeader('Authorization', 'Bearer ' + token)
+      x.setRequestHeader('Content-Type', f.type || 'application/octet-stream')
+      x.setRequestHeader('X-File-Name', encodeURIComponent(f.name))
+      x.upload.onprogress = e => { pet(); if (e.lengthComputable) showProgress(f.id, e.loaded / e.total) }
+      x.onload = () => {
+        clearTimeout(dog)
+        let j = {}
+        try { j = JSON.parse(x.responseText) } catch {}
+        if (x.status === 200) resolve(j.upload)
+        else if (x.status === 401) { keyless('That key was not accepted.'); reject(new Error('key')) }
+        else if (x.status >= 400 && x.status < 500 && x.status !== 408 && x.status !== 429) reject(new Refused(j.error || 'refused'))
+        else reject(new Error('HTTP ' + x.status))
+      }
+      x.onerror = x.onabort = () => { clearTimeout(dog); reject(new Error('network')) }
+      pet(); x.send(blob)
+    })
+  }
+  function showProgress(id, frac) {
+    progress.set(id, frac)
+    const bar = tray.querySelector(`[data-id="${id}"] .bar i`)
+    if (bar) bar.style.width = Math.round(frac * 100) + '%'
+  }
+
+  // the draft's uploads, one at a time; a network failure waits and tries again, a refusal stays
+  let pumpTimer = 0, pumpTries = 0, pumping = false
+  async function pump() {
+    if (pumping || !token) return
+    pumping = true; clearTimeout(pumpTimer)
+    let again = false
+    for (const d of draft.filter(d => d.state === 'up' || d.state === 'retry')) {
+      try { await upload(d); setChip(d.id, { state: 'done' }) }
+      catch (e) {
+        if (e instanceof Refused) setChip(d.id, { state: 'refused', why: e.message })
+        else if (e.message === 'key') break
+        else { again = true; setChip(d.id, { state: 'retry' }) }
+      }
+    }
+    pumping = false
+    if (again) pumpTimer = setTimeout(pump, BACKOFF[Math.min(pumpTries++, BACKOFF.length - 1)])
+    else pumpTries = 0
+  }
+  function setChip(id, change) {
+    const d = draft.find(x => x.id === id)
+    if (!d) return  // removed meanwhile
+    Object.assign(d, change)
+    if (d.state !== 'refused') delete d.why
+    keepDraft(); drawTray(); armSend()
+  }
+  function addFiles(list) {
+    const lim = limits()
+    for (const file of list) {
+      if (draft.some(d => d.name === file.name && d.size === file.size && d.mod === file.lastModified)) continue  // the same file again
+      const d = { id: newId(), name: file.name || 'pasted', size: file.size, type: file.type || '', mod: file.lastModified || 0, state: 'up' }
+      const ok = sendable(), room = lim.message - ok.reduce((n, x) => n + x.size, 0)
+      const why = ok.length >= lim.files ? `one message takes ${lim.files} files: send these first`
+        : file.size > lim.file ? `too big: ${fmtSize(file.size)}, the limit is ${fmtSize(lim.file)}`
+        : file.size > room ? `over the message's ${fmtSize(lim.message)}: send it in the next one` : ''
+      if (why) Object.assign(d, { state: 'refused', why })
+      else { bytes.set(d.id, file); db.put(d.id, file) }
+      draft.push(d)
+    }
+    keepDraft(); drawTray(); armSend(); pump()
+  }
+  function unpick(id) {
+    draft = draft.filter(d => d.id !== id)
+    keepDraft(); db.del(id); bytes.delete(id); drawTray(); armSend()
+  }
+  const forgetFiles = o => { for (const f of (o && o.files) || []) { db.del(f.id); bytes.delete(f.id) } }
+
+  // the tray: one chip a file above the box, a thumbnail or the file's kind, its name, its size or
+  // why it can't go, and ✕
+  const tray = $('tray')
+  function drawTray() {
+    tray.hidden = !draft.length
+    tray.replaceChildren(...draft.map(d => {
+      const el = document.createElement('div'); el.className = 'att ' + d.state; el.dataset.id = d.id
+      el.append(fileFace(d), fileText(d, d.state === 'refused' ? d.why
+        : d.state === 'retry' ? fmtSize(d.size) + ' · waiting for the connection'
+        : d.state === 'up' ? fmtSize(d.size) + ' · uploading' : fmtSize(d.size)))
+      if (d.state === 'up' || d.state === 'retry') {
+        const bar = document.createElement('span'), i = document.createElement('i')
+        bar.className = 'bar'; i.style.width = Math.round((progress.get(d.id) || 0) * 100) + '%'; bar.append(i); el.append(bar)
+      }
+      const x = document.createElement('button'); x.type = 'button'; x.className = 'x'; x.textContent = '✕'
+      x.setAttribute('aria-label', 'Remove ' + d.name); x.onclick = () => unpick(d.id)
+      el.append(x)
+      return el
+    }))
+  }
+  function fileFace(f) {
+    if (isPic(f.type)) {
+      const img = document.createElement('img'); img.className = 'face'; img.alt = ''
+      fileURL(f.id).then(u => { img.src = u }).catch(() => {})
+      return img
+    }
+    return span('face kind', extOf(f.name))
+  }
+  function fileText(f, line) {
+    const t = document.createElement('span'); t.className = 'nm'
+    t.append(span('', f.name), span('', line))
+    return t
+  }
+  // a file's bytes as a blob URL: this page's own, else IndexedDB's, else the computer's (behind the token)
+  const urls = new Map()
+  function fileURL(id) {
+    if (!urls.has(id)) {
+      urls.set(id, (async () => {
+        let b = bytes.get(id) || await db.get(id)
+        if (!b) {
+          const r = await fetch('/api/file/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+          if (!r.ok) throw new Error('HTTP ' + r.status)
+          b = await r.blob()
+        }
+        return URL.createObjectURL(b)
+      })().catch(e => { urls.delete(id); throw e }))
+    }
+    return urls.get(id)
+  }
+  // in the thread: images as thumbnails (a tap shows one whole), other files as name and size
+  function makeFiles(files) {
+    const box = document.createElement('div'); box.className = 'files'
+    for (const f of files) {
+      const b = document.createElement('button'); b.type = 'button'
+      if (isPic(f.type)) {
+        b.className = 'pic'; b.setAttribute('aria-label', 'Show ' + f.name)
+        const img = document.createElement('img'); img.alt = f.name; b.append(img)
+        fileURL(f.id).then(u => { img.src = u }).catch(() => { img.remove(); b.className = 'doc'; b.append(fileFace({ name: f.name }), fileText(f, 'no longer on the computer')) })
+        b.onclick = () => { if (b.className === 'pic') view(f) }
+      } else {
+        b.className = 'doc'; b.setAttribute('aria-label', 'Save ' + f.name)
+        b.append(fileFace(f), fileText(f, fmtSize(f.size)))
+        b.onclick = () => fileURL(f.id).then(u => { const a = document.createElement('a'); a.href = u; a.download = f.name; a.click() }).catch(() => {})
+      }
+      box.append(b)
+    }
+    return box
+  }
+  function view(f) {
+    const v = document.createElement('div'); v.className = 'viewer'; v.setAttribute('role', 'dialog'); v.setAttribute('aria-label', f.name)
+    const img = document.createElement('img'); img.alt = f.name; v.append(img)
+    fileURL(f.id).then(u => { img.src = u }).catch(() => v.remove())
+    const esc = e => { if (e.key === 'Escape') close() }
+    const close = () => { v.remove(); removeEventListener('keydown', esc) }
+    v.onclick = close; addEventListener('keydown', esc)
+    document.body.append(v)
+  }
+  // picked with the button, pasted into the box, or dropped on the page
+  $('attach').onclick = () => $('pick').click()
+  $('pick').onchange = e => { addFiles([...e.target.files]); e.target.value = '' }
+  input.addEventListener('paste', e => {
+    const fs = [...((e.clipboardData && e.clipboardData.files) || [])]
+    if (fs.length) { e.preventDefault(); addFiles(fs) }
+  })
+  const dragsFiles = e => [...((e.dataTransfer && e.dataTransfer.types) || [])].includes('Files')
+  document.addEventListener('dragover', e => { if (dragsFiles(e)) { e.preventDefault(); document.body.classList.add('dropping') } })
+  document.addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('dropping') })
+  document.addEventListener('drop', e => {
+    document.body.classList.remove('dropping')
+    if (dragsFiles(e)) { e.preventDefault(); if (token && !$('composer').hidden) addFiles([...e.dataTransfer.files]) }
+  })
+  addEventListener('storage', e => { if (e.key === FILES) { draft = (load(FILES, []) || []).filter(d => d && d.id); drawTray(); armSend() } })
+
   // ---- sending: the outbox ----
   let flushing = false, flushTimer = 0, flushTries = 0
   async function flush(now) {
     if (now) { clearTimeout(flushTimer); flushTries = 0 }
+    pump()  // the draft's uploads, on the same occasions
     outbox = outItems()  // another tab's too: whichever tab is online sends them all
     if (flushing || !token || !(outbox.length || held)) return
     flushing = true
     let again = false
     for (const o of [...outbox, ...(held ? [held] : [])]) {
       if (o !== held && (o.error || !load(OUT + o.cid, null))) continue  // refused, or sent by another tab meanwhile
+      let file = null
+      try {  // its files first, each once (#623): a refusal says which file and why
+        for (const f of o.files || []) { file = f; await upload(f) }
+        file = null
+      } catch (e) {
+        if (e.message === 'key') break
+        if (!(e instanceof Refused)) { again = true; continue }
+        const why = file.name + ': ' + e.message
+        if (o === held) { held = null; banner('Not sent: ' + why + '. Your message is still in the box.', true); continue }
+        o.error = why; keep(o); render(); continue
+      }
       try {
-        const r = await post('/api/send', { text: o.text, cid: o.cid, ...(o.about ? { about: aboutBody(o.about) } : {}) })
+        const r = await post('/api/send', { text: o.text, cid: o.cid, ...(o.about ? { about: aboutBody(o.about) } : {}),
+          ...(o.files ? { files: o.files.map(f => f.id) } : {}) })
         const j = await r.json().catch(() => ({}))
         // landed: the reply names it. The snapshot alone holds the newest 200, so a retry after
         // a lost reply, 205 messages later, kept its pending bubble for good (#264, the audit of 1.2)
         if (r.ok) {
           if (o === held) sentHeld()
-          else if (j.message && j.message.cid === o.cid) drop(o.cid)
+          else if (j.message && j.message.cid === o.cid) { forgetFiles(o); drop(o.cid) }
           if (j.state) apply(j.state); else render()
           continue
         }
@@ -743,8 +979,9 @@
   const newId = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2))
   function send() {
     const text = input.value.trim()
-    if (!text || !token || held) return
-    const o = { cid: newId(), text, ts: now(), ...(about ? { about } : {}) }
+    const files = sendable().map(({ id, name, size, type }) => ({ id, name, size, type }))
+    if ((!text && !files.length) || !token || held) return
+    const o = { cid: newId(), text, ts: now(), ...(about ? { about } : {}), ...(files.length ? { files } : {}) }
     if (!save(OUT + o.cid, o)) {  // not stored, so not cleared: sent from here, kept till it lands
       held = o; sendBtn.disabled = true
       banner('Sending…')
@@ -753,6 +990,7 @@
     }
     outbox = outItems()
     setAbout(null)
+    clearTray(files)
     input.value = ''; save(K.draft, ''); grow(); sendBtn.disabled = true
     render(); toEnd(true); flush(true)
   }
@@ -764,28 +1002,36 @@
     outbox = outItems()
     render(); toEnd(true); flush(true)
   }
-  // an expired message, sent again as a new one through the outbox (its own cid)
-  function resend(text) {
+  // an expired message, sent again as a new one through the outbox (its own cid), with its files:
+  // already on the computer, so not a byte again (#623)
+  function resend(m) {
     if (!token) return
-    const o = { cid: newId(), text, ts: now() }
+    const files = (m.files || []).map(({ id, name, size, type }) => ({ id, name, size, type }))
+    const o = { cid: newId(), text: m.text, ts: now(), ...(files.length ? { files } : {}) }
     if (!save(OUT + o.cid, o)) { banner('Not sent: this browser keeps no outbox here. Copy it into the box.', true); return }
     outbox = outItems()
     render(); toEnd(true); flush(true)
   }
   function sentHeld() {
     if (input.value.trim() === held.text) { input.value = ''; save(K.draft, ''); grow(); sendBtn.disabled = true }
-    if (!(held.about && held.about.audio)) setAbout(null)  // a kept take never set the box's
+    if (!(held.about && held.about.audio)) { setAbout(null); clearTray(held.files || []) }  // a kept take left the box as it was
     held = null; banner('')
+  }
+  function clearTray(sent) {  // sent: their bytes stay until the message lands; refused ones go now
+    const ids = new Set(sent.map(f => f.id))
+    for (const d of draft) if (!ids.has(d.id) && d.state === 'refused') db.del(d.id)
+    draft = draft.filter(d => !ids.has(d.id) && d.state !== 'refused')
+    keepDraft(); drawTray(); armSend()
   }
 
   // ---- composer ----
   const touch = matchMedia('(pointer: coarse)').matches
   function grow() { input.style.height = ''; input.style.height = Math.min(input.scrollHeight, innerHeight * 0.38) + 'px' }
   input.value = load(K.draft, '')
-  input.addEventListener('input', () => { grow(); sendBtn.disabled = !input.value.trim(); save(K.draft, input.value) })
+  input.addEventListener('input', () => { grow(); armSend(); save(K.draft, input.value) })
   input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !touch && !e.isComposing) { e.preventDefault(); send() } })
   $('composer').addEventListener('submit', e => { e.preventDefault(); send() })
-  sendBtn.disabled = !input.value.trim(); grow()
+  armSend(); grow(); drawTray()
 
   // ---- no key: say how to get one, or take it pasted ----
   function keyless(why, forget) {

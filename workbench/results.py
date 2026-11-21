@@ -67,6 +67,9 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
     earlier = st.get("step_sizes") or []
     reviews = sum(s.get("reviews") or 0 for s in earlier) + st.get("reviews", 0)  # every step's
     steps = earlier + ([last_step] if last_step else [])
+    u, per_step = spend.usage_by_step(task)  # what it cost Claude, and each step's share (#558)
+    if per_step and len(per_step) == len(steps):
+        steps = [{**s, "claude": c} for s, c in zip(steps, per_step)]
     row = {"ts": store.now(), "task": task.name, "outcome": outcome, "model": spec.get("model"),
            "size": spec.get("size"), "repo": spec.get("repo"), "stack": spec.get("stack"),
            "rounds": st.get("round", 1),
@@ -86,7 +89,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "tuned_max": st.get("tuned_max") or {},
            "spec_gaps": [g["text"] for g in st.get("spec_gaps") or []],
            **({"backlog": spec["backlog"]} if spec.get("backlog") else {}),  # wb backlog
-           **({"claude": u} if (u := spend.usage(task)) else {}),  # what it cost Claude
+           **({"claude": u} if u else {}),
            **({"gpu_wh": st["gpu_wh"]} if "gpu_wh" in st else {}),  # the runner's GPU energy
            **({"remote_gpu": True} if st.get("remote_gpu") else {}),  # another machine's: unmeasured
            **({"active_minutes": round(st["active_s"] / 60, 1)} if st.get("active_s") else {}),

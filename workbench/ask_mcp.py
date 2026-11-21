@@ -73,6 +73,32 @@ NO_ANSWER = ("No answer arrived in time. Make the most reasonable assumption, ca
              "the assumption in your final summary.")
 
 
+# A question's wait runs on the monotonic clock, less any step longer than FROZEN_SECS (runner's
+# too: a frozen process, a host's sleep that the monotonic clock still counted, as WSL2's and
+# macOS's may). On the wall clock a laptop suspended past the ask timeout woke to its question
+# expired while every round clock had paused (#453, the 2026-11-20 audit).
+FROZEN_SECS = 60
+STEP_SECS = 30  # the server's longest wait between looks: well inside FROZEN_SECS
+
+
+class Waited:
+    """Seconds waited so far, a suspend left out."""
+
+    def __init__(self):
+        self.tick, self.secs = time.monotonic(), 0.0
+
+    def step(self) -> float:
+        t = time.monotonic()
+        dt, self.tick = t - self.tick, t
+        if 0 <= dt <= FROZEN_SECS:
+            self.secs += dt
+        return self.secs
+
+
+# The runner's wait on each relayed question, by task directory and id: `opened` holds its mark
+_WAITS: dict[tuple[str, str], Waited] = {}
+
+
 def _permission(q: dict) -> bool:
     return bool(q.get("command") or q.get("path"))
 
@@ -110,14 +136,14 @@ def ask(task: store.Task, question: str, context: str = "", command: str = "",
                              "question": question, "context": context,
                              **({"command": command} if command else {}),
                              **({"path": path} if path else {})})
-    deadline = time.time() + float(spec.get("ask_timeout", 1200))
+    limit, waited = float(spec.get("ask_timeout", 1200)), Waited()
     watcher = Watcher(afile.parent)  # wakes the moment `wb answer` writes the file
     try:
-        while time.time() < deadline:
+        while waited.step() < limit:
             answer = _read(afile)  # written whole (write_answer): there means done
             if answer is not None:
                 return answer.strip()
-            watcher.wait(max(0.0, min(60.0, deadline - time.time())))
+            watcher.wait(max(0.0, min(STEP_SECS, limit - waited.secs)))
     finally:
         watcher.close()
     return NO_ANSWER
@@ -206,6 +232,7 @@ def close(task: store.Task, opened: dict) -> None:
     the mod woke Claude for it and `wb answer` reported an answer nobody would read (the 0.90
     review). The server's own words, should one still be waiting a moment; lessons skip it."""
     for qid in list(opened):
+        _WAITS.pop((str(task.dir), qid), None)
         if is_open(task, qid):
             try:
                 write_answer(task, qid, NO_ANSWER)
@@ -284,7 +311,6 @@ def relay(task: store.Task, opened: dict) -> None:
     reader that sees the notice sees the task asking (the mod drops a question notice otherwise)."""
     st = task.status
     asks = dict(st.get("asks") or {})
-    now = time.time()
     new = [n[:-5] for n in _names(task) if n[:-5] not in asks]
     raised = []
     for qid in new[:NEW_MAX] if len(asks) < ASKS_MAX else []:
@@ -306,11 +332,13 @@ def relay(task: store.Task, opened: dict) -> None:
     timeout = float(task.spec.get("ask_timeout", 1200))
     for qid in list(opened):
         answer = _read(ask_dir(task) / f"{qid}.answer")
+        waited = _WAITS.setdefault((str(task.dir), qid), Waited()).step()
         if answer is not None:
             task.event({"ts": store.now(), "round": st.get("round"), "kind": "answer",
                         "id": qid, "text": answer.strip()[:QUESTION_CHARS]})
             del opened[qid]
-        elif now - opened[qid] > timeout:  # the server has given up on it
+            _WAITS.pop((str(task.dir), qid), None)
+        elif waited > timeout:  # the server has given up on it (both leave a suspend out)
             close(task, {qid: opened.pop(qid)})
     if asks != (st.get("asks") or {}):
         task.set_status(asks=asks)

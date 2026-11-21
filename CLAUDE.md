@@ -191,7 +191,7 @@ Plain files under `$WB_HOME` (`~/.local/state/workbench`); the tree and formats:
 (*Files and formats*):
 ```
 notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json stats.json tuning.json speed.json gpu*.{lock,json,admit,load}
-scout.json update.json watch.json optimize.json gc.json wsl-gpus.json archive/ imports/ images/ audio/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch,open,port}.json
+scout.json update.json watch.json optimize.json gc.json wsl-gpus.json archive/ imports/ images/ audio/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch,open,port}.json chat/uploads/
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md imports/ bin/git grants.json gitdir.json submodules.json (no lane)
 locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)

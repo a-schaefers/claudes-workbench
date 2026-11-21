@@ -544,6 +544,60 @@ class Budget(unittest.TestCase):
         self.assertEqual(self.budget([tiny]), (None, []))      # an APU alone: unknown, no sharing
         self.assertEqual(self.budget([{"name": "Arc", "driver": "xe", "vram": None}]), (None, []))
 
+    def test_with_one_ollama_per_gpu_each_server_is_budgeted_and_limited_by_its_own_settings(self):
+        # #460 (the audit of 1.8, reproduced with a fake /proc): :11434 on GPU 0 and :11435 on
+        # GPU 1; the lowest pid's settings stood for both, so the second was budgeted GPU 0 and
+        # read the first one's OLLAMA_NUM_PARALLEL
+        card = lambda i: {"name": f"RTX 3090 #{i}", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30,  # noqa
+                          "uuid": f"GPU-{i}{i}", "discrete": True}
+        cards = [card(0), card(1)]
+        with tempfile.TemporaryDirectory() as proc:
+            def process(pid, environ):
+                Path(proc, pid, "ns").mkdir(parents=True)
+                Path(proc, pid, "comm").write_text("ollama\n")
+                Path(proc, pid, "cmdline").write_bytes(b"ollama\0serve\0")
+                Path(proc, pid, "environ").write_bytes(b"\0".join(environ) + b"\0")
+                os.symlink("mnt:[1]", Path(proc, pid, "ns", "mnt"))
+            Path(proc, "self", "ns").mkdir(parents=True)
+            os.symlink("mnt:[1]", Path(proc, "self", "ns", "mnt"))
+            process("100", [b"CUDA_VISIBLE_DEVICES=0", b"OLLAMA_NUM_PARALLEL=1"])  # the default port
+            process("200", [b"CUDA_VISIBLE_DEVICES=1", b"OLLAMA_HOST=127.0.0.1:11435",
+                            b"OLLAMA_NUM_PARALLEL=2", b"CUDA_DEVICE_ORDER=PCI_BUS_ID"])
+            first, second = "http://127.0.0.1:11434", "http://127.0.0.1:11435"
+            with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}), \
+                    mock.patch.object(hardware, "PROC", Path(proc)), \
+                    mock.patch.object(hardware, "_run", lambda *a, **k: ""), \
+                    mock.patch.object(hardware, "gpus", lambda windows=True: cards):
+                self.assertEqual(hardware.ollama_env_at(second)["OLLAMA_NUM_PARALLEL"], "2")
+                self.assertEqual(hardware.ollama_env_at(first)["OLLAMA_NUM_PARALLEL"], "1")
+                self.assertEqual(models.budget_devices(second)[1], [cards[1]])
+                self.assertEqual(models.budget_devices(first)[1], [cards[0]])
+                m = lambda url: models.Model(id="o/a", provider="o", name="a", base_url=url + "/v1",  # noqa
+                                             engine="ollama", label="o/a", extra={"weights_gb": 1})
+                self.assertTrue(models.can_share(m(second), [m(second)], int(99e9)))   # two slots
+                self.assertFalse(models.can_share(m(first), [m(first)], int(99e9)))    # one
+
+    def test_an_ollama_with_no_ollama_host_is_the_default_port_server_whatever_its_pid(self):
+        # the review of #460: a process with no OLLAMA_HOST matched no port, so when the
+        # default-port server was the later one, the other's settings (the lowest pid's) stood
+        with tempfile.TemporaryDirectory() as proc:
+            def process(pid, environ):
+                Path(proc, pid, "ns").mkdir(parents=True)
+                Path(proc, pid, "comm").write_text("ollama\n")
+                Path(proc, pid, "cmdline").write_bytes(b"ollama\0serve\0")
+                Path(proc, pid, "environ").write_bytes(b"\0".join(environ) + b"\0")
+                os.symlink("mnt:[1]", Path(proc, pid, "ns", "mnt"))
+            Path(proc, "self", "ns").mkdir(parents=True)
+            os.symlink("mnt:[1]", Path(proc, "self", "ns", "mnt"))
+            process("100", [b"CUDA_VISIBLE_DEVICES=1", b"OLLAMA_HOST=127.0.0.1:11435",
+                            b"OLLAMA_NUM_PARALLEL=2"])
+            process("200", [b"CUDA_VISIBLE_DEVICES=0", b"OLLAMA_NUM_PARALLEL=1"])  # the default port
+            with mock.patch.object(hardware, "PROC", Path(proc)), \
+                    mock.patch.object(hardware, "_run", lambda *a, **k: ""):
+                self.assertEqual(hardware.ollama_env_at("http://127.0.0.1:11434")["OLLAMA_NUM_PARALLEL"], "1")
+                self.assertEqual(hardware.ollama_env_at("http://127.0.0.1:11434")["CUDA_VISIBLE_DEVICES"], "0")
+                self.assertEqual(hardware.ollama_env_at("http://127.0.0.1:11435")["OLLAMA_NUM_PARALLEL"], "2")
+
     def test_an_apus_carve_out_never_outranks_or_adds_to_a_discrete_card(self):
         # the 0.90 review: a Radeon 780M set to 16 GiB beside an 8 GiB RTX became the budget, and
         # a 4 GiB one was added to an RX 7600S's 8 (amdgpu reports both as VRAM)
@@ -744,6 +798,18 @@ class CanShare(Base):
                 self.assertEqual(models.can_share(b, [a], int(99e9)), ok, most)
         with mock.patch.object(models.hardware, "ollama_env", lambda: {"OLLAMA_MAX_LOADED_MODELS": "2"}):
             self.assertFalse(models.can_share(c, [a, b], int(99e9)))
+
+    def test_ollamas_default_model_limit_is_three_per_gpu(self):
+        # #466 (the audit of 1.8; Ollama's server/sched.go: defaultModelsPerGPU * len(gpus)):
+        # counted as 3 in all, a fourth task on a two-card box was refused sharing
+        a, b, c, d = (self.model(f"ollama/{x}", gb=1) for x in "abcd")
+        card = {"name": "RTX 3090", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30, "discrete": True}
+        for cards, ok in (([card], False), ([card, dict(card)], True)):
+            with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}), \
+                    mock.patch.object(models.hardware, "gpus", lambda windows=True: cards), \
+                    mock.patch.object(models.hardware, "ollama_env", lambda: {}):
+                self.assertEqual(models.max_loaded(), 3 * len(cards))
+                self.assertEqual(models.can_share(d, [a, b, c], int(99e9)), ok, len(cards))
 
 
 

@@ -207,7 +207,13 @@ since feedback, resume and next set `queued` a moment before `spawn_runner` writ
 their slow work, `wb next`'s session export and the GPU note, comes before it: a `wb next` was
 reaped as dead while it read the session)
 becomes `failed`, `last` "the runner died (see runner.log)", with an `error` event and one
-`failed` notice ("wb resume continues it"); the agent's group (`agent_pid`, read before it is
+`failed` notice ("wb resume continues it"). A runner whose status `boot` isn't this boot
+(`store.boot_id`) was ended by a restart (a WSL2 VM shut down, a battery that died, an update):
+`last` is `RESTARTED` ("interrupted by a restart…"), and the first reaper reaps the session's
+other tasks the same restart left (same task.json `session` and `cwd`) quietly and raises one
+notice on the first started, naming them all (`tasks`) and `wb resume --all --repo <dir>`; the
+others are acknowledged with it (`_restart_notice`), so the mod wakes Claude once, not once a task
+with a guess at why (#544). The agent's group (`agent_pid`, read before it is
 cleared) is killed when `models.runs` shows it still runs `run --standalone` (off Linux the kernel leaves it running when its parent dies, as the
 2026-11-19 audit observed), and `runner.sweep` kills what its agent left. The
 check-and-set is `Task.set_status_if`, under the task's status lock (`locks/<task>.status.lock`), so of two reapers one notifies. `wb status`, `wait`,
@@ -307,7 +313,10 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   alone); a rerun and `wb discard` delete it only through `delete_branch(at=branch_made)`, so one
   moved since stays, and `wb discard` says why it kept one (#416). `wb feedback`, `next`
   and `resume` on a task that never got its worktree say to discard it and start again
-  (`cli._need_worktree`, `runner.checked_out`). The user's own checkout is never touched, and
+  (`cli._need_worktree`, `runner.checked_out`), except a `resume` of one interrupted from outside
+  (status `last` in `cli.INTERRUPTED`: a restart, a runner that died, a signal) before its first
+  round: it starts round 1 again and its runner makes the checkout again (`cli._rechecks_out`,
+  so `wb resume --all` after a reboot takes a task that was still checking out). The user's own checkout is never touched, and
   uncommitted changes in it stay out of the agent's copy (it says so). The worktree's real git dir
   is recorded in `rules/<task>/gitdir.json` before any agent runs there (*Git, commits and
   projects*). Submodules are not checked out there, and it says so: populated, each one's `.git`
@@ -454,7 +463,12 @@ it (its row is kept but left out by `store.results()`, and its lessons aren't ga
 scarce resource, so each row also records what the task cost the Claude Code session that ran it
 (task.json `session`), read from that session's transcript at accept or discard:
 `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/*/<session>.jsonl`, plus its subagents' files under
-`<session>/subagents/`. Usage is per API call (an assistant message: one row per content block,
+`<session>/subagents/`, and those of each later session its process had (`spend.sessions`): a
+/clear continues the process under a new id and transcript, whose review turns once went
+uncounted (#451). Every `wb` call records its session under its process
+(`store.note_claude_session`: `claude-sessions/<CLAUDE_PID>`, a `<ts> <id>` line once per id);
+the ones task.json's `claude_pid` recorded from its `created_at` on are read too, each turn
+counted per session. Usage is per API call (an assistant message: one row per content block,
 the same `usage` on each, so counted once by `message.id`), and a call is charged to tasks of that
 session only:
 - a call whose Bash runs `wb … <task>` (each `wb` in the command, split with `shlex`) is that
@@ -466,8 +480,12 @@ session only:
   spec before `wb start`), back to the last call that ran any `wb` or edited a file other than
   one the naming call hands over or one in the task's worktree: a long turn of other work that ended
   in `wb start` once put all of it on the task (82K output, 2026-11-17); a turn a wake opened
-  (`` [workbench] Task `<name>` ``, the mod's opening, `WAKE`) is that task's from its start; a
-  turn that names none is no task's (planning, other work);
+  (`` [workbench] Task `<name>` ``, the mod's opening, `WAKE`, matched only at the prompt's start,
+  after Claude Code's "The workbench plugin sent a message:" line) is that task's from its start;
+  a turn that names none is no task's (planning, other work). A turn starts at a user row that is
+  no tool result, not `isMeta` (an image a Read showed, a skill's body) and not
+  `isCompactSummary`: those, taken for new turns, ended a review's charge mid-turn, and a summary
+  quoting a wake was charged as one (#557);
 - a call naming several tasks is split evenly; a subagent's call is charged as the session's
   call before it.
 
@@ -485,6 +503,20 @@ turn(s)`), and
 `wb stats` averages it per model and size. A task with no session (started by hand, or before
 0.90) or whose transcript Claude Code has cleaned up records none. The router reads it
 (`_cheaper`, *Choosing a model*).
+
+**Each step's share** (`spend.usage_by_step`, #558). A task of several steps (`wb next`) also
+records each step's cost, in its row's `steps[i].claude`, so a bench case of one step is set
+against that step's handoff, not the whole task's (Claude's audit of 1.90: a 3-step task's 240K
+read handoff/self 2.67 against Claude writing step 3 for 90K, when step 3's own share was about
+80K). The split is by time: the task's `next_step` events (written by `wb next`) mark where each
+step began, and a charged call is the step under way when it was made, except that a call
+running `wb next <task>` and the calls charged with it as its spec (the reading back to the spec's
+edit, as for `wb start`; `calls` marks them `ahead`) are the step it hands over. So a step's cost
+is its spec, its reviews and its feedback; step 1's also has the planning before `wb start`, and
+the last step's the accept. A review read before the next spec was written stays with the step
+reviewed; a spec written in an earlier turn, not just before `wb next`, stays where it was charged.
+A `wb next` that failed hands nothing over (clamped to the last step). No split is written when a
+charged call has no timestamp, or the steps counted don't match the row's.
 
 ### What a task saved: an estimate of Claude writing it
 `workbench/savings.py` sets a task's cost beside an estimate of what Claude would have spent
@@ -586,8 +618,16 @@ so no `except Exception` on the way swallows a stop). wb's own stops mark status
 (`cli._stop_runner`): that stop logs a `stopped` event (`by: reviewer`, "stopped by the
 reviewer"), and the command sets the phase. A SIGTERM without the mark (a shutdown, a logout, a
 `kill`) while the phase is live logs `stopped` `by: signal`, sets `stuck` with `SIGNAL_STOP` ("the
-runner was stopped by a signal … not by Claude") and raises a `stuck` notice, so the task is
-resumable rather than live forever (past the first step, with `steps_line`). Any other exception writes the traceback to `runner.log`, sets
+runner was stopped by a signal … not by Claude", status `signalled`: when the signal came) and
+raises a `stuck` notice, so the task is resumable rather than live forever (past the first step, with `steps_line`). A shutdown or a
+logout signals every runner at once, and each raised a notice of its own, one wake a task (#544):
+`_signal_notice` waits, up to `SIGNAL_SETTLE` (12 s, past `_stop`'s 10 s wait on an agent) after
+its signal, while another task of its session (`store.owner`: task.json `session` and `cwd`, else
+`repo`) still runs a live runner; then, under `locks/signal-stop.lock`, one notice names every
+task of the session the signal stopped within that span (`tasks`), raised on the first started
+with `wb resume --all --repo <dir>` (and each one's `steps_line`; `cause` `signal`), the others
+acknowledged with it (`store.write_ack`); a runner a notice already named raises none. One
+stopped alone keeps its own notice, with `wb resume <n>`. Any other exception writes the traceback to `runner.log`, sets
 `failed` and raises a `failed` notice with the traceback's tail. On the way out `_end_agent` runs
 once more and `pid` and `stopping` are cleared.
 
@@ -605,7 +645,7 @@ on the new code") with a `stuck` notice, before anything of the round runs. `wb 
 while any runner is live; a manual pull is the case this catches.
 
 **`drive(task)`**, the loop:
-1. Phase `queued`, `pid`; resolve the model (unknown: `failed`). With a `setup`, `copy` or
+1. Phase `queued`, `pid`, `boot`; resolve the model (unknown: `failed`). With a `setup`, `copy` or
    `siblings` and no `prepared` in status: the worktree set up (`_prepare`; a failure: `failed`,
    before any round). With `--test`, while no round has reported (`needs_base_check`: no
    `base_check` in status, step one, no review round, no `rounds/<n>/summary.md`; not
@@ -653,7 +693,10 @@ while any runner is live; a manual pull is the case this catches.
 3. Each round n: after the first, the lease rejoined and `lease.load()` again, since each request resets Ollama's
    keep-alive to its own 5 minutes and a longer test run once left the auto-fix round paying for
    the reload inside its think budget (a reload adds to `load_secs` and `loads` and logs a `load` event;
-   resident already, it is one look at the server). For n > 1, `fresh_reason` decides whether a fresh session takes over
+   resident already, it is one look at the server). Notes still pending (they came in while the
+   task was queued, the model loaded or the auto-fix prompt was written) are added to the round's
+   `prompt.md` with `NOTE_HEAD` and counted taken (`_early_notes`): they once waited for the round
+   to end and came a round late (#452). For n > 1, `fresh_reason` decides whether a fresh session takes over
    (`_start_fresh`); a one-round `keep` is cleared and passed to `run_round`, so that round never
    hands over. Phase `running`, `round_started_at`, a `round` event, then `run_round`, then
    `_end_agent` (however the round ended, and while the lease is still held, so the GPU's next
@@ -747,7 +790,8 @@ steer --now` and held the GPU lease (#195, the 2026-11-19 audit).
 The guards' clocks (`_Clock`) run on `time.monotonic()`, which a suspend doesn't advance and NTP
 never steps (on the wall clock a laptop shut for 20 minutes woke to a round stopped for silence:
 the 2026-11-16 audit); a loop pass longer than `FROZEN_SECS` (60 s, against its 5 s wait) means
-the process was frozen, and that time counts as neither the round's nor silence. Check-ins stay
+the process was frozen, and that time counts as neither the round's nor silence. A question's
+wait (`ask_mcp.Waited`, its own `FROZEN_SECS`: keep the two alike) leaves a suspend out the same way. Check-ins stay
 on the wall clock, which the files' timestamps use. Silence and the think budget:
 - The think budget starts at the round's first output line: OpenCode prints nothing while the
   model reads its prompt, which on the CPU or a model spilled into RAM takes many minutes, and a
@@ -1665,7 +1709,11 @@ courtesy: the runner's count is the one that holds) it returns the refusal. Othe
 `ask/<id>.json` (`{id, ts, round, question, context, command?, path?}`) and blocks (a `Watcher`
 on `ask/`) until `ask/<id>.answer` appears or the ask timeout passes (`--ask-timeout`, 20
 minutes), returning the answer or "No answer arrived in time. Make the most reasonable
-assumption…". A call that raises (a full disk, an unwritable `ask/`) returns `isError: true` and
+assumption…". Both that wait and the runner's (below) count on `ask_mcp.Waited`: the monotonic
+clock, less any step longer than `ask_mcp.FROZEN_SECS` (60 s, as the round's `_Clock`; the server
+looks at least every `STEP_SECS`, 30 s), so a suspend doesn't expire the question; on the wall
+clock a laptop woken past the ask timeout found it answered and closed (#453).
+A call that raises (a full disk, an unwritable `ask/`) returns `isError: true` and
 `ask_reviewer failed: <why>; carry on without an answer and say so in your summary.`; any other
 request that raises gets a `-32603` error with the request's own id (`null` only for a line that
 isn't a request). OpenCode's MCP client dropped a reply with id `null`, so the call waited out
@@ -1721,7 +1769,7 @@ the runner is woken by the note itself (`_steer_bell`), stops the agent within s
 starts the next round with the note first, marked as overriding anything earlier. The next round
 continues the session unless the between-rounds check hands it to a fresh one; during the tests
 there is nothing to interrupt, so the note waits for them, and while the task waits for the GPU it
-waits for the round to start: `wb steer` and `wb allow` say which (`cli._when_delivered`), not
+goes with the round's prompt when the round starts (`runner._early_notes`): `wb steer` and `wb allow` say which (`cli._when_delivered`), not
 "within a few seconds". A note the runner never delivered (it stopped first) goes to the stuck
 report, and the next `wb resume` carries it, `wb feedback` and `wb next` drop it and say so.
 
@@ -1736,7 +1784,9 @@ handovers and a base check cut short raise check-ins whatever the setting; a ses
 reading is a `reading:` line in the round's report instead.
 
 **Progress checks** (`workbench/progress.py`, #95) are the user's opt-in: `wb progress on
-[--after MIN]`, `wb progress off`, kept in `$WB_HOME/progress.json` `{on, after?, ts}`. Off, the
+[--after MIN]`, `wb progress off`, kept in `$WB_HOME/progress.json` `{on, after?, ts}`. A stored
+`after` stays through a bare `on` or `off` (`set_enabled`: the pane's row runs them bare, and
+each dropped a `--after 30`, #578) until `--after` is given again; `--after 0` clears it. Off, the
 default, nothing below runs and the timing is the check-ins'.
 - **Active work.** Each round adds its time, less Claude's answers and a frozen machine
   (`_Clock.ran`), to status `active_s`, on or off. Waiting for the GPU happens before a round,
@@ -1896,7 +1946,14 @@ counted the wait for Claude's review as the agent being slow, #543). Discarded s
 records (`judged`). Each value's mean is smoothed toward the others' (`PRIOR`, two tasks' worth),
 so one lucky task moves nothing, and the pick walks one step at a time toward whatever scores
 best. Values past the model's compaction point (`runner.fresh_ceiling`) are never tried (a
-window under `models.MIN_WINDOW`, 16K, which would leave none, is refused instead). Trial
+window under `models.MIN_WINDOW`, 16K, which would leave none, is refused instead). An output cap
+that is a large share of the window can put the ceiling under every value: then the ceiling less
+`tuning.CEILING_MARGIN` (0.05) is the only one, and the smallest value when that isn't positive
+(the smallest stood before, past the compaction, so every long step compacted: a 16K cap on 32K
+is a 0.375 ceiling, #595, the audit of 1.90); `runner.handover_warning` says so, a `note:` in `wb
+start` and a `--` line in `wb doctor` ("its output cap … puts OpenCode's compaction at N% of the
+window, before the earliest handover point"; under `HANDOVER_ROOM`, "no handover fits"), and
+`optimize.budget` cuts such a cap to a quarter of the window. Trial
 runs aren't evidence. `wb tune` shows each model's record and pick; `$WB_HOME/tuning.json` pins a
 value (`{"fresh_at": 0.6}`, used as given, ceiling or not). A new knob: add it to `KNOBS`, read it
 with `tuning.value(task, name)`.
@@ -1918,20 +1975,23 @@ so what Claude learned about how the user likes delegation run in one repo would
 next. When the user says something that holds anywhere (their review bar, whether to merge, how
 much to ask them), Claude keeps it with `wb notes add "…"` (one sentence, at most 300
 characters; at most 20 notes) in `$WB_HOME/notes.md` (`- ` lines, under `notes.lock`). Every
-session in workbench mode, in any project, is handed them in a `user-notes` block. `wb notes`
+session in workbench mode, in any project, is handed them in a `user-notes` block (or, when the
+mode came on after the first message, with /workbench's text or a row of their own: #540). `wb notes`
 lists them and `wb notes drop N…` removes ones that have stopped holding. A fact about one repo
 goes in its CLAUDE.md instead.
 
 ## Waking Claude, exactly once
 
 The runner appends notices to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts,
-task, kind, text, round?, id?, cause?}`; `cause` on a `stuck` or `failed` notice with a round:
+task, kind, text, round?, id?, cause?, tasks?}`; `cause` on a `stuck` or `failed` notice with a round:
 `guard` (a guard stopped it), `agent` (OpenCode exited non-zero with no text), `signal` (a
-SIGTERM from outside wb, `SIGNAL_STOP`) or `died` (`reap`)). Kinds: `review` (the round report and `review_diff`), `stuck`, `failed` (the round report as text;
+SIGTERM from outside wb, `SIGNAL_STOP`) or `died` (`reap`, a restart's batch notice too); `tasks`:
+a restart's or a shutdown's batch, below and in *The runner, inside*). Kinds: `review` (the round report and `review_diff`), `stuck`, `failed` (the round report as text;
 a load failure or crash without a round), `question` (with the question's `id`), `checkin`
 (periodic, a nudge, the mid-round handover before the last a round allows, a
 base check whose `--test-timeout` cut it short). `wb` itself writes only
-one: `reap`'s `failed` for a runner that died without a report. The agent never writes one: the
+one: `reap`'s `failed` for a runner that died without a report (or one for a restart's batch;
+the runner raises a shutdown's). The agent never writes one: the
 file is out of its lane (the 2026-11-16 audit: it could forge any task's wake, or wipe them
 all). Readers take its rows through `store.notices()`, which keeps only whole ones (a dict with a
 `NAME_RE` task, a kind, a numeric ts): one row without a task once made every acknowledging
@@ -1951,11 +2011,19 @@ of 1.8).
   review for a task since discarded or sent back) is acknowledged and dropped.
 - **Held mid-turn.** While Claude's main loop is mid-turn (`mem.busy`, set by `turn.start` or the
   model's own `tool.call`) the wake is held (a prompt submitted then would queue and arrive stale)
-  and checked again on every poll, and after the turn even if notify.jsonl hasn't changed. Otherwise
+  and checked again on every poll, and after the turn even if notify.jsonl hasn't changed. A
+  question (a PERMISSION request too) doesn't wait: its agent is blocked, and after the ask timeout
+  (`--ask-timeout`, 1200 s) it guesses, so it goes into the running turn (`session.send`, as a web
+  message does, with MIDTURN_NOTE saying whose it is); only if that is refused is it held, and one
+  held that the runner then answered with `NO_ANSWER` (timed out unseen) wakes Claude after the
+  turn with the question and that the agent assumed (MISSED_NOTE), not a silent ack (#542). Otherwise
   the mod writes `acked` first, shows a toast, and submits
   a prompt: `[workbench] Task <n> <headline>.`, the notice's text, and the next commands to run
   (`NEXT[kind]` in `register.tsx`; a question names its `wb answer <n> --id <id>`, a PERMISSION
-  question the `wb allow` that answers it). A prompt the engine drops (a settings hook's block, a
+  question the `wb allow` that answers it). A batch's notice (a `tasks` list: a restart's or a
+  shutdown's) wakes as `[workbench] Tasks <a>, <b> were interrupted.` (one: `Task <n> was
+  interrupted.`) and ends with `BATCH_NEXT`, the resume, not the failure's `wb log`, feedback or
+  discard (#544). A prompt the engine drops (a settings hook's block, a
   Stop, a host limit) puts `acked` back (unless something acted on the task since), toasts, and
   the safety net tries again a minute later.
 - **Acting acknowledges.** `feedback`, `next`, `answer`, `allow`, `note`, `resume`, `takeover`,
@@ -1988,8 +2056,8 @@ of 1.8).
   notice (it said "no notice", and the notice came again on the next wait). A bare wait with no
   open task exits 2. `--timeout` exits 2 when it passes.
 - **Off switch.** The plugin's `wake` setting (`on`/`off`) stops the prompts and keeps the pane
-  and the toasts; a `workbench-wake` context block tells Claude no wake will come, so it doesn't
-  end its turn waiting for one.
+  and the toasts; a `workbench-wake` context block (or the same note said later, #540) tells
+  Claude no wake will come, so it doesn't end its turn waiting for one.
 
 The mod runs in every Claude Code session with the plugin and the state directory is global, so
 a session wakes, rewakes and compacts only for its own tasks (`mine`). `wb start` records the
@@ -2052,7 +2120,8 @@ nothing until a surface attaches.
   `coding`; `▸ Web chat: Off (default)`, key `chat`; the default option says so, to show how it was at
   the start, the user 2026-11-19); a press opens its options under it as Buttons (keys
   `coding:only|ask|decide`, `chat:off|on`, `probe:off|on`, the chosen one marked `❯`), picked by a click or Enter
-  on the ring, and a pick folds the row again. Under them, the sentence of the option the ring is
+  on the ring, and a pick folds the row again; the option already chosen only folds it, running
+  nothing (#578: picking On again ran a bare `wb progress on`). Under them, the sentence of the option the ring is
   on (the `ui.focus` hook keeps it in the `pane` atom), else the chosen one's; the pointer on an
   option lays its own sentence over it (a hover reveal: `display: "none"` Boxes, absolute, under
   the option's hover scope, since no hook runs on hover). **Claude coding** (#93, *Claude coding*):
@@ -2075,8 +2144,10 @@ nothing until a surface attaches.
   *Stats recording*), **Live view** (`LIVE_STOPS`: `wb stats set live`), **Live refresh**
   (`EVERY_STOPS`, `1 s`, `2 s (default)`, `5 s`: `wb stats set every`), each read back from
   stats.json (`statsSettings`, a mistyped value its default); **Progress checks**
-  (`PROGRESS_STOPS`, `Off (default)` / `On`: `wb progress on|off`, read from progress.json; off by
-  default because each check wakes Claude); and **Electricity price per kWh**, an Input (key
+  (`PROGRESS_STOPS`, `Off (default)` / `On`: `wb progress on|off`, read from progress.json
+  (`progressSettings`); off by default because each check wakes Claude; with a threshold kept
+  there (`wb progress on --after N`, `after` a number other than 0) On reads `On, after N min`
+  and its sentence names it (`progressStops`), where it said "its typical length", #578); and **Electricity price per kWh**, an Input (key
   `price`) that runs `wb savings --price X --json` (`setPrice`, through `parsePrice`: one comma or
   point as the decimal separator, a currency sign or code of up to three characters before or
   after, decimal digits only; anything else, `0x10` and `1e3` among them, is refused with a toast
@@ -2509,7 +2580,11 @@ name), or a unique case-insensitive substring.
 A model's `name` is its name at the server: the entry's `"id"` when it has one (an alias, which
 OpenCode sends in its place), else the entry's key. Every probe, load, unload and placement uses
 it; the model's id (`<provider>/<key>`) routes and selects. Read as the key, an alias OpenCode ran
-was "the server lists N models, not friendly" (the 2026-11-19 audit).
+was "the server lists N models, not friendly" (the 2026-11-19 audit). `wb doctor`, `wb scout`
+(its sizes, windows and "installed but not registered" match too) and `wb model add` ask the
+server by the same name (`cli.served_name`): by the key, an aliased Ollama entry read 404,
+doctor said BAD on `OLLAMA_CONTEXT_LENGTH`'s window, and the add it advised died (#588, the
+audit of 1.90).
 
 Every request to a server on this machine (`_open`: probes, loads, pulls, the image engines) goes
 direct, never through an `http_proxy` in the environment, which urllib would otherwise use for
@@ -2553,7 +2628,11 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
 - `remote: <root>`: on a provider, `wb remote` made it (for the Ollama at that root), so `wb
   remote --remove` may delete it (#197).
 - `keep_loaded` (top level, a list): model ids or Ollama names wb never unloads or stops to make
-  room (*Residency*), nor measures (`wb optimize`: each probe unloads its model, #254).
+  room (*Residency*), nor measures (`wb optimize`: each probe unloads its model, #254). An entry
+  is an id only when it starts with a provider id the config has (`<provider>/<key>`: its entry's
+  `id`, an alias, or its key); else it is an Ollama name, whole (`hf.co/<org>/<repo>:Q4_K_M`,
+  `user/model:tag`), untagged read as `:latest` (`models._kept_name`; cut at its first `/`, a
+  namespaced name never matched itself and `mannix/llama3:8b` kept `llama3:8b`, #461).
 - `variant_of: <id>`: `wb optimize apply` made this model from that one (with a copy of its other
   keys here): the two share one record in the router (`router.lineage`), and the router puts the
   variant first (#584).
@@ -2564,7 +2643,12 @@ tools": the router never picks it, `wb start --model` refuses it; a missing key 
 default and counts as capable), a provider problem (`url_problem`: an Ollama provider, plain
 OpenAI-compatible, whose baseURL doesn't end in `/v1`, where Ollama's OpenAI API lives; OpenCode
 would get 404 on every request after the model loaded; or an `apiKey` the agent won't get, above),
-an Ollama cloud model not allowed. Then Ollama: not answering / `<name>` is not pulled / a cloud
+an Ollama cloud model not allowed. A server's root is its baseURL without a trailing `/v1` or `/api`
+(`server_root`, behind `Model.root`, `server_key`, the engine probe and `providers()`): a native
+Ollama SDK provider (`ollama-ai-provider`, `-v2`) has a `…/api` baseURL, and with only `/v1`
+stripped it probed `/api/api/version` and read "not running", and one Ollama through both was two
+servers (#585, the audit of 1.90); a server's own probe of such a base asks `<root>/v1/models`
+(`openai_base`). Then Ollama: not answering / `<name>` is not pulled / a cloud
 model by its tags row / pulled / loaded (`/api/tags`, `/api/ps`). A server (`GET <base>/models`):
 running (a server listing several models must list this one: "the server lists N models, not …";
 one listing none (`data: []`) is unavailable, "the server answers but lists no model" (it read as
@@ -2621,13 +2705,21 @@ lists every downloaded model, so `status` says running) is loaded first, after `
 below, with `POST /api/v1/models/load` and `context_length` set to its `limit.context`; a refused
 load raises, naming `lms load <key> --context-length N`. Left to OpenCode's first request, LM
 Studio loaded it with its default window (often 4K), refused the prompt, and round 1 failed
-(#335, the audit of 1.4). Nothing is freed when `m` fits beside every model resident now (`_room_beside`: Ollama only, a
+(#335, the audit of 1.4). With just-in-time loading off, `/v1/models` lists only loaded
+models: before `status` says the server lists no model, other models, or serves another one,
+it asks `lmstudio_unloaded`, and a model LM Studio has is available, not resident ("in LM Studio,
+not loaded (wb loads it)"); with A loaded, B was told to set its id to A (#462, the audit of
+1.8). Nothing is freed when `m` fits beside every model resident now (`_room_beside`: Ollama only, a
 known budget, no other server resident, `m` all in VRAM if loaded, Ollama's loaded-model limit not
 reached, and the loaded sizes from `/api/ps` plus `need(m)` within `SHARE_AT` of the budget):
 every round once unloaded the user's Open WebUI, autocomplete or embedding model, fits or not
-(the 2026-11-19 audit). Else `free_gpu(keep={m, *keep})`: every other running
-server with a `stop` command is stopped once per server, after waiting up to 10 minutes while its
-`/metrics` says a reply is in progress (a running server with no `stop` is left, with a warning
+(the 2026-11-19 audit). Else `free_gpu(keep={m, *keep}, of=m)` (an Ollama known to be on other
+cards than `m`'s is left alone: `apart`, under **The machine** below): every other running
+server with a `stop` command is stopped once per server, after waiting up to 10 minutes while it
+answers someone (`_server_idle`: llama-server's `/slots` `is_processing`, else `/metrics` as a JSON
+`live.state` or Prometheus text with a `BUSY_GAUGES` gauge above 0, `llamacpp:requests_processing`
+or `vllm:num_requests_running`; read as JSON only, both stopped mid-reply, #465, the audit of 1.8;
+a server that says none of these is idle) (a running server with no `stop` is left, with a warning
 that it may hold GPU memory); every model loaded on each discovered Ollama server is unloaded
 (`POST /api/generate {keep_alive: 0}`) except kept ones, and except models.json's `keep_loaded`
 (`keep_loaded()`: ids or Ollama names; a server whose model is listed is never stopped), which
@@ -2638,7 +2730,9 @@ finishes and stops its clock while one runs, so a stamp that moves, or one alrea
 tasks on a shared system Ollama, since `gpu.lock` is per account; Open WebUI; an editor). Then it
 warns ("<names> on ollama is answering requests that aren't this account's tasks …: waiting up to
 10 min for it to go idle before unloading it") and waits, up to `INFLIGHT_WAIT` 10 min, for a
-quiet watch, then unloads it either way. Each account's runner once unloaded the other's model
+quiet watch, looking at most once an `INFLIGHT_POLL` second (a stamp already past is busy at
+once, and the wait asked `/api/ps` back to back: 1,137 requests in 0.25 s, #459, the audit of
+1.8), then unloads it either way. Each account's runner once unloaded the other's model
 before every round, mid-use, and both reloaded on every request (#378, the audit of 1.6). A
 server whose `/api/ps` gives no `expires_at` has nothing to watch. A machine-wide lease (one
 `gpu.lock` for every account, opt-in) would be the whole answer and isn't built; meanwhile `wb
@@ -2704,13 +2798,16 @@ VRAM means no sharing. `gpus(windows=False)`: the budget asks WSL's PowerShell o
 at most hourly (`wsl-gpus.json`); each adapter named from Windows is a group of its own, since
 the registry can't tell a laptop's Radeon iGPU from its Radeon card: the largest counts (#522). A model's
 need: `vram_gb`, else Ollama's loaded size (weights and context), else weights × `KV_GUESS` 1.25.
-`can_share(m)`: every running model and `m` are Ollama and local, and their needs sum to at most
+`can_share(m)`: every running model and `m` are Ollama and local, and the needs of `m` and of the
+running models that may share its cards (not `apart`: one Ollama per GPU, **The machine**) sum to at most
 `SHARE_AT` 0.9 of the budget; the same model again (the same `server` and name) needs a slot of
 `OLLAMA_NUM_PARALLEL` for each task on it (two already running it need 3: a value of 2 once
 admitted any number, and a third task's requests queued inside Ollama while its silence budget
 ran, the 2026-11-19 audit), and different models may not outnumber `OLLAMA_MAX_LOADED_MODELS`
-(unset or 0: `OLLAMA_MAX_LOADED` 3, Ollama's default per GPU), or Ollama swaps them on every
-request (both read from the running Ollama's environment, `hardware.ollama_env`, which `wb
+on their server (`max_loaded`; unset or 0: `OLLAMA_MAX_LOADED` 3 per GPU the budget counts,
+Ollama's `defaultModelsPerGPU * len(gpus)`; counted as 3 in all, a fourth task on a two-card box
+was refused, #466, the audit of 1.8), or Ollama swaps them on every
+request (both read from the running Ollama's environment, `hardware.ollama_env_at`, which `wb
 doctor` and `wb scout` say the source of, or that it is unknown). Admission
 happens under the `gpu.admit` flock: holders are the `gpu.json` entries whose process is alive,
 checked by identity (`_alive`: a pid of another user's is dead, and when available the process's start
@@ -2813,8 +2910,10 @@ output: ctx/8}}` plus `options.max_tokens` = 2 × output (`ollama_cap`: Ollama i
 `max_completion_tokens` OpenCode sends and honours `max_tokens`; uncapped, a degenerate
 generation runs until the context is full, seen as 20K-token turns with no edit). The context is
 `--context`, else what Ollama serves (`ollama_served_context`: the loaded `context_length`, the
-Modelfile's `num_ctx`, `OLLAMA_CONTEXT_LENGTH`), else the provider's other models' setting, else
-never the trained length: with none of those, Ollama serves its own default (often 4K-8K, below
+Modelfile's `num_ctx`, `OLLAMA_CONTEXT_LENGTH`), never the provider's other models' setting
+(Ollama serves each model its own: beside a `wb optimize` variant whose 64K is its Modelfile's,
+an add said 64K while Ollama served its default, #464, the audit of 1.8), and never the trained
+length: with none of those, Ollama serves its own default (often 4K-8K, below
 OpenCode's ~10K-token prompt), so add refuses and says to set `OLLAMA_CONTEXT_LENGTH` or pass
 `--context` (the 2026-11-16 audit: a stock Ollama got a 256K entry and cut prompts off silently);
 the trained length only caps the result. Another server's window is what it says
@@ -2855,7 +2954,9 @@ and sharing the GPU.
 Ollama still resolves to those weights: an alias's `id`, untagged read as `:latest`; #333, the
 audit of 1.4. The same Ollama however its host is spelled, `localhost`, `127.0.0.1` or this
 machine's name: `models.server_key`, which `Model.server` uses too; compared as strings, a retire
-deleted the default's weights under another provider, #368, the audit of 1.6); its results stay. `wb model sizes <id> trivial|significant|…` sets `sizes`. `wb doctor` asks each
+deleted the default's weights under another provider, #368, the audit of 1.6; and any provider
+the config has, one in `disabled_providers` too: `models.configured_providers`, #458, the audit of
+1.8); its results stay. `wb model sizes <id> trivial|significant|…` sets `sizes`. `wb doctor` asks each
 Ollama provider once whether it answers (`ollama_answers`; a sleeping LAN box once cost 35 s a
 model and ran doctor past Claude's 2-minute Bash limit): one that doesn't gets one `--` line, its
 models read "ollama is not answering" without another probe, and their served-context checks are
@@ -2926,16 +3027,40 @@ started by hand in another terminal, a user unit's; under `PROC`), lowest pid fi
 `ollama` unit that is running (`systemctl show -p LoadState -p ActiveState -p Environment`, the
 system's then `--user`'s; `Environment` split as a shell would, since systemd quotes a value with
 a space; an `EnvironmentFile` isn't in it); a running container of an `ollama` image that
-`docker ps` or `podman ps` lists (its `Config.Env`, from `inspect`); on macOS launchctl (what the
+`docker ps` or `podman ps` lists (its `Config.Env`, from `inspect`, and the devices its
+`HostConfig` gives it, `container_mask`: `DeviceRequests`' `DeviceIDs`, or a `Count` of the first
+N, as `CUDA_VISIBLE_DEVICES` with `CUDA_DEVICE_ORDER=PCI_BUS_ID`, and `Devices`' `/dev/dri/renderD…`
+as `ROCR_VISIBLE_DEVICES`, this host's numbering; unread, `--gpus device=0` was budgeted every
+card, #463, the audit of 1.8); on macOS launchctl (what the
 app reads); a unit that isn't running. A process in another mount namespace than wb's, and a
 container, give only `OLLAMA_KNOBS` (`OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`,
 `OLLAMA_MAX_LOADED_MODELS`): their paths, bind address and device numbers are the container's.
+A process in a container gives way to the container's own answer when `docker`/`podman` lists
+one, since only its `HostConfig` says which cards it has (rootless docker or podman, whose
+processes this user can read, and wb as root, were budgeted every card: the review of #463).
 With none, wb's own environment is the guess and the source is unknown; `cli.ollama_line` (`wb
 doctor`, `wb scout`, when a local Ollama model is configured) says so and points at models.json's
 `gpu_gb` and `vram_gb`, or names the source and the knobs set. Read from systemd, launchctl or
 wb's environment alone (which also filled in what a unit left unset), Ollama in Docker, one
 started by hand, or Ollama for Windows from WSL had its sharing knobs read as unset (#379, the
 audit of 1.6). A system unit's process runs as another user and can't be read: its unit says.
+With several `ollama serve` readable here (one per GPU, each on its own port), `ollama_env_at(root)`
+is the one whose `OLLAMA_HOST` listens on root's port (`_ollama_processes`; unset is `OLLAMA_PORT`
+11434; a container's gives no `OLLAMA_HOST` and isn't matched), else `ollama_env()`; the GPU
+budget (`budget_devices(root)`, `gpu_budget(root)`), `can_share` and `_room_beside` read the
+task's own server's devices, `OLLAMA_NUM_PARALLEL` and `OLLAMA_MAX_LOADED_MODELS`, the last
+counting only the models on that server. The lowest pid's stood for both: two 24 GB cards were
+budgeted as GPU 0 alone for the second server (#460, the audit of 1.8). Which cards each server
+uses is `models.server_devices(root)`: its budget's devices (by UUID, else driver, name and size),
+and only when `hardware.ollama_matched(root)` is sure of its process (several readable, exactly
+one on that port); else None (one process readable, a container's, `gpu_gb` by hand, no card
+named). `models.apart(a, b)`: both known and no card in common; unknown is never apart, which is
+the behaviour from before. Servers apart don't touch each other's memory: `free_gpu(…, of=m)`
+(as `make_resident` calls it) unloads only on the Ollama servers not apart from `m`'s, and
+`_others_resident` asks only those; `_room_beside` and `can_share` count only the models on them
+against `m`'s budget. Every server's models were unloaded, so a task on GPU 0's Ollama emptied
+GPU 1's, and every running model was summed against one card, which refused sharing that fit.
+`free_gpu()` with no `of` (`wb image`, `wb audio`, `wb optimize`) still frees every card.
 `ollama_context()` (`OLLAMA_CONTEXT_LENGTH`
 with spaces and quotes trimmed, as Ollama reads it, and the raw value: `report` says when it isn't
 a number instead of crashing), `ollama_models_dir()` (`os.path.isdir`: a directory it can't read
@@ -3107,8 +3232,10 @@ followed by `SELF_PROMPT` (the acceptance command, run before finishing).
 - **The row.** It goes to runs.jsonl with `arm: "claude"`, `model: "claude"`, `label: "claude"`,
   `claude`, `turns`, `claude_model`. `wb bench report` keeps those rows out of the per-model
   table and lists each one under "Claude writing it": PASS or fail, its weighted tokens, and the
-  original task's handoff cost to Claude (its results row's `claude`, every step's;
-  `handoff_cost`) with the ratio handoff/self.
+  handoff cost to Claude of the case's step (`handoff_cost`: its results row's `steps[step-1].claude`
+  for a task of several steps, *Each step's share*; the row's `claude` for one step) with the
+  ratio handoff/self. A task of several steps whose row has only the whole task's cost (written
+  before #558) prints `handoff ~240K (all N steps; not comparable)` and no ratio.
 - **The yes.** It refuses without `--yes`, because it spends Claude tokens, and nothing runs it
   on its own.
 
@@ -3120,7 +3247,8 @@ it runs on its own only where the user is told and expects a short wait, and onl
 (`due`: never measured, the GPU changed (`fingerprint`: each GPU's name and memory), a remote
 server's models changed, a model came since (not one in `skipped` before its `retry_after`), or
 the last run was stopped): at the end of `wb setup`, and once per Claude Code session
-opened, after its first turn while no task is open (the mod's `measureIfDue`, which toasts
+opened, after its first turn while quiet (the mod's `measureIfDue`, gated like the weekly check:
+`quietForJobs`, #541; `optimize.start` itself defers to a task holding the GPU; it toasts
 "workbench: measuring the GPU for N local model(s) (<why>): about M min; a task you start goes
 first" and wakes no one). `wb optimize start --if-due` is that check: quiet when nothing is due or
 a task holds the GPU (the next session tries again). Due for a new model only, it measures only
@@ -3200,7 +3328,8 @@ audit; a name already in OpenCode's config or Ollama is refused: retire it first
 `num_ctx` N (`/api/create` `from`: no download, no GPU) and OpenCode's entry copied from the
 model's (its options, such as `reasoningEffort: "none"`, kept; `limit.context` set to the new
 window, and the caps recomputed together by `budget`: `limit.output` and `options.max_tokens`
-kept while the output cap is at most half the window, else cut to a quarter of it, `limit.input` the window less the
+kept while the output cap is at most half the window and leaves room for a handover before the
+compaction (`runner.handover_warning`, #595), else cut to a quarter of it, `limit.input` the window less the
 output cap, and an entry no request could fit refused before anything is made: a 16K fit of a
 128K entry once wrote an input limit of -16384 and kept its 32K and 64K caps, #332, the audit of
 1.4; an alias's `id` dropped, since it would name the old model). The variant gets a copy of the
@@ -3288,19 +3417,23 @@ and the medium rules, and adds Unicode Cf and tag characters). 43 regex rules, 2
 high, case-insensitive and multiline:
 - exfiltration (critical: curl/wget sending a `$…KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL` variable
   to a non-loopback URL, `cat` reading .env/credentials/.netrc/.pgpass/.npmrc/.pypirc (not a heredoc writing one, not
-  `.env.example`), staging in /tmp
-  then piping out; high: `~/.ssh`/`.aws`/`.gnupg`/`.kube`/`.docker`, `printenv`/`env |`, a
+  `.env.example`, not a line that warns against it: "Never `cat .env`"), staging in /tmp
+  then sending it (curl, wget, nc, `python -c`; not a script of the skill's own); high: `~/.ssh`/`.aws`/`.gnupg`/`.kube`/`.docker`, `printenv`/`env |`, a
   markdown link carrying a variable, "send/post/upload … to http", webhook.site, requestbin,
   pipedream, hookbin, pastebin);
-- prompt injection (critical: ignore previous instructions, disregard your rules, system prompt
-  override, no restrictions, without filters, DAN; high: "you are now", "pretend to be", don't
+- prompt injection, each within one line and at most four words apart where the rule allows any
+  (`S`, `W`: `\s+` and any number of words once read "## Ignore generated files", a blank
+  line, "Follow all instructions" as one, #455) (critical: ignore previous instructions,
+  disregard your rules, system prompt override, no restrictions, without filters, DAN; high: "you are now", "pretend to be", don't
   tell the user/reviewer, when no one is watching, output the system prompt, instructions in an
   HTML comment, a hidden `display:none` div);
 - destructive (critical: recursive rm of the home directory itself (`~`, `~/`, `~/*`, `$HOME`,
-  `${HOME}`, not a directory under it) or of `/`, `> /etc/`, mkfs, `dd of=/dev/`,
+  `${HOME}`, not a directory under it) or of `/`, `> /etc/` (high on a Dockerfile's `RUN` line or
+  in a Dockerfile: it writes the image), mkfs, `dd of=/dev/`,
   sudoers/visudo);
 - remote code (critical: curl|wget piped to a shell, `/bin/sh -i … >/dev/tcp`, a reverse shell
-  (`reverse_shell`: nc/ncat/netcat with `-e` or `-c`, socat to `exec:`/`system:`/`pty`),
+  (`reverse_shell`: nc/ncat/netcat with `-e` or `-c` of its own, not a later command's after
+  `;`, `&` or `|`, socat to `exec:`/`system:`/`pty`),
   `python -c "import socket`; high: a listener (`listener`: `nc -l`, socat `tcp-listen:`), ngrok,
   localtunnel, serveo);
 - obfuscation (critical: base64 decode or echo piped to an interpreter that runs
@@ -3309,7 +3442,13 @@ high, case-insensitive and multiline:
 - credentials (critical: PEM private keys, `ghp_`, `github_pat_`, `glpat-`, `sk-ant-`, `sk-`,
   `AKIA`);
 - Claude's files (critical: a shell write to AGENTS.md, CLAUDE.md or `.claude/settings*` through
-  `>`, `>>`, `sed -i` or `tee`; high: a line telling the agent to edit one).
+  `>`, `>>`, `sed -i` or `tee`, high when what comes before the `>` is itself one of them,
+  `AGENTS.md > CLAUDE.md`; high: a line telling the agent to edit one).
+
+The redirect rules (`REDIRECTS`: `> /etc/`, staging in /tmp, the write to Claude's files) match
+the text with HTML tags blanked (`TAG`), so `Read <code>CLAUDE.md</code>` is no redirect;
+`_softened` holds the other exceptions above (#455). Each finding's line names its rule
+(`[pipe_to_shell]`).
 
 File rules: what is scanned is what `skills.add` copies, which follows links. A symlink resolving
 outside the skill, or into its `.git`, and binary extensions are critical; so are a link to
@@ -3329,11 +3468,17 @@ clean. On an update only `new_findings` count: the same (file, rule, stripped li
 finding whatever its line number. `content_hash` is a sha256 over each regular file's relative
 path and bytes (display only). The rules are drawn to pass ordinary advice (`cat .env.example`, a heredoc
 writing `.env`, `rm -rf ~/build`; `nc -l 8080` is only high); a skill still refused is reworded,
-not forced.
+or, when the finding is safe as written (rustup's or bun's `curl … | sh` install line), added
+with `--reviewed <rule>`: that rule's critical findings pass as warnings ("scan, reviewed: …")
+and the commit records each under "Reviewed (the scan's critical findings, judged safe):". It
+can't pass `scan.UNREVIEWABLE` (a symlink out, a binary, invisible characters, padded code, NUL
+bytes: what reading the skill can't judge), and a rule with no finding is a warning. Before
+#455 there was no way past a false positive.
 
 **The flows.**
-- `wb skill add <name> --from <file|dir> -m "<what review taught>" [--source …] [--lesson ID…]`
-  (`skills.add`): check, then scan (critical findings become problems, the rest warnings), then
+- `wb skill add <name> --from <file|dir> -m "<what review taught>" [--source …] [--lesson ID…]
+  [--reviewed RULE…]` (`skills.add`): check, then scan (critical findings become problems, but
+  those of a `--reviewed` rule, the rest warnings), then
   copy (`skills._put`): a directory source replaces the skill's directory, copied first into a
   scratch `.adding-<name>-…` in the library (`.git` ignored) and renamed into place, a file source
   only SKILL.md, written beside it and renamed over it, so a copy that fails leaves the old
@@ -4096,7 +4241,8 @@ for each task it hands over, since the user asked for exactly that. The mod deni
 Edit, MultiEdit, Write and NotebookEdit calls on a path under `$WB_HOME/tasks/<task>/worktree/`
 without one (`codingRefusal`, in the one unmatched `tool.call` hook; the deny names the rule), and
 outside `decide` adds a `claude-coding` context block with the rule (`CODING_RULES`) while
-delegating or with a task open. A shell edit isn't seen: the block says the rule covers it too.
+delegating or with a task open; a change mid-session (the pane, `wb coding`) reaches the
+conversation as a row with the new rule (`sayRules`, #540). A shell edit isn't seen: the block says the rule covers it too.
 
 ## Experiments
 
@@ -4291,13 +4437,39 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
 - **The path of a message.** The page posts it; the server appends it to `chat/messages.jsonl`.
   The listening session's mod submits it to Claude as `[web chat] <the user's words>`, nothing
   more (a reply to screenshots adds `(about <task>, step <s>, screenshots <n>)`; a take kept from
-  Claude's audio shortlist, `(keeps take <n> of the shortlist: <path>)`, #397), so the terminal
-  shows what the user wrote; how to answer is in the `/workbench` skill. It
+  Claude's audio shortlist, `(keeps take <n> of the shortlist: <path>)`, #397; and each attached
+  file a line `[attached: <path> (<size>, <type>)]`, `attachedLines`, so Claude can Read it, #623),
+  so the terminal shows what the user wrote; how to answer is in the `/workbench` skill. It
   goes into the running turn if Claude is mid-turn (`session.send`, with one line saying it's from
   the user), else as the next prompt. The mod also writes a receipt (`wb chat ack`) that the page
   shows at once (Claude has it now, or will read it after its current step). Claude answers with
   `wb chat reply`, which the page shows. The page says whether a session is listening and whether
   Claude is working.
+- **Attachments, each uploaded once** (#623; the owner, 2026-11-20, from the phone: simple, and
+  never a file uploaded twice by a refresh). The attach button beside the box (or a paste, or a
+  drop) puts each file in the tray above the box as a chip: a thumbnail for an image, else its
+  kind (`PDF`), its name and size, and ✕. Each file gets its upload id on the page when it is
+  picked (`crypto.randomUUID()`, else the page's fallback) and is uploaded at once by that id
+  (`PUT /api/upload/<id>`), before Send. The server stores an id once (`chat.save_upload`): the
+  same id again stores nothing and answers with the first upload, so a retry, a reload or a second
+  tab can't make a second copy; the page also asks `GET /api/upload/<id>` before it sends a byte,
+  so a file the computer has is never sent again. The body is read to its `Content-Length` into a
+  `.part-<hex>` file in the upload's directory and becomes the file only whole (a body cut short,
+  or a server stopped mid-body, leaves nothing the message can name). A message names its files by
+  id (`/api/send` `files`); one naming an id with no upload is refused (400), and the server keeps
+  one file per content (sha256) in a message, so the same photo picked twice is one file. The
+  message row carries each file's `{id, name, size, type, path}`, and the mod gives Claude each
+  path. Limits (chat.json, read on each request): `upload_mb` per file (25), `upload_message_mb`
+  for a message's files together (50), `UPLOAD_FILES` 10 a message; the page refuses a file past
+  them on its chip with the reason, and the server refuses it again (413) before reading the body,
+  answering then reading on a moment (`_linger`) so the refusal reaches the page rather than a
+  reset. Saved under `chat/uploads/<id>/<name>`, the directory 0700 and the file 0600, through
+  directory fds opened `O_NOFOLLOW` and created `O_EXCL`, so nothing is written through a link: a
+  link where the id's directory or the file goes is refused (409). A name that is a path (`/`,
+  `\`, `.`, `..`) is refused; other names lose unprintable characters and leading dots and are cut
+  to `UPLOAD_NAME` 120 characters, keeping the extension. `wb gc` removes uploads older than its
+  `--days` whose message has a receipt, or that no message waiting for one names (a draft never
+  sent: `chat.drop_old_uploads`).
 - **The switch.** `chat/switch.json` `{on}`, written by `wb chat on|off` (the pane's row runs
   them); absent is off. Off, no session listens or sends the chat a dialog, the pane shows no link,
   the away state ends, and `wb chat off` removes `listener.json`, so the page says nobody listens.
@@ -4362,8 +4534,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   under *The mod*.
 
 **Files** (`$WB_HOME/chat/`):
-- `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude", text, cid?, shots?,
-  audio?, about?}`. A post whose `cid` the thread already holds returns that row instead of adding one
+- `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude", text (empty when a user's
+  message is files alone), cid?, shots?, audio?, about?, files?}`. `files` (the user's attachments) is
+  `[{id, name, size, type, path}]`, from each upload's meta. A post whose `cid` the thread already holds returns that row instead of adding one
   (`_by_cid`: the file read on from where the last post stopped, the newest `CIDS_KEPT` 5000 ids
   kept; only the last 500 rows were checked, and a tab offline longer than that sent its message
   twice, #199). A user's message so found that `open.json` lacks and that has no receipt is put
@@ -4431,8 +4604,11 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   A message of the user's unread past `MESSAGE_EXPIRE` (6 h, the one threshold: the snapshot's
   `expire`) carries `expired: true` in `chat.thread` and `wb chat pending`; `wb chat claim` refuses
   it, so no session springs it on Claude, and the page says "Not passed to Claude (over 6 h old)"
-  with *send again* (a new message, its own cid). The mod skipped it on a clock of its own and
+  with *send again* (a new message, its own cid, naming the same uploads: not a byte sent again). The mod skipped it on a clock of its own and
   the page said "Delivered" for good (#536).
+- `uploads/<id>/`: one attachment (0700): `<name>` (0600) and `.meta.json` `{id, name, size, type,
+  sha256, ts, path}`, written last, so it marks the upload whole; `.part-<hex>` while a body comes
+  (removed whatever happens). `uploads.lock`: one upload finishing at a time.
 - `prefs.json`: `{away: "ask"|"allow"}` (anything else reads as `ask`), from the gear menu
   (`/api/prefs`), read by `chat.ask` (`allow` answers a new permission at once, by `setting`).
 - `push.json`: `{subs: [{endpoint, ts, ua}]}`, the devices with notifications on (the last 20,
@@ -4445,7 +4621,11 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
 **Settings.** The token: `$WB_CHAT_TOKEN`, else `~/.config/workbench/chat-token` (created on first
 use with `O_EXCL`, mode 600, `token_urlsafe(32)`; kept at 600; one under 16 characters is refused
 with a message), read once when the server starts, so a new token needs a restart. The settings:
-`$WB_CHAT_CONFIG`, else `~/.config/workbench/chat.json`, with two keys. `bind`: addresses to listen
+`$WB_CHAT_CONFIG`, else `~/.config/workbench/chat.json`, with four keys. `upload_mb` and
+`upload_message_mb`: the attachment limits, per file (25) and per message (50), in MiB, read on
+each request (*Attachments* above) straight from the file (`chat.upload_limits`, not `settings`:
+every snapshot reads them, so a `bind` broken while the server runs must not fail each request).
+`bind`: addresses to listen
 on, which replace localhost (`localhost`, an address, `tailscale`: the tailnet IPv4 from
 `tailscale status --json`, the CLI found on PATH or, on macOS, in the app bundle
 (`TAILSCALE_APP`); skipped as `tailscale (not running)`, or `tailscale (CLI not found: …)` when
@@ -4507,7 +4687,7 @@ thread no longer):
 - `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`; `thread` reads the files' last `THREAD_BYTES` 4 MiB, `store.read_jsonl_tail`, as `asks` does: the whole history was parsed on every poll, 56 ms at 20,000 rows, the 2026-11-19 audit),
   asks (the last 20, each with `answer` (null while open), `answered`, `by`), prefs, push (`{key:
   the VAPID public key, test: the last test push's ts}`), listener, savings (`chat.week_saved`:
-  `savings.totals` over the last 7 days with its `score`, as `wb savings --json` without `period`), build, expire (`MESSAGE_EXPIRE` in seconds: past it a
+  `savings.totals` over the last 7 days with its `score`, as `wb savings --json` without `period`), uploads (`chat.upload_limits`: `{file, message, files}`, the byte limits and files a message), build, expire (`MESSAGE_EXPIRE` in seconds: past it a
   user's unread row carries `expired`, #536), now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
   when the page does: a page that loaded other files reloads itself.
 - `GET /api/shot?task=&n=&side=base|candidate`: one side of a `wb shot` pair as `image/png`,
@@ -4539,9 +4719,21 @@ thread no longer):
   (`Hub.dir`) and stops at `close()`: a test's hub, resolving `WB_HOME` again on each restart,
   made the next test's state directory in its setUp's way (#134).
 - `POST /api/send`: JSON only (415), at most 32 KB (413), a `Content-Length` that isn't a number
-  0 or more (400), `{text: 1–8000 characters, cid?: 1–64 characters, about?: {task, n} | {audio, n}}` (400;
-  an `about` naming no pair, 400 "no such screenshots"; no such take, an `n` that isn't a whole
-  number among them, 400 "no such take"), → 200 `{message, listener, state}`.
+  0 or more (400), `{text: 1–8000 characters, cid?: 1–64 characters, about?: {task, n} | {audio, n},
+  files?: up to 10 upload ids}` (400; an `about` naming no pair, 400 "no such screenshots"; no such
+  take, an `n` that isn't a whole number among them, 400 "no such take"; text may be empty with
+  files; an id with no upload, 400 "no upload <id>: …"; the files over `upload_message_mb`
+  together, 413), → 200 `{message, listener, state}`.
+- `PUT /api/upload/<id>` (`<id>` 8–64 of `[A-Za-z0-9-]`, else 400): the file's bytes as a raw body
+  (no multipart parser: `cgi` is gone in 3.13), its name URI-encoded in `X-File-Name`, its type in
+  `Content-Type` (kept when it looks like one, else `application/octet-stream`). No
+  `Content-Length`, 411; over `upload_mb`, 413 "too big: <size>, the limit is <limit>" before
+  reading; a name that is a path, 400; a link in the way, 409; a body cut short, nothing kept. →
+  200 `{upload: {id, name, size, type, path}, new}`; an id already stored → the same, `new: false`.
+- `GET /api/upload/<id>`: 200 `{upload}` when stored, else 404 (the page asks before it uploads).
+  `GET /api/file/<id>`: the file, never through a link; an image (`SHOWN`: png, jpeg, gif, webp,
+  avif) as itself, anything else as `application/octet-stream` with `Content-Disposition:
+  attachment`, so nothing uploaded renders as a page.
 - `POST /api/answer`: the same checks, `{id: 1–64 characters, answer: "allow"|"deny", note?: up
   to 2000 characters, answers?: up to 4}` (400; `expired` is the mod's alone; answers that don't
   fit the question, or answers on anything but a question, or a question allowed without them,
@@ -4634,6 +4826,20 @@ the first render is done; the backlog a first visit loads, a message that arrive
 is hidden (it counts as unread in the title) and reduced motion show whole, and each shown message
 is remembered (`wb-chat-seen`, the last 500) so a reload doesn't replay it. Light and dark follow `prefers-color-scheme` (tokens on
 `:root`, `color-scheme` meta, a theme colour per scheme); reduced motion turns animations off.
+Attachments (#623): the tray's chips (`drawTray`; wrapped, not scrolled sideways, so a refused
+chip says why on screen) are the draft's files, kept in localStorage (`wb-chat-files`: `[{id,
+name, size, type, mod, state: up|retry|done|refused, why?}]`) with their bytes in IndexedDB
+(`wb-chat`, store `files`) until the message carrying them lands, so a reload shows the same
+chips and never sends a stored file again. `pump` uploads the draft's files one at a time (XHR,
+for the progress bar; one with no progress for `STALL_MS` 30 s is dropped and tried again with
+the same id), a network failure backing off, a refusal shown on its chip. The same file picked
+twice (name, size, modified time) is one chip. Send takes the text and the chips not refused into
+the outbox item (`files`: `[{id, name, size, type}]`); `flush` makes sure each is uploaded before
+it posts `/api/send` with their ids, and a refused one marks the message not sent, naming the file
+(edit puts its files back in the tray). In the thread a message shows its images as thumbnails
+(a tap shows one whole, `view`; a tap or Escape closes it) and other files as name and size (a
+tap saves it), each fetched once with the token as a blob (`fileURL`), or from this page's own
+bytes; one `wb gc` removed says "no longer on the computer".
 Away from localhost over plain HTTP the page isn't a secure context, so the browser's UUID and
 clipboard are missing (the page falls back), and it can't install or notify: the gear says so,
 and that `tailscale serve --bg 1337` gives it an https address on the tailnet.
@@ -4699,7 +4905,9 @@ Only the user's two slash commands stop the delegation, never words in a message
 - **`/workbench-quit`** runs `wb stop --all --repo <the session's directory> --session <id>…`
   (each id the session's process has had): this session's
   running agents stop, every task keeps its worktree for later, and Claude is told not to finish,
-  restart or clean up anything unless asked.
+  restart or clean up anything unless asked. Each stopped task is `parked` (status): out of the
+  status line's count, rewake, the boundary, the jobs' gate and `wb status` without `--all` (so
+  out of a new conversation's open-tasks block), until something picks it up (#541).
 - **`/workbench-quit-and-hand-back-claude`** runs `wb takeover --all --user` with the same scope and
   starts a turn for Claude
   to leave workbench mode, finish each task taken over itself to its own standard (`wb diff`, the acceptance
@@ -4738,8 +4946,8 @@ const bound to one; imports from the module's own files also pass). The helpers 
 
 **State.** Eight `$.state` atoms survive a module reload within a session; each has a shape tag,
 and an atom read under an old tag is absent, so change the tag when its type changes:
-`tasks` (`tasks-6`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
-updatedAt, tokens, recent, repo, cwd, session, claude_pid, claude_start, backlog, allowed), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
+`tasks` (`tasks-7`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
+updatedAt, tokens, recent, repo, cwd, session, claude_pid, claude_start, backlog, parked, allowed), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
 `chat` (`chat-3`, {key, delegating, webAt, url, web}: workbench mode lives here, plus the session's
 listener key and the web chat's switch as last read), `pane` (`pane-1`, {tab, open, focus,
 minimized}: the pane's tab, the open settings row, the option under the ring, the strip), `sessions` (`sessions-1`, string[]: every Claude Code session id this process
@@ -4748,12 +4956,16 @@ none), `stats` (`stats-1`, {key, feed}: the Stats tab's `wb stats --json` and th
 it was read from), `top` (`top-1`, {snap, busy}: `wb top --json`'s newest tick and each GPU's busy
 % since the Stats tab opened). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
 this session's open set, the session's resolved `cwd` and `home`, `person`, follow, sawTurn, scoutAsked,
-toasts sent, dropped wakes, the closed tasks no longer read, the events pid, …). The task facts
+toasts sent, dropped wakes, the closed tasks no longer read, the events pid, what the conversation was told of the rules (`said`, #540), …). The task facts
 themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.json's
 `offered_at` and `chat/listener.json`.
 
 **session.start.** Sets `mem.root` (`WB_HOME` or `~/.local/state/workbench`), `mem.wb` (`WB_BIN`
-or `wb`), `mem.skill` (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then `skills/workbench/SKILL.md`),
+or `wb`), `mem.skill` (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then `skills/workbench/SKILL.md`);
+`WB_HOME`, `CLAUDE_CONFIG_DIR` and `WB_SAVINGS` (`mem.savingsFile`) read as wb reads them (`absolutePath`, `store.absolute_env`'s
+rule: `~` expanded, relative to the session's directory, where the mod's `wb` calls run, `.`,
+`..` and extra slashes dropped: settings.json's `env` passes them literally, and a `~` left the
+pane empty and a trailing slash the Claude-coding guard off, #454),
 the chat key (`<start ms>-<6 base36>`, kept across reloads), `mem.cwd` and `mem.home` (the
 session's directory and the home directory, resolved: which tasks without a `session` are this
 session's, `mine`), `mem.ids` (the `sessions` atom plus `$.session.id()`), registers its `workbench-*` commands (*Commands*
@@ -4808,14 +5020,18 @@ row, past the task's `acked`; a row is still true when it's a check-in and the t
 queued/running/testing, a question while the phase is `asking` and (with an id) its
 `ask/<id>.json` has no `<id>.answer`, or the phase equals the kind. A stale one is acked and dropped. A true one is
 toasted once (`workbench: <name> <headline>`); a task that isn't this session's (`mine`: its
-`session` is one of the process's ids, else by directory as above) gets nothing more; if Claude is busy it waits and leaves the file unseen; else the mod writes `acked
+`session` is one of the process's ids, else by directory as above) gets nothing more; if Claude is busy a question is sent into the turn (`intoTurn`: `acked` first, put back if the engine
+refuses, and the row's key kept in `mem.heldAsks`), and anything else waits and leaves the file unseen; a held question gone stale whose
+`<id>.answer` opens with ask_mcp's NO_ANSWER, its task still open, gets the MISSED_NOTE wake; else the mod writes `acked
 = row.ts` and submits (`wake`) `[workbench] Task \`<n>\` <headline>.\n\n<row.text>\n\n<NEXT[kind]>`
+(and `\n\n<AWAY_NOTE>` while the user is away on the web chat, as every wake and `intoTurn` text, #540)
 (HEADLINE and NEXT are the per-kind texts at the top of register.tsx; NEXT names the commands to
 run: a question's `wb answer <n> --id <id>`, and a PERMISSION request is answered by the `wb
 allow` it names). A submit the engine drops (`{drop}`) puts `acked` back if it still holds the
 value written, records `mem.dropped`, and toasts once. With the `wake` setting off it is only
 toasted: `acked` isn't written, so `wb wait` still gets it. `deliver` remembers each task's
-newest notice ts in notify.jsonl's tail, however old (`mem.noticed`). `rewake`: when idle, with
+newest notice ts in notify.jsonl's tail, however old (`mem.noticed`), a batch's for each task it
+names (`tasks`: acknowledged with it, they have no notice of their own, and rewake woke for them). `rewake`: when idle, with
 wake on, a task of this session's waiting on
 Claude (review/asking/stuck/failed) whose status changed between 60 s (`REWAKE_MS`) and 12 h
 (`REWAKE_MAX_MS`) ago, whose news Claude hasn't had and whose wake wasn't dropped in the last
@@ -4832,19 +5048,28 @@ sessions a task belongs to, the first to deliver a notice wins (the `acked` writ
 (`skill.prompt`, which also records its path and opens the pane through `showPane`; run again
 while the mode is on and with no task, which `firstTask` reads from the expanded skill's
 "**First task:** \`…\`" line, it returns AGAIN_NOTE in place of the skill: the pane is back,
-reply in one line), or a Bash tool call that runs `wb start|next|feedback|steer|answer`
+reply in one line), or a Bash tool call that runs `wb start|next|feedback|steer|answer|resume`
 (`delegates`, checked before it runs; a resumed session or a /workbench the mod missed; not
 `accept` or `takeover`, which a done note after a quit asks for). Only a command counts, not
-text (#409, 2026-11-20: a Python patch's string holding "(wb next)" turned a session's mode on):
-heredoc bodies, quoted strings and comments are dropped, the rest split into simple commands
-(`;`, `&&`, `||`, `|`, `&`, newlines, `(`, `$(`, `{`, backticks), and the command word, past
-`VAR=x`, `env`, `time`, `nohup`, `exec` and `command`, must be `wb` or a path ending in `/wb`.
+text (#409, 2026-11-20: a Python patch's string holding "(wb next)" turned a session's mode on),
+and the line is read as bash reads it (`simpleCommands`, #560: the text matcher before it missed
+a quoted path, `if`/`while`/`!`, a `$(…)` in double quotes, `timeout`/`nice`/`stdbuf`, anything
+after a `<<<`, and `wb resume`, and split `echo foo \; wb start` in two): a backslash or quotes
+are undone within a word (`"…/bin/wb" start` is `wb`; `\;` is a `;` in a word), comments and
+heredoc bodies are dropped (an unquoted heredoc's `$(…)` and backticks still run, as do those in
+double quotes), a `<<<` here-string's word is a word; the simple commands split at `;`, `&`, `|`,
+newlines, `(`, `)`, `$(` and backticks; the command word, past `VAR=x`, the reserved words (`if`,
+`then`, `elif`, `else`, `while`, `until`, `do`, `!`, `{`) and the wrappers with their options
+(`PREFIXES`: `env`, `time`, `nohup`, `exec`, `command`, `timeout` and its duration, `nice`,
+`ionice`, `stdbuf`), must be `wb` or a path ending in `/wb`. It is syntactic: `true || wb
+steer` counts.
 Off:
 either quit command, which also closes the pane. While on: the `workbench-mode` and `user-notes`
 context blocks (and `claude-coding` outside "Let Claude decide", with a task open too), the idle status line, pane auto-open, web chat listening, the apprentice's
 "Workbench mode is on.", the boundary compaction. `mem.delegated` remembers the mode was on in
 this load, so a hand-back's compaction still keeps the state. No `$.ui.invalidate`: rewriting
-the first message would cost the conversation's prompt cache.
+the first message would cost the conversation's prompt cache, and an unrouted block isn't added
+after the first message anyway: *The rules said later* below.
 
 **Commands.** Every one is `/workbench` (the skill) or starts with `workbench-`, so typing
 `/workbench` lists them all (2026-11-17: they were `/delegate` and `/delegate-*`, no alias; the
@@ -4872,11 +5097,31 @@ conversation's first message and after a compaction or `/clear`, not every turn)
 every plan is a handoff plan, the SKILL.md path); `user-notes` while delegating and notes.md has
 notes; `web-chat` for six hours after a web message (longer while a backlog task of this
 session's is open: `awayNow`), until a prompt is typed in the terminal
-(reply with `wb chat reply`, `wb chat log` shows the thread); `workbench-wake` with the `wake`
+(AWAY_NOTE: reply with `wb chat reply`, `wb chat log` shows the thread; each wake says it too
+while away, below); `workbench-wake` with the `wake`
 setting off, while delegating or with a task of this session's open (WAKE_OFF_NOTE: no wake will
 come; tell the user, pick it up when asked); `workbench` whenever `wb status` with `scope()`
 exits 0 listing open tasks (the status, plus `wb report`/`wb watch`; a failing one toasts once
 instead). None in a session with no person at it.
+
+**The rules said later** (#540). Claude Code computes those blocks once, and one it doesn't route
+can't be added afterwards, so a session that entered workbench mode after its first message (the
+usual way in) got no notes and no wake-off note, and a Claude coding change in the pane reached
+only the file gates. `mem.said` records what the conversation was told of the three rules that
+depend on the state (`Said`: the notes, the wake-off note, the coding mode; set by
+`prompt.context`, null before one in this load); `unsaid` returns what it lacks now and counts it
+said: the notes once (Claude edits them itself), the wake-off note once, the coding rule
+whenever the mode differs (CODING_DECIDE when it went back to "Let Claude decide": the earlier
+rule no longer applies). `/workbench` appends them to the skill's text (or to AGAIN_NOTE) and sets
+`mem.skillTurn`, so a `prompt.context` computed after it in the same turn (/workbench as the
+first message) leaves those blocks out; a compaction or the turn's end clears it. Every poll
+runs `sayRules`: what is still unsaid (the mode turned on by a Bash `wb start`, the pane's
+coding row, `wb coding` anywhere) goes in as a user-role row the model reads
+(`$.session.append`, which starts no turn), or, refused, as a queued `[workbench]` turn. Being
+away comes and goes with the web chat, so it isn't one of them: `wake` and `intoTurn` end
+their text with AWAY_NOTE while `away()` holds (`awayToo`), and a wake after the user typed in
+the terminal again doesn't (the web-chat block alone left a user who went to the web chat after
+the first message unseen: a task's news was written for the terminal they had left).
 
 **Compaction.** `session.compact` (main conversation only, while a task of this session's is
 open, in a session delegating or that delegated in this load) appends
@@ -4887,7 +5132,7 @@ Claude idle, none of them waiting for Claude) it compacts once usage reaches `WB
 auto-compact threshold (or the window when auto-compact is off).
 
 **Status line and pane.** Status: `⚒ wb · <name> <phase> r<round>` for queued/running/testing,
-`<name> asks`, `<N> awaiting review` (review + stuck + failed), joined by ` · `; `⚒ wb ·
+`<name> asks`, `<N> awaiting review` (review + stuck + failed, not a parked one: `waitsOnClaude`, #541), joined by ` · `; `⚒ wb ·
 workbench mode` with nothing listed. Pane: one row per task (a mark per phase: spinner running, ◌
 queued, ◐ testing, ? asking, ◆ review, ▲ stuck, ✗ failed, ✓ accepted, – discarded; name, phase,
 round, label or model, tests, age since creation, or "ago" once closed), its recent lines; then
@@ -4913,7 +5158,8 @@ its `ts` within 15 s) makes this one stand by; otherwise it writes `chat/listene
 `{session, cwd, pid, start, busy}` when that changes, and
 delivers each user message without a receipt, once `wb chat claim <id> --by <key>` gives it the
 message (refused: another session's, looked at again a minute later; two sessions starting
-together both took the chat and both submitted it, #84): idle → `prompt.submit('[web chat] <words>', asUser)`,
+together both took the chat and both submitted it, #84): idle → `prompt.submit('[web chat] <words>', asUser)`
+(each attached file a line after the words, `attachedLines`: `[attached: <path> (<size>, <type>)]`),
 receipt `how=now`; busy → `session.send` into the running turn with WEB_NOTE, else a queued
 prompt (`how=queued`); `wb chat ack <id> --by <key> --how …` once it entered (a dropped prompt
 gets no receipt and is tried again a minute later), `webAt = now`, a toast. Dialogs
@@ -4952,7 +5198,9 @@ listening at once.
 
 **The weekly model check** (`scoutIfDue`): once `wb events` has said hello (wb runs), Claude idle
 a minute after a main-loop turn (`SCOUT_QUIET_MS`: raised the moment a turn ended, it buried
-Claude's question to the user), no task open, once per
+Claude's question to the user), quiet (`quietForJobs`: no task anywhere active, and none of this
+session's waiting on Claude (`waitsOnClaude`: not a parked one) within `REWAKE_MAX_MS`; any open task at any age once gated it, so
+one stuck task left by a quit stopped the check for good, #541), once per
 load: when scout.json's `done_at` is 7+ days old and `offered_at` 1+ day old, it writes
 `offered_at` and submits SCOUT_NOTE (`wb scout`, research, recommend keep/add/retire, change
 nothing without a yes; the audio and image engines too, each model's licence checked against
@@ -5027,7 +5275,7 @@ Every waiter and its bounded wake (a timeout to re-check what the kernel can't s
 | `wb log -f` | the task directory | 30 s |
 | `wb watch` | the task directory | 1.5 s on a terminal while the task is live, 30 s otherwise; the session exported again only on a change or every 30 s while live (#555) |
 | the runner's steer bell | the task directory (`steer.jsonl`) and `ask/` | 5 s, while OpenCode runs |
-| `ask_reviewer` | `ask/` | 60 s, until the ask timeout |
+| `ask_reviewer` | `ask/` | 30 s (`STEP_SECS`), until the ask timeout |
 | the chat `Hub` | `chat/` and the listener's pidfd | 60 s |
 | `wb stop` / `takeover` | `wait_exit(pid, 15)` | |
 | `wb top` | `select` on its nvidia-smi stream and, on a terminal, the keys | each tick (`--every`), when it also checks its parent |
@@ -5075,7 +5323,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb next <task> --spec <file> -m "…"` | `--include` (approve bulk additions and large binaries), `--no-sign` (this commit unsigned), `--test` (replaces the acceptance command, and grants it to the agent's shell like `wb start --test`: `context.test_allowances`, #514), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`; the agent's proposals settled around the commit and put back if it fails, *Claude's files*); a step with no changes (once the proposals are settled) makes no commit and advances all the same, "step N of <task> had no changes" (it died on "nothing to commit" and the task stayed on the step, #507, Claude's audit of 1.90), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:", or "(no changes to commit)" for an empty step, + spec + PROTOCOL), records the spec gaps, says what `runner.fresh_reason` makes of the status to come, then advances the step (round, steps, step_round, reviews reset, phase queued) in one status write right before it spawns: written before that slow export, an interrupt left step 2 under review with no runner, a retry dying on "nothing to commit" and accept closing the task on step 1 (#191). A retry after one interrupted past its commit (the worktree's tip carries this step's trailer and nothing changed since: `cli._step_landed`) takes that commit and measures the step from `HEAD~1`, so the task advances once; it died on "nothing to commit" (#85). The spec is read again, so give it again (`-` reads stdin). Says whether the next step gets a fresh session and why (`runner.fresh_reason`), each undelivered note it dropped, and names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically, never through a link: `ask_mcp.write_answer`); the blocked `ask_reviewer` returns it, and a question's id goes in status `answered` (the Stats feed's). An empty answer is refused: the question stays open; so is one over `ask_mcp.FILE_MAX` (256 KiB, `ask_mcp.too_long`, also checked in `write_answer`), which the server never reads: it said "answered" and the agent waited out its ask timeout for `NO_ANSWER` (#605); the refusal says to put the material in a file in the task's worktree and answer with its path. A closed question (answered, or dropped by the runner) is refused. |
 | `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` (refused when the answer it makes, `--text` with the patterns and directories named, is past `FILE_MAX`, before any grant: #605) | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse or has the wrong shape: `context.commands_conf`); answers the oldest open permission request (else the pending question) with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule (while the tests run or the task waits for the GPU it says the agent gets it when they end, or when its round starts). `--path` goes through `_lane_dir` (refuses a path through a link, naming its target, and what `context.lane_refusal` refuses: `/`, home, a place inside credentials, workbench's state or config, or the skill library, and a place in the task's repo or its git directory; creates the directory; `*` turns the lane off for the task). |
-| `wb progress [on\|off]` | `--after MIN` (with `on`, or alone to move the threshold of checks already on; refused with `off` or while off, #602; default: the task's typical length on its model) | The user's opt-in to progress checks; with no argument, what it is (*Progress checks*). |
+| `wb progress [on\|off]` | `--after MIN` (with `on`, or alone to move the threshold of checks already on; refused with `off` or while off, #602; default: the task's typical length on its model; kept through a bare `on`/`off`, `0` clears it) | The user's opt-in to progress checks; with no argument, what it is (*Progress checks*). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (a smaller step: the note opens with `STEP_NOTE`; after a progress check, recorded as a `smaller` intervention, else a `hint`) | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
 | `wb experiment [<name> [on\|off]]` | | The experiments (*Experiments*): with no argument, each one's purpose and state (`cli.experiment_lines`: `probe: on and working (probe-code 0.6.0)`, `probe: on, but not set up: no probe with `+"`symbols`"+` is on PATH, so it changes nothing yet (probe, a code-search tool: github.com/probelabs/probe; its release binary from …)`, `probe: off (wb experiment probe on)`); with a name, its state; with `on`/`off`, sets it in `experiments.json` for the tasks started from then (`; tasks already started keep theirs`). An unknown name is refused. |
@@ -5083,8 +5331,8 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat` (post the pair to the web chat), `--setup` (run the setup in each checkout) | At review, for a visual task: the project's capture command run on the base and on the candidate, each in a scratch checkout under the task's lane; where each PNG is, or why a side has none (*Screenshots of the base and the candidate*). |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--user` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. Outside "Let Claude decide" it needs the user's recorded yes for the task, else exit 3; `--user` (the mod's hand-back command) is the user's own ask, and records one (*Claude coding*). `--all`: every task that isn't closed; a task refused (the coding gate, exit 3) is said and the rest are still taken over, then it exits with the refusal's code (#601: the first refusal left every other runner going). `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR, inside it or holds it, or its `cwd` is DIR or inside it, by whole components of real paths (in lower case where the file system ignores case), never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
 | `wb verify <task>` | `--test CMD` (the task's `--test`), `--files PATH…`, `--expect TEXT` (the failure the base must print to be proven), `--timeout N` (300), `--setup` (run the setup in each checkout, not copy what it made) | At review: a regression test on the base (with the candidate's test files) and on the candidate, each in a scratch checkout under the task's lane; the verdict, each run's exit and assertion, and where both outputs are (*Verifying a fix against the base*). Refuses while the agent runs. SIGTERM or SIGHUP ends it as an error would (`cli._ends_cleanly`, both commands): the tests' group killed and swept, the scratch removed; Claude's Bash killing it at 2 minutes left both behind (#372, the audit of 1.6), so the skill runs a long one in the background. `wb image`, `wb audio`, `wb bench add` and `wb bench self` end the same way (#589): an engine, a listener and `claude -p` run in a session of their own whose whole group is killed when they finish, time out or wb is ended (`media.run_group`: `subprocess.run` killed only a wrapper script, and its worker kept the GPU after the lease was gone), the GPU lease, an audio server's unload and the temp directories run their cleanups, and a stopped `bench self` writes its runs.jsonl row (`error`, "stopped before it finished (a signal)"). |
-| `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID` | A live task only. Marks status `stopping`, SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), sweeps what the agent left (`runner.sweep`), phase `stuck`, "stopped by the reviewer", and acknowledges the task; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user"; without `--repo`/`--session`, the bench's driver first (`bench.stop_driver`), so it starts no replay. `--session ID`, `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other sessions'): …`. |
-| `wb resume <task>` | | Reaps a dead runner first. Phase stuck/failed (a task whose runner died is failed), no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round; Claude's notes the last runner never delivered follow, as a `NOTE_HEAD` note. A note names the GPU's holders when it will wait for them. Acks the task and gathers lessons. |
+| `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID` | A live task only. Marks status `stopping`, SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), sweeps what the agent left (`runner.sweep`), phase `stuck`, "stopped by the reviewer", and acknowledges the task; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user", status `parked` (the time: `store.parked`, out of `wb status` and the mod's counts until `spawn_runner` clears it, #541); without `--repo`/`--session`, the bench's driver first (`bench.stop_driver`), so it starts no replay. `--session ID`, `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other sessions'): …`. |
+| `wb resume <task>` | `--all` (every task in scope interrupted from outside, status `last` one of `cli.INTERRUPTED`: a restart, a runner that died, a signal; not one a guard stopped or that crashed), with `--repo DIR`, `--session ID…` (as `wb stop --all`'s scope, `_scope`) or `--backlog NAME` | Reaps a dead runner first. Phase stuck/failed (a task whose runner died is failed), no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round; Claude's notes the last runner never delivered follow, as a `NOTE_HEAD` note. A task that never ran a round (round 1, no `round_started_at`, no session: it was queued) starts round 1 again on the prompt `wb start` wrote, its notes delivered with it (`_early_notes`); one interrupted before its checkout finished too, the runner making the checkout again (`_rechecks_out`, #529). `--all` resumes in the order the tasks were started (`store.all_tasks`), each under its command lock (#544). A note names the GPU's holders when it will wait for them. Acks the task and gathers lessons. |
 | `wb accept <task> -m "…"` | `--include` (approve bulk additions and large binaries), `--no-sign` (this commit unsigned: a key that needs unlocking), `--merge`, `--merge-as merge|ff|squash` (how `--merge` lands, implying it: a merge commit, the default; fast-forward only, refused when the branch has moved; or one squashed commit with the tip's message, for a repo kept to linear history, #352; commands.json `repos` `merge` sets a repo's default for `--merge`, which it doesn't imply), `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` (the agent's `<name>.proposed` CLAUDE.md/AGENTS.md over the file; without it they are dropped: *Claude's files*) | Reaps a dead runner first; a repo that moved stops it before anything is stopped or changed (`wb relocate` first, #498). Phase review; refuses a closed task, unless an earlier accept or discard closed it without writing its results row (status `unrecorded`): then it writes that row, once, from what the earlier run measured, and says so (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner is stopped ("no changes to accept yet"); a live task whose commit then fails is left `stuck` ("accept failed: …", for wb accept again, resume, feedback or discard), not live with no runner. Records the step, commits (a worktree with no new changes accepts the branch's commits past the base: earlier steps, or Claude's own after a takeover; a retry after an accept died past its commit takes that commit; `delegate/<task>` is then made that commit, `gitops.put_on_branch`, refused with the worktree kept when the branch holds commits it lacks, #417) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree (a failure is a warning: `remove_worktree`) and the agent's runtime directory (`drop_runtime_dir`), records the branch's tip (status `tip`), `--merge`s (`merge --no-ff --commit --no-squash --no-log -m <git's message for delegate/<task>>`, no hooks in any mode, #499, or with `--merge-as` `merge --ff-only --no-squash` (#430) or `merge --squash --ff` (#429) then `commit -C <tip>` (a squash conflict backed out with `reset --merge`; the squashed branch isn't an ancestor, so it is deleted with `branch -D` once the merge is recorded, and a retry interrupted between the squash and that record, which can't find it by ancestry, finds it from status `closing`'s `merge_from`, the target's head saved before the merge: a commit on its first-parent line whose parent is that head and whose message is the tip's, `gitops.squashed`; it squashed again and recorded the landed squash as refused, #432), into `base_branch`, which the main checkout must have out, else any branch, holding the base either way (refused naming the commits the merge would bring back: #418); never a detached HEAD; no changes to tracked files (a submodule moved or edited in its own checkout only when the merge changes its gitlink, #505), no merge under way, no untracked or ignored file where the merge, done first in memory, would write one (#189, #241); a conflict, or a merge git left unfinished, is backed out (#190), and so is a signature with no answer in `COMMIT_SECS` or a SIGTERM mid-merge (#420); the merge commit is signed as the task's was, unsigned after `--no-sign` (#420); a failure is reported and the accept stands, exit 5, `NOT_MERGED`: it exited 0, and a script went on as if main had the change, #247; a merged branch is then deleted, `drop_merged_branch`). A retry after an interruption resumes from status `closing` (#246): a merge already made is found by the commit's ancestry in the target branch (`gitops.contains`), not by the branch's name, a squash by `merge_from` (#432), writes the results row, removes the task's rules (`_closed`, and `gc` once a day), prints how far CLAUDE.md (or `.claude/CLAUDE.md`) is behind (a failure there never fails the accept) and what the task cost Claude (`claude:`, when known). Gathers lessons. |
 | `wb relocate <task> --repo <dir>` | | Where the task's repository is now: moved or renamed, or the checkout it started from removed. Refuses a repo without the task's base commit, or whose git dir keeps no worktree linked to the task's; refuses a `.git` naming another git dir; repairs the worktree's link (`git worktree repair`, else written as it would be), records `rules/<task>/gitdir.json` afresh, rewrites task.json `repo`, `git_common` and a `cwd` inside the old place (`gitops.relocate`, #498). |
 | `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch`, `--drop-steps` (delete the branch even with committed steps) | Stops the runner, records the step, removes the worktree (never fails on it: a warning), the agent's runtime directory (`drop_runtime_dir`), its rules (`_closed`, which also runs `gc` when the last was over `GC_EVERY` a day ago, as accept does) and the branch, its tip recorded first (status `tip`) and printed (`deleted (was <sha>)`), in the repo `gitops.repo_of` finds (a removed linked worktree's main one); not with `--keep-branch`, a repo that moved (said: "wasn't deleted"), or a branch with commits past the base (the steps `wb next` committed: kept, with how to merge or delete it, unless `--drop-steps`; #494); for a task whose checkout was cut short (#529), only the branch its runner made (status `branch_made`), while it still points there (#416), writes the results row, prints what the task cost Claude (`claude:`, when known). Gathers lessons. Refuses a closed task, unless its row is unwritten (as for accept). |
@@ -5093,7 +5341,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb wait [<task>]` | `--timeout S` (0: none) | Reaps dead runners, then blocks (inotify) until a notice past a task's `acked` arrives, prints `[<kind>] <task>\n<text>` and acks it (skipping notices no longer true, rows that aren't whole and removed tasks'). Named: a closed task exits 2; a task already waiting whose notice was taken elsewhere prints it again "(already delivered once)"; one stopped or taken over by hand prints `[<phase>] <task> (no notice: <last>)`. Bare, with no open task: exits 2. |
-| `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID` | Reaps dead runners. One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died within `REAP_GRACE`. Named: also `worktree: <path>` while it exists. `--session ID`, `--repo DIR` (the mod's context block): only that session's tasks (as for `wb stop`), then `open elsewhere (other sessions'): …`, by name. |
+| `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID` | Reaps dead runners. One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died within `REAP_GRACE`. Named: also `worktree: <path>` while it exists. A task `wb stop --all` parked (`store.parked`: still stuck, `parked` set) shows as phase `parked`, and without `--all` or a name is left out of the table for one line, `parked by wb stop --all (/workbench-quit): …; leave them unless the user asks`, after it ("no open tasks" first when it was all there was, so the mod's context block stays out; #541). `--session ID`, `--repo DIR` (the mod's context block): only that session's tasks (as for `wb stop`), then `open elsewhere (other sessions'): …`, by name. |
 | `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden: one pass of JSON lines, the mod's pane), `--last N` (hidden, with `--json`: the newest N transcript lines) | The live transcript (`transcript.follow`); default task: the most recently updated open one, else the most recently updated task, never a `wb bench` replay (#555). |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, questions, answers, stops, auto-fixes, rounds, tests, errors. `-f` follows until the task needs Claude or is closed, looking at the phase before each wait (on a finished task it returns at once: it waited 30 s, #90) and printing the events that came with it; each pass reaps a task whose runner died (`cli.reap`), so the follow ends on its error instead of following it for ever, and each line is flushed, so a pipe or a file gets it as it comes (#545). |
 | `wb report <task>` | `--round N` | The round's summary.md. |
@@ -5110,10 +5358,9 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL. `--remove` undoes it; not while OpenCode's default model is one of them, nor for a provider wb didn't add or that now points elsewhere. |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). A flag or size for another action is refused, not ignored (#602): `--url`, `--start`, `--stop`, `--label`, `--context` and `--pull` go with `add`, `--delete` with `retire`, sizes with `sizes`. |
-| `wb scout` | `--done [--notes "…"]` (`--notes` without `--done` refused, #602), `--due`, `--watch "…"`, `--unwatch N` (1-based; 0 refused) | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it); the image and audio engines (`audio.coverage`: what
-the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
+| `wb scout` | `--done [--notes "…"]` (`--notes` without `--done` refused, #602), `--due`, `--watch "…"`, `--unwatch N` (1-based; 0 refused) | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it, compared by `models.server_key`, so `::1`, `localhost` or this host's name is one server, #588); the image and audio engines (`audio.coverage`: what the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill with its history, the scan alone. |
-| `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…` | Check, scan, copy, commit. |
+| `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…`, `--reviewed RULE…` (a scan rule whose critical findings Claude read and judged safe: they pass, recorded in the commit; never one in `scan.UNREVIEWABLE`) | Check, scan, copy, commit. |
 | `wb skill patch <n> --old … --new … -m "…"` | `--old-file`, `--new-file`, `--lesson` | An exact, unique replacement, then as add. |
 | `wb skill import <url\|owner/repo\|path>` | `--path DIR`, `--as NAME` | Fetch into `imports/`, show license, hash, scan; never adds. |
 | `wb skill retire <n> -m "…"` / `restore <n>` | | Move to and from `retired/`. |
@@ -5122,12 +5369,12 @@ the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 d
 | `wb notes` / `add "…"` / `drop N…` | | The user's standing delegation preferences (`notes.md`, `- ` lines, at most 20 of 300 characters). |
 | `wb bench add <task>` | `--step N` (the last), `--hidden PATH…` (the test files the step changed), `--check CMD`, `--name CASE` (the task's; `<task>-sN` for a step of several) | Makes a case of one step of an accepted task (*Bench*): the base as a bundle, the spec, the acceptance command, the hidden checks, the grants. Refused: not accepted or a trial, the repo or commit gone, no acceptance command, no hidden checks, ones that pass on the base already, submodules or Git LFS files the repo can't supply (named), or ones its own commit fails in the agent's lane (no replay could pass them), or a shallow clone (#478). |
 | `wb bench list` / `wb bench report` / `wb bench stop` | `report`: `--run ID`, `--label TEXT` | The cases; pass rates, rounds, auto-fixes, minutes and local tokens per label and model, then each case against the original's model and review rounds (with the running run's progress), the preempted count, and each replay that didn't start with why and its `wb.log`, or that the machine broke off (`broke off: <infra>: …`, its task's `runner.log`, #508) (the last 10; a run of only those said "no replays yet", #89); stop the driver, which closes its replay. |
-| `wb bench self <case>` | `--yes` (required: it spends Claude tokens), `--turns N` (40) | Claude Code writes the case (`claude -p`, edits and the acceptance command only), graded by its hidden checks in the original task's lane; one runs.jsonl row (`arm: claude`) and its line: PASS or fail, the weighted tokens, the handoff's cost and the ratio (*Bench*). |
+| `wb bench self <case>` | `--yes` (required: it spends Claude tokens), `--turns N` (40) | Claude Code writes the case (`claude -p`, edits and the acceptance command only), graded by its hidden checks in the original task's lane; one runs.jsonl row (`arm: claude`) and its line: PASS or fail, the weighted tokens, the handoff's cost of the case's step and the ratio, or for a row with only a whole multi-step task's cost, that cost marked not comparable and no ratio (*Bench*). |
 | `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. First closes what a killed driver left (`bench.sweep`), and refuses while a replay's runner still lives. Skips what an earlier run with the same label already passed or failed (an `error` runs again); with nothing left, says so and starts no driver. |
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run), archived tasks included (#270): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`; without a name, `[{backlog, tasks, open}]` (it printed the text, #602). |
 | `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X\|off` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive and finite, else exit 1) writes savings.json first; `--price off` removes `kwh_price`, its other keys kept (`savings.set_price(None)`, #609). The cost reads `GPU 600 Wh, cost 0.15`: no currency sign. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price}` (`price`: the kWh price set, or null; the pane's Settings row shows it). `--card FILE.svg`: the badge as an image (*The badge*). |
 | `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (the feed, *The Stats feed*) | `wb stats set` changes the Stats tab's settings (stats.json, *Stats recording*) and prints them. `wb stats` starts with the feed's headline (`stats.summary` over `feed(only=stats.SUMMARY)`: the week and all time, the streak, what the agents absorbed, their questions, the guards that fired), then the results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
-| `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`), the scratch directories (`store.SCRATCH_PREFIXES`: `.verify-`, `.base-`, `.check-`, `.submodule-`, `wb-index-`, `wb-merge-`, `.wb-image-`, `.wb-audio-`, each named `<prefix><maker's pid>.<start tag>-` by `store.scratch`, the tag `models.start_tag`, a crc32 of its start; and `wb bench add`'s half-made case `.<case>.<pid>.tmp`) in the state directory, `bench/`, `bench/cases/` and each default output directory of `wb image` and `wb audio` (`_scratch_homes`: only the top level was swept, and a bench add or a generation killed at Claude's Bash limit left its clone or temp directory for good, #589) `SCRATCH_AGE` (an hour) old whose maker is gone (`bench/`: a killed `wb bench add`'s clones, #439) (`_drop_scratches`, `_maker_alive`: a pid live again under a process with another start is gone, #532; an untagged name goes by the pid), half-made starts (`_dead_start`, `_drop_start`: a task directory with no task.json whose `starting.json` pid is gone or now another process's (its `start`, #532), or with none past `RULES_GRACE`; its worktree (unlocked first: killed mid-checkout, git leaves it locked "initializing", which remove and prune skip), registration and rules go too, and the branch only when `starting.json` says this start made it and only while it still points at `branch_at` (`delete_branch(at=)`: one `update-ref -d` compare-and-delete; an earlier task's unmerged `delegate/<task>` was deleted after a start killed before its worktree, #416); killed commands left full clones that `_disk_room` counted, and a killed start's name was refused for good: #376, the audit of 1.6) and the delegate branches of tasks accepted with `--merge` before accept deleted them itself (`_merged_branches`: tip recorded first, `branch -d`). Prints the counts; writes `gc.json`. Then (not in `cli.gc`, which a discard runs) `bench.sweep`: the bench replays a driver killed without warning left (*Bench*, #511), with a line naming them. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
+| `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`), the scratch directories (`store.SCRATCH_PREFIXES`: `.verify-`, `.base-`, `.check-`, `.submodule-`, `wb-index-`, `wb-merge-`, `.wb-image-`, `.wb-audio-`, each named `<prefix><maker's pid>.<start tag>-` by `store.scratch`, the tag `models.start_tag`, a crc32 of its start; and `wb bench add`'s half-made case `.<case>.<pid>.tmp`) in the state directory, `bench/`, `bench/cases/` and each default output directory of `wb image` and `wb audio` (`_scratch_homes`: only the top level was swept, and a bench add or a generation killed at Claude's Bash limit left its clone or temp directory for good, #589) `SCRATCH_AGE` (an hour) old whose maker is gone (`bench/`: a killed `wb bench add`'s clones, #439) (`_drop_scratches`, `_maker_alive`: a pid live again under a process with another start is gone, #532; an untagged name goes by the pid), half-made starts (`_dead_start`, `_drop_start`: a task directory with no task.json whose `starting.json` pid is gone or now another process's (its `start`, #532), or with none past `RULES_GRACE`; its worktree (unlocked first: killed mid-checkout, git leaves it locked "initializing", which remove and prune skip), registration and rules go too, and the branch only when `starting.json` says this start made it and only while it still points at `branch_at` (`delete_branch(at=)`: one `update-ref -d` compare-and-delete; an earlier task's unmerged `delegate/<task>` was deleted after a start killed before its worktree, #416); killed commands left full clones that `_disk_room` counted, and a killed start's name was refused for good: #376, the audit of 1.6), the web chat's uploads older than N days whose message has its receipt, or that no unread message names (`chat.drop_old_uploads`, #623), and the delegate branches of tasks accepted with `--merge` before accept deleted them itself (`_merged_branches`: tip recorded first, `branch -d`). Prints the counts; writes `gc.json`. Then (not in `cli.gc`, which a discard runs) `bench.sweep`: the bench replays a driver killed without warning left (*Bench*, #511), with a line naming them. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
 
 ### Other
 | Command | Flags | What it does |
@@ -5139,7 +5386,7 @@ the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 d
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it; "not a repo" is told apart in any language, `gitops.NotARepo`), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name) with the line for the user's `$SHELL` (`cli.path_advice`: zsh's `~/.zshrc`, bash's `~/.bashrc`, on macOS `~/.bash_profile`, fish's `fish_add_path`, else `~/.profile`) and to start Claude Code again from a new terminal (the desktop app or an IDE too); "add it" was all it said (#274, the audit of 1.2), and `wb doctor`'s "wb isn't on PATH" gives the same line when that link is there; exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. Ends with a `first run:` checklist (`cli.first_run`, #111), one line each, `ok` or `--` with the fix: OpenCode 2.x (else where to get it), a model server answering (a configured provider, this machine's Ollama, or a server on a default port; else: start yours, or run /workbench and Claude lays out the ones that fit the machine, never steering to one; `wb model add --url`), a local model registered (else: run /workbench, and Claude picks one for the machine), Landlock. It names no model, and changes no exit code. |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`, refused without it, which pulled at once, #602: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Refuses, before anything changes, when `claude` isn't on PATH; a step that can't run or runs past 300 s fails with a line (after a clone's pull: what is left to run), and update.json is written as soon as the pull lands. Prints `updated <kind> a..b (N commit(s))` or `already up to date`; without the count when `a` is gone, as in Claude Code's marketplace clone, which is one commit deep and replaced by its update (the count once failed an update that had landed, 2026-11-20). The check's fetch (`cli._fetch_origin`) never prompts and never hangs: no terminal, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, at most `FETCH_SECS` = 60 s; the user's own ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`) is kept, and with none ssh runs with `BatchMode`. In between, `--if-due` recounts `HEAD..@{u}` locally, so a pull made elsewhere shows at once. |
-| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line; one outside `runner.OPENCODE_TESTED` another `--` line), the OpenCode config files (the user's `$OPENCODE_CONFIG` among them), the Python wb runs on (its version and path, and when the launcher handed over from an older `python3`, #259), git (BAD below `gitops.GIT_FLOOR`, 2.34: #527), models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), a `--` line for each model `wb optimize` measured with a window to change (`optimize.advice`), a `--` line for a model left thinking whose output cap (`options.max_tokens`, else `limit.output`: any server) at its measured write speed here outlasts its think budget (`router.thinking_stall`: it can sit silent until nudged and stopped; seen 2026-11-18 on a spilled 64K entry; harmless on a fast card, so measured per machine), the state directory (made if missing, then checked writable; what it holds, counted for at most 3 s, and the free space beside it: BAD under 2 GB, #342), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), where the Ollama here had its settings read or that nothing could say (`cli.ollama_line`, a `--` line, with a local Ollama model: #379), the models this machine's Ollama has loaded that no task here holds (`models.unheld_loaded`, a `--` line: a task that needs the room unloads them once idle; on a shared Ollama `keep_loaded` keeps them and `gpu_gb` gives the budget that lets a model fit beside them, #378), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`), and a `--` line when the home directory lies in a temp root, which the lane writes whole (`context.home_gap`: its credentials are then readable to agents; the 2026-11-19 audit, a sandbox's profile under `/tmp`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings, and `repos` its settings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), what a logout would stop (`cli.logout_stops`), whether runs keep the machine awake (`cli.awake_line`, *Kept awake*: `ok` with caffeinate, or with systemd-inhibit when a probe's sleep lock is granted; a `--` line for an idle lock only, for WSL2, or for no tool), with web chat notifications subscribed, this Python's CA certificates (`webpush.has_cas`: loaded, or a CA directory with files; BAD without, with the fix, #539), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed), and one `--  experiment …` line per experiment (`wb experiment`'s). `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line; one outside `runner.OPENCODE_TESTED` another `--` line), the OpenCode config files (the user's `$OPENCODE_CONFIG` among them), the Python wb runs on (its version and path, and when the launcher handed over from an older `python3`, #259), git (BAD below `gitops.GIT_FLOOR`, 2.34: #527), models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), a `--` line for each model `wb optimize` measured with a window to change (`optimize.advice`), a `--` line for a model left thinking whose output cap (`options.max_tokens`, else `limit.output`: any server) at its measured write speed here outlasts its think budget (`router.thinking_stall`: it can sit silent until nudged and stopped; seen 2026-11-18 on a spilled 64K entry; harmless on a fast card, so measured per machine), the state directory (made if missing, then checked writable; what it holds, counted for at most 3 s, and the free space beside it: BAD under 2 GB, #342), a `--  waiting on Claude for 3+ days: <name> (<phase> <N>d[, parked]), …` line naming the tasks in review, stuck, failed or asking whose status hasn't changed for `IDLE_DAYS` (3) with `wb resume`, `wb report`, `wb discard` (`idle_line`: nothing else named a task left for weeks, #541), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), where the Ollama here had its settings read or that nothing could say (`cli.ollama_line`, a `--` line, with a local Ollama model: #379), the models this machine's Ollama has loaded that no task here holds (`models.unheld_loaded`, a `--` line: a task that needs the room unloads them once idle; on a shared Ollama `keep_loaded` keeps them and `gpu_gb` gives the budget that lets a model fit beside them, #378), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`), and a `--` line when the home directory lies in a temp root, which the lane writes whole (`context.home_gap`: its credentials are then readable to agents; the 2026-11-19 audit, a sandbox's profile under `/tmp`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings, and `repos` its settings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), what a logout would stop (`cli.logout_stops`), whether runs keep the machine awake (`cli.awake_line`, *Kept awake*: `ok` with caffeinate, or with systemd-inhibit when a probe's sleep lock is granted; a `--` line for an idle lock only, for WSL2, or for no tool), with web chat notifications subscribed, this Python's CA certificates (`webpush.has_cas`: loaded, or a CA directory with files; BAD without, with the fix, #539), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed), and one `--  experiment …` line per experiment (`wb experiment`'s). `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -5147,7 +5394,8 @@ the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 d
 $WB_HOME (~/.local/state/workbench)
   notify.jsonl                   notices that need Claude, all tasks (the runner writes them)
   notify.old.jsonl               notices handled and older than ARCHIVE_DAYS, moved by gc (_rotate_notices)
-  gc.json                        the last gc: {at, archived, notices, rules, runtime, branches}
+  claude-sessions/<pid>          "<ts> <session id>" lines: each session a Claude Code process ran wb in (spend.sessions)
+  gc.json                        the last gc: {at, archived, notices, rules, runtime, scratch, starts, uploads, branches}
   archive/<task>/                a task closed and untouched for ARCHIVE_DAYS (30), moved from tasks/ by gc
   coding.json                    Claude coding, the user's choice: {mode: only|ask|decide, ts}; none: decide
   experiments.json  .lock        wb experiment: {<name>: "on"|"off"}; a missing name is off (*Experiments*)
@@ -5180,6 +5428,7 @@ $WB_HOME (~/.local/state/workbench)
                                  switch.json ({on}: wb chat on|off)  serve.pid ({pid, port, start}; wb chat url revives from it)  serve.log (the server wb chat on started)
                                  port.json ({port, pid, start}: the port wb chat serve runs on, read back without --port)
                                  audio/<batch>/ (wb chat listen's copies, <n>.<ext>, and audio.json; the newest 20)
+                                 uploads/<id>/ (an attachment: <name> 0600 and .meta.json; *The web chat*)  uploads.lock
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
                                  CLAUDE.md (a copy of the user's), imports/<n>/<name> (an import
                                  from outside the repo: context.import_files), bin/git (the shim),
@@ -5197,6 +5446,7 @@ $WB_HOME (~/.local/state/workbench)
                                  the runner and wb stop froze at their next status write: the 0.90 review)
   locks/prepare.json, prepare-<n>.lock  the setups' and base checks' queue ({pid: {task, since, start,
                                  holding}}) and their turns, PREP_SLOTS of them (runner.prep_turn, #590)
+  locks/signal-stop.lock         one runner at a time writing a shutdown's one notice (runner._signal_notice, #544)
   locks/config-<key>.lock        one read-modify-write at a time of a user's config file (store.config_lock:
                                  <key> from the path a write lands in; beside the file it would be a stray
                                  file in the user's dotfiles; #495)
@@ -5231,7 +5481,7 @@ $WB_HOME (~/.local/state/workbench)
                                  real path, else by git dir: its linked worktrees too; --setup and --setup-timeout replace its setup and its limit, a
                                  positive whole number, --copy and --sibling add) and how wb
                                  accept --merge lands there (context.MERGE_AS; --merge-as overrides, #352)
-  chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...]}
+  chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...], "upload_mb": 25, "upload_message_mb": 50}
   chat-token ($WB_CHAT_TOKEN)    the web chat's token, mode 600
   savings.json ($WB_SAVINGS)     {"kwh_price": N}, the electricity price the energy is costed at (wb savings --price;
                                  --price off removes it; other keys kept)
@@ -5250,7 +5500,8 @@ $WB_HOME (~/.local/state/workbench)
 `WB_IMAGES`, `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_OPENCODE_CONFIG`, `WB_SAVINGS`,
 and the user's `OPENCODE_CONFIG` and `CLAUDE_CONFIG_DIR`, #328) accept `~` and
 relative paths: `absolute_env()`, first thing in `cli.main` and the runner, makes them absolute
-against wb's cwd (not resolved: a symlinked home stays as named), so every child inherits the
+against wb's cwd (not resolved: a symlinked home stays as named; the mod's `absolutePath` does the
+same for `WB_HOME`, `CLAUDE_CONFIG_DIR` and `WB_SAVINGS`, #454), so every child inherits the
 same place (a relative `WB_HOME` once had wb write the task under its cwd and the runner, which
 runs from the package's directory, look for it there: the 2026-11-16 audit; a relative
 `OPENCODE_CONFIG` had `wb start` pick a model the runner then called unknown: #328, the audit of
@@ -5315,6 +5566,9 @@ check-ins off), not `wb start`'s.
 | Key | Meaning; set by |
 |---|---|
 | `phase`, `last`, `pid` | the phase; the last action in words; the runner's pid (cleared when it exits) |
+| `parked` | when `wb stop --all` (/workbench-quit) stopped it; counted only while the phase is `stuck` (`store.parked`), cleared by `spawn_runner` (#541) |
+| `signalled` | when a SIGTERM that wasn't wb's stopped the runner (`SIGNAL_STOP`): a shutdown's tasks are batched by it (`runner._signal_notice`, #544) |
+| `boot` | the boot the runner started in (`store.boot_id`: Linux's and WSL2's `/proc/sys/kernel/random/boot_id`, macOS's `kern.boottime`); `reap` reads another as a restart (#544) |
 | `round`, `round_started_at` | the runner round (every kind counts); when it started |
 | `steps`, `step_round`, `step_sizes` | `wb next`: the step number, the round it began, the closed steps' `results.step` |
 | `reviews` | review rounds in this step (`wb feedback` +1, `wb next` resets) |
@@ -5388,7 +5642,9 @@ medians of status `speeds`) and `gpu_w` (`{mean, peak}`); `commit` and `merged` 
 discard. A step (`results.step`): `files`,
 `lines` (added, against HEAD, new files included), `removed`, `window`, `landed`, `compacted` (its last
 session, or one a handover replaced: a `fresh` event's `compacted`), `handovers` (fresh sessions
-with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
+with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`, and `claude` (that
+step's share of the row's `claude`, `spend.usage_by_step`, same shape: only in a row of several
+steps whose cost was split, #558).
 
 **bench/cases/<case>/case.json** (`bench.add`): `name`, `task`, `step`, `repo`, `base`,
 `reference`, `size`, `stack`, `test_cmd`, `test_timeout`, `check_cmd`, `hidden` (paths, their
@@ -5538,7 +5794,7 @@ main (*Shipping to main*).
 - `tests/test_workbench.py`: end to end, one class per feature (Lifecycle, Context, Steering,
   WorktreeSetup, Watch, AskServer, ConfigLayer, AgentContext, SkillLibrary, RealOpenCode, GitGuard, Lane,
   Permission, Images, Audio, Discovery, Routing, Tuning, Notes, Setup, Update, Projects, ModelSet,
-  WebChat, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, RealOpenCodeRun, Drift).
+  WebChat, ChatUploads, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, RealOpenCodeRun, Drift).
 - `tests/test_gpu.py`: sharing the GPU (side by side, taking turns, unknown VRAM, an exclusive
   holder, `wb start` refused or `--queue`d behind a holder, `wb image` refused or `--wait`ing,
   `wb audio` refused while a CPU engine runs beside a task, stale holders, a share Ollama couldn't keep), `can_share` (with `OLLAMA_MAX_LOADED_MODELS`) and
@@ -5671,9 +5927,12 @@ take, the composer's draft untouched: #397), the phone keyboard (a swipe down or
 the thread puts it away, a tap on the composer or a button doesn't: touches made by hand, Chromium
 only, since no headless browser raises a keyboard; once it is down the composer is back at the
 foot), a message over 6 h unread (not passed to Claude, never "Delivered", *send again* lands a
-new one), no script errors; and once, in node (`swSays`: `sw.js` in a `vm` against a given state,
-since no browser here shows a push), a push's text: Claude's newer reply over an older or stale
-prompt, a newer open prompt over the reply (#538).
+new one), an attachment (a photo picked, the page reloaded before sending: the chip is back and it
+was uploaded once; sent, one message with one path reaches `wb chat pending`, its thumbnail opens
+whole) and one refused on its chip (over chat.json's `upload_mb`, then dropped with ✕; the test's
+own `WB_CHAT_CONFIG`), no script errors; and once, in node (`swSays`: `sw.js` in a `vm` against a
+given state, since no browser here shows a push), a push's text: Claude's newer reply over an older
+or stale prompt, a newer open prompt over the reply (#538).
 
 **Conventions for a new test.** Names read as sentences (`test_a_note_does_not_swallow_a_failure_claude_has_not_seen`);
 one class per feature with a one-line docstring; end to end through `self.start`/`wait_phase`/
@@ -5754,6 +6013,10 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `free`, `publish`): a change there changes both (`tests.Images`, `tests.Audio`). A new kind of
   generated media → its config path in `store.PATH_VARS` and `context.private_paths`, its output
   directory in `cli.EVENT_SKIP` (and the mod's ears), its engines in `wb scout`.
+- **`ask_mcp.NO_ANSWER`'s opening** ("No answer arrived in time.") → the mod's `NO_ANSWER`, which
+  tells a question that timed out unseen from one answered (#542).
+- **How wb reads a path variable** (`store.absolute_env`, `home()`) → the mod's `absolutePath`,
+  which reads `WB_HOME` and `CLAUDE_CONFIG_DIR` the same way (#454).
 - **A process wb leaves running** (a runner, the bench driver, `wb optimize`, the chat `wb chat
   on` starts) → started through `cli.detach` (its own scope where logind kills sessions: #531),
   with `awake=` when it runs unattended (*Kept awake*, #516), and named in `cli.logout_stops`' lines.
@@ -5775,8 +6038,12 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `wb accept` write → `gitops.step_commit`, which finds them from status `tip` once the merged
   branch is gone.
 - **The mod's wake opening** (`` [workbench] Task `<name>` ``, register.tsx) **or Claude Code's
-  transcript rows** (`type`, `message.id`, `message.usage`, a Bash `tool_use`'s `command`,
-  `timestamp`, `subagents/`) → `spend.py` (`WAKE`, `calls`) and the ClaudeSpend tests' rows.
+  transcript rows** (`type`, `isMeta`, `isCompactSummary`, `message.id`, `message.usage`, a Bash
+  `tool_use`'s `command`, `timestamp`, `subagents/`, the line before a plugin's message) →
+  `spend.py` (`WAKE`, `_prompt`, `calls`) and the ClaudeSpend tests' rows.
+- **`wb next`'s `next_step` event** (its `ts`, written after the step's commit) **or the
+  results row's `steps` count** → `spend.usage_by_step` (where each step's cost begins),
+  `results.record` (which writes it per step) and `bench.handoff_cost` (which reads it, #558).
 - **`cli.PROTOCOL`** → the transcript's fold marker `\n---\nHow to work`, the `Lesson:` parser,
   the handbook (they shouldn't contradict), and every agent's prefill (keep it short).
 - **`agent/HANDBOOK.md`** → every agent prompt carries it; each token costs prefill time.
@@ -5811,7 +6078,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
-- **A `$.state` atom's type** in the mod → its tag (`tasks-6`, `live-1`, `chat-3`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`, `top-1`).
+- **A `$.state` atom's type** in the mod → its tag (`tasks-7`, `live-1`, `chat-3`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`, `top-1`).
 - **The Claude coding choices** (`cli.CODING`: modes, labels, sentences) → the mod's
   `CODING_STOPS` (the Settings row) and `CODING_RULES` (the context block), and the skill's *Claude
   coding* bullet.
@@ -5853,7 +6120,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   calls it one) → `__version__` in `workbench/__init__.py` (`wb --version`, task.json's
   `wb_version`, the ask server's `serverInfo`), `docs/release-checklist.md` filled in as
   `docs/releases/<version>.md` (a green nightly on the commit, every command the README offers
-  run at the tagged commit (#422), the platforms by hand), then a
+  run at the tagged commit (#422), the platforms by hand and the release evidence (#482), each
+  run recorded against the candidate: its SHA, OS, filesystem, versions, hardware, result and
+  skip reason; best effort, a skip is not a gate), then a
   `v<version>` tag (a trailing `.0` dropped, as `v0.90`) and a GitHub release (`gh release create
   v<version> --generate-notes`, its notes linking the filled-in checklist). **`wb setup`'s links** → README's quickstart and
   *Installing*.

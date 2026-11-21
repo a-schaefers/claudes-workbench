@@ -13,7 +13,10 @@ from pathlib import Path
 
 from . import context, store
 
-WAKE = re.compile(r"\[workbench\] Task `([a-z0-9][a-z0-9-]{0,47})`")  # the mod's wake opening
+# The mod's wake opening, at a prompt's start only, after the line Claude Code puts before a
+# plugin's message: matched anywhere, a summary quoting one charged later calls to it (#557)
+WAKE = re.compile(r"\s*(?:The [\w .-]{1,60} plugin sent a message:\s*)?"
+                  r"\[workbench\] Task `([a-z0-9][a-z0-9-]{0,47})`")
 KINDS = ("input", "cache_write_5m", "cache_write_1h", "cache_read", "output")
 # Input-equivalent weights: the API's multipliers on the base input price (claude-api skill,
 # pricing, cached 2026-10-06): output 5x on every current model, a cache write 1.25x (5 minutes)
@@ -41,8 +44,11 @@ def _ts(row: dict) -> float | None:
 
 
 def _prompt(row: dict) -> str | None:
-    """A user row's text when it starts a turn; None for a tool result (within one)."""
-    if row.get("type") != "user":
+    """A user row's text when it starts a turn; None for a tool result (within one), and for
+    the rows Claude Code adds inside a turn (isMeta: an image a Read showed, a skill's body) or
+    after a compaction (isCompactSummary): taken for new turns, they once ended the task's
+    charge mid-review (#557)."""
+    if row.get("type") != "user" or row.get("isMeta") or row.get("isCompactSummary"):
         return None
     content = (row.get("message") or {}).get("content")
     if isinstance(content, str):
@@ -82,8 +88,8 @@ EDITS = ("Edit", "Write", "NotebookEdit")  # Claude Code's tools that change a f
 def _named(row: dict, names: set[str]) -> dict:
     """What an assistant message does that charging needs: the session's tasks its `wb` calls
     name (`hit`) and close (`shut`), whether it ran `wb` at all, the files it edited, and the
-    specs it handed over (`wb start|next --spec`)."""
-    out = {"hit": set(), "shut": set(), "wb": False, "edits": set(), "specs": set()}
+    specs it handed over (`wb start|next --spec`), and the tasks a `wb next` names (`nexts`)."""
+    out = {"hit": set(), "shut": set(), "wb": False, "edits": set(), "specs": set(), "nexts": set()}
     for c in (row.get("message") or {}).get("content") or []:
         if not (isinstance(c, dict) and c.get("type") == "tool_use"):
             continue
@@ -98,6 +104,8 @@ def _named(row: dict, names: set[str]) -> dict:
             out["hit"] |= these
             if words and words[0] in CLOSING:
                 out["shut"] |= these
+            if words and words[0] == "next":
+                out["nexts"] |= these
             for i, w in enumerate(words):
                 flag, _, val = w.partition("=")
                 if flag in HANDED:
@@ -130,8 +138,9 @@ def _usage(row: dict) -> dict:
 
 
 def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
-    """Every API call of the session, {at, turn, names, usage}, `names` being the tasks it is
-    charged to. A call that runs `wb … <task>` is that task's, and so are the calls after it in
+    """Every API call of the session, {at, turn, names, usage, ahead}, `names` being the tasks it
+    is charged to and `ahead` those of them it hands a next step (a `wb next` call and the spec
+    charged with it). A call that runs `wb … <task>` is that task's, and so are the calls after it in
     the turn, until another `wb` names other tasks or `wb accept|discard` closes it; the calls
     just before a turn's first such `wb` are its tasks' too (the reading and the spec before
     `wb start`), back to the last call that ran `wb` or edited a file other than its `--spec`;
@@ -143,12 +152,12 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
     events, by_id = [], {}  # an assistant message is a row per content block, each with its usage
     for row in store.read_jsonl(main)[0]:
         if (text := _prompt(row)) is not None:
-            events.append(set(WAKE.findall(text)) & names)
+            events.append({m.group(1)} & names if (m := WAKE.match(text)) else set())
         elif row.get("type") == "assistant":
             does = _named(row, names)
             mid = (row.get("message") or {}).get("id") or f"row {len(events)}"
             if mid in by_id:
-                for k in ("hit", "shut", "edits", "specs"):
+                for k in ("hit", "shut", "edits", "specs", "nexts"):
                     by_id[mid][k] |= does[k]
                 by_id[mid]["wb"] |= does["wb"]
                 continue
@@ -159,7 +168,8 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
         if isinstance(ev, set):  # a prompt: a new turn, the wake's task, or none yet
             turn, current, waiting = turn + 1, set(ev), []
             continue
-        c = {"at": ev["at"], "turn": turn, "names": set(ev["hit"] or current), "usage": ev["usage"]}
+        c = {"at": ev["at"], "turn": turn, "names": set(ev["hit"] or current), "usage": ev["usage"],
+             "ahead": set(ev["nexts"])}
         out.append(c)
         if ev["hit"]:
             # the calls just before it are the reading and the spec for it, back to the last
@@ -168,7 +178,7 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
             for w, wev in reversed(waiting):
                 if wev["wb"] or not all(_theirs(p, ev["hit"], ev["specs"]) for p in wev["edits"]):
                     break
-                w["names"] = set(ev["hit"])
+                w["names"], w["ahead"] = set(ev["hit"]), set(ev["nexts"])
             waiting, current = [], ev["hit"] - ev["shut"]
         elif current and all(_theirs(p, current, set()) for p in ev["edits"]):
             pass  # still the task's: reading its diff, its worktree, writing its feedback
@@ -188,30 +198,69 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
             i = max((j for j, s in enumerate(starts) if s is not None and s <= at), default=None)
             if i is not None and out[i]["names"]:
                 out.append({"at": at, "turn": out[i]["turn"], "names": set(out[i]["names"]),
-                            "usage": _usage(row)})
+                            "usage": _usage(row), "ahead": set(out[i]["ahead"])})
     return out
 
 
-def usage(task: store.Task) -> dict | None:
-    """The task's share of its session: {turns, calls, input, cache_write_5m,
-    cache_write_1h, cache_read, output}; None without a session or its transcript.
-    ``calls`` is the task's share of each charged call, each counting 1/len(names)."""
+def sessions(task: store.Task) -> list[str]:
+    """The Claude Code sessions the task's Claude worked in: the one `wb start` recorded, then
+    each one its process had since (a /clear starts another: store.note_claude_session, #451)."""
     sid = task.spec.get("session")
-    main, subs = transcript_paths(sid) if sid else (None, [])
-    if main is None:
-        return None
-    names = {t.name for t in store.all_tasks() if t.spec.get("session") == sid} | {task.name}
-    total, turns, call_count = dict.fromkeys(KINDS, 0.0), set(), 0.0
+    if not sid:
+        return []
+    later = store.claude_sessions(task.spec.get("claude_pid"), task.spec.get("created_at") or 0)
+    return [sid] + [s for s in later if s != sid]
+
+
+def usage(task: store.Task) -> dict | None:
+    """The task's share of its sessions: {turns, calls, input, cache_write_5m,
+    cache_write_1h, cache_read, output}; None without a session or any of its transcripts.
+    ``calls`` is the task's share of each charged call, each counting 1/len(names)."""
+    return usage_by_step(task)[0]
+
+
+def _step_bounds(task: store.Task) -> list[float]:
+    """When each `wb next` handed the task its next step (its `next_step` events), in order."""
+    return sorted(float(e["ts"]) for e in store.read_jsonl(task.dir / "events.jsonl")[0]
+                  if e.get("kind") == "next_step" and isinstance(e.get("ts"), (int, float)))
+
+
+def usage_by_step(task: store.Task) -> tuple[dict | None, list[dict] | None]:
+    """``usage`` for the whole task, and the same for each of its steps (#558) when it had more
+    than one and every call charged to it has a timestamp: a call is the step under way when it
+    was made (the `next_step` events mark where each began), except that a `wb next` call and
+    the calls charged with it as its spec (`ahead`) are the step it hands over. So a step's cost
+    is its spec, its reviews and its feedback; step 1's also has the planning before `wb start`,
+    the last step's the accept. Every session the task's Claude worked in counts (`sessions`: a
+    /clear starts another, #451), a turn per session."""
+    sids = sessions(task)
+    found = [(s, *transcript_paths(s)) for s in sids]
+    found = [(s, main, subs) for s, main, subs in found if main is not None]
+    if not found:
+        return None, None
+    names = {t.name for t in store.all_tasks() if t.spec.get("session") in sids} | {task.name}
     try:
-        charged = calls(main, subs, names)
+        charged = [{**c, "turn": (s, c["turn"])} for s, main, subs in found
+                   for c in calls(main, subs, names) if task.name in c["names"]]
     except OSError:  # unreadable: a measurement never stops an accept
-        return None
+        return None, None
+    bounds = _step_bounds(task)
+    per = None
+    if bounds and all(c["at"] is not None for c in charged):
+        per = [[] for _ in range(len(bounds) + 1)]
+        for c in charged:
+            i = sum(b <= c["at"] for b in bounds) + (task.name in c.get("ahead", ()))
+            per[min(i, len(bounds))].append(c)  # a `wb next` that failed hands nothing over
+    return _sum(charged), None if per is None else [_sum(cs) for cs in per]
+
+
+def _sum(charged: list[dict]) -> dict:
+    total, turns, call_count = dict.fromkeys(KINDS, 0.0), set(), 0.0
     for c in charged:
-        if task.name in c["names"]:
-            turns.add(c["turn"])
-            call_count += 1 / len(c["names"])
-            for k in KINDS:
-                total[k] += c["usage"][k] / len(c["names"])
+        turns.add(c["turn"])
+        call_count += 1 / len(c["names"])
+        for k in KINDS:
+            total[k] += c["usage"][k] / len(c["names"])
     return {"turns": len(turns), "calls": round(call_count, 1),
             **{k: round(v) for k, v in total.items()}}
 

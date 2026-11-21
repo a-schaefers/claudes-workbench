@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import store
 
@@ -433,6 +434,7 @@ def cpu() -> dict:
     return {"name": name, "threads": os.cpu_count()}
 
 
+OLLAMA_PORT = 11434  # Ollama's default, where an OLLAMA_HOST without a port listens
 OLLAMA_KEYS = ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL",
                "OLLAMA_MAX_LOADED_MODELS", "OLLAMA_HOST")
 # The server's own knobs, which mean the same read from a container: its OLLAMA_MODELS is a path
@@ -449,15 +451,17 @@ def _environ(raw: bytes, keys) -> dict:
     return {k: v for k, _, v in pairs if k in keys}
 
 
-def _ollama_process() -> tuple[dict, str] | None:
-    """The environment of an `ollama serve` running here that this user may read
+def _ollama_processes() -> list[tuple[dict, str, bool]]:
+    """The environment of each `ollama serve` running here that this user may read
     (/proc/<pid>/environ: one started by hand in another terminal, a user unit's, anyone's as
-    root), and what it is. One in another mount namespace (a container) gives its knobs only.
-    A system unit's process (user ollama) can't be read: systemd says its environment."""
+    root), lowest pid first, what it is, and whether it runs in a container (another mount
+    namespace: its knobs only). A system unit's process (user ollama) can't be read: systemd
+    says its environment."""
     try:
         pids = sorted(int(d.name) for d in PROC.iterdir() if d.name.isdigit())
     except OSError:
-        return None
+        return []
+    found = []
     for pid in pids:
         d = PROC / str(pid)
         try:
@@ -472,8 +476,49 @@ def _ollama_process() -> tuple[dict, str] | None:
         except OSError:
             boxed = False
         if boxed:
-            return _environ(raw, OLLAMA_KNOBS), f"the ollama process {pid} (in a container: its knobs only)"
-        return _environ(raw, OLLAMA_KEYS + SET_ONLY), f"the running ollama's environment (pid {pid})"
+            found.append((_environ(raw, OLLAMA_KNOBS),
+                          f"the ollama process {pid} (in a container: its knobs only)", True))
+        else:
+            found.append((_environ(raw, OLLAMA_KEYS + SET_ONLY),
+                          f"the running ollama's environment (pid {pid})", False))
+    return found
+
+
+def _port(host: str) -> int:
+    """The port an OLLAMA_HOST value (``host:port``, ``:port``, a URL, or unset) listens on."""
+    raw = (host or "").strip()
+    try:
+        return urlparse(raw if "://" in raw else f"http://{raw}").port or OLLAMA_PORT
+    except ValueError:
+        return OLLAMA_PORT
+
+
+def ollama_env_at(root: str | None) -> dict:
+    """The environment of the Ollama serving ``root``: with several `ollama serve` running here
+    (one per GPU, on ports of their own), the one whose OLLAMA_HOST listens on root's port; else
+    ollama_env(). The lowest pid's stood for every one: two cards with an Ollama each were
+    budgeted as one, and the first one's NUM_PARALLEL and MAX_LOADED_MODELS read for both (#460,
+    the audit of 1.8). One with no OLLAMA_HOST listens on OLLAMA_PORT: read as matching nothing,
+    the default-port server started after the other got the other's settings (the review of
+    #460). A container's process gives no OLLAMA_HOST of the host's, so it isn't matched."""
+    return ollama_matched(root) or ollama_env()
+
+
+def ollama_matched(root: str | None) -> dict | None:
+    """ollama_env_at's environment when it is surely root's own: several `ollama serve` are
+    readable here and exactly one listens on root's port. None otherwise (one process, none or
+    two on that port, a container's), where ollama_env() is a guess that may be another
+    server's: what can tell two servers' cards apart (models.server_devices) needs the sure one."""
+    procs = _ollama_processes() if root else []
+    if len(procs) > 1:
+        want = urlparse(root).port
+        hit = [env for env, _, boxed in procs if not boxed
+               and _port(env.get("OLLAMA_HOST") or "") == want]
+        if len(hit) == 1:
+            env = dict(hit[0])
+            for k in OLLAMA_KEYS:
+                env.setdefault(k, "")
+            return env
     return None
 
 
@@ -490,8 +535,47 @@ def _ollama_container() -> tuple[dict, str] | None:
             except ValueError:
                 items = []
             raw = b"\0".join(str(x).encode() for x in items if isinstance(x, str))
-            return _environ(raw, OLLAMA_KNOBS), f"the {tool} container {name or cid}"
+            try:
+                host = json.loads(_run(tool, "inspect", "--format", "{{json .HostConfig}}", cid) or "{}")
+            except ValueError:
+                host = {}
+            return ({**_environ(raw, OLLAMA_KNOBS), **container_mask(host)},
+                    f"the {tool} container {name or cid}")
     return None
+
+
+def container_mask(host) -> dict:
+    """The devices a container's HostConfig gives it, as the masks visible() reads, in this
+    host's numbering: `--gpus device=0` or compose `device_ids` (DeviceRequests' DeviceIDs, or a
+    Count of the first N; NVIDIA's toolkit numbers them as nvidia-smi does, PCI order), and an AMD
+    card passed as `--device /dev/dri/renderD129` (Devices). The container's own masks number
+    its own devices, so only these say which of this host's cards it has; unread, an Ollama
+    limited to one card was budgeted every card (#463, the audit of 1.8). {} when it has all."""
+    if not isinstance(host, dict):
+        return {}
+    out = {}
+    for req in host.get("DeviceRequests") or []:
+        if not isinstance(req, dict):
+            continue
+        caps = {c for group in req.get("Capabilities") or [] for c in group or []}
+        if req.get("Driver") not in ("", None, "nvidia") or (caps and "gpu" not in caps):
+            continue
+        ids = [str(x) for x in req.get("DeviceIDs") or [] if str(x).strip()]
+        count = req.get("Count") or 0
+        if not ids and isinstance(count, int) and count > 0:
+            ids = [str(i) for i in range(count)]
+        if ids:
+            out.update(CUDA_VISIBLE_DEVICES=",".join(ids), CUDA_DEVICE_ORDER="PCI_BUS_ID")
+    renders = [str(d.get("PathOnHost") or "") for d in host.get("Devices") or [] if isinstance(d, dict)]
+    renders = [p.rsplit("/", 1)[-1] for p in renders if re.fullmatch(r"/dev/dri/renderD\d+", p)]
+    if renders:
+        slot = lambda dev: dict(x.split("=", 1) for x in _read(dev / "uevent").splitlines()  # noqa: E731
+                                if "=" in x).get("PCI_SLOT_NAME")
+        amd = [c["slot"] for c in drm_cards(DRM) if c["driver"] == "amdgpu"]  # gpus()'s order
+        picked = [str(amd.index(s)) for r in renders if (s := slot(DRM / r / "device")) in amd]
+        if picked:
+            out["ROCR_VISIBLE_DEVICES"] = ",".join(dict.fromkeys(picked))
+    return out
 
 
 def ollama_settings() -> tuple[dict, str]:
@@ -506,7 +590,13 @@ def ollama_settings() -> tuple[dict, str]:
     from WSL had OLLAMA_NUM_PARALLEL and OLLAMA_MAX_LOADED_MODELS read as unset, so sharing was
     refused that fit or allowed where Ollama swaps (#379, the audit of 1.6). One source is the
     whole answer: wb's environment no longer fills in what a unit leaves unset."""
-    found, idle = _ollama_process(), None
+    first, idle = next(iter(_ollama_processes()), None), None
+    found = first[:2] if first else None
+    if first and first[2]:
+        # a container's process gives its knobs, not the cards it was given: its HostConfig says
+        # (container_mask). Read from the process alone (rootless docker or podman, whose
+        # processes are this user's; wb as root), it was budgeted every card (the review of #463)
+        found = _ollama_container() or found
     if not found and system() != "macos":
         for scope in ((), ("--user",)):
             raw = _run("systemctl", *scope, "show", "ollama", "-p", "LoadState", "-p", "ActiveState",

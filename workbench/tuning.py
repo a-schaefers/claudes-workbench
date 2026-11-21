@@ -18,7 +18,9 @@ explore doesn't blur the pick's record.
 
 A knob can have a ceiling per model (the runner's: fresh_at must come before OpenCode's
 compaction, which sits one reply and one step's growth short of the window), and values past it
-are never tried. A default past it falls to the highest value under it.
+are never tried. A default past it falls to the highest value under it; with every value past
+it, the ceiling less CEILING_MARGIN is the only one (an output cap that is a large share of the
+window: #595).
 
 $WB_HOME/tuning.json pins a knob for everyone on this install: {"fresh_at": 0.6}.
 """
@@ -35,6 +37,9 @@ PRIOR = 2  # tasks' worth of the pooled record each value starts with
 EXPLORE = 0.2
 COMPACT_PENALTY = 0.25
 SPEED_WEIGHT = 0.15
+# Below a ceiling under every candidate: the smallest value once stood, past OpenCode's
+# compaction, so every long step compacted instead of handing over (#595, the audit of 1.90)
+CEILING_MARGIN = 0.05
 
 
 @dataclass(frozen=True)
@@ -97,8 +102,13 @@ def reward(row: dict, usual_minutes: float | None = None) -> float:
 
 
 def allowed(name: str, ceiling=None) -> list:
+    """The knob's values at or under ``ceiling``; none is, the ceiling less CEILING_MARGIN (or
+    the smallest value, when that isn't positive: nothing fits, and runner.handover_warning says)."""
     vals = sorted(KNOBS[name].values)
-    return [v for v in vals if ceiling is None or v <= ceiling + 1e-9] or vals[:1]
+    under = [v for v in vals if ceiling is None or v <= ceiling + 1e-9]
+    if under:
+        return under
+    return [round(ceiling - CEILING_MARGIN, 3)] if ceiling - CEILING_MARGIN > 0 else vals[:1]
 
 
 def default(name: str, ceiling=None):
