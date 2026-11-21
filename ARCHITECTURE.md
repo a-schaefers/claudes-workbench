@@ -7118,7 +7118,8 @@ the copy you want repoints the links; the state directory and the skill library 
 ## The tests
 
 Run from the repo root (`tests/__init__.py` makes `tests` a package; the other modules import
-`tests.test_workbench`): `python3 -m unittest` (the whole suite, six modules; about two minutes),
+`tests.test_workbench`): `python3 -m unittest` (the whole suite, six modules; 24 to 28 minutes on
+CI's Ubuntu at 24dfb6d, 7.5 at 594c0bc: its tests doubled in a day, #950),
 one class or test with `python3 -m unittest tests.test_workbench.Context[.test_…]`, by name with
 `-k handover`. The mod's tests: `claude plugin validate mod && claude plugin test mod`
 (`mod/hooks/register.test.tsx`). The web chat in real browsers: `PLAYWRIGHT=…/node_modules/playwright
@@ -7136,7 +7137,17 @@ Windows runner (Windows' own `wsl --install`, then `scripts/ci-wsl.sh`: dash as 
 user who isn't root, a clone in WSL's own file system, OpenCode; no third-party action, which
 the repo's settings refuse). Either failing turns the run red, and a release waits for a
 green nightly on its commit (`docs/release-checklist.md`; the 2026-11-19 audit: the macOS job
-could fail unseen and ran without OpenCode, and nothing ran WSL). The credential-read enforcement test requires Landlock, and the Snap launcher test requires Linux.
+could fail unseen and ran without OpenCode, and nothing ran WSL). The `macos` job is a matrix of
+three shards (`WB_TEST_SHARD=K/3`: `tests/__init__.py`'s `load_tests` deals whole test classes,
+largest first, to the lightest shard; only discovery is sharded, named tests run as named), each
+`python3 -X faulthandler -m unittest -v`, so each test's name is in the log as it runs: unsharded,
+it passed its 60 minutes and was cancelled on every run from d56ef5d on, and since unittest
+prints failures only at the end, about 40 failures and an 18-minute hang were never reported
+(#950). Every suite job (`check.yml`, `opencode.yml`, the nightly's three, through `WSLENV` and
+`ci-wsl.sh` for WSL) sets `WB_TEST_HANG_SECS` (600): `tests/__init__.py` arms `SIGALRM` around
+each test, and one still running then gets every thread's stack on stderr (`faulthandler`) and
+fails with `TimeoutError: <test id> hung past WB_TEST_HANG_SECS (N s)`, its tearDown run and the
+suite going on. Their limits are 60 minutes. The credential-read enforcement test requires Landlock, and the Snap launcher test requires Linux.
 The killed-runner test checks immediate kernel cleanup on Linux and cleanup after reaping on both platforms. Neither is a required check:
 each pull request would wait on a macOS and a Windows runner. Both Linux jobs install the OpenCode the real-OpenCode tests were last verified with (`OPENCODE_VERSION`,
 from its GitHub release through `scripts/install-opencode.sh`, checked against the tarball's hash

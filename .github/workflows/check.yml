@@ -27,8 +27,10 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # the suite: 7.5 minutes at 594c0bc, 24 to 28 at 24dfb6d, its tests doubled in a day (#950)
+    timeout-minutes: 60
     env:
+      WB_TEST_HANG_SECS: '600'  # a hung test fails, named, and the suite goes on (tests/__init__.py, #950)
       # The Claude Code the mod was last verified with; the floor is in ARCHITECTURE.md, *The tests*.
       CLAUDE_CODE_VERSION: '2.1.311'
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'

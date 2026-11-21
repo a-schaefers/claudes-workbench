@@ -33,7 +33,7 @@ the drift this rule exists to stop.
 
 ## Commands
 ```sh
-python3 -m unittest                                   # the whole suite, about 8 minutes
+python3 -m unittest                                   # the whole suite, about 25 minutes
 python3 -m unittest tests.test_workbench.Context      # one class (or .Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod: the $ rule, then mod/hooks/register.test.tsx
 PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat in WebKit and Chromium
