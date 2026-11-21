@@ -9055,6 +9055,45 @@ class Projects(Base):
                               capture_output=True, text=True, check=True).stdout
         self.assertIn("gpgsig", body)
 
+    def test_a_signer_that_asks_for_a_touch_gets_no_dry_signature_and_is_told_apart_from_ssh_add(self):
+        # #528 (the audit of v1.90): the dry signature made a security key blink on every wb
+        # start, and on a timeout advised ssh-add, which can't make a touch-required key sign
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        pub = Path(self.tmp.name) / "id_ed25519_sk.pub"
+        pub.write_text("sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t x@y\n")
+        signed = Path(self.tmp.name) / "signed"
+        prog = Path(self.tmp.name) / "signer"
+        prog.write_text(f"#!/bin/sh\necho >> {signed}\nexit 1\n")
+        prog.chmod(0o755)
+        for k, v in (("gpg.format", "ssh"), ("user.signingkey", str(pub)), ("commit.gpgsign", "true")):
+            g("config", k, v)
+        out = self.start("t-touch", "ok")
+        self.assertIn("signed by a security key (an sk- SSH key), which asks for a touch", out)
+        self.assertIn("--no-sign commits unattended", out)
+        self.assertNotIn("ssh-add", out)
+        g("config", "user.signingkey", "key::ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA x@y")
+        g("config", "gpg.ssh.program", str(prog))   # an op-ssh-sign: asks on each use
+        out = self.start("t-touch2", "ok", "--queue")
+        self.assertIn("signed by signer (gpg.ssh.program)", out)
+        self.assertFalse(signed.exists())                          # no dry signature asked for
+        wait_phase("t-touch2", {"review"})
+        err = self.refused("accept", "t-touch2", "-m", "feat: answer")
+        self.assertIn("asks for a touch or an approval: none came; or --no-sign", err)
+        self.assertNotIn("ssh-add", err)
+        # an OpenPGP key on a card: gpg lists it with the card's serial number
+        gpg = Path(self.tmp.name) / "gpg"
+        row = ["sec", "u", "255", "22", "ABCDEF0123456789", "1700000000", "", "", "u", "", "",
+               "scESC", "", "", "D2760001240100000006", "", ""]
+        gpg.write_text(f"#!/bin/sh\necho '{':'.join(row)}'\n")
+        gpg.chmod(0o755)
+        for k in ("gpg.format", "user.signingkey", "gpg.ssh.program"):
+            g("config", "--unset", k)
+        g("config", "gpg.program", str(gpg))
+        self.assertIn("signed by an OpenPGP card", gitops.sign_problem(self.repo, "HEAD"))
+        row[14] = "+"                                                # a key on disk: dry-run
+        gpg.write_text(f"#!/bin/sh\necho '{':'.join(row)}'\nexit 1\n")
+        self.assertIsNone(gitops.presence_signer(self.repo))
+
     def test_a_monorepo_package_with_its_own_claude_md_is_where_the_agent_and_tests_run(self):
         # #375 (the audit of 1.6, reproduced): from packages/app, whose CLAUDE.md Claude Code reads,
         # wb start refused the repo for a CLAUDE.md at its root, and the agent worked from the root

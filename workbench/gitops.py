@@ -736,17 +736,83 @@ UNLOCK = f"commits here are signed and the key needs unlocking first: {UNLOCK_HO
 NO_TERMINAL = {"GPG_TTY": "", "DISPLAY": "", "WAYLAND_DISPLAY": "", "SSH_ASKPASS_REQUIRE": "never"}
 
 
+def _unlock(repo: Path) -> str:
+    signer = presence_signer(repo)
+    return (f"commits here are signed by {signer}, which asks for a touch or an approval: none "
+            "came; or --no-sign") if signer else UNLOCK
+
+
 def signs(repo: Path) -> bool:
     return git(repo, "config", "--bool", "commit.gpgsign", check=False).strip() == "true"
+
+
+# SSH agents that ask on each use (macOS's Secretive, 1Password's), by their socket's path
+ASKING_AGENTS = {"secretive": "Secretive", "1password": "1Password"}
+
+
+def presence_signer(repo: Path) -> str | None:
+    """What signs ``repo``'s commits when it asks the user each time (a touch, an approval), else
+    None: an SSH security key (`sk-`), a `gpg.ssh.program` of its own (1Password's op-ssh-sign), an
+    SSH agent that asks per use, an OpenPGP key on a card. A dry signature made the key blink on
+    every wb start, and on a timeout advised ssh-add, which can't make it sign (#528)."""
+    fmt = git(repo, "config", "gpg.format", check=False).strip().lower() or "openpgp"
+    key = git(repo, "config", "user.signingkey", check=False).strip()
+    if fmt == "ssh":
+        text = key.removeprefix("key::")
+        if not text.startswith(("sk-", "ssh-", "ecdsa-")):  # a path: the key file, or its .pub
+            path = Path(os.path.expanduser(text))
+            for f in (path, path.with_name(path.name + ".pub")):
+                with contextlib.suppress(OSError, ValueError):
+                    head = f.read_bytes()[:4096]
+                    if head.startswith(b"sk-"):
+                        text = "sk-"
+                        break
+        if text.startswith("sk-"):
+            return "a security key (an sk- SSH key)"
+        if prog := git(repo, "config", "gpg.ssh.program", check=False).strip():
+            return f"{os.path.basename(prog)} (gpg.ssh.program)"
+        sock = os.environ.get("SSH_AUTH_SOCK", "").lower()
+        return next((name for word, name in ASKING_AGENTS.items() if word in sock), None)
+    if fmt != "openpgp":
+        return None
+    gpg = git(repo, "config", "gpg.program", check=False).strip() or "gpg"
+    try:  # field 15 of a secret key's row: a token's serial number when the key is on a card
+        out = subprocess.run([gpg, "--batch", "--with-colons", "--list-secret-keys",
+                              *([key] if key else [])], capture_output=True, text=True,
+                             timeout=SIGN_SECS, stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for row in out.splitlines():
+        f = row.split(":")
+        if len(f) > 14 and f[0] in ("sec", "ssb") and "s" in f[11] and f[14] not in ("", "#", "+"):
+            return "an OpenPGP card"
+    return None
+
+
+def touch_line(signer: str) -> str:
+    return (f"commits here are signed by {signer}, which asks for a touch or an approval: wb accept "
+            f"waits {COMMIT_SECS} s for it; --no-sign commits unattended")
+
+
+def unlock_how(repo: Path) -> str:
+    """Why a signed commit failed and what makes it work: unlock a passphrase key, or be there
+    for a key that asks each time, which ssh-add can't make sign (#528)."""
+    signer = presence_signer(repo)
+    return (f"{signer} asks for a touch or an approval nobody gave" if signer
+            else f"the key needs unlocking first ({UNLOCK_HOW})")
 
 
 def sign_problem(repo: Path, rev: str) -> str | None:
     """UNLOCK when ``repo``'s commits are signed and signing can't happen unattended (a key with a
     passphrase no agent holds, a pinentry that needs a terminal), else None. A dry commit-tree -S
     of ``rev``'s tree, with no terminal or display: wb accept failed at the very end of the task
-    with "incorrect passphrase supplied" (#374, the audit of 1.6). It leaves a loose object."""
+    with "incorrect passphrase supplied" (#374, the audit of 1.6). It leaves a loose object. A key
+    that asks each time gets no dry run, which only made it ask on every start (#528): it is
+    said instead (touch_line)."""
     if not signs(repo):
         return None
+    if signer := presence_signer(repo):
+        return touch_line(signer)
     r = None
     with contextlib.suppress(GitError):
         r = _run(repo, ["commit-tree", "-S", "-m", "workbench: can it sign?", f"{rev}^{{tree}}"],
@@ -777,10 +843,11 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
             r = _run(worktree, [*NO_HOOKS, "commit", "-q", "-m", message], NO_TERMINAL,
                      check=False, timeout=COMMIT_SECS)
         except GitError as e:  # no answer: a pinentry waiting on an unattended desktop
-            raise GitError(f"not committed: {UNLOCK} ({e})") from None
+            raise GitError(f"not committed: {_unlock(worktree)} ({e})") from None
         if r.returncode:
             said = (r.stderr or r.stdout).decode("utf-8", "replace").strip().splitlines()
-            raise GitError(f"not committed: {UNLOCK} (git: {said[0] if said else r.returncode})")
+            raise GitError(f"not committed: {_unlock(worktree)} "
+                           f"(git: {said[0] if said else r.returncode})")
     else:
         git(worktree, *NO_HOOKS, "commit", "-q", "-m", message)
     return git(worktree, "rev-parse", "--short", "HEAD").strip()
@@ -970,7 +1037,7 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     def failed(what, e):
         why = str(e)
         if signed and any(w in why for w in ("no answer in", "failed to sign", "failed to write commit")):
-            why = (f"the commit is signed and the key needs unlocking first ({UNLOCK_HOW}); then "
+            why = (f"the commit is signed and {unlock_how(repo)}; then "
                    f"merge it by hand ({why.splitlines()[0]})")
         return GitError(f"{what} {branch_name(task)} failed and was backed out: {why}")
 
