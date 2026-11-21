@@ -1723,7 +1723,7 @@ def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str
     an RX 7600S's 8). With none known, as before. Only the devices Ollama's environment lets it
     see count (hardware.visible): the one serving ``root`` when several run here, one per GPU
     (hardware.ollama_env_at: #460). Apple Silicon: iogpu.wired_limit_mb, else macOS's default
-    share; an APU: its carve-out and GTT, as hardware.gpus found; an NVIDIA GPU that shares the
+    share (an Intel Mac's adapters none: #711); an APU: its carve-out and GTT, as hardware.gpus found; an NVIDIA GPU that shares the
     RAM (a DGX Spark, a Jetson): the RAM less what the system uses (system_reserve, #524)."""
     hand = _overrides().get("gpu_gb")
     if hand is not None:
@@ -1736,6 +1736,11 @@ def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str
         gb = os.environ.get("WB_FAKE_GPU_GB")  # tests: a GPU of this size
         return (int(float(gb) * 1e9), [], "WB_FAKE_GPU_GB") if gb else (None, [], "")
     devs = hardware.gpus(windows=False)  # WSL's Windows names carry no VRAM: skip PowerShell
+    if hardware.system() == "macos":
+        # an Intel Mac's Radeon or Intel adapter runs no Ollama model: Ollama's Intel Mac build
+        # runs on the CPU in RAM, so a 4 GB Radeon Pro made every model over 3.9 GB "too big"
+        # beside 32 GB of RAM (#711); gpu_gb still sets one (llama.cpp's Metal on AMD)
+        devs = [g for g in devs if g.get("unified")]
     notes = []
     if any((g.get("driver") or "").split(" ")[0] in ("nvidia", "amdgpu") for g in devs):
         devs, notes = hardware.visible(devs, hardware.ollama_env_at(root))

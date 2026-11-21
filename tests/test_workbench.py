@@ -15896,10 +15896,20 @@ class Hardware(unittest.TestCase):
         self.assertIn("RAM   34.4 GB (2.1 GB free) · swap 2.1 GB (1.6 GB free)", out)
         self.assertIn("CPU   Apple M2 Pro", out)
 
-    def test_an_intel_mac_reports_its_graphics_cards_vram(self):
-        hw = self.fake("Darwin", runs={("system_profiler",): json.dumps({"SPDisplaysDataType": [
-            {"sppci_model": "AMD Radeon Pro 5500M", "spdisplays_vram": "8 GB"}]})})
-        self.assertIn("AMD Radeon Pro 5500M · 8.6 GB VRAM · metal", "\n".join(hw.report()))
+    def test_an_intel_mac_reports_its_graphics_cards_vram_but_budgets_none_of_it(self):
+        # #711: a MacBook Pro's 4 GB Radeon became the budget, though Ollama's Intel Mac build
+        # runs on the CPU in RAM: every model over 3.9 GB was "too big" beside 32 GB of RAM
+        from workbench import models, top
+        profile = json.dumps({"SPDisplaysDataType": [
+            {"sppci_model": "AMD Radeon Pro 5500M", "spdisplays_vram": "8 GB"}]})
+        hw = self.fake("Darwin", runs={("system_profiler",): profile})
+        self.assertIn("AMD Radeon Pro 5500M · 8.6 GB VRAM · Ollama runs models on the CPU on an Intel "
+                      "Mac (gpu_gb sets a budget by hand) · metal", "\n".join(hw.report()))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+            self.assertEqual(models.budget_devices(), (None, [], ""))
+        t = top.Top(2)
+        self.assertEqual([g.get("total") for g in t.gpus()][:1], [None])   # no GPU memory: models read `cpu`
+        self.assertFalse(t.gpu_memory)
 
     def test_wsl_reads_each_windows_gpus_memory_and_budgets_it_when_linux_sees_none(self):
         # #522: a 16 GB RX 7800 XT under Ollama for Windows was "VRAM unknown", scout said only

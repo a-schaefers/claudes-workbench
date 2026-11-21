@@ -2972,8 +2972,11 @@ budget's why says "less N GB the system uses". All of `MemTotal` passed a 6.5 GB
 an 8 GB Orin Nano whose desktop held 2 GB (#524); another server's loaded model counts as the
 system's, which only stops sharing. `gpu_gb` still overrides it. Apple Silicon: `iogpu.wired_limit_mb` when set, else macOS's default
 (`unified_default`: two thirds of the RAM up to `UNIFIED_SMALL` 36 GiB, three quarters above,
-Metal's recommendedMaxWorkingSetSize; it was 75% everywhere, too much on 8-32 GB Macs). Unknown
-VRAM means no sharing. `gpus(windows=False)`: the budget asks WSL's PowerShell only when Linux sees no GPU, and then
+Metal's recommendedMaxWorkingSetSize; it was 75% everywhere, too much on 8-32 GB Macs). On macOS
+only an Apple GPU (`unified`) counts: an Intel Mac's Radeon or Intel adapter is no budget, as
+Ollama's Intel Mac build runs on the CPU in RAM, and a 4 GB Radeon Pro beside 32 GB of RAM made
+every model over 3.9 GB "too big" (#711; `gpu_gb` sets one by hand, for llama.cpp's Metal on AMD).
+Unknown VRAM means no sharing. `gpus(windows=False)`: the budget asks WSL's PowerShell only when Linux sees no GPU, and then
 at most hourly (`wsl-gpus.json`); each adapter named from Windows is a group of its own, since
 the registry can't tell a laptop's Radeon iGPU from its Radeon card: the largest counts (#522). A model's
 need: `vram_gb`, else Ollama's loaded size (weights and context), else weights × `KV_GUESS` 1.25.
@@ -3209,7 +3212,8 @@ CPU-only rack server was told to set `gpu_gb` for its BMC (#710, as `wb top` alr
 NVIDIA left to nvidia-smi when it answered,
 else listed from sysfs, VRAM unknown); macOS reads `system_profiler SPDisplaysDataType -json`
 (Apple Silicon: unified memory, `wired_limit`; an adapter with only shared memory, an Intel iGPU,
-has VRAM unknown).
+has VRAM unknown; `report` says of an Intel Mac's adapter that Ollama runs on the CPU there, and
+`wb top` gives it no `total`, so its loaded models read `cpu`, not `split`: #711).
 Every size `wb` prints is in decimal GB (`size`, `wb top`'s `_gb`, the progress of a pull `wb model add` starts), the
 unit `gpu_gb` and `vram_gb` take and Ollama prints: scout showed a 16 GiB card as "16.0 GB VRAM"
 beside "GPU budget 17 GB", and a 12 GiB card's owner who wrote `{"gpu_gb": 12}` got 7% less than

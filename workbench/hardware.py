@@ -761,6 +761,8 @@ def report() -> list[str]:
             vram = (f" · {size(g['vram'])} VRAM" + (f" ({size(g['vram_used'])} in use)"
                                                     if g.get("vram_used") else "")) if g["vram"] \
                 else " · VRAM unknown"
+            if where == "macos":  # an Intel Mac's adapter: no budget counts it (#711)
+                vram += " · Ollama runs models on the CPU on an Intel Mac (gpu_gb sets a budget by hand)"
         gpu_lines.append(f"  GPU   {g['name']}{vram} · {g['driver']}")
     lines += gpu_lines or ["  GPU   none found (models would run on the CPU)"]
     m, c = memory(), cpu()

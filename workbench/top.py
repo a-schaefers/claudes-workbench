@@ -202,7 +202,9 @@ class Top:
             # the most the GPU may wire (iogpu.wired_limit_mb, else macOS's default share, the
             # budget's ceiling, #574) is said beside it as `limit`. The RAM in use drawn against
             # that limit put an idle 16 GB Mac at 104% in red with no model loaded (#701)
-            self.static = [{"name": g["name"], **({"total": g["vram"]} if g.get("vram") else {}),
+            # an Intel Mac's Radeon: no total, as Ollama runs there on the CPU in RAM, so its
+            # models read `cpu`, not a warning's "split 0.0 GB GPU" (#711)
+            self.static = [{"name": g["name"], **({"total": g["vram"]} if g.get("vram") and g.get("unified") else {}),
                             **({"unified": True, "limit": g.get("wired_limit") or models.unified_default(g["vram"])}
                                if g.get("unified") and g.get("vram") else
                                {"unified": True} if g.get("unified") else {})}
