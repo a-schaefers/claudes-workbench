@@ -5138,6 +5138,37 @@ class Watch(Base):
             self.assertIn(f"TEXT-OF-{kind}", shown, kind)
         self.assertIn("■ Claude: the spec missed: TEXT-OF-spec_gap", shown)
 
+    def test_every_event_kind_wb_log_prints_has_a_line_in_wb_watch_too(self):
+        # #861: wb log and wb watch kept their own lists of kinds, and wb log's left out the
+        # runner's rows; they share transcript.EVENT_KINDS now, each with a branch here
+        from workbench import transcript
+        t = store.Task("t-kinds2")
+        store.write_json(t.dir / "task.json", {"name": "t-kinds2", "created_at": store.now()})
+        for kind in sorted(transcript.EVENT_KINDS) + ["step", "no-such-kind"]:
+            t.event({"ts": store.now(), "round": 1, "kind": kind, "text": f"TEXT-OF-{kind}"})
+        got = {e.key: e for e in transcript.task_entries(t)}
+        self.assertEqual(len(got), len(transcript.EVENT_KINDS))   # not step's, nor an unknown's
+
+    def test_wb_log_n_counts_the_lines_it_prints_and_shows_the_runners_own_rows(self):
+        # #861 (the third 2026-11-21 audit): -n took the last N rows before the filter, so the
+        # step rows (one per model request) used up the count, and the runner's gpu, handover
+        # and compaction rows never printed at all
+        t = store.Task("t-log861")
+        store.write_json(t.dir / "task.json", {"name": "t-log861", "created_at": store.now()})
+        t.set_status(phase="stuck", round=1)
+        for i in range(20):
+            t.event({"ts": store.now(), "round": 1, "kind": "tool", "tool": "read", "ok": True,
+                     "brief": f"file{i}.py"})
+            t.event({"ts": store.now(), "round": 1, "kind": "step", "tokens": 100})
+        for kind, text in (("gpu", "partly on the CPU"), ("full", "the session filled up"),
+                           ("stopped", "40 calls without an edit")):
+            t.event({"ts": store.now(), "round": 1, "kind": kind, "text": text})
+        out = run_wb("log", "t-log861", "-n", "10").splitlines()
+        self.assertEqual(len(out), 10, out)
+        self.assertIn("partly on the CPU", out[-3])
+        self.assertIn("the session filled up", out[-2])
+        self.assertIn("file13.py", out[0])
+
     def test_json_lines_for_the_pane_end_with_what_is_happening(self):
         self.start("t-live", "hang")
         deadline = time.time() + 10

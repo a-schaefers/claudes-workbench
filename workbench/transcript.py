@@ -320,6 +320,16 @@ def session_entries(data: dict, worktree: str, verbose: bool) -> list[Entry]:
     return out
 
 
+# The event kinds task_entries gives a line, each but the tool rows (from the session's export)
+# from its own row. wb log prints these too, one line each, from this one set: it once printed a
+# fixed nine, so the runner's own (a model partly on the CPU, a handover, a steer) never showed
+# there, and a test checks task_entries has a branch for each (#861).
+EVENT_KINDS = frozenset({
+    "round", "tests", "autofix", "self_review", "ask", "answer", "captain", "steer", "skills",
+    "allow", "interrupted", "fresh", "full", "load", "left_bg", "reading_full", "resumed",
+    "coding", "spec_gap", "next_step", "takeover", "stopped", "error", "retry", "gpu"})
+
+
 def task_entries(task: store.Task) -> list[Entry]:
     out = []
     rows, _ = store.read_jsonl(task.dir / "events.jsonl")

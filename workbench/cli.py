@@ -1705,19 +1705,26 @@ def cmd_log(a):
     # the agent's words and output, on a terminal: no raw escape sequences (transcript.plain)
     shown = transcript.plain if sys.stdout.isatty() else str
 
+    # the agent's text, its tool calls, and every kind wb watch shows (transcript.EVENT_KINDS):
+    # a fixed nine once left out the runner's own rows, a gpu or handover among them (#861)
+    kinds = {"text", "tool"} | transcript.EVENT_KINDS
+
     def show(r):
-        t = time.strftime("%H:%M:%S", time.localtime(r["ts"]))
-        k = r["kind"]
+        t = time.strftime("%H:%M:%S", time.localtime(r.get("ts") or 0))
+        k = r.get("kind")
         if k == "tool":
-            mark = "" if r["ok"] else "  ✗ " + r.get("error", "")[:100]
+            mark = "" if r.get("ok") else "  ✗ " + r.get("error", "")[:100]
             # flushed: piped or redirected, a follow printed nothing for minutes (#545)
-            print(shown(f"{t} r{r['round']} {r['tool']:8} {r['brief']}{mark}"), flush=True)
-        elif k in ("text", "ask", "answer", "stopped", "autofix", "round", "tests", "error", "retry"):
-            body = r.get("text", "")
+            print(shown(f"{t} r{r.get('round')} {r.get('tool', ''):8} {r.get('brief', '')}{mark}"), flush=True)
+        elif k in kinds:
+            body = str(r.get("text") or "")
             if k == "text" and not a.verbose:
                 body = body.strip().splitlines()[0][:110] if body.strip() else ""
-            print(shown(f"{t} r{r['round']} {k:8} {body}"), flush=True)
+            print(shown(f"{t} r{r.get('round')} {k:8} {body}"), flush=True)
 
+    # -n counts the lines printed: the last N rows, cut before the filter, held step rows (one
+    # per model request) that never print, and `-n 30` showed a dozen lines (#861)
+    rows = [r for r in rows if r.get("kind") in kinds]
     for r in rows[-a.n:] if a.n else rows:
         show(r)
     watcher = Watcher(task.dir) if a.follow else None
