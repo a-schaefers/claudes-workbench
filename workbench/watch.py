@@ -91,7 +91,9 @@ class Watcher:
                     return True
         return False
 
-    def add(self, d: Path) -> None:
+    def add(self, d: Path, again: bool = False) -> None:
+        """Watch ``d`` (and, recursive, what it holds). ``again`` walks the directories already
+        watched too, for what was made in them while the news was lost."""
         if not d.is_dir() or self._skipped(d):
             return
         wd = _lib().inotify_add_watch(self.fd, os.fsencode(d), MASK) if self.native else -1
@@ -107,11 +109,12 @@ class Watcher:
             # link took the watches into the sibling's whole tree (#439, Codex's 17)
             try:
                 subs = [sub for sub in d.iterdir() if sub.is_dir() and not sub.is_symlink()]
-            except OSError:
+            except OSError:  # gone or unreadable since: its IN_IGNORED says so
                 return
             for sub in subs:
-                if not self._skipped(sub) and sub not in self.dirs.values() and sub not in self.polled:
-                    self.add(sub)
+                if not self._skipped(sub) and (
+                        again or sub not in self.dirs.values() and sub not in self.polled):
+                    self.add(sub, again)
 
     def _poll(self) -> list[Path]:
         """What changed in the polled directories since they were last looked at."""
@@ -145,6 +148,12 @@ class Watcher:
                 name = buf[i + _EVENT.size:i + _EVENT.size + size].rstrip(b"\0")
                 i += _EVENT.size + size
                 if mask & IN_Q_OVERFLOW:  # events were lost: every directory may have changed
+                    # and, recursive, the directories made meanwhile are found by walking: a task
+                    # made in the burst was never watched, seen only by the mod's 30 s safety
+                    # poll (#472, the audit of 1.8)
+                    if self.recursive:
+                        for root in self.roots:
+                            self.add(root, again=True)
                     changed += list(self.dirs.values())
                     continue
                 if mask & IN_IGNORED:  # the directory went away (deleted, moved, unmounted)

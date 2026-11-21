@@ -8,6 +8,7 @@ import fnmatch
 import io
 import json
 import queue
+import select
 import shlex
 import os
 import shutil
@@ -3949,6 +3950,33 @@ class Watch(Base):
                          ["meta", "activity", "clock"])
         self.assertRegex(lines[-2]["t"], r"…")
         self.assertRegex(lines[-1]["t"], r"^⏲ task \d")
+
+    def test_after_an_inotify_queue_overflow_directories_made_meanwhile_are_watched(self):
+        # #472 (the audit of 1.8, reproduced: 16,484 events against a 16,384 queue): the
+        # overflow reported every watched directory but didn't look for new ones, so a task made
+        # in the burst gave no changed lines. Its creation is lost here as in the overflow
+        from workbench import watch
+        root = Path(self.tmp.name) / "w"
+        (root / "tasks" / "old").mkdir(parents=True)
+        with watch.Watcher(root, recursive=True) as w:
+            if not w.native:
+                self.skipTest("no inotify here")
+            (root / "tasks" / "new" / "rounds").mkdir(parents=True)
+            while select.select([w.fd], [], [], 0.1)[0]:
+                os.read(w.fd, 65536)  # the news of tasks/new, lost
+            real, sent = os.read, []
+
+            def read(fd, n):
+                if fd == w.fd and not sent:
+                    sent.append(1)
+                    return watch._EVENT.pack(-1, watch.IN_Q_OVERFLOW, 0, 0)
+                return real(fd, n)
+            with mock.patch("os.read", read):
+                changed = w.read()
+            self.assertIn(root / "tasks" / "new", changed)
+            self.assertIn(root / "tasks" / "new" / "rounds", changed)
+            (root / "tasks" / "new" / "rounds" / "status.json").write_text("{}")
+            self.assertIn(root / "tasks" / "new" / "rounds" / "status.json", w.wait(5))
 
     def test_wb_events_leaves_out_closed_tasks_and_the_rules(self):
         # a thousand finished tasks were 4,000 watches per Claude session (the 2026-11-16 audit)

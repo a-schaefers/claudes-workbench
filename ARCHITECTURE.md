@@ -4952,7 +4952,9 @@ lists the hooks, calls and env reads; `claude --debug` shows hook errors.
 - **`Watcher(*dirs, recursive=False, skip=())`**: inotify through ctypes (`inotify_init1`,
   `inotify_add_watch`, from `CDLL(None)`, the process's own symbols, so musl works too) on directories, for modify, attribute changes, close-write, create, delete and moves; a queue
   overflow or a directory that went away reports every watched directory as changed rather than
-  losing the news. `recursive` adds new subdirectories as they appear, never through a link (a
+  losing the news; recursive, an overflow first walks every root again (`add(root, again=True)`),
+  so a directory made while events were lost is watched and reported too (a task made in a burst
+  was seen only by the mod's 30 s safety poll, #472, the audit of 1.8). `recursive` adds new subdirectories as they appear, never through a link (a
   task's `--sibling` link took 251 of 256 watches into the sibling: #439), and leaves out one it
   can't list (mode 000, removed mid-scan: that killed `wb events` at every respawn, #439); `skip`
   leaves out directories by pattern, matched against the path below the root (`tasks/*/worktree`).
