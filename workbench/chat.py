@@ -1000,13 +1000,37 @@ def start(port: int) -> int:
     return proc.pid
 
 
+# What keeps the chat up: systemd's wb-chat.service on Linux, launchd's workbench.chat agent on
+# macOS (launchd/workbench.chat.plist). Only systemd was known: on a Mac `wb chat off` and the
+# port-taken error gave systemctl advice, and revive ignored the agent (#756).
+LAUNCHD_LABEL = "workbench.chat"
+
+
+def _macos() -> bool:
+    return sys.platform == "darwin"
+
+
+def service_hint(what: str) -> str:
+    """The command that does ``what`` ("stop", "status") to the chat's service on this OS."""
+    if _macos():
+        return {"stop": f"launchctl bootout gui/$(id -u)/{LAUNCHD_LABEL}",
+                "status": f"launchctl print gui/$(id -u)/{LAUNCHD_LABEL}"}[what]
+    return {"stop": "systemctl --user disable --now wb-chat", "status": "systemctl --user status wb-chat"}[what]
+
+
+def service_name() -> str:
+    return f"launchd's {LAUNCHD_LABEL}" if _macos() else "systemd's wb-chat"
+
+
 def _unit_keeps_it() -> bool:
-    """Whether wb-chat.service is enabled, so systemd brings the chat back itself."""
-    if not shutil.which("systemctl"):
+    """Whether wb-chat.service is enabled (Linux) or the workbench.chat agent is loaded (macOS),
+    so systemd or launchd brings the chat back itself."""
+    argv = (["launchctl", "print", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"] if _macos()
+            else ["systemctl", "--user", "is-enabled", "--quiet", "wb-chat"])
+    if not shutil.which(argv[0]):
         return False
     try:
-        return subprocess.run(["systemctl", "--user", "is-enabled", "--quiet", "wb-chat"],
-                              capture_output=True, timeout=5).returncode == 0
+        return subprocess.run(argv, capture_output=True, timeout=5).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -1866,7 +1890,7 @@ def make_servers(port: int, binds: list[str] | None = None,
                 s.server_close()
             why = (("the port is taken: by another address in the bind list (chat.json's bind, or "
                     "--bind) or another program" if servers else
-                    "the port is taken: another wb chat serve (systemctl --user status wb-chat) or "
+                    f"the port is taken: another wb chat serve ({service_hint('status')}) or "
                     "another program") + "; --port picks another" if e.errno == errno.EADDRINUSE else
                    "that address isn't on this machine (chat.json's bind, or --bind)"
                    if e.errno == errno.EADDRNOTAVAIL else e.strerror or str(e))

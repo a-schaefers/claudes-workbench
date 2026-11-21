@@ -4897,7 +4897,10 @@ through `/bin/sh`, since launchd expands no `~`, with Homebrew's `python3` first
 `/usr/bin/python3` being 3.9): copy it to `~/Library/LaunchAgents/` and `launchctl bootstrap
 gui/$(id -u) ~/Library/LaunchAgents/workbench.chat.plist` (its comment says how to remove it; it
 retries even a broken install's exit 78, which launchd can't exempt; not checked on a Mac yet,
-#449). WSL2 with systemd on (`[boot] systemd=true` in `/etc/wsl.conf`) uses the unit; without
+#449). wb's messages name the service of the OS it runs on (`chat.service_name`, `service_hint`:
+`launchctl bootout`/`print gui/$(id -u)/workbench.chat` on macOS, `systemctl --user
+disable --now`/`status wb-chat` elsewhere), in `wb chat off` and the port-taken error; they gave
+systemctl advice on a Mac (#756). WSL2 with systemd on (`[boot] systemd=true` in `/etc/wsl.conf`) uses the unit; without
 it, and on any machine with neither, the revive below brings a chat `wb chat on` started back. `wb chat url` prints the link, `http://localhost:1337/#token=…` (the
 port the running server recorded in `chat/port.json`, else the one `chat/serve.pid` says `wb chat
 on` last started one on, else 1337; `--port` names one: `wb chat url`,
@@ -4974,7 +4977,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   for good (#449). `wb chat url` now starts it again first (`chat.revive`, silently: the mod reads
   the output whole as the link) when the switch is on, `chat/serve.pid` names a server that is
   gone (its pid not a live `wb chat serve`), nothing answers on that port, and `wb-chat.service`
-  isn't enabled (`systemctl --user is-enabled`: systemd's to restart). The mod runs `wb chat url`
+  isn't enabled (`chat._unit_keeps_it`: `systemctl --user is-enabled`, on macOS `launchctl print
+  gui/<uid>/workbench.chat`, the agent loaded; it checked only systemd, #756: the service's to
+  restart). The mod runs `wb chat url`
   as a session starts and every 10 minutes while the chat is on, so it comes back within that
   once any Claude session with the mod runs. `wb doctor` says when the switch is on and nothing,
   or something else, answers (`cli.chat_gap`). A server `chat.start` makes has no supervisor of

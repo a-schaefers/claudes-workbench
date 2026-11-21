@@ -3750,7 +3750,7 @@ def cmd_chat(a):
             print("web chat off: stopped the server it started")
         elif chat.running(a.port):
             print("web chat off: no link in the pane and no session listens; a server still runs "
-                  "(systemd's wb-chat: systemctl --user disable --now wb-chat stops it)")
+                  f"({chat.service_name()}: {chat.service_hint('stop')} stops it)")  # #756
         else:
             print("web chat off")
     elif a.action == "reply":

@@ -15461,6 +15461,27 @@ class WebChat(Base):
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
         self.assertEqual(run_wb("chat", "off", "--port", str(port)).strip(), "web chat off")  # no unit named
 
+    def test_on_macos_the_launchd_agent_is_checked_and_named_instead_of_systemd(self):
+        # #756 (the 2026-11-21 audit, finding 103): with the launchd agent keeping the chat up,
+        # `wb chat off` and the port-taken error gave systemctl advice, and revive ignored the agent
+        chat, ran = self.chat, []
+        fake = lambda argv, **kw: ran.append(argv) or subprocess.CompletedProcess(argv, 0, b"", b"")
+        with mock.patch.object(chat, "_macos", return_value=True), \
+                mock.patch.object(chat.shutil, "which", lambda name: "/bin/" + name), \
+                mock.patch.object(chat.subprocess, "run", fake):
+            self.assertTrue(chat._unit_keeps_it())
+        self.assertEqual(ran, [["launchctl", "print", f"gui/{os.getuid()}/workbench.chat"]])
+        with mock.patch.object(chat, "_macos", return_value=True):
+            off = run_wb("chat", "off", "--port", str(self.port))              # a server it didn't start
+            self.assertIn("launchd's workbench.chat: launchctl bootout gui/$(id -u)/workbench.chat stops it", off)
+            self.assertNotIn("systemctl", off)
+            with self.assertRaisesRegex(RuntimeError, r"another wb chat serve \(launchctl print "
+                                        r"gui/\$\(id -u\)/workbench.chat\)"):
+                chat.make_servers(self.port, ["127.0.0.1"])
+        with mock.patch.object(chat, "_macos", return_value=False):
+            self.assertIn("systemd's wb-chat: systemctl --user disable --now wb-chat stops it",
+                          run_wb("chat", "off", "--port", str(self.port)))
+
     def test_a_chat_wb_chat_on_started_comes_back_after_a_reboot_or_a_crash(self):
         # #449 (the 2026-11-20 audit): the switch stayed on and the pane showed the link, but nothing
         # started the server again, so the phone said "Can't reach the computer" for good
