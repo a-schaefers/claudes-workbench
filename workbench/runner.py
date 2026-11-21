@@ -1366,9 +1366,13 @@ def proposal_diff(task: store.Task) -> str:
     import difflib
     parts = []
     for real, prop in proposals(task.worktree):
-        old = real.read_text(errors="replace").splitlines(keepends=True) if real.is_file() and \
-            not real.is_symlink() else []
         rel = real.relative_to(task.worktree)
+        # against the file the agent read: a gitignored CLAUDE.md is the checkout's copy, and
+        # the whole proposal read as new, diffed against nothing (#506, Claude's audit of 1.90)
+        local = Path(task.spec["repo"]) / rel
+        read = real if real.is_file() and not real.is_symlink() else local if (
+            local.is_file() and gitops.ignored(local.parent, local.name)) else None
+        old = read.read_text(errors="replace").splitlines(keepends=True) if read else []
         d = "".join(difflib.unified_diff(old, prop.read_text(errors="replace").splitlines(
             keepends=True), f"a/{rel}", f"b/{rel}"))
         parts.append(f"\n\nthe agent proposes this change to {rel} (wb accept --take-claude-md "

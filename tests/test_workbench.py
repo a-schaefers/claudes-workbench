@@ -571,6 +571,49 @@ class Lifecycle(Base):
             self.assertNotIn("CLAUDE.md.proposed", files)
             self.assertEqual("CLAUDE.md" in files, kept)
 
+    def test_a_proposal_for_a_gitignored_claude_md_goes_over_the_checkouts_copy(self):
+        # #506 (Claude's audit of 1.90, reproduced): CLAUDE.md gitignored, the agent proposed a
+        # change; the review diffed it against nothing, accept --take-claude-md said "took" and
+        # `add -A` skipped the ignored file, so the change went with the worktree
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout
+        (self.repo / ".gitignore").write_text("CLAUDE.md\nAGENTS.md\n")
+        g("rm", "-q", "--cached", "CLAUDE.md")
+        g("add", ".gitignore")
+        g("commit", "-qm", "CLAUDE.md is local")
+        old = (self.repo / "CLAUDE.md").read_text()
+        self.start("t-ign", "ok")
+        wait_phase("t-ign", {"review"})
+        t = store.Task("t-ign")
+        prop = t.worktree / "CLAUDE.md.proposed"
+        prop.write_text(old + "Answers live in answer.txt.\n")
+        shown = runner.review_diff(t)
+        self.assertIn("+Answers live in answer.txt.", shown)
+        self.assertNotIn("+# repo", shown)                 # against the copy the agent read
+        out = run_wb("accept", "t-ign", "-m", "feat: answer", "--take-claude-md")
+        self.assertIn(f"took the agent's proposed CLAUDE.md: written over {self.repo / 'CLAUDE.md'}", out)
+        self.assertEqual((self.repo / "CLAUDE.md").read_text(), old + "Answers live in answer.txt.\n")
+        files = g("show", "--name-only", "--format=", "delegate/t-ign").split()
+        self.assertNotIn("CLAUDE.md", files)
+        self.assertNotIn("CLAUDE.md.proposed", files)
+        # where the checkout's copy can't take it (a link, as wb init makes AGENTS.md): refused,
+        # the proposal kept, and the way to apply it by hand named
+        (self.repo / "AGENTS.md").symlink_to("CLAUDE.md")
+        self.start("t-ign2", "ok")
+        wait_phase("t-ign2", {"review"})
+        t = store.Task("t-ign2")
+        prop = t.worktree / "AGENTS.md.proposed"
+        prop.write_text("# the agent's\n")
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("accept", "t-ign2", "-m", "feat: answer", "--take-claude-md")
+        self.assertIn("git ignores AGENTS.md", err.getvalue())
+        self.assertIn(str(prop), err.getvalue())
+        self.assertTrue(prop.is_file())
+        self.assertTrue((self.repo / "AGENTS.md").is_symlink())
+        self.assertIn("dropped the agent's proposed AGENTS.md",
+                      run_wb("accept", "t-ign2", "-m", "feat: answer"))
+
     def test_a_proposal_the_project_already_tracks_is_left_alone(self):
         # #321 (the audit of 1.4, reproduced): a CLAUDE.md.proposed committed before the task
         # was settled as the agent's, and accept deleted it, though wb diff never showed it
@@ -1728,6 +1771,137 @@ class Lifecycle(Base):
         self.assertTrue(tip.startswith(gitops.merge(repo, "t", "main", how="ff")))
         self.assertEqual(git(repo, "rev-list", "--min-parents=2", "--count", "HEAD"), "0")
 
+    def test_a_squash_lands_under_merge_ff_only_and_merge_ff_false(self):
+        # #429 (the audit of 1.8, reproduced): merge.ff=only refused every squash once main had
+        # moved ("Not possible to fast-forward"), merge.ff=false every squash at all ("'--squash'
+        # and '--no-ff' cannot be used together"): the linear-history repos #352 was made for
+        for ff in ("only", "false"):
+            repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
+                                       task={b"b.txt": b"b\n"}, ignore={}, config=[("merge.ff", ff)])
+            head = gitops.merge(repo, "t", "main", how="squash")
+            self.assertEqual((repo / "b.txt").read_bytes(), b"b\n", ff)
+            self.assertEqual(g("rev-list", "--min-parents=2", "--count", "HEAD"), b"0\n", ff)
+            self.assertEqual(g("rev-parse", "--short", "HEAD").strip().decode(), head, ff)
+            self.assertEqual(g("status", "--porcelain"), b"", ff)
+
+    def test_no_merge_mode_runs_the_repos_hooks_and_the_merge_commit_names_the_branch(self):
+        # #499 (Claude's audit of 1.90, reproduced): a commit-msg hook requiring "feat: " refused
+        # the merge's "Merge commit '<sha>'", which nobody could edit, and accept exited 5, while
+        # --merge-as squash ran no hooks and landed; #471: the message named a raw SHA
+        hooks = Path(self.tmp.name) / "hooks"
+        hooks.mkdir()
+        mark = Path(self.tmp.name) / "hook-ran"
+        for name in ("commit-msg", "pre-merge-commit", "post-merge", "pre-commit"):
+            (hooks / name).write_text(f"#!/bin/sh\necho {name} >> {mark}\nexit 1\n")
+            (hooks / name).chmod(0o755)
+        for how in ("merge", "squash", "ff"):
+            repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
+                                       task={b"b.txt": b"b\n"}, ignore={})
+            if how == "ff":
+                g("reset", "-q", "--hard", "HEAD~1")
+            g("config", "core.hooksPath", str(hooks))
+            tip = g("rev-parse", "delegate/t").strip().decode()  # what accept merges: the SHA
+            gitops.merge(repo, "t", "main", how=how, tip=tip)
+            self.assertEqual((repo / "b.txt").read_bytes(), b"b\n", how)
+            self.assertFalse(mark.exists(), mark.exists() and mark.read_text())
+            if how == "merge":
+                self.assertEqual(g("log", "-1", "--format=%s"), b"Merge branch 'delegate/t'\n")
+                g("switch", "-q", "-c", "dev", "HEAD~1")  # git's own wording: "into dev" here
+                g("config", "merge.log", "true")          # and its shortlog, once
+                gitops.merge(repo, "t", "dev", tip=tip)
+                self.assertEqual(g("log", "-1", "--format=%B"),
+                                 b"Merge branch 'delegate/t' into dev\n\n* delegate/t:\n  task\n\n")
+
+    def _submodule_case(self):
+        """A repo with submodule lib, a task branch adding b.txt, and main moved on."""
+        top = Path(self.tmp.name) / f"s{len(os.listdir(self.tmp.name))}"
+        top.mkdir()
+        g = lambda r, *a: subprocess.run(["git", "-C", str(r), *a], check=True,  # noqa
+                                         capture_output=True, text=True).stdout
+        sub, repo = top / "sub", top / "app"
+        for r in (sub, repo):
+            g(top, "init", "-q", "-b", "main", r.name)
+        (sub / "x.txt").write_text("x\n")
+        g(sub, "add", "x.txt")
+        g(sub, "commit", "-qm", "s1")
+        (repo / "a.txt").write_text("a\n")
+        g(repo, "add", "a.txt")
+        g(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "lib")
+        g(repo, "commit", "-qm", "base")
+        g(repo, "switch", "-qc", "delegate/t")
+        (repo / "b.txt").write_text("b\n")
+        g(repo, "add", "b.txt")
+        g(repo, "commit", "-qm", "task")
+        g(repo, "switch", "-q", "main")
+        (repo / "c.txt").write_text("c\n")
+        g(repo, "add", "c.txt")
+        g(repo, "commit", "-qm", "main")
+        return repo, lambda *a: g(repo, *a)
+
+    def test_a_submodule_moved_or_edited_in_the_checkout_does_not_stop_the_merge(self):
+        # #505 (Claude's audit of 1.90, reproduced): lib one commit ahead of its gitlink (a git
+        # pull without submodule update) or edited inside: "app has uncommitted changes", naming
+        # no file, where `git merge --no-ff` in the same state succeeds
+        for state in ("moved", "edited"):
+            repo, g = self._submodule_case()
+            lib = repo / "lib"
+            if state == "moved":
+                (lib / "y.txt").write_text("y\n")
+                g("-C", "lib", "add", "y.txt")
+                g("-C", "lib", "commit", "-qm", "s2")
+            else:
+                (lib / "x.txt").write_text("edited\n")
+            at = g("-C", "lib", "rev-parse", "HEAD")
+            gitops.merge(repo, "t", "main")
+            self.assertEqual((repo / "b.txt").read_text(), "b\n", state)
+            self.assertEqual(g("-C", "lib", "rev-parse", "HEAD"), at, state)  # left as it was
+            if state == "edited":
+                self.assertEqual((lib / "x.txt").read_text(), "edited\n")
+
+    def test_the_merge_refuses_naming_what_is_uncommitted_and_a_moved_submodule_it_would_change(self):
+        # #505: a moved submodule whose gitlink the merge changes is in the way (named), and
+        # uncommitted changes are named too
+        repo, g = self._submodule_case()
+        g("switch", "-q", "delegate/t")
+        g("-C", "lib", "commit", "-q", "--allow-empty", "-m", "the task's")
+        g("add", "lib")
+        g("commit", "-qm", "the task moves lib")
+        g("switch", "-q", "main")  # lib stays at the task's commit: moved, here
+        g("-C", "lib", "commit", "-q", "--allow-empty", "-m", "mine")
+        head = g("rev-parse", "HEAD")
+        with self.assertRaisesRegex(gitops.GitError, "submodule lib is at another commit"):
+            gitops.merge(repo, "t", "main")
+        self.assertEqual(g("rev-parse", "HEAD"), head)
+        g("add", "lib")  # staged: an uncommitted change of the checkout's own
+        (repo / "a.txt").write_text("mine\n")
+        with self.assertRaisesRegex(gitops.GitError, r"uncommitted changes \(a\.txt, lib\)"):
+            gitops.merge(repo, "t", "main")
+
+    def test_a_fast_forward_under_a_squash_merge_option_lands_or_is_backed_out_for_real(self):
+        # #430 (the audit of 1.8, reproduced): with branch.main.mergeOptions=--squash, --ff-only
+        # staged a squash and left HEAD; no MERGE_HEAD, so nothing was reset, and the checkout
+        # kept `A b.txt` while wb said "it was backed out"
+        repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
+                                   task={b"b.txt": b"b\n"}, ignore={},
+                                   config=[("branch.main.mergeOptions", "--squash")])
+        tip = g("rev-parse", "delegate/t").strip().decode()
+        g("reset", "-q", "--hard", "HEAD~1")  # main at the base: it can fast-forward
+        self.assertTrue(tip.startswith(gitops.merge(repo, "t", "main", how="ff")))
+        self.assertEqual(g("rev-parse", "HEAD").strip().decode(), tip)
+        self.assertEqual(g("status", "--porcelain"), b"")
+        # a git that stages without moving HEAD and says nothing (--no-squash not honoured): what
+        # wb says was backed out is
+        g("reset", "-q", "--hard", "HEAD~1")
+        real = gitops._run
+
+        def squashing(cwd, args, *rest, **kw):
+            return real(cwd, [x for x in args if x != "--no-squash"], *rest, **kw)
+        with mock.patch.object(gitops, "_run", squashing), \
+                self.assertRaisesRegex(gitops.GitError, "backed out"):
+            gitops.merge(repo, "t", "main", how="ff")
+        self.assertEqual(g("rev-parse", "HEAD"), g("rev-parse", f"{tip}~1"))
+        self.assertEqual(g("status", "--porcelain"), b"")
+
     def _signer(self, hang_on_merge: bool = False) -> Path:
         """A gpg.program that signs unattended with a made-up signature (git checks only the
         status line), or, `hang_on_merge`, waits on nobody for a commit with two parents: a
@@ -1843,6 +2017,62 @@ class Lifecycle(Base):
             "merge": "rebase"}}}))
         with self.assertRaisesRegex(RuntimeError, '"merge" is one of merge, ff, squash'):
             context.commands_conf()
+
+    def test_a_retry_after_an_interrupted_squash_finds_the_squash_it_made(self):
+        # #432 (the audit of 1.8, reproduced by Codex with an injected interruption): main moved
+        # on its own, accept was killed after git's squash and before merged_head was saved, and
+        # the retry looked for the tip, which a squash never holds: exit 5, merged=false, though
+        # main had the work
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout.strip()
+        self.start("t-isq", "ok")
+        wait_phase("t-isq", {"review"})
+        (self.repo / "other.txt").write_text("other\n")
+        g("add", "other.txt")
+        g("commit", "-qm", "main moves on")
+        real = gitops.merge
+
+        def then_killed(*a, **kw):
+            real(*a, **kw)
+            raise SystemExit(128 + signal.SIGTERM)
+        with mock.patch.object(gitops, "merge", then_killed), self.assertRaises(SystemExit):
+            run_wb("accept", "t-isq", "-m", "feat: answer", "--merge-as", "squash")
+        squash = g("rev-parse", "--short", "main")
+        self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
+        out = run_wb("accept", "t-isq", "-m", "feat: answer", "--merge-as", "squash")
+        self.assertIn(f"merged into main as {squash}", out)
+        self.assertEqual(g("rev-parse", "--short", "main"), squash)    # not squashed twice
+        row = [r for r in store.results() if r.get("task") == "t-isq"][-1]
+        self.assertTrue(row["merged"])
+        self.assertNotIn("merge_refused", row)
+        self.assertEqual(g("branch", "--list", "delegate/t-isq"), "")
+        # another commit from the same parent isn't taken for it
+        self.assertIsNone(gitops.squashed(self.repo, "main", g("rev-parse", "main~1"), "main~1"))
+
+    def test_the_merge_by_hand_line_follows_the_repos_merge_mode_and_signing(self):
+        # #471 (the audit of 1.8): "merge with: … merge --no-ff" whatever commands.json's `merge`
+        # said, and a signed merge commit after --no-sign
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "merge": "squash"}}}))
+        q = shlex.quote(str(self.repo))
+        for name, extra, want in (
+                ("t-h1", (), f"merge with: git -C {q} merge --squash --ff delegate/t-h1 && "
+                             f"git -C {q} commit -C delegate/t-h1"),
+                ("t-h2", ("--no-sign",), f"git -C {q} commit --no-gpg-sign -C delegate/t-h2")):
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+            self.assertIn(want, run_wb("accept", name, "-m", f"feat: {name}", *extra))
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "merge": "ff"}}}))
+        self.start("t-h3", "ok")
+        wait_phase("t-h3", {"review"})
+        self.assertIn(f"merge with: git -C {q} merge --ff-only delegate/t-h3",
+                      run_wb("accept", "t-h3", "-m", "feat: h3"))
+        Path(os.environ["WB_COMMANDS"]).write_text("{}")
+        self.start("t-h4", "ok")
+        wait_phase("t-h4", {"review"})
+        self.assertIn(f"merge with: git -C {q} merge --no-ff --no-gpg-sign delegate/t-h4",
+                      run_wb("accept", "t-h4", "-m", "feat: h4", "--no-sign"))
 
     def test_accept_merge_completes_the_merge_or_says_it_did_not(self):
         # #190 (the 2026-11-19 audit): with branch.main.mergeOptions=--no-commit, git left the
@@ -2773,6 +3003,40 @@ class Context(Base):
         self.assertEqual(reaped, [False])
         wait_phase("t-nr", {"review"})
         self.assertNotIn("failed", [r["kind"] for r in store.notices() if r["task"] == "t-nr"])
+
+    def test_a_step_with_no_changes_advances_and_a_failed_commit_keeps_the_proposals(self):
+        # #507 (Claude's audit of 1.90): a step that changed nothing died on "nothing to commit"
+        # and stayed put; and wb next dropped the agent's CLAUDE.md.proposed before a commit
+        # that then failed, so a retry with --take-claude-md had nothing to take
+        self.start("t-ne", "ok")
+        wait_phase("t-ne", {"review"})
+        step = Path(self.tmp.name) / "step.md"
+        step.write_text("Check the answer again.\n")
+        run_wb("next", "t-ne", "--spec", str(step), "-m", "feat: step one")
+        wait_phase("t-ne", {"review"})                     # step 2 rewrote the same answer
+        out = run_wb("next", "t-ne", "--spec", str(step), "-m", "feat: step two")
+        self.assertIn("step 2 of t-ne had no changes; step 3 sent", out)
+        st = wait_phase("t-ne", {"review"})
+        self.assertEqual(st["steps"], 3)
+        self.assertTrue(self.runs()[2]["prompt"].startswith(
+            "Step 2 of this task is done and committed (no changes to commit). The next step:"))
+        log = lambda: subprocess.run(["git", "-C", str(self.repo), "log", "--format=%s",  # noqa
+                                      "delegate/t-ne"], capture_output=True, text=True).stdout
+        self.assertNotIn("feat: step two", log())
+        t = store.Task("t-ne")
+        prop = t.worktree / "CLAUDE.md.proposed"
+        prop.write_text("# repo\nA test project. Answers go in answer.txt.\n")
+        subprocess.run(["git", "init", "-q", str(t.worktree / "nest")], check=True)  # refused
+        with self.assertRaises(SystemExit):
+            run_wb("next", "t-ne", "--spec", str(step), "-m", "feat: step three")
+        self.assertTrue(prop.is_file())                    # still there to take
+        self.assertEqual((t.worktree / "CLAUDE.md").read_text(), "# repo\nA test project.\n")
+        shutil.rmtree(t.worktree / "nest")
+        out = run_wb("next", "t-ne", "--spec", str(step), "-m", "feat: step three",
+                     "--take-claude-md")
+        self.assertIn("took the agent's proposed CLAUDE.md", out)
+        self.assertIn("step 3 of t-ne committed", out)
+        self.assertIn("feat: step three", log())
 
 
 class StartChecks(Base):

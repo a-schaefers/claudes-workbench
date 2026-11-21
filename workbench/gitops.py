@@ -691,6 +691,18 @@ def jj_colocated(repo: Path) -> bool:
     return (Path(repo) / ".jj").is_dir() and (Path(repo) / ".git").exists()
 
 
+def merge_by_hand(repo: Path, branch: str, how: str = "merge", sign: bool = True) -> str:
+    """The git command that lands ``branch`` as wb accept --merge would: in the repo's mode (the
+    --merge-as, else commands.json's `merge`) and unsigned after --no-sign. The line said merge
+    --no-ff whatever the repo kept to (#471, the audit of 1.8)."""
+    g, nosign = f"git -C {shlex.quote(str(repo))}", "" if sign else " --no-gpg-sign"
+    if how == "ff":
+        return f"{g} merge --ff-only {branch}"
+    if how == "squash":
+        return f"{g} merge --squash --ff {branch} && {g} commit{nosign} -C {branch}"
+    return f"{g} merge --no-ff{nosign} {branch}"
+
+
 def jj_merge(repo: Path, branch: str) -> str:
     """The jj command that merges ``branch`` onto the working copy's parent, as a new change."""
     return f"jj -R {shlex.quote(str(repo))} new @- {branch}"
@@ -729,8 +741,10 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     interruption (a SIGTERM, raised by the caller) backs the checkout out to where it was: a
     pinentry nobody answered hung accept until it was killed, leaving MERGE_HEAD and the staged
     merge in the user's checkout, and --no-sign's merge still signed (#420, the audit of 1.8)."""
-    if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
-        raise GitError(f"{repo} has uncommitted changes; merge {branch_name(task)} by hand")
+    dirty, submodules = _uncommitted(repo)
+    if dirty:
+        raise GitError(f"{repo} has uncommitted changes ({_listed(dirty)}); merge "
+                       f"{branch_name(task)} by hand")
     have = current_branch(repo)
     if not have:
         raise GitError(detached(repo, branch_name(task)))
@@ -756,6 +770,12 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         raise GitError(f"the merge would overwrite {', '.join(in_the_way)} in {repo}, untracked "
                        f"there (yours, maybe ignored): move it aside, then merge "
                        f"{branch_name(task)} by hand")
+    written = set(_written(repo, source).split(b"\0")) if submodules else set()
+    if touched := [f"submodule {p.decode('utf-8', 'replace')} {why}"
+                   for p, why in submodules.items() if p in written]:
+        raise GitError(f"the merge would change what {', '.join(touched)} in {repo} points at: "
+                       f"bring it back (git submodule update), then merge {branch_name(task)} "
+                       "by hand")
     before = git(repo, "rev-parse", "HEAD").strip()
     signed = sign and signs(repo)
     unsigned = () if sign else ("-c", "commit.gpgsign=false")
@@ -776,14 +796,25 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         return GitError(f"{what} {branch_name(task)} failed and was backed out: {why}")
 
     # --commit and --no-squash outrank a branch.<name>.mergeOptions of --no-commit or --squash,
-    # which left the merge pending while accept said merged (#190, the 2026-11-19 audit)
+    # which left the merge pending while accept said merged (#190, the 2026-11-19 audit); a
+    # fast-forward needs --no-squash too: --ff-only under mergeOptions=--squash staged a squash
+    # and left HEAD (#430, the audit of 1.8). The squash says --ff: merge.ff=only refused it once
+    # the branch had moved, merge.ff=false every time ("cannot be used together", #429)
+    # No mode runs the repo's hooks (NO_HOOKS, --no-verify), as no commit of workbench's does:
+    # a commit-msg hook refused the merge commit's message, which nobody could edit, while the
+    # squash ran none and landed; and once staged the merge holds the agent's files, a relative
+    # hooksPath's hooks among them (#499, Claude's audit of 1.90). The merge commit names the
+    # branch as git's own would (fmt-merge-msg, the repo's merge.log and suppressDest kept), not
+    # the tip's SHA it merges (#471, the audit of 1.8)
     try:
         if how == "squash":  # no MERGE_HEAD to abort: backed out with reset --merge
-            git(repo, "merge", "--squash", "--no-commit", source)
+            git(repo, *NO_HOOKS, "merge", "--squash", "--ff", "--no-commit", source)
             committing([*NO_HOOKS, "commit", "--no-verify", "-q", "-C", source])
+        elif how == "ff":
+            committing([*NO_HOOKS, "merge", "--ff-only", "--no-squash", source])
         else:
-            committing(["merge", *(("--ff-only",) if how == "ff" else
-                                   ("--no-ff", "--commit", "--no-squash")), "--no-edit", source])
+            committing([*NO_HOOKS, "merge", "--no-ff", "--commit", "--no-squash", "--no-verify",
+                        "--no-log", "-m", merge_message(repo, task, source), source])
     except BaseException as e:  # a conflict, a timeout, a SIGTERM: the checkout as it was (#420)
         _back_out(repo, before)
         if isinstance(e, GitError):
@@ -795,11 +826,80 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         return git(repo, "rev-parse", "--short", "HEAD").strip()
     if _merging(repo) or _run(repo, ("merge-base", "--is-ancestor", source, "HEAD"),
                               check=False).returncode:
-        if _merging(repo):
-            git(repo, "merge", "--abort", check=False)
+        # HEAD or the index changed with no MERGE_HEAD (a squash staged) is backed out too (#430)
+        _back_out(repo, before)
         raise GitError(f"git didn't complete the merge of {branch_name(task)} (a merge setting "
                        "of yours?); it was backed out: merge it by hand")
     return git(repo, "rev-parse", "--short", "HEAD").strip()
+
+
+def _uncommitted(repo: Path) -> tuple[list[str], dict[bytes, str]]:
+    """(the checkout's uncommitted changes to tracked files, {submodule: how it differs} for
+    each submodule changed only in its own checkout). A submodule ahead of its gitlink (a pull
+    without submodule update) or edited inside stays as it is through a merge that doesn't
+    change its gitlink, and was refused as "uncommitted changes", naming nothing (#505, Claude's
+    audit of 1.90). --ignore-submodules=none: a setting of the user's that hides one mustn't hide
+    it from the merge's check."""
+    out = _run(repo, ("status", "--porcelain=v2", "-z", "--untracked-files=no",
+                      "--ignore-submodules=none")).stdout.split(b"\0")
+    dirty, subs, rows = [], {}, iter(out)
+    for row in rows:
+        if not row:
+            continue
+        kind, fields = row[:1], row.split(b" ")
+        n = {b"1": 8, b"2": 9, b"u": 10}.get(kind)
+        if n is None:
+            continue
+        path = b" ".join(fields[n:])
+        if kind == b"2":
+            next(rows, None)  # the rename's original path
+        xy, sub = fields[1].decode(), fields[2].decode()
+        if kind == b"1" and sub.startswith("S") and xy[0] == ".":
+            subs[path] = ("is at another commit" if sub[1] == "C" else "has local edits"
+                          if sub[2] == "M" else "has untracked files")
+        else:
+            dirty.append(path.decode("utf-8", "replace"))
+    return dirty, subs
+
+
+def _listed(paths: list[str], most: int = 5) -> str:
+    return ", ".join(sorted(paths)[:most]) + (f" and {len(paths) - most} more"
+                                               if len(paths) > most else "")
+
+
+def _written(repo: Path, branch: str) -> bytes:
+    """The paths merging ``branch`` would leave different from HEAD (NUL-separated)."""
+    written = _merge_tree(repo, branch)
+    return _trial_merge(repo, branch) if written is None else written
+
+
+def merge_message(repo: Path, task: str, tip: str) -> str:
+    """The merge commit's message git itself writes for ``delegate/<task>`` (`fmt-merge-msg`:
+    "Merge branch 'delegate/<task>'", "into <branch>" unless merge.suppressDest drops it, the
+    shortlog under merge.log, so the merge itself takes --no-log), though what is merged is
+    the reviewed ``tip`` (#471)."""
+    b, sha = branch_name(task), git(repo, "rev-parse", "--verify", f"{tip}^{{commit}}").strip()
+    r = _run(repo, ["fmt-merge-msg"], check=False, input=f"{sha}\t\tbranch '{b}' of .\n".encode())
+    said = r.stdout.decode("utf-8", "replace").strip() if r.returncode == 0 else ""
+    return said or f"Merge branch '{b}'"
+
+
+def squashed(repo: Path, into: str, before: str | None, tip: str) -> str | None:
+    """The squash of ``tip`` an earlier accept made on ``into``, which stood at ``before`` then:
+    a commit of the branch's first-parent line whose parent is ``before`` and whose message is
+    the tip's (commit -C). A squash never holds the tip, so a retry interrupted between it and
+    its record squashed again and recorded it refused (#432, the audit of 1.8)."""
+    if not before:
+        return None
+    want = git(repo, "log", "-1", "--format=%B", tip, check=False).strip()
+    log = git(repo, "log", "--first-parent", "--format=%H %P%x00%B%x01",
+              f"{before}..refs/heads/{into}", check=False)
+    for entry in log.split("\x01"):
+        head, _, body = entry.lstrip("\n").partition("\x00")
+        sha, *parents = head.split() or [""]
+        if sha and parents[:1] == [before] and want and body.strip() == want:
+            return git(repo, "rev-parse", "--short", sha).strip()
+    return None
 
 
 def _back_out(repo: Path, before: str) -> None:

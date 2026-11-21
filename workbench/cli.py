@@ -841,17 +841,59 @@ def cmd_feedback(a):
     _say(lessons.nudge(task))
 
 
-def _settle_proposals(task: store.Task, take: bool) -> None:
+@contextmanager
+def _settle_proposals(task: store.Task, take: bool):
     """The agent's proposed instruction files (runner.proposals) are never committed as they are:
-    --take-claude-md puts each over its file, else it is dropped."""
-    for real, prop in runner.proposals(task.worktree):
+    --take-claude-md puts each over its file, else it is dropped. Around the commit, and undone
+    when it fails: wb next dropped the proposal, then died on its commit, so a retry with
+    --take-claude-md had nothing to take (#507, Claude's audit of 1.90). Said once it stands."""
+    done, local = [], {}
+    if take:  # a file git ignores is in no commit: the checkout's own copy takes it (#506)
+        for real, prop in runner.proposals(task.worktree):
+            rel = real.relative_to(task.worktree)
+            if not gitops.ignored(task.worktree, str(rel)):
+                continue
+            mine = Path(task.spec["repo"]) / rel
+            if mine.is_symlink() or not mine.parent.is_dir() or not gitops.ignored(
+                    mine.parent, mine.name):
+                raise gitops.GitError(
+                    f"git ignores {rel}, so no commit would hold the agent's proposal, and "
+                    f"{mine} can't take it ({'a link' if mine.is_symlink() else 'not a local file'}"
+                    f"): apply {prop} by hand, then accept without --take-claude-md")
+            local[real] = mine
+    try:
+        for real, prop in runner.proposals(task.worktree):
+            was = (("link", os.readlink(real)) if real.is_symlink() else
+                   ("file", real.read_bytes()) if real.is_file() else None)
+            done.append((real, prop, prop.read_bytes(), was))
+            if take and real not in local:
+                prop.replace(real)
+            else:
+                prop.unlink()
+        yield
+    except BaseException:
+        for real, prop, data, was in reversed(done):
+            prop.write_bytes(data)
+            if take and real not in local:
+                real.unlink(missing_ok=True)
+                if was and was[0] == "link":
+                    os.symlink(was[1], real)
+                elif was:
+                    real.write_bytes(was[1])
+        raise
+    for real, _, data, _ in done:
         rel = real.relative_to(task.worktree)
-        if take:
-            prop.replace(real)
-            print(f"took the agent's proposed {rel}")
+        if real in local:  # the commit stands: now the checkout's copy, which no commit holds
+            tmp = local[real].with_name(f".{local[real].name}.wb-{os.getpid()}")
+            tmp.write_bytes(data)
+            if local[real].exists():
+                shutil.copymode(local[real], tmp)
+            tmp.replace(local[real])
+            print(f"took the agent's proposed {rel}: written over {local[real]} (gitignored, "
+                  "so in no commit)")
         else:
-            prop.unlink()
-            print(f"dropped the agent's proposed {rel} (--take-claude-md takes it)")
+            print(f"took the agent's proposed {rel}" if take else
+                  f"dropped the agent's proposed {rel} (--take-claude-md takes it)")
 
 
 @one_at_a_time
@@ -877,11 +919,14 @@ def cmd_next(a):
     commit = _step_landed(task, step)
     measured = results.step(task, landed=True, since="HEAD~1" if commit else "HEAD")
     if not commit:
-        _settle_proposals(task, a.take_claude_md)
         try:
-            commit = gitops.commit_all(task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} "
-                                       f"(step {step})\nOpenCode-Session: {st.get('session')}",
-                                       a.include, _signed(spec, a))
+            with _settle_proposals(task, a.take_claude_md):
+                # a step that changed nothing advances with no commit: it died on "nothing to
+                # commit" and the task stayed on the step (#507, Claude's audit of 1.90)
+                if gitops.changed(task.worktree):
+                    commit = gitops.commit_all(
+                        task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} (step {step})"
+                        f"\nOpenCode-Session: {st.get('session')}", a.include, _signed(spec, a))
         except gitops.GitError as e:
             die(str(e))
     _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
@@ -897,7 +942,8 @@ def cmd_next(a):
     n = st.get("round", 1) + 1
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
     task.round_dir(n).joinpath("prompt.md").write_text(
-        f"Step {step} of this task is done and committed ({commit}). The next step:\n\n"
+        f"Step {step} of this task is done and committed ({commit or 'no changes to commit'}). "
+        "The next step:\n\n"
         + nxt.rstrip()
         + PROTOCOL.format(branch=spec["branch"], test_line=test_line(test), budget=budget),
         encoding="utf-8")
@@ -906,7 +952,8 @@ def cmd_next(a):
                    step_sizes=(st.get("step_sizes") or []) + [measured],
                    context="fresh" if a.fresh else None,
                    auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
-                   auto_fixes=0, phase="queued", last=f"step {step} committed; next step queued",
+                   auto_fixes=0, phase="queued", last=f"step {step} " + (
+                       "committed" if commit else "had no changes") + "; next step queued",
                    **({} if handed is None else dict(
                        skills=handed, skills_ever=_union(st.get("skills_ever"), handed),
                        skills_rev={**(st.get("skills_rev") or {}), **skills.revs(handed)})))
@@ -920,10 +967,12 @@ def cmd_next(a):
     gpu = _gpu_note(task)
     task.set_status(**advance)
     task.event({"ts": store.now(), "round": n, "kind": "next_step",
-                "text": f"step {step} committed as {commit}; next step sent"})
+                "text": f"step {step} " + (f"committed as {commit}" if commit else
+                                           "had no changes") + "; next step sent"})
     spawn_runner(task)
     _ack_all(task, upto=handled)
-    print(f"step {step} of {a.name} committed as {commit}; step {step + 1} sent "
+    print(f"step {step} of {a.name} " + (f"committed as {commit}" if commit else "had no changes")
+          + f"; step {step + 1} sent "
           + (f"to a fresh session ({why})" if why else "to the same session"))
     _say(gpu)
     _say_dropped(dropped)
@@ -1725,8 +1774,6 @@ def cmd_accept(a):
         die(f"{a.name} has no changes to accept yet: wait for it, or wb stop {a.name} first")
     _stop_runner(task)  # under --force it may still be running, and would set its phase back
     checked = None if close else verify.note(task)  # before the commit: what Claude accepts it on (#97)
-    if not close:
-        _settle_proposals(task, a.take_claude_md)
     repo = Path(spec["repo"])
     rounds, autofix = st.get("round", 1), st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0)
     msg = (f"{a.message}\n\nDelegated to {spec['model_label']} via OpenCode: {rounds} round(s), "
@@ -1740,11 +1787,12 @@ def cmd_accept(a):
             commit = _landed(task)
             if not commit:
                 head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
-                if gitops.changed(task.worktree) or head == spec["base"]:
-                    commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a))
-                else:  # nothing new: the branch's commits past the base are the work (the steps
-                    # wb next committed, or Claude's own after a takeover: the audit)
-                    commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
+                with _settle_proposals(task, a.take_claude_md):  # kept if the commit fails (#507)
+                    if gitops.changed(task.worktree) or head == spec["base"]:
+                        commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a))
+                    else:  # nothing new: the branch's commits past the base are the work (the
+                        # steps wb next committed, or Claude's own after a takeover: the audit)
+                        commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
             # the branch must hold it before the worktree goes: on a detached HEAD the commit was
             # left in no branch at all (#417, the audit of 1.8)
             gitops.put_on_branch(repo, spec["branch"], commit, task.worktree)
@@ -1771,10 +1819,18 @@ def cmd_accept(a):
         into = close.get("merge_into")
         if into and into != "HEAD" and gitops.contains(repo, f"refs/heads/{into}", tip):
             merged = gitops.git(repo, "rev-parse", "--short", f"refs/heads/{into}").strip()  # made already
+        elif into and into != "HEAD" and (merged := gitops.squashed(
+                repo, into, close.get("merge_from"), tip)):
+            pass  # a squash made already: it never holds the tip, so the retry squashed again (#432)
         else:
             try:
                 if not into:
                     raise gitops.GitError(gitops.detached(repo, spec["branch"], had=True))
+                # where the target stood before: a squash interrupted before merged_head was
+                # saved is found from it on the retry (#432, the audit of 1.8)
+                close = {**close, "merge_from": gitops.git(
+                    repo, "rev-parse", "--verify", "-q", f"refs/heads/{into}", check=False).strip()}
+                task.set_status(closing=close)
                 # every target is held to the base, a named branch too: reset or rebased since
                 # the start, the merge brought back what was withdrawn from it (#418)
                 # signed as the task's commit was, and a kill backs the checkout out: SIGTERM
@@ -1818,7 +1874,10 @@ def cmd_accept(a):
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}" if merged else
            f"\nmerge with: {gitops.jj_merge(repo, spec['branch'])}" if gitops.jj_colocated(repo) else
-           f"\nmerge with: git -C {shlex.quote(str(repo))} merge --no-ff {spec['branch']}"))
+           f"\nmerge with: " + gitops.merge_by_hand(
+               repo, spec["branch"], close.get("merge_as") if close.get("merge") else
+               context.repo_conf(spec["repo"]).get("merge") or "merge",
+               close.get("sign", True) and _signed(spec, a))))
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(checked)
     _say(lessons.nudge(task, "accepted"))
