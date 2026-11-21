@@ -270,6 +270,51 @@ def gpu(who: str, say, wait: bool, keep=()):
         yield
 
 
+def boxes(e: dict) -> list:
+    """The remote servers the coding tasks use on the host a url engine is on (a `wb remote`
+    box, WSL2's Windows host): one discovered model per lease pool there. An engine there took no
+    turn and posted while a task's model was loaded on that card, so one of them spilled or
+    crashed (#750). None for a command engine, one that says "gpu": false, or one on this host."""
+    if e.get("command") or e.get("gpu") is False or not isinstance(e.get("url"), str):
+        return []
+    try:
+        host = (urlparse(e["url"]).hostname or "").lower()
+    except ValueError:
+        return []
+    if not host or models._this_host(host):
+        return []
+    found: dict = {}
+    for m in models.discover().values():
+        if m.remote and (urlparse(m.root).hostname or "").lower() == host:
+            found.setdefault(models.pool(m), m)
+    return list(found.values())
+
+
+@contextlib.contextmanager
+def turns(who: str, say, wait: bool, *engines: dict):
+    """Every GPU turn a batch needs: this machine's (`gpu`) for an engine on its GPU, and one on
+    each remote box an engine shares with the coding tasks (`boxes`): queued with that box's
+    tasks (`GpuLease(None, …, on=)`, as `wb optimize` does), refused at once unless ``wait``,
+    and that box's Ollama models unloaded (keep_loaded kept)."""
+    remote = {models.pool(m): m for e in engines for m in boxes(e)}
+    here = [e for e in engines if on_gpu(e) and not boxes(e)]
+    with contextlib.ExitStack() as stack:
+        if here:
+            stack.enter_context(gpu(who, say, wait, serving(*engines)))
+        for m in remote.values():
+            stack.enter_context(models.GpuLease(None, who, say, wait=wait, on=m))
+            if m.engine == "ollama" and not models._fake():
+                held = models.keep_loaded()
+                for name in models._ollama_loaded(m.root):
+                    if not models._kept_name(name, held):
+                        say(f"unloading {name} on {m.root}")
+                        try:
+                            models._post(f"{m.root}/api/generate", {"model": name, "keep_alive": 0}, timeout=120)
+                        except Exception:  # as models._unload: its server may be gone
+                            pass
+        yield
+
+
 def free(out_dir: Path, stem: str, suffix: str, extra: tuple[str, ...] = ()) -> Path:
     """`<stem><suffix>`, or `<stem>-2<suffix>` and on, whichever has neither the file nor its
     .json sidecar (nor any ``extra`` file beside it), claimed by creating its sidecar empty

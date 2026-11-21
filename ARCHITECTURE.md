@@ -4030,7 +4030,12 @@ Then describe the engine in `~/.config/workbench/images.json` (`$WB_IMAGES`). Tw
   their output may be used.
 - `"gpu": false` marks an engine that isn't on this machine's GPU (a CPU build, another box): it
   takes no lease and frees nothing, so it runs beside a coding task. A url on another host is off
-  this GPU by default (`"gpu": true` puts it back on).
+  this GPU by default (`"gpu": true` puts it back on), but when that host serves a model the
+  coding tasks use (a `wb remote` box, WSL2's Windows host), it takes its turn there: it queues
+  with that box's tasks (refused while one runs, unless `--wait`) and that box's Ollama models are
+  unloaded first (`media.turns`, `media.boxes`: it took no turn and generated beside a task's model
+  on that card, #750). A command engine in WSL beside an Ollama on Windows still takes this
+  machine's pool, not the Windows host's.
 
 A generation on this GPU takes the GPU lock and unloads the coding models first, just as a task does. While
 a task holds the GPU, `wb image` refuses at once and names it; `--wait` queues behind it instead
@@ -4085,7 +4090,11 @@ custom-node packs do run their own Python).
   listings, `wb scout` and generation in http.client's InvalidURL, #748), then a command whose first token is on
   PATH or a file; a url whose server answers a GET within 2 s (any status but 401 and 403, "wants
   an API key" or "refused the key": #597, it was listed as ready and failed every generation).
-- `generate`: an engine off this GPU (`media.on_gpu`) runs with no lease and frees nothing; any
+- `generate`: its turns come from `media.turns`: an engine on a remote box the tasks use
+  (`media.boxes`: a discovered remote model whose host is the url's, one per lease pool) takes
+  `GpuLease(None, "wb image", wait=…, on=<that model>)` on each such pool, as `wb optimize`
+  does, and unloads that box's Ollama models (not `keep_loaded`), #750; an engine off this GPU
+  otherwise (`media.on_gpu`) runs with no lease and frees nothing; any
   other holds the GPU for the whole batch through `media.gpu`, that is `models.GpuLease(None, "wb image",
   wait=…)` (any live holder in gpu.json: a RuntimeError naming them, unless `--wait`; then it
   queues in gpu.json behind the running tasks; while it holds or waits, `wb start` refuses a new
@@ -4230,7 +4239,8 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   every speech batch.
 - `"gpu": false` marks an engine that runs on the CPU. It takes no GPU lease and frees nothing,
   so it can run beside a coding task. A url engine on another host is off this GPU unless it
-  says `"gpu": true` (`media.on_gpu`, as for images). Any other engine has the GPU to itself,
+  says `"gpu": true` (`media.on_gpu`, as for images), or is on a remote box the coding tasks use,
+  where it takes that box's turn (`media.turns`, as for images, #750). Any other engine has the GPU to itself,
   exactly as `wb image` does, and `free_gpu` keeps the models on the engine's or the listener's
   own server (`media.serving`).
 
@@ -4242,8 +4252,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   (refused when it's of another kind), else the first of `--kind`, else the first that isn't a
   listener.
 - `generate` refuses, before anything runs, a voice not in `voices` and a `--voice`, `--lyrics`,
-  `--seconds` or `--ref` the engine has no slot for. It runs under `media.gpu("wb audio", …)`
-  (the lease, `free_gpu`, `settle`) unless both the engine and the listener are off this GPU.
+  `--seconds` or `--ref` the engine has no slot for. It runs under `media.turns("wb audio", …)`: `media.gpu`
+  (the lease, `free_gpu`, `settle`) unless both the engine and the listener are off this GPU, and
+  a turn on each remote box either is on (#750).
   Each clip is made in a temporary directory (`.wb-audio-*`), checked there (`inspect`), then
   published with its sidecar and spectrogram under the first free `<slug>-<seed>.wav`
   (`media.free`, #267). A url engine POSTs `{model, input, voice, seed, response_format: "wav"}`

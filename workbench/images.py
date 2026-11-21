@@ -31,7 +31,6 @@ each batch) makes it let go.
 from __future__ import annotations
 
 import base64
-import contextlib
 import json
 import os
 import re
@@ -192,8 +191,9 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
     out_dir.mkdir(parents=True, exist_ok=True)
     seed = int(time.time()) % 1_000_000 if seed is None else seed
     made = []
-    # the GPU to itself, queued with the tasks; an engine off this GPU runs beside them (#587)
-    hold = media.gpu("wb image", say, wait, media.serving(e)) if media.on_gpu(e) else contextlib.nullcontext()
+    # the GPU to itself, queued with the tasks; an engine off this GPU runs beside them (#587),
+    # unless it is on a remote box the tasks use: then a turn there (#750)
+    hold = media.turns("wb image", say, wait, e)
     # the unload inside the lease, failed or not: the next task loads beside nothing (#749)
     with hold, media.unloading([e], say, "image", config_path().parent):
         for i in range(n):

@@ -21,7 +21,6 @@ model is named here: the user installs one and describes it.
 from __future__ import annotations
 
 import array
-import contextlib
 import json
 import math
 import operator
@@ -158,10 +157,8 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
     out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     seed = int(time.time()) % 1_000_000 if seed is None else seed
-    on_gpu = media.on_gpu(e) or bool(ear and media.on_gpu(ear[1]))
     made = []
-    hold = (media.gpu("wb audio", say, wait, media.serving(e, *([ear[1]] if ear else [])))
-            if on_gpu else contextlib.nullcontext())
+    hold = media.turns("wb audio", say, wait, e, *([ear[1]] if ear else []))  # as wb image (#750)
     with hold:
         try:
             for i in range(n):

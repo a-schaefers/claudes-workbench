@@ -170,6 +170,33 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.assertTrue(store.Task("t-r2").status.get("remote_gpu"))    # its savings: unmeasured (#117)
         self.assertNotIn("remote_gpu", store.Task("t-here").status)
 
+    def test_an_image_server_on_a_remote_box_takes_its_turn_with_that_boxs_tasks(self):
+        # #750 (the 2026-11-21 audit, finding 97): an image url on a `wb remote` box took no lease,
+        # so it generated while a task's model sat on that card, and one of them spilled or crashed
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama-pc"] = {"options": {"baseURL": "http://gpu-pc.invalid:11434/v1"},
+                                        "models": {"coder": {"limit": {"context": 32768}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"ollama-pc": {"local": True}}))
+        tmp = Path(self.tmp.name)
+        (tmp / "images.json").write_text(json.dumps(
+            {"box": {"url": "http://gpu-pc.invalid:30000/v1/images/generations"},
+             "elsewhere": {"url": "http://other-pc.invalid:30000/v1/images/generations"}}))
+        os.environ["WB_IMAGES"] = str(tmp / "images.json")
+        self.start("t-r1", "hang", "--model", "ollama-pc/coder")
+        wait_running("t-r1")
+        png = lambda e, v: Path(v["out"]).write_bytes(b"\x89PNG\r\n\x1a\n")
+        with mock.patch.object(images, "_server", png), mock.patch.object(images, "ready", lambda e: ""):
+            with self.assertRaisesRegex(RuntimeError, "t-r1"):           # its turn: refused, not beside it
+                images.generate("a fox", tmp / "o", n=1, name="box", say=lambda m: None)
+            self.assertEqual(len(images.generate("a fox", tmp / "o", n=1, name="elsewhere",
+                                                 say=lambda m: None)), 1)  # a host no task uses
+            run_wb("stop", "t-r1")
+            said = []
+            self.assertEqual(len(images.generate("a fox", tmp / "o", n=1, name="box", say=said.append)), 1)
+        self.assertEqual(models.holders(), {})                           # this machine's GPU untouched
+        self.assertEqual(models.holders(pool="gpu-gpu-pc-invalid-11434"), {})   # the turn let go of
+
     def test_a_task_sent_back_goes_ahead_of_one_started_after_it(self):
         # its review waits on that round: behind a night's backlog, it would wait for all of it
         os.environ["WB_FAKE_GPU_GB"] = "24"
