@@ -8297,6 +8297,39 @@ class Lane(Base):
                               or str(home / p).startswith(q + "/")], p)
         self.assertTrue((moved / "toolchains").is_dir())
 
+    @home_outside_the_lane
+    def test_nim_elm_and_clojure_homes_and_caches_moved_by_their_variables_are_in_the_lane(self):
+        # #911 (the third 2026-11-21 audit): #672 allowed nimble, elm and clojure, but ~/.nimble,
+        # ~/.elm and ~/.gitlibs were out of the lane, as were caches moved by CCACHE_DIR, HF_HOME
+        # and the like, every Julia depot after the first, and pnpm's store or cabal's state
+        # under a custom XDG_DATA_HOME or XDG_STATE_HOME: each build or test was refused
+        home = self.fake_home()
+        for d in (".elm/0.19.1/packages", ".nimble/pkgs2", "ccache", "hf", "jd1", "jd2",
+                  "nimbledir/pkgs2", "cabaldir/bin", "data/pnpm/store", "state/cabal",
+                  ".local/share/pnpm/store"):
+            (home / d).mkdir(parents=True)
+        env = {"CCACHE_DIR": str(home / "ccache"), "HF_HOME": str(home / "hf"),
+               "JULIA_DEPOT_PATH": f"{home / 'jd1'}{os.pathsep}{home / 'jd2'}{os.pathsep}",
+               "NIMBLE_DIR": str(home / "nimbledir"), "CABAL_DIR": str(home / "cabaldir"),
+               "XDG_DATA_HOME": str(home / "data"), "XDG_STATE_HOME": str(home / "state")}
+        task = self.bare_task("t-911", self.repo)
+        with mock.patch.dict(os.environ, env):
+            w = context.writable(task)
+            for p in (".elm", "ccache", "hf", "jd1", "jd2", "data/pnpm/store", "state/cabal",
+                      ".nimble/pkgs2", "nimbledir/pkgs2"):
+                self.assertIn(str(home / p), w, p)
+            for p in (".nimble/bin", "nimbledir/bin", "cabaldir/bin",   # made first, split out
+                      ".local/share/pnpm/store"):    # the XDG variable moved it
+                self.assertFalse([q for q in w if q == str(home / p) or q.startswith(f"{home / p}/")
+                                  or str(home / p).startswith(q + "/")], p)
+            self.assertTrue((home / ".nimble" / "bin").is_dir())
+            self.assertTrue((home / "nimbledir" / "bin").is_dir())
+            # not made yet: the grant names the home, which wb allow --path then makes (#824)
+            self.assertEqual(runner.lane_grant(f"{home}/.gitlibs/libs/x/y"), f"{home}/.gitlibs")
+            shutil.rmtree(home / ".nimble")
+            self.assertEqual(runner.lane_grant(f"{home}/.nimble/pkgs2/x-1.0/x.nim"),
+                             f"{home}/.nimble/pkgs2")        # never its bin/
+
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     @home_outside_the_lane
     def test_secrets_stay_unreadable_inside_tool_homes_and_where_variables_moved_them(self):

@@ -1622,7 +1622,11 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `.platformio`, `.conan2`, `.hex`, `.mix`, `.sbt`, `.ivy2`, `.pub-cache`, `.konan`,
   `.local/share/hatch`, `.local/share/virtualenvs`, and since #437 `.local/share/NuGet`, NuGet's
   http and plugins caches, `.local/state/cabal`, Cabal 3.10's store without `~/.cabal`, and
-  `.android`, the debug keystore, split around `adbkey`), Flutter's `bin/cache` for
+  `.android`, the debug keystore, split around `adbkey`; since #911, the third 2026-11-21 audit,
+  `.nimble`, `.elm` and `.gitlibs`, the homes of nimble, elm and Clojure's git deps, which #672
+  allowed but whose installs and builds the lane refused; the `.local/share/` and `.local/state/`
+  entries under `$XDG_DATA_HOME` and `$XDG_STATE_HOME` instead when those are set, `tool_homes`,
+  as `secret_paths` follows them), Flutter's `bin/cache` for
   `$FLUTTER_ROOT` and each `flutter` on PATH (`flutter_caches`: every flutter command opens
   `bin/cache/lockfile` for writing; kept whole, like `.dotnet`, though the Dart SDK the user's
   flutter runs lives there) and wherever the environment moved them
@@ -1630,8 +1634,11 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `GOMODCACHE`, `GOCACHE`, `npm_config_cache`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`,
   `GRADLE_USER_HOME`, `BUN_INSTALL`, `DENO_DIR`, `MIX_HOME`, `HEX_HOME`, `PUB_CACHE`,
   `KONAN_DATA_DIR`, `HATCH_DATA_DIR`, `WORKON_HOME`, `CARGO_TARGET_DIR`, `NPM_CONFIG_CACHE`,
-  `NUGET_PACKAGES`, each only when absolute; of `GOPATH` and `BUN_INSTALL` only their
-  caches, `VAR_CACHES`: `pkg`, `install/cache`), OpenCode's own data (`.local/share/opencode`,
+  `NUGET_PACKAGES`, and since #911 `CCACHE_DIR`, `SCCACHE_DIR`, `YARN_CACHE_FOLDER`,
+  `PRE_COMMIT_HOME`, `STACK_ROOT`, `CABAL_DIR`, `JULIA_DEPOT_PATH` (every entry, `ALL_ENTRIES`),
+  `CONAN_HOME`, `PLATFORMIO_CORE_DIR`, `HF_HOME` (which `ENV_KEEP` passes to the agent),
+  `TORCH_HOME`, `ELM_HOME` and `NIMBLE_DIR`, each only when absolute; of `GOPATH` and
+  `BUN_INSTALL` only their caches, `VAR_CACHES`: `pkg`, `install/cache`), OpenCode's own data (`.local/share/opencode`,
   `.local/state/opencode`, and `opencode` under `$XDG_DATA_HOME` and `$XDG_STATE_HOME` when set),
   `$XDG_CACHE_HOME`, and the extra paths (`commands.json` `paths`, the task's grants `paths`), each with its real path
   too, keeping only those that exist. OpenCode's data, state, cache and config directories
@@ -1643,8 +1650,10 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `.deno` and pnpm's home give only their caches; `.local/share/uv` is out (`uv tool` programs and
   the Pythons every uv venv links to; uv's cache is `~/.cache/uv`, the 0.90 review), so a Python
   uv must download first, like `uv tool install`, asks; and `NOT_WRITABLE` (`.cargo/bin`,
-  `.cargo/env`, `.dotnet/tools`, `.cabal/bin`, `.ghcup/bin`, `.rustup/toolchains`, and
-  `$CARGO_HOME`'s `bin` and `env` and `$RUSTUP_HOME`'s `toolchains`) are left out of their homes;
+  `.cargo/env`, `.dotnet/tools`, `.cabal/bin`, `.ghcup/bin`, `.rustup/toolchains`,
+  `.nimble/bin`, and `VAR_NOT_WRITABLE`: `$CARGO_HOME`'s `bin` and `env`, `$RUSTUP_HOME`'s
+  `toolchains`, `$NIMBLE_DIR`'s and `$CABAL_DIR`'s `bin`; all made or not: `not_writable_paths`)
+  are left out of their homes;
   so are the user's active Python environments (`context.python_envs`: `VIRTUAL_ENV`,
   `CONDA_PREFIX`, each PATH `bin` beside a `pyvenv.cfg` or `conda-meta`), which poetry's,
   pipenv's and virtualenvwrapper's homes put inside the lane (#490). Landlock only allows, so a
@@ -1658,7 +1667,8 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   directory below a split one (above);
   `cargo install`, `rustup toolchain install` (or a `rust-toolchain.toml` naming one not
   installed yet) and the like need `wb allow --path`. A rustup home gets `toolchains/` made first,
-  so the split keeps it out even before rustup made it. What stays in the lane is a documented
+  and a nimble home its `bin/` (`MADE_FIRST`), so the split keeps it out even before the tool
+  made it. What stays in the lane is a documented
   trade, like `/tmp`, for letting builds and package managers work without asking: a home kept
   whole can hold a program the user's own tools run later outside the lane: `.dotnet` (the
   `dotnet` host and SDKs when installed there), `.ghcup`'s toolchains, `.julia` (juliaup),

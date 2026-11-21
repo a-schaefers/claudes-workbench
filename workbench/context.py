@@ -483,13 +483,25 @@ TOOL_HOMES = (".cache", ".cargo", ".rustup", "go/pkg", ".npm", ".bun/install/cac
               ".local/share/hatch", ".local/share/virtualenvs",
               # NuGet's http and plugins caches, Cabal 3.10's store without ~/.cabal, and
               # Android's debug keystore, its adbkey hidden (SECRETS): each build failed (#437)
-              ".local/share/NuGet", ".local/state/cabal", ".android")
+              ".local/share/NuGet", ".local/state/cabal", ".android",
+              # the homes of ecosystems #672 allowed: `nimble install -d` writes ~/.nimble/pkgs2,
+              # `elm make` in a fresh worktree takes ~/.elm's package lock, Clojure's git deps
+              # fill ~/.gitlibs, and each was refused (#911, the third 2026-11-21 audit)
+              ".nimble", ".elm", ".gitlibs")
 # where the user moved them: a toolchain follows its variable, not the default path; GOPATH and
-# BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches
+# BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches. The second
+# line's were refused where the user moved them, HF_HOME though ENV_KEEP passes it on (#911)
 TOOL_HOME_VARS = ("CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE", "GOCACHE", "npm_config_cache",
                   "PIP_CACHE_DIR", "UV_CACHE_DIR", "GRADLE_USER_HOME", "BUN_INSTALL", "DENO_DIR",
                   "MIX_HOME", "HEX_HOME", "PUB_CACHE", "KONAN_DATA_DIR", "HATCH_DATA_DIR",
-                  "WORKON_HOME", "CARGO_TARGET_DIR", "NPM_CONFIG_CACHE", "NUGET_PACKAGES")
+                  "WORKON_HOME", "CARGO_TARGET_DIR", "NPM_CONFIG_CACHE", "NUGET_PACKAGES",
+                  "CCACHE_DIR", "SCCACHE_DIR", "YARN_CACHE_FOLDER", "PRE_COMMIT_HOME", "STACK_ROOT",
+                  "CABAL_DIR", "JULIA_DEPOT_PATH", "CONAN_HOME", "PLATFORMIO_CORE_DIR", "HF_HOME",
+                  "TORCH_HOME", "ELM_HOME", "NIMBLE_DIR")
+# the variables whose every entry is a home, not only the first: Julia stacks its depots (#911)
+ALL_ENTRIES = ("JULIA_DEPOT_PATH",)
+# TOOL_HOMES' entries under these follow the variable, as secret_paths does (#911)
+XDG_BASES = (("XDG_DATA_HOME", ".local/share/"), ("XDG_STATE_HOME", ".local/state/"))
 # The SDKs a build reads by variable, not from PATH: with only Android's platform-tools on PATH,
 # Gradle couldn't open ~/Android/Sdk/platforms' android.jar, and every build and test failed
 # (#437, the audit of 1.8). Their targets are readable, and so are the SDKs' default places.
@@ -501,7 +513,15 @@ VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
 # CARGO_HOME and RUSTUP_HOME for theirs); a toolchain a rust-toolchain.toml names that isn't
 # installed yet asks first (`wb allow --path`)
 NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghcup/bin",
-                ".rustup/toolchains")
+                ".rustup/toolchains", ".nimble/bin")
+# and the same places in the homes TOOL_HOME_VARS moved: nimble and cabal install programs into
+# their bin/ (#911)
+VAR_NOT_WRITABLE = {"CARGO_HOME": ("bin", "env"), "RUSTUP_HOME": ("toolchains",),
+                    "NIMBLE_DIR": ("bin",), "CABAL_DIR": ("bin",)}
+# a home holding one is made with it first, so the split keeps it out before the tool makes it
+# (else the agent could make it and plant a program there)
+MADE_FIRST = {".rustup": "toolchains", ".nimble": "bin", "RUSTUP_HOME": "toolchains",
+              "NIMBLE_DIR": "bin"}
 # and what cargo makes at the top of its split home, made first so the split grants it: a split
 # home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
 # every build with a dependency, and a git dependency failed wherever git/ didn't exist yet)
@@ -686,15 +706,27 @@ def _split(place: str, out_of: set[str]) -> list[str]:
     return [q for n in names for q in _split(os.path.join(real, n), out_of)]
 
 
+def tool_homes() -> list[Path]:
+    """TOOL_HOMES' places: under the home, or under XDG_DATA_HOME and XDG_STATE_HOME where those
+    are set (pnpm's store, hatch's and cabal's were refused there, #911)."""
+    home, out = Path.home(), []
+    for t in TOOL_HOMES:
+        var = next((v, b) for v, b in (*XDG_BASES, (None, "")) if t.startswith(b))
+        out.append(Path(os.environ[var[0]]) / t[len(var[1]):] if var[0] and os.environ.get(var[0])
+                   else home / t)
+    return out
+
+
 def tool_var_homes() -> list[str]:
-    """The toolchain homes TOOL_HOME_VARS name, each that is set (its first entry, its cache for
-    VAR_CACHES' whole homes)."""
+    """The toolchain homes TOOL_HOME_VARS name, each that is set (its first entry, every one for
+    ALL_ENTRIES, its cache for VAR_CACHES' whole homes)."""
     out = []
     for v in TOOL_HOME_VARS:
         if os.environ.get(v):
-            first = os.environ[v].split(os.pathsep)[0]
-            if os.path.isabs(first):  # a relative CARGO_TARGET_DIR is the build's own, in the repo
-                out.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
+            entries = os.environ[v].split(os.pathsep)
+            for e in entries if v in ALL_ENTRIES else entries[:1]:
+                if os.path.isabs(e):  # a relative CARGO_TARGET_DIR is the build's own, in the repo
+                    out.append(os.path.join(e, VAR_CACHES[v]) if v in VAR_CACHES else e)
     return out
 
 
@@ -705,7 +737,7 @@ def tool_home_of(real: str) -> str | None:
     what exists), and the walk up from a refused `~/.npm/_cacache` reached the home directory,
     which no grant may name, so a first `npm ci` or `go test` named no grant at all (#824)."""
     homes = dict.fromkeys(os.path.realpath(h) for h in (
-        *(Path.home() / t for t in TOOL_HOMES), *tool_var_homes()))
+        *tool_homes(), *tool_var_homes()))
     homes.pop(os.path.realpath(Path.home()), None)
     within = [h for h in homes if real == h or _under(real, h)]
     if within:
@@ -714,14 +746,19 @@ def tool_home_of(real: str) -> str | None:
     return below[0] if len(below) == 1 else None
 
 
+def not_writable_paths() -> list[Path]:
+    """NOT_WRITABLE's places under the home and VAR_NOT_WRITABLE's in the homes those variables
+    name, made or not."""
+    return [*(Path.home() / h for h in NOT_WRITABLE),
+            *(Path(os.environ[v]) / n for v, names in VAR_NOT_WRITABLE.items()
+              if os.environ.get(v) for n in names)]
+
+
 def not_writable(made_only: bool = True) -> set[str]:
-    """NOT_WRITABLE's places, CARGO_HOME's and RUSTUP_HOME's own among them, as real paths: those
-    that exist, or with ``made_only`` false every one (lane_grant: a grant made before cargo or
-    rustup runs must not hold their bin/ either)."""
-    cargo, rustup = os.environ.get("CARGO_HOME"), os.environ.get("RUSTUP_HOME")
-    return {os.path.realpath(p) for p in (*(Path.home() / h for h in NOT_WRITABLE),
-                                          *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()),
-                                          *((Path(rustup) / "toolchains",) if rustup else ()))
+    """NOT_WRITABLE's places, CARGO_HOME's, RUSTUP_HOME's and the like's own among them, as real
+    paths: those that exist, or with ``made_only`` false every one (lane_grant: a grant made
+    before cargo or rustup runs must not hold their bin/ either)."""
+    return {os.path.realpath(p) for p in not_writable_paths()
             if not made_only or os.path.lexists(p)}
 
 
@@ -775,7 +812,7 @@ def writable(task: store.Task) -> list[str] | None:
             print(f"workbench: can't make OpenCode's directory {d} ({e.strerror}): "
                   f"its first run fails without it", file=sys.stderr)
     places = [tempfile.gettempdir(), *TEMP_ROOTS, *DEV_NODES, *gpu_nodes(task), "/proc",
-              *(home / h for h in TOOL_HOMES + OPENCODE_HOMES), *(x for x in xdg if x),
+              *tool_homes(), *(home / h for h in OPENCODE_HOMES), *(x for x in xdg if x),
               *flutter_caches(),
               *(Path(p).expanduser() for p in extra)]
     whole = {"/", os.path.realpath(home)}  # a GOPATH=~ must not hand over the home directory
@@ -792,11 +829,11 @@ def writable(task: store.Task) -> list[str] | None:
                         Path(c, n).touch()
                 except OSError:  # a read-only home: the task starts all the same
                     pass
-    rustup = os.environ.get("RUSTUP_HOME")
-    for r in {os.path.realpath(r) for r in (home / ".rustup", rustup) if r}:
-        if os.path.isdir(r):  # made, so it is split out: else the agent could make it and plant one
-            try:
-                os.makedirs(os.path.join(r, "toolchains"), exist_ok=True)
+    for k, n in MADE_FIRST.items():  # ~/.rustup's toolchains/, ~/.nimble's bin/ (#911)
+        r = os.environ.get(k) if k.isupper() else str(home / k)
+        if r and os.path.isabs(r) and os.path.isdir(r):  # made, so it is split out: else the
+            try:                                         # agent could make it and plant one
+                os.makedirs(os.path.join(r, n), exist_ok=True)
             except OSError:
                 pass
     # the user's active Python environments too: a venv in a tool home (poetry's, pipenv's,
@@ -1540,10 +1577,7 @@ def read_only(task: store.Task, lane: list[str]) -> list[str]:
     the audit of 1.90). Also the SDKs (sdk_roots). Never one inside a lane entry, whose own
     rules say what is done there."""
     hidden = secret_paths() | private_paths()
-    home = Path.home()
-    split = [home / h for h in NOT_WRITABLE]
-    split += [Path(v) / d for v, d in ((os.environ.get("RUSTUP_HOME"), "toolchains"),
-                                       (os.environ.get("CARGO_HOME"), "bin")) if v]
+    split = not_writable_paths()
     places = tool_roots(hidden) | sdk_roots(hidden) | {
         os.path.realpath(p) for p in split
         if os.path.isdir(p) and not any(_under(os.path.realpath(p), h) for h in hidden)}
