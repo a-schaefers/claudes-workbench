@@ -1780,6 +1780,50 @@ class Lifecycle(Base):
                                  capture_output=True, text=True).stdout.splitlines()
             self.assertEqual(log.count(f"feat: {t}"), 1, name)   # one commit, merged once
 
+    def test_a_half_finished_accept_is_finished_by_accept_and_refused_by_everything_else(self):
+        # #878 (Claude's audit of 1.90.24): an accept cut short after saving `closing` left the
+        # task in review: discard recorded committed work as discarded, and feedback, next or
+        # takeover added work that the retried accept's forced worktree removal deleted
+        def refused(*argv):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                run_wb(*argv)
+            return err.getvalue()
+        self.start("t-half", "ok", "--test", TEST_CMD)
+        wait_phase("t-half", {"review"})
+        with mock.patch.object(gitops, "remove_worktree", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            run_wb("accept", "t-half", "-m", "feat: answer")  # cut short, its worktree still there
+        task = store.Task("t-half")
+        self.assertEqual(task.status["phase"], "review")
+        self.assertIn("being accepted: wb accept t-half finishes it", run_wb("status"))
+        spec = Path(self.tmp.name) / "next.md"
+        spec.write_text("More.\n")
+        for argv in (("feedback", "t-half", "--text", "more"), ("next", "t-half", "--spec", str(spec),
+                     "-m", "x"), ("discard", "t-half"), ("takeover", "t-half")):
+            self.assertIn("t-half is being accepted: an earlier wb accept committed", refused(*argv),
+                          argv)
+        task.set_status(phase="stuck")
+        self.assertIn("wb accept t-half finishes it", refused("resume", "t-half"))
+        task.set_status(phase="review")
+        (task.worktree / "extra.txt").write_text("added after the commit\n")
+        self.assertIn("worktree changed after an earlier wb accept committed", refused(
+            "accept", "t-half", "-m", "feat: answer"))
+        (task.worktree / "extra.txt").unlink()
+        self.assertIn("accepted t-half", run_wb("accept", "t-half", "-m", "feat: answer"))
+        self.assertEqual(store.Task("t-half").status["phase"], "accepted")
+        # cut short after the worktree went, during the merge: discard's advice no more
+        self.start("t-half2", "ok", "--test", TEST_CMD)
+        wait_phase("t-half2", {"review"})
+        with mock.patch.object(gitops, "merge", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            run_wb("accept", "t-half2", "-m", "feat: answer", "--merge")
+        task = store.Task("t-half2")
+        self.assertFalse(task.worktree.exists())
+        self.assertIn("wb accept t-half2 finishes it", cli._worktree_problem(task))
+        self.assertIn("wb accept t-half2 finishes it", refused("feedback", "t-half2", "--text", "x"))
+        self.assertIn("accepted t-half2", run_wb("accept", "t-half2", "-m", "feat: answer", "--merge"))
+
     def test_a_last_step_with_no_new_edits_accepts_after_an_interrupt_took_its_worktree(self):
         # #246: the worktree was removed, the retry found no accept trailer on step 1's commit,
         # and exited 1 with the task in review for good

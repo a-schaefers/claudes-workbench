@@ -497,6 +497,8 @@ def _worktree_problem(task: store.Task) -> str | None:
     if task.spec.get("repo") and not gitops.repo_of(task.spec).is_dir():  # damaged: the runner says (#475)
         return (f"{task.spec['repo']} moved or was deleted: wb relocate {task.name} --repo <its "
                 "new path>, then try again")
+    if why := _accepting(task):  # before the discard advice (#878)
+        return why
     if task.worktree.is_dir():
         return None
     if not runner.checked_out(task):
@@ -505,6 +507,19 @@ def _worktree_problem(task: store.Task) -> str | None:
     return (f"{task.name}'s worktree is gone ({task.worktree}): its committed work is on branch "
             f"{task.spec.get('branch')}; wb discard {task.name} --keep-branch drops the task and "
             "keeps the branch")
+
+
+def _accepting(task: store.Task) -> str | None:
+    """Why the task can't be changed or dropped: an earlier wb accept got past its commit
+    (status `closing`) and stopped before it finished (Claude's Bash limit, an Esc, a signer
+    waiting on a touch). It looked like a task still in review: discard recorded committed work
+    as discarded, and feedback or next added work that the retried accept's forced worktree
+    removal then deleted (#878, Claude's audit of 1.90.24)."""
+    close = task.status.get("closing")
+    if not close or task.status.get("phase") in store.CLOSED:
+        return None
+    return (f"{task.name} is being accepted: an earlier wb accept committed {close.get('commit')} "
+            f"and stopped partway; wb accept {task.name} finishes it")
 
 
 def _need_worktree(task: store.Task) -> None:
@@ -1196,6 +1211,8 @@ def cmd_feedback(a):
     st = task.status
     if st.get("phase") not in ("review", "stuck", "failed"):
         die(f"{a.name} is {st.get('phase')}; feedback goes to a task waiting for review")
+    if why := _accepting(task):  # (#878)
+        die(why)
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
     _need_worktree(task)
@@ -1294,6 +1311,8 @@ def cmd_next(a):
     spec, st = task.spec, task.status
     if st.get("phase") != "review":
         die(f"{a.name} is {st.get('phase')}; wb next follows an approved step under review")
+    if why := _accepting(task):  # (#878)
+        die(why)
     handed = _skill_names(a.skill) if a.skill else None
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
@@ -2030,6 +2049,8 @@ def _resume(task: store.Task) -> None:
     st, name = task.status, task.name
     if st.get("phase") not in ("stuck", "failed"):
         die(f"{name} is {st.get('phase')}; wb resume continues a stopped task")
+    if why := _accepting(task):  # (#878)
+        die(why)
     if runner_alive(task):
         die(f"{name}'s runner is still running")
     if not _rechecks_out(task):
@@ -2340,6 +2361,8 @@ def cmd_takeover(a):
     task = need(a.name)
     if task.status.get("phase") in store.CLOSED:
         die(f"{a.name} is {task.status.get('phase')}")
+    if why := _accepting(task):  # (#878)
+        die(why)
     if not runner.checked_out(task):  # the runner's checkout, running or failed: a hand-back made
         # it again from nothing, and Claude's edits went with the old worktree (#655)
         die(f"{a.name}: its worktree isn't ready yet: wait for it, or wb discard {a.name}")
@@ -2452,6 +2475,14 @@ def cmd_accept(a):
            f"\n\nWorkbench-Task: {a.name}\nOpenCode-Session: {st.get('session')}")
     if close:
         commit, measured = close["commit"], close.get("step")
+        if task.worktree.is_dir() and (gitops.changed(task.worktree) or gitops.git(
+                task.worktree, "rev-parse", "HEAD", check=False).strip() != gitops.git(
+                    repo, "rev-parse", "--verify", "-q", f"{commit}^{{commit}}", check=False).strip()):
+            # the forced worktree removal below would delete what changed, and the merge leave
+            # it out (#878)
+            die(f"{a.name}'s worktree changed after an earlier wb accept committed {commit}: "
+                f"put it back to that commit (git -C {shlex.quote(str(task.worktree))} status), "
+                f"or keep the changes elsewhere, then wb accept {a.name} again")
     else:
         measured = results.step(task, landed=True)
         try:
@@ -2480,7 +2511,8 @@ def cmd_accept(a):
             into = gitops.current_branch(repo)
         close = {"commit": commit, "step": measured, "merge": bool(a.merge), "merge_into": into,
                  "merge_as": a.merge_as or "merge", "sign": _signed(spec, a)}
-        task.set_status(closing=close, tip=tip)  # before anything is removed
+        task.set_status(closing=close, tip=tip,  # before anything is removed
+                        last=f"being accepted: wb accept {a.name} finishes it if this stops")  # #878
         _spec_gaps(task, a.spec_gap)
     tip = task.status["tip"]
     # before the branch can go: wb bench add reads the steps (#649), from a bundle in the task's
@@ -3024,6 +3056,8 @@ def cmd_discard(a):
         if _finish_record(task):
             return
         die(f"{a.name} is already {task.status.get('phase')}")
+    if why := _accepting(task):  # its commit exists, perhaps merged: not a discard (#878)
+        die(why)
     _stop_runner(task)
     _spec_gaps(task, a.spec_gap)
     repo = gitops.repo_of(spec)  # a removed linked worktree: the repository's main one (#498)
