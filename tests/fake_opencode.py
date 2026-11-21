@@ -7,6 +7,9 @@
   hang   print one event, then go silent (the silence timeout should stop it)
   crash  exit 1 with no events; with FAKE_DOWN (a file) it takes the model server down with it
          (creates the file) the first time, and behaves like ok after
+  crashtalk  like crash, after the model's first words ("Let me look at the parser"): a server
+         killed out of memory late in a round (#657); with FAKE_CRASH_HANG it then goes silent
+         instead of exiting (OpenCode retrying a server that is gone)
   slow   a first run that takes an hour; a continued session behaves like ok
   fill   writes "41", then a step that fills 76% of a 32K window (6K of it reasoning), then
          works on for an hour; a fresh session handed the task behaves like ok
@@ -109,12 +112,18 @@ if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
 if scenario == "fill" and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
-if scenario == "crash" and os.path.exists(os.environ.get("FAKE_DOWN", "") + ".crashed"):
+if scenario in ("crash", "crashtalk") and os.path.exists(os.environ.get("FAKE_DOWN", "") + ".crashed"):
     scenario = "ok"  # the server came back: this run works
+if scenario == "crashtalk":
+    emit("step_start")
+    emit("text", text="Let me look at the parser.")
+    scenario = "crash"
 if scenario == "crash":
     if os.environ.get("FAKE_DOWN"):  # an out-of-memory kill or an Ollama restart, mid-round
         for f in (os.environ["FAKE_DOWN"], os.environ["FAKE_DOWN"] + ".crashed"):
             open(f, "w").close()
+    if os.environ.get("FAKE_CRASH_HANG"):
+        time.sleep(3600)
     sys.exit(1)
 if args and args[0] == "run" and not os.environ.get("FAKE_NO_MCP"):
     # as OpenCode does when a session starts: each local MCP server in the config is started and

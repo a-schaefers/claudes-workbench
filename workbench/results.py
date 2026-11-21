@@ -41,8 +41,9 @@ def step(task: store.Task, landed: bool, since: str = "HEAD") -> dict:
 # Notices that end a round for reasons outside the step: a shutdown's, a logout's or a kill's
 # SIGTERM (runner.SIGNAL_STOP), and a runner that died (cli.reap: killed, out of memory, a reboot).
 # Counted as stuck, a laptop shut down mid-step shrank the model's slice for good (#582, the audit
-# of 1.90). Notices from before `cause` was written are known by their text.
-NOT_THE_STEP = ("signal", "died")
+# of 1.90). And a model server that died again after the round's one revive (runner, `server`:
+# #657). Notices from before `cause` was written are known by their text.
+NOT_THE_STEP = ("signal", "died", "server")
 _NOT_THE_STEP_TEXT = ("the runner was stopped by a signal", "the runner died without a report")
 
 

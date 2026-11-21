@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a scri
 
 from unittest import mock
 
-from workbench import context, images, media, models, router, store, watch
+from workbench import context, images, media, models, results, router, store, watch
 from tests.test_workbench import Base, TEST_CMD, run_wb, wait_phase
 
 
@@ -2412,6 +2412,27 @@ class ServerRestarted(Base):
         self.assertIn("opencode exited 1 with the model's server down: wb starts it again and the "
                       "round runs again", [r["text"] for r in rows if r.get("kind") == "load"])
 
+    def test_a_server_that_dies_after_the_models_first_words_is_revived_too(self):
+        # #657: the revive needed a round with no text, but an out-of-memory kill comes late in a
+        # round, after "Let me look at the parser": the task failed and counted against the model
+        os.environ["FAKE_DOWN"] = str(self.down)
+        self.start("t-talk", "crashtalk", "--test", TEST_CMD, "--model", "s/m")
+        st = wait_phase("t-talk", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertTrue(st["tests"]["ok"])                              # the round, run again
+        self.assertEqual(self.starts.read_text().count("\n"), 1)
+
+    def test_a_round_left_silent_by_a_server_that_died_is_revived_not_reported_stuck(self):
+        # #657: OpenCode retrying a server that is gone, until the silence guard stops the round
+        os.environ.update(FAKE_DOWN=str(self.down), FAKE_CRASH_HANG="1")
+        self.start("t-hush", "crashtalk", "--test", TEST_CMD, "--model", "s/m",
+                   "--silence-timeout", "3")
+        st = wait_phase("t-hush", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        rows, _ = store.read_jsonl(store.Task("t-hush").dir / "events.jsonl")
+        self.assertIn("the round went silent with the model's server down: wb starts it again and "
+                      "the round runs again", [r["text"] for r in rows if r.get("kind") == "load"])
+
     def test_a_second_crash_in_the_same_round_still_fails_the_task(self):
         os.environ["FAKE_DOWN"] = str(self.down)
         # the start brings the server back but the crash marker goes too: it crashes again
@@ -2421,6 +2442,11 @@ class ServerRestarted(Base):
         st = wait_phase("t-oom2", {"review", "stuck", "failed"}, timeout=90)
         self.assertEqual((st["phase"], st["last"]), ("failed", "opencode exited 1"))
         self.assertEqual(self.starts.read_text().count("\n"), 1)        # revived once a round
+        # the machine's failure, not the step's: the model's slice isn't shrunk for it (#657)
+        self.assertEqual(st.get("infra"), "model")
+        note = [r for r in store.notices() if r["task"] == "t-oom2"][-1]
+        self.assertEqual(note["cause"], "server")
+        self.assertFalse(results.step(store.Task("t-oom2"), False)["stuck"])
 
 
 class Fit(Base):

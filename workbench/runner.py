@@ -2529,15 +2529,19 @@ def drive(task: store.Task) -> None:
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])
                 continue
-            if not rnd["stuck"] and rnd["exit"] not in (0, None) and not rnd["texts"] \
-                    and revived != n and ((down := _down(m)) or _stopped(m)):
-                # OpenCode died without a word while the model's server is down (restarted, or
-                # killed out of memory): the round never reached the model. Once it is back, the
-                # loop's load reloads it and the round runs again, once (the 2026-11-19 audit).
-                # A server wb starts itself isn't waited for: the loop's load starts it (#579).
+            crashed = not rnd["stuck"] and rnd["exit"] not in (0, None)
+            hushed = rnd["guard"] == "silence"  # OpenCode retrying a server that is gone
+            if (crashed or hushed) and revived != n and ((down := _down(m)) or _stopped(m)):
+                # OpenCode died (or went quiet) while the model's server is down (restarted, or
+                # killed out of memory). Once it is back, the loop's load reloads it and the round
+                # runs again, once, continuing the session (the 2026-11-19 audit). A server wb
+                # starts itself isn't waited for: the loop's load starts it (#579). Whatever the
+                # model said first: an OOM kill comes late in a round, after its first words, and
+                # failed the task against the model (#657)
                 revived = n
                 task.event({"ts": store.now(), "round": n, "kind": "load",
-                            "text": f"opencode exited {rnd['exit']} with the model's server down: "
+                            "text": (f"opencode exited {rnd['exit']}" if crashed else "the round went silent")
+                                    + " with the model's server down: "
                                     + ("the round runs again once it is back" if down else
                                        "wb starts it again and the round runs again")})
                 lease.step_aside()  # #257: nothing of ours is on the GPU while it is down
@@ -2551,9 +2555,14 @@ def drive(task: store.Task) -> None:
                 text = summary_text(task, n, rnd, None) + _undelivered(task)
                 task.round_dir(n).joinpath("summary.md").write_text(text)
                 phase = "stuck" if rnd["stuck"] else "failed"
-                task.set_status(phase=phase, last=rnd["stuck"] or f"opencode exited {rnd['exit']}")
+                # its server gone again after the round's one revive: the machine's, not the
+                # step's, so the model's slice isn't shrunk for it (#657)
+                server = (crashed or hushed) and revived == n and (_down(m) or _stopped(m))
+                task.set_status(phase=phase, last=rnd["stuck"] or f"opencode exited {rnd['exit']}",
+                                **({"infra": "model"} if server else {}))
                 # what stopped it, for results.step: a guard or the agent's own exit (#582)
-                task.notify(phase, text, round=n, cause="guard" if rnd["stuck"] else "agent")
+                task.notify(phase, text, round=n,
+                            cause="server" if server else "guard" if rnd["stuck"] else "agent")
                 return
             # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257
             lease.step_aside(unload=bool(task.spec.get("unload_for_tests")))

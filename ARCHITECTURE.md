@@ -748,12 +748,16 @@ while any runner is live; a manual pull is the case this catches.
    carries any pending notes), unless this runner has already handed over `HANDOVER_MAX` (5)
    times: then the round is stuck ("handed over to a fresh session 5 times in this round without
    finishing: the step is too big for this model's window…"). Interrupted, or a note pending and the round not stuck →
-   `_steer_round` (the next round carries the notes). Opencode exited non-zero with no text
-   while the model's server is down (it went away under the round) → a `load` event, the wait
+   `_steer_round` (the next round carries the notes). Opencode exited non-zero, or the silence
+   guard stopped the round (OpenCode retrying), while the model's server is down (it went away
+   under the round), whatever the model had said first (an out-of-memory kill comes late in a
+   round, after its first words, and it once had to be silent: #657) → a `load` event, the wait
    for the server (*Waiting for a server that is down*), and the round runs again, once a round.
    A server wb starts itself (models.json `start`) that is no longer running (`runner._stopped`:
    an out-of-memory kill, a CUDA assert) isn't waited for: the loop's load starts it again, and
    the round runs again, once a round; a start that fails fails the task as a load failure (#579).
+   The rerun continues the session. The server gone again after that one revive fails (or
+   sticks) the task with `infra` `model` and notice `cause` `server` (#657).
    Stuck, or opencode exited non-zero (`died`: whatever it printed, since a child that said "I
    will inspect the files" and exited 7 went on to an already-green test and to review as "tests
    passed", #427; not the runner's own stop of a shutdown that hung, `lingered`) → the report
@@ -2149,7 +2153,7 @@ goes in its CLAUDE.md instead.
 
 The runner appends notices to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts,
 task, kind, text, round?, id?, cause?, tasks?}`; `cause` on a `stuck` or `failed` notice with a round:
-`guard` (a guard stopped it), `agent` (OpenCode exited non-zero with no text), `signal` (a
+`guard` (a guard stopped it), `agent` (OpenCode exited non-zero), `server` (the model's server gone again after the round's revive, #657), `signal` (a
 SIGTERM from outside wb, `SIGNAL_STOP`) or `died` (`reap`, a restart's batch notice too); `tasks`:
 a restart's or a shutdown's batch, below and in *The runner, inside*). Kinds: `review` (the round report and `review_diff`), `stuck`, `failed` (the round report as text;
 a load failure or crash without a round), `question` (with the question's `id`), `checkin`
@@ -3151,7 +3155,7 @@ max(50, round(15s)·10), s = min(window/32768, `GUESS_MAX` 4): 3 files/150 lines
 (results rows' `steps`, with files ≥ 1, from rows `tuning.judged` keeps; files and lines without
 the generated ones, `gitops.footprint`): `_went` is badly when the step compacted (in its last session, or in one a handover replaced: the `fresh` event's `compacted`), filled up
 reading (`read_full`), got stuck (a `stuck` or `failed` notice of its rounds, but not one whose
-`cause` is `signal` or `died`, `results.NOT_THE_STEP`, nor one from before `cause` with
+`cause` is `signal`, `died` or `server`, `results.NOT_THE_STEP`, nor one from before `cause` with
 `SIGNAL_STOP`'s or reap's text: a shutdown mid-step shrank the slice for good, #582), or needed ≥ `BAD_REVIEWS` 2 agent-caused review rounds; well
 when it landed and wasn't taken over; else no evidence. Files and lines are each learned alone:
 the smallest bad step caps the slice below its size (files − 1, lines × 3/4); once `FIT_MIN` (2)
@@ -6013,7 +6017,7 @@ check-ins off), not `wb start`'s.
 | `reviewed` | `{step, tree}`: the working tree the last review notice showed, a tree object (`gitops.snapshot`, bulky new files left out); the next review notice of the same step shows the diff since it |
 | `tests` | `{ok, exit, tail, round, lane?, proxy?}` of the last test run (`exit`: a code, `timeout` or `output limit`; `lane`: the device nodes it was refused outside the lane, #331; `proxy`: the proxy variables the agent's environment left out, when the run failed on a connection, #380) |
 | `base_check` | `{ok, exit, tail, limit}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`, `"setup failed"` when its scratch checkout couldn't be set up); the runner, before round 1, only with `--test` and without `--no-base-check` |
-| `infra` | why the machine, not the agent, failed the task: `setup` (`runner._prepare`), `model` (`_load_failed`: it couldn't load, or its server stayed down past `DOWN_WAIT`), `crash`, `disk full` (the runner's crash handler), `runner died` (`cli.reap`); cleared at each runner's start. A replay with it is an `error` row, not `failed` (*Bench*, #508) |
+| `infra` | why the machine, not the agent, failed the task: `setup` (`runner._prepare`), `model` (`_load_failed`: it couldn't load, or its server stayed down past `DOWN_WAIT`, or died again after a round's revive: #657), `crash`, `disk full` (the runner's crash handler), `runner died` (`cli.reap`); cleared at each runner's start. A replay with it is an `error` row, not `failed` (*Bench*, #508) |
 | `prepared` | true once the worktree is set up (`runner._prepare`: `setup`, `copy`, `siblings`), so a later run of the runner doesn't again |
 | `checked_out`, `checkout_secs` | `runner.checkout`: the worktree is made (task.json `checkout: "runner"`, #529); how long the checkout took |
 | `taken_over` | `wb takeover`: Claude has had the worktree; `runner.checkout` then fails a task not checked out rather than remove it and check it out again (#655) |
