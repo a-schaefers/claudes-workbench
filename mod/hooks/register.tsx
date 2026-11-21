@@ -1341,6 +1341,7 @@ const mem = {
   chatExpired: new Set<string>(), // web messages wb said are too old to pass on (#536): not asked again
   chatQueued: new Map<string, string>(), // web messages whose receipt says queued (id → by): read once a turn ends
   chatOwed: new Map<string, Owed>(), // web messages passed to Claude with no reply in the chat yet (#767)
+  listenerAt: new Map<string, number>(), // another session's chat listener (pid@start), when last seen alive (#839)
   submitted: false, // this mod submitted a prompt while Claude was idle, and no turn has started since (#837)
   chatUrlAt: 0, // when the web chat's link was last looked up
   savingsAt: 0, // when the week's saving was last read
@@ -2113,8 +2114,20 @@ async function listen($: any, now: number) {
   const claim = await readJson($, `${dir}/listener.json`)
   const theirs = claim.session && claim.session !== st.key
   // whether it lives unknown, its claim stands while the file is fresh: read as gone, two
-  // sessions took the listener from each other on every poll, each write the other's event (#700)
-  const lives = claim.pid ? await alive($, Number(claim.pid), claim.start ? String(claim.start) : '') : false
+  // sessions took the listener from each other on every poll, each write the other's event (#700).
+  // Asked only of another session's claim, and a live one at most every PID_CHECK_MS: on macOS
+  // (no /proc) each ask is a `kill` and a `ps`, run on every poll, 80 a minute, even for this
+  // session's own claim, whose answer went unused (#839).
+  let lives: boolean | null = false
+  if (theirs && claim.pid) {
+    const key = `${Number(claim.pid)}@${claim.start ?? ''}`
+    if (now - (mem.listenerAt.get(key) ?? -Infinity) < PID_CHECK_MS) lives = true
+    else {
+      lives = await alive($, Number(claim.pid), claim.start ? String(claim.start) : '')
+      mem.listenerAt.clear() // one claim at a time
+      if (lives === true) mem.listenerAt.set(key, now)
+    }
+  }
   const fresh = async () => now - ((await $.fs.stat(`${dir}/listener.json`).catch(() => undefined))?.mtimeMs ?? 0) < CHAT_STALE_MS
   if (theirs && (claim.pid ? lives === true || (lives === null && await fresh())
     : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens

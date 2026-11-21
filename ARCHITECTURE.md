@@ -6076,7 +6076,9 @@ frame in six, other poses blink one in eleven, except `sleep` and `slump`; FACE 
 session's live claim (its pid lives, `/proc/<pid>` on Linux, else `kill -0`, and, with a `start`, still started then: `alive`,
 which reads `/proc/<pid>/stat` or `ps -o lstart=` as wb does and compares only two of a kind; when
 neither can say, while listener.json was written within 15 s, #700: read as gone, two sessions took
-it from each other on every poll; without a pid, its `ts` within 15 s) makes this one stand by; otherwise it writes `chat/listener.json`
+it from each other on every poll; without a pid, its `ts` within 15 s; asked only of another
+session's claim, and a live one at most every PID_CHECK_MS, 30 s, `mem.listenerAt`: on macOS each
+ask is a `kill` and a `ps`, run on every poll even for the session's own claim, #839) makes this one stand by; otherwise it writes `chat/listener.json`
 `{session, cwd, pid, start, busy}` when that changes, and
 delivers each user message without a receipt, once `wb chat claim <id> --by <key>` gives it the
 message (refused: another session's, looked at again a minute later; two sessions starting

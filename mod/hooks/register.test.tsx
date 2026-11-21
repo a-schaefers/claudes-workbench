@@ -729,6 +729,35 @@ test('a listener whose life can\'t be told keeps the chat while its claim is fre
   expect(JSON.parse(files['/wb/chat/listener.json']).session).not.toBe('other-key')
 })
 
+test('without /proc the chat listener spawns no kill or ps for its own claim, and asks of another\'s at most twice a minute (#839)', async ($, on) => {
+  // #839: on macOS listen ran `kill -0` and `ps` on every 1.5 s poll, for its own claim too
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'run', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })   // polls every 1.5 s
+  fakeTasks(on, files, ['run'])
+  chatOn(files)
+  const asks: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[0] === 'kill' || e.argv.includes('ps')) asks.push(e.argv)
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'watch' ? '{}' : '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  const own = files['/wb/chat/listener.json']
+  expect(JSON.parse(own).pid).toBe(4242)                           // this session listens
+  await clock.advance(30_000)
+  expect(files['/wb/chat/listener.json']).toBe(own)
+  expect(asks).toEqual([])                                         // its own claim: never asked
+  files['/wb/chat/listener.json'] = JSON.stringify({ session: 'other-key', pid: 777, start: '1' })
+  await clock.advance(60_000)
+  expect(files['/wb/chat/listener.json']).toContain('other-key')  // theirs stands
+  expect(asks.filter(a => a[0] === 'kill').length).toBeGreaterThanOrEqual(1)
+  expect(asks.filter(a => a[0] === 'kill').length).toBeLessThanOrEqual(3)  // not 40
+})
+
 test('on a file system that ignores case, a task under ~/Repos is a session in ~/repos\'s', async ($, on) => {
   // the 2026-11-19 audit (finding 28): by the raw strings it was no one's
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
