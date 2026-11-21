@@ -23,8 +23,8 @@ def step(task: store.Task, landed: bool, since: str = "HEAD", gaps=None) -> dict
     except (gitops.GitError, OSError):
         size = {}
     # A `fresh` event at a later step's first round replaced the session the step before left
-    # (compacted or full when wb next ran: a mid-round handover's is at the round after), and that
-    # step's own measure counted it. Kept, a clean step 2 after a compacted step 1 was measured
+    # (compacted or full when wb next ran: a mid-round handover's is at the round after), and it judges
+    # that step (whose own measure saw a compaction), not this one. Kept, a clean step 2 after a compacted step 1 was measured
     # compacted, went badly and shrank the model's slice (2026-11-21, the audit of #958).
     evs = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0] if (e.get("round") or 0) >= first
            and not (first > 1 and e.get("kind") == "fresh" and e.get("round") == first)]
