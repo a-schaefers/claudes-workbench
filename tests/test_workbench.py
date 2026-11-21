@@ -308,6 +308,30 @@ class Lifecycle(Base):
         self.assertIsNone(wait_phase("t-skip", {"review"}).get("base_check"))
         self.assertNotIn("on the base", run_wb("report", "t-skip"))
 
+    def test_a_task_resumed_before_its_first_round_still_checks_the_base(self):
+        # #510 (the audit of 1.90): the gate was round 1, so a task that failed waiting for its
+        # server and was resumed (round 2) ran with no base check, and its report said nothing
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-late", "ok", "--test", TEST_CMD, "--auto-fix", "0", "--no-self-review")
+        with mock.patch.object(runner, "_down", return_value=True), \
+                mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+            runner.drive(store.Task("t-late"))
+        st = store.Task("t-late").status
+        self.assertEqual((st["phase"], st.get("base_check")), ("failed", None))
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("resume", "t-late")
+        runner.drive(store.Task("t-late"))
+        st = store.Task("t-late").status
+        self.assertEqual((st["phase"], st["round"]), ("review", 2))
+        self.assertIs(st["base_check"]["ok"], False)
+        self.assertTrue((store.Task("t-late").dir / "base-tests.txt").exists())
+        summary = (store.Task("t-late").round_dir(2) / "summary.md").read_text()
+        self.assertIn("base check: on the base the acceptance command fails", summary)
+        # once a round has reported, never again
+        task = store.Task("t-late")
+        task.set_status(base_check=None)
+        self.assertFalse(runner.needs_base_check(task))
+
     def test_a_base_check_cut_short_by_the_test_timeout_says_which_limit(self):
         # It once said "ran past 120s" whatever limit had cut it (the 2026-11-16 audit).
         self.start("t-slowbase", "ok", "--test", "sleep 5", "--test-timeout", "1", "--auto-fix", "0")

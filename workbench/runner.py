@@ -1351,6 +1351,18 @@ def review_diff(task: store.Task) -> str:
         return ""
 
 
+def needs_base_check(task: store.Task) -> bool:
+    """Whether the base check is still to run: a --test task (not --no-base-check) with none
+    recorded, on its first step and before any round has reported. Gated on round 1, a task that
+    failed or was stopped before its first round (a server down at start, wb stop during the
+    setup) and was then resumed, round 2, ran without one, and its report didn't say so (#510,
+    the audit of 1.90)."""
+    st = task.status
+    return bool(task.spec.get("test_cmd") and not task.spec.get("no_base_check")
+                and st.get("base_check") is None and st.get("steps", 1) == 1
+                and not st.get("reviews") and not any(task.dir.glob("rounds/*/summary.md")))
+
+
 def _base_check(task: store.Task) -> None:
     """Before round 1, once: the base check, its result in status `base_check` and the first
     report, and a check-in at once when it says the command can't do its job."""
@@ -1358,7 +1370,8 @@ def _base_check(task: store.Task) -> None:
     r = base_check(task)
     task.set_status(base_check=r, last="waiting for the GPU")
     if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS:  # every round's tests will too
-        task.notify("checkin", f"task {task.name}: {base_check_line(r, task)}", round=1)
+        task.notify("checkin", f"task {task.name}: {base_check_line(r, task)}",
+                    round=task.status.get("round", 1))
 
 
 def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
@@ -1744,9 +1757,7 @@ def drive(task: store.Task) -> None:
             _wait_up(task, m)
         except RuntimeError as e:
             return _load_failed(task, e)
-    st = task.status
-    if (task.spec.get("test_cmd") and not task.spec.get("no_base_check")
-            and "base_check" not in st and st.get("round", 1) == 1):
+    if needs_base_check(task):
         _base_check(task)  # on the untouched base, before the agent and the GPU
     # beside the running tasks' models when all fit the GPU, else alone once they finish
     with models.GpuLease(m, task.name, say) as lease:

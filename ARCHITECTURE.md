@@ -529,8 +529,12 @@ once more and `pid` and `stopping` are cleared.
 **`drive(task)`**, the loop:
 1. Phase `queued`, `pid`; resolve the model (unknown: `failed`). With a `setup`, `copy` or
    `siblings` and no `prepared` in status: the worktree set up (`_prepare`; a failure: `failed`,
-   before any round). With `--test`, on round 1 and no `base_check` in status yet (and not
-   `no_base_check`): the base check, before the GPU.
+   before any round). With `--test`, while no round has reported (`needs_base_check`: no
+   `base_check` in status, step one, no review round, no `rounds/<n>/summary.md`; not
+   `no_base_check`): the base check, before the GPU. Gated on round 1, a task that failed or was
+   stopped before its first round (its server down at start, `wb stop` during the setup) and was
+   then resumed into round 2 ran without one, and its report didn't say so (#510, the audit of
+   1.90).
 2. Hold one `GpuLease` for everything that follows, except where it steps aside
    (`lease.step_aside`: out of `gpu.json`, `gpu.lock` unlocked) because the task needs no GPU: the
    tests, and a wait for a server that is down. All of `drive` ran under it, so queued tasks waited
