@@ -1906,7 +1906,11 @@ Each tick reads, cheapest first:
   waits up to one interval for the stream's first line (`SmiStream.wait`); a stream that ended is
   started again, after an interval, doubling to `SMI_RETRY_MAX` 60 s, back to one interval once it
   reads. Before the first line and after an exit (a driver reset, an Xid), an NVIDIA machine said
-  "RAM (no GPU)" (#547). NVIDIA's sysfs cards are left out only when nvidia-smi named its cards. macOS: the GPUs from system_profiler once (no VRAM used, no busy %); WSL
+  "RAM (no GPU)" (#547). NVIDIA's sysfs cards are left out only when nvidia-smi named its cards.
+  A card nvidia-smi gives no memory (`[N/A]`) on ARM (`hardware.shares_ram`, `gpus`' rule: a DGX
+  Spark, GB10, a Jetson) shows the RAM it shares: `total` `MemTotal`, `used` `MemTotal` less
+  `MemAvailable` (`hardware.memory`, one read a tick), `unified`; it showed load and watts but no
+  memory (#572). An x86 card's `[N/A]` stays unknown. macOS: the GPUs from system_profiler once (no VRAM used, no busy %); WSL
   where nvidia-smi named no card (none, or one that fails): Windows' adapters once (names, and memory as `total` where the registry says); no GPU at all: the RAM, from /proc/meminfo.
 - **Tasks**: every task's task.json and status.json, re-read only when one changes (`_Files`, by
   mtime and size), and a running task's newest `step` events (the last 64 KiB of events.jsonl).
@@ -2475,7 +2479,7 @@ Ollama that answers while OpenCode has no provider at all.
 `gpu_budget` runs in routing and in the lease). `system()`: `macos`, `wsl` (`/proc/version`
 contains "microsoft"), `linux`. `gpus()`: `nvidia-smi` (`smi()`: from PATH, else WSL's `WSL_SMI`, `/usr/lib/wsl/lib/nvidia-smi`, which a systemd unit's PATH may lack; UUID, name, MiB total/used, driver; a name may hold commas) on Linux and
 WSL (`[N/A]` reads as unknown, except on ARM (`aarch64`/`arm64`: a DGX Spark, a Jetson), where
-the GPU shares the RAM: `unified` with `MemTotal`, and `ram_free` (`MemAvailable`) for the
+the GPU shares the RAM (`shares_ram`): `unified` with `MemTotal`, and `ram_free` (`MemAvailable`) for the
 budget's reserve, the 2026-11-19 audit and #524; a line of fewer than
 five fields is skipped); WSL adds Windows' adapters (`_windows_gpus`: one `powershell.exe
 -EncodedCommand` of `WINDOWS_SCRIPT`, no quoting through the interop: `Win32_VideoController`'s

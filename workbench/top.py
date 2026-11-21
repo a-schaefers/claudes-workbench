@@ -237,6 +237,14 @@ class Top:
         for i in sorted({i for _, i in (k for k in self.names if isinstance(k, tuple))} | set(latest)):
             out.append({"name": self.names.get(("nvidia", i), f"NVIDIA GPU {i}"), "driver": "nvidia",
                         "index": i, **latest.get(i, {}), **({} if i in latest else {"stale": True})})
+        if any("total" not in g for g in out) and hardware.shares_ram():
+            # a DGX Spark, a Jetson: nvidia-smi gives the GPU no memory ([N/A]), it is the RAM's
+            # (hardware.gpus' rule), so the view showed none of it filling (#572). One read a tick
+            m = hardware.memory()
+            for g in out if m.get("ram") else ():
+                if "total" not in g:
+                    g.update(total=m["ram"], unified=True,
+                             **({"used": m["ram"] - m["ram_free"]} if m.get("ram_free") is not None else {}))
         for n, c in enumerate(self.cards):
             dev = c["dev"]
             g = {"index": len(out) if self.smi_path else n, "name": self.names.get(c["slot"], c["card"]),

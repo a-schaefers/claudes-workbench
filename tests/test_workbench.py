@@ -9616,7 +9616,7 @@ mode = os.environ.get("FAKE_SMI_MODE", "")  # slow, exit (the stream), flaky (it
 if "--query-gpu=index,name" in sys.argv:
     if mode == "dead":
         sys.exit(9)
-    print("0, NVIDIA Fake 4090\\n1, NVIDIA Fake Old")
+    print("0, NVIDIA GB10" if mode == "gb10" else "0, NVIDIA Fake 4090\\n1, NVIDIA Fake Old")
     sys.exit()
 if mode in ("exit", "dead"):
     sys.exit(9)
@@ -9629,8 +9629,11 @@ ms = int(sys.argv[sys.argv.index("-lms") + 1])
 with open(os.environ["FAKE_SMI_PID"], "w") as f:
     f.write(str(os.getpid()))
 while True:
-    print("0, 1024, 24564, 37, 215.50")
-    print("1, [N/A], [N/A], [N/A], [N/A]", flush=True)
+    if mode == "gb10":  # a DGX Spark's shape: the GPU's memory is the RAM's, [N/A] to nvidia-smi
+        print("0, [N/A], [N/A], 41, 38.2", flush=True)
+    else:
+        print("0, 1024, 24564, 37, 215.50")
+        print("1, [N/A], [N/A], [N/A], [N/A]", flush=True)
     time.sleep(ms / 1000)
 """
 
@@ -9789,6 +9792,27 @@ class Top(Base):
         finally:
             t.close()
         self.assertEqual((back.get("used"), back.get("stale")), (1024 * 2 ** 20, None))
+
+    def test_a_dgx_sparks_gpu_shows_the_ram_it_shares_and_an_x86_cards_n_a_stays_unknown(self):
+        # #572: a GB10's memory.used/total are [N/A], so wb top showed its load and watts but not
+        # the 128 GB of shared memory filling, though hardware.gpus knew it is the RAM
+        bindir = self.fake_smi()
+        os.environ["FAKE_SMI_MODE"] = "gb10"
+        ram = {"ram": 128 * 10 ** 9, "ram_free": 100 * 10 ** 9, "swap": None, "swap_free": None}
+        rows = {}
+        for machine in ("aarch64", "x86_64"):
+            with mock.patch("platform.machine", lambda: machine), \
+                    mock.patch.object(hardware, "memory", lambda: ram):
+                t = self.top(Path(self.tmp.name, "nodrm"), smi=str(bindir / "nvidia-smi"))
+                try:
+                    rows[machine] = t.gpus()
+                finally:
+                    t.close()
+        self.assertEqual(rows["aarch64"], [{"name": "NVIDIA GB10", "driver": "nvidia", "index": 0, "busy": 41,
+                                            "watts": 38.2, "total": 128 * 10 ** 9, "used": 28 * 10 ** 9,
+                                            "unified": True}])
+        self.assertEqual(rows["x86_64"], [{"name": "NVIDIA GB10", "driver": "nvidia", "index": 0, "busy": 41,
+                                           "watts": 38.2}])
 
     def test_on_wsl_a_failing_nvidia_smi_falls_back_to_windows_adapters_not_the_ram(self):
         # #547: on WSL a stream that started and then failed hid Windows' adapters too

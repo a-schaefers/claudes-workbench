@@ -52,6 +52,12 @@ def smi() -> str:
     return "nvidia-smi" if shutil.which("nvidia-smi") or not os.path.isfile(WSL_SMI) else WSL_SMI
 
 
+def shares_ram() -> bool:
+    """Whether an NVIDIA GPU nvidia-smi gives no memory ([N/A]) uses the RAM: on ARM (a DGX Spark,
+    a Jetson) it does; on x86 a card's [N/A] stays unknown. gpus and wb top ask it alike (#572)."""
+    return platform.machine().lower() in ("aarch64", "arm64")
+
+
 def system() -> str:
     """linux, wsl, macos, or what Python calls the platform."""
     name = platform.system()
@@ -159,7 +165,7 @@ def gpus(windows: bool = True) -> list[dict]:
         mib = lambda v: int(v) * 2 ** 20 if v.isdigit() else None  # noqa: E731 ("[N/A]" on some cards)
         g = {"name": name, "driver": f"nvidia {driver}", "vram": mib(total),
              "vram_used": mib(used), "discrete": True, "uuid": uuid}
-        if g["vram"] is None and platform.machine().lower() in ("aarch64", "arm64"):
+        if g["vram"] is None and shares_ram():
             # DGX Spark, Jetson: the GPU shares the RAM and nvidia-smi gives it no size ([N/A]),
             # so there was no budget at all (the 2026-11-19 audit). An x86 card's [N/A] stays unknown
             # (ram_free: what the system left, from which the budget takes its reserve, #524)
