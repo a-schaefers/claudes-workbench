@@ -2071,6 +2071,17 @@ test('a period\'s energy is every task\'s, compared by the saving or not', () =>
   expect(week({ energy: { wh: 1500 } })).toBe('3 tasks · 3 landed (100%) · 1.5 kWh')  // nothing compared
 })
 
+test('a bench run still going or cut short shows beside the last finished one, never in its place', () => {
+  // #570: the newest run's first graded case read "M 1/1" as the model's result
+  const bench = (b: any) => statsLines({ tasks: 1, bench: { M: b } }).find(l => l.label === 'Bench')?.text
+  expect(bench({ run: 'r1', day: '2026-11-18', passed: 8, of: 10,
+    partial: { run: 'r2', day: '2026-11-20', passed: 1, of: 1, planned: 10, running: true } }))
+    .toBe('M 8/10 (2026-11-18), newer run 1 of 10 so far, 1 passed')
+  expect(bench({ partial: { run: 'r2', day: '2026-11-20', passed: 0, of: 2, planned: 10, running: false } }))
+    .toBe('M newer run 2 of 10 before it stopped, 0 passed')
+  expect(bench({ run: 'r1', day: '2026-11-18', passed: 8, of: 10 })).toBe('M 8/10 (2026-11-18)')
+})
+
 test('a one-task exception shows beside its task and is under way from Claude\'s first edit', async ($, on) => {
   // #94: the next hand-back spends it once Claude has started on it
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

@@ -9540,6 +9540,30 @@ class Stats(Base):
         self.rows({"ts": now - 3600, "outcome": "accepted", "gpu_wh": 30})               # no session at all
         self.assertEqual(stats.feed(now)["periods"]["week"]["energy"], {"wh": 30})
 
+    def test_the_bench_line_keeps_the_last_finished_run_beside_a_newer_partial_one(self):
+        # #570: a newer run's one graded case replaced the finished run's 8/10 with "1/1"
+        from workbench import bench, stats
+        now = time.time()
+        for run, n in (("r1", 10), ("r2", 10)):
+            store.write_json(bench.home() / "runs" / run / "plan.json",
+                             {"run": run, "pairs": [[f"c{i}", "M"] for i in range(n)], "repeat": 1})
+        rows = [{"ts": now - 86400, "run": "r1", "case": f"c{i}", "model": "M",
+                 "outcome": "passed" if i < 8 else "failed"} for i in range(9)]
+        rows.append({"ts": now - 86400, "run": "r1", "case": "c9", "model": "M", "outcome": "error"})  # never started
+        rows.append({"ts": now, "run": "r2", "case": "c0", "model": "M", "outcome": "passed"})
+        for r in rows:
+            store.append_jsonl(bench.runs_file(), r)
+        b = stats.feed()["bench"]["M"]
+        self.assertEqual((b["run"], b["passed"], b["of"]), ("r1", 8, 9))
+        self.assertEqual(b["partial"], {"run": "r2", "day": b["partial"]["day"], "passed": 1, "of": 1,
+                                        "planned": 10, "running": False})
+        for i in range(1, 10):                                                   # r2 finishes
+            store.append_jsonl(bench.runs_file(), {"ts": now + i, "run": "r2", "case": f"c{i}",
+                                                   "model": "M", "outcome": "failed"})
+        b = stats.feed()["bench"]["M"]
+        self.assertEqual((b["run"], b["passed"], b["of"]), ("r2", 1, 10))
+        self.assertNotIn("partial", b)
+
     def test_a_models_write_speed_trend_compares_its_newest_third_with_its_oldest(self):
         from workbench import stats
         self.rows(*({"ts": 1000.0 + i, "outcome": "accepted", "speed": {"write": w}}

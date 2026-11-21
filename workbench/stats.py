@@ -230,18 +230,45 @@ def _days(rows: list[dict], now: float, n: int = 30) -> list[dict]:
 
 
 def _bench() -> dict:
-    """Each model's newest bench run: the cases passed of those graded."""
+    """Each model's newest finished bench run, the cases passed of those graded, and a newer run
+    still going or cut short as `partial` beside it ({run, day, passed, of, planned, running}),
+    never in its place: the newest run's first graded case read "1/1" as the model's result,
+    for good if the run was stopped (#570). A run is finished for a model once each of its
+    planned replays (plan.json's pairs on it, times repeat) has settled: graded, or didn't start
+    (an error, which drive doesn't retry). A run with no plan is taken as finished."""
     from . import bench
-    newest: dict[str, tuple] = {}
-    rows = [r for r in bench.rows() if r.get("model") and r.get("arm") != "claude"]
-    for r in rows:
-        if r["model"] not in newest or r.get("ts", 0) > newest[r["model"]][1]:
-            newest[r["model"]] = (r.get("run"), r.get("ts", 0))
-    out = {}
-    for model, (run, ts) in newest.items():
-        rs = [r for r in rows if r["model"] == model and r.get("run") == run]
-        out[model] = {"run": run, "day": _day(ts), "passed": sum(r.get("outcome") == "passed" for r in rs),
-                      "of": len(rs)}
+    every = [r for r in store.read_jsonl(bench.runs_file())[0]
+             if isinstance(r, dict) and r.get("model") and r.get("arm") != "claude"]
+    graded = defaultdict(list)
+    settled = defaultdict(set)
+    for r in every:
+        key = (r["model"], r.get("run"))
+        if r.get("outcome") in ("passed", "failed"):
+            graded[key].append(r)
+        if r.get("outcome") in ("passed", "failed", "error"):
+            settled[key].add((r.get("case"), r.get("rep", 1)))
+    plans: dict = {}
+    running = (bench.driver() or {}).get("run")
+
+    def planned(model, run) -> int | None:
+        if run not in plans:
+            plans[run] = bench.plan(run) if isinstance(run, str) and run else {}
+        p = plans[run]
+        if not p.get("pairs"):
+            return None
+        return sum(1 for _, m in p["pairs"] if m == model) * int(p.get("repeat") or 1)
+
+    out: dict = {}
+    for (model, run), rs in sorted(graded.items(), key=lambda kv: max(r.get("ts", 0) for r in kv[1])):
+        ts = max(r.get("ts", 0) for r in rs)
+        line = {"run": run, "day": _day(ts), "passed": sum(r["outcome"] == "passed" for r in rs), "of": len(rs)}
+        n = planned(model, run)
+        m = out.setdefault(model, {})
+        if n is None or len(settled[(model, run)]) >= n:
+            m.pop("partial", None)  # a newer run finished: the older partial is history
+            m.update(line)
+        else:
+            m["partial"] = {**line, "planned": n, "running": run == running}
     return out
 
 

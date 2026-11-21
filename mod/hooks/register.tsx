@@ -814,7 +814,12 @@ export function statsLines(f: Record<string, any> | null): { label: string; text
     if (said.length) out.push({ label: `What helps (${model})`, text: said.join(' · ') })
   }
   const bench = Object.entries(f.bench ?? {}) as [string, any][]
-  if (bench.length) out.push({ label: 'Bench', text: bench.map(([m, b]) => `${m} ${b.passed}/${b.of} (${b.day})`).join(' · ') })
+  // the newest finished run, and a newer one beside it, never in its place (#570)
+  const sofar = (p: any) => `${p.of} of ${p.planned} ${p.running ? 'so far' : 'before it stopped'}` +
+    (p.of ? `, ${p.passed} passed` : '')
+  if (bench.length) out.push({ label: 'Bench', text: bench.map(([m, b]) => `${m} ` +
+    [b.run !== undefined ? `${b.passed}/${b.of} (${b.day})` : '', b.partial ? `newer run ${sofar(b.partial)}` : '']
+      .filter(Boolean).join(', ')).join(' · ') })
   const opt = Object.entries(f.optimized ?? {}) as [string, any][]
   if (opt.length) out.push({ label: 'Optimized', text: opt.map(([m, o]) => `${m} ${Math.round(o.window / 1024)}K` +
     (o.spill ? ` (${o.spill}% on the CPU)` : ' all on the GPU')).join(' · ') })

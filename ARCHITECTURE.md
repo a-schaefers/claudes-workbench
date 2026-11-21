@@ -1771,7 +1771,11 @@ from `TREND_MIN` 6 rows, `write_change_pct`: the newest third's median against t
 third's), `sizes`, `stacks` (`{tasks, accepted_pct}`), `days` (the last 30 local days: `{day,
 tasks, landed}`; the streak's and the days' arithmetic is on local dates, never `now - 86400`, which
 skipped or repeated a date across a daylight-saving change, #563), `guards` (summed), `helps` (`progress.helped`, per model tried), `bench` (each
-model's newest run: `{run, day, passed, of}`) and `optimized` (optimize.json's `{window, fits,
+model's newest finished run: `{run, day, passed, of}`, the cases passed of those graded; a newer
+run still going or stopped is `partial`, `{…, planned, running}`, beside it, never in its place:
+its first graded case read as the model's "1/1", #570. A run is finished for a model once each
+replay its plan.json gives it, times `repeat`, has been graded or failed to start; a run with no
+plan counts as finished) and `optimized` (optimize.json's `{window, fits,
 spill, ts}` per model). It reads results.jsonl once and passes that snapshot down (each period's
 savings and each model's helps read it again: 16 reads of a 4,800-row history, 3 s at 20,000 rows,
 #565; `helps` is `progress.helped_by_model`, one pass over the judged rows); about 0.4 s at 10,000
@@ -2041,7 +2045,7 @@ nothing until a surface attaches.
   questions (asked, and answered only as `wb answer` did), one
   line per model (tasks, landed, rounds, minutes, write speed with its trend as a sparkline,
   `spark`, and the change, Claude's cost a task), by size, the last 30 days as a sparkline, bests,
-  the newest milestone, what stopped agents (`GUARD_WORDS`), what helps, bench, the optimized
+  the newest milestone, what stopped agents (`GUARD_WORDS`), what helps, bench (the last finished run, and "newer run k of N so far" beside it), the optimized
   windows. A section with no data is left out; a new install's says to delegate one with
   /workbench. It is read (`refreshStats`) only while the tab is shown (`pane.tab` and `$.ui.panes()`
   `isShown`): on the tab's press, then at each poll when results.jsonl's or stats.json's size or
