@@ -201,6 +201,34 @@ def users_servers_off() -> dict:
 CONFIG_CONTENT_MAX = 120_000
 
 
+# What the layer sets that a project's opencode.json, loaded after it, must not change either:
+# the compaction backstop past the handover point, the model for titles and summaries, OpenCode
+# updating itself (#353). A project config set compaction `auto: false` (a session past the
+# handover point then overflowed), sent titles to its cloud small_model, and turned updates on
+# past OPENCODE_TESTED (#519).
+RESTATED = ("small_model", "autoupdate", "compaction")
+
+
+def model_pins(model_id) -> dict:
+    """The task's model entry's `limit` and `options.max_tokens`, as a `provider` overlay: what
+    wb planned the handover and the compaction buffer against. A project config's own window for
+    the model would move OpenCode's compaction off them (#519). {} for a model wb doesn't know."""
+    try:
+        m = models.resolve(model_id) if isinstance(model_id, str) else None
+    except KeyError:
+        m = None
+    if m is None:
+        return {}
+    cfg, entry = m.config, {}
+    if isinstance(cfg.get("limit"), dict):
+        entry["limit"] = cfg["limit"]
+    if isinstance(cfg.get("options"), dict) and "max_tokens" in cfg["options"]:
+        entry["options"] = {"max_tokens": cfg["options"]["max_tokens"]}
+    if not entry:
+        return {}
+    return {"provider": {m.provider: {"models": {m.id.split("/", 1)[1]: entry}}}}
+
+
 # The user's own OPENCODE_CONFIG_CONTENT goes under the rules, not away: replaced, the providers,
 # instructions or permissions kept there were lost to the agent (#347, the audit of 1.4). Its
 # permissions come first, so the rules' (the last match wins) still decide; its MCP servers stay
@@ -209,7 +237,9 @@ CONFIG_CONTENT_MAX = 120_000
 # handover's backstop, and their `skills` or `instructions` replace the task's. But `provider`,
 # which the layer always sets now (its timeouts, #491): the user's providers stay, and the
 # layer's timeouts go on top of them here too, so neither their content nor a project's
-# opencode.json puts the 300 s header wait back.
+# opencode.json puts the 300 s header wait back. The RESTATED keys and the task model's pins
+# (model_pins; the layer's small_model is the task's model) are said again here, on top, so a
+# project config can't change them either (#519).
 def rules_env(layer: dict) -> dict:
     users = models.users_config_content()
     theirs = users.get("permissions")
@@ -222,13 +252,17 @@ def rules_env(layer: dict) -> dict:
     if timeouts:
         users["provider"] = models._merge(users["provider"] if isinstance(users.get("provider"), dict)
                                           else {}, timeouts)
+    pinned = {k: layer[k] for k in RESTATED if k in layer}
+    if pins := model_pins(layer.get("small_model")):
+        mine = users.get("provider")  # theirs, with the layer's timeouts
+        pinned["provider"] = models._merge(mine if isinstance(mine, dict) else {}, pins["provider"])
     rules = {"permissions": [*(theirs if isinstance(theirs, list) else []),
-                             *layer["permissions"]], "share": "disabled"}
+                             *layer["permissions"]], "share": "disabled", **pinned}
     content = json.dumps({**users, **rules}, separators=(",", ":"))
     if len(content.encode()) <= CONFIG_CONTENT_MAX:
         return {"OPENCODE_CONFIG_CONTENT": content}
     # too long: the rules stay in the layer, so the user's content may not lift them either
-    rest = json.dumps({**users, "share": "disabled"}, separators=(",", ":"))
+    rest = json.dumps({**users, "share": "disabled", **pinned}, separators=(",", ":"))
     return {"OPENCODE_DISABLE_PROJECT_CONFIG": "1",
             "OPENCODE_CONFIG_CONTENT": rest if len(rest.encode()) <= CONFIG_CONTENT_MAX else "{}"}
 
