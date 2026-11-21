@@ -13052,6 +13052,15 @@ class Top(Base):
         os.write(fd, b"q")                                                # one key, no Enter
         self.assertTrue(wait_gone(top_pid, 10))
 
+    def test_an_every_that_is_infinite_tiny_or_not_a_number_is_refused(self):
+        # #611: inf printed "every": Infinity then overflowed time.sleep; 1e-6 spun a core
+        for bad in ("inf", "1e-6", "nan", "0", "-1", "1e9"):
+            r = subprocess.run([str(ROOT / "bin" / "wb"), "top", "--json", "--every", bad],
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 1, bad)
+            self.assertIn("--every takes seconds from 0.2 to 3600", r.stderr, bad)
+            self.assertEqual(r.stdout, "", bad)
+
     def test_sigterm_ends_it_quietly(self):
         p = subprocess.Popen([str(ROOT / "bin" / "wb"), "top", "--json", "--every", "0.2"],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

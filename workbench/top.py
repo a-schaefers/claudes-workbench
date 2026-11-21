@@ -463,7 +463,7 @@ class Top:
         """The probe on a thread of its own: a server that accepts and then stalls held the tick,
         so `q`, the nvidia-smi stream and the pane's lines waited for its timeouts (#561). The
         tick shows the newest answers; one probe runs at a time. The first is waited for, up to
-        one interval, so the first view has the rack."""
+        one interval (PROBE_EVERY at most), so the first view has the rack."""
         if self.prober and self.prober.is_alive():
             return
         self.probed = time.monotonic()
@@ -471,7 +471,7 @@ class Top:
         self.prober = threading.Thread(target=self.probe, args=(found, running), daemon=True)
         self.prober.start()
         if first:
-            self.prober.join(max(self.every, 1.0))
+            self.prober.join(min(max(self.every, 1.0), PROBE_EVERY))  # --every may be an hour
 
     def _state(self, m: models.Model, tags: dict, ps: dict, catalog: dict | None = None) -> dict:
         r = {"model": m.id, "label": m.label}

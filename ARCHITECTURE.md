@@ -2176,7 +2176,9 @@ entry in the mod's `LINE_STYLE`; changing the shape needs a new `live-1` tag.
 
 `workbench/top.py` (#407): what this machine is doing, for anyone without the mod's pane, and a
 feed for whatever draws one (`--json`). One long-lived process, like `wb events`, cheap enough to
-tick every 2 s (`--every S`; default stats.json `every`, else `EVERY` 2), and nothing runs when
+tick every 2 s (`--every S`, from 0.2 to 3600, `cli.TOP_EVERY`: inf printed `"every": Infinity`, not
+JSON, then overflowed `time.sleep`, and 1e-6 spun a core, #611; default stats.json `every`, else
+`EVERY` 2), and nothing runs when
 nobody looks: it exits when its parent process goes (checked each tick), and quietly (exit 0) on
 SIGTERM, SIGHUP, a closed pipe, `q` or Ctrl-C, killing its nvidia-smi child. Never a model call,
 a load or an `opencode session export`.
@@ -2219,7 +2221,7 @@ Each tick reads, cheapest first:
   task's server other than Ollama (which has none). A model on another machine is not asked: no
   telemetry. Probes to this machine skip HTTP proxies (`models._open`). The loop (`--json`, the
   terminal) probes on a thread (`Top._probe_bg`, one at a time; the first waited for up to an
-  interval), so a server that accepts and then stalls never holds the tick, `q` or the GPU rows;
+  interval, `PROBE_EVERY` at most), so a server that accepts and then stalls never holds the tick, `q` or the GPU rows;
   the one pass probes inline.
 - **Typical load**: the median of the tasks' single loads per model (`models.single_loads`:
   status `loads`, else, for a task from before it, its `load_secs`), recomputed every
@@ -4923,7 +4925,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, questions, answers, stops, auto-fixes, rounds, tests, errors. `-f` follows until the task needs Claude or is closed, looking at the phase before each wait (on a finished task it returns at once: it waited 30 s, #90) and printing the events that came with it; each pass reaps a task whose runner died (`cli.reap`), so the follow ends on its error instead of following it for ever, and each line is flushed, so a pipe or a file gets it as it comes (#545). |
 | `wb report <task>` | `--round N` | The round's summary.md. |
 | `wb diff <task> [paths…]` | `--stat`, `--all` | The worktree against the task's base, or after `wb next` against the last committed step (`--all`: the whole branch); new files included. Once the worktree is gone (accepted, discarded), the git command for the branch's commits: from the base to status `tip`, the accepted commit, since `--merge` deletes the branch (#477); the branch for a task never accepted. |
-| `wb top` | `--json` (one object per tick, until its parent exits), `--every S` (stats.json `every`, else 2) | A live view of the machine (*Seeing what the agent does*, `wb top`): each GPU's memory, busy % and watts, the running tasks, every model (the rack) and the GPU lease's queue; on a terminal redrawn in place, `q` or Ctrl-C quits; elsewhere one plain pass. Never a model call, a load or a session export. |
+| `wb top` | `--json` (one object per tick, until its parent exits), `--every S` (0.2 to 3600 s, else exit 1; default stats.json `every`, else 2) | A live view of the machine (*Seeing what the agent does*, `wb top`): each GPU's memory, busy % and watts, the running tasks, every model (the rack) and the GPU lease's queue; on a terminal redrawn in place, `q` or Ctrl-C quits; elsewhere one plain pass. Never a model call, a load or a session export. |
 | `wb events` | | `{"hello": pid, "start": …}`, then `{"changed": [paths]}` whenever `$WB_HOME` changes (not tasks' worktrees and rounds, closed tasks, `rules/`, `imports/`, `images/`, `audio/`, the bench's clones and runs, what a link leads to, `runner.log`, `*.lock`, `*.tmp`, dotfiles); reaps dead runners once a minute; exits when its parent does. The mod's ears. |
 
 ### Models, skills, lessons, notes

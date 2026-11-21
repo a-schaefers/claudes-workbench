@@ -3310,9 +3310,14 @@ def cmd_events(a):
 def cmd_top(a):
     """A live feed of the machine: GPUs, running tasks, the rack of models, the GPU's queue."""
     from . import top
-    if a.every is not None and not a.every > 0:
-        die("--every takes a number of seconds above 0")
+    # a finite, sane interval: inf printed `"every": Infinity` (not JSON) and then overflowed
+    # time.sleep, and 1e-6 spun a core re-reading every task's files (#611)
+    if a.every is not None and not TOP_EVERY[0] <= a.every <= TOP_EVERY[1]:
+        die(f"--every takes seconds from {TOP_EVERY[0]:g} to {TOP_EVERY[1]:g}")
     top.main(every=a.every, as_json=a.json)
+
+
+TOP_EVERY = (0.2, 3600)  # wb top --every's range, in seconds (NaN and inf fail the comparison)
 
 
 def cmd_chat(a):
@@ -4397,7 +4402,7 @@ def parser() -> argparse.ArgumentParser:
                        "GPU's queue (q quits)")
     s.add_argument("--json", action="store_true", help="one JSON object per tick, until the parent exits")
     s.add_argument("--every", type=float, metavar="S",
-                   help="seconds between ticks (default: stats.json every, else 2)")
+                   help="seconds between ticks, 0.2 to 3600 (default: stats.json every, else 2)")
     s.set_defaults(f=cmd_top)
     s = sub.add_parser("chat", help="the web chat: turn it on or off (on starts a server; kept as "
                        "left), serve it, its link, reply to the user there, takes for the user "
