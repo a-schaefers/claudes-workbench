@@ -1190,8 +1190,12 @@ def bundle_steps(repo: Path, base: str, tip: str, dest: Path) -> bool:
         clone, part = Path(tmp) / "c", dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
         try:
             git(tmp, "clone", "-q", "--bare", "--shared", "--no-tags", str(repo), str(clone))
-            git(clone, "update-ref", "refs/heads/steps", tip)
-            git(clone, "bundle", "create", "-q", str(part.resolve()), f"{base}..steps")
+            # named, not found from the cwd: safe.bareRepository=explicit refuses a bare repo git
+            # discovers, the bundle was never made, and every accept kept the ref #799 removed
+            # (#887, the third 2026-11-21 audit)
+            bare = f"--git-dir={clone}"
+            git(tmp, bare, "update-ref", "refs/heads/steps", tip)
+            git(tmp, bare, "bundle", "create", "-q", str(part.resolve()), f"{base}..steps")
             os.replace(part, dest)
         except (GitError, OSError):
             part.unlink(missing_ok=True)

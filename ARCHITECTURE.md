@@ -3857,7 +3857,9 @@ moved, the commits were in no branch once accept deleted `delegate/<task>`, a ha
 kept no object alive, and once the reflogs expired and `git gc` pruned, no case could be made
 (#649, Codex's audit of 1.90.6). So `wb accept` keeps the steps, base..tip, as a git bundle in the
 task's own state, `tasks/<task>/steps.bundle` (`gitops.bundle_steps`, `STEPS_BUNDLE`: made in a
-`--shared` scratch clone, so the user's repo gets no ref), and `bench add` first puts them back
+`--shared` scratch clone, so the user's repo gets no ref; named with `--git-dir`, since
+`safe.bareRepository=explicit` refuses a bare repo git finds from the cwd, and every accept fell
+back to the ref: #887), and `bench add` first puts them back
 in the repo when git's gc has pruned them (`gitops.restore_steps`: `git bundle unbundle`, the
 objects alone, no ref, no FETCH_HEAD, so git may prune them again). Until #799 (the second
 2026-11-21 audit) accept kept a ref in the user's repo instead, `refs/workbench/accepted/<task>`

@@ -11640,6 +11640,23 @@ class Bench(Base):
         run_wb("gc")                                     # every step has its case: the bundle goes
         self.assertFalse((task.dir / gitops.STEPS_BUNDLE).exists())
 
+    def test_the_steps_bundle_is_made_with_the_users_safe_bare_repository_explicit(self):
+        # #887 (the third 2026-11-21 audit, reproduced): git found the bare scratch clone from
+        # the cwd, safe.bareRepository=explicit refused it, and every accept kept
+        # refs/workbench/accepted/<task> in the user's repo again, as before #799
+        conf = Path(self.tmp.name) / "explicit.gitconfig"
+        conf.write_text("[user]\n\tname = t\n\temail = t@t\n[safe]\n\tbareRepository = explicit\n")
+        base = gitops.git(self.repo, "rev-parse", "HEAD").strip()
+        (self.repo / "s.txt").write_text("step\n")
+        gitops.git(self.repo, "add", "s.txt")
+        gitops.git(self.repo, "commit", "-qm", "a step")
+        tip = gitops.git(self.repo, "rev-parse", "HEAD").strip()
+        dest = Path(self.tmp.name) / gitops.STEPS_BUNDLE
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(conf)}):
+            self.assertIs(gitops.bundle_steps(self.repo, base, tip, dest), True)
+        heads = gitops.git(self.repo, "bundle", "list-heads", str(dest))
+        self.assertIn(tip, heads)
+
     def test_a_ref_kept_before_799_moves_into_the_tasks_bundle_and_leaves_the_users_repo(self):
         # #799 (the second 2026-11-21 audit): a task accepted before the bundle has its steps
         # kept by refs/workbench/accepted/<task>; wb gc moves them into its bundle and deletes the
