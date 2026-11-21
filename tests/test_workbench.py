@@ -6969,7 +6969,8 @@ class Routing(Base):
     def result(self, model, size, outcome, minutes=2.0, n=1, **extra):
         for _ in range(n):
             store.append_jsonl(store.home() / "results.jsonl", {
-                "model": model, "size": size, "outcome": outcome, "minutes": minutes, **extra})
+                "model": model, "size": size, "outcome": outcome, "minutes": minutes,
+                "active_minutes": minutes, **extra})
 
     def test_with_no_results_significant_gets_the_largest_and_trivial_the_smallest(self):
         from workbench import router
@@ -8033,7 +8034,7 @@ class Tuning(Base):
         for _ in range(n):
             store.append_jsonl(store.home() / "results.jsonl", {
                 "model": self.M, "window": self.W, "outcome": outcome, "reviews": reviews,
-                "minutes": minutes, "tuned": {"fresh_at": fresh_at}, **extra})
+                "minutes": minutes, "active_minutes": minutes, "tuned": {"fresh_at": fresh_at}, **extra})
 
     def explores(self, name):
         from workbench import tuning
@@ -8061,12 +8062,14 @@ class Tuning(Base):
 
     def test_compaction_and_time_cost_reward(self):
         from workbench import tuning
-        base = {"outcome": "accepted", "reviews": 0, "minutes": 10}
+        base = {"outcome": "accepted", "reviews": 0, "minutes": 10, "active_minutes": 10}
         self.assertEqual(tuning.reward(base, 10), 1.0)
         self.assertEqual(tuning.reward({**base, "reviews": 1}, 10), 0.5)
         self.assertEqual(tuning.reward({**base, "steps": [{"compacted": True}]}, 10), 0.75)
-        self.assertAlmostEqual(tuning.reward({**base, "minutes": 20}, 10), 0.85)
-        self.assertAlmostEqual(tuning.reward({**base, "minutes": 5}, 10), 1.15)
+        self.assertAlmostEqual(tuning.reward({**base, "active_minutes": 20}, 10), 0.85)
+        self.assertAlmostEqual(tuning.reward({**base, "active_minutes": 5}, 10), 1.15)
+        # the wait for Claude's review isn't the agent being slow (#543): wall minutes don't count
+        self.assertEqual(tuning.reward({**base, "minutes": 480}, 10), 1.0)
         self.assertEqual(tuning.reward({**base, "outcome": "discarded"}, 10), 0.0)
 
     def test_some_tasks_explore_a_neighbour_the_rest_take_the_pick(self):
@@ -8105,7 +8108,7 @@ class Tuning(Base):
         from workbench import tuning
         self.assertEqual(tuning.best("self_review", self.M, self.W), 1)
         row = lambda v, reviews: {"model": self.M, "window": self.W, "outcome": "accepted",  # noqa
-                                  "reviews": reviews, "minutes": 10 if v == 0 else 14,
+                                  "reviews": reviews, "active_minutes": 10 if v == 0 else 14,
                                   "tuned": {"self_review": v}}
         for v, reviews in [(1, 1)] * 3 + [(0, 1)] * 3:   # reviewed itself, Claude still sent it back
             store.append_jsonl(store.home() / "results.jsonl", row(v, reviews))
@@ -9613,6 +9616,28 @@ class Progress(Base):
         run_wb("accept", "t", "-m", "x")
         from workbench import progress
         self.assertEqual(progress.helped(store.Task("t").spec["model"]), {"hint": [0, 0], "smaller": [1, 1]})
+
+    def test_the_typical_length_is_the_median_of_active_work_and_the_eta_counts_active_work(self):
+        # #543: a mean of wall minutes (queue, review, a night before the accept) made a 12-minute
+        # task's typical length 108 minutes, so checks and ETAs came at many times the real length
+        from workbench import router, transcript
+        model = "ollama/mimo-v2.6:9b-q8_0"
+        for wall, active in ((15, 12), (15, 12), (15, 12), (15, 12), (480, 12)):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": model, "size": "small", "outcome": "accepted", "minutes": wall,
+                "active_minutes": active})
+        store.append_jsonl(store.home() / "results.jsonl", {   # before active_minutes: skipped
+            "model": model, "size": "small", "outcome": "accepted", "minutes": 900})
+        self.assertEqual(router.expected_minutes(model, "small"), 12)
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        task = store.Task("t")
+        now = time.time()
+        task.set_status(phase="running", active_s=300, round_started_at=now - 60)
+        store.write_json(task.dir / "task.json", {**task.spec, "size": "small", "model": model,
+                                                  "created_at": now - 7200})  # two hours queued
+        line = transcript.clock_line(task, now)
+        self.assertIn("~6m00s left (typically 12m)", line)                 # 12 less 5 + 1 active
 
     def test_what_helped_more_on_the_model_decides_once_both_were_tried_enough(self):
         from workbench import progress

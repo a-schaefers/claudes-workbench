@@ -77,7 +77,7 @@ class Score:
     def line(self) -> str:
         if not self.tries:
             return "no real tasks yet"
-        t = f", ~{self.minutes:.1f} min" if self.minutes is not None else ""
+        t = f", ~{self.minutes:.1f} min of active work" if self.minutes is not None else ""
         like = f", {self.like_wins}/{self.like_tries} on {'/'.join(self.stack)}" if self.like_tries else ""
         c = f", ~{self.claude / 1000:.0f}K Claude tokens a task" if self.claude_n >= COST_MIN else ""
         return f"{self.wins}/{self.tries} real tasks accepted{like}{t}{c}"
@@ -109,8 +109,12 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
         like = [r for r in real if set(row_stack(r)) & set(stack)]
         s.like_tries = len(like)
         s.like_wins = sum(r.get("outcome") == "accepted" for r in like)
-    times = [r["minutes"] for r in real if r.get("minutes") is not None]
-    s.minutes = sum(times) / len(times) if times else None
+    # the agent's active work, median: wall minutes held the queue, Claude's review and a night
+    # before an accept (480 min for a 12-minute task), and a mean let one such row set every
+    # ETA and progress check at many times the real length (#543). Rows without it are skipped.
+    times = [r["active_minutes"] for r in real if isinstance(r.get("active_minutes"), (int, float))
+             and not isinstance(r["active_minutes"], bool)]
+    s.minutes = statistics.median(times) if times else None
     spent = [spend.weighted(r["claude"]) for r in real if isinstance(r.get("claude"), dict)]
     s.claude, s.claude_n = (statistics.fmean(spent) if spent else None), len(spent)
     return s
@@ -133,7 +137,8 @@ def _cheaper(close: list[Score]) -> list[Score]:
 
 
 def expected_minutes(model_id: str, size: str) -> float | None:
-    """How long a task of this size usually takes on this model, from real tasks."""
+    """How long a task of this size usually takes on this model, from real tasks: the median of
+    their active minutes (the agent's own working time), so compare it with a task's active time."""
     m = models.discover().get(model_id)
     if not m:
         return None

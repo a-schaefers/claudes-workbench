@@ -852,7 +852,8 @@ each ("not delivered, dropped …"), for Claude to fold into the feedback. The r
 are dropped silently.
 
 **Check-ins** (`checkin_text`), every `checkin` minutes of a round (not while asking): `task X ·
-label · round n · running <time> · ~Xm left (typically Nm)`, then since the last check-in: tools
+label · round n · running <time> · ~Xm left (typically Nm)` (the typical length and the time so
+far both active work, *Progress checks*), then since the last check-in: tools
 used and failed, tokens read and written, `now:` the last action, the agent's latest words (400
 characters), the files changed so far, and a NOTE naming changed files the spec never mentions
 (`outside_spec`: a changed path or its basename that the step's prompt doesn't contain; silent
@@ -1699,7 +1700,8 @@ default, nothing below runs and the timing is the check-ins'.
   so it never counts. The results row carries `active_minutes`.
 - **The check.** It fires at each whole multiple of the threshold of active work, once
   (`progress.due`, status `progress_checks`), and never while asking. The threshold is `--after`,
-  else `router.expected_minutes` for the task's size and model (`progress.threshold`). The check
+  else `router.expected_minutes` for the task's size and model (`progress.threshold`: the median
+  of their `active_minutes`, active against active, #543). The check
   is a `checkin` notice (`progress: true`): the check-in digest, then `progress.text`. That is
   the active minutes against the threshold, the evidence (files changed, whether any changed
   since the last check: status `progress_mark`, a `gitops.mark`), the round's failed tool calls
@@ -1844,7 +1846,8 @@ sets for one task (`--self-review`/`--no-self-review`) wins over the record and 
 (`EXPLORE`) tries the value next to it. When a task closes, its value scores the result (`reward`):
 1 for accepted, divided by one plus the review rounds the agent caused (every step's), less
 `COMPACT_PENALTY` 0.25 if OpenCode still had to compact, and up to ± `SPEED_WEIGHT` 0.15 for being
-faster or slower than that model's usual task. Discarded scores 0; a discard Claude marks
+faster or slower than that model's usual task, both in active minutes (the median; the wall clock
+counted the wait for Claude's review as the agent being slow, #543). Discarded scores 0; a discard Claude marks
 `--spec-gap` is its own miss and counts for nothing, here or in the router's and the skills'
 records (`judged`). Each value's mean is smoothed toward the others' (`PRIOR`, two tasks' worth),
 so one lucky task moves nothing, and the pick walks one step at a time toward whatever scores
@@ -2112,9 +2115,11 @@ clock line:
   `Pondering`, `Tinkering`…) and the time since the newest message. `models._server_idle` reads
   the same `live.state`.
 - *Clock:* `⏲ task T · round N t · model load t`, then while it runs (queued, running, testing, asking) the ETA (`~X left (typically
-  Nm)`, `X past its typical Nm`, or no ETA yet; typical is `router.expected_minutes`, the mean
-  wall time of this model's judged results of this size, against the time since the task was
-  created), `context U of WK (P%)` and tokens written.
+  Nm)`, `X past its typical Nm`, or no ETA yet; typical is `router.expected_minutes`, the median
+  active minutes of this model's judged results of this size (rows without `active_minutes`
+  skipped), against the task's active work so far (`runner.active_so_far`: status `active_s` plus
+  the round under way): a mean of wall minutes held queues, reviews and nights before an accept,
+  108 minutes for a 12-minute task, #543), `context U of WK (P%)` and tokens written.
 
 A header first: the model line (label, reasoning effort, variant, context), repo, branch, test
 command, and why it was routed there. Options: `--once` prints one pass and exits (as for a

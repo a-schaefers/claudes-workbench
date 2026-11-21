@@ -581,15 +581,24 @@ def _clock(secs: float) -> str:
     return f"{int(secs // 60)}m{int(secs % 60):02d}s"
 
 
-def checkin_text(task: store.Task, n: int, out: dict, since: float) -> str:
-    """The digest a check-in wakes Claude with: what changed since the last one, and timing."""
+def active_so_far(task: store.Task, now: float | None = None) -> float:
+    """The task's active work in seconds, as the ETA compares it with the typical length: status
+    `active_s` (the rounds so far, written as each ends) plus the round under way, whole."""
+    st, now = task.status, now or time.time()
+    running = st.get("round_started_at") if st.get("phase") in ("running", "testing", "asking") else None
+    return float(st.get("active_s") or 0) + (max(0.0, now - running) if running else 0.0)
+
+
+def checkin_text(task: store.Task, n: int, out: dict, since: float, active: float | None = None) -> str:
+    """The digest a check-in wakes Claude with: what changed since the last one, and timing.
+    ``active``: the round's own count of active work so far, when the round knows it."""
     from . import router  # router -> models; imported late to keep the runner's startup lean
     spec, st, now = task.spec, task.status, time.time()
     took = now - spec["created_at"]
     typical = router.expected_minutes(spec["model"], spec.get("size", "significant"))
     eta = ""
-    if typical:
-        left = typical * 60 - took
+    if typical:  # active work against active work: the wall clock held queues and reviews (#543)
+        left = typical * 60 - (active_so_far(task, now) if active is None else active)
         eta = (f" · ~{_clock(left)} left (typically {typical:.0f}m)" if left > 0 else
                f" · {_clock(-left)} past its typical {typical:.0f}m")
     rows = [r for r in store.read_jsonl(task.dir / "events.jsonl")[0] if r.get("ts", 0) > since]
@@ -874,7 +883,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 nudges = task.status.get("nudges", 0) + 1
                 task.set_status(nudges=nudges)
                 task.notify("checkin", checkin_text(task, n, out, max(started, float(
-                    task.status.get("checkin_at") or 0))) + f"\nthe runner nudged it: {mins} min of "
+                    task.status.get("checkin_at") or 0)), prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
                     f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
                     round=n)
         if out["stuck"]:
@@ -886,17 +895,17 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             break
         every = float(spec.get("checkin") or 0) * 60
         since = max(started, float(task.status.get("checkin_at") or 0))
+        active = prior + clock.ran(mono)
         if every and now - since >= every and not asking:
             task.set_status(checkin_at=now)
-            task.notify("checkin", checkin_text(task, n, out, since), round=n)
-        active = prior + clock.ran(mono)
+            task.notify("checkin", checkin_text(task, n, out, since, active), round=n)
         if typical and not asking and progress.due(task, active, typical):
             mark = gitops.mark(task.worktree)
             files = gitops.changed(task.worktree)
             moved = mark != task.status.get("progress_mark", edit_mark)
             task.set_status(progress_checks=int(active // (typical * 60)), progress_mark=mark,
                             progress_open=True)
-            task.notify("checkin", checkin_text(task, n, out, since) + "\n" + progress.text(
+            task.notify("checkin", checkin_text(task, n, out, since, active) + "\n" + progress.text(
                 task, active, typical, moved, len(files.splitlines()) if files else 0,
                 len(out["errors"])), round=n, progress=True)
         notes = pending_steer(task)
