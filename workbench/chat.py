@@ -166,8 +166,11 @@ def shots(task: str, n) -> dict | None:
         return None
     return {"task": task, "n": n, "step": m.get("step"), "round": m.get("round"),
             "viewport": m.get("viewport"),
-            # a capture that failed shows no image, even when it wrote one (#268; verify.shot_ok)
-            **{s: {"rev": (x := m.get(s) or {}).get("rev"), "image": bool(x.get("ok", x.get("image"))),
+            # a capture that failed shows no image, even when it wrote one (#268; verify.shot_ok);
+            # one dropped with its archived task (store.slim_archive) is `pruned` (#821)
+            **{s: {"rev": (x := m.get(s) or {}).get("rev"),
+                   "image": bool(x.get("ok", x.get("image"))) and not x.get("pruned"),
+                   **({"pruned": True} if x.get("pruned") else {}),
                    **({"exit": x["exit"]} if x.get("exit") not in (None, 0) else {})}
                for s in ("base", "candidate")}}
 
@@ -1614,8 +1617,11 @@ class Handler(BaseHTTPRequestHandler):
                 n = (q.get("n") or [""])[0]
                 body = shot_png((q.get("task") or [""])[0], int(n) if n.isdigit() else 0,
                                 (q.get("side") or [""])[0])
-                if body is None:
-                    self._json(404, {"error": "no such screenshot"})
+                if body is None:  # 410: dropped with its archived task, the message still names it (#821)
+                    pair = shots((q.get("task") or [""])[0], int(n) if n.isdigit() else 0)
+                    side = (pair or {}).get((q.get("side") or [""])[0])
+                    gone = isinstance(side, dict) and side.get("pruned")
+                    self._json(410 if gone else 404, {"error": "expired" if gone else "no such screenshot"})
                 else:
                     self._send(200, body, "image/png")
             return

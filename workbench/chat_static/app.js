@@ -431,6 +431,9 @@
   const shotOf = s => `${s.task} · step ${s.step} · round ${s.round}`
   function shotImage(s, side, fig) {
     // a capture that exited nonzero failed, whatever it wrote (#268)
+    // dropped with its archived task, months on (#821)
+    const expired = 'This screenshot has expired: an archived task keeps its screenshots 90 days.'
+    if (s[side].pruned) { fig.prepend(span('missing', expired)); return }
     if (!s[side].image) { fig.prepend(span('missing', `No image: the capture failed${s[side].exit != null ? ` (exit ${s[side].exit})` : ''}. The code review stands on its own.`)); return }
     const img = document.createElement('img')
     img.alt = `${side === 'base' ? 'Base' : 'Candidate'} of ${shotOf(s)}`
@@ -439,7 +442,7 @@
           { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
       .then(r => r.ok ? r.blob() : Promise.reject(r.status))
       .then(b => { img.src = URL.createObjectURL(b) })
-      .catch(() => img.replaceWith(span('missing', 'This image could not be loaded.')))
+      .catch(st => img.replaceWith(span('missing', st === 410 ? expired : 'This image could not be loaded.')))
   }
   function makeShots(s) {
     const box = document.createElement('div')

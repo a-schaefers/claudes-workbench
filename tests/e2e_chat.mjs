@@ -399,6 +399,20 @@ async function run(engine, device) {
     if (!(await page.locator('#about').isHidden())) throw new Error('still replying about them')
     await until(async () => (await page.$$eval('.about-tag', t => t.at(-1)?.textContent)) === 'About fix-nav, step 1')
   })
+  await check('a pair whose screenshots were dropped with its archived task says they expired, not that they failed (#821)', async () => {
+    const d = join(home, 'state/tasks/fix-old/shots/1')
+    mkdirSync(d, { recursive: true })
+    writeFileSync(join(d, 'shots.json'), JSON.stringify({ step: 1, round: 1, viewport: '390x844',
+      base: { rev: 'aaaaaaaaaaaa', ok: true, pruned: true }, candidate: { rev: 'bbbbbbbbbbbb', ok: true, pruned: true } }))
+    const pair = { task: 'fix-old', n: 1, step: 1, round: 1, viewport: '390x844',  // as recorded then
+      base: { rev: 'aaaaaaaaaaaa', image: true }, candidate: { rev: 'bbbbbbbbbbbb', image: true } }
+    appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: 'shots-old', ts: Date.now() / 1000, from: 'claude',
+      text: 'screenshots of fix-old.', shots: pair }) + '\n')
+    await page.reload()
+    const expired = async () => (await page.$$eval('.shots .missing', m => m.map(x => x.textContent)))
+      .filter(t => t.includes('This screenshot has expired')).length
+    await until(async () => (await expired()) === 2)
+  })
   await check("wb audio's shortlist: each take plays from its blob, with its checks, and Keep sends the pick (#397)", async () => {
     const d = join(home, 'takes'); mkdirSync(d, { recursive: true })
     const wav = (secs, rate = 8000) => {  // a 440 Hz tone, 16-bit mono PCM

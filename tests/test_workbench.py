@@ -10022,6 +10022,32 @@ class Cleanup(Base):
             self.assertIs(got.get(name), True, (name, replaced))
         self.assertEqual(store.read_jsonl(store.home() / "results.jsonl")[0][-1].get("trial"), True)
 
+    def test_gc_drops_an_archived_tasks_cached_exports_and_screenshots_marking_them_expired(self):
+        # #821: slimming left each earlier session's export (megabytes, a cache of OpenCode's own
+        # store) and wb shot's PNGs in archive/ for good
+        from workbench import chat
+        old = store.home() / "archive" / "t-shot"
+        (old / "shots" / "1").mkdir(parents=True)
+        long_ago = time.time() - (store.SLIM_DAYS + 1) * 86400
+        (old / "status.json").write_text(json.dumps({"phase": "accepted", "updated_at": long_ago}))
+        (old / "task.json").write_text("{}")
+        (old / ".export-ses_a1.json").write_text("x" * 5000)
+        for side in ("base", "candidate"):
+            (old / "shots" / "1" / f"{side}.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 992)
+        store.write_json(old / "shots" / "1" / "shots.json", {
+            "step": 1, "round": 2, "viewport": "390x844",
+            "base": {"rev": "a", "ok": True}, "candidate": {"rev": "b", "ok": True}})
+        self.assertTrue(chat.shots("t-shot", 1)["base"]["image"])
+        self.assertEqual(store.slim_archive(), 7000)
+        self.assertEqual(sorted(p.name for p in old.rglob("*") if p.is_file()),
+                         ["shots.json", "status.json", "task.json"])
+        pair = chat.shots("t-shot", 1)
+        for side in ("base", "candidate"):
+            self.assertEqual((pair[side]["image"], pair[side]["pruned"], pair[side]["rev"]),
+                             (False, True, "ab"[side == "candidate"]))
+        self.assertIsNone(chat.shot_png("t-shot", 1, "base"))
+        self.assertEqual(store.slim_archive(), 0)                         # once
+
     def test_gc_trims_what_history_kept_for_good(self):
         # #740 (the 2026-11-21 audit): the archive kept every log and test output, notify.old.jsonl
         # and imports/ and claude-sessions/ only grew, and the disk advice never named them
@@ -15714,6 +15740,11 @@ class WebChat(Base):
             self.assertEqual(self.call("/api/shot?" + bad, token=tok)[0], 404, bad)
         (d / "candidate.png").symlink_to(Path(os.environ["WB_CHAT_TOKEN"]))  # never through a link
         self.assertEqual(self.call("/api/shot?task=t&n=1&side=candidate", token=tok)[0], 404)
+        # #821: a pair dropped with its archived task says so, for the page to show it expired
+        store.write_json(d / "shots.json", {**store.read_json(d / "shots.json"),
+                                            "candidate": {"rev": "def", "ok": True, "pruned": True}})
+        self.assertEqual(self.call("/api/shot?task=t&n=1&side=candidate", token=tok),
+                         (410, {"error": "expired"}))
         code, r = self.call("/api/send", {"text": "the button moved", "cid": "c1",
                                           "about": {"task": "t", "n": 1, "step": 9}}, tok)
         self.assertEqual(code, 200)

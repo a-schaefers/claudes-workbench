@@ -754,8 +754,12 @@ SLIM_DAYS = 90  # an archived task keeps its bulky outputs this long after it cl
 # (appended every round), each round's and check's test output (up to 320 KB each). Its
 # task.json, status.json, prompts, summaries, events and asks stay: names stay taken, wb bench
 # add reads an accepted task's prompts, and the lessons and transcripts its events (#740).
+# And the earlier sessions' exports (`.export-<sid>.json`, megabytes each: a cache of OpenCode's
+# own store, which transcript.finished_export fills again on demand) and wb shot's PNGs, whose
+# shots.json side says `pruned` so the web chat shows them expired, not broken (#821).
 SLIM_GLOBS = ("runner.log", "base-tests.txt", "setup.txt", "rounds/*/tests.txt",
-              "verify/*/base.txt", "verify/*/candidate.txt", "shots/*/*.txt")
+              "verify/*/base.txt", "verify/*/candidate.txt", "shots/*/*.txt", ".export-*.json")
+SHOT_SIDES = ("base", "candidate")
 
 
 def slim_archive(days: float = SLIM_DAYS) -> int:
@@ -774,6 +778,30 @@ def slim_archive(days: float = SLIM_DAYS) -> int:
                         f.unlink()
                 except OSError:
                     continue
+        for shot in d.glob("shots/*/"):
+            freed += _prune_shots(shot)
+    return freed
+
+
+def _prune_shots(shot: Path) -> int:
+    """Drop one wb shot pair's PNGs, its shots.json side marked `pruned` first (chat.shots: the
+    image expired); the bytes freed."""
+    meta, freed = read_json(shot / "shots.json", None), 0
+    if not isinstance(meta, dict):
+        return 0
+    pngs = [(side, f) for side in SHOT_SIDES
+            if (f := shot / f"{side}.png").is_file() and not f.is_symlink()]
+    if not pngs:
+        return 0
+    for side, _ in pngs:
+        meta[side] = {**(meta.get(side) if isinstance(meta.get(side), dict) else {}), "pruned": True}
+    write_json(shot / "shots.json", meta)  # before the files: never an image said there that isn't
+    for _, f in pngs:
+        try:
+            freed += f.stat().st_size
+            f.unlink()
+        except OSError:
+            continue
     return freed
 
 
