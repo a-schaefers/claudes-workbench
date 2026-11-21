@@ -1004,17 +1004,26 @@ class _Power(threading.Thread):
         self.done = threading.Event()
         self.wh = 0.0
         self.w_sum, self.n, self.peak = 0.0, 0, 0.0  # the samples themselves: mean and peak
+        self.last: float | None = None
+        self.watts: float | None = None
+        self.clock = time.monotonic  # the tests' fake clock goes here
 
     def run(self):
-        last = time.time()  # the first sample is taken at once; it adds nothing yet
-        watts = self._sample()
+        self.step(self.clock())  # the first sample is taken at once; it adds nothing yet
         while not self.done.is_set():
             self.done.wait(POWER_EVERY)
-            now = time.time()
-            if watts is not None:
-                self.wh += watts * (now - last) / 3600
-            last = now
-            watts = self._sample()
+            self.step(self.clock())
+
+    def step(self, now: float) -> None:
+        """Add the last reading over the time since it, on the monotonic clock, and read again.
+        An interval past FROZEN_SECS (a suspend that clock still counted, as WSL2's may) or
+        backwards adds nothing: on the wall clock an 8-hour suspend mid-round added 150 W x 8 h,
+        1.2 kWh, to gpu_wh, the results row and wb savings' cost, and a clock step back took
+        energy away (#559)."""
+        if self.last is not None and self.watts is not None and 0 <= now - self.last <= FROZEN_SECS:
+            self.wh += self.watts * (now - self.last) / 3600
+        self.last = now
+        self.watts = self._sample()
 
     def _sample(self):
         watts = hardware.gpu_power_w()

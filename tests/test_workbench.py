@@ -8562,9 +8562,9 @@ class Savings(Base):
         t = {"now": 100.0}
         fake_time = lambda: (t.__setitem__("now", t["now"] + 0.1) or t["now"])
         with mock.patch.object(hardware, "gpu_power_w", return_value=300.0), \
-             mock.patch.object(runner, "POWER_EVERY", 0.1), \
-             mock.patch.object(runner.time, "time", side_effect=fake_time):
+             mock.patch.object(runner, "POWER_EVERY", 0.1):
             p = runner._Power()
+            p.clock = fake_time
             p.start()
             t0 = fake_time()
             for _ in range(3):  # wait until the third sample: 0.3 s of fake time
@@ -8584,9 +8584,9 @@ class Savings(Base):
         fake_time = lambda: (t.__setitem__("now", t["now"] + 0.1) or t["now"])
         readings = [300.0, None, 300.0, None, 300.0, None, 300.0]
         with mock.patch.object(hardware, "gpu_power_w", side_effect=list(readings)) as power, \
-             mock.patch.object(runner, "POWER_EVERY", 0.1), \
-             mock.patch.object(runner.time, "time", side_effect=fake_time):
+             mock.patch.object(runner, "POWER_EVERY", 0.1):
             p = runner._Power()
+            p.clock = fake_time
             p.start()
             # five readings, however slow the machine: a fixed 0.3 s gave a macOS runner one (#236)
             deadline = time.monotonic() + 20
@@ -8598,6 +8598,17 @@ class Savings(Base):
         # the next reading before it stopped: 300 W times 2 to 3 tenths of a second
         self.assertGreaterEqual(p.wh, 300.0 * 0.2 / 3600 - 1e-12)
         self.assertLess(p.wh, 300.0 * 0.4 / 3600 + 1e-12)
+
+    def test_a_suspend_or_a_clock_step_mid_round_adds_no_gpu_energy(self):
+        # #559: an 8-hour suspend added 150 W x 8 h, 1.2 kWh, to gpu_wh on the wall clock, and a
+        # step back took energy away
+        with mock.patch.object(hardware, "gpu_power_w", return_value=150.0):
+            p = runner._Power()
+            for t in (0, 10, 20, 20 + 8 * 3600, 20 + 8 * 3600 + 10, 5, 15):
+                p.step(float(t))
+        # counted: 0-10, 10-20, the 10 s after the wake and the 10 s after the step back
+        self.assertAlmostEqual(p.wh, 150 * 40 / 3600, places=9)
+        self.assertIs(p.clock, time.monotonic)
 
     def test_accepted_row_records_energy_and_diff_and_discarded_row_neither(self):
         from workbench import store, results

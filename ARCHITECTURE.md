@@ -535,7 +535,10 @@ status `gpu_wh` (not for a remote model: `CURRENT["remote"]`, set in `drive`, wh
 `remote_gpu` instead, so its savings line ends `GPU energy not measured (another machine's)` and
 `savings.summary` counts such tasks, #117; nor for the suite's
 fake models, `WB_FAKE_MODELS`, which would read this machine's GPU; a None reading adds
-nothing; the tests after the round aren't counted). It is the whole GPU's draw, so tasks sharing
+nothing; the tests after the round aren't counted). Its intervals are on the monotonic clock,
+and one past `FROZEN_SECS` (60 s: a suspend that clock still counted, as WSL2's may) or
+backwards adds nothing (`_Power.step`): on the wall clock an 8-hour suspend mid-round added
+1.2 kWh of a 150 W GPU to `gpu_wh`, the results row and `wb savings`' cost (#559). It is the whole GPU's draw, so tasks sharing
 the GPU each count all of it. The size: `gitops.footprint` gives `files`, `lines` (added) and
 `removed`; each step records them (`results.step`), and an accepted task's row sums them as
 `diff`.
