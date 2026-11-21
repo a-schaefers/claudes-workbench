@@ -20064,6 +20064,12 @@ class Top(Base):
                           FAKE_SMI_LOG=str(bindir / "log"), FAKE_SMI_PID=str(bindir / "pid"))
         return bindir
 
+    @staticmethod
+    def x86():
+        """An x86 machine's card: on ARM (an Apple Silicon CI runner, a DGX Spark) nvidia-smi's
+        [N/A] memory is the RAM's (#572), so the fake old card read as unified there (#950)."""
+        return mock.patch("platform.machine", lambda: "x86_64")
+
     def top(self, drm, smi=None):
         from workbench import top
         run = hardware._run if smi else lambda *argv: ""  # no lspci: the PCI id instead
@@ -20154,6 +20160,7 @@ class Top(Base):
         self.assertLessEqual(g["used"], g["total"])
 
     def test_nvidia_comes_from_one_long_lived_nvidia_smi_and_n_a_is_left_out(self):
+        self.enterContext(self.x86())
         bindir = self.fake_smi()
         t = self.top(Path(self.tmp.name, "nodrm"), smi=str(bindir / "nvidia-smi"))
         try:
@@ -20180,6 +20187,7 @@ class Top(Base):
         # #547: before nvidia-smi's first line (the one pass Claude's Bash gets, the pane's first
         # tick) and after its stream exited, wb top said "RAM (no GPU)" on an NVIDIA machine
         from workbench import top
+        self.enterContext(self.x86())
         bindir = self.fake_smi()
         smi, nodrm = str(bindir / "nvidia-smi"), Path(self.tmp.name, "nodrm")
         os.environ["FAKE_SMI_MODE"] = "slow"
@@ -20565,10 +20573,13 @@ class Top(Base):
                              str(ROOT / "bin" / "wb"), str(out)], capture_output=True, text=True, timeout=30)
         pid = int(sh.stdout.strip())
         self.assertTrue(wait_gone(pid, 10), "wb top outlived its parent")
-        deadline = time.time() + 5
-        while not (bindir / "pid").exists() and time.time() < deadline:
-            time.sleep(0.05)
-        self.assertTrue(wait_gone(int((bindir / "pid").read_text()), 10), "nvidia-smi outlived wb top")
+        if hardware.system() == "macos":  # a Mac has no NVIDIA card: wb top never runs nvidia-smi
+            self.assertFalse((bindir / "log").exists())
+        else:
+            deadline = time.time() + 5
+            while not (bindir / "pid").exists() and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(wait_gone(int((bindir / "pid").read_text()), 10), "nvidia-smi outlived wb top")
         first = json.loads(out.read_text().splitlines()[0])
         self.assertEqual(sorted(first), ["every", "gpus", "queue", "rack", "running", "ts"])
 
@@ -20588,13 +20599,15 @@ class Top(Base):
                  "    signal.signal(signal.SIGTTOU, signal.SIG_IGN)\n"  # a shell's own step
                  "    os.tcsetpgrp(0, os.getpid())\n"
                  "    signal.signal(signal.SIGTTOU, signal.SIG_DFL)\n"
-                 "    os.execv(sys.argv[1], [sys.argv[1], 'top', '--every', '0.2'])\n"
+                 "    os.execv(sys.executable, [sys.executable, sys.argv[1], 'top', '--every', '0.2'])\n"
                  "open(sys.argv[2], 'w').write(str(pid))\n"
                  "while not os.WIFEXITED(os.waitpid(pid, os.WUNTRACED)[1]):\n"
                  "    pass\n")
         child, fd = pty.fork()
         if child == 0:
-            os.environ["PATH"] = "/usr/bin:/bin"  # no nvidia-smi: nothing to wait on
+            # no nvidia-smi: nothing to wait on. wb runs on this Python, not PATH's python3, which
+            # on a Mac is Xcode's 3.9 (#950)
+            os.environ["PATH"] = "/usr/bin:/bin"
             os.execv(sys.executable, [sys.executable, "-c", shell, str(ROOT / "bin" / "wb"), str(pidfile)])
         def reap_all():
             for pid in (int(pidfile.read_text()) if pidfile.exists() else 0, child):
@@ -20624,11 +20637,13 @@ class Top(Base):
         os.kill(top_pid, signal.SIGTSTP)
         self.assertTrue(read_until(b"\033[?1049l"))
         self.assertIn(b"\033[?25h", got)
+        def state():  # ps, not /proc/<pid>/stat: a Mac has no /proc (#950)
+            return subprocess.run(["ps", "-o", "stat=", "-p", str(top_pid)], capture_output=True,
+                                  text=True).stdout.strip()[:1]
         deadline = time.time() + 10
-        while Path(f"/proc/{top_pid}/stat").read_text().split(")")[1].split()[0] != "T" \
-                and time.time() < deadline:
+        while state() != "T" and time.time() < deadline:
             time.sleep(0.05)
-        self.assertEqual(Path(f"/proc/{top_pid}/stat").read_text().split(")")[1].split()[0], "T")
+        self.assertEqual(state(), "T")
         self.assertTrue(termios.tcgetattr(fd)[3] & termios.ICANON)        # the shell's mode back
         del got[:]
         os.kill(top_pid, signal.SIGCONT)
