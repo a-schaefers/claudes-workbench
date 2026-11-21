@@ -4,6 +4,7 @@ and the detector that decides a run is going nowhere.
 import hashlib
 import json
 import os
+import time
 from collections import deque
 
 EDIT_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch"}
@@ -34,7 +35,9 @@ def normalize(raw: dict, round_no: int):
     kind = raw.get("type")
     part = _obj(raw.get("part"))
     ts = raw.get("timestamp")
-    ts = round(ts / 1000, 3) if isinstance(ts, (int, float)) else 0.0
+    # when OpenCode leaves the timestamp out, the time it was read: 0.0 sorted the row first in
+    # wb watch and the check-in digests (#481)
+    ts = round(ts / 1000, 3) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else round(time.time(), 3)
     if kind == "tool_use":
         state = _obj(part.get("state"))
         tool = str(part.get("tool") or "?")

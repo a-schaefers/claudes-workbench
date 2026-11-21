@@ -727,7 +727,9 @@ pending `--now` note (an `interrupted` event). Any stop goes through `_stop`: SI
 process group, 10 s for the leader, then SIGKILL. The agent's pid is kept in `status.agent_pid`
 while it runs, so `wb stop` can end it if the runner can't. A round that ends mid-question
 clears `asking`. A stdout line that is JSON but not an object is skipped, not a crash, and
-`events.normalize` reads an event whose parts have the wrong shape as empty ones. A line is
+`events.normalize` reads an event whose parts have the wrong shape as empty ones, and stamps
+one without a `timestamp` with the time it was read (it was 0.0, sorting the row first in `wb
+watch` and the check-in digests, #481). A line is
 parsed by `store.loads`, which makes a lone surrogate (half an emoji, escaped: valid JSON) U+FFFD,
 as `transcript.export` does with the session export: no UTF-8 file can hold one, and one in a
 model's tool arguments failed the next status write and the task (#438).
@@ -816,7 +818,8 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
   on the step's first round, else fresh ("the last session ended before it began", so a session
   that never started still hands the next round the task); `keep` → continue; the last round handed over (`context: full`) → fresh; OpenCode compacted the
   session (`session export` lists a completed compaction) → fresh; the session's last assistant
-  message carried `fresh_at` or more of the window (input + cache read + cache write + output) →
+  message that counted any tokens (`context_state`: one whose counts are all 0, an aborted step,
+  is passed over, #481) carried `fresh_at` or more of the window (input + cache read + cache write + output) →
   fresh. This check doesn't look at whether files changed. When the export fails (a 30 s
   timeout, a busy store: `transcript.export(sid, strict=True)` is None), the round's last
   `step_finish` count stands in (status `live_used`, when it is this session's), compactions are
@@ -1653,6 +1656,8 @@ It answers `initialize` (echoing the client's protocol version, else `2025-06-18
 report line, `NOTE: the agent's OpenCode never listed workbench_ask_reviewer, so it can't ask you
 anything`, with the `opencode mcp list` command that says why (the 2026-11-19 audit: an OpenCode
 that stopped loading the server would have left the agent mute, and nothing said so).
+`run_round` removes the mark before each OpenCode starts, so each round's report judges its own
+round: kept from round 1, the note could fire only there (#481).
 The server runs inside the agent's lane, so it writes only `ask/`. A call first checks `command`
 and `path` (`bad_request`: one line of at most `LINE_MAX`, 4096, characters; a path absolute) and
 replies with what to fix instead of asking; past a budget (counted from the ask files, a

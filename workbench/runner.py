@@ -707,6 +707,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     cmd = lane.wrap(context.writable(task), cmd,   # writes stay in the agent's lane (lane.py),
                     context.readable(task),       # and credentials out of its reach
                     context.unix_paths(task))
+    try:  # this round's OpenCode marks it again: kept from round 1, the report's note about a
+        (ask_mcp.ask_dir(task) / ask_mcp.LISTED).unlink()  # lost ask tool could fire only there (#481)
+    except OSError:
+        pass
     log = open(task.dir / "runner.log", "a")
     proc = subprocess.Popen(cmd, cwd=task.workdir, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=log, encoding="utf-8",
@@ -1808,11 +1812,16 @@ def context_state(task: store.Task) -> dict:
         return {"used": live.get("used") if live.get("session") == sid else None,
                 "window": task.status.get("window"), "compactions": 0}
     msgs = got.get("messages", [])
-    last = next((m for m in reversed(msgs) if m.get("type") == "assistant" and m.get("tokens")), None)
-    used = None
-    if last:  # what the next request carries: everything the last one read, plus its reply
-        tk, cache = last["tokens"], last["tokens"].get("cache") or {}
-        used = tk.get("input", 0) + cache.get("read", 0) + cache.get("write", 0) + tk.get("output", 0)
+    def carried(tk) -> int:  # what the next request carries: all the message read, plus its reply
+        if not isinstance(tk, dict):
+            return 0
+        cache = tk.get("cache") if isinstance(tk.get("cache"), dict) else {}
+        return sum(n for n in (tk.get("input"), cache.get("read"), cache.get("write"), tk.get("output"))
+                   if isinstance(n, (int, float)))
+    # the last one that counted anything: an aborted step recorded with every count 0 (an
+    # interrupt) read as an empty session and skipped the between-rounds check (#481)
+    last = next((m for m in reversed(msgs) if m.get("type") == "assistant" and carried(m.get("tokens"))), None)
+    used = carried(last["tokens"]) if last else None
     return {"used": used, "window": task.status.get("window"),
             "compactions": sum(m.get("type") == "compaction" and m.get("status") == "completed"
                                for m in msgs)}

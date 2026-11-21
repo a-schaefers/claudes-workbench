@@ -3715,6 +3715,17 @@ class StartChecks(Base):
                    "--model", "mimo", "--base", "nope")
         self.assertIn("no commit nope", err.getvalue())
 
+    def test_a_later_round_that_loses_the_ask_tool_says_so_too(self):
+        # #481: ask/.listed was kept from round 1, so the note could fire only in round 1
+        self.start("t-later", "ok")
+        wait_phase("t-later", {"review"})
+        self.assertNotIn("never listed", run_wb("report", "t-later"))
+        os.environ["FAKE_NO_MCP"] = "1"                       # round 2's OpenCode lists nothing
+        run_wb("feedback", "t-later", "--text", "once more")
+        wait_phase("t-later", {"review"})
+        self.assertEqual(store.Task("t-later").status["round"], 2)
+        self.assertIn("never listed workbench_ask_reviewer", run_wb("report", "t-later"))
+
 
 class Steering(Base):
     def setUp(self):
@@ -14374,6 +14385,27 @@ class Detector(unittest.TestCase):
             "status": "completed", "input": {"filePath": "/a/" + "x" * 120}}}}, 1)
         self.assertEqual(row["path"], "/a/" + "x" * 120)                 # whole, not the brief
 
+
+    def test_an_event_without_a_timestamp_is_stamped_when_read_not_at_zero(self):
+        # #481: ts 0.0 sorted the row first in wb watch and the check-in digests
+        before = time.time()
+        row = events.normalize({"type": "text", "part": {"text": "x"}}, 1)
+        self.assertGreaterEqual(row["ts"], round(before, 3) - 0.001)
+        self.assertLessEqual(row["ts"], time.time())
+        self.assertEqual(events.normalize({"type": "text", "timestamp": 1_800_000_000_000,
+                                           "part": {"text": "x"}}, 1)["ts"], 1_800_000_000.0)
+
+    def test_an_aborted_step_counting_nothing_doesnt_empty_the_session(self):
+        # #481: the last assistant message with a tokens field, all its counts 0 (an interrupt),
+        # read as an empty session, which skipped the between-rounds check
+        task = mock.Mock(status={"session": "ses_x", "window": 32768})
+        msgs = [{"type": "assistant", "tokens": {"input": 20000, "output": 100,
+                                                 "cache": {"read": 3000, "write": 0}}},
+                {"type": "assistant", "tokens": {"input": 0, "output": 0, "cache": {"read": 0, "write": 0}}}]
+        with mock.patch.object(transcript, "export", return_value={"messages": msgs}):
+            self.assertEqual(runner.context_state(task)["used"], 23100)
+        with mock.patch.object(transcript, "export", return_value={"messages": msgs[1:]}):
+            self.assertIsNone(runner.context_state(task)["used"])      # nothing counted: unknown
 
     def test_events_of_the_wrong_shape_are_skipped_not_a_crash(self):
         # A plugin's console.log on OpenCode's stdout crashed the runner mid-round (the
