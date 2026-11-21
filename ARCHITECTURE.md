@@ -3051,7 +3051,8 @@ what they hold.
 when `m` is resident and nothing else is, or all of it is in VRAM with room beside the rest,
 unless it is a local Ollama model partly on the CPU that would fit whole once the GPU is freed
 around it (`_respread`: a known budget, its `/api/ps` size plus the kept models' within it, no
-running server wb can't stop): then, after `free_gpu`, it is unloaded (`_unload`) and loaded
+running server wb can't stop that holds memory, `_servers_hold`: an LM Studio counts only for the
+instances `free_gpu` leaves loaded, #808): then, after `free_gpu`, it is unloaded (`_unload`) and loaded
 again, since Ollama reuses a loaded runner as it was placed. Loaded while something else held
 the VRAM, it crawled at CPU speed all task beside an empty GPU (#703). Each (root, name, size)
 is reloaded so once (`_RESPREAD`): one that comes back split isn't reloaded every round.
@@ -3068,7 +3069,9 @@ models: before `status` says the server lists no model, other models, or serves 
 it asks `lmstudio_unloaded`, and a model LM Studio has is available, not resident ("in LM Studio,
 not loaded (wb loads it)"); with A loaded, B was told to set its id to A (#462, the audit of
 1.8). Nothing is freed when `m` fits beside every model resident now (`_room_beside`: Ollama only, a
-known budget, no other server resident, `m` all in VRAM if loaded, Ollama's loaded-model limit not
+known budget, no other server resident (`_servers_hold`: an LM Studio only with an instance
+loaded, since its just-in-time list named every downloaded model and an idle one read as
+resident, so every round emptied the GPU and #703's reload never fired, #808), `m` all in VRAM if loaded, Ollama's loaded-model limit not
 reached, and the loaded sizes from `/api/ps` plus `need(m)` within `SHARE_AT` of the budget):
 every round once unloaded the user's Open WebUI, autocomplete or embedding model, fits or not
 (the 2026-11-19 audit). Else `free_gpu(keep={m, *keep}, of=m)` (an Ollama known to be on other

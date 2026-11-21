@@ -1419,9 +1419,11 @@ def _respread(m: Model, keep=()) -> tuple | None:
     if not budget:
         return None
     local = [o for o in discover().values() if not o.remote]
-    if any(o.engine == "server" and not o.stop and status(o)["resident"] for o in local):
+    held = keep_loaded()
+    unstopped = [o for o in local if not o.stop]  # free_gpu stops a server that has a stop
+    if _servers_hold(unstopped, [o for o in unstopped if o.id in keep or o.id in held], held):
         return None  # its memory stays taken whatever is freed
-    held, seen, mine, kept = keep_loaded(), {}, None, 0
+    seen, mine, kept = {}, None, 0
     ours = [o for o in local if o.engine == "ollama" and (o.id in keep or o.id in held)]
     for key, root in _roots(o for o in local if o.engine == "ollama").items():
         if apart(m.root, root, seen):
@@ -1682,6 +1684,29 @@ def _others_resident(m: Model, keep=()) -> bool:
                if not apart(m.root, root, seen) for n in _ollama_loaded(root))
 
 
+def _servers_hold(local: list[Model], ours: list[Model] | None = None, held: set | None = None) -> bool:
+    """Whether a resident server (not Ollama) among ``local`` holds GPU memory nothing here
+    measures: any server but LM Studio, which says what it has loaded (/api/v1/models). Its
+    just-in-time list names every downloaded model, so an idle LM Studio read as resident: every
+    round unloaded the user's Ollama models that fit beside the task's, and a model split onto the
+    CPU was never placed again (#808). With ``ours`` (and ``held``, keep_loaded), only the
+    instances free_gpu leaves loaded count, since it unloads the rest; without, any loaded."""
+    seen: set = set()
+    for o in local:
+        if o.engine != "server" or o.server in seen or not status(o)["resident"]:
+            continue
+        seen.add(o.server)
+        rows = _lmstudio_rows(o.root, o.api_key)
+        if rows is None:
+            return True  # a server that can't say what it holds
+        loaded = {i["id"] for x in rows for i in _instances(x)}
+        if ours is not None:
+            loaded -= {i for s, i in _lmstudio_extra(local, ours, held or set())[0] if s.server == o.server}
+        if loaded:
+            return True
+    return False
+
+
 def _room_beside(m: Model) -> bool:
     """Whether ``m`` fits on the GPU beside every model resident there now, so nothing need be
     unloaded: every round once emptied the GPU of the user's other models even when all of them
@@ -1692,7 +1717,7 @@ def _room_beside(m: Model) -> bool:
     if m.engine != "ollama" or not budget:
         return False
     local = [o for o in discover().values() if not o.remote]
-    if any(o.engine == "server" and status(o)["resident"] for o in local):
+    if _servers_hold(local):
         return False
     used, here, mine, seen = 0, [], False, {}
     for key, root in _roots(o for o in local if o.engine == "ollama").items():

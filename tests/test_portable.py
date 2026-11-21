@@ -1239,6 +1239,33 @@ class Real(unittest.TestCase):
         models.make_resident(found["lms/b"], say=lambda *_: None)
         self.assertEqual(loaded, {"a": 32768, "b": 32768})        # keep_loaded is kept
 
+    def test_an_idle_lm_studio_neither_empties_the_gpu_of_ollamas_models_nor_stops_a_respread(self):
+        # #808: just in time, LM Studio's /v1/models lists every downloaded model, so with nothing
+        # loaded it read as a resident server: every round unloaded the user's Ollama models that
+        # fit beside the task's, and a model split onto the CPU was never placed again (#703)
+        gb = 10 ** 9
+        ollama_loaded, lms_loaded, posts = [{"name": "chat", "size": 2 * gb, "size_vram": 2 * gb}], {}, []
+        srv, port = fake_ollama(ollama_loaded, ["x", "chat"], posts)
+        lms, url = fake_lmstudio(lms_loaded, [])
+        self.servers += [srv, lms]
+        win = {"limit": {"context": 32768}}
+        self.config({"o": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"x": {}, "chat": {}}},
+                     "lms": {"options": {"baseURL": url + "/v1"}, "models": {"a": win, "b": win}}},
+                    {"lms": {"engine": "server"}, "o/x": {"vram_gb": 4}, "gpu_gb": 20})
+        found = models.discover()
+        self.assertTrue(models.status(found["lms/a"])["resident"])  # its list, not its memory
+        x = found["o/x"]
+        self.assertTrue(models._room_beside(x))                    # 2 + 4 of 18, LM Studio idle
+        lms_loaded["a"] = 32768
+        self.assertFalse(models._room_beside(x))                   # an instance whose size is unsaid
+        ollama_loaded.append({"name": "x", "size": 10 * gb, "size_vram": 5 * gb})  # half on the CPU
+        self.assertIsNotNone(models._respread(x))                  # free_gpu unloads a
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps(
+            {"lms": {"engine": "server"}, "o/x": {"vram_gb": 4}, "gpu_gb": 20, "keep_loaded": ["lms/a"]}))
+        self.assertIsNone(models._respread(models.discover()["o/x"]))  # kept: its memory stays taken
+        lms_loaded.clear()
+        self.assertIsNotNone(models._respread(models.discover()["o/x"]))
+
     def test_lm_studio_says_each_models_size_window_and_tool_training(self):
         from workbench import cli
         lms = self.server({"/api/v1/models": {"models": [
