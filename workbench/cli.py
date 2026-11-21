@@ -1816,7 +1816,10 @@ def cmd_accept(a):
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}" if merged else
            f"\nmerge with: {gitops.jj_merge(repo, spec['branch'])}" if gitops.jj_colocated(repo) else
-           f"\nmerge with: git -C {shlex.quote(str(repo))} merge --no-ff {spec['branch']}"))
+           f"\nmerge with: " + gitops.merge_by_hand(
+               repo, spec["branch"], close.get("merge_as") if close.get("merge") else
+               context.repo_conf(spec["repo"]).get("merge") or "merge",
+               close.get("sign", True) and _signed(spec, a))))
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(checked)
     _say(lessons.nudge(task, "accepted"))

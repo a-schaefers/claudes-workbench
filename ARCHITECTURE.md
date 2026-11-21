@@ -3230,7 +3230,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
   (`cli._ends_cleanly` raises it) is backed out, `merge --abort` and then `reset --merge` to the
   commit before (`gitops._back_out`: a kill left `MERGE_HEAD` and the staged merge, #420), and
   reported as not merged); otherwise it prints the
-  merge command. A colocated Jujutsu repo (`gitops.jj_colocated`: `.jj/` beside `.git`) has git's
+  merge command (`merge with:`, `gitops.merge_by_hand`): in the repo's mode, the `--merge-as`
+  given or commands.json's `merge`, and with `--no-gpg-sign` after `--no-sign` (it said `merge
+  --no-ff` whatever the repo kept to, #471, the audit of 1.8). A colocated Jujutsu repo (`gitops.jj_colocated`: `.jj/` beside `.git`) has git's
   HEAD detached whenever jj has moved the working copy, so its tasks record no `base_branch` and
   `--merge` meets a detached HEAD: the refusal (`gitops.detached`) says so and names jj's merge,
   `jj -R <repo> new @- delegate/<task>` (`gitops.jj_merge`, a merge change on the working copy's

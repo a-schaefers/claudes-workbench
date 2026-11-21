@@ -1859,6 +1859,31 @@ class Lifecycle(Base):
         with self.assertRaisesRegex(RuntimeError, '"merge" is one of merge, ff, squash'):
             context.commands_conf()
 
+    def test_the_merge_by_hand_line_follows_the_repos_merge_mode_and_signing(self):
+        # #471 (the audit of 1.8): "merge with: … merge --no-ff" whatever commands.json's `merge`
+        # said, and a signed merge commit after --no-sign
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "merge": "squash"}}}))
+        q = shlex.quote(str(self.repo))
+        for name, extra, want in (
+                ("t-h1", (), f"merge with: git -C {q} merge --squash --ff delegate/t-h1 && "
+                             f"git -C {q} commit -C delegate/t-h1"),
+                ("t-h2", ("--no-sign",), f"git -C {q} commit --no-gpg-sign -C delegate/t-h2")):
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+            self.assertIn(want, run_wb("accept", name, "-m", f"feat: {name}", *extra))
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "merge": "ff"}}}))
+        self.start("t-h3", "ok")
+        wait_phase("t-h3", {"review"})
+        self.assertIn(f"merge with: git -C {q} merge --ff-only delegate/t-h3",
+                      run_wb("accept", "t-h3", "-m", "feat: h3"))
+        Path(os.environ["WB_COMMANDS"]).write_text("{}")
+        self.start("t-h4", "ok")
+        wait_phase("t-h4", {"review"})
+        self.assertIn(f"merge with: git -C {q} merge --no-ff --no-gpg-sign delegate/t-h4",
+                      run_wb("accept", "t-h4", "-m", "feat: h4", "--no-sign"))
+
     def test_accept_merge_completes_the_merge_or_says_it_did_not(self):
         # #190 (the 2026-11-19 audit): with branch.main.mergeOptions=--no-commit, git left the
         # merge pending, HEAD unmoved, and accept said merged

@@ -691,6 +691,18 @@ def jj_colocated(repo: Path) -> bool:
     return (Path(repo) / ".jj").is_dir() and (Path(repo) / ".git").exists()
 
 
+def merge_by_hand(repo: Path, branch: str, how: str = "merge", sign: bool = True) -> str:
+    """The git command that lands ``branch`` as wb accept --merge would: in the repo's mode (the
+    --merge-as, else commands.json's `merge`) and unsigned after --no-sign. The line said merge
+    --no-ff whatever the repo kept to (#471, the audit of 1.8)."""
+    g, nosign = f"git -C {shlex.quote(str(repo))}", "" if sign else " --no-gpg-sign"
+    if how == "ff":
+        return f"{g} merge --ff-only {branch}"
+    if how == "squash":
+        return f"{g} merge --squash --ff {branch} && {g} commit{nosign} -C {branch}"
+    return f"{g} merge --no-ff{nosign} {branch}"
+
+
 def jj_merge(repo: Path, branch: str) -> str:
     """The jj command that merges ``branch`` onto the working copy's parent, as a new change."""
     return f"jj -R {shlex.quote(str(repo))} new @- {branch}"
