@@ -293,6 +293,10 @@ def send(text: str, frm: str, cid: str | None = None, **extra) -> dict:
     reply is about (``about``)."""
     with _send_lock:
         if cid and (r := _by_cid(cid)):
+            if r.get("from") == "user" and r.get("id") not in open_work()["messages"]:
+                # a send cut off between the append and the index (a restart mid-request): the
+                # retry found the id and said sent, and the listener never had it (#446)
+                _open_update(lambda w: _reopen(w, r))
             return r
         row = {"id": f"{int(time.time() * 1000)}-{secrets.token_hex(3)}", "ts": store.now(),
                "from": frm, "text": text, **({"cid": cid} if cid else {}),
@@ -389,6 +393,25 @@ def _open_rebuild() -> dict:
         elif "tool" in r and r.get("id"):
             open_asks[r["id"]] = {"kind": "permission", **r}
     return {"messages": msgs, "asks": open_asks}
+
+
+def _received(msg_id: str) -> bool:
+    """Whether the message has a receipt: read whole, but only when a retried send finds its
+    message missing from the index (rare), so the rows are parsed only where the id appears."""
+    try:
+        data = (chat_dir() / "receipts.jsonl").read_bytes()
+    except FileNotFoundError:
+        return False
+    key = msg_id.encode()
+    return any(r.get("id") == msg_id for line in data.splitlines() if key in line
+               for r in store._rows(line) if isinstance(r, dict))
+
+
+def _reopen(work: dict, row: dict) -> None:
+    """Under open.lock: index a message the index lacks, unless Claude already has it (an ack
+    writes its receipt before it takes the lock, so a receipt not seen here is popped after)."""
+    if row["id"] not in work["messages"] and not _received(row["id"]):
+        work["messages"][row["id"]] = row
 
 
 def _open_update(change) -> dict:

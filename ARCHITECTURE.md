@@ -4095,7 +4095,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   audio?, about?}`. A post whose `cid` the thread already holds returns that row instead of adding one
   (`_by_cid`: the file read on from where the last post stopped, the newest `CIDS_KEPT` 5000 ids
   kept; only the last 500 rows were checked, and a tab offline longer than that sent its message
-  twice, #199). `shots` (Claude's, from `wb shot --chat`) is `chat.shots`: `{task, n, step, round,
+  twice, #199). A user's message so found that `open.json` lacks and that has no receipt is put
+  back in it (`_reopen`, under `open.lock`): a send cut off between its append and the index (a
+  restart mid-request) was retried, said sent, and never reached the listener (#446). `shots` (Claude's, from `wb shot --chat`) is `chat.shots`: `{task, n, step, round,
   viewport, base: {rev, image: bool, exit?}, candidate: {rev, image: bool, exit?}}` (`image` false
   for a failed capture, `exit` when it wasn't 0: #268). `about` (the user's reply
   to a pair) is `{task, n, step, round}`, taken from the pair's shots.json and not from the page.

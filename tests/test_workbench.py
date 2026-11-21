@@ -11610,6 +11610,31 @@ class WebChat(Base):
         self.assertEqual(len(b["state"]["messages"]), 1)
         self.assertEqual(self.call("/api/send", {"text": "x", "cid": 7}, token=tok)[0], 400)
 
+    def test_a_send_cut_off_at_any_point_reaches_the_listener_exactly_once_when_retried(self):
+        # #446 (the 2026-11-20 audit): cut off after the message was appended and before the open
+        # index had it, the retry found the client id and said sent; the thread showed it and the
+        # listener never had it
+        chat = self.chat
+        pending = lambda: [r["id"] for r in chat.pending()]
+        with mock.patch.object(chat.store, "append_jsonl", side_effect=OSError("cut")):  # before the append
+            with self.assertRaises(OSError):
+                chat.send("one", "user", "c-a")
+        a = chat.send("one", "user", "c-a")
+        self.assertEqual(pending(), [a["id"]])
+        with mock.patch.object(chat, "_open_update", side_effect=OSError("cut")):  # between the two
+            with self.assertRaises(OSError):
+                chat.send("two", "user", "c-b")
+        self.assertEqual(pending(), [a["id"]])
+        b = chat.send("two", "user", "c-b")
+        self.assertEqual(pending(), [a["id"], b["id"]])
+        self.assertEqual(chat.send("two", "user", "c-b")["id"], b["id"])  # after both: nothing new
+        self.assertEqual(pending(), [a["id"], b["id"]])
+        chat.ack(b["id"], "s")                                             # Claude has it: a late retry
+        self.assertEqual(chat.send("two", "user", "c-b")["id"], b["id"])  # doesn't send it again
+        self.assertEqual(pending(), [a["id"]])
+        rows = store.read_jsonl(chat.chat_dir() / "messages.jsonl")[0]
+        self.assertEqual([r["cid"] for r in rows], ["c-a", "c-b"])
+
     def test_a_send_retried_after_many_messages_still_lands_once(self):
         # #199 (the 2026-11-19 audit): only the last 500 rows were checked for the client id, so a
         # tab offline longer than that sent its queued message twice
