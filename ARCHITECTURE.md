@@ -5351,7 +5351,12 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   `rebase-apply`, `sequencer` in the git dir): "not committed: a merge is under way here, so
   commit AGENTS.md yourself once it is done" (the review of #931: during `git merge --no-commit`
   the link's commit took MERGE_HEAD as its second parent with only HEAD's tree, so the merge's
-  changes were lost and MERGE_HEAD consumed).
+  changes were lost and MERGE_HEAD consumed). An `AGENTS.md` moved to a gitignored `CLAUDE.md`
+  (which gets no link) commits nothing either: "not committed: CLAUDE.md is gitignored, so
+  AGENTS.md's move to it is yours to commit" when `AGENTS.md` was committed (git now sees it
+  deleted), "nothing to commit: CLAUDE.md is gitignored" when it wasn't; the link goes in a
+  commit only when it is in the worktree (the review of #931: the commit held a link the worktree
+  lacked, ` D AGENTS.md` right after, and force-tracked the gitignored `CLAUDE.md`).
 - **CLAUDE.md stays true.** It goes into every agent prompt, so `wb accept` prints how many code
   commits it's behind (`cli.claude_md_status`, at the accepted commit, the task's `tip`: read
   at the branch `--merge` had deleted, every merged accept said "the repo has no CLAUDE.md", a

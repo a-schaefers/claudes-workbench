@@ -4342,10 +4342,18 @@ def _commit_link(d: Path, head: dict, index: dict, moved: bool) -> str:
     user's index and working tree keep their bytes. A path whose index already differed from
     HEAD (a staged change of theirs), or a link whose CLAUDE.md isn't committed, is left to them."""
     import tempfile
+    if moved and _local_claude_md(d):
+        # a committed AGENTS.md moved to a gitignored CLAUDE.md, which gets no link: the commit
+        # held a link the worktree lacked and force-tracked the CLAUDE.md that is never to be
+        # committed (the review of #931). Git sees AGENTS.md deleted: the user's call
+        return ("not committed: CLAUDE.md is gitignored, so AGENTS.md's move to it is yours to "
+                "commit" if "AGENTS.md" in head else "nothing to commit: CLAUDE.md is gitignored")
     with tempfile.TemporaryDirectory(prefix="wb-init-") as tmp:
         (link := Path(tmp, "link")).write_text("CLAUDE.md")
+        agents = d / "AGENTS.md"
         new = {"AGENTS.md": ("120000", gitops.git(d, "hash-object", "-w", "--no-filters",
-                                                  str(link)).strip())}
+                                                  str(link)).strip())} \
+            if agents.is_symlink() and os.readlink(agents) == "CLAUDE.md" else {}  # only what is there
         if moved and head.get("AGENTS.md", ("",))[0].startswith("100"):
             new["CLAUDE.md"] = head["AGENTS.md"]  # its committed text: unstaged edits stay unstaged
         changed = {p: e for p, e in new.items() if head.get(p) != e}

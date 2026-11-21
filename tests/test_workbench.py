@@ -16225,6 +16225,34 @@ class Projects(Base):
                     self.assertEqual(self.git(d, "show", ":theirs.txt"), "theirs")  # the staged result kept
                 self.assertEqual(os.readlink(d / "AGENTS.md"), "CLAUDE.md")
 
+    def test_init_commits_nothing_when_a_committed_agents_md_moves_to_a_gitignored_claude_md(self):
+        # the review of #931: the commit held an AGENTS.md link the worktree didn't have (status
+        # ` D AGENTS.md` right after) and force-tracked the gitignored CLAUDE.md
+        self.identity()
+        d = Path(self.tmp.name) / "init-local"
+        d.mkdir()
+        self.git(d, "init", "-q")
+        (d / ".gitignore").write_text("CLAUDE.md\n")
+        (d / "AGENTS.md").write_text("# rules\n")
+        self.git(d, "add", "-A"); self.git(d, "commit", "-qm", "agents")
+        before = self.git(d, "rev-parse", "HEAD")
+        out = run_wb("init", str(d))
+        self.assertIn("AGENTS.md moved to CLAUDE.md, not committed: CLAUDE.md is gitignored, so "
+                      "AGENTS.md's move to it is yours to commit", out)
+        self.assertEqual(self.git(d, "rev-parse", "HEAD"), before)
+        self.assertEqual(self.git(d, "ls-files"), ".gitignore\nAGENTS.md")   # CLAUDE.md never tracked
+        self.assertEqual((d / "CLAUDE.md").read_text(), "# rules\n")
+        self.assertFalse((d / "AGENTS.md").exists() or (d / "AGENTS.md").is_symlink())
+        self.assertEqual(self.git(d, "status", "--porcelain"), "D AGENTS.md")
+        d = Path(self.tmp.name) / "init-local-untracked"   # never committed: nothing to say it moved
+        d.mkdir()
+        self.git(d, "init", "-q")
+        (d / ".gitignore").write_text("CLAUDE.md\n")
+        self.git(d, "add", "-A"); self.git(d, "commit", "-qm", "ignore")
+        (d / "AGENTS.md").write_text("# rules\n")
+        self.assertIn("nothing to commit: CLAUDE.md is gitignored", run_wb("init", str(d)))
+        self.assertEqual(self.git(d, "ls-files"), ".gitignore")
+
     def identity(self):
         cfg = Path(self.tmp.name) / "gitconfig"
         cfg.write_text("[user]\n\temail = t@t\n\tname = t\n")
