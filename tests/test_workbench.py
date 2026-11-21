@@ -264,6 +264,16 @@ class Lifecycle(Base):
         self.assertIn("check the tail shows it failing only for what the step changes", report)
         self.assertIn("on the base the acceptance command fails", run_wb("wait", "t-base", "--timeout", "1"))
 
+    def test_the_base_check_line_promises_a_check_in_only_for_a_cut_short_run(self):
+        # #881 (Claude's audit of 1.90.24): it promised a check-in when the command already
+        # passes on the base, which the runner never raises (a note in the first report)
+        out = self.start("t-bline", "ok", "--test", "true")
+        line = next(x for x in out.splitlines() if x.startswith("base check:"))
+        self.assertIn("a check-in at once if --test-timeout cuts it short", line)
+        self.assertNotIn("already passes", line)
+        wait_phase("t-bline", {"review"})
+        self.assertNotIn("checkin", [r["kind"] for r in store.notices() if r["task"] == "t-bline"])
+
     def test_what_the_base_check_writes_never_reaches_the_agents_worktree(self):
         # #192 (the 2026-11-19 audit): the base check ran in the task's worktree, and a stamp it
         # wrote made the same failing command pass after the agent's unrelated edit
