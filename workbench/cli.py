@@ -2767,13 +2767,14 @@ def cmd_scout(a):
         installed = {x["name"]: x for x in models.ollama_installed(prov["root"])} if up else {}
         other = prov["engine"] != "ollama" and not models._fake() and \
             models._ask(f"{models.openai_base(prov['url'])}/models", prov["key"], timeout=1) is not None
-        for name in prov["models"]:
+        for name, e in prov["models"].items():
             m = registered.get(f"{pid}/{name}")
-            disk = installed.get(name) or installed.get(f"{name}:latest") or {}
-            said = models.server_facts(prov["root"], name, prov["key"]) if other else {}
+            asked = served_name(name, e)  # the server's name for it: an alias's id (#588)
+            disk = installed.get(asked) or installed.get(f"{asked}:latest") or {}
+            said = models.server_facts(prov["root"], asked, prov["key"]) if other else {}
             if said.get("weights"):
                 disk = {"size": said["weights"]}
-            served = models.ollama_served_context(prov["root"], name) if up else said.get("context")
+            served = models.ollama_served_context(prov["root"], asked) if up else said.get("context")
             ctx = ((m.config.get("limit") or {}).get("context") or 0) if m else 0
             facts = " · ".join(x for x in (
                 f"{hardware.size(disk.get('size'))} on disk" if disk.get("size") else "",
@@ -2788,8 +2789,8 @@ def cmd_scout(a):
             print(f"  {pid}/{name}: {facts or prov['engine']} · {used}"
                   + (f" · bench: {replayed}" if replayed else "")
                   + (f"\n    slice: {router.slice(m).line()}" if m else ""))
-        extra = [x for x in installed if x not in prov["models"] and x.removesuffix(":latest")
-                 not in prov["models"]]
+        names = {served_name(n, e).removesuffix(":latest") for n, e in prov["models"].items()}
+        extra = [x for x in installed if x.removesuffix(":latest") not in names]
         local = [x for x in extra if not installed[x]["cloud"]]
         if local:
             print(f"  installed in {pid} but not registered: " + ", ".join(
@@ -2810,15 +2811,20 @@ def cmd_scout(a):
           "and when done: wb scout --done --notes \"…\"")
 
 
+def served_name(key: str, entry) -> str:
+    """The name the server knows a config entry by: its `id` (an alias, #203), else its key."""
+    return str((entry.get("id") if isinstance(entry, dict) else None) or key)
+
+
 def server_lines(provs: dict) -> list[str]:
     """wb scout's view of the model servers on this machine, whichever they are: the commands on
     PATH, and each default port that answers, with whether OpenCode has a provider for it."""
     on_path, answering = models.servers_here()
-    roots = {p["root"].rstrip("/") for p in provs.values()}
+    keys = {models.server_key(p.get("url") or p["root"]) for p in provs.values()}  # ::1, a LAN IP (#588)
     lines = [f"  on PATH: {', '.join(on_path)}"] if on_path else []
     for x in answering:
         listed = ", ".join(x["models"][:8]) + (", ..." if len(x["models"]) > 8 else "") or "no models"
-        known = (x["root"] in roots or x["root"].replace("127.0.0.1", "localhost") in roots)
+        known = models.server_key(x["root"]) in keys
         lines.append(f"  {x['root']} answers (usually {x['usually']}): {listed}" + (
             "" if known else f"; OpenCode has no provider for it (wb model add <provider>/<model> "
                              f"--url {x['root']}/v1 --context N)"))
@@ -3190,6 +3196,8 @@ def cmd_model(a):
             if provs else f"no local provider: {models.why_none()}")
     prov = provs[provider]
     if a.action == "add":
+        # the server's name for it: an existing alias's id, not its key (#588, the audit of 1.90)
+        asked = served_name(name, prov["models"].get(name))
         if prov["problem"]:
             die(f"provider {provider}: {prov['problem']}")
         _say(prov.get("engine_note"))  # an Ollama emulator, driven as a server (#580)
@@ -3205,7 +3213,7 @@ def cmd_model(a):
             # (the 2026-11-16 audit)
             die(f"Ollama isn't answering at {prov['root']}: start it (ollama serve, or its "
                 "service or app), then retry")
-        if prov["engine"] == "ollama" and models.ollama_cloud(prov["root"], name) \
+        if prov["engine"] == "ollama" and models.ollama_cloud(prov["root"], asked) \
                 and not models.cloud_allowed(a.id):
             die(f"{a.id} is an Ollama cloud model: it runs on ollama.com, off this machine. To hand "
                 f"it work anyway, give it \"local\": true in {models.overrides_path()} first")
@@ -3213,20 +3221,20 @@ def cmd_model(a):
             if prov["engine"] != "ollama":
                 die(f"{provider} is not an Ollama provider; install the model the server's own way")
             try:
-                models.ollama_pull(prov["root"], name, say=lambda m: print(m, flush=True))
+                models.ollama_pull(prov["root"], asked, say=lambda m: print(m, flush=True))
             except (OSError, RuntimeError, ValueError) as e:  # URLError and HTTPError are OSErrors
-                die(f"pulling {name} failed: {getattr(e, 'reason', e)}")
+                die(f"pulling {asked} failed: {getattr(e, 'reason', e)}")
         try:
-            facts = models.ollama_show(prov["root"], name) if prov["engine"] == "ollama" else {}
+            facts = models.ollama_show(prov["root"], asked) if prov["engine"] == "ollama" else {}
         except Exception as e:
-            die(f"{provider} can't describe {name} ({e}): is it pulled? (--pull downloads it)")
+            die(f"{provider} can't describe {asked} ({e}): is it pulled? (--pull downloads it)")
         caps = facts.get("capabilities") or []
         # the context the server actually serves: what it says it gives this model, else what
         # this provider's other models are set to. Never Ollama's trained length: it serves its
         # own small default then, and the prompt was cut off silently (the 2026-11-16 audit)
         other = {} if prov["engine"] == "ollama" or models._fake() else \
-            models.server_facts(prov["root"], name, prov["key"])
-        served = models.ollama_served_context(prov["root"], name) if prov["engine"] == "ollama" \
+            models.server_facts(prov["root"], asked, prov["key"])
+        served = models.ollama_served_context(prov["root"], asked) if prov["engine"] == "ollama" \
             else other.get("context")
         # never a sibling's window for Ollama: it serves each model its own (a `wb optimize`
         # variant's 64K is its Modelfile's), and llama3.1:8b beside qwen3:8b-64k was registered
@@ -4109,6 +4117,7 @@ def cmd_doctor(a):
         ollama = prov["engine"] == "ollama"
         for name, e in prov["models"].items():
             said = (e.get("limit") or {}).get("context")
+            asked = served_name(name, e)  # the server's name for it: an alias's id (#588)
             if not said and f"{pid}/{name}" in found:  # it passed, and the runner never handed
                 # over (the 2026-11-16 audit)
                 line(False, f"{pid}/{name} has no limit.context, so its tasks never hand over and "
@@ -4116,7 +4125,7 @@ def cmd_doctor(a):
                      f"{pid}/{name}" + ("" if ollama else " --context N (the window it serves)"))
             if not ollama:
                 # only a server running this model is asked: a down one cost seconds a model
-                served = models.server_facts(prov["root"], name, prov["key"])["context"] \
+                served = models.server_facts(prov["root"], asked, prov["key"])["context"] \
                     if (states.get(f"{pid}/{name}") or {}).get("resident") else None
                 if said and served and said > served:
                     line(False, f"{pid}/{name} says a {said // 1024}K context but the server serves "
@@ -4136,7 +4145,7 @@ def cmd_doctor(a):
                 print(f"--  {fit}")
             if prov["root"] in down:
                 continue
-            served = models.ollama_served_context(prov["root"], name)
+            served = models.ollama_served_context(prov["root"], asked)
             if said and not served:  # a stock Ollama serves 4K-8K (the 2026-11-16 audit)
                 print(f"--  {pid}/{name}: Ollama's served context is unknown (not loaded, no num_ctx, "
                       f"no OLLAMA_CONTEXT_LENGTH); its default may be below the entry's "

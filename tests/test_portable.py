@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+import contextlib
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -955,6 +956,67 @@ class Real(unittest.TestCase):
         with self.assertRaises(SystemExit), redirect_stdout(out):
             cli.main(["doctor"])
         self.assertIn("BAD v/coder says a 128K context but the server serves 32K", out.getvalue())
+
+    def test_doctor_scout_and_add_ask_ollama_by_an_aliased_entrys_id(self):
+        # #588 (the audit of 1.90): `ollama/coder` with id qwen3-coder:30b; doctor asked Ollama
+        # about `coder`, fell back to OLLAMA_CONTEXT_LENGTH and said BAD, its advice (wb model add
+        # ollama/coder --context …) died on a 404, and scout listed qwen3-coder:30b as unregistered
+        from workbench import cli
+        tag = "qwen3-coder:30b"
+        class H(BaseHTTPRequestHandler):
+            def reply(self, code, body):
+                self.send_response(code)
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode())
+            def do_GET(self):
+                body = {"/api/version": {"version": "0.40.0"},
+                        "/api/tags": {"models": [{"name": tag, "size": 18_000_000_000}]},
+                        "/api/ps": {"models": []}}.get(self.path)
+                self.reply(200 if body is not None else 404, body or {})
+            def do_POST(self):
+                asked = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["model"]
+                if self.path != "/api/show" or asked != tag:
+                    return self.reply(404, {"error": f"model '{asked}' not found"})
+                self.reply(200, {"capabilities": ["tools"], "parameters": "num_ctx 65536",
+                                 "model_info": {"qwen3.context_length": 262144}})
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.servers.append(srv)
+        entry = {"id": tag, "limit": {"context": 65536, "output": 8192}, "options": {"max_tokens": 16384}}
+        self.config({"ollama": {"options": {"baseURL": f"http://127.0.0.1:{srv.server_address[1]}/v1"},
+                                "models": {"coder": entry}}})
+        out = io.StringIO()
+        with mock.patch.object(models.hardware, "ollama_env", return_value={"OLLAMA_CONTEXT_LENGTH": "32768"}), \
+                mock.patch.object(models.hardware, "ollama_context", return_value=(32768, "32768")), \
+                contextlib.suppress(SystemExit), redirect_stdout(out):
+            cli.main(["doctor"])
+        self.assertNotIn("Ollama serves 32K", out.getvalue())
+        self.assertNotIn("served context is unknown", out.getvalue())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["model", "add", "ollama/coder"])          # no 404: it asks for the id
+        self.assertIn("registered ollama/coder", out.getvalue())
+        self.assertIn("64K context", out.getvalue())
+        saved = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]["ollama"]["models"]
+        self.assertEqual(saved["coder"]["id"], tag)              # the alias stays an alias
+        out = io.StringIO()
+        tmp = Path(self.tmp.name)
+        with mock.patch.dict(os.environ, {"WB_SKILLS": str(tmp / "skills"), "WB_IMAGES": str(tmp / "i.json"),
+                                          "WB_AUDIO": str(tmp / "a.json")}), \
+                mock.patch.object(cli.hardware, "report", return_value=[]), \
+                mock.patch.object(cli, "ollama_line", return_value=""), \
+                mock.patch.object(cli.models, "servers_here", return_value=([], [])), redirect_stdout(out):
+            cli.main(["scout"])
+        self.assertNotIn("installed in ollama but not registered", out.getvalue())
+        self.assertIn("ollama/coder: 16.8 GB on disk · 64K context · Ollama serves 64K", out.getvalue())
+        ipv6 = (["llama-server"], [{"root": "http://[::1]:8080", "usually": "llama-server", "models": ["m"]}])
+        with mock.patch.object(cli.models, "servers_here", return_value=ipv6):
+            lines = cli.server_lines({"ls": {"root": "http://127.0.0.1:8080", "url": "http://[::1]:8080/v1"}})
+            self.assertNotIn("no provider", lines[1])           # ::1 is this machine too
+            lines = cli.server_lines({"ls": {"root": "http://localhost:8080", "url": "http://localhost:8080/v1"}})
+            self.assertNotIn("no provider", lines[1])
 
     def test_a_down_ollama_is_named_by_add_and_retire_without_a_traceback(self):
         # the 2026-11-16 audit: --pull died in a urllib traceback, a describe blamed a missing

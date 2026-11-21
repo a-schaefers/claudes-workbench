@@ -2570,7 +2570,11 @@ name), or a unique case-insensitive substring.
 A model's `name` is its name at the server: the entry's `"id"` when it has one (an alias, which
 OpenCode sends in its place), else the entry's key. Every probe, load, unload and placement uses
 it; the model's id (`<provider>/<key>`) routes and selects. Read as the key, an alias OpenCode ran
-was "the server lists N models, not friendly" (the 2026-11-19 audit).
+was "the server lists N models, not friendly" (the 2026-11-19 audit). `wb doctor`, `wb scout`
+(its sizes, windows and "installed but not registered" match too) and `wb model add` ask the
+server by the same name (`cli.served_name`): by the key, an aliased Ollama entry read 404,
+doctor said BAD on `OLLAMA_CONTEXT_LENGTH`'s window, and the add it advised died (#588, the
+audit of 1.90).
 
 Every request to a server on this machine (`_open`: probes, loads, pulls, the image engines) goes
 direct, never through an `http_proxy` in the environment, which urllib would otherwise use for
@@ -5330,8 +5334,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL. `--remove` undoes it; not while OpenCode's default model is one of them, nor for a provider wb didn't add or that now points elsewhere. |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). A flag or size for another action is refused, not ignored (#602): `--url`, `--start`, `--stop`, `--label`, `--context` and `--pull` go with `add`, `--delete` with `retire`, sizes with `sizes`. |
-| `wb scout` | `--done [--notes "…"]` (`--notes` without `--done` refused, #602), `--due`, `--watch "…"`, `--unwatch N` (1-based; 0 refused) | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it); the image and audio engines (`audio.coverage`: what
-the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
+| `wb scout` | `--done [--notes "…"]` (`--notes` without `--done` refused, #602), `--due`, `--watch "…"`, `--unwatch N` (1-based; 0 refused) | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it, compared by `models.server_key`, so `::1`, `localhost` or this host's name is one server, #588); the image and audio engines (`audio.coverage`: what the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill with its history, the scan alone. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…`, `--reviewed RULE…` (a scan rule whose critical findings Claude read and judged safe: they pass, recorded in the commit; never one in `scan.UNREVIEWABLE`) | Check, scan, copy, commit. |
 | `wb skill patch <n> --old … --new … -m "…"` | `--old-file`, `--new-file`, `--lesson` | An exact, unique replacement, then as add. |
