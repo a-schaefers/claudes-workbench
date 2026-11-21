@@ -702,6 +702,7 @@ def cmd_start(a):
         # were 500K of one task's 1.2M (2026-11-17); the pane shows progress, and the warnings
         # (a nudge, a full window, handovers, a cut base check) still wake
         "checkin": a.checkin or 0, "self_review": a.self_review,
+        "experiments": context.task_experiments(),  # what this task's agent has: wb experiment
         "round_timeout": a.round_timeout or limits["round"],
         "silence_timeout": a.silence_timeout or limits["silence"],
         "think_timeout": a.think_timeout if a.think_timeout is not None else limits["think"],
@@ -1531,6 +1532,37 @@ def _coding_gate(task: store.Task, user: bool) -> None:
     die(f"Claude coding is {CODING['only'][0]}: report the blocker to the user and keep the work "
         f"with the agent (wb feedback, a smaller step); they say when Claude writes code "
         f"(then wb coding allow {task.name} --edit \"…\" --said \"<their words>\")", 3)
+
+
+def experiment_lines() -> list[str]:
+    """One line per experiment: its setting and whether it can work here (probe installed)."""
+    on = context.experiments()
+    out = []
+    for name in context.EXPERIMENTS:
+        if not on[name]:
+            out.append(f"{name}: off (wb experiment {name} on)")
+        elif name == "probe" and not (path := context.probe_bin()):
+            out.append(f"{name}: on, but no probe with `symbols` is on PATH, so it changes "
+                       "nothing yet (its release binary: github.com/probelabs/probe/releases; crates.io's 0.6.0 lacks symbols)")
+        else:
+            found = _tool_version([path])[1] if name == "probe" else ""
+            out.append(f"{name}: on" + (f", found ({found})" if found else ""))
+    return out
+
+
+def cmd_experiment(a):
+    """List the experiments, or turn one on or off for the tasks started from now on."""
+    if a.name is None:
+        for name, what in context.EXPERIMENTS.items():
+            print(f"{name}: {what}")
+        print("\n".join(experiment_lines()))
+        return
+    if a.name not in context.EXPERIMENTS:
+        die(f"no experiment {a.name} (wb experiment lists them)")
+    if a.state is not None:
+        context.set_experiment(a.name, a.state == "on")
+    print(next(r for r in experiment_lines() if r.startswith(f"{a.name}:"))
+          + ("; tasks already started keep theirs" if a.state is not None else ""))
 
 
 def cmd_coding(a):
@@ -3606,6 +3638,8 @@ def cmd_doctor(a):
     print("ok  the Claude Code mod is installed (workbench@workbench)" if listed else
           "--  the Claude Code mod (the pane, the wake-ups) isn't among Claude Code's installed "
           "plugins: claude plugin install workbench@workbench, unless it loads another way")
+    for row in experiment_lines():
+        print(f"--  experiment {row}")
     sys.exit(0 if ok else 1)
 
 
@@ -3910,6 +3944,11 @@ def parser() -> argparse.ArgumentParser:
                    "(e.g. the next try still gets the units wrong)")
     s.add_argument("--did", help="used: what Claude changed under the allowance")
     s.set_defaults(f=cmd_coding)
+    s = sub.add_parser("experiment", help="the experiments (changes measured before they are "
+                       "supported): list them, or turn one on or off for the tasks started from now")
+    s.add_argument("name", nargs="?")
+    s.add_argument("state", nargs="?", choices=["on", "off"])
+    s.set_defaults(f=cmd_experiment)
     s = sub.add_parser("stop", help="stop a running task (wb resume or wb feedback continues it)")
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true", help="every running agent")

@@ -359,6 +359,21 @@ const CHAT_STOPS: [string, string, string][] = [
   ['on', 'On', 'A localhost web server to interact with Claude.'],
 ]
 
+// The probe experiment's row (ARCHITECTURE.md, *Experiments*): wb's choice (`wb experiment probe
+// on|off`, experiments.json), off by default. A task keeps what it started with.
+const PROBE_STOPS: [string, string, string][] = [
+  ['off', 'Off (default)', 'The agent reads whole files, as without the experiment.'],
+  ['on', 'On', "The agent may read a file's outline and one function, with probe (its release binary)."],
+]
+
+async function probeMode($: any): Promise<string> {
+  try {
+    return JSON.parse(await $.fs.read(`${mem.root}/experiments.json`)).probe === 'on' ? 'on' : 'off'
+  } catch {
+    return 'off'
+  }
+}
+
 // One settings row: a Button naming the choice, which opens its options under it, each a Button
 // (a click, or Enter on the ring), the chosen one marked. Under them the sentence of the option
 // the ring is on, else the chosen one's; the pointer on an option lays its own over it (a hover
@@ -1659,7 +1674,7 @@ export const register: Register = (on, options) => {
         ))}
       </Box>
     )
-    // the Settings tab: Claude coding (#93) and the web chat, one row each at rest
+    // the Settings tab: Claude coding (#93), the web chat and the probe experiment, one row each at rest
     if (view.tab === 'settings') return (
       <Box flexDirection="column">
         <Text dimColor>{SETTINGS_HINT}</Text>
@@ -1667,6 +1682,8 @@ export const register: Register = (on, options) => {
           {settingRow(kit, $, 'coding', 'Claude coding', CODING_STOPS, await codingMode($), view,
             v => runWb($, ['coding', v]))}
           {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
+          {settingRow(kit, $, 'probe', 'Agent code navigation (experimental, may go away)', PROBE_STOPS, await probeMode($), view,
+            v => runWb($, ['experiment', 'probe', v]))}
         </Box>
         {pinned}
         {tabs}
