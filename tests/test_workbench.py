@@ -15623,6 +15623,25 @@ class ChatUploads(Base):
         self.assertIn("2 web chat upload(s)", run_wb("gc"))
         self.assertEqual(sorted(p.name for p in self.uploads().iterdir()), ["llllllll-2", "llllllll-4"])
 
+    def test_a_long_non_ascii_name_is_saved_cut_by_bytes_and_a_disk_that_refuses_says_final(self):
+        # #742 (the 2026-11-21 audit, finding 92): cut to 120 characters, 120 CJK ones were 360
+        # bytes, the rename failed ENAMETOOLONG, and the page retried that 500 for good
+        for name, ext in (("報告書" * 40 + ".pdf", ".pdf"), ("東京の写真と会議のメモ" * 9 + ".jpg", ".jpg"),
+                          ("😀" * 70 + ".png", ".png")):
+            uid = f"nnnnnnnn-{len(name)}"
+            code, got = self.put(uid, b"the bytes", name=name)
+            self.assertEqual(code, 200, got)
+            saved = Path(got["upload"]["path"]).name
+            self.assertLessEqual(len(saved.encode()), self.chat.UPLOAD_NAME)
+            self.assertTrue(saved.endswith(ext) and name.startswith(saved[:-len(ext)]), saved)
+        self.assertEqual(self.chat.upload_name("a" * 300 + ".tar.gz")[-3:], ".gz")
+        for err, code, final in ((errno.ENOSPC, 507, True), (errno.ENAMETOOLONG, 500, True),
+                                 (errno.EIO, 500, False)):
+            with mock.patch.object(self.chat, "save_upload", side_effect=OSError(err, os.strerror(err))):
+                got = self.put("ffffffff-1", b"x")
+            self.assertEqual(got, (code, {"error": f"not saved: {os.strerror(err)}",
+                                          **({"final": True} if final else {})}))
+
     def test_an_expired_message_leaves_the_open_index_once_and_gc_then_drops_its_uploads(self):
         # #741 (the 2026-11-21 audit, finding 91): only an ack took a message out of open.json, and
         # an expired one is never acked, so every new session claimed it again and toasted, `wb

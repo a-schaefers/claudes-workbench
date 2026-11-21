@@ -4924,7 +4924,14 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   directory fds opened `O_NOFOLLOW` and created `O_EXCL`, so nothing is written through a link: a
   link where the id's directory or the file goes is refused (409). A name that is a path (`/`,
   `\`, `.`, `..`) is refused; other names lose unprintable characters and leading dots and are cut
-  to `UPLOAD_NAME` 120 characters, keeping the extension. `wb gc` removes uploads older than its
+  to `UPLOAD_NAME` 140 bytes of UTF-8 (under eCryptfs's 143; ext4 and APFS take 255), keeping the
+  extension (up to 16 bytes) and never splitting a character: cut by characters, a CJK name of 120
+  was 360 bytes and failed `ENAMETOOLONG` (#742). A disk that refuses (`OSError`) answers 507 for
+  `ENOSPC`/`EDQUOT`, else 500, `{error: "not saved: <reason>"}`, with `final: true` for an errno
+  that another try can't fix (`FINAL_ERRNOS`: no space or quota, permission, a read-only disk, a
+  name too long). The page calls a `final` answer, or the `SERVER_TRIES`-th (3) 5xx in a row for
+  one file, a refusal and shows the server's reason on the chip; other failures wait and try again
+  (`BACKOFF`). It re-sent the whole file forever, "waiting for the connection" (#742). `wb gc` removes uploads older than its
   `--days` whose message has a receipt (an expired message's too: it is retired, #741), or that no
   message still deliverable names (a draft never sent: `chat.drop_old_uploads`).
 - **The switch.** `chat/switch.json` `{on}`, written by `wb chat on|off` (the pane's row runs

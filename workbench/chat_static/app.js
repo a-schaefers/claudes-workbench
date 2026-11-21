@@ -746,7 +746,11 @@
   function armSend() { sendBtn.disabled = !(input.value.trim() || sendable().length) }
 
   class Refused extends Error {}
-  const inflight = new Map(), progress = new Map()
+  // A server failure is tried again, but not for good: a full disk or a name it can't save
+  // answered 500 or 507 to every try, and each re-sent the whole file (#742). One the server
+  // calls `final`, or the SERVER_TRIES-th in a row, is a refusal, its reason on the chip.
+  const SERVER_TRIES = 3
+  const inflight = new Map(), progress = new Map(), serverFails = new Map()
   function upload(f) {  // resolves once the computer has file f ({id, name, size, type})
     if (inflight.has(f.id)) return inflight.get(f.id)
     const p = (async () => {
@@ -775,10 +779,14 @@
         clearTimeout(dog)
         let j = {}
         try { j = JSON.parse(x.responseText) } catch {}
-        if (x.status === 200) resolve(j.upload)
+        if (x.status === 200) { serverFails.delete(f.id); resolve(j.upload) }
         else if (x.status === 401) { keyless('That key was not accepted.'); reject(new Error('key')) }
-        else if (x.status >= 400 && x.status < 500 && x.status !== 408 && x.status !== 429) reject(new Refused(j.error || 'refused'))
-        else reject(new Error('HTTP ' + x.status))
+        else if (j.final || (x.status >= 400 && x.status < 500 && x.status !== 408 && x.status !== 429)) reject(new Refused(j.error || 'refused'))
+        else if (x.status >= 500) {
+          const n = (serverFails.get(f.id) || 0) + 1
+          serverFails.set(f.id, n)
+          reject(n >= SERVER_TRIES ? new Refused(j.error || 'not saved: HTTP ' + x.status) : new Error('HTTP ' + x.status))
+        } else reject(new Error('HTTP ' + x.status))
       }
       x.onerror = x.onabort = () => { clearTimeout(dog); reject(new Error('network')) }
       pet(); x.send(blob)

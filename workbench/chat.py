@@ -1172,7 +1172,10 @@ MB = 1 << 20
 UPLOAD_MB = 25            # chat.json `upload_mb`: one file at most this
 UPLOAD_MESSAGE_MB = 50    # chat.json `upload_message_mb`: a message's files together at most this
 UPLOAD_FILES = 10         # files one message may carry
-UPLOAD_NAME = 120         # characters of a saved file's name
+# UTF-8 bytes of a saved file's name: under eCryptfs's 143 (ext4 and APFS take 255). Cut by
+# characters, 120 CJK ones were 360 bytes, the rename failed ENAMETOOLONG, and the page retried
+# that 500 for good (#742)
+UPLOAD_NAME = 140
 UPLOAD_ID = re.compile(r"[A-Za-z0-9-]{8,64}")  # crypto.randomUUID(), or the page's fallback
 UPLOAD_TYPE = re.compile(r"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*")
 SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"}  # served as images
@@ -1212,15 +1215,26 @@ def upload_limits() -> dict:
 def upload_name(name: str) -> str:
     """The name a file is saved under. One that is a path (a `/` or `\\`), or `.`/`..`, is refused:
     no browser sends one. Otherwise unprintable characters become `_`, leading dots go (the
-    directory's own files start with one), and a long name keeps its extension."""
+    directory's own files start with one), and a long name keeps its extension, cut to
+    UPLOAD_NAME bytes of UTF-8, never inside a character (#742)."""
     if not name or any(c in name for c in "/\\\0") or name.strip() in (".", ".."):
         raise UploadError(400, "that file name can't be saved")
     clean = "".join(c if c.isprintable() else "_" for c in name).strip().lstrip(". ")
-    if len(clean) > UPLOAD_NAME:
+    if len(clean.encode()) > UPLOAD_NAME:
         stem, ext = os.path.splitext(clean)
-        ext = ext[:16]
-        clean = stem[:UPLOAD_NAME - len(ext)] + ext
+        ext = _cut(ext, 16)
+        clean = _cut(stem, UPLOAD_NAME - len(ext.encode())) + ext
     return clean or "file"
+
+
+def _cut(text: str, size: int) -> str:
+    """``text`` cut to at most ``size`` bytes of UTF-8, whole characters only."""
+    return text.encode()[:size].decode("utf-8", "ignore")
+
+
+# A disk that refuses for good: another try with the same bytes fails the same way, so the page
+# is told it is final (`final: true`) and shows why; it re-sent a 25 MB body forever (#742)
+FINAL_ERRNOS = {errno.ENOSPC, errno.EDQUOT, errno.EACCES, errno.EPERM, errno.EROFS, errno.ENAMETOOLONG}
 
 
 def _dir_fd(parent: int | None, name: str, make: bool) -> int:
@@ -1650,12 +1664,13 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         except OSError as e:  # the disk refused
-            return self._refuse(507 if e.errno == errno.ENOSPC else 500, f"not saved: {e.strerror or e}")
+            return self._refuse(507 if e.errno in (errno.ENOSPC, errno.EDQUOT) else 500,
+                                f"not saved: {e.strerror or e}", final=e.errno in FINAL_ERRNOS)
         self._json(200, {"upload": {k: meta.get(k) for k in ATTACHED}, "new": new})
 
-    def _refuse(self, code: int, why: str) -> None:
+    def _refuse(self, code: int, why: str, final: bool = False) -> None:
         try:
-            self._json(code, {"error": why})
+            self._json(code, {"error": why, **({"final": True} if final else {})})
         except OSError:  # the page went away meanwhile
             self.close_connection = True
             return

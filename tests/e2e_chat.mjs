@@ -2,7 +2,7 @@
 // real `wb chat serve`, and `wb chat` on the Claude side. Run: node tests/e2e_chat.mjs
 // Needs Playwright: PLAYWRIGHT=/path/to/node_modules/playwright (it isn't a workbench dependency).
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, copyFileSync, readFileSync, readdirSync, existsSync, rmSync, statSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, copyFileSync, readFileSync, readdirSync, existsSync, rmSync, statSync, utimesSync, chmodSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createServer, connect as dial } from 'node:net'
 import { runInNewContext } from 'node:vm'
@@ -560,6 +560,39 @@ async function run(engine, device) {
       await page.click('#tray .att .x')
       await until(async () => await page.locator('#tray').isHidden())
     } finally { writeFileSync(env.WB_CHAT_CONFIG, '{}') }
+  })
+  await check('a disk that refuses for good shows its reason on the chip, and a server failure stops after three tries', async () => {
+    // #742 (the 2026-11-21 audit): a full disk or a name it can't save answered 500 or 507 to
+    // every try, and the page re-sent the whole file forever, saying only "waiting for the connection"
+    const puts = []
+    const count = r => { if (r.method() === 'PUT' && r.url().includes('/api/upload/')) puts.push(r.url()) }
+    page.on('request', count)
+    const root = join(home, 'state/chat/uploads')
+    mkdirSync(root, { recursive: true })
+    chmodSync(root, 0o500)  // EACCES: a refusal another try can't fix, so `final`
+    try {
+      await page.setInputFiles('#pick', { name: 'full.txt', mimeType: 'text/plain', buffer: Buffer.from('full') })
+      await until(async () => ((await page.locator('#tray .att.refused').textContent()) || '').includes('not saved: Permission denied'))
+      await sleep(2000)
+      if (puts.length !== 1) throw new Error(`a final refusal was sent ${puts.length} times`)
+      await page.click('#tray .att .x')
+      await until(async () => await page.locator('#tray').isHidden())
+    } finally { chmodSync(root, 0o700); page.off('request', count) }
+    if (engine === 'webkit') return  // its routing doesn't see an XHR's PUT; Chromium checks the rest
+    const flaky = []
+    await page.route('**/api/upload/*', route => {
+      if (route.request().method() !== 'PUT') return route.continue()
+      flaky.push(route.request().url())
+      return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'not saved: Input/output error' }) })
+    })
+    try {
+      await page.setInputFiles('#pick', { name: 'flaky.txt', mimeType: 'text/plain', buffer: Buffer.from('flaky') })
+      await until(async () => ((await page.locator('#tray .att.refused').textContent()) || '').includes('Input/output error'), 15000)
+      await sleep(2500)
+      if (flaky.length !== 3) throw new Error(`sent ${flaky.length} times`)
+      await page.click('#tray .att .x')
+      await until(async () => await page.locator('#tray').isHidden())
+    } finally { await page.unroute('**/api/upload/*') }
   })
   await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
   await browser.close()
