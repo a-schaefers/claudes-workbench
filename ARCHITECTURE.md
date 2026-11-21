@@ -6157,7 +6157,8 @@ entries past MODES_KEEP_MS, 30 days: #689, `claude --continue` came back with th
 didn't listen and a compaction dropped it, until Claude happened to run a delegating command; a
 `wb adopt` that succeeds turns it on too, for a task still delegated (`delegatedWork`: running, or
 waiting on Claude and neither parked nor `taken_over`): adopting the reviews /workbench-quit parked
-or the hand-back took over turned the mode back on against them, #834), registers its `workbench-*` commands (*Commands*
+or the hand-back took over turned the mode back on against them, #834; one taken over and handed
+back to the agent is delegated again, `spawn_runner` clearing `taken_over`, #926), registers its `workbench-*` commands (*Commands*
 below), runs `wb setup` once with a toast when the `/workbench` skill link is missing
 but the old `skills/delegate` link is there (a copy updated across the 2026-11-17 rename), and, when a person can be at the session (`isInteractive`, or a surface), starts the ears
 and two timers. A `claude -p` run or an SDK session (neither) stays quiet, no poll, no wake, no
@@ -6875,7 +6876,7 @@ check-ins off), not `wb start`'s.
 | `infra` | why the machine, not the agent, failed the task: `setup` (`runner._prepare`), `model` (`_load_failed`: it couldn't load, or its server stayed down past `DOWN_WAIT`, or died again after a round's revive: #657), `crash`, `disk full` (the runner's crash handler), `runner died` (`cli.reap`); cleared at each runner's start. A replay with it is an `error` row, not `failed` (*Bench*, #508) |
 | `prepared` | true once the worktree is set up (`runner._prepare`: `setup`, `copy`, `siblings`), so a later run of the runner doesn't again |
 | `checked_out`, `checkout_secs` | `runner.checkout`: the worktree is made (task.json `checkout: "runner"`, #529); how long the checkout took |
-| `taken_over` | `wb takeover`: Claude has had the worktree; `runner.checkout` then fails a task not checked out rather than remove it and check it out again (#655) |
+| `taken_over` | `wb takeover`: Claude has had the worktree; `runner.checkout` then fails a task not checked out rather than remove it and check it out again (#655). Cleared by the hand-back (`spawn_runner`: wb feedback, next, resume) once the task is checked out, so the mod's `delegatedWork` reads its next review as the agent's again (#926) |
 | `branch_made` | `runner.checkout`: the commit it makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists; the only branch a cleanup of the checkout cut short deletes, and only there (#416, #529) |
 | `setup_secs` | set with `prepared`: how long the preparation took, in the first report; what it left is the task's `prepared.json` (*Files and formats*: #867). A task prepared before that file has `prepared_paths`, `prepared_marks` (and `prepared_bytes`) here instead, which `runner.prepared_record` reads |
 | `failed_before` | `setup` or `load`: the runner failed the task on its setup or its model's load before the agent ran (`_prepare`, `_load_failed`); the results row copies it (#581) |

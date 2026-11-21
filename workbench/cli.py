@@ -162,6 +162,11 @@ def spawn_runner(task: store.Task) -> int:
     env.pop("WB_TASK", None)  # the agent's mark (runner.sweep kills what carries it), not the runner's
     # a stop wb made earlier says nothing about this runner, nor an earlier runner's beat (#872)
     task.set_status(stopping=None, parked=None, beat=None)
+    # handed back to the agent: no longer Claude's, so a later session adopting its review turns
+    # workbench mode back on (#926: the mod's delegatedWork read the old takeover). Kept for a
+    # task not checked out, whose runner's #655 guard reads it
+    if task.status.get("taken_over") and runner.checked_out(task):
+        task.set_status(taken_over=None)
     with open(task.dir / "runner.log", "a") as log:
         # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
         # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own

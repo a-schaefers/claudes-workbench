@@ -5160,6 +5160,18 @@ class Steering(Base):
         self.assertFalse(cli.runner_alive(task))
         self.assertEqual(task.status["last"], "Claude took over")
 
+    def test_a_task_handed_back_after_a_takeover_is_no_longer_marked_taken_over(self):
+        # #926: taken_over stayed set after wb feedback, so the mod, adopting the task's next
+        # review in a new session, read it as Claude's and left workbench mode off
+        self.start("t-hb", "ok")
+        wait_phase("t-hb", {"review"})
+        run_wb("takeover", "t-hb")
+        self.assertTrue(store.Task("t-hb").status["taken_over"])
+        run_wb("feedback", "t-hb", "--text", "carry on")
+        self.assertIsNone(store.Task("t-hb").status.get("taken_over"))
+        wait_phase("t-hb", {"review"})
+        self.assertIsNone(store.Task("t-hb").status.get("taken_over"))
+
     def test_a_sessions_bail_out_and_hand_back_leave_another_projects_tasks_alone(self):
         # the 2026-11-16 audit: /workbench-quit in one project's session stopped the agents of a
         # session in another project; the mod passes its directory as --repo

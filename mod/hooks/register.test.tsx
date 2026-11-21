@@ -590,7 +590,7 @@ test('a session that adopts a task whose process is gone turns workbench mode on
 
 // #834: /workbench-quit parked the review (or the hand-back took it over), the session ended, and
 // the next one in the project adopted it and turned the mode back on against the quit
-async function adoptsLeftOver($: any, on: any, extra: Record<string, unknown>) {
+async function adoptsLeftOver($: any, on: any, extra: Record<string, unknown>, modeOn = false) {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   const ui: string[] = []
@@ -618,8 +618,17 @@ async function adoptsLeftOver($: any, on: any, extra: Record<string, unknown>) {
   await clock.advance(3000)
   expect(JSON.parse(files['/wb/tasks/orphan/task.json']).session).toBe('sess-new') // still adopted
   await clock.advance(3000)
-  expect(ui).not.toContain('open workbench')
-  expect(ui.some(l => l.includes('workbench mode'))).toBe(false)
+  if (modeOn) {
+    expect(ui.filter(l => l.startsWith('status')).at(-1)).toBe('status ⚒ wb · 1 awaiting review')
+    await $.command.run({ command: 'workbench-quit', args: '' })   // the mode was on: the quit says so
+    expect(ui).toContain('close workbench')
+  } else {
+    expect(ui).not.toContain('open workbench')
+    expect(ui.some(l => l.includes('workbench mode'))).toBe(false)
+    await $.command.run({ command: 'workbench-quit', args: '' })
+    expect(ui).not.toContain('close workbench')                    // it was off
+  }
+  await clock.advance(3000)
 }
 
 test('adopting a task the user\'s quit parked leaves workbench mode off (#834)', async ($, on) => {
@@ -628,6 +637,12 @@ test('adopting a task the user\'s quit parked leaves workbench mode off (#834)',
 
 test('adopting a task handed back to Claude leaves workbench mode off (#834)', async ($, on) => {
   await adoptsLeftOver($, on, { taken_over: true })
+})
+
+test('adopting a task taken over, handed back to the agent and in review again turns workbench mode on (#926)', async ($, on) => {
+  // the hand-back (wb feedback/next/resume) clears taken_over (spawn_runner): the review is the
+  // agent's work again, and a later session adopting it gets the mode and its procedure back
+  await adoptsLeftOver($, on, { round: 2, last: 'round 2 done' }, true)
 })
 
 test('in workbench mode the status line counts only this session\'s tasks as awaiting review (#693)', async ($, on) => {
