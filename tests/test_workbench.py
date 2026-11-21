@@ -10506,6 +10506,46 @@ class Stats(Base):
         self.assertEqual(stats.feed()["models"]["m"]["write_change_pct"], 25)
 
 
+class LoneFlags(Base):
+    """A flag that only works with another is refused without it, not ignored (#602, the audit
+    of v1.90): Claude reads the exit code and the one-line report, and believed it saved."""
+    def refused(self, *argv) -> str:
+        out, err = io.StringIO(), io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stdout(out), redirect_stderr(err):
+            cli.main(list(argv))
+        self.assertEqual(e.exception.code, 1, argv)
+        self.assertEqual(out.getvalue(), "", argv)          # nothing done, nothing reported
+        return err.getvalue()
+
+    def test_a_flag_without_the_one_it_goes_with_is_refused_and_changes_nothing(self):
+        self.assertIn("--if-due goes with --check", self.refused("update", "--if-due"))
+        self.assertIn("progress checks are off", self.refused("progress", "--after", "10"))
+        self.assertIn("--after goes with on", self.refused("progress", "off", "--after", "10"))
+        self.assertIn("off (the default)", run_wb("progress"))                 # nothing written
+        self.assertIn("--notes goes with --done", self.refused("scout", "--notes", "kept it"))
+        self.assertNotIn("done_at", cli.scout_state())
+        self.assertIn("the watch list has 0 item(s)", self.refused("scout", "--unwatch", "0"))
+        for argv, says in ((["retire", "ollama/m", "--label", "x"], "go with wb model add"),
+                           (["retire", "ollama/m", "--context", "8192"], "go with wb model add"),
+                           (["retire", "ollama/m", "--pull"], "go with wb model add"),
+                           (["sizes", "ollama/m", "--url", "http://127.0.0.1:1/v1"], "go with wb model add"),
+                           (["add", "ollama/m", "--delete"], "--delete goes with wb model retire"),
+                           (["retire", "ollama/m", "trivial"], "go with wb model sizes")):
+            self.assertIn(says, self.refused("model", *argv), argv)
+
+    def test_after_alone_moves_the_threshold_of_checks_already_on(self):
+        run_wb("progress", "on")
+        self.assertIn("on: a task past 5 min of active work", run_wb("progress", "--after", "5"))
+        self.assertIn("on: a task past 5 min", run_wb("progress"))             # saved
+
+    def test_a_nameless_backlog_json_prints_the_batches_as_json(self):
+        self.assertEqual(json.loads(run_wb("backlog", "--json")), [])
+        self.start("t-a", "ok", "--backlog", "night-1", "--queue")
+        wait_phase("t-a", {"review"})
+        self.assertEqual(json.loads(run_wb("backlog", "--json")),
+                         [{"backlog": "night-1", "tasks": 1, "open": 1}])
+
+
 class Progress(Base):
     """Opt-in progress checks (#95): active work, evidence, a hint or a smaller step, and what
     helped, learned; the coding choice untouched."""

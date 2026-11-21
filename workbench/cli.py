@@ -1652,7 +1652,14 @@ STEP_NOTE = ("A smaller step: do only this now, then stop and report; the rest o
 
 
 def cmd_progress(a):
-    """The user's opt-in to progress checks (#95): on, off, or what it is."""
+    """The user's opt-in to progress checks (#95): on, off, or what it is. --after alone moves
+    the threshold of checks already on (it was ignored, and "on: …" printed as if saved: #602)."""
+    if a.after is not None and a.state == "off":
+        die("--after goes with on: wb progress on --after MIN")
+    if a.after is not None and not a.state:
+        if not progress.settings().get("on"):
+            die("progress checks are off: wb progress on --after MIN")
+        a.state = "on"
     if a.state:
         progress.set_enabled(a.state == "on", a.after if a.state == "on" else None)
     s = progress.settings()
@@ -2445,6 +2452,11 @@ def cmd_backlog(a):
         names = {}
         for t in tasks:
             names.setdefault(t.spec["backlog"], []).append(t)
+        if a.json:  # it printed the text (#602)
+            print(json.dumps([{"backlog": name, "tasks": len(ts),
+                               "open": sum(1 for t in ts if t.status.get("phase") not in store.CLOSED)}
+                              for name, ts in names.items()]))
+            return
         if not names:
             print("no backlogs (wb start --backlog NAME starts one)")
         for name, ts in names.items():
@@ -2580,6 +2592,8 @@ def cmd_scout(a):
     Claude reads it, looks up what is newest and best for this hardware, and recommends."""
     path = store.home() / "scout.json"
     st = scout_state()
+    if a.notes is not None and not a.done:  # saved nothing, and printed the report (#602)
+        die("--notes goes with --done: wb scout --done --notes \"…\"")
     if a.done:
         store.write_json(path, {**st, "done_at": store.now(), "notes": a.notes or ""})
         print(f"model check recorded; the next one is due in {SCOUT_EVERY_DAYS} days")
@@ -2590,7 +2604,7 @@ def cmd_scout(a):
         store.write_json(watch, items + [{"ts": store.now(), "text": a.watch}])
         print("added to the watch list")
         return
-    if a.unwatch:
+    if a.unwatch is not None:  # 0 printed the weekly report as if it had done something (#602)
         if not 1 <= a.unwatch <= len(items):
             die(f"the watch list has {len(items)} item(s)")
         store.write_json(watch, items[:a.unwatch - 1] + items[a.unwatch:])
@@ -3023,6 +3037,13 @@ def cmd_audio(a):
 
 def cmd_model(a):
     """Add a model to OpenCode's config (pulling it first with --pull), or retire one."""
+    # before sizes, which returned first: a flag for another action was accepted and ignored (#602)
+    if a.action != "add" and (a.url or a.start or a.stop or a.label or a.context or a.pull):
+        die("--url, --start, --stop, --label, --context and --pull go with wb model add")
+    if a.action != "retire" and a.delete:
+        die("--delete goes with wb model retire")
+    if a.action != "sizes" and a.sizes:
+        die(f"sizes ({' '.join(a.sizes)}) go with wb model sizes <id>")
     if a.action == "sizes":
         try:
             m = models.resolve(a.id)
@@ -3036,8 +3057,6 @@ def cmd_model(a):
                                     if a.sizes else "tasks of every size"))
         return
     provider, _, name = a.id.partition("/")
-    if a.action != "add" and (a.url or a.start or a.stop):
-        die("--url, --start and --stop go with wb model add")
     if a.action == "add" and name and a.url:
         try:  # any OpenAI-compatible server, not only Ollama (the server is the user's choice)
             if models.add_server_provider(provider, a.url):
@@ -3737,6 +3756,8 @@ def cmd_update(a):
     kind = "marketplace" if PKG_ROOT.resolve().is_relative_to(marketplace.resolve()) else "clone"
     path = store.home() / "update.json"
     last = store.read_json(path, {})
+    if a.if_due and not a.check:  # it pulled and updated at once, weekly or not (#602)
+        die("--if-due goes with --check: wb update --check --if-due")
     if a.check:
         quiet = os.environ.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
         if a.if_due and (quiet or time.time() - last.get("checked_at", 0) < UPDATE_EVERY):
