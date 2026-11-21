@@ -1355,6 +1355,10 @@ def clip_tail(output: str, lines: int, width: int = 300, total: int = 4000) -> s
     return s if len(s) <= total else "… (earlier output cut)\n" + s[-total:]
 
 
+# A pty the lane refused, which names no path: Python's pty.openpty and pexpect ("out of pty
+# devices"), node-pty and others; the grant is /dev/pts (#829, the second 2026-11-21 audit)
+PTY_REFUSED = re.compile(r"out of pty devices|failed to create pseudo-?terminal|forkpty\(3\) failed",
+                         re.I)
 # A refusal in a test's output: the phrase, and the absolute paths on its line. Not a URL's path
 # (`https://h/x`), nor one inside a word.
 REFUSAL = re.compile(r"permission denied|operation not permitted", re.I)
@@ -1395,6 +1399,8 @@ def lane_refused(task: store.Task, output: str) -> list[str]:
     sockets = context.unix_paths(task) if lane.abi() >= 9 else None
     found = []
     for line in output[-200_000:].splitlines():
+        if PTY_REFUSED.search(line) and "/dev/pts" not in found and "/dev/pts" not in places:
+            found.append("/dev/pts")  # no path, no "permission denied" (#829)
         if not REFUSAL.search(line):
             continue
         for path in refused_paths(line):
@@ -1415,6 +1421,8 @@ def runner_may(path: str) -> bool:
     real = os.path.realpath(path)
     if os.path.exists(real):
         return os.access(real, os.R_OK) or os.access(real, os.W_OK)
+    if real.startswith("/dev/"):  # a pty index gone by now (#829): the kernel's, not a mode's
+        return True
     while not os.path.exists(real):
         real = os.path.dirname(real)
     return os.access(real, os.W_OK | os.X_OK)
@@ -1429,14 +1437,16 @@ def is_socket(path: str) -> bool:
 
 
 def lane_grant(path: str) -> str | None:
-    """The `wb allow --path` that reaches a refused path: itself when it exists (a directory, a
-    device node, a socket) or is a device node, else the nearest directory that does; the
+    """The `wb allow --path` that reaches a refused path: /dev/pts for a pty, itself when it
+    exists (a directory, a device node, a socket) or is a device node, else the nearest directory that does; the
     toolchain home it falls in when that isn't made yet, or the one below it (`~/go`: `go/pkg`,
     context.tool_home_of, #824: the walk reached the home directory); then, while that place holds what the lane is split around
     (context.split_points: a grant of it would be split again), the next directory down
     towards the path. None when no grant can (`/`, the home directory, a secret:
     context.lane_refusal)."""
     target = real = os.path.realpath(path)
+    if real == "/dev/pts" or real.startswith("/dev/pts/"):
+        return "/dev/pts"  # every pty, not the one index this run got (#829)
     while not os.path.exists(real) and not real.startswith("/dev/"):  # a node: itself, or /dev
         real = os.path.dirname(real)
     if (home := context.tool_home_of(target)) and (not os.path.exists(home)

@@ -8141,6 +8141,22 @@ class Lane(Base):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [sock]}))
         self.assertIn("connected", run())
 
+    def test_a_pty_the_lane_refused_is_named_with_a_grant_of_every_pty(self):
+        # #829 (the second 2026-11-21 audit): `open /dev/pts/7: permission denied` was granted
+        # that one index, which the next run didn't get, and Python's "out of pty devices" named
+        # no grant at all
+        abi = mock.patch.object(lane, "abi", lambda: 6)   # a lane to refuse: #773 asks for one
+        abi.start(); self.addCleanup(abi.stop)
+        task = self.bare_task("t-829", self.repo)
+        out = "open /dev/pts/7: permission denied\nOSError: out of pty devices\n"
+        self.assertEqual(runner.lane_refused(task, out), ["/dev/pts/7", "/dev/pts"])
+        self.assertEqual(runner.lane_grant("/dev/pts/7"), "/dev/pts")
+        line = runner.not_the_code(task, {"ok": False, "exit": 1, "lane": ["/dev/pts/7", "/dev/pts"]})
+        self.assertIn("refused /dev/pts/7, /dev/pts: wb allow t-829 --path /dev/pts, then", line)
+        if os.path.isdir("/dev/pts"):
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["/dev/pts"]}))
+            self.assertEqual(runner.lane_refused(task, out), [])
+
     @unittest.skipUnless(lane_device(), "needs Landlock and a device node this user may open")
     def test_a_device_node_the_lane_refused_is_named_with_its_wb_allow(self):
         # #331 (the audit of 1.4): /dev/kvm or /dev/fuse refused read as the project's bug, and the

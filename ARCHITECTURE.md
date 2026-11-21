@@ -1485,7 +1485,10 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   devices, and not `/dev/pts`: a task that needs it or a GPU asks; `/dev/ptmx` alone opens no
   pty, since Landlock checks the `/dev/pts/N` it hands out ("out of pty devices"), and is kept
   so that a `/dev/pts` grant is all a pty-driven test needs, which the skill and the handbook
-  say), with `--unload-for-tests` the GPU's nodes that exist (`GPU_NODES` through `gpu_nodes`:
+  say, and the report too: `lane_grant` gives `/dev/pts` for anything under it, and a test
+  output line matching `PTY_REFUSED` ("out of pty devices", "failed to create pseudo-terminal",
+  "forkpty(3) failed"), which names no path, counts as a refusal of `/dev/pts`: the report said
+  `--path /dev/pts/7`, an index the next run didn't get, or nothing, #829), with `--unload-for-tests` the GPU's nodes that exist (`GPU_NODES` through `gpu_nodes`:
   `/dev/dri/renderD*`, `/dev/kfd`, `/dev/nvidia[0-9]*`, `/dev/nvidiactl`, `/dev/nvidia-uvm`,
   `/dev/nvidia-uvm-tools`, `/dev/dxg`; without them CUDA, ROCm and Vulkan found no device and
   said nothing of permission, #331, the audit of 1.4; any other node a failed test run names
