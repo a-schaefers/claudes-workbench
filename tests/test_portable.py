@@ -26,6 +26,9 @@ from workbench import context, images, media, models, router, store, watch
 from tests.test_workbench import Base, TEST_CMD, run_wb, wait_phase
 
 
+REAL_SLEPT = models.slept  # Real stands a machine that never sleeps in for it (#716)
+
+
 def serve(routes: dict) -> tuple[ThreadingHTTPServer, str]:
     """A model server on a free port answering GET path -> JSON body (404 for anything else). A
     route may be a function of the request's headers, and an int body is that status code."""
@@ -149,6 +152,9 @@ class Real(unittest.TestCase):
         no_gpu = mock.patch.object(models.hardware, "gpus", lambda windows=True: [])  # this machine's
         no_gpu.start()  # would decide what fits; a test that wants a budget sets models.json gpu_gb
         self.addCleanup(no_gpu.stop)
+        awake = mock.patch.object(models, "slept", lambda: 0.0)  # this machine's suspends would
+        awake.start()  # excuse the past stamps the tests set (#716); a test that wants one sets it
+        self.addCleanup(awake.stop)
 
     def tearDown(self):
         for s in self.servers:
@@ -653,6 +659,29 @@ class Real(unittest.TestCase):
         self.assertIn("long on ollama was still in use after", warned[-1])
         self.assertEqual([p["model"] for p in posts], ["long"])   # the GPU is the task's after all
         self.assertFalse(models._in_use({"r": []}))            # nothing to watch: no wait at all
+
+    def test_an_idle_models_stamp_left_past_by_a_suspend_is_not_taken_for_a_request(self):
+        # #716: Ollama's unload timer stops in a suspend while its wall-clock expires_at doesn't,
+        # so after the lid opened an idle model read as answering someone and the next task
+        # waited for nothing behind a warning
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        idle = {"name": "idle", "size": 10, "size_vram": 10, "expires_at": at(-600)}
+        found, posts = self.own([idle], [])
+        warned = []
+        with mock.patch.object(models, "slept", lambda: 3600.0), \
+                mock.patch.object(models, "INFLIGHT_WATCH", 0.3), mock.patch.object(models, "INFLIGHT_WAIT", 5):
+            t0 = time.monotonic()
+            models.free_gpu(say=lambda m: None, warn=warned.append)
+        self.assertLess(time.monotonic() - t0, 3)
+        self.assertEqual((warned, [p["model"] for p in posts]), ([], ["idle"]))
+        self.assertTrue(models._past(at(-600)))                # never asleep: a request past it
+        with mock.patch.object(models, "slept", lambda: 60.0):
+            self.assertTrue(models._past(at(-600)))            # later than any sleep explains
+        clocks = {getattr(time, "CLOCK_BOOTTIME", -1): 5000.0, time.CLOCK_MONOTONIC: 1400.0}
+        with mock.patch.object(models.hardware, "system", lambda: "linux"), \
+                mock.patch.object(models.time, "clock_gettime", lambda c: clocks.get(c, 0.0)):
+            if hasattr(time, "CLOCK_BOOTTIME"):
+                self.assertEqual(REAL_SLEPT(), 3600.0)            # BOOTTIME counts the suspends
 
     def test_waiting_for_someone_elses_request_asks_ollama_at_most_once_a_second(self):
         # #459 (the audit of 1.8, reproduced): a stamp already past is busy at once, so each

@@ -1514,13 +1514,32 @@ def _stamps(doomed: dict) -> dict:
             if x.get("name") in names and x.get("expires_at")}
 
 
+def slept() -> float:
+    """Seconds this machine has spent suspended since it booted: Linux's CLOCK_BOOTTIME less
+    CLOCK_MONOTONIC, macOS's CLOCK_MONOTONIC_RAW less CLOCK_UPTIME_RAW (which stops in sleep);
+    0 where neither pair exists."""
+    for with_sleep, without in (("CLOCK_BOOTTIME", "CLOCK_MONOTONIC"), ("CLOCK_MONOTONIC_RAW", "CLOCK_UPTIME_RAW")):
+        a, b = getattr(time, with_sleep, None), getattr(time, without, None)
+        if a is not None and b is not None and (hardware.system() == "macos") == (without == "CLOCK_UPTIME_RAW"):
+            try:
+                return max(0.0, time.clock_gettime(a) - time.clock_gettime(b))
+            except OSError:
+                return 0.0
+    return 0.0
+
+
 def _past(stamp: str) -> bool:
-    """Whether an /api/ps expires_at has gone by (a request running past the keep-alive)."""
+    """Whether an /api/ps expires_at has gone by (a request running past the keep-alive). Ollama
+    sets it from the wall clock but times the unload on Go's monotonic clock, which stops in a
+    suspend: after a lid closed and opened, an idle model's stamp is past while its timer still
+    runs, and was read as answering someone, the next task waiting behind a warning for nothing
+    (#716). So a stamp is past only by more than the machine has slept (slept: 0 on one that
+    never sleeps, a server, where #378's shared Ollamas run); a request on it still moves it."""
     try:  # Ollama writes nanoseconds; fromisoformat before 3.12 reads at most six digits
         when = datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", stamp.replace("Z", "+00:00")))
     except (ValueError, TypeError):
         return False
-    return when.tzinfo is not None and when.timestamp() < time.time() - 2
+    return when.tzinfo is not None and when.timestamp() < time.time() - 2 - slept()
 
 
 def _in_use(doomed: dict, watch: float | None = None) -> set:

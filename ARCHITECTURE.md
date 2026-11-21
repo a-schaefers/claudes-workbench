@@ -2885,7 +2885,11 @@ returns before the memory is freed and Ollama loading at once split the model (#
 `_others_resident` doesn't count either. Before those unloads, `_wait_unused` watches `/api/ps`
 for `INFLIGHT_WATCH` 10 s (`_in_use`): Ollama moves a model's `expires_at` each time a request
 finishes and stops its clock while one runs, so a stamp that moves, or one already past
-(`_past`), is a model answering someone this account's lease doesn't know (another account's
+(`_past`: past by more than the machine has slept since boot, `slept()`, Linux's
+`CLOCK_BOOTTIME` less `CLOCK_MONOTONIC`, macOS's `CLOCK_MONOTONIC_RAW` less `CLOCK_UPTIME_RAW`;
+Ollama's unload timer stops in a suspend while its wall-clock stamp doesn't, and after a lid was
+opened an idle model read as busy, #716. On a machine that has slept, a request running past its
+keep-alive is seen once it ends and its stamp moves), is a model answering someone this account's lease doesn't know (another account's
 tasks on a shared system Ollama whose machine has no shared lease, below; Open WebUI; an editor). Then it
 warns ("<names> on ollama is answering requests that aren't this account's tasks …: waiting up to
 10 min for it to go idle before unloading it") and waits, up to `INFLIGHT_WAIT` 10 min, for a
