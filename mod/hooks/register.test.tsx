@@ -2328,6 +2328,32 @@ test('the probe row says whether it works, and turned on without probe it asks C
   await ui.unmount()
 })
 
+test('turning the web chat on from the pane says why wb couldn\'t, and pins no link (#690)', async ($, on) => {
+  // #690: setWeb ignored wb's failure; the row read On and the pane pinned a link that gave a 401
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'chat' && e.argv[2] === 'on') {             // wb leaves the switch off
+      return { value: { exitCode: 1, stdout: '', stderr: 'wb: web chat left off: another account\'s chat answers on port 1337: wb chat on --port <free port>\n' } }
+    }
+    if (e.argv[1] === 'chat' && e.argv[2] === 'url') return { value: { exitCode: 0, stdout: 'http://localhost:1337/#token=abc\n', stderr: '' } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-settings' })
+  await ui.press({ key: 'chat' })
+  await ui.press({ key: 'chat:on' })
+  expect(toasts.some(t => t.includes("another account's chat answers on port 1337"))).toBe(true)
+  expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: Off (default)')
+  expect(await ui.find({ type: 'Text', text: /token=abc/ })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('the settings rows open to Buttons, pick through wb, and say the sentence of the option the ring is on', async ($, on) => {
   // #93, and the user, 2026-11-19: a Select's sentence followed only the saved choice, and the options
   // should take a click or the keys

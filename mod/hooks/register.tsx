@@ -631,8 +631,12 @@ function settingRow(kit: Row, $: any, name: string, title: string, stops: [strin
 
 // Turns the web chat on or off through wb, which keeps the choice (and starts a server for on),
 // then reads it back at once: the link shows (or goes) with the pick, not at the next poll
+// wb's reason is shown when it fails, as setProbe does: ignored, the row read On and the pane
+// pinned a link that gave a 401 or nothing on the phone (#690). wb leaves the switch off then,
+// so no link is pinned.
 async function setWeb($: any, value: string) {
-  await runWb($, ['chat', value], 15_000)
+  const { ok, out } = await runWb($, ['chat', value], 15_000)
+  if (!ok) $.ui.toast(`workbench: ${brief(out)}`)
   mem.chatUrlAt = 0
   await readSwitch($)
   await chatLink($)

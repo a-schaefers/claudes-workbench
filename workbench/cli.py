@@ -3780,20 +3780,26 @@ def cmd_chat(a):
         back = chat.revive()  # a chat wb chat on started, gone after a reboot or a crash (#449)
         print(chat.url(a.port if named or not back else back))  # the token is the key: keep it private
     elif a.action == "on":  # the pane's switch, kept: the link shows and a session listens
-        chat.set_on(True)
+        # the switch goes on only with a server of ours answering: turned on first and left on
+        # when this died, the pane's row read On and pinned a link that gave a 401 or nothing,
+        # its reason never shown (#690)
         who = chat.who_answers(a.port)
         if who == "workbench":
+            chat.set_on(True)
             print(f"web chat on: {chat.url(a.port)}")
         elif who == "other":  # its link would open someone else's page (#200), or 401 (#554)
-            die(f"web chat on, but another account's chat (or another program, or a server still on "
-                f"a replaced token) answers on port {a.port}: wb chat on --port <free port> (and "
+            chat.set_on(False)
+            die(f"web chat left off: another account's chat (or another program, or a server still "
+                f"on a replaced token) answers on port {a.port}: wb chat on --port <free port> (and "
                 "the same --port in chat.json's service, if any)")
         else:
             pid = chat.start(a.port)
             log = chat.chat_dir() / "serve.log"
             if not chat.wait_up(a.port, pid):
+                chat.set_on(False)
                 tail = (log.read_text(errors="replace").strip().splitlines() or ["(nothing)"])[-1]
-                die(f"web chat on, but its server didn't start: {tail} ({log})")
+                die(f"web chat left off: its server didn't start: {tail} ({log})")
+            chat.set_on(True)
             print(f"web chat on: started its server (pid {pid}, {log}): {chat.url(a.port)}")
         for why in logout_stops():  # its unit is a user service: a logout stops it (#351)
             print(f"--  {why}")

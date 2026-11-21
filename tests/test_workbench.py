@@ -15537,6 +15537,9 @@ class WebChat(Base):
             run_wb("chat", "on", "--port", str(port))
         self.assertIn(f"another account's chat", err.getvalue())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
+        # #690: the switch stayed on when it died, so the pane read On and pinned a dead link
+        self.assertIn("web chat left off", err.getvalue())
+        self.assertFalse(self.chat.is_on())
         self.assertEqual(run_wb("chat", "off", "--port", str(port)).strip(), "web chat off")  # no unit named
 
     def test_a_push_fetches_only_the_newest_open_ask_and_claudes_last_word(self):
