@@ -2886,15 +2886,29 @@ A gaming PC can do the work for a laptop.
    serves); `wb remote <pc> --remove` undoes it.
 
 Tasks on the PC take turns on its GPU, apart from the laptop's, and `wb optimize` measures its
-models too. The turns are this client's only: each client's remote lease (`gpu-<host>.json`) sits
+models too. The lease is this client's only: each client's remote lease (`gpu-<host>.json`) sits
 in its own lease directory, so two machines (or two users) on one box, or the box's own wb tasks,
-don't wait for each other, and when their models don't fit the box together Ollama swaps them on
-most requests. What a client does about it (`models.box_others`, `BOX_SHARED`, #812): before
-loading its model on the box, a model loaded there that its task doesn't run (keep_loaded's
-aside) and that is answering requests (`_in_use`, as for a shared Ollama here) is waited for, up
-to `INFLIGHT_WAIT` 10 min, instead of evicted mid-request; a model the load evicted anyway is
-named in a `gpu` event; and `wb start` notes the models the box has loaded for someone else. Run
-such tasks at different times, or on models that fit the box together. Their energy isn't measured, and the savings lines say so. A second machine adds a
+hold no lease in common, and when their models don't fit the box together Ollama swaps them.
+A shared lease would need state kept on the box, and nothing of workbench runs there: Ollama's
+API is all a client can see of it, and it has no lock, no owner per model and no request count,
+only `/api/ps` (what is loaded, and each model's `expires_at`, which a finished request moves and
+a running one lets pass). So the clients coordinate through that (`models.box_others`,
+`box_quiet`, `BOX_SHARED`, #812): before loading its model on the box, a client waits while a
+model loaded there that its task doesn't run (keep_loaded's aside) has had a request in the last
+`BOX_QUIET` (150 s, watched from then on: `/api/ps` says when a model expires, not when it was
+last used), up to `BOX_WAIT` (40 min, a round's default limit); within a round the agent's
+requests are seldom further apart, since OpenCode sends a shell command past 2 minutes to the
+background. Every client doing the same, they take the box a round at a time rather than a
+request at a time, and the waiting task's status says what it waits for (a `gpu` event when the
+model was answering). A load then waits a `BOX_QUIET` once for an idle model left loaded there
+(the load is skipped altogether while the task's own model is still on the box). What it can't
+stop: a round that begins while the other's model is quiet (its tool running past `BOX_QUIET`),
+a wait cut off by `BOX_WAIT`, or a client of an older wb, Open WebUI or anything else that loads
+without looking, still swap their models on each request. A model the load evicted anyway is
+named in a `gpu` event, and so is the task's own model found gone from the box at its next round
+while another client's is loaded there (`GpuLease.load`); `wb start` notes the models the box has
+loaded for someone else, and that the runner waits for them. Run such tasks at different times,
+or on models that fit the box together. Their energy isn't measured, and the savings lines say so. A second machine adds a
 model beside this one's; it doesn't make one model faster. Another server there (llama.cpp, LM
 Studio, vLLM): give its provider `"local": true` in `~/.config/workbench/models.json`, then `wb
 model add <provider>/<model> --url <baseURL>`. Ollama's cloud models (`:cloud`) run on ollama.com
@@ -7088,6 +7102,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `releasable`, `make_resident`, `GpuLease.step_aside`/`_unload_unshared`, `optimize.busy` and its
   per-server lease, `verify`'s GPU tests, `media.boxes` and `media.shares_gpu`. One left out
   takes a second lease on `gpu` in one process (it waits on itself) or leaves a model loaded.
+- **`models.BOX_QUIET` and `BOX_WAIT`** (a wb remote box's turns, #812) → OpenCode's 2-minute
+  move of a shell command to the background (`BG_GRACE`), which bounds the gap between a round's
+  requests, and `router.ROUND_DEFAULT_S`, a round's default limit; `wb start`'s note names both.
 - **`progress.DEFAULT_MIN` and `TYPICAL_MIN`** → the pane's Progress checks sentence
   (`PROGRESS_STOPS` in `register.tsx`), which names them (#724).
 - **`ask_mcp.NO_ANSWER`'s opening** ("No answer arrived in time.") → the mod's `NO_ANSWER`, which

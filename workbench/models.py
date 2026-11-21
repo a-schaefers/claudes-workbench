@@ -1269,12 +1269,8 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
     others = box_others(m, keep) if away else []
     host = urlparse(m.root).hostname
-    if others:  # another client's model on the box: not evicted in the middle of its request
-        _wait_unused({m.root: others}, warn,
-                     said=(f"on {host} is answering another client's requests: waiting up to "
-                           f"{INFLIGHT_WAIT // 60} min for it to go idle before loading {m.name} "
-                           f"({BOX_SHARED})"),
-                     then=f"loading {m.name} anyway")
+    if others:  # another client's model on the box: not evicted in the middle of its round
+        box_quiet(m, others, say, warn)
     if m.engine == "ollama":
         if respread:
             # Ollama never re-places a loaded runner: a generate with the same options reuses
@@ -1641,18 +1637,16 @@ def _in_use(doomed: dict, watch: float | None = None) -> set:
     return busy
 
 
-def _wait_unused(doomed: dict, warn, said: str = "", then: str = "unloading it") -> None:
+def _wait_unused(doomed: dict, warn) -> None:
     """Wait, up to INFLIGHT_WAIT, while a model free_gpu would unload is answering requests that
     aren't this account's tasks' (they are kept): unloading it between someone's requests made
-    them reload it on the next (#378). It is unloaded after, used or not: the GPU is the task's.
-    ``said``, ``then``: the warning's words, for another client's model on a wb remote box (#812)."""
+    them reload it on the next (#378). It is unloaded after, used or not: the GPU is the task's."""
     due = time.monotonic() + INFLIGHT_POLL
     busy = _in_use(doomed)
     if not busy:
         return
     names = ", ".join(sorted({n for _, n in busy}))
-    warn(f"{names} {said}" if said else
-         f"{names} on ollama is answering requests that aren't this account's tasks (another "
+    warn(f"{names} on ollama is answering requests that aren't this account's tasks (another "
          f"user's wb, Open WebUI, an editor): waiting up to {INFLIGHT_WAIT // 60} min for it to go "
          "idle before unloading it (models.json keep_loaded leaves a model loaded)")
     deadline = time.monotonic() + INFLIGHT_WAIT
@@ -1663,16 +1657,60 @@ def _wait_unused(doomed: dict, warn, said: str = "", then: str = "unloading it")
                        min(INFLIGHT_WATCH, max(deadline - time.monotonic(), 0)))
     if busy:
         names = ", ".join(sorted({n for _, n in busy}))
-        warn(f"{names} on ollama was still in use after {INFLIGHT_WAIT // 60} min: {then}")
+        warn(f"{names} on ollama was still in use after {INFLIGHT_WAIT // 60} min: unloading it")
 
 
 # Clients of one wb remote box don't share a lease: each one's gpu-<host>.json is in its own
 # lease_dir, so a laptop's and a desktop's tasks on one box each loaded their model, Ollama
 # evicted the other's to serve each request, and both paid a reload on most requests, the cause
-# never named (#812). So before a load there, a model another client is using is waited for
-# (not evicted mid-request), and one the load evicted anyway is named.
+# never named (#812). Nothing of wb runs on the box, so no lease can be kept there; what every
+# client can see is its /api/ps. So a load there waits until a model another client has loaded
+# has gone BOX_QUIET seconds without a request (box_quiet): the clients take the box in turns,
+# a round each, instead of a request each. One the load evicted anyway is named.
 BOX_SHARED = ("clients of one wb remote box don't share a GPU lease, so their models may swap on "
               "every request: run them at different times, or on models that fit the box together")
+# Within a round the agent's requests are seldom further apart than this: OpenCode sends a shell
+# command past 2 minutes to the background and asks the model again. Unused this long, another
+# client's model has finished its round (or its task), and loading over it costs it one reload.
+BOX_QUIET = 150
+BOX_WAIT = 2400  # at most this long waiting for it: a round's default limit (router.ROUND_DEFAULT_S)
+BOX_POLL = 2.0   # seconds between two looks at the box's /api/ps meanwhile
+
+
+def box_quiet(m: Model, others: list[str], say, warn) -> None:
+    """Wait, up to BOX_WAIT, until each of ``others`` (box_others: what the box has loaded for
+    another client) has had no request for BOX_QUIET seconds in a row, or has gone, before ``m``
+    is loaded over it (#812). Watched from now: /api/ps says when a model expires, not when it was
+    last used. A request finishing moves its expires_at, and one past is a request still running
+    (_past, as _in_use reads them). A server that gives no expires_at has nothing to watch."""
+    host, root = urlparse(m.root).hostname, m.root
+    last = _stamps({root: others})
+    if not last:
+        return
+    names = ", ".join(sorted({n for _, n in last}))
+    say(f"{names} on {host} is another client's: loading {m.name} once it has gone "
+        f"{BOX_QUIET} s without a request")
+    began = quiet = time.monotonic()
+    busy = False
+    while True:
+        now = _stamps({root: others})
+        moved = sorted({k[1] for k, v in now.items() if _past(v) or last.get(k) not in (None, v)})
+        if moved:
+            quiet = time.monotonic()
+            if not busy:
+                warn(f"{', '.join(moved)} on {host} is answering another client's requests: "
+                     f"waiting up to {BOX_WAIT // 60} min for it to go {BOX_QUIET} s unused before "
+                     f"loading {m.name} ({BOX_SHARED})")
+            busy = True
+        last = now
+        if not now or time.monotonic() - quiet >= BOX_QUIET:
+            return
+        if time.monotonic() - began >= BOX_WAIT:
+            warn(f"{names} on {host} was still in use after {BOX_WAIT // 60} min: loading "
+                 f"{m.name} anyway, and the two may swap on every request ({BOX_SHARED})")
+            return
+        time.sleep(min(BOX_POLL, max(BOX_QUIET - (time.monotonic() - quiet), 0) + 0.01,
+                       max(BOX_WAIT - (time.monotonic() - began), 0) + 0.01))
 
 
 def box_others(m: Model, keep=()) -> list[str]:
@@ -2194,6 +2232,7 @@ class GpuLease:
         self.pool = pool(m or on)  # ``on``: whose server a lease with no model takes (wb optimize)
         self.fh = None
         self.aside = False  # stepped out of gpu.json for the tests or a server's wait (#257)
+        self.loaded = False  # its model loaded once: a remote box's since unloaded is named (#812)
         self.me = str(os.getpid())
         # its place in the queue: when the task started, so one sent back for another round
         # (feedback, next, resume) goes ahead of tasks started after it; an image, from now
@@ -2353,7 +2392,15 @@ class GpuLease:
         for it to leave the lease, so its runner looked alive after its review notice (the
         2026-11-16 audit). Lock order: gpu.load, then gpu.admit."""
         if self.m.remote:
-            return make_resident(self.m, say=self.say, warn=self.warn)
+            # gone from a wb remote box since this task's last round, with another client's model
+            # there: the other client's load evicted it, and nothing said so to this task (#812)
+            if self.loaded and (others := box_others(self.m)) and not status(self.m)["resident"]:
+                self.warn(f"{self.m.name} was unloaded from {urlparse(self.m.root).hostname} since "
+                          f"the last round, which has {', '.join(others)} loaded for another "
+                          f"client: {BOX_SHARED}")
+            secs = make_resident(self.m, say=self.say, warn=self.warn)
+            self.loaded = True
+            return secs
         with _lease_lock(self.home / f"{self.pool}.load"):
             with _lease_lock(self.home / f"{self.pool}.admit"):
                 held = self._holders()
