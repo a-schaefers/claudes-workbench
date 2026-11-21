@@ -456,11 +456,12 @@ def _ollama_process() -> tuple[dict, str] | None:
     (/proc/<pid>/environ: one started by hand in another terminal, a user unit's, anyone's as
     root), and what it is. One in another mount namespace (a container) gives its knobs only.
     A system unit's process (user ollama) can't be read: systemd says its environment."""
-    return next(iter(_ollama_processes()), None)
+    return next(((env, what) for env, what, _ in _ollama_processes()), None)
 
 
-def _ollama_processes() -> list[tuple[dict, str]]:
-    """_ollama_process's answer for every `ollama serve` this user may read, lowest pid first."""
+def _ollama_processes() -> list[tuple[dict, str, bool]]:
+    """_ollama_process's answer for every `ollama serve` this user may read, lowest pid first,
+    and whether it runs in a container (another mount namespace)."""
     try:
         pids = sorted(int(d.name) for d in PROC.iterdir() if d.name.isdigit())
     except OSError:
@@ -481,10 +482,10 @@ def _ollama_processes() -> list[tuple[dict, str]]:
             boxed = False
         if boxed:
             found.append((_environ(raw, OLLAMA_KNOBS),
-                          f"the ollama process {pid} (in a container: its knobs only)"))
+                          f"the ollama process {pid} (in a container: its knobs only)", True))
         else:
             found.append((_environ(raw, OLLAMA_KEYS + SET_ONLY),
-                          f"the running ollama's environment (pid {pid})"))
+                          f"the running ollama's environment (pid {pid})", False))
     return found
 
 
@@ -502,11 +503,14 @@ def ollama_env_at(root: str | None) -> dict:
     (one per GPU, on ports of their own), the one whose OLLAMA_HOST listens on root's port; else
     ollama_env(). The lowest pid's stood for every one: two cards with an Ollama each were
     budgeted as one, and the first one's NUM_PARALLEL and MAX_LOADED_MODELS read for both (#460,
-    the audit of 1.8). A container's process gives no OLLAMA_HOST, so it isn't matched."""
+    the audit of 1.8). One with no OLLAMA_HOST listens on OLLAMA_PORT: read as matching nothing,
+    the default-port server started after the other got the other's settings (the review of
+    #460). A container's process gives no OLLAMA_HOST of the host's, so it isn't matched."""
     procs = _ollama_processes() if root else []
     if len(procs) > 1:
         want = urlparse(root).port
-        hit = [env for env, _ in procs if "OLLAMA_HOST" in env and _port(env["OLLAMA_HOST"]) == want]
+        hit = [env for env, _, boxed in procs if not boxed
+               and _port(env.get("OLLAMA_HOST") or "") == want]
         if len(hit) == 1:
             env = dict(hit[0])
             for k in OLLAMA_KEYS:

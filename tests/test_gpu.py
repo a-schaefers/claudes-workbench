@@ -577,6 +577,27 @@ class Budget(unittest.TestCase):
                 self.assertTrue(models.can_share(m(second), [m(second)], int(99e9)))   # two slots
                 self.assertFalse(models.can_share(m(first), [m(first)], int(99e9)))    # one
 
+    def test_an_ollama_with_no_ollama_host_is_the_default_port_server_whatever_its_pid(self):
+        # the review of #460: a process with no OLLAMA_HOST matched no port, so when the
+        # default-port server was the later one, the other's settings (the lowest pid's) stood
+        with tempfile.TemporaryDirectory() as proc:
+            def process(pid, environ):
+                Path(proc, pid, "ns").mkdir(parents=True)
+                Path(proc, pid, "comm").write_text("ollama\n")
+                Path(proc, pid, "cmdline").write_bytes(b"ollama\0serve\0")
+                Path(proc, pid, "environ").write_bytes(b"\0".join(environ) + b"\0")
+                os.symlink("mnt:[1]", Path(proc, pid, "ns", "mnt"))
+            Path(proc, "self", "ns").mkdir(parents=True)
+            os.symlink("mnt:[1]", Path(proc, "self", "ns", "mnt"))
+            process("100", [b"CUDA_VISIBLE_DEVICES=1", b"OLLAMA_HOST=127.0.0.1:11435",
+                            b"OLLAMA_NUM_PARALLEL=2"])
+            process("200", [b"CUDA_VISIBLE_DEVICES=0", b"OLLAMA_NUM_PARALLEL=1"])  # the default port
+            with mock.patch.object(hardware, "PROC", Path(proc)), \
+                    mock.patch.object(hardware, "_run", lambda *a, **k: ""):
+                self.assertEqual(hardware.ollama_env_at("http://127.0.0.1:11434")["OLLAMA_NUM_PARALLEL"], "1")
+                self.assertEqual(hardware.ollama_env_at("http://127.0.0.1:11434")["CUDA_VISIBLE_DEVICES"], "0")
+                self.assertEqual(hardware.ollama_env_at("http://127.0.0.1:11435")["OLLAMA_NUM_PARALLEL"], "2")
+
     def test_an_apus_carve_out_never_outranks_or_adds_to_a_discrete_card(self):
         # the 0.90 review: a Radeon 780M set to 16 GiB beside an 8 GiB RTX became the budget, and
         # a 4 GiB one was added to an RX 7600S's 8 (amdgpu reports both as VRAM)
