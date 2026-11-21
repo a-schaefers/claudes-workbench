@@ -928,7 +928,11 @@ and the output's tail ("the setup command failed (exit N)", "setting up the work
 (copy failed)" for a link or copy, or "setting up the worktree failed (timed out after Ns; wb
 start --setup-timeout SECS, or "setup_timeout" in the repo's commands.json "repos" entry, raises
 it)": `setup_timed_out`, which a scratch checkout's output says too), and, when it failed on a connection, the proxy the agent's
-environment left out (`runner.proxy_gap`, #380). Each scratch checkout (the base check, `wb verify`, `wb shot`:
+environment left out (`runner.proxy_gap`, #380); it ends "fix it, then wb resume <task>: it sets
+the worktree up again (the agent never ran)", and sets status `failed_before` `setup`. A load
+failure before the agent ran (`runner._load_failed`, `results.ran` false) sets it `load` and its
+notice adds "the agent never ran: once the model can, wb resume <task> starts it". Either way the
+results row says `ran: false`, which the router and the tuning leave out (#581). Each scratch checkout (the base check, `wb verify`, `wb shot`:
 `verify._run`) gets the same links beside it and a copy of the task's `prepared_paths` from its
 worktree (`prepare(at, prepared)`, as a reflink where the filesystem has them). A file already present in the scratch checkout takes precedence. A missing prepared input or a changed parent link requires fresh setup: each input's parent must resolve to the same path under the two worktrees' resolved roots, so a link inside a worktree refuses the copy while a symlinked state directory (`WB_HOME` a link to another volume) doesn't (#345). The setup
 isn't run there: each ran it from nothing, up to the setup limit, and a first build compiled three
@@ -1749,8 +1753,9 @@ part of the setting. `live` and `every` are the Stats tab's live view (`wb top`)
 
 **The Stats feed** (`stats.feed`, `wb stats --json`, #405): everything workbench has learned, as
 one object for the Stats tab's history, built from what already computes it. Rows are
-`store.results()` that `tuning.judged` keeps (no trials, no spec-gap discards), except where
-Claude's cost is counted (the periods' savings, the saved milestones): there every row but trials. A section with
+`store.results()` that `tuning.judged` keeps (no trials, no spec-gap discards, no task whose
+agent never ran), except where Claude's cost is counted (the periods' savings, the saved
+milestones): there every row but trials. A section with
 nothing in it is left out, never zeros, so a new install's feed is `{ts, until, settings, tasks:
 0}`; `until` is the next local midnight (`_midnight`): the streak, days and periods are counted
 from today, so the pane reads the feed again once it passes.
@@ -2705,7 +2710,10 @@ exit 4 and `--queue`, and the bench's preemption, apply per server alike. `free_
 unloads or stops a remote provider's models.
 
 **Routing** (`router.rank`, `choose`). Rows: `store.results()` (no trials) that `tuning.judged`
-keeps, for this model and size. Quality is the acceptance rate with a uniform prior, overall =
+keeps, for this model and size. `judged` drops a discard marked `--spec-gap` and a task whose
+agent never ran (row `ran` false: its setup or its model's load failed, `failed_before`; a row
+from before `ran` was recorded: not accepted and `tok_out` 0): three discards of a lockfile
+problem scored a model 0/3, and the router passed it by for good (#581). Quality is the acceptance rate with a uniform prior, overall =
 (accepted + 1) / (tried + 2); on the repo's stack (`gitops.stack`: up to two languages, each at
 least 20% of the tracked source files; a row's stack is the one recorded, else read from its repo)
 quality = (like_accepted + `LIKE_PRIOR`·overall) / (like_tried + `LIKE_PRIOR`), `LIKE_PRIOR` = 2.
@@ -5219,6 +5227,7 @@ check-ins off), not `wb start`'s.
 | `checked_out`, `checkout_secs` | `runner.checkout`: the worktree is made (task.json `checkout: "runner"`, #529); how long the checkout took |
 | `branch_made` | `runner.checkout`: the commit it makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists; the only branch a cleanup of the checkout cut short deletes, and only there (#416, #529) |
 | `prepared_paths`, `setup_secs` | set with `prepared`: the worktree's ignored paths the preparation left, which each scratch checkout copies instead of running the setup (#249), unless one is a virtualenv (#325); how long it took, in the first report |
+| `failed_before` | `setup` or `load`: the runner failed the task on its setup or its model's load before the agent ran (`_prepare`, `_load_failed`); the results row copies it (#581) |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
 | `live_used` | `{session, used}`: the context the round's last `step_finish` carried (input + cache + output), what the between-rounds check uses when the session export fails (#262) |
@@ -5263,7 +5272,9 @@ questions `ask {id}`, `answer {id}`. From `wb`:
 **results.jsonl** (`results.record`, on accept and discard): `ts`, `task`, `outcome`
 (`accepted`/`discarded`), `model`, `size`, `repo`, `stack`, `rounds`, `auto_fixes`, `reviews`
 (every step's), `spec_rounds`, `tests_ok`, `minutes` (wall clock since `wb start`, queueing and
-review included), `tok_in`, `tok_out`, `skills_offered`, `skills_loaded`, `skills_rev`, `experiments` (the
+review included), `tok_in`, `tok_out`, `ran` (whether the agent ever got a request to its model, `results.ran`: a
+session began or a token was written), `failed_before` (`setup` or `load`, when it never ran:
+status's), `skills_offered`, `skills_loaded`, `skills_rev`, `experiments` (the
 names on for the task, when any), `steps` (one `results.step` per step), `window`, `tuned`, `explored`, `tuned_max`, `spec_gaps`, `claude`
 (when known: `spend.usage`, `{turns, calls, input, cache_write_5m, cache_write_1h, cache_read,
 output}`, *What a task cost Claude*), `gpu_wh` (status's, when measured), `remote_gpu` (true

@@ -2902,6 +2902,41 @@ class WorktreeSetup(Base):
         said = (store.Task("t-scratch").dir / "verify" / "1" / "base.txt").read_text()
         self.assertIn("setting up the scratch checkout failed: timed out after 5s", said)
 
+    def test_a_task_whose_setup_failed_is_resumed_and_discarded_never_counts_against_its_model(self):
+        # #581, the audit of 1.90: three discards of a lockfile problem scored the model 0/3 and
+        # the router passed it by, though its agent never ran a request
+        from workbench import models, router, tuning
+        flag = Path(self.tmp.name) / "network-back"
+        setup = f"test -e {flag} || {{ echo NO-NETWORK; exit 5; }}"
+        self.start("t-never", "ok", "--test", TEST_CMD, "--setup", setup)
+        wait_phase("t-never", {"failed"})
+        note = [r for r in store.notices() if r["task"] == "t-never"][-1]
+        self.assertIn("fix it, then wb resume t-never: it sets the worktree up again (the agent "
+                      "never ran)", note["text"])
+        run_wb("discard", "t-never")
+        row = [r for r in store.results() if r["task"] == "t-never"][-1]
+        self.assertEqual((row["ran"], row["failed_before"]), (False, "setup"))
+        self.assertFalse(tuning.judged(row))
+        m = models.resolve(row["model"])
+        self.assertEqual(router.score(m, row["size"]).tries, 0)        # nothing held against it
+        # resumed once the setup can work: it sets up again, and the agent runs
+        self.start("t-back", "ok", "--test", TEST_CMD, "--setup", setup, "--no-self-review")
+        wait_phase("t-back", {"failed"})
+        flag.touch()
+        run_wb("resume", "t-back")
+        st = wait_phase("t-back", {"review", "stuck", "failed"})
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        run_wb("discard", "t-back")
+        row = [r for r in store.results() if r["task"] == "t-back"][-1]
+        self.assertIs(row["ran"], True)
+        self.assertNotIn("failed_before", row)
+        self.assertEqual(router.score(m, row["size"]).tries, 1)        # this one ran: it counts
+        # rows from before `ran`: not accepted with no token written never ran
+        self.assertFalse(tuning.judged({"outcome": "discarded", "tok_out": 0}))
+        self.assertTrue(tuning.judged({"outcome": "discarded", "tok_out": 120}))
+        self.assertTrue(tuning.judged({"outcome": "accepted", "tok_out": 0}))
+        self.assertTrue(tuning.judged({"outcome": "discarded"}))
+
     def test_a_sparse_checkout_gets_a_sparse_worktree_and_a_sparse_base_check(self):
         # #263 (the audit of 1.2): the worktree held the whole monorepo, and the base check's
         # clone of it too

@@ -1633,6 +1633,22 @@ class ServerAway(Base):
         self.assertLess(time.monotonic() - began, 20)
         self.assertFalse(self.waits("t-gone"))
 
+    def test_a_model_that_never_loaded_says_resume_and_its_discard_is_not_held_against_it(self):
+        # #581, the audit of 1.90: a task whose model never loaded, discarded, counted as the
+        # model's rejected work
+        from workbench import tuning
+        self.tags.clear()                                             # not pulled: fails at once
+        self.start("t-noload", "ok", "--test", TEST_CMD, "--model", "o/m", "--force")
+        wait_phase("t-noload", {"failed"}, timeout=30)
+        note = [r for r in store.notices() if r["task"] == "t-noload"][-1]
+        self.assertIn("the agent never ran: once the model can, wb resume t-noload starts it",
+                      note["text"])
+        run_wb("discard", "t-noload")
+        row = [r for r in store.results() if r["task"] == "t-noload"][-1]
+        self.assertEqual((row["ran"], row["failed_before"]), (False, "load"))
+        self.assertFalse(tuning.judged(row))
+        self.assertEqual(router.score(models.resolve("o/m"), row["size"]).tries, 0)
+
 
 class ServerRestarted(Base):
     """A model server wb starts itself (models.json `start`) that dies under a round: #579, the

@@ -68,8 +68,15 @@ def _key(row: dict) -> tuple:
 
 def judged(row: dict) -> bool:
     """Whether a closed task says anything about the model, a knob or a skill: not a discard
-    Claude put down to its own spec (--spec-gap), which would score the agent for Claude's miss."""
-    return not (row.get("outcome") == "discarded" and row.get("spec_gaps"))
+    Claude put down to its own spec (--spec-gap), which would score the agent for Claude's miss;
+    nor a task whose agent never ran (`ran` false: its setup or its model's load failed), which
+    scored the model 0/3 for a lockfile problem or a sleeping server and locked it out of routing
+    (#581). A row from before `ran` was recorded: not accepted, and no token written."""
+    if row.get("outcome") == "discarded" and row.get("spec_gaps"):
+        return False
+    if "ran" in row:
+        return bool(row["ran"])
+    return row.get("outcome") == "accepted" or row.get("tok_out") != 0
 
 
 def agent_reviews(row: dict) -> int:

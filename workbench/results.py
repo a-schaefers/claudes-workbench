@@ -38,6 +38,14 @@ def step(task: store.Task, landed: bool, since: str = "HEAD") -> dict:
             "stuck": stuck, "took_over": any(e.get("kind") == "takeover" for e in evs)}
 
 
+def ran(task: store.Task) -> bool:
+    """Whether the task's agent ever got a request to its model: a session began (OpenCode's first
+    event names it) or a token was written. A task that failed on its setup or its model's load
+    never did, and discarded, it counted against the model as rejected work (#581)."""
+    st = task.status
+    return bool(st.get("session") or st.get("sessions") or st.get("tok_out"))
+
+
 def record(task: store.Task, outcome: str, last_step: dict | None = None, **extra) -> dict:
     spec, st = task.spec, task.status
     if spec.get("bench"):  # a replay: its row is bench/runs.jsonl's
@@ -54,6 +62,8 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "tests_ok": (st.get("tests") or {}).get("ok"),
            "minutes": round((store.now() - spec.get("created_at", store.now())) / 60, 1),
            "tok_in": st.get("tok_in", 0), "tok_out": st.get("tok_out", 0),
+           "ran": (went := ran(task)),
+           **({"failed_before": st["failed_before"]} if not went and st.get("failed_before") else {}),
            "skills_offered": st.get("skills_ever") or [], "skills_loaded": skills.loaded(task),
            "skills_rev": st.get("skills_rev") or {},  # the version handed: judges each edit
            "steps": steps,

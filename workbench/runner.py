@@ -1432,10 +1432,11 @@ def _prepare(task: store.Task) -> bool:
         f"setting up the worktree failed ({setup_timed_out(spec) if code == 'timeout' else code})"
     tail = "\n".join("    " + x for x in clip_tail(output, 8, total=1500).splitlines())
     proxy = f"\n{proxy_line(gone)}, if the setup needed it" if (gone := proxy_gap(output)) else ""
-    task.set_status(phase="failed", last=what, infra="setup")  # the machine's, not the model's (#508)
+    task.set_status(phase="failed", last=what, infra="setup", failed_before="setup")  # #508
+    # resume, not discard and start again: the agent never ran, and wb resume sets up again (#581)
     task.notify("failed", f"task {task.name}: {what} before any round "
-                f"({task.dir / 'setup.txt'}):\n{tail}{proxy}\nfix it, then wb discard {task.name} and "
-                "start again")
+                f"({task.dir / 'setup.txt'}):\n{tail}{proxy}\nfix it, then wb resume {task.name}: "
+                "it sets the worktree up again (the agent never ran)")
     return False
 
 
@@ -2000,8 +2001,14 @@ def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
 
 
 def _load_failed(task: store.Task, e: Exception) -> None:
-    task.set_status(phase="failed", last=f"model: {e}", infra="model")
-    task.notify("failed", f"task {task.name}: could not load {task.spec['model']}: {e}")
+    from .results import ran  # results imports this module
+    never = not ran(task)
+    task.set_status(phase="failed", last=f"model: {e}", infra="model",
+                    **({"failed_before": "load"} if never else {}))
+    # the agent never ran: resuming loses nothing, and a discard records nothing of the model
+    task.notify("failed", f"task {task.name}: could not load {task.spec['model']}: {e}"
+                + (f"\nthe agent never ran: once the model can, wb resume {task.name} starts it"
+                   if never else ""))
 
 
 # A model whose server is only down (models.may_come_up: Ollama not answering, a server with no
