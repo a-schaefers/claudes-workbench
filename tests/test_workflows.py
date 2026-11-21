@@ -91,6 +91,13 @@ class ReleaseGates(unittest.TestCase):
             self.assertIn(want, checklist)
         self.assertIn("docs/release-checklist.md", (ROOT / "ARCHITECTURE.md").read_text())
 
+    def test_the_release_checklist_runs_what_the_readme_offers_at_the_tag(self):
+        # #422 (the audit of 1.8): the 1.8 tag's README offered audio, and `wb audio` landed after it
+        checklist = (ROOT / "docs" / "release-checklist.md").read_text()
+        self.assertIn("## What the README offers", checklist)
+        self.assertIn("runs at the tagged commit", checklist)
+        self.assertIn("--help` exits 0", checklist)
+
 
 class Marketplace(unittest.TestCase):
     def test_the_plugin_has_no_version_so_installs_track_main(self):

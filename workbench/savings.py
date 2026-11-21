@@ -86,8 +86,16 @@ def price() -> float | None:
 
 
 def set_price(kwh_price: float) -> None:
-    """Write {"kwh_price": kwh_price} to the file price() reads (creating its directory)."""
-    store.write_json(_path(), {"kwh_price": kwh_price})
+    """Set "kwh_price" in the file price() reads (creating its directory), its other keys kept:
+    under its lock and through a link, keeping its mode (#495)."""
+    def read():
+        try:
+            data = json.loads(_path().read_text())
+        except (OSError, ValueError):  # missing or broken: price() reads it as unset
+            return {}
+        return data if isinstance(data, dict) else {}
+    with store.edit_config(_path(), read) as data:
+        data["kwh_price"] = kwh_price
 
 
 def totals(rows: list[dict], since: float = 0) -> dict:

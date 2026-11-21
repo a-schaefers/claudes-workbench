@@ -8013,6 +8013,135 @@ class ModelSet(Base):
         self.assertIn("runtime: retry", out)
 
 
+class ConfigWrites(Base):
+    """What wb writes into the user's own config files: OpenCode's, models.json, commands.json,
+    savings.json."""
+    def layered(self, content=None):
+        """An admin's system file, the user's global file, and a session's OPENCODE_CONFIG_CONTENT."""
+        from workbench import models
+        tmp = Path(self.tmp.name)
+        mine, system = tmp / "mine", tmp / "etc-opencode"
+        mine.mkdir()
+        system.mkdir()
+        (system / "opencode.json").write_text(json.dumps({
+            "disabled_providers": ["cloud"], "share": "disabled",
+            "provider": {"admin": {"options": {"baseURL": "http://127.0.0.1:8081/v1"}, "models": {"a": {}}}}}))
+        (mine / "opencode.json").write_text(json.dumps({"provider": {"ollama": OPENCODE_CONFIG["provider"]["ollama"]}}))
+        del os.environ["WB_OPENCODE_CONFIG"]
+        os.environ["OPENCODE_CONFIG_DIR"] = str(mine)
+        os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps(content or {"theme": "session", "provider": {
+            "secretprov": {"options": {"baseURL": "http://127.0.0.1:9999/v1", "apiKey": "sk-SESSION-ONLY"},
+                           "models": {"s": {}}}}})
+        patch = mock.patch.object(models, "_system_dir", return_value=system)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return mine / "opencode.json"
+
+    def test_a_write_keeps_the_system_file_and_the_sessions_config_out_of_the_users_file(self):
+        # #421 (the audit of 1.8): write_config wrote read_config()'s merge, so one wb model add
+        # copied the admin's settings and a session-only provider with its apiKey into the user's file
+        from workbench import models
+        mine = self.layered()
+        models.write_entry("ollama", "new", {"limit": {"context": 8192}})
+        self.assertTrue(models.add_server_provider("srv", "http://127.0.0.1:7000/v1"))
+        own = json.loads(mine.read_text())
+        self.assertEqual(sorted(own), ["provider"])                          # no share, theme, filters
+        self.assertEqual(sorted(own["provider"]), ["ollama", "srv"])         # no admin, no secretprov
+        self.assertEqual(sorted(own["provider"]["ollama"]["models"]), ["mimo-v2.6:9b-q8_0", "new", "qwen3.8-27b"])
+        self.assertNotIn("SESSION-ONLY", mine.read_text())
+        # a model for the admin's provider is the user's own overlay: the admin's baseURL stays theirs
+        models.write_entry("admin", "b", {"limit": {"context": 4096}})
+        self.assertEqual(json.loads(mine.read_text())["provider"]["admin"], {"models": {"b": {"limit": {"context": 4096}}}})
+        self.assertEqual(sorted(models.read_config()["provider"]["admin"]["models"]), ["a", "b"])
+        models.write_entry("admin", "b", None)                               # the user's own: removed
+        self.assertNotIn("b", models.read_config()["provider"]["admin"]["models"])
+
+    def test_a_change_to_what_another_layer_sets_is_refused_naming_that_layer(self):
+        # #421: removing a model the system file or OPENCODE_CONFIG_CONTENT sets left it in effect,
+        # and a default set in the session's config came back from the user's file once it ended
+        from workbench import models
+        mine = self.layered()
+        before = mine.read_text()
+        with self.assertRaisesRegex(RuntimeError, "OPENCODE_CONFIG_CONTENT"):
+            models.write_entry("secretprov", "t", {"limit": {"context": 4096}})  # its provider: session-only
+        with self.assertRaisesRegex(RuntimeError, "etc-opencode/opencode.json"):
+            models.write_entry("admin", "a", None)                           # the admin's model
+        os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps({"model": "secretprov/s", "provider": {
+            "ollama-box": {"name": "Ollama on box", "options": {"baseURL": "http://box:11434/v1"}, "models": {}},
+            "ollama": {"models": {"qwen3.8-27b": {"name": "Session Qwen"}}}}})
+        with self.assertRaisesRegex(RuntimeError, "OPENCODE_CONFIG_CONTENT"):
+            models.set_default("ollama/qwen3.8-27b")                         # the session's would win
+        with self.assertRaisesRegex(RuntimeError, "OPENCODE_CONFIG_CONTENT"):
+            models.remove_remote("box")
+        with self.assertRaisesRegex(RuntimeError, "OPENCODE_CONFIG_CONTENT"):
+            models.write_entry("ollama", "qwen3.8-27b", None)                # still set by the session
+        self.assertEqual(mine.read_text(), before)                           # nothing written
+        os.environ.pop("OPENCODE_CONFIG_CONTENT")
+        models.set_default("ollama/qwen3.8-27b")
+        self.assertEqual(json.loads(mine.read_text())["model"], "ollama/qwen3.8-27b")
+
+    def test_models_json_commands_json_and_savings_json_are_written_through_their_links_keeping_their_mode(self):
+        # #495: write_json replaced each dotfiles link with a plain 0644 file holding the new keys,
+        # while the 0600 file in the dotfiles kept the old ones
+        from workbench import models, savings
+        tmp = Path(self.tmp.name)
+        dots = tmp / "dotfiles"
+        dots.mkdir()
+        links = {"WB_MODELS": {"ollama": {"start": "serve --token s3cret"}},
+                 "WB_COMMANDS": {"allow": ["make *"], "env": ["HF_TOKEN"]},
+                 "WB_SAVINGS": {"kwh_price": 0.3, "note": "mine"}}
+        for var, data in links.items():
+            real = dots / Path(os.environ.get(var, f"{var}.json")).name
+            real.write_text(json.dumps(data))
+            real.chmod(0o600)
+            link = tmp / f"link-{real.name}"
+            link.symlink_to(real)
+            os.environ[var] = str(link)
+        models.set_override("ollama/qwen3.8-27b", "sizes", ["trivial"])
+        context.allow_always("allow", ["docker *"])
+        savings.set_price(0.25)
+        for var in links:
+            link = Path(os.environ[var])
+            self.assertTrue(link.is_symlink(), var)
+            self.assertEqual(link.resolve().stat().st_mode & 0o777, 0o600, var)
+        self.assertEqual(models._overrides(), {"ollama": {"start": "serve --token s3cret"},
+                                               "ollama/qwen3.8-27b": {"sizes": ["trivial"]}})
+        self.assertEqual(context.commands_conf(), {"allow": ["make *", "docker *"], "env": ["HF_TOKEN"]})
+        self.assertEqual(json.loads(Path(os.environ["WB_SAVINGS"]).read_text()), {"kwh_price": 0.25, "note": "mine"})
+        os.environ["WB_MODELS"] = str(tmp / "new" / "models.json")          # a new file: 0600
+        models.set_override("ollama", "skip", True)
+        self.assertEqual(Path(os.environ["WB_MODELS"]).stat().st_mode & 0o777, 0o600)
+        if os.geteuid() != 0:  # a link into a read-only store (Nix) is refused, never replaced
+            dots.chmod(0o500)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "isn't writable.*dotfiles"):
+                    context.allow_always("allow", ["cargo *"])
+            finally:
+                dots.chmod(0o700)
+            self.assertTrue(Path(os.environ["WB_COMMANDS"]).is_symlink())
+
+    def test_a_read_modify_write_of_a_config_file_waits_for_the_one_under_way(self):
+        # #495: two sessions' wb allow --always close together lost one grant (no lock)
+        from workbench import models
+        path = models.overrides_path()
+        done = threading.Event()
+        with store.locked(store.config_lock(path)):
+            t = threading.Thread(target=lambda: (models.set_override("ollama", "skip", True), done.set()))
+            t.start()
+            self.assertFalse(done.wait(0.5))                                 # waits for the lock
+        t.join(10)
+        self.assertTrue(done.is_set())
+        self.assertEqual(models._overrides(), {"ollama": {"skip": True}})
+        context.allow_always("allow", ["a *"])
+        with store.locked(store.config_lock(context.commands_path())):
+            t = threading.Thread(target=context.allow_always, args=("allow", ["b *"]))
+            t.start()
+            t.join(0.5)
+            self.assertTrue(t.is_alive())
+        t.join(10)
+        self.assertEqual(context.commands_conf()["allow"], ["a *", "b *"])
+
+
 class DiskRoom(Base):
     """#342 (the audit of 1.4): nothing watched the disk, and a full one wedged every task."""
     @staticmethod

@@ -464,7 +464,7 @@ average, so the constants stand until there are more runs to fit (#120).
 `claude: 56K · writing it yourself: ~59K (estimate) · saved ~3K · GPU 41 Wh` (a negative saving
 reads `cost ~3K more`); `totals(rows, since)` adds them up, with the energy's `cost` at the
 user's electricity price (`price()`, from `$WB_SAVINGS`, else `~/.config/workbench/savings.json`
-`{"kwh_price": …}`; `set_price` writes it), and `of`, every closed task of the period, compared
+`{"kwh_price": …}`; `set_price` sets it, keeping any other key, through `store.edit_config`), and `of`, every closed task of the period, compared
 or not (the coverage).
 
 **The badge** (`savings.score`, #101) is one number from 1 to 100 over those totals. B is the
@@ -1350,8 +1350,11 @@ permission request (`_permission_asked`), else the pending question; both write 
 `write_answer`.
 
 **Granting.** `wb allow <task> "<pattern>"… [--path DIR…] [--always]` adds to the task's grants
-(`rules/<task>/grants.json`, through `context.grant`; and to `commands.json` with `--always`, which
-refuses a `commands.json` that doesn't parse or has the wrong shape), answers any pending question with
+(`rules/<task>/grants.json`, through `context.grant`; and to `commands.json` with `--always`,
+`context.allow_always`, a read-modify-write under the file's lock, through a symlink, its mode kept
+(`store.edit_config`: unlocked, two sessions' grants close together lost one, and a dotfiles link
+became a plain 0644 file, #495); it refuses a `commands.json` that doesn't parse or has the wrong
+shape), answers any pending question with
 "Claude allowed … Run it again now and carry on.", and when the agent is running, also queues that
 as a `--now` note so the agent restarts on its session with the new rule (the rules are read when
 OpenCode starts).
@@ -1927,16 +1930,30 @@ through `_strip_jsonc` (comments and trailing commas removed), then the user's
 variable is set, never its keys; #347). A provider's relative
 `{file:path}` starts in the directory of the file that defines it (`_provider_dirs`).
 `opencode_config_path()` is the global file wb names: `opencode.json` if it exists, else
-`opencode.jsonc` if it exists, else `opencode.json`; `write_config` writes the one file there is,
+`opencode.jsonc` if it exists, else `opencode.json`; `own_config` writes the one file there is,
 else that one.
 A file that doesn't parse is a `RuntimeError` naming it (every command prints it as a message;
-`wb doctor` prints it as BAD and stops). `write_config(cfg, change)` refuses while two files are
+`wb doctor` prints it as BAD and stops). Every write (`write_entry`, `_add_provider`,
+`remove_remote`, `set_default`) changes that one file's own parsed contents, `own_config(change)`
+yielding (the file, its contents) and writing them back when the change ends, under the file's
+lock (`store.edit_config`); `read_config`'s merge is for lookups only. Writing the merge back
+copied an admin's system file and a session's `OPENCODE_CONFIG_CONTENT` (an `apiKey` with it)
+into the user's file, where the admin's later changes stopped taking effect (#421, the audit of
+1.8). What another layer sets is that layer's (`set_elsewhere(target, *keys, later)`, naming each
+file, or `OPENCODE_CONFIG_CONTENT`): removing a model or a `wb remote` provider another layer also
+sets is refused, since it would stay in effect, and so is changing a model, or `--set-default`'s
+`model`, that a layer loaded after the file sets, which would win ("… is set in <layer>, which wb
+doesn't write: make this change there by hand: …"). A model for a provider only the system file
+defines goes into the user's file as an overlay (`{"provider": {"<id>": {"models": {…}}}}`, which
+OpenCode merges over the admin's); one for a provider only `OPENCODE_CONFIG_CONTENT` defines is
+refused (it would leave a provider with no baseURL on disk once the session ends). `own_config` refuses while two files are
 layered (one merged file would undo the layering), unless the file is strict JSON (no comments,
 no trailing commas), and when the file (or a symlink's target) isn't writable (a Nix store), and
 then prints only `change`, what to do by hand (the keys wb sets, or the key to delete or set),
 never the config, which can hold a provider's `apiKey` (the 2026-11-16 audit). A write reformats
 the file (atomic, indent 2), through a symlink to its target (dotfiles stay linked), keeping the
-file's mode (0600 for a new file; the temporary file is never readable by others).
+file's mode (0600 for a new file; the temporary file is never readable by others):
+`store.write_through`, which models.json, commands.json and savings.json share (#495).
 
 The agent's OpenCode loads the global files itself, but its `OPENCODE_CONFIG` is the task's layer
 (`runner.agent_env`), so a provider defined only in `$WB_OPENCODE_CONFIG` or the user's
@@ -2022,7 +2039,8 @@ refuses one, and `wb scout` lists them apart from what is installed. models.json
 on the model's own id allows one; it is then `remote`, holding no GPU lease.
 
 **models.json** (`$WB_MODELS`, default `~/.config/workbench/models.json`, strict JSON; a
-malformed file breaks every command) holds only what OpenCode can't say, keyed by provider id or
+malformed file breaks every command; `set_override` changes one key under its lock, through a
+symlink, keeping its mode: `store.edit_config`, #495) holds only what OpenCode can't say, keyed by provider id or
 model id; a model's entry is merged over its provider's (`{**provider, **model}`):
 - `start` / `stop`: shell commands for a server (start detached, then status every 5 s up to 20
   min; stop with a 300 s limit);
@@ -2596,7 +2614,7 @@ output cap, and an entry no request could fit refused before anything is made: a
 128K entry once wrote an input limit of -16384 and kept its 32K and 64K caps, #332, the audit of
 1.4; an alias's `id` dropped, since it would name the old model). The router weighs both by their records; retiring the
 old one is the user's call (`wb model retire`). The config is checked first (`models.config_target`,
-the checks `write_config` makes: one file, no comments, writable), before anything is made: the
+the checks `own_config` makes: one file, no comments, writable), before anything is made: the
 variant was made, then a config with comments refused its entry, and once the config was plain
 JSON the retry refused the variant as taken (#266, the audit of 1.2). A variant made and not yet
 registered is kept in optimize.json `made` (`<provider>/<name>` → the source's id), so a retry
@@ -4126,7 +4144,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
 |---|---|---|
-| `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed); the router's ranking per size. `--set-default` writes the significant-work pick as OpenCode's `model`. |
+| `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed); the router's ranking per size. `--set-default` writes the significant-work pick as OpenCode's `model` (`models.set_default`: in the user's file, refused while `OPENCODE_CONFIG_CONTENT` sets one, which would win: #421). |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | Registers a model in opencode.json, merged into any existing entry; `--url` first writes an OpenAI-compatible provider for any server on this machine (`models.add_server_provider`: a provider already there is never touched, and one for another baseURL refuses the add; a URL off this machine needs models.json `local: true`), and `--start`/`--stop` write the model's models.json `start`/`stop`; on a first run with no `--url` it writes the `ollama` provider when Ollama answers; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | Asked for, or when due at setup and session start (*Optimize*). `start --if-due`: only when due, else nothing printed. `estimate`: how long a run would hold the GPU. `start`: detached; measures each Ollama model's largest window all on the GPU (refused while a task holds it; a task that wants it stops it); `--bench` then starts `wb bench run` on every model. `report` (the default): a line per model. `stop`. `apply <id>…`: adds the measured window as an entry of its own beside the model (an Ollama `<name>:<tag>-<N>k`, `optimize.entry_name`, with that `num_ctx`, the entry's settings copied; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL. `--remove` undoes it; not while OpenCode's default model is one of them, nor for a provider wb didn't add or that now points elsewhere. |
@@ -4210,6 +4228,9 @@ $WB_HOME (~/.local/state/workbench)
                                  lane reads; in the task's directory an agent held runner.lock, then
                                  status.lock, with flock, and every later runner exited at once, then
                                  the runner and wb stop froze at their next status write: the 0.90 review)
+  locks/config-<key>.lock        one read-modify-write at a time of a user's config file (store.config_lock:
+                                 <key> from the path a write lands in; beside the file it would be a stray
+                                 file in the user's dotfiles; #495)
   tasks/<task>/                  readable from the lane; only worktree/ and ask/ writable
     task.json  status.json
     events.jsonl  steer.jsonl  acked  context.md  runner.log
@@ -4227,7 +4248,10 @@ $WB_HOME (~/.local/state/workbench)
 ~/.local/share/workbench/skills/ ($WB_SKILLS) the skill library, its own git repo; retired/
 ~/.local/share/workbench/try/<n>/ wb try's sample projects, each a repo of its own (its task: try-<n>;
                                  beside $WB_SKILLS, whatever it is set to)
-~/.config/workbench/
+~/.config/workbench/             wb's writes to models.json, commands.json and savings.json (and OpenCode's
+                                 config, models.own_config) go through store.edit_config: locked, through a
+                                 symlink to its target, the mode kept (0600 for a new file); a read-only
+                                 target is refused
   models.json ($WB_MODELS)       what OpenCode can't say about each model or provider
   images.json ($WB_IMAGES)       image engines
   audio.json ($WB_AUDIO)         audio engines (speech, sfx, music, and a listener)
@@ -4239,7 +4263,8 @@ $WB_HOME (~/.local/state/workbench)
                                  accept --merge lands there (context.MERGE_AS; --merge-as overrides, #352)
   chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...]}
   chat-token ($WB_CHAT_TOKEN)    the web chat's token, mode 600
-  savings.json ($WB_SAVINGS)     {"kwh_price": N}, the electricity price the energy is costed at (wb savings --price)
+  savings.json ($WB_SAVINGS)     {"kwh_price": N}, the electricity price the energy is costed at (wb savings --price;
+                                 other keys kept)
 ~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; then $OPENCODE_CONFIG; $WB_OPENCODE_CONFIG) the models
 /tmp/wb-run-<uid>-<hash>/        the agent's XDG_RUNTIME_DIR (lane on; context.runtime_dir), 0700: kept while
                                  the task is open (stuck or in review too), removed by wb accept and wb discard
@@ -4260,7 +4285,14 @@ same place (a relative `WB_HOME` once had wb write the task under its cwd and th
 runs from the package's directory, look for it there: the 2026-11-16 audit; a relative
 `OPENCODE_CONFIG` had `wb start` pick a model the runner then called unknown: #328, the audit of
 1.4). `write_json` writes `.<name>.<pid>.<random>.tmp` beside the file (created exclusively, so two threads never share one: the 2026-11-19 audit) and renames it
-(no fsync); `read_json` returns the default for a missing or broken file. `append_jsonl` appends
+(no fsync), replacing a symlink with a plain file, which is right for the state directory. The
+user's own config files take `write_through` instead: `writable_target` follows a symlink to its
+target (refused, saying to edit it in its source, when that isn't writable: a Nix store), the
+temporary file goes beside the target, created 0600, and gets the target's mode (0600 for a new
+file) before the rename; `edit_config(path, read, change)` is the read-modify-write around it,
+under `config_lock(path)` (`locks/config-<key>.lock`), `read()` checking the file first and nothing
+written when the change raises (#495: a dotfiles link became a plain 0644 file, and two
+`wb allow --always` close together lost one grant); `read_json` returns the default for a missing or broken file. `append_jsonl` appends
 one line under `<file>.lock` (flock; a task's own events and steer files under `locks/<task>.<file>.lock`, `store.task_lock`, out of the lane), first ending a last line a write cut short (a full disk, a
 crash), so only that fragment is lost, not the row after it; `read_jsonl(path, offset)` returns
 the whole lines and the offset after the last one, skipping bad lines (bad JSON, or bytes that
@@ -4800,7 +4832,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   (*Installing*); adding one would freeze them on it. **A release** (by hand, when the owner
   calls it one) → `__version__` in `workbench/__init__.py` (`wb --version`, task.json's
   `wb_version`, the ask server's `serverInfo`), `docs/release-checklist.md` filled in as
-  `docs/releases/<version>.md` (a green nightly on the commit, the platforms by hand), then a
+  `docs/releases/<version>.md` (a green nightly on the commit, every command the README offers
+  run at the tagged commit (#422), the platforms by hand), then a
   `v<version>` tag (a trailing `.0` dropped, as `v0.90`) and a GitHub release (`gh release create
   v<version> --generate-notes`, its notes linking the filled-in checklist). **`wb setup`'s links** → README's quickstart and
   *Installing*.

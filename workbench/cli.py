@@ -1425,17 +1425,13 @@ def cmd_allow(a):
     dirs = [_lane_dir(p, context.repo_dirs(task)) for p in a.path or [] if p.strip()]
     if not pats and not dirs:
         die("nothing to allow")
-    conf_path = context.commands_path()
-    conf = context.commands_conf()  # refused unless it parses: rewriting it would lose the file
+    context.commands_conf()  # refused unless it parses, before any grant: rewriting it would lose it
     for key, new in (("allow", pats), ("paths", dirs)):
         if not new:
             continue
         context.grant(task, key, new)
         if a.always:
-            conf[key] = (conf.get(key) or []) + [p for p in new if p not in (conf.get(key) or [])]
-    if a.always:
-        conf_path.parent.mkdir(parents=True, exist_ok=True)
-        store.write_json(conf_path, conf)
+            context.allow_always(key, new)
     said = ", ".join([f"`{p}`" for p in pats] + [f"the directory {d}" for d in dirs])
     text = (f"Claude allowed {said}" + (" from now on" if a.always else " for this task")
             + ". Run it again now and carry on." + (f" {a.text.strip()}" if a.text else ""))
@@ -2085,11 +2081,8 @@ def cmd_models(a):
         top, why = router.choose("significant")
         if top is None:
             die(why)
-        cfg = models.read_config()
-        old = cfg.get("model")
-        cfg["model"] = top.model.id
         try:
-            models.write_config(cfg, f'set "model": "{top.model.id}"')
+            old = models.set_default(top.model.id)
         except RuntimeError as e:
             die(str(e))
         print(f"\nOpenCode's default model: {old} → {top.model.id} ({why})")
