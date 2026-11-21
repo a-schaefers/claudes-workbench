@@ -2065,9 +2065,11 @@ def _maker_alive(pid: str, tag: str) -> bool:
 
 
 def _drop_scratches() -> int:
-    """The scratch directories (store.SCRATCH_PREFIXES) SCRATCH_AGE old whose maker is gone (#376)."""
+    """The scratch directories (store.SCRATCH_PREFIXES) SCRATCH_AGE old whose maker is gone (#376),
+    in the state directory and in bench/, where a killed `wb bench add` leaves its clones (#439)."""
     n = 0
-    for d in sorted(store.home().iterdir()) if store.home().is_dir() else []:
+    tops = [p for p in (store.home(), store.home() / "bench") if p.is_dir() and not p.is_symlink()]
+    for d in sorted(d for top in tops for d in top.iterdir()):
         pre = next((p for p in store.SCRATCH_PREFIXES if d.name.startswith(p)), None)
         if not pre or not d.is_dir() or d.is_symlink():
             continue
@@ -3204,7 +3206,9 @@ EVENT_SKIP = ("tasks/*/worktree", "tasks/*/tree", "tasks/*/rounds", "rules", "im
               # and the scratch clones and indexes (the base check, verify, shot, bench, a
               # submodule fill, a merge): one with a copied node_modules took a wb events from 2
               # watched directories to 605, and each write there woke the mod (#373, the audit
-              # of 1.6)
+              # of 1.6); and the bench's (`wb bench add`'s .base-/.check- clones, a run's
+              # replays): 1,209 of 1,211 watches were there (#439)
+              "bench/.?*", "bench/runs",
               *(SCRATCH := (".?*", "wb-index-*", "wb-merge-*")))  # .?*: not "." (the home itself)
 QUIET = (".lock", ".tmp", "runner.log")
 
