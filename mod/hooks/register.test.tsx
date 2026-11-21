@@ -2995,14 +2995,14 @@ test('the probe row says whether it works, and turned on without probe it asks C
   on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
   let found = false
   let checks = 0
-  const missing = 'probe: on, but not set up: no probe with `symbols` is on PATH, so it changes nothing yet (probe, a code-search tool: github.com/probelabs/probe; its release binary from github.com/probelabs/probe/releases, not crates.io\'s probe-code 0.6.0)'
+  const missing = (level: string) => `probe: ${level}, but not set up: no probe with \`symbols\` is on PATH, so it changes nothing yet (probe, a code-search tool: github.com/probelabs/probe; its release binary from github.com/probelabs/probe/releases, not crates.io's probe-code 0.6.0)`
   on('process.run', (_: any, e: any) => {
     if (e.argv[1] !== 'experiment') return { value: { exitCode: 0, stdout: '', stderr: '' } }
     if (e.argv[3]) files['/wb/experiments.json'] = JSON.stringify({ probe: e.argv[3] })
     else checks++
-    const state = JSON.parse(files['/wb/experiments.json'] ?? '{}').probe
-    const said = state !== 'on' ? 'probe: off (wb experiment probe on)'
-      : found ? 'probe: on and working (probe-code 0.6.0)' : missing
+    const state = JSON.parse(files['/wb/experiments.json'] ?? '{}').probe ?? 'off'
+    const said = state === 'off' ? 'probe: off (wb experiment probe adaptable|moderate|aggressive)'
+      : found ? `probe: ${state} and working (probe-code 0.6.0)` : missing(state)
     return { value: { exitCode: 0, stdout: `${said}${e.argv[3] ? '; tasks already started keep theirs' : ''}\n`, stderr: '' } }
   })
   const row = async (ui: any) => (await ui.findAll({ type: 'Button' })).map((b: any) => b.props.label)
@@ -3012,16 +3012,16 @@ test('the probe row says whether it works, and turned on without probe it asks C
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'tab-settings' })
   expect(await row(ui)).toBe('▸ Agent code navigation: Off (default)')
-  expect(checks).toBe(0)                                            // off: wb isn't asked
+  expect(checks).toBe(1)                                            // off: asked once (it runs no probe then)
   await ui.press({ key: 'probe' })
-  await ui.press({ key: 'probe:on' })
+  await ui.press({ key: 'probe:adaptable' })
   expect(toasts.filter(t => t.includes('code navigation'))).toEqual([
     "workbench: Agent code navigation is on but not set up: probe isn't installed. Claude will offer to set it up."])
-  expect(await row(ui)).toBe('▸ Agent code navigation: On, not set up')
+  expect(await row(ui)).toBe('▸ Agent code navigation: Adaptable, not set up')
   await clock.advance(5000)                                         // the next poll starts Claude's turn
   expect(asked).toHaveLength(1)
   expect(asked[0]).toContain('The user just turned on Agent code navigation')
-  expect(asked[0]).toContain(missing)
+  expect(asked[0]).toContain(missing('adaptable'))
   expect(asked[0]).toContain('github.com/probelabs/probe/releases')
   expect(asked[0]).toContain('install nothing without their yes')
 
@@ -3029,16 +3029,56 @@ test('the probe row says whether it works, and turned on without probe it asks C
   await clock.advance(31_000)
   await ui.press({ key: 'tab-tasks' })
   await ui.press({ key: 'tab-settings' })
-  expect(await row(ui)).toBe('▸ Agent code navigation: On, working')
+  expect(await row(ui)).toBe('▸ Agent code navigation: Adaptable, working')
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:off' })
   expect(await row(ui)).toBe('▸ Agent code navigation: Off (default)')
   await ui.press({ key: 'probe' })
-  await ui.press({ key: 'probe:on' })
+  await ui.press({ key: 'probe:moderate' })
   expect(toasts.filter(t => t.includes('code navigation'))).toHaveLength(2)
-  expect(toasts.at(-1)).toBe('workbench: Agent code navigation is on and working (probe-code 0.6.0): tasks started from now use it.')
+  expect(toasts.at(-1)).toBe('workbench: Agent code navigation is moderate and working (probe-code 0.6.0): tasks started from now use it.')
   await clock.advance(5000)
   expect(asked).toHaveLength(1)                                     // working: nothing for Claude
+  await ui.unmount()
+})
+
+test('the probe row offers off, adaptable, moderate and aggressive, and marks adaptable recommended only when wb does', async ($, on) => {
+  // the owner's design (2026-11-21, #857): probe has levels, one of them adaptive; "recommended"
+  // waits for a measurement (context.PROBE_RECOMMENDED), so it is wb's word, not the pane's
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/experiments.json': JSON.stringify({ probe: 'on' }) }  // before the levels
+  fakeTasks(on, files, [])
+  const runs: string[][] = []
+  let recommended = false
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    if (e.argv[1] !== 'experiment') return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    if (e.argv[3]) files['/wb/experiments.json'] = JSON.stringify({ probe: e.argv[3] })
+    const best = recommended ? '; adaptable is recommended' : ''
+    return { value: { exitCode: 0, stdout: `probe: off (wb experiment probe adaptable|moderate|aggressive)${best}\n`, stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-settings' })
+  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: Adaptable')  // "on" reads as adaptable
+  await ui.press({ key: 'probe' })
+  const options = async () => (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => / {2}[❯ ] /.test(l))
+  expect(await options()).toEqual(['    Off (default)', '  ❯ Adaptable', '    Moderate', '    Aggressive'])
+  for (const level of ['moderate', 'aggressive', 'off', 'adaptable']) {             // round the cycle, each through wb
+    runs.length = 0
+    await ui.press({ key: `probe:${level}` })
+    expect(runs.some(r => r.join(' ') === `wb experiment probe ${level}`)).toBe(true)
+    await ui.press({ key: 'probe' })
+    expect((await options()).find(l => l.startsWith('  ❯'))?.toLowerCase()).toContain(level)
+  }
+  expect(await ui.find({ type: 'Text', text: /never to read a long file whole/ })).toBeDefined()  // what each does
+  expect(await ui.find({ type: 'Text', text: /Moderate, until this machine's results/ })).toBeDefined()
+  recommended = true                                                // Claude set PROBE_RECOMMENDED
+  await clock.advance(31_000)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: Adaptable (recommended)')
   await ui.unmount()
 })
 
@@ -3081,7 +3121,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
     runs.push(e.argv)
     if (e.argv[1] === 'chat' && e.argv[2] === 'on') files['/wb/chat/switch.json'] = JSON.stringify({ on: true })
     if (e.argv[1] === 'coding') files['/wb/coding.json'] = JSON.stringify({ mode: e.argv[2] })  // what wb writes
-    if (e.argv[1] === 'experiment') files['/wb/experiments.json'] = JSON.stringify({ [e.argv[2]]: e.argv[3] })
+    if (e.argv[1] === 'experiment' && e.argv[3]) files['/wb/experiments.json'] = JSON.stringify({ [e.argv[2]]: e.argv[3] })  // a set, not the row's ask
     if (e.argv[1] === 'chat' && e.argv[2] === 'url')
       return { value: { exitCode: 0, stdout: 'http://localhost:1337/#token=abc\n', stderr: '' } }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
@@ -3122,9 +3162,9 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   expect(runs.some(r => r.join(' ') === 'wb chat on')).toBe(true)
   expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: On')
   await ui.press({ key: 'probe' })
-  await ui.press({ key: 'probe:on' })
-  expect(runs.some(r => r.join(' ') === 'wb experiment probe on')).toBe(true)   // then the row asks how it came out
-  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On')
+  await ui.press({ key: 'probe:adaptable' })
+  expect(runs.some(r => r.join(' ') === 'wb experiment probe adaptable')).toBe(true)   // then the row asks how it came out
+  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: Adaptable')
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts.at(-1)).toBe('http://localhost:1337/#token=abc')                                   // the link, at once
   await ui.press({ key: 'tab-tasks' })

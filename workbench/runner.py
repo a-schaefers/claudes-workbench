@@ -770,9 +770,7 @@ def outside_spec(task: store.Task, files: str) -> list[str]:
     here first (seen 2026-11-16: a flow-field module nobody asked for). Matched by path or name;
     a brace form names each (`src/replay_io.{h,c}`: flagged as unnamed on 2026-11-18)."""
     spec = current_task_prompt(task)
-    spec += "\n" + " ".join(a + part + b for a, parts, b in
-                             re.findall(r"([\w./-]*)\{([\w.-]+(?:,[\w.-]+)+)\}([\w./-]*)", spec)
-                             for part in parts.split(","))
+    spec += "\n" + " ".join(context.brace_names(spec))
     paths = [line[3:].split(" -> ")[-1].strip('"') for line in files.splitlines()]
     if not any(p in spec or Path(p).name in spec for p in paths):
         return []
@@ -2993,8 +2991,12 @@ def drive(task: store.Task) -> None:
             window = (m.config.get("limit") or {}).get("context")
             task.set_status(window=window)
             own = task.spec.get("self_review")  # --self-review / --no-self-review, else learned
+            # probe's level was fixed at wb start, its prompt written then (context.probe_start)
+            level = context.probe_level(task)
             tuning.tune(task, task.spec["model"], window, {"fresh_at": fresh_ceiling(m.config)},
-                        {} if own is None else {"self_review": int(own)})
+                        {**({} if own is None else {"self_review": int(own)}),
+                         "probe_aggressive": None if level is None else int(level == "aggressive")},
+                        ("probe_aggressive",) if task.spec.get("probe_explored") else ())
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
         handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)

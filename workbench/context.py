@@ -341,6 +341,15 @@ EXPERIMENTS = {
     "probe": "the agent's shell may run probe, and its handbook says how: a file's outline and "
              "one function, instead of the whole file",
 }
+# An experiment's settings besides "off", in the pane's order (one with none here is "on"). probe's
+# (the owner's design, 2026-11-21, #857): moderate, the condition measured to do no harm;
+# aggressive, the order that cost more on a 27B at 40K but may pay on a stronger model or a wider
+# window; adaptable, moderate until this machine's own results move it (the probe_aggressive
+# knob, tuning.py). "on", the setting before levels, reads as adaptable.
+EXPERIMENT_LEVELS = {"probe": ("adaptable", "moderate", "aggressive")}
+# Whether the pane marks adaptable "recommended": Claude sets it once a measurement says moderate,
+# with the read cap and the outline, is at least as good as off (#857's step 6); not yet
+PROBE_RECOMMENDED = False
 # the file length from which the probe experiment's note and protocol line apply: its gain
 # showed only on a 2,700-line file, its cost on 1,500-line ones (#857)
 PROBE_FILE_LINES = 1500
@@ -373,6 +382,11 @@ EXPERIMENT_PROTOCOL = {
     "probe": "- When you need one function from a file over {probe_lines} lines, `probe extract "
              "<file>#<name>` it instead of reading the whole file.\n",
 }
+# probe's aggressive level: the order of the quick A/B (2026-11-21), which explored more and
+# failed big-compaction on a 27B at 40K, kept for the models and windows where it may pay (#857)
+PROBE_AGGRESSIVE_PROTOCOL = ("- Never read a file over {probe_lines} lines whole: `probe extract "
+                             "<file>#<name>` the function you need (`probe symbols <file>` first "
+                             "when you don't know its name).\n").replace("{probe_lines}", str(PROBE_FILE_LINES))
 EXPERIMENT_NOTES = {k: v.replace("{probe_lines}", str(PROBE_FILE_LINES)) for k, v in EXPERIMENT_NOTES.items()}
 EXPERIMENT_PROTOCOL = {k: v.replace("{probe_lines}", str(PROBE_FILE_LINES))
                        for k, v in EXPERIMENT_PROTOCOL.items()}
@@ -412,25 +426,37 @@ def experiment_protocol(task: store.Task | None = None, experiments: dict | None
     task's, or ``experiments`` as task.json will record them (wb start writes round 1's prompt
     before task.json, #873)."""
     have = experiments if experiments is not None else (task.spec.get("experiments") or {}) if task else {}
-    return "".join(line for name, line in EXPERIMENT_PROTOCOL.items() if have.get(name))
+    return "".join(PROBE_AGGRESSIVE_PROTOCOL if name == "probe" and have.get(name) == "aggressive"
+                   else line for name, line in EXPERIMENT_PROTOCOL.items() if have.get(name))
 
 
 def experiments_path() -> Path:
     return store.home() / "experiments.json"
 
 
-def experiments() -> dict[str, bool]:
-    """Each experiment's setting: off unless experiments.json says "on"."""
+def setting(name: str, value) -> str:
+    """An experiment's setting as experiments.json or `wb experiment` gives it: "off", or one of
+    its EXPERIMENT_LEVELS ("on" for one without levels). "on" (True) before probe had levels
+    reads as adaptable (2026-11-21); anything else is off."""
+    levels = EXPERIMENT_LEVELS.get(name, ("on",))
+    if value is True or value == "on":
+        return levels[0]
+    return value if value in levels else "off"
+
+
+def experiments() -> dict[str, str]:
+    """Each experiment's setting: off unless experiments.json says otherwise."""
     saved = store.read_json(experiments_path(), {}) or {}
     saved = saved if isinstance(saved, dict) else {}
-    return {name: saved.get(name) == "on" for name in EXPERIMENTS}
+    return {name: setting(name, saved.get(name)) for name in EXPERIMENTS}
 
 
-def set_experiment(name: str, on: bool) -> None:
+def set_experiment(name: str, value) -> None:
+    """Set ``name`` to a level (or "on"/"off"; True and False mean the same)."""
     with store.locked(experiments_path().with_suffix(".lock")):
         saved = store.read_json(experiments_path(), {}) or {}
         saved = saved if isinstance(saved, dict) else {}
-        store.write_json(experiments_path(), {**saved, name: "on" if on else "off"})
+        store.write_json(experiments_path(), {**saved, name: setting(name, value)})
 
 
 def probe_bin() -> str | None:
@@ -459,18 +485,94 @@ PROBE_READS = ("symbols", "extract", "search", "grep", "query")
 PROBE_RELEASES = "github.com/probelabs/probe/releases"
 
 
-def task_experiments() -> dict[str, bool]:
-    """What `wb start` records: each experiment on only when set on and able to work (probe
-    installed), so a task's record says what its agent really had. An experiment that is off
-    isn't checked at all: a `probe` on PATH ran on every start with it off, and one printing a
-    non-UTF-8 byte failed the start after its branch and worktree were made (#518)."""
+def task_experiments() -> dict:
+    """What `wb start` records: each experiment's setting only when set and able to work (probe
+    installed), else False, so a task's record says what its agent really had (probe's adaptable
+    is resolved after, probe_start). An experiment that is off isn't checked at all: a `probe` on
+    PATH ran on every start with it off, and one printing a non-UTF-8 byte failed the start after
+    its branch and worktree were made (#518)."""
     able = {"probe": probe_bin}
-    return {name: on and (able[name]() is not None if name in able else True)
-            for name, on in experiments().items()}
+    return {name: s if s != "off" and (able[name]() is not None if name in able else True) else False
+            for name, s in experiments().items()}
+
+
+def probe_start(level: str, model: str, window, task_name: str, long: bool) -> tuple[str, bool]:
+    """(the level this task's agent gets, whether it is the knob's exploration): adaptable goes
+    through the probe_aggressive knob (tuning.py), which explores only when the spec names a
+    file over PROBE_FILE_LINES, the only tasks where the levels act differently: elsewhere a try
+    of aggressive would teach nothing (the owner's design, 2026-11-21, #857)."""
+    if level != "adaptable":
+        return level, False
+    from . import tuning
+    v, explored = tuning.choose("probe_aggressive", model, window, task_name, explore=long)
+    return ("aggressive" if v else "moderate"), explored
 
 
 def experiment(task: store.Task, name: str) -> bool:
     return bool((task.spec.get("experiments") or {}).get(name))
+
+
+def probe_level(task: store.Task) -> str | None:
+    """The probe level this task's agent has: moderate or aggressive, None when off. A task
+    started before the levels recorded True and had moderate's condition."""
+    v = (task.spec.get("experiments") or {}).get("probe")
+    return None if not v else v if v in ("moderate", "aggressive") else "moderate"
+
+
+def brace_names(text: str) -> list[str]:
+    """Each path a brace form names, `src/replay_io.{h,c}`: src/replay_io.h, src/replay_io.c
+    (flagged as unnamed by outside_spec on 2026-11-18)."""
+    return [a + part + b for a, parts, b in
+            re.findall(r"([\w./-]*)\{([\w.-]+(?:,[\w.-]+)+)\}([\w./-]*)", text)
+            for part in parts.split(",")]
+
+
+# a path in a spec: a name with an extension, maybe under directories (`workbench/cli.py`,
+# `cli.py`, `./src/a.c:120`, `a.py#run`)
+SPEC_PATH = re.compile(r"(?<![\w/.-])((?:\.{1,2}/)?(?:[\w.-]+/)*[\w-][\w.-]*\.[A-Za-z]\w*)(?![\w/-])")
+SPEC_PATHS_MAX = 40  # the paths a spec names that are looked at, in order
+
+
+def spec_paths(text: str) -> list[str]:
+    """The relative file paths a spec's text names, in order, once each (brace forms too)."""
+    seen: list[str] = []
+    for p in SPEC_PATH.findall(text + "\n" + " ".join(brace_names(text))):
+        p = p[2:] if p.startswith("./") else p
+        if p not in seen and ".." not in Path(p).parts:
+            seen.append(p)
+    return seen[:SPEC_PATHS_MAX]
+
+
+def long_files(text: str, root: Path, sub: str | None = None, rev: str | None = None) -> dict[str, int]:
+    """{path from ``root``: its lines} for each file the spec names with more than
+    PROBE_FILE_LINES lines, in the order named: read in the checkout ``root`` (the worktree), or
+    at commit ``rev`` of the repo ``root`` (wb start, before the worktree exists). A name is
+    tried in the package ``sub`` first, then at the top; one outside ``root`` is none."""
+    out: dict[str, int] = {}
+    top = os.path.realpath(root)
+    for p in spec_paths(text):
+        for rel in ([f"{sub}/{p}"] if sub else []) + [p]:
+            if rev:
+                try:
+                    n = _count_lines(gitops.git_bytes(root, "cat-file", "blob", f"{rev}:{rel}"))
+                except gitops.GitError:
+                    continue
+            else:
+                real = os.path.realpath(Path(root) / rel)
+                if not real.startswith(top + os.sep) or not os.path.isfile(real):
+                    continue
+                try:
+                    n = _count_lines(Path(real).read_bytes())
+                except OSError:
+                    continue
+            if n > PROBE_FILE_LINES:
+                out.setdefault(rel, n)
+            break
+    return out
+
+
+def _count_lines(data: bytes) -> int:
+    return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
 
 
 # How wb accept --merge lands: a merge commit, fast-forward only, or one squashed commit (#352)
