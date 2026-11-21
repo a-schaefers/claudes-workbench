@@ -1943,7 +1943,14 @@ counted the wait for Claude's review as the agent being slow, #543). Discarded s
 records (`judged`). Each value's mean is smoothed toward the others' (`PRIOR`, two tasks' worth),
 so one lucky task moves nothing, and the pick walks one step at a time toward whatever scores
 best. Values past the model's compaction point (`runner.fresh_ceiling`) are never tried (a
-window under `models.MIN_WINDOW`, 16K, which would leave none, is refused instead). Trial
+window under `models.MIN_WINDOW`, 16K, which would leave none, is refused instead). An output cap
+that is a large share of the window can put the ceiling under every value: then the ceiling less
+`tuning.CEILING_MARGIN` (0.05) is the only one, and the smallest value when that isn't positive
+(the smallest stood before, past the compaction, so every long step compacted: a 16K cap on 32K
+is a 0.375 ceiling, #595, the audit of 1.90); `runner.handover_warning` says so, a `note:` in `wb
+start` and a `--` line in `wb doctor` ("its output cap … puts OpenCode's compaction at N% of the
+window, before the earliest handover point"; under `HANDOVER_ROOM`, "no handover fits"), and
+`optimize.budget` cuts such a cap to a quarter of the window. Trial
 runs aren't evidence. `wb tune` shows each model's record and pick; `$WB_HOME/tuning.json` pins a
 value (`{"fresh_at": 0.6}`, used as given, ceiling or not). A new knob: add it to `KNOBS`, read it
 with `tuning.value(task, name)`.
@@ -3305,7 +3312,8 @@ audit; a name already in OpenCode's config or Ollama is refused: retire it first
 `num_ctx` N (`/api/create` `from`: no download, no GPU) and OpenCode's entry copied from the
 model's (its options, such as `reasoningEffort: "none"`, kept; `limit.context` set to the new
 window, and the caps recomputed together by `budget`: `limit.output` and `options.max_tokens`
-kept while the output cap is at most half the window, else cut to a quarter of it, `limit.input` the window less the
+kept while the output cap is at most half the window and leaves room for a handover before the
+compaction (`runner.handover_warning`, #595), else cut to a quarter of it, `limit.input` the window less the
 output cap, and an entry no request could fit refused before anything is made: a 16K fit of a
 128K entry once wrote an input limit of -16384 and kept its 32K and 64K caps, #332, the audit of
 1.4; an alias's `id` dropped, since it would name the old model). The variant gets a copy of the

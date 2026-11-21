@@ -9236,6 +9236,34 @@ class Tuning(Base):
         picks = {tuning.choose("fresh_at", self.M, self.W, f"t{i}", top) for i in range(300)}
         self.assertEqual(picks, {(0.6, False), (0.5, True)})  # never 0.7 above the pick
 
+    def test_a_ceiling_under_every_value_hands_over_before_the_compaction_and_says_so(self):
+        # #595 (the audit of 1.90, reproduced): a 16K output cap on a 32K window put the ceiling
+        # at 0.375, allowed() still gave [0.4], and OpenCode compacted every long step first
+        from workbench import optimize, runner, tuning
+        cfg = {"limit": {"context": 32768, "output": 16384}}
+        top = runner.fresh_ceiling(cfg)
+        self.assertEqual(top, 0.375)
+        self.assertEqual(tuning.allowed("fresh_at", top), [0.325])
+        self.assertEqual(tuning.choose("fresh_at", self.M, self.W, "t", top), (0.325, False))
+        self.assertLess(tuning.choose("fresh_at", self.M, self.W, "t", top)[0], top)
+        self.assertIn("puts OpenCode's compaction at 38% of the window", runner.handover_warning(cfg))
+        tiny = {"limit": {"context": 16384, "output": 8192}, "options": {"max_tokens": 16384}}
+        self.assertLessEqual(runner.fresh_ceiling(tiny), 0)
+        self.assertEqual(tuning.allowed("fresh_at", runner.fresh_ceiling(tiny)), [0.4])
+        self.assertIn("no handover fits", runner.handover_warning(tiny))
+        self.assertEqual(runner.handover_warning({"limit": {"context": 32768, "output": 4096}}), "")
+        lim, opts = optimize.budget({"limit": {"context": 131072, "output": 16384}}, 32768)
+        self.assertEqual(lim["output"], 8192)               # trimmed so a handover fits
+        self.assertEqual(runner.handover_warning({"limit": lim, "options": opts}), "")
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama"]["models"]["qwen3.8-27b"]["limit"] = {"context": 32768, "output": 16384}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        out = io.StringIO()
+        with contextlib.suppress(SystemExit), redirect_stdout(out):
+            cli.main(["doctor"])
+        self.assertIn("--  ollama/qwen3.8-27b: its output cap (limit.output 16384 of a 32K window)",
+                      out.getvalue())
+
     def test_trials_are_not_evidence_and_a_pin_wins(self):
         from workbench import tuning
         self.result(0.8, n=5, trial=True)

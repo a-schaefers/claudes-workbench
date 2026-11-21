@@ -931,6 +931,8 @@ def cmd_start(a):
     measured = (optimize.state().get("models") or {}).get(m.id)
     if measured and (fit := optimize.advice(m.id, measured)):
         print(f"note: {fit} (ask the user first: it adds to their OpenCode config)")
+    if gap := runner.handover_warning(m.config):  # #595
+        print(f"note: {m.id}: {gap}")
     print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
 
 
@@ -4123,6 +4125,8 @@ def cmd_doctor(a):
                 line(False, f"{pid}/{name} has no limit.context, so its tasks never hand over and "
                      "nothing compacts before the server cuts them off: wb model add "
                      f"{pid}/{name}" + ("" if ollama else " --context N (the window it serves)"))
+            if said and (gap := runner.handover_warning(e)):  # any server (#595)
+                print(f"--  {pid}/{name}: {gap}")
             if not ollama:
                 # only a server running this model is asked: a down one cost seconds a model
                 served = models.server_facts(prov["root"], asked, prov["key"])["context"] \

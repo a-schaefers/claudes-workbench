@@ -308,12 +308,17 @@ def entry_name(source: str, window: int) -> str:
 
 def budget(entry: dict, fits: int) -> tuple[dict, dict]:
     """The entry's limits and options at a ``fits`` window, its caps recomputed together: the
-    source's output cap kept while it is at most half the window, else cut to a quarter of it,
-    and ``max_tokens`` never past it. A 16K fit of a 128K entry with a 32K output cap and ``max_tokens`` 64K once
+    source's output cap kept while it is at most half the window and leaves room for a handover
+    before OpenCode's compaction (runner.handover_warning), else cut to a quarter of it, and
+    ``max_tokens`` never past it. A 16K fit of a 128K entry with a 32K output cap and ``max_tokens`` 64K once
     wrote an input limit of -16384 and kept both caps (#332, the audit of 1.4)."""
+    from . import runner  # runner imports models, as this does: not at the top
     lim, opts = dict(entry.get("limit") or {}), dict(entry.get("options") or {})
     out = lim.get("output") or fits // 8
-    if out > fits // 2:
+    if out > fits // 2 or out > fits // 4 and runner.handover_warning(
+            {"limit": {"context": fits, "input": fits - out, "output": out}}):
+        # a cap that leaves OpenCode's compaction before the earliest handover point compacted
+        # every long step: a 16K cap kept at a 32K fit put it at 37% (#595, the audit of 1.90)
         out = fits // 4
     lim.update(context=fits, input=fits - out, output=out)
     if opts.get("max_tokens"):

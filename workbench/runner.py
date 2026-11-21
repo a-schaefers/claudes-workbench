@@ -129,6 +129,25 @@ def fresh_ceiling(cfg: dict) -> float | None:
     return (usable - buf) / window
 
 
+def handover_warning(cfg: dict) -> str:
+    """What to say of an entry whose output cap puts OpenCode's compaction before the earliest
+    handover point (fresh_ceiling under every fresh_at value), or "". Nothing said so, and every
+    long step compacted, the small-model summary the handover exists to avoid (#595, the audit of
+    1.90). Under HANDOVER_ROOM no successor has room, so no handover fits at all."""
+    top = fresh_ceiling(cfg)
+    lo = min(tuning.KNOBS["fresh_at"].values)
+    if top is None or top >= lo:
+        return ""
+    lim, opts = cfg.get("limit") or {}, cfg.get("options") or {}
+    caps = ", ".join(f"{k} {v}" for k, v in (("limit.output", lim.get("output")),
+                                             ("options.max_tokens", opts.get("max_tokens"))) if v)
+    return (f"its output cap ({caps} of a {lim['context'] // 1024}K window) puts OpenCode's "
+            f"compaction at {max(top, 0):.0%} of the window, before the earliest handover point "
+            f"({lo:.0%}): " + ("no handover fits, so long steps compact" if top < HANDOVER_ROOM else
+                               f"handovers come at {top - tuning.CEILING_MARGIN:.0%}, with little room")
+            + "; lower limit.output and options.max_tokens")
+
+
 # OpenCode 2.3 gives every provider a 300 s wait for the response headers (`headerTimeout`) and
 # 900 s between streamed chunks (`chunkTimeout`). A server that sends its headers with the first
 # token (Ollama on the CPU, a model spilled into RAM) reads a 10-20K-token prompt for 8-30
