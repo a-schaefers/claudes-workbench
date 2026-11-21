@@ -1824,6 +1824,28 @@ class Lifecycle(Base):
         self.assertIn("wb accept t-half2 finishes it", refused("feedback", "t-half2", "--text", "x"))
         self.assertIn("accepted t-half2", run_wb("accept", "t-half2", "-m", "feat: answer", "--merge"))
 
+    def test_an_accept_retried_after_its_commit_landed_still_measures_the_step(self):
+        # #879 (Claude's audit of 1.90.24): killed (or out of disk) between its commit and the
+        # `closing` write, the retry measured since HEAD, its own commit: 0 files and 0 lines
+        self.start("t-meas", "ok", "--test", TEST_CMD)
+        wait_phase("t-meas", {"review"})
+        real = store.Task.set_status
+
+        def full(task, **kw):
+            if "closing" in kw and kw["closing"]:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(task, **kw)
+        with mock.patch.object(store.Task, "set_status", full), redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit):
+            run_wb("accept", "t-meas", "-m", "feat: answer")
+        task = store.Task("t-meas")
+        self.assertIn("Workbench-Task: t-meas", gitops.git(task.worktree, "log", "-1", "--format=%B"))
+        self.assertIsNone(task.status.get("closing"))
+        run_wb("accept", "t-meas", "-m", "feat: answer")
+        row = next(r for r in store.results(trials=True) if r.get("task") == "t-meas")
+        self.assertGreaterEqual(row["steps"][-1].get("files", 0), 1)
+        self.assertGreaterEqual(row["diff"]["added"], 1)
+
     def test_a_last_step_with_no_new_edits_accepts_after_an_interrupt_took_its_worktree(self):
         # #246: the worktree was removed, the retry found no accept trailer on step 1's commit,
         # and exited 1 with the task in review for good

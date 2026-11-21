@@ -1397,6 +1397,17 @@ def cmd_next(a):
     _say(lessons.nudge(task))
 
 
+def _accept_landed(task: store.Task) -> bool:
+    """Whether the worktree's tip is an earlier wb accept's own commit (`Workbench-Task: <task>`,
+    no step) with nothing changed since, as _step_landed for wb next (#879)."""
+    try:
+        body = gitops.git(task.worktree, "log", "-1", "--format=%B", "HEAD")
+        return (f"Workbench-Task: {task.name}" in body.splitlines()
+                and not gitops.changed(task.worktree))
+    except gitops.GitError:
+        return False
+
+
 def _step_landed(task: store.Task, step: int) -> str | None:
     """The commit an interrupted wb next made for this step before it recorded the next one: the
     worktree's tip carries the step's trailer and nothing has changed since. A retry then
@@ -2484,7 +2495,11 @@ def cmd_accept(a):
                 f"put it back to that commit (git -C {shlex.quote(str(task.worktree))} status), "
                 f"or keep the changes elsewhere, then wb accept {a.name} again")
     else:
-        measured = results.step(task, landed=True)
+        # a retry after an accept killed between its commit and `closing` (ENOSPC, a kill):
+        # measured since HEAD, its own commit, the step read as 0 files and 0 lines and the
+        # savings card priced the task at nothing (#879, Claude's audit of 1.90.24)
+        measured = results.step(task, landed=True,
+                                since="HEAD~1" if _accept_landed(task) else "HEAD")
         try:
             commit = _landed(task)
             if not commit:
