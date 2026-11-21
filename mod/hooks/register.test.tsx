@@ -3145,6 +3145,34 @@ test('the Stats tab reads the history again after wb optimize, a bench run, a pr
   await ui.unmount()
 })
 
+test('the Stats tab reads the history again after a machine of a network home measures (#894)', async ($, on) => {
+  // #894: on a network home each machine keeps optimize.json and speed.json in machines/<id>/,
+  // which the key never stamped: the tab kept a feed without the machine's new measurements
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  const pane = fakeTasks(on, files, ['m-a'])                     // fs.list: machines/m-a (no tasks/)
+  const reads: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'stats' && e.argv[2] === '--json') reads.push(e.argv)
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ ...FEED, until: 1_900_000_000 }) : '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(10)
+  expect(reads.length).toBe(1)
+  await clock.advance(31_000)
+  expect(reads.length).toBe(1)                                           // nothing changed
+  for (const [i, f] of ['optimize.json', 'speed.json'].entries()) {
+    files[`/wb/machines/m-a/${f}`] = '{}'
+    await clock.advance(31_000)
+    expect(reads.length).toBe(2 + i)
+  }
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
 test('the Stats tab\'s settings pick through wb, progress checks stay off by default, and the price is typed', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}

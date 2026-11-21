@@ -685,8 +685,13 @@ async function refreshStats($: any, force = false) {
   const stamp = async (f: string) => {
     try { const s = await $.fs.stat(f.startsWith('/') ? f : `${mem.root}/${f}`); return `${s.size}@${s.mtimeMs}` } catch { return '-' }
   }
+  // on a network home each machine keeps its optimize.json and speed.json in machines/<id>/
+  // (store.machine_dir, #894): every machine's, since which one is this is wb's to say
+  const machines = await $.fs.list(`${mem.root}/machines`).catch(() => []) as { name: string; kind: string }[]
+  const own = machines.filter(e => e.kind === 'dir').flatMap(e =>
+    ['optimize.json', 'speed.json'].map(f => `machines/${e.name}/${f}`))
   const key = (await Promise.all(['results.jsonl', 'stats.json', 'optimize.json', 'bench/runs.jsonl',
-    'speed.json', mem.savingsFile || '-'].map(stamp))).join(' ')
+    'speed.json', ...own, mem.savingsFile || '-'].map(stamp))).join(' ')
   const had = await read($, statsFeed)
   const now = await $.clock.now()
   const dayOver = typeof had.feed?.until === 'number' && now / 1000 >= had.feed.until

@@ -330,7 +330,7 @@ def _bench() -> dict:
 
 
 def _optimized() -> dict:
-    data = store.read_json(store.home() / "optimize.json", {}) or {}
+    data = store.read_json(store.machine_dir() / "optimize.json", {}) or {}  # optimize.path
     models = data.get("models") if isinstance(data, dict) else None
     return {m: {k: v[k] for k in ("window", "fits", "spill", "ts") if k in v}
             for m, v in (models or {}).items() if isinstance(v, dict) and v.get("window")}

@@ -475,6 +475,20 @@ def network_fs(path: str) -> str | None:
     return best[1] if best and best[1] in NETWORK_FS else None
 
 
+def machine_dir() -> Path:
+    """Where this machine's own state lives: $WB_HOME, or on a network file system its
+    `machines/<machine()>/`, since several machines may share the state directory there. The GPU
+    lease's files were the first (#849); optimize.json, boxes.json and wsl-gpus.json followed,
+    shared, one machine's measurements re-measured away by the next and its loads on a wb remote
+    box read as the other's own (#894). Made when needed."""
+    h = home()
+    if not network_fs(os.path.realpath(h)):
+        return h
+    own = h / "machines" / machine()
+    own.mkdir(parents=True, exist_ok=True)
+    return own
+
+
 def write_json(path: Path, data, mode: int | None = None) -> None:
     """``data`` as ``path``, atomically; ``mode``: the file's, else the umask's (a shared GPU
     lease's gpu.json is the group's to read: #802)."""

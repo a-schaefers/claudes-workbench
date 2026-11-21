@@ -234,7 +234,12 @@ machine asleep, whose runner then finds its task failed when it wakes) is dead h
 machine (power loss, a container recreated with a new host name, `store.machine()` falling back
 to it, a reimaged machine) kept its task live for good, no command able to clear it (#872); one
 recorded before the beat (no `beat`) is trusted, as before. `wb doctor` says when the state directory is on a network file system
-(`store.network_fs`, by its mount type). The agent's group (`agent_pid`, read before it is
+(`store.network_fs`, by its mount type). There each machine keeps its own state in
+`$WB_HOME/machines/<store.machine()>/` (`store.machine_dir`, else `$WB_HOME`): the GPU lease
+(#849), optimize.json and optimize.log, boxes.json and wsl-gpus.json (#894: shared, each machine's
+`wb optimize` found the other's GPU in the fingerprint and emptied its own to measure again, and
+another machine's loads on a wb remote box counted as this one's). A new file of one machine's
+goes there too. The agent's group (`agent_pid`, read before it is
 cleared) is killed when `models.runs` shows it still runs `run --standalone` (off Linux the kernel leaves it running when its parent dies, as the
 2026-11-19 audit observed), and `runner.sweep` kills what its agent left. The
 check-and-set is `Task.set_status_if`, under the task's status lock (`locks/<task>.status.lock`), so of two reapers one notifies. `wb status`, `wait`,
@@ -2657,7 +2662,7 @@ Live view off: no child, no **Now**. The newest tick is the `top` atom
   feed is made from changed (`$.fs.stat`, the key kept with the feed: results.jsonl, stats.json,
   optimize.json, bench/runs.jsonl, speed.json and the price's savings.json, `mem.savingsFile`:
   with the first two alone, `wb optimize`, a bench run or a price left the tab stale for good,
-  #549), when the feed's `until` (its next local
+  #549; and each `machines/<id>/`'s optimize.json and speed.json, a network home's, #894), when the feed's `until` (its next local
   midnight) has passed, and after a Stats setting is picked; and once in each load
   (`mem.statsLoaded`), since the atom outlives a reload. A read that fails or times out keeps the
   last feed and is tried again after `STATS_RETRY_MS` 60 s, doubling to `RETRY_MAX_MS` 10 min
@@ -2956,7 +2961,7 @@ only `/api/ps` (what is loaded, and each model's `expires_at`, which a finished 
 a running one lets pass). So the clients coordinate through that (`models.box_others`,
 `box_quiet`, `BOX_SHARED`, #812): before loading its model on the box, a client waits while a
 model loaded there that its task doesn't run (keep_loaded's aside, and any this machine loaded
-there itself in the last week: `box_mine`, `$WB_HOME/boxes.json` `{root: {name: ts}}`, written by
+there itself in the last week: `box_mine`, `boxes.json` `{root: {name: ts}}` in `store.machine_dir()`, written by
 each load, so one user with one box never waits on their own last task's model; such a model is
 still watched for `INFLIGHT_WATCH`, since this machine runs one task at a time on the box and a
 request on it now is another client's: then its mark is dropped, `_forget_mine`, and it is waited
@@ -3315,7 +3320,7 @@ before every round, mid-use, and both reloaded on every request (#378, the audit
 server whose `/api/ps` gives no `expires_at` has nothing to watch. The whole answer is one lease
 for every account (#393): the lease's files live in `models.lease_dir()`, which is `$WB_GPU_DIR`,
 else `SHARED_GPU` (`/var/lib/workbench/gpu`) when it is a directory this account may write, else
-`$WB_HOME` as before, or on a network file system `$WB_HOME/machines/<store.machine()>/` (`_own_lease`:
+`$WB_HOME` as before, or on a network file system `$WB_HOME/machines/<store.machine()>/` (`_own_lease`, `store.machine_dir`:
 machines sharing a state directory pruned each other's holders as dead and took turns on GPUs they
 don't share, #849). An admin opts a machine in once (`sudo install -d -m 2775 -g <group>
 /var/lib/workbench/gpu`, the accounts in that group): every account's tasks then take turns or
@@ -3679,7 +3684,7 @@ five fields is skipped); WSL adds Windows' adapters (`_windows_gpus`: one `power
 -EncodedCommand` of `WINDOWS_SCRIPT`, no quoting through the interop: `Win32_VideoController`'s
 names, each one's memory from its driver's registry key, `HardwareInformation.qwMemorySize` under
 the display class `{4d36e968-e325-11ce-bfc1-08002be10318}`, since `AdapterRAM` caps at 4 GB),
-kept `WINDOWS_FOR` (an hour) in `$WB_HOME/wsl-gpus.json`, as a PowerShell start takes seconds.
+kept `WINDOWS_FOR` (an hour) in `wsl-gpus.json` (`store.machine_dir()`), as a PowerShell start takes seconds.
 
 `powershell.exe` from PATH, else Windows' own under WSL's automount root (`hardware.powershell`:
 `[automount] root` in `/etc/wsl.conf`, `/mnt/` by default, then `WINDOWS_POWERSHELL`), since
@@ -6538,6 +6543,8 @@ $WB_HOME (~/.local/state/workbench)
                                  models.lease_dir(): $WB_GPU_DIR or /var/lib/workbench/gpu
                                  when shared by the machine's accounts, #393; machines/<machine>/
                                  when the state dir is on a network file system, #849)
+  machines/<machine>/            on a network file system, one machine's own (store.machine_dir, #849, #894): its
+                                 GPU lease, optimize.json and .log, boxes.json, wsl-gpus.json (each listed here)
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
   update.json                    wb update: when origin was last asked, how far behind this copy was

@@ -50,7 +50,9 @@ class Stopped(Exception):
 
 
 def path() -> Path:
-    return store.home() / "optimize.json"
+    # this machine's (store.machine_dir): shared on a network home, each machine's run found the
+    # other's GPU in the fingerprint, emptied its own and re-measured every model (#894)
+    return store.machine_dir() / "optimize.json"
 
 
 def state() -> dict:
@@ -453,8 +455,8 @@ def start(bench: bool = False, if_due: bool = False) -> list[str]:
     env = context.detached_env()
     for k in ("WB_TASK", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"):
         env.pop(k, None)
-    store.home().mkdir(parents=True, exist_ok=True)  # a fresh profile's first wb setup (#198)
-    with open(store.home() / "optimize.log", "a") as log:
+    path().parent.mkdir(parents=True, exist_ok=True)  # a fresh profile's first wb setup (#198)
+    with open(path().with_suffix(".log"), "a") as log:
         argv = ["--bench"] * bench + ["--all"] * (not why)  # asked for: every model again
         from . import cli  # cli imports this module
         # its own scope, to outlive a logout: SIGTERM there recorded "stopped" (#531)

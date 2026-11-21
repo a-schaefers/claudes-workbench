@@ -1769,7 +1769,9 @@ BOX_MINE_S = 7 * 86400
 
 
 def _boxes_path() -> Path:
-    return store.home() / "boxes.json"
+    # this machine's (store.machine_dir): shared on a network home, another machine's loads on
+    # the box read as this one's, and box_quiet never waited for them (#894)
+    return store.machine_dir() / "boxes.json"
 
 
 def box_mine(root: str) -> set[str]:
@@ -1932,12 +1934,7 @@ def _own_lease() -> Path:
     """The state directory, or on a network file system its `machines/<store.machine()>/`: there
     several machines may share it, and each one's wb read the other's holders as dead and erased
     them from gpu.json, and took turns with them on a GPU they don't share (#849)."""
-    home = store.home()
-    if not store.network_fs(os.path.realpath(home)):
-        return home
-    own = home / "machines" / store.machine()
-    own.mkdir(parents=True, exist_ok=True)
-    return own
+    return store.machine_dir()
 
 
 def lease_shared() -> bool:

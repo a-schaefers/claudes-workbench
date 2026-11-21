@@ -4998,6 +4998,32 @@ class Steering(Base):
             self.assertEqual([fs("/home/u/.local/state/workbench"), fs("/mnt/my x/s"), fs("/var/x"),
                               fs("/homes")], ["nfs4", "cifs", None, None])
 
+    def test_on_a_network_state_dir_each_machine_keeps_its_own_measurements_and_box_record(self):
+        # #894: optimize.json, boxes.json and wsl-gpus.json were shared by every machine on a
+        # network home: each machine's wb optimize found the other's GPU, emptied its own and
+        # re-measured, and another machine's loads on a wb remote box counted as this one's
+        from workbench import hardware, models, optimize
+        self.assertEqual(store.machine_dir(), store.home())   # a local state dir: as before
+        self.assertEqual(optimize.path(), store.home() / "optimize.json")
+        with mock.patch.object(store, "network_fs", return_value="nfs"):
+            for name in ("machine-a", "machine-b"):
+                with mock.patch.object(store, "machine", return_value=name):
+                    own = store.home() / "machines" / name
+                    self.assertEqual(store.machine_dir(), own)
+                    self.assertEqual(optimize.path(), own / "optimize.json")
+                    self.assertEqual(models._boxes_path(), own / "boxes.json")
+                    m = models.Model(id="box/x", provider="box", name="x", base_url="http://box:11434/v1",
+                                     engine="ollama", label="box/x")
+                    models._note_mine(m)
+                    self.assertEqual(models.box_mine(m.root), {"x"})
+                    with mock.patch.object(hardware, "powershell", return_value=None):
+                        hardware._windows_gpus()
+                    self.assertTrue((own / hardware.WINDOWS_CACHE).exists())
+                    self.assertEqual(models._own_lease(), own)
+            with mock.patch.object(store, "machine", return_value="machine-c"):
+                self.assertEqual(models.box_mine(m.root), set())   # neither one's loads
+        self.assertFalse((store.home() / "boxes.json").exists())
+
     def test_a_shutdown_that_signals_every_runner_raises_one_notice_for_its_tasks(self):
         # #544: a clean shutdown's SIGTERM left one stuck notice per task, written by each runner
         # as it stopped, and the mod woke Claude once a task
