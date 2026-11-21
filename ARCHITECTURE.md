@@ -622,8 +622,9 @@ once more and `pid` and `stopping` are cleared.
    by the task's start, then `free_gpu` within `keep_loaded` and the memory let go), since they
    ran the project's GPU tests beside other tasks' resident models and an out-of-memory failure
    read as the base's or the change's (#502, the audit of 1.90). Waiting is said (status `last`
-   for the base check; a line before the report for `wb verify` and `wb shot`). `lease.load()` (the seconds go to
-   `status.load_secs`), the window (`limit.context`) into `status.window`, and `tuning.tune` picks
+   for the base check; a line before the report for `wb verify` and `wb shot`). `lease.load()` (the seconds are added to
+   `status.load_secs`, after what the task's earlier runners loaded: set, a `wb feedback` runner
+   finding the model resident wrote 0 over a 40 s cold load, #567), the window (`limit.context`) into `status.window`, and `tuning.tune` picks
    the task's knob values once (`status.tuned`). A load error: `failed`, with a notice.
 3. Each round n: after the first, the lease rejoined and `lease.load()` again, since each request resets Ollama's
    keep-alive to its own 5 minutes and a longer test run once left the auto-fix round paying for
@@ -5096,7 +5097,7 @@ check-ins off), not `wb start`'s.
 | `session`, `sessions`, `session_mark`, `session_floor` | the OpenCode session; earlier ones; `gitops.mark` when it began; the context it had read at its first change |
 | `context` | a one-round instruction: `fresh`, `keep`, `full` (a handover happened) |
 | `full_pct`, `handovers` | the fill at the last mid-round handover; how many |
-| `window`, `load_secs` | the model's context window; the load time (and any reloads before later rounds) |
+| `window`, `load_secs` | the model's context window; the load time, summed over every runner of the task (`wb feedback`, `next`, `resume`) and the reloads before later rounds |
 | `tuned`, `explored`, `tuned_max` | the knob values this task runs at (`tuning.tune`) |
 | `steer_taken`, `nudges`, `nudged_round`, `checkin_at` | notes delivered; nudges sent; the round that ended in one; the last check-in |
 | `active_s` | the agent's active work so far, in seconds: rounds less answers and a frozen machine (*Progress checks*) |

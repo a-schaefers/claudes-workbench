@@ -2087,7 +2087,9 @@ def drive(task: store.Task) -> None:
         try:
             secs = _load(task, lease, m)
             window = (m.config.get("limit") or {}).get("context")
-            task.set_status(load_secs=round(secs, 1), window=window)
+            # added to what earlier runners loaded (wb feedback, next, resume): set, a second
+            # runner finding the model resident wrote 0 over the task's 40 s (#567)
+            task.set_status(load_secs=round((task.status.get("load_secs") or 0) + secs, 1), window=window)
             own = task.spec.get("self_review")  # --self-review / --no-self-review, else learned
             tuning.tune(task, task.spec["model"], window, {"fresh_at": fresh_ceiling(m.config)},
                         {} if own is None else {"self_review": int(own)})

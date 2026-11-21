@@ -918,6 +918,21 @@ class Lifecycle(Base):
         self.assertEqual((st["phase"], st["round"]), ("review", 2))
         self.assertEqual(len(calls), 2)
 
+    def test_a_tasks_load_time_adds_up_across_its_runners_and_a_resident_model_adds_nothing(self):
+        # #567: each runner set load_secs to its own first load, so a wb feedback runner that found
+        # the model resident wrote 0.0 over a 40 s cold load, and the results row kept the 0
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-loads", "ok", "--no-base-check")
+        for i, (secs, want) in enumerate(((40.0, 40.0), (0.0, 40.0), (25.0, 65.0))):
+            if i:  # each runner after the first is a wb feedback's
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb("feedback", "t-loads", "--text", "again")
+            with mock.patch.object(runner.models, "make_resident", return_value=secs):
+                runner.drive(store.Task("t-loads"))
+            self.assertEqual(store.Task("t-loads").status["load_secs"], want)
+        run_wb("accept", "t-loads", "-m", "feat: answer")
+        self.assertEqual(store.results()[-1]["load_secs"], 65.0)
+
     def test_the_gpu_is_let_go_while_the_tests_run_and_while_the_server_is_down(self):
         # #257 (the audit of 1.2): all of drive ran under the lease, so queued tasks waited
         # through every test run and a 20-minute wait for a dead server, and a project's GPU
