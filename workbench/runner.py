@@ -1842,17 +1842,19 @@ def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
 def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
     wt, spec = task.worktree, task.spec
     steps = gitops.git(wt, "log", "--oneline", f"{spec['base']}..HEAD").strip()
-    diff = gitops.diff(wt, "HEAD")
-    stat = gitops.diff(wt, "HEAD", stat=True)
     room = min(int(HANDOFF_DIFF_SHARE * (task.status.get("window") or 32768) * 4), HANDOFF_DIFF_MAX)
-    work = (f"```diff\n{diff}\n```" if len(diff) <= room else
-            f"The diff is too long to include; read the changed files:\n```\n{stat}\n```")
+    # read no further than the room: a 300 MB generated file, not ignored, was read whole into
+    # the runner at each handover only to be cut, risking an OOM kill (#474, the audit of 1.8)
+    diff = gitops.diff(wt, "HEAD", limit=room)
+    work = (f"```diff\n{diff}\n```" if diff is not None else
+            "The diff is too long to include; read the changed files:\n"
+            f"```\n{gitops.diff(wt, 'HEAD', stat=True)}\n```")
     return (f"You are picking this task up in a fresh session ({why}). Nothing from the earlier "
             f"session carries over except what is in the working tree, so start from what is "
             f"below and re-read the files you need.\n\n## The task\n\n"
             f"{current_task_prompt(task)}\n\n## The work so far\n\n"
             + (f"Earlier steps, committed:\n```\n{steps}\n```\n\n" if steps else "")
-            + (f"Uncommitted changes (`git diff HEAD`):\n{work}" if diff else
+            + (f"Uncommitted changes (`git diff HEAD`):\n{work}" if diff != "" else
                "No uncommitted changes yet.")
             + f"\n\n## Now\n\n{instructions}")
 

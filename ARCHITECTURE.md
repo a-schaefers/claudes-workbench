@@ -817,7 +817,10 @@ session (why)…", `## The task` (the current step's prompt, `current_task_promp
 which `round_asks`, the lessons and `wb bench add` read too; the spec plus the protocol), `## The work so far` (the committed steps, `git log --oneline
 base..HEAD`, and the uncommitted diff, `git diff HEAD` with new files; a diff over
 `HANDOFF_DIFF_SHARE` (9%) of the window at 4 characters a token, about 12K characters on 32K, and never
-over `HANDOFF_DIFF_MAX` (60K characters), is replaced by its `--stat` and "read the changed files"), and `## Now`: "Start on the task above"
+over `HANDOFF_DIFF_MAX` (60K characters), is replaced by its `--stat` and "read the changed files";
+the diff is read only that far, `gitops.diff(…, limit=)`: read whole and then cut, a 300 MB
+generated file not ignored was hundreds of MB in the runner at each handover, #474, the audit of
+1.8), and `## Now`: "Start on the task above"
 on a step's first round; a `CARRY_ON` or `RESUME` round's own text (it carries the asks); else
 the round's instructions, after what the step's earlier rounds asked since the last review
 feedback (`round_asks`, under `ASKED`'s "What you were asked to do…", then "Now:"). An auto-fix

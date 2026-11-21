@@ -3437,6 +3437,30 @@ class Context(Base):
         self.assertIn("Write the answer to answer.txt.", last)   # the task, not only "carry on"
         self.assertIn("Claude stopped your last session", last.split("## Now")[1])
 
+    def test_a_handover_reads_no_more_of_the_diff_than_its_prompt_has_room_for(self):
+        # #474 (the audit of 1.8; #348's fix missed it): the handover read the whole diff and
+        # then cut it, so a 300 MB generated file not ignored was hundreds of MB in the runner
+        self.start("t-hb", "ok")
+        wait_phase("t-hb", {"review"})
+        task = store.Task("t-hb")
+        (task.worktree / "generated.txt").write_text(("y" * 79 + "\n") * 20000)
+        real, read = gitops.diff, []
+
+        def diff(*a, **k):
+            out = real(*a, **k)
+            read.append(len(out or ""))
+            return out
+        with mock.patch.object(gitops, "diff", diff):
+            prompt = runner.handoff_prompt(task, "why", "Carry on.")
+        self.assertIn("The diff is too long to include", prompt)
+        self.assertIn("generated.txt", prompt)               # its stat
+        self.assertLess(max(read), runner.HANDOFF_DIFF_MAX)  # never the whole 1.6 MB
+        (task.worktree / "generated.txt").unlink()
+        prompt = runner.handoff_prompt(task, "why", "Carry on.")
+        self.assertIn("```diff\n", prompt)                     # a short diff is still shown
+        (task.worktree / "answer.txt").unlink()
+        self.assertIn("No uncommitted changes yet.", runner.handoff_prompt(task, "why", "Carry on."))
+
     def test_the_handover_point_is_the_tasks_tuned_one(self):
         os.environ["FAKE_FILL"] = "25000"          # 76%: past the default 0.6, short of 0.8
         store.home().mkdir(parents=True, exist_ok=True)
