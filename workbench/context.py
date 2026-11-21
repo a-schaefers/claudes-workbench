@@ -732,6 +732,23 @@ def split_points() -> set[str]:
     return _hidden() | set(python_envs()) | not_writable(made_only=False)
 
 
+def gem_home_of(real: str) -> str | None:
+    """The RubyGems home the real path ``real`` lies in (GEM_HOME, or the nearest directory up
+    with both `gems/` and `specifications/`: an rbenv, rvm, asdf or mise Ruby's), else None.
+    `bundle install` writes its cache/, gems/, specifications/ and extensions/, so a grant of
+    the one directory Bundler named was refused again at the next (#832)."""
+    if (g := os.environ.get("GEM_HOME")) and os.path.isabs(g) and \
+            (real == (g := os.path.realpath(g)) or _under(real, g)):
+        return g
+    home = os.path.realpath(Path.home())
+    d = real
+    while d not in ("/", home) and d != os.path.dirname(d):
+        if os.path.isdir(os.path.join(d, "gems")) and os.path.isdir(os.path.join(d, "specifications")):
+            return d
+        d = os.path.dirname(d)
+    return None
+
+
 def writable(task: store.Task) -> list[str] | None:
     """The directories (and files) the agent may write to, None when the user turned the lane off
     (`"paths": ["*"]`). Only those that exist: the kernel's rules are on real files."""

@@ -1361,7 +1361,10 @@ PTY_REFUSED = re.compile(r"out of pty devices|failed to create pseudo-?terminal|
                          re.I)
 # A refusal in a test's output: the phrase, and the absolute paths on its line. Not a URL's path
 # (`https://h/x`), nor one inside a word.
-REFUSAL = re.compile(r"permission denied|operation not permitted", re.I)
+REFUSAL = re.compile(r"permission denied|operation not permitted|"
+                     # Bundler's PermissionError and RubyGems' FilePermissionError, which say
+                     # neither (#832): "while trying to write to `…`", "write permissions for"
+                     r"error while trying to (?:write to|create)|write permissions for", re.I)
 ABS_PATH = re.compile(r"(?<![\w:/.~-])/[\w.+@~-]+(?:/[\w.+@~-]+)*")
 # and where a path may hold spaces (/mnt/c/Users/John Smith, ~/Library/Application Support):
 # quoted, or running up to the refusal itself. ABS_PATH stopped at the first space, and the
@@ -1440,7 +1443,8 @@ def lane_grant(path: str) -> str | None:
     """The `wb allow --path` that reaches a refused path: /dev/pts for a pty, itself when it
     exists (a directory, a device node, a socket) or is a device node, else the nearest directory that does; the
     toolchain home it falls in when that isn't made yet, or the one below it (`~/go`: `go/pkg`,
-    context.tool_home_of, #824: the walk reached the home directory); then, while that place holds what the lane is split around
+    context.tool_home_of, #824: the walk reached the home directory), or else the RubyGems
+    home it is in (context.gem_home_of, #832); then, while that place holds what the lane is split around
     (context.split_points: a grant of it would be split again), the next directory down
     towards the path. None when no grant can (`/`, the home directory, a secret:
     context.lane_refusal)."""
@@ -1452,6 +1456,8 @@ def lane_grant(path: str) -> str | None:
     if (home := context.tool_home_of(target)) and (not os.path.exists(home)
                                                    or context._under(home, target)):
         real = home  # made by wb allow --path (cli._lane_dir), then in the lane (#824)
+    elif gems := context.gem_home_of(target):
+        real = gems  # the whole gem home, which `bundle install` writes all over (#832)
     if context.lane_refusal(real):
         return None
     if real in context.secret_sockets():

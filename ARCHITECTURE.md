@@ -1500,7 +1500,9 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `/dev/dri/renderD*`, `/dev/kfd`, `/dev/nvidia[0-9]*`, `/dev/nvidiactl`, `/dev/nvidia-uvm`,
   `/dev/nvidia-uvm-tools`, `/dev/dxg`; without them CUDA, ROCm and Vulkan found no device and
   said nothing of permission, #331, the audit of 1.4; any other node a failed test run names
-  with "Permission denied" or "Operation not permitted" outside the lane, `/dev/kvm` say, goes in
+  with "Permission denied" or "Operation not permitted" (`REFUSAL`; and since #832 Bundler's
+  "error while trying to write to" and RubyGems' "write permissions for", which say neither)
+  outside the lane, `/dev/kvm` say, goes in
   status `tests.lane` and the report names `wb allow <task> --path <node>` for it:
   `runner.lane_refused`; since #437, the audit of 1.8, any absolute path on a refusal's line
   (`refused_paths`: a quoted one, `QUOTED_PATH`, or one running up to the refusal itself,
@@ -1511,7 +1513,12 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   it falls in when that isn't made yet, or the one below it (`context.tool_home_of`: `TOOL_HOMES`
   and the `TOOL_HOME_VARS` targets, `tool_var_homes`; `~/go` gives `~/go/pkg`), which
   `wb allow --path` then makes: on a machine that never ran npm or Go the walk reached the home
-  directory and nothing was named, #824, the second 2026-11-21 audit; then, while that place
+  directory and nothing was named, #824, the second 2026-11-21 audit; else the RubyGems home
+  it is in, whole (`context.gem_home_of`: `GEM_HOME`, or the nearest directory up with both
+  `gems/` and `specifications/`, an rbenv, rvm, asdf or mise Ruby's: `bundle install` writes its
+  `cache/`, `gems/`, `specifications/` and `extensions/`, and a grant of the one Bundler named
+  was refused at the next, #832; the skill says to run the install in the user's checkout
+  rather than grant it, as its gems run later outside the lane); then, while that place
   holds something the lane is split around (`context.split_points`: the secrets, workbench's
   own files, the user's active Python environments, #825, and `NOT_WRITABLE`'s places, made or
   not: `not_writable`), the next directory down

@@ -8164,6 +8164,27 @@ class Lane(Base):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [sock]}))
         self.assertIn("connected", run())
 
+    @home_outside_the_lane
+    def test_a_gem_home_bundler_was_refused_is_named_whole(self):
+        # #832 (the second 2026-11-21 audit): with an rbenv Ruby, `bundle install` writes the
+        # Ruby's gem home; Bundler's and RubyGems' refusals say no "permission denied", so the
+        # report named nothing, and a grant of the one directory named failed at the next
+        home = self.fake_home()
+        gems = home / ".rbenv" / "versions" / "3.3.0" / "lib" / "ruby" / "gems" / "3.3.0"
+        for d in ("cache", "gems", "specifications"):
+            (gems / d).mkdir(parents=True)
+        task = self.bare_task("t-832", self.repo)
+        out = (f"There was an error while trying to write to `{gems}/cache`. It is likely that "
+               "you need to grant write permissions for that path.\n"
+               f"    You don't have write permissions for the {gems}/extensions/x86_64-linux "
+               "directory.\n")
+        self.assertEqual(runner.lane_refused(task, out),
+                         [f"{gems}/cache", f"{gems}/extensions/x86_64-linux"])
+        self.assertEqual({runner.lane_grant(p) for p in runner.lane_refused(task, out)}, {str(gems)})
+        (home / "rvm-gems").mkdir()                                     # rvm's, by GEM_HOME
+        with mock.patch.dict(os.environ, {"GEM_HOME": str(home / "rvm-gems")}):
+            self.assertEqual(runner.lane_grant(f"{home}/rvm-gems/ruby-3.3.0/cache"), f"{home}/rvm-gems")
+
     def test_a_pty_the_lane_refused_is_named_with_a_grant_of_every_pty(self):
         # #829 (the second 2026-11-21 audit): `open /dev/pts/7: permission denied` was granted
         # that one index, which the next run didn't get, and Python's "out of pty devices" named
