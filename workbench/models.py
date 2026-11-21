@@ -1113,8 +1113,10 @@ def freed(m: Model, keep=()) -> bool:
         for o in discover().values()))
 
 
-# Prometheus gauges of requests being answered: llama-server's (--metrics), vLLM's
-BUSY_GAUGES = ("llamacpp:requests_processing", "vllm:num_requests_running")
+# Prometheus gauges of requests being answered or waiting: llama-server's (--metrics), vLLM's,
+# SGLang's (--enable-metrics) and TGI's; SGLang and TGI read as idle and were stopped mid-reply (#715)
+BUSY_GAUGES = ("llamacpp:requests_processing", "vllm:num_requests_running", "sglang:num_running_reqs",
+               "sglang:num_queue_reqs", "tgi_batch_current_size", "tgi_queue_size")
 
 
 def _server_idle(m: Model) -> bool:

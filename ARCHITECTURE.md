@@ -2872,8 +2872,10 @@ every round once unloaded the user's Open WebUI, autocomplete or embedding model
 cards than `m`'s is left alone: `apart`, under **The machine** below): every other running
 server with a `stop` command is stopped once per server, after waiting up to 10 minutes while it
 answers someone (`_server_idle`: llama-server's `/slots` `is_processing`, else `/metrics` as a JSON
-`live.state` or Prometheus text with a `BUSY_GAUGES` gauge above 0, `llamacpp:requests_processing`
-or `vllm:num_requests_running`; read as JSON only, both stopped mid-reply, #465, the audit of 1.8;
+`live.state` or Prometheus text with a `BUSY_GAUGES` gauge above 0, `llamacpp:requests_processing`,
+`vllm:num_requests_running`, SGLang's `sglang:num_running_reqs` and `sglang:num_queue_reqs`, or
+TGI's `tgi_batch_current_size` and `tgi_queue_size`; read as JSON only, llama-server and vLLM were
+stopped mid-reply, #465, the audit of 1.8, and SGLang and TGI, missing from the list, still were, #715;
 a server that says none of these is idle) (a running server with no `stop` is left, with a warning
 that it may hold GPU memory); after a stop that succeeded, `released(STOP_SETTLE)` waits up to
 30 s until the cards' used VRAM stops falling (`media.settle` waits the same way), since a stop

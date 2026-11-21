@@ -575,6 +575,24 @@ class Real(unittest.TestCase):
                  ({"/metrics": prom("vllm:num_requests_running", "0.0")}, True),
                  ({"/metrics": {"live": {"state": "generating"}}}, False),
                  ({}, True)]                                   # says nothing: idle, as before
+        # #715: SGLang's and TGI's own /metrics text, as they print it, answering one request
+        sglang = ('# HELP sglang:num_running_reqs The number of running requests.\n'
+                  '# TYPE sglang:num_running_reqs gauge\n'
+                  'sglang:num_running_reqs{{model_name="Qwen/Qwen2.5-Coder-7B-Instruct"}} {run}\n'
+                  '# HELP sglang:num_queue_reqs The number of requests in the waiting queue.\n'
+                  '# TYPE sglang:num_queue_reqs gauge\n'
+                  'sglang:num_queue_reqs{{model_name="Qwen/Qwen2.5-Coder-7B-Instruct"}} {queue}\n'
+                  '# TYPE sglang:gen_throughput gauge\n'
+                  'sglang:gen_throughput{{model_name="Qwen/Qwen2.5-Coder-7B-Instruct"}} 41.2\n')
+        tgi = ('# TYPE tgi_batch_current_size gauge\ntgi_batch_current_size {batch}\n'
+               '# TYPE tgi_queue_size gauge\ntgi_queue_size {queue}\n'
+               '# TYPE tgi_request_count counter\ntgi_request_count 17\n')
+        cases += [({"/metrics": sglang.format(run="1.0", queue="0.0")}, False),
+                  ({"/metrics": sglang.format(run="0.0", queue="2.0")}, False),
+                  ({"/metrics": sglang.format(run="0.0", queue="0.0")}, True),
+                  ({"/metrics": tgi.format(batch="1", queue="0")}, False),
+                  ({"/metrics": tgi.format(batch="0", queue="3")}, False),
+                  ({"/metrics": tgi.format(batch="0", queue="0")}, True)]
         for page, idle in cases:
             pages.clear()
             pages.update(page)
