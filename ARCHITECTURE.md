@@ -719,8 +719,9 @@ of its own that ends when the run does:
 
 - **macOS**: `caffeinate -i -w <pid>` (idle sleep; a closed lid on battery still sleeps).
 - **Linux booted with systemd**: `systemd-inhibit --what=idle:sleep --who=workbench --why='task
-  <name>' --mode=block` around a wait for the pid (`AWAIT_PID`: a pidfd, else `kill -0` every
-  15 s); `systemd-inhibit --list` shows it. logind's polkit grants a sleep lock to a local active
+  <name>' --mode=block` around a wait for the pid (`AWAIT_PID`: a pidfd, else a kqueue's
+  `NOTE_EXIT`, both at the exit itself, else `kill -0` every 15 s, which a pid not yet reaped still
+  answers); `systemd-inhibit --list` shows it. logind's polkit grants a sleep lock to a local active
   session only, so where it refuses (SSH, a scope outside any session) an idle lock is held
   instead (`--what=idle`: it holds logind's `IdleAction`, not a desktop's suspend). It starts in
   the caller's session, not `runner_scope`'s scope, for that grant: under

@@ -18193,7 +18193,7 @@ class KeepAwake(Base):
         time.sleep(0.3)
         self.assertNotIn("released", log.read_text())         # held while the run lives
         sleeper.kill()
-        end = time.monotonic() + 30                           # the waiter polls a pidfd, else 15 s
+        end = time.monotonic() + 30                           # a pidfd or a kqueue, else 15 s
         while "released" not in log.read_text() and time.monotonic() < end:
             time.sleep(0.05)
         self.assertIn("released", log.read_text())           # and let go when it ends

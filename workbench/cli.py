@@ -224,7 +224,10 @@ def detach(argv: list[str], awake: str = "", **kw) -> subprocess.Popen:
     return proc
 
 
-# Waits for a pid to exit (argv[1]): a pidfd where Linux has one, else kill -0 every 15 s.
+# Waits for a pid to exit (argv[1]): a pidfd where Linux has one, a kqueue NOTE_EXIT where
+# there is one (macOS), else kill -0 every 15 s. Both events fire at the exit itself: kill -0
+# still finds a pid its parent hasn't reaped, and on macOS the tests' runs held their wait past
+# the run (#950)
 AWAIT_PID = """import os, select, sys, time
 pid = int(sys.argv[1])
 try:
@@ -233,6 +236,13 @@ except (AttributeError, OSError):
     fd = None
 if fd is not None:
     select.select([fd], [], [])
+elif hasattr(select, "kqueue"):
+    kq = select.kqueue()
+    try:  # returns at the exit, or at once with an error event for a pid already gone
+        kq.control([select.kevent(pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                  select.KQ_NOTE_EXIT)], 1, None)
+    except OSError:
+        pass
 else:
     while True:
         try:
