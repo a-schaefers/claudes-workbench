@@ -2208,7 +2208,8 @@ def drive(task: store.Task) -> None:
                 task.round_dir(n).joinpath("summary.md").write_text(text)
                 phase = "stuck" if rnd["stuck"] else "failed"
                 task.set_status(phase=phase, last=rnd["stuck"] or f"opencode exited {rnd['exit']}")
-                task.notify(phase, text, round=n)
+                # what stopped it, for results.step: a guard or the agent's own exit (#582)
+                task.notify(phase, text, round=n, cause="guard" if rnd["stuck"] else "agent")
                 return
             # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257
             lease.step_aside(unload=bool(task.spec.get("unload_for_tests")))
@@ -2405,7 +2406,8 @@ def main():
             kept = steps_line(task)
             task.notify("stuck", f"task {task.name}: {SIGNAL_STOP}. wb resume {task.name} "
                         f"continues it in a fresh session, wb discard {task.name} drops it"
-                        + (f"\n{kept}" if kept else ""), round=st.get("round"))
+                        + (f"\n{kept}" if kept else ""),
+                        round=st.get("round"), cause="signal")  # not the step's size (#582)
     except Exception as e:
         err = traceback.format_exc()
         full = store.disk_full(e)

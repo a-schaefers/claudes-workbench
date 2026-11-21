@@ -1,6 +1,7 @@
 """How much one task holds: the window's guess, and the record of each closed step correcting it."""
 import json
 import os
+import signal
 import sys
 import unittest
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script too
 
 from workbench import models, router, store
-from tests.test_workbench import Base, TEST_CMD, run_wb, wait_phase
+from tests.test_workbench import Base, TEST_CMD, backdate, run_wb, running, wait_phase
 
 
 class Slice(Base):
@@ -135,6 +136,44 @@ class Measured(Base):
         self.assertEqual(self.row()["steps"][0]["handovers"], 0)
         self.assertIn("1 of 1 measured steps went well",
                       router.slice(models.resolve("ollama/mimo-v2.6:9b-q8_0")).line())
+
+
+    def test_a_shutdown_or_a_dead_runner_mid_step_isnt_held_against_its_size(self):
+        # #582, the audit of 1.90: a SIGTERM from a shutdown, or a runner killed out of memory and
+        # reaped, recorded the step stuck, and the slice shrank though the step then landed
+        mimo = models.resolve("ollama/mimo-v2.6:9b-q8_0")
+        for name, how in (("t-down", signal.SIGTERM), ("t-oom", signal.SIGKILL)):
+            with self.subTest(how=how):
+                (store.home() / "results.jsonl").unlink(missing_ok=True)
+                self.start(name, "hang", "--test", TEST_CMD, "--no-self-review")
+                st = running(name)
+                os.kill(st["pid"], how)
+                if how == signal.SIGKILL:
+                    backdate(name)
+                    self.assertIn(f"[failed] {name}", run_wb("wait", name, "--timeout", "5"))
+                else:
+                    wait_phase(name, {"stuck"})
+                cause = [r for r in store.notices() if r["task"] == name][-1]["cause"]
+                self.assertEqual(cause, "signal" if how == signal.SIGTERM else "died")
+                os.environ["FAKE_SCENARIO"] = "ok"
+                run_wb("resume", name)
+                wait_phase(name, {"review"})
+                run_wb("accept", name, "-m", "feat: answer")
+                (step,) = self.row()["steps"]
+                self.assertEqual((step["landed"], step["stuck"]), (True, False))
+                self.assertIn("1 of 1 measured steps went well, 0 badly", router.slice(mimo).line())
+
+    def test_a_guard_still_counts_the_step_stuck_and_old_notices_are_read_by_their_text(self):
+        from workbench import results
+        self.start("t-guard", "loop", "--test", TEST_CMD)            # one call repeated: a guard
+        wait_phase("t-guard", {"stuck"})
+        self.assertEqual([r for r in store.notices() if r["task"] == "t-guard"][-1]["cause"], "guard")
+        run_wb("discard", "t-guard")
+        self.assertTrue(self.row()["steps"][0]["stuck"])
+        for text, skip in (("task t: the runner was stopped by a signal (a shutdown…)", True),
+                           ("task t: the runner died without a report (killed…)", True),
+                           ("task t: stuck: one call repeated 4 times", False)):
+            self.assertIs(results._not_the_step({"kind": "stuck", "text": text}), skip)
 
 
 if __name__ == "__main__":

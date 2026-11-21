@@ -21,7 +21,7 @@ def step(task: store.Task, landed: bool, since: str = "HEAD") -> dict:
         size = {}
     evs = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0] if (e.get("round") or 0) >= first]
     stuck = any(r.get("task") == task.name and r.get("kind") in ("stuck", "failed")
-                and (r.get("round") or 0) >= first
+                and (r.get("round") or 0) >= first and not _not_the_step(r)
                 for r in store.notices())
     from .runner import context_state  # the runner imports what this module does
     try:
@@ -36,6 +36,20 @@ def step(task: store.Task, landed: bool, since: str = "HEAD") -> dict:
             "read_full": any(e.get("kind") == "reading_full" for e in evs),  # before any change
             "reviews": reviews, "spec_rounds": min(len(gaps), reviews),
             "stuck": stuck, "took_over": any(e.get("kind") == "takeover" for e in evs)}
+
+
+# Notices that end a round for reasons outside the step: a shutdown's, a logout's or a kill's
+# SIGTERM (runner.SIGNAL_STOP), and a runner that died (cli.reap: killed, out of memory, a reboot).
+# Counted as stuck, a laptop shut down mid-step shrank the model's slice for good (#582, the audit
+# of 1.90). Notices from before `cause` was written are known by their text.
+NOT_THE_STEP = ("signal", "died")
+_NOT_THE_STEP_TEXT = ("the runner was stopped by a signal", "the runner died without a report")
+
+
+def _not_the_step(notice: dict) -> bool:
+    if "cause" in notice:
+        return notice["cause"] in NOT_THE_STEP
+    return any(t in str(notice.get("text") or "") for t in _NOT_THE_STEP_TEXT)
 
 
 def ran(task: store.Task) -> bool:

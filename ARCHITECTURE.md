@@ -1893,7 +1893,9 @@ goes in its CLAUDE.md instead.
 ## Waking Claude, exactly once
 
 The runner appends notices to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts,
-task, kind, text, round?, id?}`). Kinds: `review` (the round report and `review_diff`), `stuck`, `failed` (the round report as text;
+task, kind, text, round?, id?, cause?}`; `cause` on a `stuck` or `failed` notice with a round:
+`guard` (a guard stopped it), `agent` (OpenCode exited non-zero with no text), `signal` (a
+SIGTERM from outside wb, `SIGNAL_STOP`) or `died` (`reap`)). Kinds: `review` (the round report and `review_diff`), `stuck`, `failed` (the round report as text;
 a load failure or crash without a round), `question` (with the question's `id`), `checkin`
 (periodic, a nudge, the mid-round handover before the last a round allows, a
 base check whose `--test-timeout` cut it short). `wb` itself writes only
@@ -2740,7 +2742,9 @@ scales with the window (`limit.context`; unknown → 32K): files = max(1, round(
 max(50, round(15s)·10), s = min(window/32768, `GUESS_MAX` 4): 3 files/150 lines on 32K (measured
 2026-11-16), 12/600 from 128K. Correction from every closed step on that model and window
 (results rows' `steps`, with files ≥ 1, from rows `tuning.judged` keeps): `_went` is badly when the step compacted (in its last session, or in one a handover replaced: the `fresh` event's `compacted`), filled up
-reading (`read_full`), got stuck, or needed ≥ `BAD_REVIEWS` 2 agent-caused review rounds; well
+reading (`read_full`), got stuck (a `stuck` or `failed` notice of its rounds, but not one whose
+`cause` is `signal` or `died`, `results.NOT_THE_STEP`, nor one from before `cause` with
+`SIGNAL_STOP`'s or reap's text: a shutdown mid-step shrank the slice for good, #582), or needed ≥ `BAD_REVIEWS` 2 agent-caused review rounds; well
 when it landed and wasn't taken over; else no evidence. A bad step caps the slice below its size
 (files − 1, lines × 3/4); the biggest good step raises it to its size and wins over the cap.
 A handover is counted, not held against a step.

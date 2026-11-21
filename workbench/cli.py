@@ -324,7 +324,7 @@ def reap(task: store.Task) -> bool:
     task.notify("failed", f"task {task.name}: the runner died without a report (killed, out of "
                 f"memory or a reboot{'; the disk has ' + store.gb(free) + ' free' if full else ''}); "
                 f"see {task.dir / 'runner.log'}. wb resume {task.name} "
-                "continues it in a fresh session", round=st.get("round"))
+                "continues it in a fresh session", round=st.get("round"), cause="died")  # #582
     return True
 
 
