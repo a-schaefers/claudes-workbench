@@ -3307,9 +3307,12 @@ answers someone (`_server_idle`: llama-server's `/slots` `is_processing`, else `
 TGI's `tgi_batch_current_size` and `tgi_queue_size`; read as JSON only, llama-server and vLLM were
 stopped mid-reply, #465, the audit of 1.8, and SGLang and TGI, missing from the list, still were, #715;
 a server that says none of these is idle) (a running server with no `stop` is left, with a warning
-that it may hold GPU memory); after a stop that succeeded, `released(STOP_SETTLE)` waits up to
-30 s until the cards' used VRAM stops falling (`media.settle` waits the same way), since a stop
-returns before the memory is freed and Ollama loading at once split the model (#703); every model loaded on each discovered Ollama server is unloaded
+that it may hold GPU memory); after a stop that succeeded, free_gpu waits up to `STOP_SETTLE`
+(30 s) in all, first until each stopped server stops answering (`status` not resident: a stop
+like `pkill vllm` returns at once, and two equal reads a second apart, before the server had begun
+to let go, read as released, #898), then `released` until the cards' used VRAM stops falling
+(`media.settle` waits the same way), since a stop returns before the memory is freed and Ollama
+loading at once split the model (#703); every model loaded on each discovered Ollama server is unloaded
 (`POST /api/generate {keep_alive: 0}`) except kept ones, and except models.json's `keep_loaded`
 (`keep_loaded()`: ids or Ollama names; a server whose model is listed is never stopped), which
 `_others_resident` doesn't count either. Before those unloads, `_wait_unused` watches `/api/ps`

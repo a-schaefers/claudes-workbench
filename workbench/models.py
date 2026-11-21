@@ -1516,7 +1516,7 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
     if _fake():
         return
     seen: dict = {}
-    stopped = False
+    stopped: list[Model] = []
     held = keep_loaded()
     local = on_this_gpu(discover())  # another host's GPU isn't ours to free (unless it's this one: #750)
     kept = [o for o in local if o.id in keep or o.id in held]
@@ -1554,11 +1554,16 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
             warn(f"{other.id}'s stop command failed (exit {r.returncode}): "
                  f"{(r.stderr or r.stdout).strip()[-200:]}")
         else:
-            stopped = True
+            stopped.append(other)
     if stopped:
         # a stop (pkill llama-server) returns before the server's VRAM is freed: Ollama loading
-        # at once found it taken and put part of the model on the CPU (#703)
-        released(STOP_SETTLE)
+        # at once found it taken and put part of the model on the CPU (#703). Waiting for the
+        # VRAM to stop falling alone ended in a second while the server still held it all, two
+        # equal reads before it had begun to let go (#898): first until it stops answering
+        deadline = time.monotonic() + STOP_SETTLE
+        while any(status(o)["resident"] for o in stopped) and time.monotonic() < deadline:
+            time.sleep(1)
+        released(max(deadline - time.monotonic(), 0))
     kept_ollama = [o for o in kept if o.engine == "ollama"]
     doomed = {root: [name for name in _ollama_loaded(root)  # every model Ollama has loaded,
                      if not any(o.server == key and _matches(o.name, {name}) for o in kept_ollama)

@@ -675,8 +675,10 @@ class Real(unittest.TestCase):
     def test_free_gpu_waits_for_a_stopped_servers_vram_before_ollama_loads(self):
         # #703: pkill llama-server returns before its memory is freed, and Ollama loading at once
         # put part of the model on the CPU
-        srv = self.server({"/v1/models": {"data": [{"id": "m"}]}})
-        self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}}, {"s": {"stop": "true"}})
+        flag = Path(self.tmp.name) / "stopped"
+        srv = self.server({"/v1/models": lambda h: 503 if flag.exists() else {"data": [{"id": "m"}]}})
+        self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}},
+                    {"s": {"stop": f"touch '{flag}'"}})
         used = iter([8 * 2 ** 30, 5 * 2 ** 30, 2 * 2 ** 30, 2 * 2 ** 30])
         reads = []
         with mock.patch.object(models.hardware, "gpus", lambda windows=True: reads.append(1) or [
@@ -684,6 +686,30 @@ class Real(unittest.TestCase):
                 mock.patch.object(models, "time", mock.Mock(wraps=time, sleep=lambda s: None)):
             models.free_gpu(say=lambda m: None)
         self.assertEqual(len(reads), 4)        # until the used VRAM stopped falling
+
+    def test_free_gpu_waits_for_a_stopped_server_to_go_before_reading_its_vram_as_released(self):
+        # #898: a stop that returns at once (pkill vllm) left the server holding its VRAM; two
+        # equal reads a second apart read as "stopped falling", and Ollama loaded into the card
+        # still taken, part of its model on the CPU for round 1
+        flag, answered = Path(self.tmp.name) / "stopped", []
+
+        def catalog(h):  # the server lets go three looks after the stop returned
+            if flag.exists():
+                answered.append(1)
+                if len(answered) > 3:
+                    return 503
+            return {"data": [{"id": "m"}]}
+        srv = self.server({"/v1/models": catalog})
+        self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}},
+                    {"s": {"stop": f"touch '{flag}'"}})
+        seen = []
+        with mock.patch.object(models.hardware, "gpus", lambda windows=True: seen.append(len(answered)) or [
+                {"name": "card", "vram": 16 * 2 ** 30,
+                 "vram_used": (2 if len(answered) > 3 else 8) * 2 ** 30}]), \
+                mock.patch.object(models, "time", mock.Mock(wraps=time, sleep=lambda s: None)):
+            models.free_gpu(say=lambda m: None)
+        self.assertGreater(len(answered), 3)               # waited until it stopped answering
+        self.assertTrue(seen and min(seen) > 3)            # and read the VRAM only after
 
     def test_a_llama_server_or_vllm_answering_a_request_is_not_idle(self):
         # #465 (the audit of 1.8): only a JSON /metrics `live.state` was read; llama-server and
