@@ -2963,8 +2963,11 @@ review: a 16 GiB Radeon 780M carve-out beside an 8 GiB RTX became the budget, an
 added to an RX 7600S's 8). With none known discrete (an APU alone, a card amdgpu gives no hwmon)
 the groups decide as above. Only the devices Ollama may see count (`hardware.visible` over
 `ollama_env()`): two 8 GiB cards with Ollama limited to one by `CUDA_VISIBLE_DEVICES` made a
-16 GiB budget (the 2026-11-19 audit). An APU counts what `hardware.gpus` found (its carve-out plus GTT, a
-limit the kernel already sets below the RAM). An NVIDIA GPU that shares the RAM (a DGX Spark, a
+16 GiB budget (the 2026-11-19 audit). An APU counts what `hardware.gpus` found (its carve-out plus GTT),
+at most its carve-out (`carve`) plus `MemTotal` (`ram`) less `system_reserve`, the same rule as
+below: the GTT is about half the RAM by default, but raised toward all of it (`amdgpu.gttsize`,
+`ttm.pages_limit`, a 128 GB Strix Halo at 124 GiB) it kept nothing for the OS, and a share past
+the RAM met the OOM killer (#712). An NVIDIA GPU that shares the RAM (a DGX Spark, a
 Jetson: nvidia-smi gives it no memory) counts the RAM less `system_reserve`: what the system had
 in use when `gpus` read it (`MemTotal` less `MemAvailable`, its `ram_free`), less what this
 machine's Ollama has loaded (`/api/ps`, one ask, 1 s), never under `SYSTEM_FLOOR` 2 GiB; the

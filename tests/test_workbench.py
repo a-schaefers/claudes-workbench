@@ -16195,6 +16195,17 @@ class Hardware(unittest.TestCase):
                       "(0.5 GB carve-out + 103.1 GB GTT) · amdgpu", "\n".join(hw.report()))
         with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
             self.assertEqual(models.budget_devices()[0], 512 * 2 ** 20 + 96 * 2 ** 30)
+        hw = self.fake("Linux", files={   # with the RAM read: kept for the budget's reserve (#712)
+            f"{card}/uevent": "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:c5:00.0",
+            f"{card}/mem_info_vram_total": str(512 * 2 ** 20), f"{card}/mem_info_gtt_total": str(124 * 2 ** 30),
+            f"{card}/hwmon/hwmon5/in1_label": "vddnb",
+            "/proc/meminfo": "MemTotal:       131072000 kB\nMemAvailable:   120000000 kB\n"})
+        apu = hw.gpus()[0]
+        self.assertEqual((apu["carve"], apu["ram"], apu["ram_free"]),
+                         (512 * 2 ** 20, 131072000 * 1024, 120000000 * 1024))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}), \
+                mock.patch.object(models, "_get", lambda *a, **k: None):
+            self.assertEqual(models.budget_devices()[0], 512 * 2 ** 20 + 120000000 * 1024)
 
         meminfo = {"/proc/meminfo": "MemTotal:       125000000 kB\nMemAvailable:    100000000 kB\n"}
         spark = ("nvidia-smi",), "GPU-77aa, NVIDIA GB10, [N/A], [N/A], 580.95"

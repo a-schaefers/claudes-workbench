@@ -256,8 +256,13 @@ def gpus(windows: bool = True) -> list[dict]:
             # an APU's GPU also maps system RAM up to its GTT size, which is where a Strix Halo
             # with a 512 MiB carve-out keeps its models: counting the carve-out alone dropped it
             # as an iGPU, so no budget (the 2026-11-19 audit)
-            g.update(vram=(g["vram"] or 0) + gtt, unified=True,
-                     memory=f"{size(g['vram'])} carve-out + {size(gtt)} GTT")
+            # The GTT can be raised toward all of RAM (amdgpu.gttsize, ttm.pages_limit), so the
+            # RAM and what the system left are kept for the budget's reserve, as for a Jetson (#712)
+            ram = memory()
+            g.update(vram=(g["vram"] or 0) + gtt, unified=True, carve=g["vram"] or 0,
+                     memory=f"{size(g['vram'])} carve-out + {size(gtt)} GTT",
+                     **({"ram": ram["ram"], "ram_free": ram["ram_free"]}
+                        if ram.get("ram") and ram.get("ram_free") is not None else {}))
         if uid := _read(dev / "unique_id"):
             g["uuid"] = f"GPU-{uid}"  # how ROCR_VISIBLE_DEVICES names it
         found.append(g)

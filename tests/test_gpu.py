@@ -640,6 +640,17 @@ class Budget(unittest.TestCase):
         apu = {"name": "Radeon 8060S", "driver": "amdgpu", "vram": 96 * 2 ** 30, "unified": True,
                "memory": "0.5 GB carve-out + 96.0 GB GTT"}
         self.assertEqual(self.budget([apu])[0], 96 * 2 ** 30)       # GTT is the kernel's own limit
+        # #712: a 128 GB Strix Halo with its GTT raised to 124 GiB kept nothing back for the OS
+        gib = 2 ** 30
+        raised = {"name": "Radeon 8060S", "driver": "amdgpu", "vram": gib // 2 + 124 * gib, "unified": True,
+                  "carve": gib // 2, "ram": 127 * gib, "ram_free": 117 * gib,
+                  "memory": "0.5 GB carve-out + 133.1 GB GTT"}
+        n, _, why = budget(raised)                                   # 10 GiB in use: kept back
+        self.assertEqual(n, gib // 2 + 117 * gib)
+        self.assertIn("less 10.7 GB the system uses", why)
+        n, _, _ = budget({**raised, "ram_free": 90 * gib}, loaded=[30 * gib])  # a loaded model is the GPU's
+        self.assertEqual(n, gib // 2 + 127 * gib - 7 * gib)
+        self.assertEqual(budget({**raised, "vram": gib // 2 + 60 * gib})[0], gib // 2 + 60 * gib)  # GTT lower
 
     def test_only_the_cards_ollama_may_see_count(self):
         # the 2026-11-19 audit: two 8 GiB cards with Ollama limited to one made a 16 GiB budget

@@ -1697,7 +1697,7 @@ def unified_default(ram: int) -> int:
 
 
 def system_reserve(g: dict, root: str | None = None) -> int:
-    """Bytes of a RAM-sharing NVIDIA GPU's memory (hardware.gpus: a Jetson's, a DGX Spark's) the
+    """Bytes of a RAM-sharing GPU's memory (hardware.gpus: a Jetson's, a DGX Spark's, an APU's) the
     system keeps: what was in use when hardware read it, less the models this machine's Ollama
     (the one at ``root``, else ollama_root_here) has loaded (theirs is the GPU's), and never under
     SYSTEM_FLOOR. All of MemTotal passed a 6.5 GB model as fitting an 8 GB Orin Nano whose desktop
@@ -1707,7 +1707,8 @@ def system_reserve(g: dict, root: str | None = None) -> int:
         return SYSTEM_FLOOR
     loaded = sum(int(x.get("size") or 0) for x in
                  (_get(f"{root or ollama_root_here()}/api/ps", timeout=1.0) or {}).get("models") or [])
-    return max(SYSTEM_FLOOR, (g.get("vram") or 0) - g["ram_free"] - loaded)
+    # an APU's `ram` is MemTotal (its vram the carve-out plus the GTT); NVIDIA's vram is MemTotal
+    return max(SYSTEM_FLOOR, (g.get("ram") or g.get("vram") or 0) - g["ram_free"] - loaded)
 
 
 def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str]:
@@ -1723,7 +1724,8 @@ def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str
     an RX 7600S's 8). With none known, as before. Only the devices Ollama's environment lets it
     see count (hardware.visible): the one serving ``root`` when several run here, one per GPU
     (hardware.ollama_env_at: #460). Apple Silicon: iogpu.wired_limit_mb, else macOS's default
-    share (an Intel Mac's adapters none: #711); an APU: its carve-out and GTT, as hardware.gpus found; an NVIDIA GPU that shares the
+    share (an Intel Mac's adapters none: #711); an APU: its carve-out and GTT, as hardware.gpus found,
+    at most its carve-out and the RAM the system leaves (#712); an NVIDIA GPU that shares the
     RAM (a DGX Spark, a Jetson): the RAM less what the system uses (system_reserve, #524)."""
     hand = _overrides().get("gpu_gb")
     if hand is not None:
@@ -1757,6 +1759,13 @@ def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str
             how = f"{g['memory']}, less {hardware.size(keep)} the system uses"
         elif g.get("unified"):
             usable, how = g.get("vram") or 0, g["memory"]
+            if g.get("ram") and g.get("ram_free") is not None:
+                # an APU: its GTT raised toward all of RAM (a 128 GB Strix Halo at 124 GiB) left
+                # nothing for the OS, and a shared load past the RAM met the OOM killer (#712)
+                keep = system_reserve(g, root)
+                room = max(0, (g.get("carve") or 0) + g["ram"] - keep)
+                if room < usable:
+                    usable, how = room, f"{g['memory']}, less {hardware.size(keep)} the system uses"
         else:
             usable, how = g.get("vram") or 0, "VRAM"
             if usable < IGPU_UNDER:
