@@ -54,7 +54,7 @@ from . import hardware, store
 from .watch import Watcher
 
 LOCAL_HOSTS = {"localhost", "0.0.0.0", "host.docker.internal"}
-OLLAMA_PORT = 11434  # Ollama's default: the guess while its server is down
+OLLAMA_PORT = hardware.OLLAMA_PORT  # Ollama's default: the guess while its server is down
 START_TIMEOUT = 20 * 60  # a big model server's first start can take minutes
 START_GRACE = 10  # after a start command fails: another process may be bringing the server up
 
@@ -1340,7 +1340,7 @@ def _room_beside(m: Model) -> bool:
     fit (the 2026-11-19 audit). Only for Ollama, under a known budget (gpu_budget), with no other
     server resident (whose memory nothing here measures), ``m`` all in VRAM if it is loaded, and
     Ollama's own limit on loaded models (OLLAMA_MAX_LOADED_MODELS) not reached."""
-    budget = gpu_budget()
+    budget = gpu_budget(m.root)
     if m.engine != "ollama" or not budget:
         return False
     local = [o for o in discover().values() if not o.remote]
@@ -1357,7 +1357,7 @@ def _room_beside(m: Model) -> bool:
             used += x.get("size") or 0
             if key == m.server:
                 here.append(x)
-    most = hardware.ollama_env().get("OLLAMA_MAX_LOADED_MODELS") or ""
+    most = hardware.ollama_env_at(m.root).get("OLLAMA_MAX_LOADED_MODELS") or ""
     if not mine and len(here) + 1 > (int(most) if most.isdigit() and int(most) else OLLAMA_MAX_LOADED):
         return False
     n = need(m)
@@ -1389,20 +1389,21 @@ def unified_default(ram: int) -> int:
     return ram * 2 // 3 if ram <= UNIFIED_SMALL else ram * 3 // 4
 
 
-def system_reserve(g: dict) -> int:
+def system_reserve(g: dict, root: str | None = None) -> int:
     """Bytes of a RAM-sharing NVIDIA GPU's memory (hardware.gpus: a Jetson's, a DGX Spark's) the
     system keeps: what was in use when hardware read it, less the models this machine's Ollama
-    has loaded (theirs is the GPU's), and never under SYSTEM_FLOOR. All of MemTotal passed a
-    6.5 GB model as fitting an 8 GB Orin Nano whose desktop held 2 GB (#524). Another server's
-    loaded model counts as the system's: too little room only stops sharing."""
+    (the one at ``root``, else ollama_root_here) has loaded (theirs is the GPU's), and never under
+    SYSTEM_FLOOR. All of MemTotal passed a 6.5 GB model as fitting an 8 GB Orin Nano whose desktop
+    held 2 GB (#524). Another server's loaded model counts as the system's: too little room only
+    stops sharing."""
     if g.get("ram_free") is None:
         return SYSTEM_FLOOR
     loaded = sum(int(x.get("size") or 0) for x in
-                 (_get(f"{ollama_root_here()}/api/ps", timeout=1.0) or {}).get("models") or [])
+                 (_get(f"{root or ollama_root_here()}/api/ps", timeout=1.0) or {}).get("models") or [])
     return max(SYSTEM_FLOOR, (g.get("vram") or 0) - g["ram_free"] - loaded)
 
 
-def budget_devices() -> tuple[int | None, list[dict], str]:
+def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str]:
     """Bytes of GPU memory models can use (None when the machine can't say: then no sharing),
     the devices that make it up, and where the number comes from (wb doctor and wb scout say it).
     models.json's `gpu_gb` sets it by hand, for hardware this can't read. One runtime serves a
@@ -1413,7 +1414,8 @@ def budget_devices() -> tuple[int | None, list[dict], str]:
     those count: an AMD APU's carve-out never outranks or adds to a card (the 0.90 review: a
     16 GiB Radeon 780M carve-out beside an 8 GiB RTX became the budget, a 4 GiB one was added to
     an RX 7600S's 8). With none known, as before. Only the devices Ollama's environment lets it
-    see count (hardware.visible). Apple Silicon: iogpu.wired_limit_mb, else macOS's default
+    see count (hardware.visible): the one serving ``root`` when several run here, one per GPU
+    (hardware.ollama_env_at: #460). Apple Silicon: iogpu.wired_limit_mb, else macOS's default
     share; an APU: its carve-out and GTT, as hardware.gpus found; an NVIDIA GPU that shares the
     RAM (a DGX Spark, a Jetson): the RAM less what the system uses (system_reserve, #524)."""
     hand = _overrides().get("gpu_gb")
@@ -1429,7 +1431,7 @@ def budget_devices() -> tuple[int | None, list[dict], str]:
     devs = hardware.gpus(windows=False)  # WSL's Windows names carry no VRAM: skip PowerShell
     notes = []
     if any((g.get("driver") or "").split(" ")[0] in ("nvidia", "amdgpu") for g in devs):
-        devs, notes = hardware.visible(devs, hardware.ollama_env())
+        devs, notes = hardware.visible(devs, hardware.ollama_env_at(root))
     if any(g.get("discrete") and g.get("vram") for g in devs):
         devs = [g for g in devs if g.get("discrete")]
     groups: dict[str, list] = {}
@@ -1438,7 +1440,7 @@ def budget_devices() -> tuple[int | None, list[dict], str]:
             usable = g.get("wired_limit") or unified_default(g.get("vram") or 0)
             how = "iogpu.wired_limit_mb" if g.get("wired_limit") else "macOS's default share of the RAM"
         elif g.get("unified") and (g.get("driver") or "").startswith("nvidia"):
-            keep = system_reserve(g)
+            keep = system_reserve(g, root)
             usable = max(0, (g.get("vram") or 0) - keep)
             how = f"{g['memory']}, less {hardware.size(keep)} the system uses"
         elif g.get("unified"):
@@ -1460,9 +1462,10 @@ def budget_devices() -> tuple[int | None, list[dict], str]:
             why + "".join(f", as {n} leaves it" for n in notes))
 
 
-def gpu_budget() -> int | None:
-    """Bytes of GPU memory models can use, or None when the machine can't say (budget_devices)."""
-    return budget_devices()[0]
+def gpu_budget(root: str | None = None) -> int | None:
+    """Bytes of GPU memory models can use, or None when the machine can't say (budget_devices):
+    those of the Ollama at ``root``, when given."""
+    return budget_devices(root)[0]
 
 
 def need(m: Model) -> int:
@@ -1496,7 +1499,7 @@ def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
     if not budget or not running or m.engine != "ollama" or m.remote or \
             any(o.engine != "ollama" or o.remote for o in running):
         return False
-    env = hardware.ollama_env()
+    env = hardware.ollama_env_at(m.root)  # its own server's settings (#460)
     if same := sum(_key(o) == _key(m) for o in running):
         # one slot each: a value of 2 once admitted any number, and a third task's requests
         # queued inside Ollama while its silence budget ran (the 2026-11-19 audit)
@@ -1504,7 +1507,9 @@ def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
         return par.isdigit() and same + 1 <= int(par)
     distinct = {_key(o): o for o in running}
     most = env.get("OLLAMA_MAX_LOADED_MODELS") or ""  # 0 or unset: Ollama's default
-    if len(distinct) + 1 > (int(most) if most.isdigit() and int(most) else OLLAMA_MAX_LOADED):
+    # its limit is its own server's: models another Ollama holds aren't counted against it
+    if sum(k[0] == m.server for k in distinct) + 1 > (int(most) if most.isdigit() and int(most)
+                                                      else OLLAMA_MAX_LOADED):
         return False
     sizes = [need(o) for o in distinct.values()] + [need(m)]
     return all(sizes) and sum(sizes) <= SHARE_AT * budget
@@ -1521,7 +1526,7 @@ def admits(m: Model | None, held: dict) -> bool:
         return False
     found = discover()
     running = [o for o in (found.get(h.get("model") or "") for h in held.values()) if o]
-    return len(running) == len(held) and can_share(m, running, gpu_budget())
+    return len(running) == len(held) and can_share(m, running, gpu_budget(m.root))
 
 
 def holders(home: Path | None = None, pool: str = "gpu") -> dict:

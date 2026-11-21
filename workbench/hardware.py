@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import store
 
@@ -433,6 +434,7 @@ def cpu() -> dict:
     return {"name": name, "threads": os.cpu_count()}
 
 
+OLLAMA_PORT = 11434  # Ollama's default, where an OLLAMA_HOST without a port listens
 OLLAMA_KEYS = ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL",
                "OLLAMA_MAX_LOADED_MODELS", "OLLAMA_HOST")
 # The server's own knobs, which mean the same read from a container: its OLLAMA_MODELS is a path
@@ -454,10 +456,16 @@ def _ollama_process() -> tuple[dict, str] | None:
     (/proc/<pid>/environ: one started by hand in another terminal, a user unit's, anyone's as
     root), and what it is. One in another mount namespace (a container) gives its knobs only.
     A system unit's process (user ollama) can't be read: systemd says its environment."""
+    return next(iter(_ollama_processes()), None)
+
+
+def _ollama_processes() -> list[tuple[dict, str]]:
+    """_ollama_process's answer for every `ollama serve` this user may read, lowest pid first."""
     try:
         pids = sorted(int(d.name) for d in PROC.iterdir() if d.name.isdigit())
     except OSError:
-        return None
+        return []
+    found = []
     for pid in pids:
         d = PROC / str(pid)
         try:
@@ -472,9 +480,39 @@ def _ollama_process() -> tuple[dict, str] | None:
         except OSError:
             boxed = False
         if boxed:
-            return _environ(raw, OLLAMA_KNOBS), f"the ollama process {pid} (in a container: its knobs only)"
-        return _environ(raw, OLLAMA_KEYS + SET_ONLY), f"the running ollama's environment (pid {pid})"
-    return None
+            found.append((_environ(raw, OLLAMA_KNOBS),
+                          f"the ollama process {pid} (in a container: its knobs only)"))
+        else:
+            found.append((_environ(raw, OLLAMA_KEYS + SET_ONLY),
+                          f"the running ollama's environment (pid {pid})"))
+    return found
+
+
+def _port(host: str) -> int:
+    """The port an OLLAMA_HOST value (``host:port``, ``:port``, a URL, or unset) listens on."""
+    raw = (host or "").strip()
+    try:
+        return urlparse(raw if "://" in raw else f"http://{raw}").port or OLLAMA_PORT
+    except ValueError:
+        return OLLAMA_PORT
+
+
+def ollama_env_at(root: str | None) -> dict:
+    """The environment of the Ollama serving ``root``: with several `ollama serve` running here
+    (one per GPU, on ports of their own), the one whose OLLAMA_HOST listens on root's port; else
+    ollama_env(). The lowest pid's stood for every one: two cards with an Ollama each were
+    budgeted as one, and the first one's NUM_PARALLEL and MAX_LOADED_MODELS read for both (#460,
+    the audit of 1.8). A container's process gives no OLLAMA_HOST, so it isn't matched."""
+    procs = _ollama_processes() if root else []
+    if len(procs) > 1:
+        want = urlparse(root).port
+        hit = [env for env, _ in procs if "OLLAMA_HOST" in env and _port(env["OLLAMA_HOST"]) == want]
+        if len(hit) == 1:
+            env = dict(hit[0])
+            for k in OLLAMA_KEYS:
+                env.setdefault(k, "")
+            return env
+    return ollama_env()
 
 
 def _ollama_container() -> tuple[dict, str] | None:

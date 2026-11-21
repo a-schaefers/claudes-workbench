@@ -3001,6 +3001,15 @@ doctor`, `wb scout`, when a local Ollama model is configured) says so and points
 wb's environment alone (which also filled in what a unit left unset), Ollama in Docker, one
 started by hand, or Ollama for Windows from WSL had its sharing knobs read as unset (#379, the
 audit of 1.6). A system unit's process runs as another user and can't be read: its unit says.
+With several `ollama serve` readable here (one per GPU, each on its own port), `ollama_env_at(root)`
+is the one whose `OLLAMA_HOST` listens on root's port (`_ollama_processes`; unset is `OLLAMA_PORT`
+11434; a container's gives no `OLLAMA_HOST` and isn't matched), else `ollama_env()`; the GPU
+budget (`budget_devices(root)`, `gpu_budget(root)`), `can_share` and `_room_beside` read the
+task's own server's devices, `OLLAMA_NUM_PARALLEL` and `OLLAMA_MAX_LOADED_MODELS`, the last
+counting only the models on that server. The lowest pid's stood for both: two 24 GB cards were
+budgeted as GPU 0 alone for the second server (#460, the audit of 1.8). Still open: `free_gpu`
+unloads every server's models, on another card too, and `can_share` sums every running model
+against the task's server's budget (safe, but it refuses sharing that fits on disjoint cards).
 `ollama_context()` (`OLLAMA_CONTEXT_LENGTH`
 with spaces and quotes trimmed, as Ollama reads it, and the raw value: `report` says when it isn't
 a number instead of crashing), `ollama_models_dir()` (`os.path.isdir`: a directory it can't read
