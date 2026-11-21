@@ -5778,8 +5778,8 @@ class Watch(Base):
         for scratch in (".verify-abc/repo", ".base-x", "wb-merge-y", "wb-index-z"):
             for i in range(20):
                 (home / scratch / "node_modules" / f"p{i}").mkdir(parents=True)
-        with Watcher(home, recursive=True, skip=cli.EVENT_SKIP) as w:
-            watched = {str(d.relative_to(home)) for d in w.dirs.values()}
+        with Watcher(home, recursive=True, skip=cli.EVENT_SKIP) as w:  # polled without inotify (macOS)
+            watched = {str(d.relative_to(home)) for d in [*w.dirs.values(), *w.polled]}
         self.assertEqual(watched, {".", "tasks"})
 
     def test_wb_events_watches_no_bench_clone_case_or_upload_no_link_out_and_survives_an_unreadable_directory(self):
@@ -14322,8 +14322,12 @@ class Try(Base):
         self.assertFalse((cli.try_dir() / "3").exists())          # (#161)
 
     def test_wb_try_refused_by_wb_init_leaves_no_sample_behind(self):
-        # #530: with no git identity wb init refused, and try/1, try/2… were left at each retry
-        os.environ.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        # #530: with no git identity wb init refused, and try/1, try/2… were left at each retry.
+        # useConfigOnly: git makes no identity up from the user and host names, as it does on a
+        # Mac (user@host.local), where a host name without a domain makes none (#950)
+        noid = Path(self.tmp.name) / "no-identity.gitconfig"
+        noid.write_text("[user]\n\tuseConfigOnly = true\n")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(noid), GIT_CONFIG_NOSYSTEM="1")
         for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
                   "EMAIL"):
             os.environ.pop(k, None)
@@ -18046,7 +18050,10 @@ class LogoutStops(Base):
                 self.assertTrue(kw.get("start_new_session"))
                 return types.SimpleNamespace(pid=os.getpid())
             awake = []  # and #516: the runs a night is left to keep the machine awake
+            # the state directory is local: off Linux, store.network_fs asks `mount` (a Popen) where
+            # Linux reads /proc/self/mounts, and the fake took it for a detach (#950, macOS)
             with mock.patch("subprocess.Popen", popen), \
+                    mock.patch.object(store, "network_fs", return_value=None), \
                     mock.patch.object(cli, "keep_awake", lambda pid, why: awake.append(why)), \
                     mock.patch.object(models, "_started", return_value="1"):
                 chat.start(51583)
