@@ -16212,6 +16212,26 @@ class Hardware(unittest.TestCase):
         (g,) = self.fake("Linux", files=bare, machine="x86_64").gpus()
         self.assertEqual((g["vram"], g.get("unified"), g.get("discrete")), (8 * 2 ** 30, None, None))
 
+    def test_a_bmcs_or_a_vms_display_adapter_is_no_gpu_and_gets_no_gpu_gb_hint(self):
+        # #710: a CPU-only Supermicro box's ASPEED (ast) was a GPU of unknown memory, so scout
+        # told the user to set gpu_gb for it; beside 8 NVIDIA cards the hint would have replaced
+        # the whole budget with one number
+        bmc = {"/fake/sys/class/drm/card0/device/uevent": "DRIVER=ast\nPCI_SLOT_NAME=0000:02:00.0",
+               "/proc/meminfo": "MemTotal:       64000000 kB\nMemAvailable:    60000000 kB\n"}
+        lspci = {("lspci",): "02:00.0 VGA compatible controller: ASPEED Technology, Inc. ASPEED Graphics Family"}
+        hw = self.fake("Linux", files=bmc, runs=lspci, machine="x86_64")
+        self.assertEqual(hw.gpus(), [])
+        self.assertIn("GPU   none found", "\n".join(hw.report()))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+            self.assertTrue(cli.gpu_line().startswith("no GPU memory found: local models run on the CPU"))
+        smi = {("nvidia-smi",): "\n".join(f"GPU-{i}, NVIDIA H100, 81559, 0, 560.94" for i in range(8)), **lspci}
+        hw = self.fake("Linux", files=bmc, runs=smi, machine="x86_64")
+        self.assertEqual({g["name"] for g in hw.gpus()}, {"NVIDIA H100"})
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+            line = cli.gpu_line()
+        self.assertNotIn("ASPEED", line)
+        self.assertNotIn("publishes no memory size", line)
+
     def test_a_discrete_amd_card_doesnt_count_its_gtt(self):
         card = "/fake/sys/class/drm/card0/device"
         hw = self.fake("Linux", files={

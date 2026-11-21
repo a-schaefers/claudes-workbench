@@ -2942,7 +2942,8 @@ let go of (a local Ollama model, a local server with `stop`); `freed(m, keep)`: 
 The budget (`budget_devices`, which also returns the devices it counts and where the number
 comes from, for `wb doctor` and `wb scout`'s `cli.gpu_line`) is models.json's top-level `gpu_gb`
 when set (decimal GB, the escape hatch for hardware this can't read; not a number: an error, as a
-malformed file; `gpu_line` names the file and the key whenever a GPU publishes no memory size,
+malformed file; `gpu_line` names the file and the key whenever a GPU that can run models
+(`hardware.COMPUTE`'s drivers, #710) publishes no memory size,
 Intel's i915 and xe, whose sysfs has none: alone, as the fix for "GPU memory unknown here", and
 beside a budget from another device, as the card that budget leaves out; its example card is of
 the vendor it names, `_card_example`: it said "an Intel Arc" of a Radeon seen from WSL, #522. Nothing pointed there,
@@ -3201,7 +3202,11 @@ missing `mem_info_vram_vendor`, which the GCN cards' memory controllers never se
 RX 580 with 24 GiB GTT was a 34.4 GB unified budget in `gpus` and in `wb top` alike (#435); KFD's
 topology can't say, since a GPU node never carries the CPU's cores; `unique_id` as `uuid` `GPU-<id>`;
 a unified device off macOS carries `memory`, what it counts, which `report` and the budget say;
-names from `lspci`; NVIDIA left to nvidia-smi when it answered,
+names from `lspci`; a display-only driver (`DISPLAY_ONLY`: a BMC's `ast` or `mgag200`, a VM's
+`bochs`, `cirrus`, `vmwgfx`, `qxl`, `virtio_gpu`, `vboxvideo`, `hyperv_drm`, `simpledrm`, USB
+`udl`/`evdi`/`gud`) is no GPU, so neither the budget, the Vulkan mask nor `gpu_line` counts it: a
+CPU-only rack server was told to set `gpu_gb` for its BMC (#710, as `wb top` already did, #551);
+NVIDIA left to nvidia-smi when it answered,
 else listed from sysfs, VRAM unknown); macOS reads `system_profiler SPDisplaysDataType -json`
 (Apple Silicon: unified memory, `wired_limit`; an adapter with only shared memory, an Intel iGPU,
 has VRAM unknown).

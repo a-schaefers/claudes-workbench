@@ -4133,7 +4133,8 @@ def gpu_line() -> str:
     # a GPU that publishes no memory size (Intel's i915 and xe) is left out of the budget: with
     # none, tasks never share and the user's other Ollama models are unloaded every round; the
     # fix was gpu_gb, and nothing said how to set it (#272, the audit of 1.2)
-    unknown = sorted({g["name"] for g in gs if g.get("vram") is None and not g.get("unified")})
+    unknown = sorted({g["name"] for g in gs if g.get("vram") is None and not g.get("unified")
+                      and (g.get("driver") or "").split(" ")[0] in hardware.COMPUTE})  # #710
     hand = (f'set its memory in {models.overrides_path()}: {{"gpu_gb": <the card\'s memory in '
             'decimal GB: 12.9 for a 12 GiB card>}'
             if unknown else "models.json gpu_gb sets it by hand")

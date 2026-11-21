@@ -175,8 +175,21 @@ def _int(text: str) -> int:
         return 0
 
 
+# Display-only adapters: a server's BMC VGA (ASPEED, Matrox), a VM's emulated card, a USB or
+# firmware framebuffer. None runs models (no CUDA, ROCm, Level Zero or Vulkan device), so they are
+# no GPU: counted as one, a CPU-only rack server was told to set gpu_gb for its BMC, an 8-GPU box
+# was hinted to replace its budget with one number, and a Vulkan mask counted the BMC (#710)
+DISPLAY_ONLY = frozenset({"ast", "mgag200", "bochs", "bochs-drm", "cirrus", "cirrus-qemu", "vmwgfx",
+                          "qxl", "virtio_gpu", "virtio-gpu", "vboxvideo", "hyperv_drm", "simpledrm",
+                          "udl", "evdi", "gud"})
+# The drivers whose cards can run models, of those that may publish no memory size: only these
+# get gpu_line's hint to set gpu_gb (#710)
+COMPUTE = ("i915", "xe", "amdgpu", "nvidia", "nouveau", "windows", "metal")
+
+
 def gpus(windows: bool = True) -> list[dict]:
-    """Every display adapter: name, driver, VRAM total and in use (bytes) where the driver says,
+    """Every display adapter that can run models (not DISPLAY_ONLY's): name, driver, VRAM total
+    and in use (bytes) where the driver says,
     and `discrete` when it is known to be a card with memory of its own (not an APU's carve-out).
     On WSL, Windows' adapters too (_windows_gpus); ``windows`` False leaves them out whenever
     Linux sees a GPU of its own (a PowerShell start takes seconds: the GPU budget and wb image's
@@ -225,8 +238,8 @@ def gpus(windows: bool = True) -> list[dict]:
             continue
         uevent = dict(x.split("=", 1) for x in _read(dev / "uevent").splitlines() if "=" in x)
         slot, driver = uevent.get("PCI_SLOT_NAME"), uevent.get("DRIVER", "")
-        if not slot or slot in seen or (driver == "nvidia" and listed):  # nvidia-smi spoke for those
-            continue
+        if not slot or slot in seen or (driver == "nvidia" and listed) or driver in DISPLAY_ONLY:
+            continue  # nvidia-smi spoke for those; a BMC's or a VM's display runs no model (#710)
         seen.add(slot)
         name = _run("lspci", "-s", slot).partition(": ")[2] or uevent.get("PCI_ID", "unknown")
         total, used = _read(dev / "mem_info_vram_total"), _read(dev / "mem_info_vram_used")
