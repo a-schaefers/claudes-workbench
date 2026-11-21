@@ -67,7 +67,7 @@ const SCOUT_NOTE =
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { WbChat, WbLine, WbLive, WbPane, WbStats, WbTask } from '../types'
+import type { WbChat, WbLine, WbLive, WbPane, WbStats, WbTask, WbTop } from '../types'
 import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
 
@@ -134,6 +134,12 @@ const TABS: [string, string, string][] = [['tasks', 'Tasks', '1'], ['stats', 'St
 // shown in a load, and again when results.jsonl or stats.json changes. No timer.
 const statsFeed = atom({ plugin: 'workbench', key: 'stats' } as const, { key: '', feed: null } as WbStats,
   { shape: 'stats-1' })
+// The Stats tab's live view (#408): one `wb top --json` child, only while the tab is on screen
+// with the live view on, ended the moment it isn't; each line its newest tick
+const topNow = atom({ plugin: 'workbench', key: 'top' } as const, { snap: null, busy: {} } as WbTop,
+  { shape: 'top-1' })
+const BUSY_KEEP = 60 // busy % samples kept per GPU for the sparkline: two minutes at 2 s
+const TOP_RETRY_MS = 30_000 // a `wb top` that ended by itself (wb missing, failing) is tried again this long after
 const SETTINGS_HINT = 'Click a row to see its options, then click one; or Tab to it and press Enter. A change applies at once.'
 const CHAT_EXPIRE_MS = 6 * 3600_000 // a web message older than this isn't submitted to a new listener
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
@@ -483,6 +489,127 @@ async function refreshStats($: any, force = false) {
   }
 }
 
+// Whether the live view should run now: the Stats tab on screen (its tab, the pane shown and not
+// minimized) with the live view on. Anything else and `wb top` isn't running.
+async function topWanted($: any): Promise<boolean> {
+  const view = await read($, pane)
+  if (view.tab !== 'stats' || view.minimized) return false
+  const shown = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
+  return !!shown?.isShown && (await statsSettings($)).live
+}
+
+// Starts or ends the live view's child to match topWanted: at each poll, on a tab's press, a
+// minimize and a Live view pick, and on each line it prints (so leaving the tab ends it within a
+// tick, whatever else happens)
+async function syncTop($: any) {
+  const want = await topWanted($)
+  if (want && !mem.top && (await $.clock.now()) >= mem.topRetryAt) void runTop($)
+  else if (!want && mem.top) stopTop()
+}
+
+function stopTop() {
+  const child = mem.top
+  mem.top = null
+  try { void child?.return?.(undefined)?.catch?.(() => {}) } catch { /* already ended */ }
+}
+
+async function runTop($: any) {
+  const child = $.process.spawn({ argv: [mem.wb, 'top', '--json'] })
+  mem.top = child
+  await update($, topNow, () => ({ snap: null, busy: {} })) // the sparkline starts as the tab opens
+  let buf = ''
+  try {
+    for await (const { stream, text } of child) {
+      if (stream !== 'stdout') continue
+      buf += text
+      let cut
+      while ((cut = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, cut)
+        buf = buf.slice(cut + 1)
+        let snap: Row
+        try { snap = JSON.parse(line) } catch { continue }
+        if (!snap || typeof snap !== 'object') continue
+        await update($, topNow, prev => {
+          const busy: Record<string, number[]> = {}
+          for (const g of (snap.gpus ?? []) as Row[])
+            if (typeof g.busy === 'number') busy[String(g.index ?? 0)] = [...(prev.busy[String(g.index ?? 0)] ?? []), g.busy].slice(-BUSY_KEEP)
+          return { snap, busy }
+        })
+      }
+      if (!(await topWanted($))) break // off screen now: leaving the loop ends the child
+    }
+  } catch {
+    // it could not start, or its stream closed: tried again after a while
+  }
+  if (mem.top === child) { // it ended by itself, not by stopTop: not again at once
+    mem.top = null
+    mem.topRetryAt = (await $.clock.now()) + TOP_RETRY_MS
+  }
+}
+
+const BLOCKS = '▏▎▍▌▋▊▉█'
+// ``frac`` (0..1) of ``width`` cells, in eighths, the rest light shade
+export function bar(frac: number, width: number): string {
+  const eighths = Math.round(Math.max(0, Math.min(1, frac)) * width * 8)
+  const full = Math.floor(eighths / 8), part = eighths % 8
+  const drawn = '█'.repeat(full) + (part ? BLOCKS[part - 1] : '')
+  return drawn + '░'.repeat(Math.max(0, width - drawn.length))
+}
+
+const gib = (n: number) => (n / 2 ** 30).toFixed(1)
+const secs = (s: number) => (s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, '0')}s`
+  : `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`)
+// lspci's long name cut to the card's own (its last bracket), as `wb top` draws it
+const cardName = (name: string) => [...name.matchAll(/\[([^\]]+)\]/g)].at(-1)?.[1] ?? name
+const RACK_MARK: Record<string, string> = { resident: '●', split: '◑', idle: '○', "can't run": '✗', remote: '⇢' }
+const RACK_COLOR: Record<string, string> = { resident: 'success', split: 'warning', "can't run": 'error' }
+
+// The live view as lines of coloured parts: each GPU (memory and busy as bars, watts, busy's
+// sparkline), what runs now, the rack (every model: where it is, its speeds, its load time, the
+// task on it) and the queue. Nothing is said for what a platform can't tell.
+export function liveLines(t: WbTop): { color?: string; dim?: boolean; bold?: boolean; text: string }[][] {
+  const s = t.snap
+  if (!s) return [[{ dim: true, text: 'Reading this machine…' }]]
+  const out: { color?: string; dim?: boolean; bold?: boolean; text: string }[][] = []
+  for (const g of (s.gpus ?? []) as Row[]) {
+    const row: { color?: string; dim?: boolean; bold?: boolean; text: string }[] = [
+      { bold: true, text: g.ram ? 'RAM ' : `GPU ${g.index ?? ''} ` }, { dim: true, text: `${cardName(String(g.name ?? ''))} ` }]
+    if (typeof g.used === 'number' && g.total) {
+      const f = g.used / g.total
+      row.push({ color: f > 0.95 ? 'error' : f > 0.8 ? 'warning' : 'success', text: bar(f, 12) },
+        { text: ` ${gib(g.used)}/${gib(g.total)} GiB ` })
+    } else if (g.total) row.push({ dim: true, text: `${gib(g.total)} GiB${g.unified ? ' unified' : ''} ` })
+    if (typeof g.busy === 'number')
+      row.push({ dim: true, text: '· busy ' }, { color: g.busy > 80 ? 'warning' : 'success', text: bar(g.busy / 100, 8) },
+        { text: ` ${g.busy}% ` })
+    if (typeof g.watts === 'number') row.push({ text: `· ${Math.round(g.watts)} W ` })
+    const line = spark(t.busy[String(g.index ?? 0)] ?? [])
+    if (line.length > 1) row.push({ dim: true, text: line.slice(-24) })
+    out.push(row)
+  }
+  for (const r of (s.running ?? []) as Row[]) {
+    const parts = [r.phase, r.round ? `round ${r.round}` : '', typeof r.round_s === 'number' ? secs(r.round_s) : '',
+      typeof r.tok_s === 'number' ? `${Math.round(r.tok_s)} tok/s${r.tok_s_from === 'live' ? '' : ' (last call)'}` : '',
+      typeof r.context_pct === 'number' ? `context ${r.context_pct}%` : ''].filter(Boolean)
+    out.push([{ color: 'claude', text: '▶ ' }, { bold: true, text: `${r.task} ` }, { dim: true, text: `${r.label || r.model} · ${parts.join(' · ')}` }])
+  }
+  if (!(s.running ?? []).length) out.push([{ dim: true, text: 'Nothing running.' }])
+  for (const m of (s.rack ?? []) as Row[]) {
+    const where = typeof m.gpu_bytes === 'number'
+      ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
+    const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}` : '',
+      m.load_s ? `loads ~${secs(m.load_s)}` : '', m.state === 'remote' ? 'another machine: no telemetry' : m.why ?? ''].filter(Boolean)
+    out.push([{ color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${RACK_MARK[m.state] ?? '•'} ` },
+      { text: `${m.label || m.model} ` }, { color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${m.state}${where}` },
+      { dim: true, text: facts.length ? ` · ${facts.join(' · ')}` : '' },
+      ...(m.tasks?.length ? [{ color: 'claude', text: ` ← ${m.tasks.join(', ')}` }] : [])])
+  }
+  for (const q of (s.queue ?? []) as Row[])
+    out.push([{ color: 'warning', text: '◌ ' }, { text: `${q.task} ` },
+      { dim: true, text: `waits for the GPU${typeof q.waited_s === 'number' ? ` (${secs(q.waited_s)})` : ''}` }])
+  return out
+}
+
 const SPARKS = '▁▂▃▄▅▆▇█'
 // Values as one character each, the highest the full block; none for all zero
 export function spark(values: number[]): string {
@@ -649,6 +776,8 @@ const mem = {
   liveKey: '', // the followed task and its updated_at when last read
   liveAt: 0, // when its transcript was last read
   statsReading: false, // a `wb stats --json` under way (refreshStats)
+  top: null as any, // the `wb top --json` child while the live view runs (syncTop)
+  topRetryAt: 0, // not before then, after one ended by itself
   price: null as number | null, // the electricity price wb says is set (`wb savings --json`)
   cwd: '', // the session's directory, resolved: which old tasks are this session's (mine)
   home: '', // the home directory, resolved: a session there claims no task by directory
@@ -1109,6 +1238,7 @@ async function poll($: any) {
     }
     void refreshLive($, list, now)
     void refreshStats($)
+    void syncTop($)
     if (!mem.busy && mem.queued.length && now >= mem.queuedRetryAt) void sendQueued($, mem.queued.shift()!)
     const isOpen = (t: WbTask) => ACTIVE.has(t.phase) || NEEDS.has(t.phase)
     // Only this session's tasks, and only in workbench mode, make a boundary: a task closing
@@ -1540,6 +1670,7 @@ async function restorePane($: any, tab: string) {
   const opening = $.ui.open({ id: PANE, title: 'Workbench' })
   mem.paneOpened = true
   await update($, pane, p => ({ ...p, tab: tab || p.tab, minimized: false }))
+  void syncTop($)
   $.ui.invalidate('ui.render')
   return opening
 }
@@ -1803,6 +1934,7 @@ export const register: Register = (on, options) => {
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin?.kind === 'person') {
       await update($, pane, p => ({ ...p, minimized: true }))
+      stopTop() // put away: the live view ends with it
       $.ui.invalidate('ui.render')
     }
     return next(e)
@@ -1861,7 +1993,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="row" columnGap={2} marginTop={1}>
         {TABS.map(([tab, label, hotkey]) => (
           <Button key={`tab-${tab}`} label={label} hotkey={hotkey} plain dimColor={view.tab !== tab}
-            onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => refreshStats($)) }} />
+            onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => { void refreshStats($); void syncTop($) }) }} />
         ))}
       </Box>
     )
@@ -1869,7 +2001,7 @@ export const register: Register = (on, options) => {
     // each at rest; the electricity price is typed (an Input: wb checks it)
     if (view.tab === 'settings') {
       const st = await statsSettings($)
-      const picked = (args: string[]) => runWb($, args).then(() => refreshStats($, true))
+      const picked = (args: string[]) => runWb($, args).then(() => { void refreshStats($, true); void syncTop($) })
       return (
         <Box flexDirection="column">
           <Text dimColor>{SETTINGS_HINT}</Text>
@@ -1895,12 +2027,22 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
-    // the Stats tab (#406): the history, read from `wb stats --json` while the tab is shown
+    // the Stats tab: the live view (#408, `wb top --json` while shown, with Live view on), then
+    // the history (#406, `wb stats --json`)
     if (view.tab === 'stats') {
       const { feed } = await read($, statsFeed)
       const cols = Math.max(30, Number(((e.props ?? {}) as Row).bodyColumns ?? e.viewport?.columns ?? 60))
+      const now = (await statsSettings($)).live ? liveLines(await read($, topNow)) : []
       return (
         <Box flexDirection="column">
+          {now.length ? (
+            <Box flexDirection="column" marginBottom={1}>
+              <Text bold color="claude">Now</Text>
+              {now.map(parts => (
+                <Text wrap="truncate-end">{parts.map(p => <Text color={p.color} dimColor={p.dim} bold={p.bold}>{p.text}</Text>)}</Text>
+              ))}
+            </Box>
+          ) : null}
           {statsLines(feed).map(({ label, text }) => (
             <Box flexDirection="column" marginBottom={label ? 0 : 1}>
               {label

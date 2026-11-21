@@ -1685,6 +1685,65 @@ test('the Stats tab\'s settings pick through wb, progress checks stay off by def
   await ui.unmount()
 })
 
+const TICK = {
+  ts: 1_800_000_000, every: 2,
+  gpus: [{ index: 0, name: 'Advanced Micro Devices, Inc. [AMD/ATI] Navi 48 [Radeon RX 9070 XT]', used: 2 ** 33, total: 2 ** 34, busy: 40, watts: 120 }],
+  running: [{ task: 'fix-it', model: 'ollama/m', label: 'Model M', phase: 'running', round: 2, round_s: 75, tok_s: 41.2, tok_s_from: 'live', context_pct: 31 }],
+  rack: [{ model: 'ollama/m', label: 'Model M', state: 'resident', gpu_bytes: 2 ** 33, write_tok_s: 40, read_tok_s: 900, load_s: 9, tasks: ['fix-it'] },
+    { model: 'ollama/n', label: 'Model N', state: 'idle', write_tok_s: 20 }],
+  queue: [{ task: 'later', model: 'ollama/n', waited_s: 30 }],
+}
+
+test('the live view runs wb top only while the Stats tab is on screen with Live view on, and ends it when left', async ($, on) => {
+  // #408: hidden, minimized, another tab or Live view off: no child at all
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '' }
+  const pane = fakeTasks(on, files, [], true, [], false)
+  let starts = 0, ends = 0
+  on('process.spawn', async function* (_: any, e: any) {
+    if (e.argv[1] !== 'top') {                                           // wb events, as fakeTasks's
+      yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+      await new Promise(() => {})
+    }
+    starts += 1
+    try {
+      for (;;) {
+        yield { stream: 'stdout', text: JSON.stringify(TICK) + '\n' }
+        await new Promise(r => setTimeout(r, 5))
+      }
+    } finally {
+      ends += 1
+    }
+  })
+  on('process.run', (_: any, e: any) => ({ value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ tasks: 0 }) : '', stderr: '' } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  await clock.advance(31_000)
+  expect(starts).toBe(0)                                                 // the Tasks tab
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await new Promise(r => setTimeout(r, 30))
+  expect(starts).toBe(1)
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts.some(t => t.startsWith('GPU 0 Radeon RX 9070 XT ██████░░░░░░ 8.0/16.0 GiB · busy ███▎░░░░ 40% · 120 W'))).toBe(true)
+  expect(texts.some(t => t.includes('fix-it Model M · running · round 2 · 1m15s · 41 tok/s · context 31%'))).toBe(true)
+  expect(texts.some(t => t.includes('● Model M resident 8.0 GiB on the GPU · writes ~40 · reads ~900 · loads ~9s ← fix-it'))).toBe(true)
+  expect(texts.some(t => t.includes('◌ later waits for the GPU (30s)'))).toBe(true)
+  await clock.advance(31_000)
+  expect(starts).toBe(1)                                                 // one child, not one a poll
+  await ui.press({ key: 'tab-tasks' })
+  await new Promise(r => setTimeout(r, 30))
+  expect(ends).toBe(1)                                                   // left: ended
+  files['/wb/stats.json'] = JSON.stringify({ live: false })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(31_000)
+  await new Promise(r => setTimeout(r, 30))
+  expect(starts).toBe(1)                                                 // Live view off: never started
+  expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'Now')).toBe(false)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
 test('the history says nothing it has no data for, and a new install how to begin', () => {
   expect(statsLines(null)).toEqual([{ label: '', text: 'Reading the history…' }])
   expect(statsLines({ tasks: 0 })[0].text).toMatch(/^No finished tasks yet/)

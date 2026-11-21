@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import hardware, models, router, store
+from . import hardware, models, router, stats, store
 from .transcript import plain
 
 EVERY = 2          # seconds between ticks without stats.json `every`
@@ -34,10 +34,8 @@ MIB = 2 ** 20
 
 
 def default_every() -> float:
-    """stats.json `every` when it says a positive number, else EVERY (no file: the defaults)."""
-    v = (store.read_json(store.home() / "stats.json", {}) or {})
-    v = v.get("every") if isinstance(v, dict) else None
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else EVERY
+    """stats.json `every` (`wb stats set every`: 1, 2 or 5 s), else EVERY."""
+    return float(stats.settings().get("every") or EVERY)
 
 
 def _float(text: str) -> float | None:

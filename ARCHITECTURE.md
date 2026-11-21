@@ -1676,7 +1676,18 @@ nothing until a surface attaches.
   a leading `$` allowed, is refused with a toast before wb is asked), shown from `wb savings
   --json`'s `price` (`priceOf`, `mem.price`). The ring's sentence follows any of these rows
   (`SETTING_ROWS`).
-- **The Stats tab** (#406) is the history: `wb stats --json` (*The Stats feed*) drawn as one line a
+- **The Stats tab** opens with **Now**, the live view (#408): `wb top --json` drawn by `liveLines`,
+  a line per GPU (memory and busy % as bars, `bar`, in eighths; watts; busy's sparkline since the
+  tab opened, the last `BUSY_KEEP` 60 samples, in memory only), a line per running task (phase,
+  round, its time, tok/s, said `(last call)` when not live, context %), the rack (one line per
+  model: resident, split, idle or can't run, where its memory is, its speeds and load time, the
+  tasks on it) and the queue. One child (`runTop`), started by `syncTop` only while the tab is
+  shown, the pane not minimized and Live view on, checked at each poll, a tab's press, a
+  minimize, a bring-back and a Stats pick; it ends (`stopTop`, `return()` on the stream) the
+  moment any of those stops holding, and its own loop checks again at each line, so a pane put
+  away by the engine ends it within a tick. One that ended by itself is tried again after
+  `TOP_RETRY_MS` 30 s. Live view off: no child, no **Now**. The newest tick is the `top` atom
+  (`top-1`). Below it is the history (#406): `wb stats --json` (*The Stats feed*) drawn as one line a
   section by `statsLines`, `Label: text` with the label bold: this week and all time (the score,
   the saving or the cost (estimate), tasks, landed, energy and, with a price, its cost), the
   streak (only the best once a run ended), what the agents absorbed without waking Claude, one
@@ -3724,7 +3735,7 @@ const bound to one; imports from the module's own files also pass). The helpers 
 "gating hook without .catch" notes) is the check. Env reads must be string literals: `HOME`,
 `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_COMPACT_AT`.
 
-**State.** Seven `$.state` atoms survive a module reload within a session; each has a shape tag,
+**State.** Eight `$.state` atoms survive a module reload within a session; each has a shape tag,
 and an atom read under an old tag is absent, so change the tag when its type changes:
 `tasks` (`tasks-5`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
 updatedAt, tokens, recent, repo, cwd, session, claude_pid, backlog, allowed), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
@@ -3733,7 +3744,8 @@ listener key and the web chat's switch as last read), `pane` (`pane-1`, {tab, op
 minimized}: the pane's tab, the open settings row, the option under the ring, the strip), `sessions` (`sessions-1`, string[]: every Claude Code session id this process
 has had, `mem.ids` while loaded), `savings` (`savings-1`, string: the pane's saving line, '' for
 none), `stats` (`stats-1`, {key, feed}: the Stats tab's `wb stats --json` and the stamp of the files
-it was read from). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
+it was read from), `top` (`top-1`, {snap, busy}: `wb top --json`'s newest tick and each GPU's busy
+% since the Stats tab opened). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
 this session's open set, the session's resolved `cwd` and `home`, `person`, follow, sawTurn, scoutAsked,
 toasts sent, dropped wakes, the closed tasks no longer read, the events pid, …). The task facts
 themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.json's
@@ -3952,7 +3964,8 @@ and the 2026-11-16 audit's: another project's task neither woken nor acked, a he
 quiet until a surface attaches, a dropped wake retried, no false rewake for a notice delivered
 before, two wakes due in one turn, two open questions, another plugin's tool call, the update
 check beside the wakes, a notify.jsonl read by its tail, the pane read only while shown,
-the Stats tab read only while shown and again when a task closes, its settings rows and the typed
+the Stats tab read only while shown and again when a task closes, `wb top` run only while the
+Stats tab is on screen with Live view on and ended when left, its settings rows and the typed
 price, a history that says nothing it has no data for, a sticky
 focus, a cut transcript, a long line clipped, `/workbench-models` once, wb missing (one toast, a
 backoff, no model check), wb failing (no open-tasks block, quit says so), no compaction without
@@ -4128,7 +4141,6 @@ $WB_HOME (~/.local/state/workbench)
   gpu.lock  gpu.json  gpu.admit  the GPU lease: the lock, who holds or waits for it, the admission lock,
   gpu.load                       and the lock that takes model loads one at a time
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
-  stats.json                     optional: {every, …}; wb top reads `every` (seconds between ticks; none or not a positive number: 2)
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
   update.json                    wb update: when origin was last asked, how far behind this copy was
   bench/cases/<case>/            case.json  spec.md  base.bundle  hidden/<path>…  reference.patch
@@ -4707,7 +4719,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
-- **A `$.state` atom's type** in the mod → its tag (`tasks-5`, `live-1`, `chat-3`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`).
+- **A `$.state` atom's type** in the mod → its tag (`tasks-5`, `live-1`, `chat-3`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`, `top-1`).
 - **The Claude coding choices** (`cli.CODING`: modes, labels, sentences) → the mod's
   `CODING_STOPS` (the Settings row) and `CODING_RULES` (the context block), and the skill's *Claude
   coding* bullet.

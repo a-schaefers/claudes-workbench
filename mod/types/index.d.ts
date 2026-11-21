@@ -46,6 +46,10 @@ export type WbPane = { tab: string; open: string; focus: string; minimized: bool
  * key of the files it was read from (results.jsonl and stats.json: size and mtime). */
 export type WbStats = { key: string; feed: Record<string, any> | null }
 
+/** The Stats tab's live view (#408): `wb top --json`'s newest tick (null before the first), and
+ * each GPU's busy % since the tab was shown, for its sparkline (memory only: never on disk). */
+export type WbTop = { snap: Record<string, any> | null; busy: Record<string, number[]> }
+
 declare module 'claude-code' {
   interface PluginState {
     workbench: {
@@ -56,6 +60,8 @@ declare module 'claude-code' {
       pane: Shaped<WbPane>
       /** the Stats tab's history (WbStats, #406) */
       stats: Shaped<WbStats>
+      /** the Stats tab's live view (WbTop, #408) */
+      top: Shaped<WbTop>
     }
   }
 }

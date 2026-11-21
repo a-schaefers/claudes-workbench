@@ -128,7 +128,7 @@ dependencies. No packaging: it runs from the clone.
 - `images.py`, `audio.py`: `wb image`, `wb audio` (`images.json`, `audio.json`; sounds come checked:
   Claude can't hear); `media.py`: what they share, the GPU too.
 - `optimize.py`: `wb optimize` (when due, or asked): each Ollama model's largest window all on the GPU.
-- `top.py`: `wb top`: GPUs, tasks, models, the queue, live.
+- `top.py`: `wb top`: GPUs, tasks, models, queue, live.
 - `agent/HANDBOOK.md`: Claude's working habits for the agent. Every agent prompt carries it: keep
   it short (prefill time).
 - `skill/workbench/`: the `/workbench` procedure (`SKILL.md`, `reference/`; `wb setup` links it).
