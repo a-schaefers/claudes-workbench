@@ -1124,9 +1124,12 @@ def resident() -> list[Model]:
 
 
 def releasable(m: Model) -> bool:
-    """Whether free_gpu can let go of the model: a local Ollama one, or a local server with a
-    stop command (a server without one, or another host's model, stays up)."""
-    return not m.remote and (m.engine == "ollama" or bool(m.stop))
+    """Whether free_gpu can let go of the model: a local Ollama one (or one on a server that
+    shares this GPU, same_gpu), or a local server with a stop command (a server without one, or
+    another host's model, stays up)."""
+    if m.remote:
+        return m.engine == "ollama" and same_gpu(m)
+    return m.engine == "ollama" or bool(m.stop)
 
 
 def freed(m: Model, keep=()) -> bool:
@@ -1225,10 +1228,11 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         _lmstudio_load(m, lms[0], say)
         return time.time() - t0
     respread = st["resident"] and _respread(m, keep)
-    if st["resident"] and not respread and (m.remote or not _others_resident(m, keep) or _room_beside(m)):
+    away = m.remote and not same_gpu(m)  # Ollama for Windows from WSL is on this GPU (#750)
+    if st["resident"] and not respread and (away or not _others_resident(m, keep) or _room_beside(m)):
         return 0.0
     t0 = time.time()
-    if not m.remote and not _room_beside(m):
+    if not away and not _room_beside(m):
         free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
     if m.engine == "ollama":
         if respread:
@@ -1436,19 +1440,22 @@ def _kept_name(name: str, held: set[str]) -> bool:
     return bare(name) in want
 
 
-def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
+def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
+             cards: frozenset | None = None) -> None:
     """Stop every model server and unload every Ollama model holding the GPU, except the models
     in ``keep`` (ids): the task's own, and those of tasks running beside it; and those the user
     keeps loaded (keep_loaded). ``of``: the model the GPU is freed for; an Ollama known to use
     only other cards than its server's (apart) keeps its models: every server's were unloaded,
-    so with one Ollama per GPU a task on one card emptied the other (#460, the audit of 1.8)."""
+    so with one Ollama per GPU a task on one card emptied the other (#460, the audit of 1.8).
+    ``cards``: the cards an image or audio engine is pinned to (media.cards), likewise: an Ollama
+    known to use none of them keeps its models (#752: a generation emptied every card)."""
     warn = warn or say
     if _fake():
         return
     seen: dict = {}
     stopped = False
     held = keep_loaded()
-    local = [o for o in discover().values() if not o.remote]  # another host's GPU isn't ours to free
+    local = on_this_gpu(discover())  # another host's GPU isn't ours to free (unless it's this one: #750)
     kept = [o for o in local if o.id in keep or o.id in held]
     # LM Studio loads and unloads one model at a time: every instance not kept is unloaded and
     # the server left running (#645); its server is then done
@@ -1494,7 +1501,8 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
                      if not any(o.server == key and _matches(o.name, {name}) for o in kept_ollama)
                      and not _kept_name(name, held)]  # ours or another tool's
               for key, root in _roots(o for o in local if o.engine == "ollama").items()
-              if of is None or not apart(of.root, root, seen)}
+              if (of is None or not apart(of.root, root, seen))
+              and (cards is None or not apart_cards(cards, root, seen))}
     _wait_unused(doomed, warn)
     for root, names in doomed.items():
         for name in names:
@@ -1630,7 +1638,7 @@ def _others_resident(m: Model, keep=()) -> bool:
     """Whether anything free_gpu would let go of holds the GPU beside ``m``: an Ollama on other
     cards (apart) isn't asked, as free_gpu leaves it be."""
     held, seen = keep_loaded(), {}
-    local = [o for o in discover().values() if not o.remote]
+    local = on_this_gpu(discover())
     ours = [m, *(o for o in local if o.id in keep or o.id in held)]
     if _lmstudio_extra(local, ours, held)[0]:  # another of LM Studio's models, loaded (#645)
         return True
@@ -1649,7 +1657,7 @@ def _room_beside(m: Model) -> bool:
     fit (the 2026-11-19 audit). Only for Ollama, under a known budget (gpu_budget), with no other
     server resident (whose memory nothing here measures), ``m`` all in VRAM if it is loaded, and
     Ollama's own limit on loaded models (OLLAMA_MAX_LOADED_MODELS) not reached."""
-    budget = gpu_budget(m.root)
+    budget = gpu_budget(m.root) if not m.remote else None  # nothing here reads another host's
     if m.engine != "ollama" or not budget:
         return False
     local = [o for o in discover().values() if not o.remote]
@@ -1849,11 +1857,31 @@ def server_devices(root: str | None) -> frozenset | None:
     unknown (one server readable, a container's, gpu_gb set by hand, no card named), and an
     unknown server is taken to share every card with every other, as all were before #460."""
     if not root or _fake() or _overrides().get("gpu_gb") is not None \
-            or hardware.ollama_matched(root) is None:
+            or not _this_host(urlparse(root).hostname) or hardware.ollama_matched(root) is None:
+        return None  # another host's process can't be read (one there on our port isn't ours)
+    return frozenset(_card(g) for g in budget_devices(root)[1]) or None
+
+
+def _card(g: dict) -> str:
+    """One card's identity, as server_devices and named_cards compare them: its UUID, else its
+    driver, name and size."""
+    return g.get("uuid") or f"{g.get('driver')}|{g.get('name')}|{g.get('vram')}"
+
+
+def named_cards(raw: str) -> frozenset | None:
+    """The cards a CUDA_VISIBLE_DEVICES-style list names (an image or audio engine's `devices`,
+    #752): numbers in nvidia-smi's order (CUDA's under CUDA_DEVICE_ORDER=PCI_BUS_ID; ROCm's for
+    AMD cards), or UUIDs or their unique starts, as hardware.visible reads them. None when that
+    can't be told (gpu_gb set by hand, no card read, a list that names none of them), and unknown
+    shares every card, as before."""
+    if _overrides().get("gpu_gb") is not None:
         return None
-    devs = budget_devices(root)[1]
-    return frozenset(g.get("uuid") or f"{g.get('driver')}|{g.get('name')}|{g.get('vram')}"
-                     for g in devs) or None
+    devs = hardware.gpus(windows=False)
+    if any(g.get("discrete") for g in devs):
+        devs = [g for g in devs if g.get("discrete")]
+    picked = hardware.visible(devs, {"CUDA_VISIBLE_DEVICES": raw, "ROCR_VISIBLE_DEVICES": raw,
+                                     "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})[0]
+    return frozenset(_card(g) for g in picked) or None
 
 
 def apart(root: str | None, other: str | None, seen: dict | None = None) -> bool:
@@ -1866,6 +1894,15 @@ def apart(root: str | None, other: str | None, seen: dict | None = None) -> bool
             seen[r] = server_devices(r)
     a, b = seen[root], seen[other]
     return a is not None and b is not None and not a & b
+
+
+def apart_cards(cards: frozenset | None, root: str | None, seen: dict | None = None) -> bool:
+    """Whether the Ollama at ``root`` is known to use none of ``cards`` (an engine's, #752), as
+    apart() tells two servers. Unknown is never apart."""
+    seen = {} if seen is None else seen
+    if root not in seen:
+        seen[root] = server_devices(root)
+    return cards is not None and seen[root] is not None and not cards & seen[root]
 
 
 def need(m: Model) -> int:
@@ -1916,18 +1953,32 @@ def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
     return all(sizes) and sum(sizes) <= SHARE_AT * budget
 
 
-def admits(m: Model | None, held: dict) -> bool:
+def admits(m: Model | None, held: dict, cards: frozenset | None = None) -> bool:
     """Whether ``m`` may take the GPU now beside the live holders ``held`` (gpu.json's entries):
     nobody waits ahead of it (first come, first served), every holder's model is known, and they
     all fit together (can_share). Nothing (an image, ``m`` None) joins anyone, and on a remote
-    server, whose memory nothing here measures, nobody shares: tasks take turns (#116)."""
+    server, whose memory nothing here measures, nobody shares: tasks take turns (#116). But an
+    image or audio engine pinned to known ``cards`` (media.cards) joins holders whose Ollama
+    servers are known to use none of them (apart_cards), and a task joins such a holder (its
+    entry's `cards`) when its own server is apart from them: on a box with one Ollama per GPU, a
+    generation on the idle card refused while any task ran on any card (#752)."""
     if not held:
-        return m is not None
-    if m is None or m.remote or any(h.get("waiting") for h in held.values()):
+        return m is not None or cards is not None
+    if (m is not None and m.remote) or any(h.get("waiting") for h in held.values()):
         return False
-    found = discover()
-    running = [o for o in (found.get(h.get("model") or "") for h in held.values()) if o]
-    return len(running) == len(held) and can_share(m, running, gpu_budget(m.root))
+    on_cards = lambda h: h.get("model") is None and isinstance(h.get("cards"), list) and h["cards"]  # noqa: E731
+    pinned = [frozenset(h["cards"]) for h in held.values() if on_cards(h)]
+    rest = [h for h in held.values() if not on_cards(h)]
+    found, seen = discover(), {}
+    running = [o for o in (found.get(h.get("model") or "") for h in rest) if o]
+    if len(running) != len(rest):
+        return False  # an exclusive holder with no model (wb optimize, unloaded tests) or an unknown one
+    if m is None:
+        return cards is not None and all(not cards & c for c in pinned) and all(
+            o.engine == "ollama" and not o.remote and apart_cards(cards, o.root, seen) for o in running)
+    if pinned and (m.engine != "ollama" or not all(apart_cards(c, m.root, seen) for c in pinned)):
+        return False
+    return not running or can_share(m, running, gpu_budget(m.root))
 
 
 def holders(home: Path | None = None, pool: str = "gpu") -> dict:
@@ -1973,8 +2024,9 @@ class GpuLease:
     swapped their models in and out on every request."""
 
     def __init__(self, m: Model | None, task: str, say=print, wait: bool = True,
-                 on: Model | None = None):
+                 on: Model | None = None, cards: frozenset | None = None):
         self.m, self.task, self.say, self.wait = m, task, say, wait
+        self.cards = cards if m is None else None  # an engine pinned to these (admits, #752)
         self.home = lease_dir()
         self.pool = pool(m or on)  # ``on``: whose server a lease with no model takes (wb optimize)
         self.fh = None
@@ -2002,6 +2054,7 @@ class GpuLease:
             self.waiting_since = store.now()
         return {"model": self.m.id if self.m else None, "task": self.task, "since": self.since,
                 "start": _started(os.getpid()), "uid": os.getuid(), "user": _user(),
+                **({"cards": sorted(self.cards)} if self.cards else {}),
                 **({"waiting": True, "waiting_since": self.waiting_since} if waiting else {})}
 
     def warn(self, msg: str) -> None:
@@ -2025,23 +2078,29 @@ class GpuLease:
     def _admit(self) -> None:
         with _lease_lock(self.home / f"{self.pool}.admit"):
             held = {p: h for p, h in self._holders().items() if p != self.me}
-            if held and self.m is None and not self.wait:
-                raise RuntimeError(busy(held, f"{self.task} needs it to itself. Run it once they "
-                                        "are in review (answer one that asks first), or with "
-                                        "--wait, in the background, to queue behind them"))
-            if admits(self.m, held):
+            refuse = self.m is None and not self.wait
+            if held and refuse and not admits(None, held, self.cards):
+                raise RuntimeError(busy(held, self._needs()))
+            if admits(self.m, held, self.cards):
                 try:
                     fcntl.flock(self.fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
                 except BlockingIOError:
-                    pass  # something has the GPU to itself: wait below
+                    if refuse:  # something has the GPU to itself, with no entry yet
+                        raise RuntimeError(busy(held, self._needs())) from None
+                    # something has the GPU to itself: wait below
                 else:
                     self._set({**held, self.me: self._entry()})
                     if held:
                         self.say("sharing the GPU with " + ", ".join(
-                            sorted({h["model"] for h in held.values() if h.get("model")})))
+                            sorted({h.get("model") or h.get("task") or "?" for h in held.values()})))
                     return
             self._set({**held, self.me: self._entry(waiting=True)})
         self._take_alone(held)
+
+    def _needs(self) -> str:
+        return (f"{self.task} needs " + ("its cards" if self.cards else "it to itself")
+                + ". Run it once they are in review (answer one that asks first), or with "
+                "--wait, in the background, to queue behind them")
 
     def step_aside(self, unload: bool = False) -> None:
         """Let the GPU go while the task needs none of it: its tests (up to --test-timeout, every
@@ -2065,7 +2124,7 @@ class GpuLease:
             held.pop(self.me, None)
             if unload:
                 self._unload_unshared(held)
-            if unload and not (self.m and self.m.remote):
+            if unload and not (self.m and self.m.remote and not same_gpu(self.m)):
                 self._set({**held, self.me: {**self._entry(), "model": None, "tests": True}})
             else:
                 self._set(held)
@@ -2074,7 +2133,7 @@ class GpuLease:
 
     def _unload_unshared(self, held: dict) -> None:
         held_ids = keep_loaded()  # the user's own (#215), and only Ollama unloads on request
-        if self.m and self.m.engine == "ollama" and not self.m.remote and not _fake() \
+        if self.m and self.m.engine == "ollama" and (not self.m.remote or same_gpu(self.m)) and not _fake() \
                 and self.m.id not in held_ids and not _kept_name(self.m.name, held_ids):
             found = discover()
             if _key(self.m) not in {_key(o) for o in (found.get(h.get("model")) for h in held.values()) if o}:
@@ -2193,11 +2252,34 @@ def _user() -> str:
 
 def pool(m: Model | None) -> str:
     """The lease files a model takes turns under: gpu.* for this machine's GPU, gpu-<host>.* for
-    a remote server's (its host and port in file-name characters)."""
-    if not (m and m.remote):
+    a remote server's (its host and port in file-name characters), but gpu.* for one on this GPU
+    after all (same_gpu: WSL2's Windows host)."""
+    if not (m and m.remote) or same_gpu(m):
         return "gpu"
     u = urlparse(m.root)
     return "gpu-" + re.sub(r"[^a-z0-9]+", "-", f"{u.hostname or 'host'}-{u.port or ''}".lower()).strip("-")
+
+
+def same_gpu(m: Model | None) -> bool:
+    """Whether a remote model's server runs on this machine's GPU after all: models.json's
+    `same_gpu` (its provider's entry or its own) when it says, else whether its host is WSL2's
+    Windows host (windows_host: NAT's gateway), whose Ollama for Windows uses the very GPU an
+    engine in WSL does. A task there took pool gpu-<winhost>, a command engine in WSL pool gpu:
+    neither waited for the other, nothing was unloaded, and both ran on one card (#750). An
+    Ollama cloud model never is."""
+    if not (m and m.remote) or m.cloud:
+        return False
+    said = m.extra.get("same_gpu")
+    if isinstance(said, bool):
+        return said
+    host = (urlparse(m.root).hostname or "").lower()
+    return bool(host) and host == (windows_host() or "").lower()
+
+
+def on_this_gpu(found: dict) -> list[Model]:
+    """The discovered models whose memory is this GPU's: the local ones, and the Ollama ones
+    on a server same_gpu says shares it (its API unloads them as a local one's does: #750)."""
+    return [o for o in found.values() if not o.remote or (o.engine == "ollama" and same_gpu(o))]
 
 
 def _started(pid: int) -> str | None:

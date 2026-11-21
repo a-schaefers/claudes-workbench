@@ -1,6 +1,7 @@
 /* The web chat's page. Three promises, kept the way merecat keeps them:
-   - Nothing half-received. The server sends the whole thread in each `state` event, and every
-     (re)connect starts with one, so a dropped connection loses nothing; replies are written
+   - Nothing half-received. Every (re)connect starts with the whole thread in a `state` event,
+     then each change comes as a `patch` of what changed (#755), so a dropped connection loses
+     nothing; replies are written
      whole by `wb chat reply`, and the paced reveal is only paint, finished instantly if the page
      is hidden or the reader prefers less motion.
    - Nothing sent twice or lost. A message goes into a local outbox with its own id first and is
@@ -325,10 +326,22 @@
       rich(body, d.plan || (d.project ? `Claude in ${d.project} finished a plan, but its text didn't reach the chat: read it and answer in that terminal.`
         : '(the plan is in the terminal)'))
       card.append(body)
-      if (d.plan && (d.plan.length > 900 || d.plan.split('\n').length > 14)) {  // long: folded, with a way to read it all
+      if (d.plan && (d.cut || d.plan.length > 900 || d.plan.split('\n').length > 14)) {  // long: folded, with a way to read it all
         body.classList.add('folded')
         const more = document.createElement('button'); more.type = 'button'; more.className = 'more'; more.textContent = 'Show the whole plan'
-        more.onclick = () => { body.classList.remove('folded'); more.remove() }
+        more.onclick = async () => {
+          if (d.cut) {  // a settled plan comes cut, its whole text fetched when asked for (#755)
+            more.disabled = true
+            try {
+              const r = await fetch('/api/ask/' + encodeURIComponent(a.id), { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+              const j = r.ok ? await r.json() : null
+              const whole = j && j.ask && j.ask.detail && j.ask.detail.plan
+              if (typeof whole !== 'string') throw new Error('HTTP ' + r.status)
+              rich(body, whole)
+            } catch { more.disabled = false; more.textContent = 'Not loaded: try again'; return }
+          }
+          body.classList.remove('folded'); more.remove()
+        }
         card.append(more)
       }
     } else if (a.kind !== 'question') {
@@ -340,7 +353,7 @@
       try {
         const r = await post('/api/answer', { id: a.id, answer: verdict, ...extra })
         const j = await r.json().catch(() => ({}))
-        if (r.ok && j.state) return apply(j.state)
+        if (r.ok && j.state) return apply(j.state, { reply: true })
         if (r.status === 401) return keyless('That key was not accepted.')
         said.textContent = j.error || 'not sent: try again'
       } catch { said.textContent = 'not sent: try again' }
@@ -540,12 +553,17 @@
     if (!text) { net.hidden = true; return }
     net.textContent = text; net.className = 'net' + (bad ? ' bad' : ''); net.hidden = false
   }
-  function apply(s) {
-    if (typeof s.now === 'number') skew = s.now - Date.now() / 1000
+  // The server's `now` of the newest state taken. A POST's reply (`reply`) older than it is
+  // skipped: the stream's patches build on what the stream sent, so a row the stream had sent
+  // that an older reply lacked would never come again (#755)
+  let stamp = 0
+  function apply(s, { reply = false, quiet = false } = {}) {
+    if (reply && typeof s.now === 'number' && s.now < stamp) return render()
+    if (typeof s.now === 'number') { skew = s.now - Date.now() / 1000; stamp = Math.max(stamp, s.now) }
     if (s.build && build && s.build !== build && reloadOnce()) return  // updated: the new page
     if (s.build) build = s.build
     live = true
-    save(K.thread, (s.messages || []).slice(-50))
+    if (!quiet) save(K.thread, (s.messages || []).slice(-50))  // a patch without messages: no rewrite (#755)
     state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null }
     if (!sheet.hidden) drawSettings()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
@@ -554,6 +572,17 @@
     for (const o of outItems()) if (onServer.has(o.cid)) { forgetFiles(o); drop(o.cid) }
     render()
   }
+  // A patch (chat.patch, #755): for messages and asks, `put` (rows new or changed, by id: replaced
+  // where they are, else added at the end, as the server's lists grow) and `drop` (ids gone); every
+  // other field whole
+  const merge = (list, d) => {
+    if (!d) return list
+    const gone = new Set(d.drop || []), put = new Map((d.put || []).map(r => [r.id, r]))
+    const out = list.filter(r => !gone.has(r.id)).map(r => { const n = put.get(r.id); put.delete(r.id); return n || r })
+    return out.concat([...put.values()])
+  }
+  const applyPatch = p => apply({ ...p, messages: merge(state.messages, p.messages), asks: merge(state.asks, p.asks) },
+    { quiet: !p.messages })
   function reloadOnce() {
     // at most once a minute, so a page whose files keep changing can't reload for ever; the draft
     // and the outbox are in localStorage already
@@ -602,8 +631,8 @@
             if (line.startsWith('event:')) event = line.slice(6).trim()
             else if (line.startsWith('data:')) data += (data ? '\n' : '') + line.slice(5).replace(/^ /, '')
           }
-          if (event === 'state' && data) {
-            try { apply(JSON.parse(data)) } catch {}
+          if ((event === 'state' || event === 'patch') && data) {
+            try { event === 'state' ? apply(JSON.parse(data)) : applyPatch(JSON.parse(data)) } catch {}
             if (failures) { failures = 0; banner('') }
             flush()
           }
@@ -1015,7 +1044,7 @@
         if (r.ok) {
           if (o === held) sentHeld()
           else if (j.message && j.message.cid === o.cid) { forgetFiles(o); drop(o.cid) }
-          if (j.state) apply(j.state); else render()
+          if (j.state) apply(j.state, { reply: true }); else render()
           continue
         }
         if (r.status === 401) { keyless('That key was not accepted.'); break }
@@ -1159,7 +1188,7 @@
       try {
         const r = await post('/api/prefs', { away: b.dataset.away })
         const j = await r.json().catch(() => ({}))
-        if (r.ok && j.state) return apply(j.state)
+        if (r.ok && j.state) return apply(j.state, { reply: true })
       } catch {}
       state.prefs = was; drawSettings(); $('away-note').textContent = 'Not saved: try again.'
     }
@@ -1303,7 +1332,7 @@
   async function firstState() {  // at once, without waiting for a stream slot to free up
     try {
       const r = await fetch('/api/state', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
-      if (r.ok && !live) apply(await r.json())
+      if (r.ok && !live) apply(await r.json(), { reply: true })  // the stream's, if it came first, is newer
     } catch {}
   }
 

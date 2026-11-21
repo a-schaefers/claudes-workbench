@@ -222,6 +222,19 @@ async function run(engine, device) {
     await until(() => { const a = JSON.parse(wb('chat', 'wait', id, '--timeout', '0', '--json')); return a.answer === 'deny' && a.note === 'split step 2' })
     await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('you asked for changes'))
   })
+  await check('a settled plan comes cut, and Show the whole plan fetches the rest', async () => {
+    // #755: thirty answered plans were most of a 922 KB state, sent on every change
+    const plan = '# Long\n\n' + Array.from({ length: 400 }, (_, i) => `${i + 1}. step ${i + 1}`).join('\n') + '\n\nTHE END'
+    const id = wb('chat', 'ask', '--tool', 'ExitPlanMode', '--kind', 'plan', '--detail', JSON.stringify({ plan })).split(' ')[0]
+    await until(async () => (await page.locator('.row.ask').last().locator('.choices .deny').count()) === 1)
+    wb('chat', 'answer', id, 'deny', '--by', 'cli')
+    await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('you asked for changes'))
+    const last = page.locator('.row.ask').last()
+    if ((await last.locator('.plan').textContent()).includes('THE END')) throw new Error('the whole plan came in the state')
+    await last.locator('.more').click()
+    await until(async () => (await last.locator('.plan').textContent()).includes('THE END'))
+    if (await last.locator('.plan.folded, .more').count()) throw new Error('still folded')
+  })
   await check("Claude's question: pick an option, answer", async () => {
     const questions = [{ question: 'Which DB?', header: 'DB', multiSelect: false,
       options: [{ label: 'SQLite', description: 'one file' }, { label: 'Postgres', description: 'a server' }] }]

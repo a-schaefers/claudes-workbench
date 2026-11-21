@@ -21,6 +21,7 @@ from collections import defaultdict
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons,
                media, models, optimize, progress, results, router, savings, scan, skills, spend, stats, store,
@@ -3097,6 +3098,8 @@ def cmd_scout(a):
         print("  " + said)
     print("\nimage engines (wb image)")
     print("\n".join(image_lines()) or f"  none: describe one in {images.config_path()}")
+    if said := image_server_lines():
+        print("\n".join(said))  # #753: one already running, before any install
     print("\naudio engines (wb audio)")
     print("\n".join(audio.lines()) or f"  none: describe one in {audio.config_path()}")
     if said := audio.coverage():
@@ -3456,6 +3459,41 @@ def image_lines() -> list[str]:
                       + ("" if e.get("unload") else " (no unload URL)")  # #749, as audio's
                       if e.get("url") and not e.get("command") and media.on_gpu(e) else "")
                    + (f"\n    {e['notes']}" if e.get("notes") else ""))
+    return out
+
+
+IMAGE_SERVERS = {
+    "comfyui": ("ComfyUI", '{{"url": "{root}", "workflow": "<a workflow saved with Export (API)>"}}'),
+    "a1111": ("AUTOMATIC1111's API (A1111, Forge, SD.Next)",
+              '{{"url": "{root}/sdapi/v1/txt2img", "unload": "{root}/sdapi/v1/unload-checkpoint"}}'),
+}
+
+
+def image_server_lines() -> list[str]:
+    """An image server answering on its default port here that no engine names, with the entry
+    that would use it: the skill proposed an 11 GB install to a user already running ComfyUI or
+    Forge (#753)."""
+    named = set()
+    for e in images.engines().values():
+        try:
+            u = urlparse(str(e.get("url") or ""))
+            if u.port and models._this_host(u.hostname):
+                named.add(u.port)
+        except ValueError:  # a url that doesn't parse: listed as not usable (#748)
+            pass
+    out = []
+    for s in images.servers_here():
+        port = urlparse(s["root"]).port
+        if port in named:
+            continue
+        if s["api"] in IMAGE_SERVERS:
+            what, entry = IMAGE_SERVERS[s["api"]]
+            out.append(f"  {what} answers at {s['root']}, and no engine uses it: "
+                       + entry.format(root=s["root"]))
+        else:
+            usual = next(IMAGE_SERVERS[k][0] for p, k, _ in images.PORTS if p == port)
+            out.append(f"  something answers at {s['root']} ({usual}'s port), but not its API"
+                       + (" (AUTOMATIC1111 needs --api)" if port == 7860 else ""))
     return out
 
 

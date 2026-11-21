@@ -200,7 +200,8 @@ def gpu(task: store.Task, say=_say):
         yield
         return
     try:
-        local = not models.resolve(task.spec["model"]).remote
+        m = models.resolve(task.spec["model"])
+        local = not m.remote or models.same_gpu(m)  # Ollama for Windows from WSL: this GPU (#750)
     except KeyError:
         local = True  # retired since: the GPU may still be busy, so take it
     if not local:

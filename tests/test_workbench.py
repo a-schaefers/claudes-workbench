@@ -8206,11 +8206,147 @@ class Images(Base):
         self.assertEqual(got, [("/sdapi/v1/txt2img", {"prompt": "a fox", "width": 512, "height": 768,
                                                       "seed": 3, "batch_size": 1, "n_iter": 1, "steps": 20})])
         self.assertEqual((tmp / "o" / "a-fox-3.png").read_bytes(), IMAGE_PNG + b"forge")
-        self.engines({"comfy": {"url": root + "/prompt", "api": "comfyui"},
+        self.engines({"sd": {"url": root + "/prompt", "api": "sdcpp"},
                       "steps": {"url": root + "/sdapi/v1/txt2img", "steps": "20"}})
         listed = run_wb("image", "--list")
-        self.assertIn("not usable: api must be one of openai, a1111", listed)
+        self.assertIn("not usable: api must be one of openai, a1111, comfyui", listed)
         self.assertIn("not usable: steps must be a whole number", listed)
+
+    def comfyui(self, history):
+        """A fake ComfyUI on a port of its own: ``history(n)`` is what its nth /history poll
+        answers; what it was sent is in the list returned."""
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        got, polls = [], []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def reply(self, body, code=200):
+                self.send_response(code); self.end_headers()
+                self.wfile.write(body if isinstance(body, bytes) else json.dumps(body).encode())
+
+            def do_GET(self):
+                got.append(("GET", self.path, None))
+                if self.path.startswith("/history/p-1"):
+                    polls.append(1)
+                    self.reply(history(len(polls)))
+                elif self.path.startswith("/view?"):
+                    self.reply(IMAGE_PNG + b"comfy")
+                elif self.path == "/system_stats":
+                    self.reply({"system": {"comfyui_version": "0"}, "devices": []})
+                else:
+                    self.reply(b"<html>ComfyUI</html>")
+
+            def do_POST(self):
+                got.append(("POST", self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                self.reply({"prompt_id": "p-1", "number": 1, "node_errors": {}} if self.path == "/prompt" else {})
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        from workbench import images
+        fast = mock.patch.object(images, "COMFY_POLL", 0.05)  # its polls, a tenth as far apart
+        fast.start()
+        self.addCleanup(fast.stop)
+        return f"http://127.0.0.1:{srv.server_port}", got
+
+    WORKFLOW = {"3": {"class_type": "KSampler", "inputs": {"seed": "{seed}", "steps": 8, "model": ["4", 0]}},
+                "5": {"class_type": "EmptyLatentImage", "inputs": {"width": "{width}", "height": "{height}"}},
+                "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "{prompt}, film grain"}},
+                "8": {"class_type": "PreviewImage", "inputs": {}},
+                "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "wb-{seed}"}}}
+
+    def test_a_comfyui_url_runs_its_saved_workflow_and_saves_the_first_output(self):
+        # #753 (the 2026-11-21 audit, finding 100): ComfyUI refused the OpenAI body outright, so
+        # the most common local image setup needed a hand-written wrapper
+        done = {"p-1": {"status": {"status_str": "success", "completed": True, "messages": []},
+                        "outputs": {"8": {"images": [{"filename": "tmp.png", "subfolder": "", "type": "temp"}]},
+                                    "9": {"images": [{"filename": "wb-3_00001_.png", "subfolder": "a b",
+                                                      "type": "output"}]}}}}
+        root, got = self.comfyui(lambda n: done if n > 1 else {})  # running at the first poll
+        tmp = Path(self.tmp.name)
+        (tmp / "flow.json").write_text(json.dumps(self.WORKFLOW))
+        self.engines({"comfy": {"url": root, "workflow": "flow.json", "gpu": False}})
+        listed = run_wb("image", "--list")
+        self.assertIn("comfy (off the GPU): " + root + " · ready", listed)
+        run_wb("image", "a {seed} fox", "--n", "1", "--seed", "3", "--size", "512x768", "--out", str(tmp / "o"))
+        posts = [(path, body) for verb, path, body in got if verb == "POST"]
+        graph = posts[0][1]["prompt"]
+        self.assertEqual(posts[0][0], "/prompt")
+        self.assertEqual(graph["3"]["inputs"], {"seed": 3, "steps": 8, "model": ["4", 0]})  # a number
+        self.assertEqual(graph["5"]["inputs"], {"width": 512, "height": 768})
+        self.assertEqual(graph["6"]["inputs"]["text"], "a {seed} fox, film grain")  # one pass
+        self.assertEqual(graph["9"]["inputs"]["filename_prefix"], "wb-3")
+        views = [path for verb, path, _ in got if path.startswith("/view?")]
+        self.assertEqual(views, ["/view?filename=wb-3_00001_.png&subfolder=a+b&type=output"])  # the saved one
+        self.assertEqual((tmp / "o" / "a-seed-fox-3.png").read_bytes(), IMAGE_PNG + b"comfy")
+        # its own /free unloads it after the batch: ComfyUI keeps what it loaded (#749)
+        self.assertEqual(posts[-1], ("/free", {"unload_models": True, "free_memory": True}))
+        self.assertNotIn("no unload URL", listed)
+
+    def test_a_comfyui_workflow_that_cant_run_is_refused_and_a_failed_one_says_why(self):
+        # #753: a UI-format save, one without {prompt}, an error in the graph and a timeout
+        from workbench import images
+        failed = {"p-1": {"status": {"status_str": "error", "completed": False, "messages": [
+            ["execution_start", {}], ["execution_error", {"exception_message": "CUDA out of\nmemory"}]]},
+            "outputs": {}}}
+        root, got = self.comfyui(lambda n: failed)
+        tmp = Path(self.tmp.name)
+        (tmp / "ui.json").write_text(json.dumps({"nodes": [], "links": []}))
+        (tmp / "bare.json").write_text(json.dumps({"6": {"class_type": "CLIPTextEncode", "inputs": {"text": "x"}}}))
+        (tmp / "flow.json").write_text(json.dumps(self.WORKFLOW))
+        self.engines({"ui": {"url": root, "workflow": "ui.json"}, "bare": {"url": root, "workflow": "bare.json"},
+                      "none": {"url": root + "/prompt", "api": "comfyui"},
+                      "gone": {"url": root, "workflow": "nowhere.json"}})
+        listed = run_wb("image", "--list")
+        self.assertIn("isn't in ComfyUI's API format: save it with Export (API)", listed)
+        self.assertIn("has no {prompt} in it", listed)
+        self.assertIn("a comfyui engine needs `workflow`", listed)
+        self.assertIn("can't read the workflow", listed)
+        self.engines({"comfy": {"url": root, "workflow": str(tmp / "flow.json"), "gpu": False, "unload": ""}})
+        with self.assertRaises(RuntimeError) as cm:
+            images.generate("a fox", tmp / "o", n=1, say=lambda *_: None)
+        self.assertEqual(str(cm.exception), "ComfyUI failed the workflow: CUDA out of memory")
+        root, got = self.comfyui(lambda n: {})  # never done: dropped and interrupted, not left drawing
+        self.engines({"comfy": {"url": root, "workflow": str(tmp / "flow.json"), "gpu": False,
+                                "timeout": 0.3, "unload": ""}})
+        with self.assertRaises(RuntimeError) as cm:
+            images.generate("a fox", tmp / "o", n=1, say=lambda *_: None)
+        self.assertIn("hadn't finished the workflow after 0 s", str(cm.exception))
+        self.assertEqual([(p, b) for v, p, b in got if v == "POST"][1:],
+                         [("/queue", {"delete": ["p-1"]}), ("/interrupt", {"prompt_id": "p-1"})])
+
+    def test_wb_scout_names_an_image_server_already_running_here(self):
+        # #753: the skill proposed an 11 GB stable-diffusion.cpp install to a user whose ComfyUI
+        # or Forge was already up
+        import socket
+        from workbench import images, models
+        root, _ = self.comfyui(lambda n: {})
+        forge, _ = self.comfyui(lambda n: {})  # something on 7860 without A1111's API: HTML
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            closed = sock.getsockname()[1]
+        ports = ((int(root.rsplit(":", 1)[1]), "comfyui", "/system_stats"),
+                 (int(forge.rsplit(":", 1)[1]), "a1111", "/sdapi/v1/options"),
+                 (closed, "comfyui", "/system_stats"))
+        with mock.patch.object(images, "PORTS", ports), mock.patch.object(models, "_fake", return_value=False):
+            found = images.servers_here()
+        self.assertEqual(found, [{"root": root, "api": "comfyui"}, {"root": forge, "api": ""}])
+        here = [{"root": "http://127.0.0.1:8188", "api": "comfyui"},
+                {"root": "http://127.0.0.1:7860", "api": "a1111"}]
+        self.engines({})
+        with mock.patch.object(images, "servers_here", return_value=here):
+            out = run_wb("scout")
+        self.assertIn('ComfyUI answers at http://127.0.0.1:8188, and no engine uses it: {"url": '
+                      '"http://127.0.0.1:8188", "workflow": "<a workflow saved with Export (API)>"}', out)
+        self.assertIn("AUTOMATIC1111's API (A1111, Forge, SD.Next) answers at http://127.0.0.1:7860", out)
+        self.engines({"forge": {"url": "http://localhost:7860/sdapi/v1/txt2img"}})  # named: not again
+        with mock.patch.object(images, "servers_here", return_value=here[1:] + [{"root": "http://127.0.0.1:8188", "api": ""}]):
+            out = run_wb("scout")
+        self.assertNotIn("answers at http://127.0.0.1:7860", out)
+        self.assertIn("something answers at http://127.0.0.1:8188 (ComfyUI's port), but not its API", out)
 
     def test_wb_image_list_as_a_word_lists_the_engines_instead_of_drawing(self):
         # like `wb skill list`: it took the GPU and drew four pictures of "list" (the 2026-11-16 audit)
@@ -15695,7 +15831,6 @@ class WebChat(Base):
         self.assertNotIn("detail", got["asks"][0])                           # not its plan's text
         self.assertEqual([m["text"] for m in got["messages"]], ["Tests pass, ready for review"])
         self.assertLess(len(json.dumps(got)), 2000)
-        self.assertGreater(len(json.dumps(chat.snapshot())), 400_000)
         code, body = self.call("/api/latest", token=chat.token())
         self.assertEqual((code, [a["id"] for a in body["asks"]]), (200, [plan["id"]]))
         self.assertEqual(self.call("/api/latest")[0], 401)
@@ -15799,7 +15934,7 @@ class WebChat(Base):
                 time.sleep(0.05)
         self.assertTrue(execs)                                           # re-exec'd, not exit 75
 
-    def test_the_stream_sends_the_whole_state_then_each_change(self):
+    def test_the_stream_sends_the_whole_state_then_what_changed(self):
         import http.client
         tok = self.chat.token()
         self.call("/api/send", {"text": "first"}, token=tok)
@@ -15822,9 +15957,78 @@ class WebChat(Base):
         self.assertEqual([m["text"] for m in json.loads(first[1][6:])["messages"]], ["first"])
         run_wb("chat", "reply", "--text", "On it.")
         second = event()
-        self.assertEqual([m["text"] for m in json.loads(second[1][6:])["messages"]], ["first", "On it."])
+        self.assertEqual(second[0], "event: patch")                      # only the new row (#755)
+        self.assertEqual([m["text"] for m in json.loads(second[1][6:])["messages"]["put"]], ["On it."])
         c.close()
         self.assertEqual(self.call("/api/stream")[0], 401)
+
+    def test_after_its_first_state_the_stream_sends_only_what_changed(self):
+        # #755 (the 2026-11-21 audit, finding 102): every receipt and busy flip sent the whole
+        # state, the thread and 20 asks with their plans: 922 KB each, five times an exchange
+        import http.client
+        chat, tok = self.chat, self.chat.token()
+        for i in range(10):
+            done = chat.ask("ExitPlanMode", "", "plan", {"plan": f"plan {i}\n" + "step\n" * 4000})
+            chat.answer(done["id"], "deny", "web")
+        for i in range(60):
+            chat.send("x" * 1500, "user" if i % 2 else "claude")
+        mine = chat.send("and the tests?", "user")
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request("GET", "/api/stream", headers={"Host": "localhost", "Authorization": f"Bearer {tok}"})
+        r = c.getresponse()
+
+        def event():
+            lines = []
+            while True:
+                line = r.fp.readline().decode().rstrip("\n")
+                if line.startswith(":"):
+                    continue
+                if not line:
+                    if lines:
+                        return lines[0][7:], json.loads(lines[1][6:]), len(lines[1])
+                    continue
+                lines.append(line)
+        kind, first, _ = event()
+        self.assertEqual((kind, len(first["messages"])), ("state", 61))       # the whole state first
+        plans = [a for a in first["asks"] if a["kind"] == "plan"]
+        self.assertTrue(all(a["detail"]["cut"] and len(a["detail"]["plan"]) == chat.PLAN_PREVIEW for a in plans))
+        code, whole = self.call(f"/api/ask/{plans[0]['id']}", token=tok)    # unfolded: fetched
+        self.assertEqual((code, len(whole["ask"]["detail"]["plan"])), (200, len("plan 0\n" + "step\n" * 4000)))
+        self.assertEqual(self.call("/api/ask/ask-nope", token=tok)[0], 404)
+        self.assertEqual(self.call(f"/api/ask/{plans[0]['id']}")[0], 401)
+        chat.ack(mine["id"], "s1")                                            # a receipt
+        kind, got, size = event()
+        self.assertEqual(kind, "patch")
+        self.assertEqual([m["id"] for m in got["messages"]["put"]], [mine["id"]])
+        self.assertEqual((got["messages"]["drop"], "asks" in got), ([], False))
+        self.assertLess(size, 3000)
+        store.write_json(chat.chat_dir() / "listener.json",
+                         {"session": "s1", "cwd": "/home/u/p", "ts": store.now(), "busy": True})
+        kind, got, size = event()                                             # a busy flip
+        self.assertEqual((kind, got["listener"]["busy"], "messages" in got), ("patch", True, False))
+        self.assertIn("prefs", got)                                           # the small fields whole
+        self.assertLess(size, 3000)
+        open_ = chat.ask("Bash", "make test")
+        kind, got, _ = event()
+        self.assertEqual([a["id"] for a in got["asks"]["put"]], [open_["id"]])
+        c.close()
+
+    def test_a_patch_names_each_row_that_changed_or_left_and_nothing_when_nothing_did(self):
+        # #755: the page merges these by id, so a row the window lost must be named
+        chat, had = self.chat, {}
+        snap = {"messages": [{"id": "a", "text": "1"}, {"id": "b", "text": "2"}], "asks": [],
+                "listener": None, "now": 1}
+        chat.patch(had, snap)
+        self.assertIsNone(chat.patch(had, {**snap, "now": 2}))              # only the clock moved
+        got = chat.patch(had, {**snap, "messages": [{"id": "b", "text": "2!"}, {"id": "c", "text": "3"}], "now": 3})
+        self.assertEqual(got["messages"], {"put": [{"id": "b", "text": "2!"}, {"id": "c", "text": "3"}], "drop": ["a"]})
+        self.assertEqual((got["now"], got["listener"], "asks" in got), (3, None, False))
+        self.assertEqual(chat.patch(had, {**snap, "messages": got["messages"]["put"], "listener": {"busy": True}})
+                         ["listener"], {"busy": True})
+        self.assertNotIn("detail", chat.page_ask({"id": "x", "answer": None}))
+        q = {"id": "q", "answer": "allow", "detail": {"questions": [{"question": "Which?", "options": [{"label": "A", "preview": "p" * 9000}]}]}}
+        self.assertEqual(chat.page_ask(q)["detail"], {"questions": [{"question": "Which?"}]})
+        self.assertEqual(chat.page_ask({**q, "answer": None})["detail"], q["detail"])  # open: whole
 
     def test_without_inotify_the_stream_stays_quiet_between_changes(self):
         # the fallback hub wakes every second; each wake was a ping (the 2026-11-16 audit)

@@ -469,6 +469,88 @@ class Real(unittest.TestCase):
         self.assertIsNone(models.server_devices(x.root))
         self.assertFalse(models.apart(x.root, y.root))      # unknown is never apart
 
+    def test_an_engine_pinned_to_one_card_waits_for_and_frees_that_card_alone(self):
+        # #752 (the 2026-11-21 audit, finding 99): with one Ollama per GPU, `wb image` refused
+        # while a task ran on either card, then unloaded both cards' models, whichever card its
+        # engine used (`env CUDA_VISIBLE_DEVICES=1 sd-cli …`)
+        gb = 10 ** 9
+        found, posts_a, posts_b = self.per_gpu([{"name": "chat", "size": 18 * gb, "size_vram": 18 * gb}],
+                                               [{"name": "y", "size": 18 * gb, "size_vram": 18 * gb}])
+        one, zero = frozenset({"GPU-11"}), frozenset({"GPU-00"})
+        self.assertEqual(media.cards({"command": "sd-cli", "beside": "b/y"}), one)
+        self.assertEqual(media.cards({"command": "sd-cli", "devices": "1"}), one)
+        self.assertEqual(media.cards({"command": "sd-cli", "devices": 1}), one)
+        self.assertEqual(media.cards({"command": "sd-cli", "devices": "GPU-11"}), one)
+        for unknown in ({"devices": "7"}, {"beside": "nobody/x"}, {}):    # every card, as before
+            self.assertIsNone(media.cards({"command": "sd-cli", **unknown}))
+        self.assertIn("devices must", media.problem({"command": "sd-cli", "devices": True}))
+        self.assertIn("beside must be a string", media.problem({"command": "sd-cli", "beside": 1}))
+        task_a = {"1": {"model": "a/x", "task": "t-a"}}
+        self.assertTrue(models.admits(None, task_a, one))            # beside a task on GPU 0
+        self.assertFalse(models.admits(None, task_a, zero))          # on its card: it waits
+        self.assertFalse(models.admits(None, task_a))                # not pinned: the whole GPU
+        image = {"2": {"model": None, "task": "wb image", "cards": ["GPU-11"]}}
+        self.assertTrue(models.admits(found["a/x"], image))          # a task on GPU 0 joins it
+        self.assertFalse(models.admits(found["b/y"], image))         # one on its card waits
+        self.assertFalse(models.admits(found["a/x"], {"3": {"model": None, "task": "wb image"}}))
+        os.environ["WB_GPU_DIR"] = str(Path(self.tmp.name, "lease"))
+        holder = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        store.write_json(models.lease_dir() / "gpu.json", {str(holder.pid): {
+            "model": "a/x", "task": "t-a", "since": 0, "start": models._started(holder.pid),
+            "uid": os.getuid()}})
+        said = []
+        with models.GpuLease(None, "wb image", said.append, wait=False, cards=one):
+            self.assertEqual(models.holders()[str(os.getpid())]["cards"], ["GPU-11"])
+        self.assertEqual(said, ["sharing the GPU with a/x"])
+        with self.assertRaisesRegex(RuntimeError, "in use by t-a: wb image needs its cards"):
+            with models.GpuLease(None, "wb image", said.append, wait=False, cards=zero):
+                pass
+        with self.assertRaisesRegex(RuntimeError, "in use by t-a"):   # not pinned: as before
+            with media.turns("wb image", said.append, False, {"command": "sd-cli"}):
+                pass
+        with media.turns("wb image", said.append, False, {"command": "sd-cli", "beside": "b/y"}):
+            self.assertEqual(posts_a, [])                            # GPU 1's Ollama freed alone
+            self.assertEqual([p["model"] for p in posts_b], ["y"])
+
+    def test_ollama_for_windows_seen_from_wsl_is_freed_and_leased_as_this_machines_gpu(self):
+        # #750 (the 2026-11-21 audit, finding 97): on WSL2 with NAT, a task on Ollama for Windows
+        # (the gateway, `local: true`, so remote) took pool gpu-<winhost> and a command engine in
+        # WSL pool gpu; neither waited for the other, free_gpu skipped the remote models, and both
+        # ran on the one card. 127.0.0.1 stands for the Windows host here, localhost for WSL.
+        for k in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+            os.environ.pop(k, None)
+        gb = 10 ** 9
+        posts_wsl, posts_win, on_wsl, on_win = [], [], [], []
+        srv_a, port_a = fake_ollama(on_wsl, ["x"], posts_wsl)
+        srv_b, port_b = fake_ollama(on_win, ["coder"], posts_win)
+        self.servers += [srv_a, srv_b]
+        providers = {"wsl": {"options": {"baseURL": f"http://localhost:{port_a}/v1"}, "models": {"x": {}}},
+                     "win": {"options": {"baseURL": f"http://127.0.0.1:{port_b}/v1"}, "models": {"coder": {}}}}
+        here = mock.patch.object(models, "_this_host", lambda h: h == "localhost")
+        here.start()
+        self.addCleanup(here.stop)
+        engine = {"url": "http://127.0.0.1:30000/v1/images/generations"}
+        for say, gateway in ((None, "127.0.0.1"), (True, None), (False, "127.0.0.1")):
+            self.config(providers, {"win": {"local": True, **({} if say is None else {"same_gpu": say})}})
+            posts_wsl.clear(), posts_win.clear()
+            on_wsl[:] = [{"name": "x", "size": 8 * gb, "size_vram": 8 * gb}]
+            on_win[:] = [{"name": "coder", "size": 14 * gb, "size_vram": 14 * gb}]
+            with mock.patch.object(models, "windows_host", lambda: gateway):
+                win = models.discover()["win/coder"]
+                self.assertTrue(win.remote)
+                shared = say is not False
+                self.assertEqual(models.same_gpu(win), shared)
+                self.assertEqual(models.pool(win), "gpu" if shared else f"gpu-127-0-0-1-{port_b}")
+                self.assertEqual(models.releasable(win), shared)
+                self.assertEqual(media.on_gpu(engine), shared)             # its turn is this GPU's
+                self.assertEqual(media.boxes(engine), [] if shared else [win])
+                models.free_gpu(say=lambda m: None)
+                self.assertEqual([p["model"] for p in posts_wsl], ["x"])
+                self.assertEqual([p["model"] for p in posts_win], ["coder"] if shared else [])
+        self.assertFalse(models.same_gpu(models.discover()["wsl/x"]))      # a local model: never remote
+
     def test_one_ollama_under_two_host_spellings_is_one_server(self):
         # free_gpu unloaded the very models it was told to keep (the 2026-11-16 audit)
         found, posts = self.own([{"name": "x", "size": 10, "size_vram": 10},

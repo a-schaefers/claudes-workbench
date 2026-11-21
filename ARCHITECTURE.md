@@ -298,8 +298,8 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   repo and model and the two ways out: `--queue` (start anyway and wait behind it) or doing the
   step yourself. Before this, the second session's task queued in silence, maybe for hours
   (the 2026-11-16 audit). The holders are gpu.json's live entries plus any task whose live runner
-  hasn't reached the lease yet (`cli._gpu_holders`). A remote model takes no lease and is never
-  refused. A known limit, left by choice (the 0.90 review): the check takes no lock, and a task
+  hasn't reached the lease yet (`cli._gpu_holders`). A remote model is checked against the
+  holders of its own server's pool (`models.pool`; this machine's for one on this GPU, #750). A known limit, left by choice (the 0.90 review): the check takes no lock, and a task
   is visible to it only once its runner's pid is in its status, after task.json is written, so
   two `wb start`s at the same moment (from two sessions) can both pass it. Nothing hangs
   silently then: the second runner waits for the GPU, and its status (`last`, the pane, `wb
@@ -2660,7 +2660,11 @@ at the Windows host (`models.windows_host`: the default gateway in `/proc/net/ro
 generated `/etc/resolv.conf`'s nameserver; all ports at once, a second each) and says a hit is
 "on Windows" and needs `local: true`; when nothing answers there either, both say
 `models.WSL_NAT`'s two ways. Seen: first run said no server answers, and Claude proposed a
-second server inside WSL (#663).
+second server inside WSL (#663). A provider at the Windows host is `remote` but on the same GPU
+(`models.same_gpu`, models.json `same_gpu` to say otherwise): its tasks share this machine's
+lease pool with WSL's own tasks and image or audio engines, and `free_gpu` unloads it. Before,
+its tasks took pool `gpu-<winhost>` and a command engine in WSL pool `gpu`: neither waited for
+the other, nothing was unloaded, and both ran on the one card (#750).
 
 #### The context window
 16K tokens at the least; 32K or more is recommended (the README says so). OpenCode's own
@@ -2771,7 +2775,9 @@ or `<label>.local`, or any of the machine's own addresses (`_own_addresses`: the
 `getaddrinfo` and `ip -o addr`, else `ifconfig -a` where there is no `ip` (macOS: the Mac's own
 LAN address counted as remote, the 2026-11-19 audit), so a LAN or Tailscale IP counts) (`_this_host`). A
 provider elsewhere counts when models.json gives it `"local": true`; it is then `remote`: it
-takes no lease on this machine's GPU, but one on its server's (tasks there take turns: *Sharing the GPU*).
+takes no lease on this machine's GPU, but one on its server's (tasks there take turns: *Sharing the GPU*),
+unless its server is on this GPU after all (`same_gpu`: WSL2's Windows host), when it takes this
+machine's.
 OpenCode talks to it directly at the baseURL (plain `http://` is unencrypted and the prompts carry
 the code: *A model on another machine* above suggests a firewall and Tailscale); nothing of workbench runs there, and no
 model is split across machines. `wb remote HOST` sets one up for an Ollama there (#114,
@@ -2877,6 +2883,13 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
 - `engine` (`ollama`/`server`): per provider only;
 - `local: true`: on a provider, counts it although it is on another host; on an Ollama cloud
   model's own id, allows that model.
+- `same_gpu: true|false`: on a provider (or a model id) that is `remote`, whether its server runs
+  on this machine's GPU after all (`models.same_gpu`). Unset, it does when its host is WSL2's
+  Windows host (`models.windows_host`, NAT's gateway: Ollama for Windows uses the very GPU WSL's
+  engines do); say `true` for another such setup (a container on its own address), `false` for a
+  Windows host with a card of its own. Then it is this machine's GPU in every way that matters
+  to sharing it: its tasks take this machine's pool (`gpu.*`, not `gpu-<host>.*`), take turns with
+  the tasks and image or audio engines here, and `free_gpu` unloads its Ollama's models (#750).
 - `remote: <root>`: on a provider, `wb remote` made it (for the Ollama at that root), so `wb
   remote --remove` may delete it (#197).
 - `keep_loaded` (top level, a list): model ids or Ollama names wb never unloads or stops to make
@@ -3146,8 +3159,14 @@ or waiting on a question), not evicted (the 0.90 review: the other task unloaded
 for that one to finish). If not, it warns "ollama could not fit … waiting for the GPU to itself",
 unloads its own model (unless a holder runs the same model: it is theirs too), marks itself
 waiting and takes its turn as above (its shared lock dropped first), then loads alone.
-`gpu.json` is `{"<pid>": {model, task, since, start, uid, user, waiting?, waiting_since?, tests?}}` (`tests`: a task's
-`--unload-for-tests` tests hold the GPU, `model` null). `wb image` takes `gpu.lock` through
+`gpu.json` is `{"<pid>": {model, task, since, start, uid, user, waiting?, waiting_since?, tests?, cards?}}` (`tests`: a task's
+`--unload-for-tests` tests hold the GPU, `model` null; `cards`: an image or audio engine pinned to
+those cards, `model` null). A lease with no model is alone unless it is pinned (`GpuLease(None, …,
+cards=)`): `admits(None, held, cards)` lets it in, on a shared `gpu.lock`, when nobody waits and
+every holder is a task on a local Ollama known to use none of its cards (`apart_cards`) or
+another engine on other cards, and a task joins a `cards` holder when its own Ollama is apart
+from them (then `can_share` decides beside the other tasks as before); refused without `--wait`
+only when it couldn't join (#752). `wb image` takes `gpu.lock` through
 `GpuLease(None, "wb image", wait=…)` (`wb audio`: `"wb audio"`, and the refusal names which): with `--wait` it queues in `gpu.json` like a task with no
 model, waits for the running tasks to finish, then has the GPU to itself; while it holds or waits
 for the GPU, `wb start` refuses a new task (exit 4, see *Two projects, one GPU*) unless `--queue`,
@@ -3158,7 +3177,17 @@ server (#116): its lease uses that server's own files, `gpu-<host>-<port>.{lock,
 memory (before, tasks on one server ran at once and its Ollama swapped their models on every
 request). It never waits on this machine's GPU, nor this machine's tasks on it; `wb start`'s
 exit 4 and `--queue`, and the bench's preemption, apply per server alike. `free_gpu` never
-unloads or stops a remote provider's models.
+unloads or stops a remote provider's models. **Which pool** (`models.pool`): `gpu` for a local
+model, and for a remote one whose server is on this GPU (`models.same_gpu`: models.json
+`same_gpu`, else WSL2's Windows host); `gpu-<host>-<port>` for any other remote one. A model on
+the same GPU still never shares (nothing here measures its server's memory), but `free_gpu`
+(`models.on_this_gpu`) unloads its Ollama's models, `make_resident` frees the GPU for it,
+`releasable` and `media.settle` count it, its unloaded tests (`step_aside`, `verify`) hold this
+GPU, and `wb optimize` probes it under its one lease (a second lease on `gpu` from the same
+process waited on itself). An image or audio engine joins `gpu` when it is on this GPU
+(`media.on_gpu`: a command, or a url here or on a host `media.shares_gpu` says is this GPU), the
+pool of each remote box a url engine is on otherwise (`media.boxes`), or none (`"gpu": false`, a
+host no task uses) (#750).
 
 **Routing** (`router.rank`, `choose`). Rows: `store.results()` (no trials) that `tuning.judged`
 keeps, for this model and size (and the models sharing its record, `lineage`: a `wb optimize
@@ -3435,7 +3464,11 @@ the behaviour from before. Servers apart don't touch each other's memory: `free_
 `_others_resident` asks only those; `_room_beside` and `can_share` count only the models on them
 against `m`'s budget. Every server's models were unloaded, so a task on GPU 0's Ollama emptied
 GPU 1's, and every running model was summed against one card, which refused sharing that fit.
-`free_gpu()` with no `of` (`wb image`, `wb audio`, `wb optimize`) still frees every card.
+`free_gpu()` with no `of` (`wb optimize`, an image or audio engine not pinned) still frees every
+card; `free_gpu(…, cards=)` (an engine pinned with `devices` or `beside`, `media.cards`) unloads
+only on the Ollama servers not known apart from those cards (`models.apart_cards`), and
+`media.settle` waits only for those (#752: a generation on GPU 1 was refused while a task ran on
+GPU 0, then emptied both).
 `ollama_context()` (`OLLAMA_CONTEXT_LENGTH`
 with spaces and quotes trimmed, as Ollama reads it, and the raw value: `report` says when it isn't
 a number instead of crashing), `ollama_models_dir()` (`os.path.isdir`: a directory it can't read
@@ -4051,8 +4084,13 @@ Then describe the engine in `~/.config/workbench/images.json` (`$WB_IMAGES`). Tw
 - A **url** is any server with the OpenAI images API (SGLang, vLLM-Omni, LocalAI and others),
   or, with `"api": "a1111"` (a url with `/sdapi/` says so itself), AUTOMATIC1111's, Forge's or
   SD.Next's: `{"url": "http://127.0.0.1:7860/sdapi/v1/txt2img", "steps": 20, "unload":
-  "http://127.0.0.1:7860/sdapi/v1/unload-checkpoint"}`. ComfyUI's isn't spoken yet: wrap it in a
-  command engine.
+  "http://127.0.0.1:7860/sdapi/v1/unload-checkpoint"}`, or, with `"api": "comfyui"` (a `workflow`
+  says so itself), ComfyUI's: `{"url": "http://127.0.0.1:8188", "workflow": "flux.json"}`. The
+  workflow is one saved with ComfyUI's **Export (API)** (not Save: that format has `nodes` and
+  `links`, which `/prompt` refuses), a path from the engine file's directory or `~`, with
+  `{prompt}` in its text node and `{seed}`, `{width}`, `{height}` wherever it wants them (a value
+  that is only `{seed}`, `{width}` or `{height}` becomes the number). Its first SaveImage output
+  is the image (a PreviewImage's if there is none).
   One started with an API key takes `"key"` (`{env:NAME}` and `{file:path}` work, as in
   OpenCode's config, a relative path from the engine file's directory), sent as a Bearer token.
 - `notes` is shown to Claude. Put the model's licence there: some licences limit where and how
@@ -4063,8 +4101,18 @@ Then describe the engine in `~/.config/workbench/images.json` (`$WB_IMAGES`). Tw
   coding tasks use (a `wb remote` box, WSL2's Windows host), it takes its turn there: it queues
   with that box's tasks (refused while one runs, unless `--wait`) and that box's Ollama models are
   unloaded first (`media.turns`, `media.boxes`: it took no turn and generated beside a task's model
-  on that card, #750). A command engine in WSL beside an Ollama on Windows still takes this
-  machine's pool, not the Windows host's.
+  on that card, #750). WSL2's Windows host is this GPU (models.json `same_gpu`): an engine
+  there, or a command engine in WSL, takes this machine's turn, which the tasks on Ollama for
+  Windows take too, and their models are unloaded first.
+- On a machine with several cards, pin an engine to the one it uses so it runs beside tasks on
+  the others: `"devices": "1"` (the cards as the engine's own `CUDA_VISIBLE_DEVICES` names them:
+  numbers in nvidia-smi's order, so give the engine `CUDA_DEVICE_ORDER=PCI_BUS_ID` too, or a
+  card's UUID), or `"beside": "<provider/model>"` (the card that model's Ollama uses), e.g.
+  `"command": "env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 sd-cli …", "devices": "1"`.
+  It then waits only for tasks on its card and unloads only the Ollama models there (#752).
+  Unpinned, or where wb can't tell which cards each Ollama uses (one Ollama per GPU, each with its
+  own `CUDA_VISIBLE_DEVICES`, *Sharing the GPU*), a generation waits for every task and empties
+  every card.
 
 A generation on this GPU takes the GPU lock and unloads the coding models first, just as a task does. While
 a task holds the GPU, `wb image` refuses at once and names it; `--wait` queues behind it instead
@@ -4072,25 +4120,31 @@ a task holds the GPU, `wb image` refuses at once and names it; `--wait` queues b
 done, so its memory is free for the next task. A url engine is a server you run: it keeps its
 model in GPU memory for as long as it is up, so a coding model loaded beside it may spill into
 RAM. Give it an `unload` URL, POSTed after each batch, and `unload_body` when it wants one
-(ComfyUI: `"unload": "http://127.0.0.1:8188/free"`, `"unload_body": {"unload_models": true,
+(a ComfyUI engine has one unless it says `"unload": ""`: its `/free` with `{"unload_models": true,
 "free_memory": true}`; A1111/Forge: `/sdapi/v1/unload-checkpoint`; LocalAI: `/backend/shutdown`
 with `{"model": …}`); without one, start it to make images and stop it afterwards (or give it a
 GPU of its own). The listing marks such a server `(no unload URL)`. `wb scout` and `wb image --list` show each engine, whether it's ready, and which are
-servers.
+servers. `wb scout` also probes ComfyUI's and A1111's default ports here (8188, 7860) and names a
+server answering there that no engine uses, with the entry that would.
 Prefer weights in safetensors or GGUF from the model's own publisher or a well-known
 quantizer. Prefer tools that load models without running code that comes with them (ComfyUI's
 custom-node packs do run their own Python).
 
 **How it works** (`workbench/images.py`, `cli.cmd_image`; what audio shares is in `workbench/media.py`).
 - `images.json` (`$WB_IMAGES`, default `~/.config/workbench/images.json`) maps an engine name to an
-  entry; the first entry is the default, non-object values are ignored. Keys: `command` or `url` (with `api`, `steps`),
+  entry; the first entry is the default, non-object values are ignored. Keys: `command` or `url` (with `api`, `steps`, `workflow`),
   `ref_arg`, `model`, `label`, `notes` (shown to Claude: put the licence there), `timeout` (s,
   default 1800), `unload` and `unload_body` (a JSON object, else `{}`: `media.unload` POSTs it to
   `unload` when the batch ends, inside the lease, failed or not, `media.unloading`; it was checked
   but never called, and an image server kept 6-12 GB beside the next task's model, #749), `key` (a url engine's API key, `media.auth`: `models._expand`, no agent filter),
   `gpu` (`media.on_gpu`: false is off this GPU; unset, a url on another host is off
   it and anything else on; #587: a remote or CPU engine took the exclusive lease, unloaded the
-  coding models and refused while any task ran).
+  coding models and refused while any task ran), `devices` (a string or number, as
+  `CUDA_VISIBLE_DEVICES` names cards: `models.named_cards` reads it through `hardware.visible`
+  in nvidia-smi's order, `CUDA_DEVICE_ORDER=PCI_BUS_ID`, and for AMD cards as
+  `ROCR_VISIBLE_DEVICES`) or `beside` (a discovered model id: its Ollama's
+  `models.server_devices`): `media.cards`, the cards it is pinned to; one that names no card, a
+  model not found or not a local Ollama, or `gpu_gb` set by hand is unknown, every card (#752).
 - A command engine (`_argv`, through `media.fill`): `shlex.split(command)`, `~` expanded per token, then `{prompt}`,
   `{out}`, `{width}`, `{height}`, `{seed}` filled in (a whole float without its `.0`: `--seconds
   30` reached an audio engine as "30.0", #596), token by token, in one pass (a prompt that
@@ -4107,11 +4161,31 @@ custom-node packs do run their own Python).
   []}` or a page that isn't JSON a traceback, a 400 only "Bad Request" (#597). An `a1111` engine
   (`images.api`, `_a1111`) POSTs `{prompt, width, height, seed, batch_size: 1, n_iter: 1, steps?}`
   and decodes `images[0]` (a `data:` prefix dropped); a Forge url got an OpenAI body and "sent no
-  image" while listed ready (#753). `ready` refuses an `api` outside `images.APIS` and a `steps`
-  that isn't a whole number.
+  image" while listed ready (#753). A `comfyui` engine (`_comfyui`; its root is the url less a
+  trailing `/prompt`, `images.comfy_root`) reads its workflow (`images.workflow`), fills it in
+  (`images._fill`: a string that is only `{seed}`, `{width}` or `{height}` becomes the number,
+  ComfyUI's KSampler refusing "3"; any other string gets the placeholders as text, in one pass),
+  POSTs `{"prompt": <graph>}` to `/prompt`, polls `/history/<prompt_id>` every `COMFY_POLL` (0.5 s)
+  until its entry appears or `timeout` passes, fails with the `execution_error`'s
+  `exception_message` when its `status_str` is "error", and GETs `/view?filename&subfolder&type`
+  for the first image with type "output" (else the first at all). Stopped before it finished (the
+  timeout, a failed poll, wb ended) it POSTs `/queue {"delete": [id]}` and `/interrupt
+  {"prompt_id": id}`: the prompt would otherwise draw on after the lease was released.
+  `images.engines` gives a comfyui entry with no `unload` key `<root>/free`, `{"unload_models":
+  true, "free_memory": true}` (`_defaults`): ComfyUI keeps every model it loaded. ComfyUI rejected
+  the OpenAI body outright (#753). `ready` refuses an `api` outside `images.APIS`, a `steps` that
+  isn't a whole number, and a comfyui engine whose workflow is missing, unreadable, not JSON, not
+  the API format (every value an object with `class_type`), or without `{prompt}`.
+- `wb scout` (`cli.image_server_lines`, `images.servers_here`): GETs `/system_stats` on
+  127.0.0.1:8188 and `/sdapi/v1/options` on 127.0.0.1:7860 (`images.PORTS`; no proxy, 1 s each);
+  a JSON object is that API, any other answer "something answers … but not its API" (an
+  AUTOMATIC1111 started without `--api`). A port an engine's url already names on this host is
+  left out; each other gets a line with the entry that would use it. None under
+  `WB_FAKE_MODELS`. The skill proposed an 11 GB install to users already running one (#753).
 - Ready (`ready`, shown by `wb image --list` and `wb scout`): an entry `media.problem` finds
   nothing wrong with (the string keys strings, a command `shlex.split` accepts, `timeout` and
-  `seconds` positive numbers, `voices` a list of names, `gpu` true or false, a known `kind` for
+  `seconds` positive numbers, `voices` a list of names, `gpu` true or false, `devices` a
+  non-empty string or number, a known `kind` for
   audio; else "not usable: <why>", refused by `generate` before the lease: an open quote or
   `"timeout": "10m"` ended `wb scout` in a traceback or crashed a generation after the unloads,
   `"voices": "af_heart"` passed the voice "a", #596; a `url` or `unload` that isn't an http(s)
@@ -4120,7 +4194,8 @@ custom-node packs do run their own Python).
   PATH or a file; a url whose server answers a GET within 2 s (any status but 401 and 403, "wants
   an API key" or "refused the key": #597, it was listed as ready and failed every generation).
 - `generate`: its turns come from `media.turns`: an engine on a remote box the tasks use
-  (`media.boxes`: a discovered remote model whose host is the url's, one per lease pool) takes
+  (`media.boxes`: a discovered remote model whose host is the url's and not on this GPU,
+  `models.same_gpu`, one per lease pool) takes
   `GpuLease(None, "wb image", wait=…, on=<that model>)` on each such pool, as `wb optimize`
   does, and unloads that box's Ollama models (not `keep_loaded`), #750; an engine off this GPU
   otherwise (`media.on_gpu`) runs with no lease and frees nothing; any
@@ -4269,13 +4344,15 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
 - `"gpu": false` marks an engine that runs on the CPU. It takes no GPU lease and frees nothing,
   so it can run beside a coding task. A url engine on another host is off this GPU unless it
   says `"gpu": true` (`media.on_gpu`, as for images), or is on a remote box the coding tasks use,
-  where it takes that box's turn (`media.turns`, as for images, #750). Any other engine has the GPU to itself,
+  where it takes that box's turn (`media.turns`, as for images, #750). `devices` and `beside` pin
+  an engine to its card, as for images (#752); the batch's lease is pinned only when the engine and
+  the listener both are (their cards together). Any other engine has the GPU to itself,
   exactly as `wb image` does, and `free_gpu` keeps the models on the engine's or the listener's
   own server (`media.serving`).
 
 **How it works** (`workbench/audio.py`, `cli.cmd_audio`; shared with images: `workbench/media.py`).
 - `audio.json` keys: `command` or `url`, `kind` (`speech`, `sfx`, `music`, `listen`; default
-  `speech`), `gpu`, `voices`, `seconds`, `unload`, `unload_body`, `key`, `ref_arg`, `model`, `label`, `notes`,
+  `speech`), `gpu`, `devices`, `beside`, `voices`, `seconds`, `unload`, `unload_body`, `key`, `ref_arg`, `model`, `label`, `notes`,
   `timeout` (s, default 1800; a listener's 600); `audio.ready` refuses a `kind` it doesn't know
   (it skipped the listener and took 10 s, #596). `engine(name, kind)` returns the named engine
   (refused when it's of another kind), else the first of `--kind`, else the first that isn't a
@@ -5233,11 +5310,16 @@ thread no longer):
   that isn't stale, a plan's without its `detail`], messages: [Claude's last message, from the
   messages' last `LATEST_BYTES` 1 MiB], push: {test}}`, the snapshot's shape for `sw.js`.
 - `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`; `thread` reads the files' last `THREAD_BYTES` 4 MiB, `store.read_jsonl_tail`, as `asks` does: the whole history was parsed on every poll, 56 ms at 20,000 rows, the 2026-11-19 audit),
-  asks (the last 20, each with `answer` (null while open), `answered`, `by`), prefs, push (`{key:
+  asks (the last 20, each with `answer` (null while open), `answered`, `by`; a settled one lean,
+  `chat.page_ask`: a plan past `PLAN_PREVIEW` 1,200 characters cut to them with `detail.cut`, a
+  question's `detail.questions` only their `question` text, all the page shows of one answered;
+  thirty answered plans were most of a 922 KB state, #755), prefs, push (`{key:
   the VAPID public key, test: the last test push's ts}`), listener, savings (`chat.week_saved`:
   `savings.totals` over the last 7 days with its `score`, as `wb savings --json` without `period`), uploads (`chat.upload_limits`: `{file, message, files}`, the byte limits and files a message), build, expire (`MESSAGE_EXPIRE` in seconds: past it a
   user's unread row carries `expired`, #536), now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
   when the page does: a page that loaded other files reloads itself.
+- `GET /api/ask/<id>`: `{ask}`, the ask whole (`chat.find_ask`), else 404 "no such prompt": the
+  page fetches a cut plan's text when the user unfolds it (#755).
 - `GET /api/shot?task=&n=&side=base|candidate`: one side of a `wb shot` pair as `image/png`,
   behind the token (401). It is read only when the task name passes `store.NAME_RE`, `n` is a
   number with a shots.json, and the side is one of the two and its capture worked (#268: a
@@ -5252,7 +5334,13 @@ thread no longer):
   `AUDIO_MAX` (64 MiB). Anything else gets 404 "no such take". The page fetches each take with the
   token and plays a blob URL, as it shows the screenshots.
 - `GET /api/stream`: server-sent events (with the security headers): `event: state` with the
-  snapshot at once and whenever it changes, `: ping` after 15 s idle. At most `MAX_STREAMS` 16
+  snapshot at once, then `event: patch` whenever it changes (`chat.patch`, against what this
+  stream sent: `messages` and `asks` as `{put: the rows new or changed, drop: the ids gone}`, only
+  when they changed, and every other field whole, about a kilobyte, with `now`), `: ping` after
+  15 s idle. The whole state went out on every receipt and busy flip, five times an exchange,
+  4.6 MB per open device with a long thread and plan mode (#755). The small fields go whole so a
+  page that took an older state from a POST's reply can't keep it (a busy flipped back would never
+  be sent again). At most `MAX_STREAMS` 16
   open: past it the oldest stream gives way (its handler's `evicted`, then a wake) and the new one
   waits up to 5 s for its slot (503 after), since a stream a phone dropped without a word (asleep,
   a new network) lingers while the live page can't get in; with the cap full of those, the page
@@ -5311,8 +5399,14 @@ or token. It never expires (it is the token file). A keyed page over https point
 50 messages, `wb-chat-thread`) and "connecting…" until the first live state, which it asks
 `/api/state` for at once as well as opening the stream (a refresh showed "no session listening"
 and an empty thread for seconds while the stream waited for a slot, 2026-11-18). The stream is a `fetch` with the
-bearer header (EventSource can't send one), parsed by hand; every state event is a full resync, so
-nothing arrives half-received. A message goes into a local outbox (one localStorage key per
+bearer header (EventSource can't send one), parsed by hand; each connection starts with a whole
+state, a resync, so nothing arrives half-received, and a `patch` is merged by id (`merge`: a row
+put replaces its own or is added at the end, a dropped one goes). The page keeps the server's
+`now` of the newest state it took (`stamp`), and skips a POST's reply (`/api/send`, `/api/answer`,
+`/api/prefs`) or the first `/api/state` older than that: the patches build on what the stream sent,
+so a row an older reply lacked would never come again (#755). The thread is saved for a reload
+only when a state or patch carries messages. A settled plan that came cut shows "Show the whole
+plan", which fetches `/api/ask/<id>` and unfolds it ("Not loaded: try again" on a failure). A message goes into a local outbox (one localStorage key per
 message, `wb-chat-out-<cid>`, the cid a `crypto.randomUUID()`), read afresh whenever it is used,
 and is sent in order until the server has it: an item is dropped when `/api/send`'s reply names
 its cid (`message.cid`, the row the server logged or already had), or when a snapshot lists it.
@@ -5951,7 +6045,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL, and a host no URL can carry; an IPv6 address is bracketed either way (#707). `--remove` undoes it; not while OpenCode's default model or `small_model` is one of them (#708), nor for a provider wb didn't add or that now points elsewhere. |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default `model` nor its `small_model`, each refusal naming the field: #708) and drops its models.json overrides but `variant_of` and `replaces` (its tasks stay in its source's record, #723); `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). A flag or size for another action is refused, not ignored (#602): `--url`, `--start`, `--stop`, `--label`, `--context` and `--pull` go with `add`, `--delete` with `retire`, sizes with `sizes`. |
-| `wb scout` | `--done [--notes "…"]` (`--notes` without `--done` refused, #602), `--due`, `--watch "…"`, `--unwatch N` (1-based; 0 refused) | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers (on WSL2, at the Windows host too when nothing answers here, and `models.WSL_NAT` when nothing answers at all: *A server on Windows, from WSL2*, #663), flagged when OpenCode has no provider for it, compared by `models.server_key`, so `::1`, `localhost` or this host's name is one server, #588); the image and audio engines (`audio.coverage`: what the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
+| `wb scout` | `--done [--notes "…"]` (`--notes` without `--done` refused, #602), `--due`, `--watch "…"`, `--unwatch N` (1-based; 0 refused) | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers (on WSL2, at the Windows host too when nothing answers here, and `models.WSL_NAT` when nothing answers at all: *A server on Windows, from WSL2*, #663), flagged when OpenCode has no provider for it, compared by `models.server_key`, so `::1`, `localhost` or this host's name is one server, #588); the image and audio engines (`audio.coverage`: what the audio ones cover), and an image server answering on ComfyUI's or A1111's port that no engine uses (`cli.image_server_lines`, #753); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill with its history, the scan alone. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…`, `--reviewed RULE…` (a scan rule whose critical findings Claude read and judged safe: they pass, recorded in the commit; never one in `scan.UNREVIEWABLE`) | Check, scan, copy, commit. |
 | `wb skill patch <n> --old … --new … -m "…"` | `--old-file`, `--new-file`, `--lesson` | An exact, unique replacement, then as add. |
@@ -5977,7 +6071,7 @@ Prints the counts and the bytes freed; writes `gc.json`. Then (not in `cli.gc`, 
 ### Other
 | Command | Flags | What it does |
 |---|---|---|
-| `wb image "<prompt>"` | `--n` (4; at least 1), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. An engine off this GPU (`"gpu": false`, or a url on another host) runs beside tasks. A bare `list` or `ls` as the prompt acts as `--list`. |
+| `wb image "<prompt>"` | `--n` (4; at least 1), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. An engine off this GPU (`"gpu": false`, or a url on another host) runs beside tasks; one pinned to a card (`devices`, `beside`) waits only for the tasks on it. A bare `list` or `ls` as the prompt acts as `--list`. |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music` (default: the first engine), `--n` (3; at least 1), `--seconds S` (engines with `{seconds}`; default the entry's `seconds`, else 5 for sfx, 30 for music, 10 otherwise), `--voice NAME` (default: the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check` (no listener, no spectrograms), `--list`, `--wait` | Clips from a local audio engine, each with one line of checks (see *Audio*). `--n` below 1 is refused (exit 2, before any lease: #592); a clip that isn't audio fails the command, unpublished. A GPU engine refuses while anything holds the GPU (`--wait` queues); a `"gpu": false` engine runs beside tasks. A bare `list` or `ls` acts as `--list`. An option the engine has no placeholder for is refused, naming it. |
 | `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|wait\|answer]` | `listen <clip>… [--text]` (Claude's shortlist of `wb audio` takes for the user to play and pick, up to 8: *Listening by ear*, #397), `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses, leaving the switch off (#690), when another program or another account's chat answers there or its server didn't start, `off` stops only one it started; `url` first starts again one `on` started that is gone, #449), `--port` (the running server's, from `chat/port.json`, else the one `chat/serve.pid` names, else 1337: #349), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo --pid` (a plan's session and directory; `--pid`, the asking session's `wb events` process, #538; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb try` | `--model <id or fragment>` (the router's pick) | A sample task that proves the setup (#112): copies `workbench/try/project/` (a tiny `stats.py` with its tests and a committed CLAUDE.md; `from __future__ import annotations`, so its `list[float]` imports on Python 3.7 and 3.8 too) into `~/.local/share/workbench/try/<n>` (beside `$WB_SKILLS`: the state directory is hidden from the lane, and its agent had no git there, #164), sets it up as `wb init` does, and starts `workbench/try/spec.md` (add `median`) as `try-<n>`, `--size trivial --trial --test '<wb's python> -m unittest'` (`sys.executable`, quoted: PATH's `python3` is 3.6 on RHEL 8, and the untouched base failed, #530): never the router's evidence or the lessons. Prints what `wb start` does, the project's path and the hidden check for review, `<wb's python> <pkg>/workbench/try/check.py <worktree>` (the agent never sees it; it fails on the untouched base, also when its Python can't read the module, passes once `median` meets the spec, and leaves no `__pycache__`). A refusal, by `wb init` (no git identity: #530; a home that is a git repo no longer refuses it, #684) or by the start (the GPU busy without `--queue`, no model), removes the copy again (#161). |
@@ -6537,7 +6631,7 @@ real run with a real model (CLAUDE.md, *Checks before committing*).
 Pixel 7: the token leaves the address bar, a send lands once with its tick, the receipt, "working"
 then the reply, a message sent during an outage lands exactly once, the stream recovers, a
 reload doubles nothing, a permission prompt's card (Allow at least 44 px tall, a tap answers it,
-the buttons go) and one left to expire, a long plan folded and sent back with a note, a question
+the buttons go) and one left to expire, a long plan folded and sent back with a note, a settled plan cut and fetched whole on unfolding (#755), a question
 answered (Answer disabled until a pick), the gear's sheet (what this lane is; Let Claude go
 ahead saved, the next prompt allowed at once and listed), a reload whose state is slow to come (the last thread, "connecting…"; Chromium only, as
 Playwright's WebKit routes no requests once a service worker is registered), the install only
@@ -6635,10 +6729,15 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
   *Keeping the docs true* is the procedure; `tests/test_docs.py` checks what it can (every command
   and flag here, every module and environment variable in CLAUDE.md, CLAUDE.md's size).
-- **`wb image` and `wb audio` share `media.py`** (the engine file, `problem`, `ready`, `auth`, `post`, `fill`, `settle`, `gpu`, `on_gpu`, `serving`,
+- **`wb image` and `wb audio` share `media.py`** (the engine file, `problem`, `ready`, `auth`, `post`, `fill`, `settle`, `gpu`, `on_gpu`, `shares_gpu`, `cards`, `serving`,
   `free`, `publish`): a change there changes both (`tests.Images`, `tests.Audio`). A new kind of
   generated media → its config path in `store.PATH_VARS` and `context.private_paths`, its output
   directory in `cli.EVENT_SKIP` (and the mod's ears), its engines in `wb scout`.
+- **`models.same_gpu`** (a remote server on this GPU, #750) → every place that tells this GPU's
+  models from another host's: `pool`, `on_this_gpu` (`free_gpu`, `_others_resident`),
+  `releasable`, `make_resident`, `GpuLease.step_aside`/`_unload_unshared`, `optimize.busy` and its
+  per-server lease, `verify`'s GPU tests, `media.boxes` and `media.shares_gpu`. One left out
+  takes a second lease on `gpu` in one process (it waits on itself) or leaves a model loaded.
 - **`progress.DEFAULT_MIN` and `TYPICAL_MIN`** → the pane's Progress checks sentence
   (`PROGRESS_STOPS` in `register.tsx`), which names them (#724).
 - **`ask_mcp.NO_ANSWER`'s opening** ("No answer arrived in time.") → the mod's `NO_ANSWER`, which
