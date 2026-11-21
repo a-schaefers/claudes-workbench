@@ -1276,7 +1276,7 @@ def _prepare(task: store.Task) -> bool:
         f"setting up the worktree failed ({code})"
     tail = "\n".join("    " + x for x in clip_tail(output, 8, total=1500).splitlines())
     proxy = f"\n{proxy_line(gone)}, if the setup needed it" if (gone := proxy_gap(output)) else ""
-    task.set_status(phase="failed", last=what)
+    task.set_status(phase="failed", last=what, infra="setup")  # the machine's, not the model's (#508)
     task.notify("failed", f"task {task.name}: {what} before any round "
                 f"({task.dir / 'setup.txt'}):\n{tail}{proxy}\nfix it, then wb discard {task.name} and "
                 "start again")
@@ -1775,7 +1775,7 @@ def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
 
 
 def _load_failed(task: store.Task, e: Exception) -> None:
-    task.set_status(phase="failed", last=f"model: {e}")
+    task.set_status(phase="failed", last=f"model: {e}", infra="model")
     task.notify("failed", f"task {task.name}: could not load {task.spec['model']}: {e}")
 
 
@@ -1845,7 +1845,8 @@ def _rejoin(task: store.Task, lease) -> None:
 
 
 def drive(task: store.Task) -> None:
-    task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid())
+    # infra: why the machine, not the agent, failed the task's last run (wb bench grades none of it)
+    task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid(), infra=None)
     say = lambda msg: task.set_status(last=msg)  # noqa: E731
     try:
         m = models.resolve(task.spec["model"])
@@ -2150,7 +2151,8 @@ def main():
             pass
         try:
             task.set_status(phase="failed", last=f"the disk is full ({e.strerror}): free some, "
-                            f"then wb resume {task.name}" if full else err.strip().splitlines()[-1][:200])
+                            f"then wb resume {task.name}" if full else err.strip().splitlines()[-1][:200],
+                            infra="disk full" if full else "crash")
             task.notify("failed", f"task {task.name}: the disk is full ({store.home()}); free "
                         f"some, then wb resume {task.name}" if full else
                         f"task {task.name}: the runner crashed\n{err[-1500:]}")

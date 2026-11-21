@@ -1038,6 +1038,7 @@ class Lifecycle(Base):
         self.assertIn("[failed] t-killed", out)
         self.assertIn("the runner died", out)
         self.assertEqual(store.Task("t-killed").status["last"], cli.RUNNER_DIED)
+        self.assertEqual(store.Task("t-killed").status["infra"], "runner died")  # bench: no grade (#508)
         os.environ["FAKE_SCENARIO"] = "ok"
         run_wb("resume", "t-killed")
         wait_phase("t-killed", {"review"})
@@ -6400,6 +6401,36 @@ class Bench(Base):
         self.assertIn("bench: 1 of 1 case(s) passed", run_wb("models"))
         bench.drive(run)                                                  # nothing left to do
         self.assertEqual(len(bench.rows()), 1)
+
+    def test_a_replay_the_machine_broke_is_an_error_kept_out_of_pass_rates_and_run_again(self):
+        # #508 (the audit of 1.90): a setup with the network out, a server asleep past DOWN_WAIT,
+        # a crashed or killed runner was graded as the model failing, and never replayed again
+        from workbench import bench
+        model = "ollama/mimo-v2.6:9b-q8_0"
+        self.accepted("t-src")
+        bench.add("t-src")
+        case = bench.cases()["t-src"]
+        os.environ["FAKE_SCENARIO"] = "ok"
+        row = bench.replay({**case, "setup": "echo offline; exit 5"}, model, 1, "r0", "", [])
+        self.assertEqual((row["outcome"], row["phase"]), ("error", "failed"), row)
+        self.assertIn("setup", row["why"])
+        store.append_jsonl(bench.runs_file(), row)
+        self.assertIsNone(bench.model_line(model))                        # no case failed
+        self.assertIn("t-src on ollama/mimo-v2.6:9b-q8_0: broke off: setup", run_wb("bench", "report"))
+        # the load failure and the reaped runner are the machine's too
+        runner._load_failed(store.Task(row["task"]), RuntimeError("lan/m can't run: asleep"))
+        self.assertEqual(store.Task(row["task"]).status["infra"], "model")
+        # so a run replays it, and one with nothing left to replay says so and starts nothing
+        out = run_wb("bench", "run", "--model", "mimo")
+        run = out.split()[2].rstrip(":")
+        deadline = time.time() + 60
+        while time.time() < deadline and (bench.driver() or not bench.rows(run)):
+            time.sleep(0.3)
+        self.assertEqual([r["outcome"] for r in bench.rows(run)], ["passed"])
+        self.assertIn("bench: 1 of 1 case(s) passed", run_wb("models"))
+        out = run_wb("bench", "run", "--model", "mimo")
+        self.assertIn("all 1 replay(s) already done (no --label): --label <name> runs them again", out)
+        self.assertFalse(bench.driver())
 
     def test_the_report_says_why_replays_never_started_and_where_their_logs_are(self):
         # #89 (the 2026-11-18 audit): a run whose every replay failed to start said "no replays yet"

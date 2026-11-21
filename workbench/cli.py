@@ -198,7 +198,8 @@ def reap(task: store.Task) -> bool:
         st = task.set_status_if(  # one reaper wins: two waiters, one notice
             lambda st: st.get("phase") in LIVE and not runner_alive(task)
             and time.time() - (st.get("updated_at") or 0) >= REAP_GRACE,
-            phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None, asking=None)
+            phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None, asking=None,
+            infra="runner died")  # the machine's: wb bench grades none of it (#508)
     except OSError as e:
         if not store.disk_full(e):
             raise

@@ -339,8 +339,9 @@ def plan(run: str) -> dict:
 
 
 def start(model_ids: list[str], case_names: list[str], skills: list[str], label: str,
-          repeat: int) -> tuple[str, list[str]]:
-    """Write a run's plan and spawn its driver; the run id and the report's lines."""
+          repeat: int) -> tuple[str | None, list[str]]:
+    """Write a run's plan and spawn its driver; the run id (None: nothing left to replay) and
+    the report's lines."""
     if d := driver():
         raise RuntimeError(f"bench run {d.get('run')} is running (wb bench stop)")
     have = cases()
@@ -359,6 +360,12 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
         raise RuntimeError("no model that can run (wb models)")
     pairs = [(c, m.id) for c in chosen for m in ms
              if model_ids or router.allowed(m, chosen[c].get("size") or "significant")]
+    done = done_keys()
+    if pairs and all((c, m, label, rep) in done for c, m in pairs for rep in range(1, repeat + 1)):
+        # a driver that skips them all said "N replay(s)" and did nothing (#508)
+        return None, [f"all {len(pairs) * repeat} replay(s) already done"
+                      + (f" under label {label}" if label else " (no --label)")
+                      + ": --label <name> runs them again"]
     run = time.strftime("%m%d-%H%M%S")
     d = home() / "runs" / run
     d.mkdir(parents=True)
@@ -382,6 +389,12 @@ def _done(row: dict) -> bool:
     return row.get("outcome") in ("passed", "failed")
 
 
+def done_keys() -> set[tuple]:
+    """(case, model, label, rep) of every replay graded: an error, the machine's, isn't (#508)."""
+    return {(r.get("case"), r.get("model"), r.get("label", ""), r.get("rep", 1))
+            for r in store.read_jsonl(runs_file())[0] if _done(r)}
+
+
 def _idle() -> bool:
     return not any(t.status.get("phase") in store.ACTIVE and not t.spec.get("bench")
                    for t in store.all_tasks())
@@ -399,10 +412,7 @@ def drive(run: str) -> None:
     label, reps = p.get("label", ""), int(p.get("repeat") or 1)
     for rep in range(1, reps + 1):
         for case_name, model in p.get("pairs") or []:
-            key = (case_name, model, label, rep)
-            done = {(r.get("case"), r.get("model"), r.get("label", ""), r.get("rep", 1))
-                    for r in store.read_jsonl(runs_file())[0] if _done(r)}
-            if key in done:
+            if (case_name, model, label, rep) in done_keys():
                 continue
             case = cases().get(case_name)
             if not case:
@@ -495,6 +505,9 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
                                  store.read_jsonl(task.dir / "events.jsonl")[0]))
         if st.get("last") == PREEMPTED:
             return {**row, "outcome": "preempted"}
+        if phase == "failed" and st.get("infra"):  # the setup, the server, the runner, the disk
+            # the machine's doing, not the model's: an error, run again next time (#508)
+            return {**row, "outcome": "error", "why": f"{st['infra']}: {st.get('last') or ''}"[:200]}
         if phase != "review":
             return {**row, "outcome": "failed", "why": (st.get("last") or phase)[:200]}
         (d / "diff.patch").write_text(gitops.diff(task.worktree, task.spec["base"]))
@@ -681,11 +694,16 @@ def report(run: str | None = None, label: str | None = None) -> str:
     # why a replay never started, and where its log is: a run whose every replay failed to start
     # said only "no replays yet" (the 2026-11-18 audit, #89)
     errors = [r for r in other if r.get("outcome") == "error"]
-    unstarted = [f"{r.get('case')} on {r.get('model')}: didn't start: {r.get('why') or '?'} "
-                 f"({home() / 'runs' / str(r.get('run')) / str(r.get('task')) / 'wb.log'})"
+    # one that started and broke for the machine's reasons (a `phase`: #508) points at its runner
+    unstarted = [f"{r.get('case')} on {r.get('model')}: "
+                 + (f"broke off: {r.get('why') or '?'} ({store.task_dir(str(r.get('task'))) / 'runner.log'})"
+                    if r.get("phase") else f"didn't start: {r.get('why') or '?'} "
+                    f"({home() / 'runs' / str(r.get('run')) / str(r.get('task')) / 'wb.log'})")
                  for r in errors[-10:]]
     if not rs:
-        return "\n".join(head + ([f"no replay finished; {len(errors)} didn't start:"] + unstarted
+        return "\n".join(head + ([f"no replay finished; {len(errors)} didn't start"
+                                  + (" or broke off" if any(r.get("phase") for r in errors) else "")
+                                  + ":"] + unstarted
                                  if errors else
                                  ["no replays yet" + (" (wb bench add, then wb bench run)"
                                                       if not cases() else "")]) + self_lines(mine))
