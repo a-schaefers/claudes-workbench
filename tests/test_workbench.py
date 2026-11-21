@@ -13877,6 +13877,28 @@ class Projects(Base):
             run_wb(*argv)
         return err.getvalue()
 
+    def test_a_branch_named_delegate_or_under_the_tasks_branch_is_refused_at_start_by_name(self):
+        # #792 (the second 2026-11-21 audit): `branch --list delegate/<task>` missed both, and
+        # the runner's `worktree add` failed every task in the repo after it had spawned
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("branch", "delegate")
+        err = self.refused("start", "t-dlg", "--spec", str(self.spec), "--repo", str(self.repo),
+                           "--model", "mimo")
+        self.assertIn("the branch delegate in", err)
+        self.assertIn("git branch -m delegate", err)
+        self.assertFalse(store.Task("t-dlg").dir.exists())
+        wt = Path(self.tmp.name) / "wt"
+        with self.assertRaisesRegex(gitops.GitError, "blocks workbench's delegate/ branches"):
+            gitops.create_worktree(self.repo, "t-dlg", wt)
+        self.assertFalse(wt.exists())
+        g("branch", "-D", "delegate")
+        g("branch", "delegate/t-dlg/old")
+        err = self.refused("start", "t-dlg", "--spec", str(self.spec), "--repo", str(self.repo),
+                           "--model", "mimo")
+        self.assertIn("the branch delegate/t-dlg/old in", err)
+        self.assertEqual(gitops.branch_clash(self.repo, "t-dlg2"), "")
+
     def test_an_unknown_base_is_named_not_reported_as_a_missing_claude_md(self):
         # the 2026-11-16 audit: --base mian sent Claude off to write a CLAUDE.md the repo had
         err = self.refused("start", "t-typo", "--spec", str(self.spec), "--repo", str(self.repo),

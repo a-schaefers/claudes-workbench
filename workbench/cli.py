@@ -939,9 +939,9 @@ def cmd_start(a):
     # (#529). What it would refuse is checked here first, the branch, a commit's own submodules.
     wt = context.tree(task.dir, repo, setup.get("siblings"), "worktree")  # #261
     base = gitops.base_commit(repo, a.base)
-    if gitops.git(repo, "branch", "--list", gitops.branch_name(a.name)).strip():
+    if why := gitops.branch_clash(repo, a.name):  # a branch `delegate` too (#792)
         shutil.rmtree(task.dir, ignore_errors=True)
-        die(f"branch {gitops.branch_name(a.name)} already exists in {repo}: pick a new name")
+        die(why)
     store.write_json(task.dir / STARTING, {"repo": str(repo), "worktree": str(wt),
                                            "pid": os.getpid(), "at": store.now(),
                                            "start": models._started(os.getpid())})

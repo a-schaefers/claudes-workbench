@@ -291,6 +291,24 @@ def branch_name(task: str) -> str:
     return f"delegate/{task}"
 
 
+def branch_clash(repo: Path, task: str) -> str:
+    """Why branch delegate/<task> can't be made in ``repo``, or "". Besides that branch itself, a
+    branch named `delegate`, or one under `delegate/<task>/`, holds the ref's place: `branch
+    --list` missed them, and the runner's `worktree add` failed for every task in that repo,
+    after it had spawned (#792, the second 2026-11-21 audit)."""
+    name = branch_name(task)
+    if git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{name}", check=False).strip():
+        return f"branch {name} already exists in {repo}: pick a new name"
+    if git(repo, "rev-parse", "--verify", "-q", "refs/heads/delegate", check=False).strip():
+        return (f"the branch delegate in {repo} blocks workbench's delegate/ branches: rename it "
+                "(git branch -m delegate <new name>), then start again")
+    if under := git(repo, "for-each-ref", "--count=1", "--format=%(refname:short)",
+                    f"refs/heads/{name}/", check=False).strip():
+        return (f"the branch {under} in {repo} blocks branch {name}: pick a new name, or rename "
+                "that branch")
+    return ""
+
+
 def base_commit(repo: Path, base: str) -> str | None:
     """The commit ``base`` names (an annotated tag peeled), or None when it names none: a typo
     once read as a missing CLAUDE.md (the 2026-11-16 audit)."""
@@ -305,8 +323,8 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
     commit = base_commit(repo, base)
     if not commit:
         raise GitError(f"no commit {base} in {repo}")
-    if git(repo, "branch", "--list", branch_name(task)).strip():
-        raise GitError(f"branch {branch_name(task)} already exists in {repo}")
+    if why := branch_clash(repo, task):
+        raise GitError(why)
     # a sparse checkout's patterns: newer git copies them into a worktree it adds (2.56 does),
     # an older one checked out the whole tree; set before the checkout either way (#263)
     sparse = sparse_of(repo)
@@ -319,7 +337,7 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
     except GitError:
         git(repo, *NO_HOOKS, "worktree", "remove", "--force", str(dest), check=False)
         drop_registration(repo, dest)
-        delete_branch(repo, task, at=commit)  # this call made it: the --list above found none
+        delete_branch(repo, task, at=commit)  # this call made it: branch_clash found none
         raise
     if rec := _record(dest):  # before any agent has run there: see _pinned
         rec.parent.mkdir(parents=True, exist_ok=True)
