@@ -1328,6 +1328,50 @@ class Lifecycle(Base):
                               capture_output=True, text=True).stdout.strip()
         self.assertIn(f"commit {head}", run_wb("accept", "t-hand", "-m", "feat: answer"))
 
+    def test_accept_puts_its_commit_on_the_task_branch_whatever_the_worktree_has_out(self):
+        # #417 (the audit of 1.8, reproduced): with the worktree's HEAD detached, accept committed
+        # there, said "on delegate/<task>", removed the worktree, and no branch held the commit
+        for name, switch in (("t-det", ("--detach",)), ("t-other", ("-c", "other"))):
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+            wt = store.Task(name).worktree
+            subprocess.run(["git", "-C", str(wt), "switch", "-q", *switch], check=True)
+            out = run_wb("accept", name, "-m", "feat: answer")
+            tip = store.Task(name).status["tip"]
+            self.assertEqual(self.branch(f"delegate/{name}"), tip, name)
+            self.assertIn(f"on delegate/{name}", out)
+            self.assertEqual(subprocess.run(
+                ["git", "-C", str(self.repo), "show", f"delegate/{name}:answer.txt"],
+                capture_output=True, text=True, check=True).stdout.strip(), "42", name)
+            self.assertFalse(wt.exists(), name)
+
+    def test_accept_keeps_the_worktree_when_the_task_branch_has_commits_its_commit_lacks(self):
+        # #417: the branch moved on without the worktree's HEAD (a step committed, then a
+        # checkout of the commit before it): moving the branch would drop that step
+        self.start("t-div", "ok")
+        wait_phase("t-div", {"review"})
+        wt = store.Task("t-div").worktree
+        g = lambda *a: subprocess.run(["git", "-C", str(wt), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout.strip()
+        g("commit", "-q", "--allow-empty", "-m", "a step")
+        step = g("rev-parse", "HEAD")
+        g("switch", "-q", "--detach", "HEAD~1")
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()) as err:
+            run_wb("accept", "t-div", "-m", "feat: answer")
+        self.assertIn("a step", err.getvalue())                    # what the branch has
+        self.assertIn(f"rebase delegate/t-div", err.getvalue())    # and the way out
+        self.assertTrue(wt.is_dir())                               # nothing removed
+        self.assertEqual(self.branch("delegate/t-div"), step)
+        st = store.Task("t-div").status
+        self.assertEqual(st["phase"], "review")
+        self.assertIsNone(st.get("closing"))
+        g("rebase", "-q", "delegate/t-div")                        # as it says, then again
+        run_wb("accept", "t-div", "-m", "feat: answer")
+        tip = store.Task("t-div").status["tip"]
+        self.assertEqual(self.branch("delegate/t-div"), tip)
+        self.assertTrue(gitops.contains(self.repo, tip, step))
+        self.assertFalse(wt.exists())
+
     def test_merge_lands_only_on_the_branch_the_task_started_from(self):
         # the audit: a task started on `feature` merged into the main checkout's `main`, and one
         # on a detached HEAD left its merge commit orphaned

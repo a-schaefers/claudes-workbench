@@ -1745,6 +1745,9 @@ def cmd_accept(a):
                 else:  # nothing new: the branch's commits past the base are the work (the steps
                     # wb next committed, or Claude's own after a takeover: the audit)
                     commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
+            # the branch must hold it before the worktree goes: on a detached HEAD the commit was
+            # left in no branch at all (#417, the audit of 1.8)
+            gitops.put_on_branch(repo, spec["branch"], commit, task.worktree)
         except gitops.GitError as e:  # nothing removed: the uncommitted work is still in the worktree
             if was_live:
                 task.set_status(phase="stuck", last=f"accept failed: {e}"[:200], pid=None)

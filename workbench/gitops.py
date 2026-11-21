@@ -612,6 +612,27 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
     return git(worktree, "rev-parse", "--short", "HEAD").strip()
 
 
+def put_on_branch(repo: Path, branch: str, commit: str, worktree: Path) -> None:
+    """Make ``branch`` the accepted ``commit`` before its worktree goes: already there, moved
+    forward when it is an ancestor (a worktree on a detached HEAD or another branch), made when
+    gone. Refuses a branch holding commits ``commit`` lacks, naming them and the way out: accept
+    committed on a detached HEAD, said the branch had it and removed the only checkout that did
+    (#417, the audit of 1.8)."""
+    ref, sha = f"refs/heads/{branch}", git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
+    have = git(repo, "rev-parse", "--verify", "-q", ref, check=False).strip()
+    if have == sha:
+        return
+    if have and not contains(repo, sha, have):
+        lost = git(repo, "log", "--format=%h %s", f"{sha}..{have}").splitlines()
+        raise GitError(
+            f"{branch} has {len(lost)} commit(s) the accepted {commit} lacks ("
+            f"{'; '.join(lost[:5])}{'; …' if len(lost) > 5 else ''}), so the worktree {worktree} "
+            f"is kept: bring them together there (git -C {shlex.quote(str(worktree))} rebase "
+            f"{branch}), or drop them (git -C {shlex.quote(str(repo))} branch -f {branch} "
+            f"{commit}), then accept again")
+    git(repo, "update-ref", "-m", "workbench: accept", ref, sha, have)  # unmoved since it was read
+
+
 def _rmtree(path: Path) -> None:
     for d, dirs, _ in os.walk(path):  # a read-only directory keeps its entries from deletion
         for x in (d, *(os.path.join(d, n) for n in dirs)):
