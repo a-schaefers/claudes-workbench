@@ -480,9 +480,14 @@ scarce resource, so each row also records what the task cost the Claude Code ses
 uncounted (#451). Every `wb` call records its session under its process
 (`store.note_claude_session`: `claude-sessions/<CLAUDE_PID>`, a `<ts> <id>` line once per id);
 the ones task.json's `claude_pid` recorded from its `created_at` on are read too, each turn
-counted per session. Usage is per API call (an assistant message: one row per content block,
-the same `usage` on each, so counted once by `message.id`), and a call is charged to tasks of that
-session only:
+counted per session. So are the sessions recorded in the task's own `claude-sessions` (a `<ts>
+<id>` line once per id, `store.note_task_session`), written by every `wb` call that names the task
+(its `name` or `task` argument): a task another process adopted after a crash, an update or a
+restart (`cli._scope`, its start process gone) was reviewed and accepted under another pid, and
+those reviews went uncounted (#719). Usage is per API call (an assistant message: one row per
+content block, the same `usage` on each, so counted once by `message.id`, across the sessions too:
+a resumed or forked session's transcript can copy the history it came from), and a call is charged
+to tasks of that session only:
 - a call whose Bash runs `wb … <task>` (each `wb` in the command, split with `shlex`) is that
   task's, and so are the turn's calls after it, until a `wb` names other tasks, `wb
   accept|discard` closes it (`CLOSING`), or a call edits (`EDITS`) a file outside the task's
@@ -5815,6 +5820,7 @@ $WB_HOME (~/.local/state/workbench)
   tasks/<task>/                  readable from the lane; only worktree/ and ask/ writable
     task.json  status.json
     events.jsonl  steer.jsonl  acked  context.md  runner.log
+    claude-sessions              "<ts> <session id>" lines: each Claude Code session a wb call naming the task ran in (spend.sessions, #719)
     coding.json                  what the user allowed Claude to edit: {allowed: [{edit, said, ts, used, when?, started?, did?}]} (*Claude coding*)
     verify/<n>/                  wb verify's runs: base.txt  candidate.txt  result.json
     shots/<n>/                   wb shot's pairs: base.png  candidate.png  base.txt  candidate.txt  shots.json

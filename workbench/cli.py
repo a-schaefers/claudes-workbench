@@ -4438,6 +4438,7 @@ def main(argv=None):
     a = parser().parse_args(argv)
     try:
         store.note_claude_session()  # which sessions a /clear gave this process (spend.usage)
+        store.note_task_session(getattr(a, "name", None) or getattr(a, "task", None))  # (#719)
     except OSError:
         pass  # a measurement's record never stops a command
     try:

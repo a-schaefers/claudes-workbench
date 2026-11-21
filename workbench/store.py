@@ -208,6 +208,38 @@ def note_claude_session() -> None:
         f.write(f"{now()} {sid}\n")
 
 
+def note_task_session(name) -> None:
+    """Record the Claude Code session a `wb` call naming a task runs in, in the task's own
+    `claude-sessions` (`<ts> <session id>` lines, once per id): a task adopted by another
+    process after a restart (its start process gone, cli._scope) was reviewed and accepted
+    there, and spend read only the start process's sessions, so the reviews went uncounted
+    (#719)."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not isinstance(name, str) or not NAME_RE.match(name) or not re.fullmatch(r"[\w-]{1,128}", sid):
+        return
+    task = Task(name)
+    if not task.exists:
+        return
+    path = task.dir / "claude-sessions"
+    if sid in task_sessions(task):
+        return
+    with path.open("a") as f:
+        f.write(f"{now()} {sid}\n")
+
+
+def task_sessions(task) -> list[str]:
+    """The session ids note_task_session recorded for the task, first seen first."""
+    try:
+        words = (task.dir / "claude-sessions").read_text().split()
+    except OSError:
+        return []
+    out = []
+    for sid in words[1::2]:
+        if sid not in out:
+            out.append(sid)
+    return out
+
+
 def claude_sessions(pid, since: float = 0) -> list[str]:
     """The session ids Claude Code process `pid` ran `wb` in from `since` on, first seen first."""
     try:

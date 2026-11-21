@@ -149,7 +149,7 @@ def _events(rows: list[dict], names: set[str]) -> list:
             events.append({m.group(1)} & names if (m := WAKE.match(text)) else set())
         elif row.get("type") == "assistant":
             does = _named(row, names)
-            mid = (row.get("message") or {}).get("id") or f"row {len(events)}"
+            mid = (row.get("message") or {}).get("id") or ("row", len(events))  # not deduplicated
             if mid in by_id:
                 for k in ("hit", "shut", "edits", "specs", "nexts"):
                     by_id[mid][k] |= does[k]
@@ -231,12 +231,14 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
 
 def sessions(task: store.Task) -> list[str]:
     """The Claude Code sessions the task's Claude worked in: the one `wb start` recorded, then
-    each one its process had since (a /clear starts another: store.note_claude_session, #451)."""
+    each one its process had since (a /clear starts another: store.note_claude_session, #451),
+    then each one a `wb` call naming the task ran in (another process that adopted it after a
+    restart: store.note_task_session, #719)."""
     sid = task.spec.get("session")
     if not sid:
         return []
     later = store.claude_sessions(task.spec.get("claude_pid"), task.spec.get("created_at") or 0)
-    return [sid] + [s for s in later if s != sid]
+    return list(dict.fromkeys([sid, *later, *store.task_sessions(task)]))
 
 
 def usage(task: store.Task) -> dict | None:
@@ -267,8 +269,16 @@ def usage_by_step(task: store.Task) -> tuple[dict | None, list[dict] | None]:
         return None, None
     names = {t.name for t in store.all_tasks() if t.spec.get("session") in sids} | {task.name}
     try:
-        charged = [{**c, "turn": (s, c["turn"])} for s, main, subs in found
-                   for c in calls(main, subs, names) if task.name in c["names"]]
+        charged, seen = [], set()
+        for s, main, subs in found:
+            for c in calls(main, subs, names):
+                # a resumed or forked session's transcript can copy the history it came from:
+                # a call is counted once, by its message id (#719)
+                if isinstance(c["id"], str) and c["id"] in seen:
+                    continue
+                seen.add(c["id"])
+                if task.name in c["names"]:
+                    charged.append({**c, "turn": (s, c["turn"])})
     except OSError:  # unreadable: a measurement never stops an accept
         return None, None
     bounds = _step_bounds(task)

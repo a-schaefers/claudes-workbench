@@ -10352,6 +10352,31 @@ class ClaudeSpend(Base):
         u = spend.usage(t1)
         self.assertEqual((u["output"], u["turns"]), (10 + 20 + 30, 2))
 
+    def test_a_task_another_process_adopted_after_a_restart_is_charged_its_reviews(self):
+        # #719: Claude Code restarted mid-task; the new process (another pid, another session)
+        # adopted the task and reviewed and accepted it, and only the start process's sessions
+        # were read, so the reviews, the costliest part, went uncounted
+        from workbench import spend
+        t1 = store.Task("t1")
+        store.write_json(t1.dir / "task.json", {"name": "t1", "session": self.SID,
+                                                "claude_pid": 111, "created_at": store.now()})
+        start = _call("m1", "2026-11-17T10:00:01Z", 10, "wb start t1 --spec s.md")
+        self.transcript([_turn("add the thing", "2026-11-17T10:00:00Z"), *start])
+        self.transcript([_turn("add the thing", "2026-11-17T10:00:00Z"), *start,   # its history,
+                         _turn("[workbench] Task `t1` is ready for review.", "2026-11-17T11:00:00Z"),
+                         *_call("m2", "2026-11-17T11:00:01Z", 20, "wb diff t1"),     # copied
+                         *_call("m3", "2026-11-17T11:00:02Z", 30, "wb accept t1 -m x")], sid="sess-b")
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "222", "CLAUDE_CODE_SESSION_ID": "sess-b"}):
+            run_wb("log", "t1")                              # a call naming the task
+            run_wb("log", "t1")                              # once per id
+            run_wb("status")                                 # naming none
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "333", "CLAUDE_CODE_SESSION_ID": "sess-c"}):
+            run_wb("status")                                 # another session, not on t1
+        self.assertEqual(spend.sessions(t1), [self.SID, "sess-b"])
+        self.assertEqual((t1.dir / "claude-sessions").read_text().count("sess-b"), 1)
+        u = spend.usage(t1)
+        self.assertEqual((u["output"], u["turns"]), (10 + 20 + 30, 2))   # m1 counted once
+
     def test_a_mid_turn_image_row_or_a_compaction_summary_starts_no_new_turn(self):
         # #557: an isMeta row (the image a Read showed, a skill's body) or a compaction summary
         # was a new prompt: the calls after it went to no task; a summary quoting a wake's
