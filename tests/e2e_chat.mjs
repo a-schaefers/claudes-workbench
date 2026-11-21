@@ -646,6 +646,38 @@ async function run(engine, device) {
       proxy.close()
     }
   })
+  await check("a 429 from something in front of the chat is sent again by itself, and a 400 still shows as not sent", async () => {
+    // #936 (the review of 1.90.24): every 4xx but 401 was a refusal, so a throttled send waited
+    // for a tap on retry; uploads already took 408 and 429 as "try again later". No service
+    // worker: WebKit's routing doesn't see a page's fetches while one is registered
+    const tc = await browser.newContext({ ...(device ? pw.devices[device] : {}), serviceWorkers: 'block' })
+    const t = await tc.newPage()
+    t.on('pageerror', e => errors.push(String(e)))
+    try {
+      await t.goto(base + '#token=' + token)
+      await until(async () => await t.locator('#input').isEditable())
+      let throttled = 0
+      await t.route('**/api/send', route => throttled++ ? route.continue()
+        : route.fulfill({ status: 429, headers: { 'Retry-After': '1' }, contentType: 'text/plain', body: 'slow down' }))
+      await t.fill('#input', 'throttled once')
+      await t.click('#send')
+      await until(() => messages().filter(m => m.text === 'throttled once').length === 1, 15000)
+      if (throttled !== 2) throw new Error(`sent ${throttled} times`)
+      await until(async () => (await t.locator('.row.user.pending').count()) === 0)
+      if (await t.locator('.row.user.failed').count()) throw new Error('marked not sent')
+      await t.unroute('**/api/send')
+      await t.route('**/api/send', route => route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'bad request' }) }))
+      await t.fill('#input', 'refused for good')
+      await t.click('#send')
+      const row = t.locator('.row.user.failed', { hasText: 'refused for good' })
+      await until(async () => (await row.count()) === 1)
+      if (!(await row.locator('.meta').textContent()).includes('Not sent: bad request')) throw new Error(await row.locator('.meta').textContent())
+      await row.locator('.meta button', { hasText: 'delete' }).click()
+      await until(async () => (await t.locator('.row.user.failed').count()) === 0)
+      await sleep(1000)
+      if (messages().filter(m => m.text === 'throttled once').length !== 1) throw new Error('throttled once landed twice')
+    } finally { await tc.close() }
+  })
   await check('a message over 6 h unread says it was not passed to Claude, never Delivered, and sends again', async () => {
     // #536 (the 2026-11-20 audit): the mod skipped it, and the page said "Delivered" for good
     listen(false)

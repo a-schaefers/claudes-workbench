@@ -6032,7 +6032,9 @@ and sent nothing (#245, the audit of 1.2). Held or not, a message has landed onl
 names its cid: a 200 that doesn't (a captive portal's or a proxy's page, an empty body) is tried
 again, where any 200 cleared a held message's box, its only copy (#934). The server ignores a cid
 it already holds, so nothing is sent twice; a 4xx other than 401 marks it not sent, with retry,
-edit and delete. Each send
+edit and delete, except 408, 425 and 429 (`transient`, which the uploads share): something in
+front of the chat saying "later", tried again by itself after its `Retry-After` (`retryAfter`, held
+under 30 s) or the backoff, whichever is longer; it waited for a tap on retry (#936). Each send
 (`post`, the reply's body included: cleared at the headers, a body that stalled held `flush`, and
 every later send, until a reload, #935) gives up after `POST_MS` 15 s and is tried again, so a
 dead line can't hold the outbox; `flush` clears its `flushing` flag and reschedules in a

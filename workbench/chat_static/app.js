@@ -609,6 +609,15 @@
       return { ok: r.ok, status: r.status, headers: r.headers, json: async () => JSON.parse(text) }
     } finally { clearTimeout(timer) }
   }
+  // "try again later", from whatever is in front of the chat (a proxy, a tunnel): never a refusal,
+  // for an upload or a send (#936)
+  const transient = status => status === 408 || status === 425 || status === 429
+  // a Retry-After (seconds or a date) in ms, held under BACKOFF's last step; 0 when it says nothing
+  function retryAfter(r) {
+    const v = (r.headers && r.headers.get('Retry-After')) || ''
+    const ms = /^\d+$/.test(v.trim()) ? Number(v) * 1000 : Date.parse(v) - Date.now()
+    return ms > 0 ? Math.min(ms, BACKOFF[BACKOFF.length - 1]) : 0
+  }
   async function connect() {
     if (conn || !token || document.hidden) return
     clearTimeout(retryTimer)
@@ -836,7 +845,7 @@
         try { j = JSON.parse(x.responseText) } catch {}
         if (x.status === 200) { serverFails.delete(f.id); resolve(j.upload) }
         else if (x.status === 401) { keyless('That key was not accepted.'); reject(new Error('key')) }
-        else if (j.final || (x.status >= 400 && x.status < 500 && x.status !== 408 && x.status !== 429)) reject(new Refused(j.error || 'refused'))
+        else if (j.final || (x.status >= 400 && x.status < 500 && !transient(x.status))) reject(new Refused(j.error || 'refused'))
         else if (x.status >= 500) {
           const n = (serverFails.get(f.id) || 0) + 1
           serverFails.set(f.id, n)
@@ -1030,7 +1039,7 @@
     outbox = outItems()  // another tab's too: whichever tab is online sends them all
     if (flushing || !token || !(outbox.length || held)) return
     flushing = true
-    let again = false
+    let again = false, wait = 0
     // in a finally: a throw from keep, render or apply left `flushing` set, and the page sent
     // nothing more until a reload (#935)
     try { for (const o of [...outbox, ...(held ? [held] : [])]) {
@@ -1063,6 +1072,7 @@
           continue
         }
         if (r.status === 401) { keyless('That key was not accepted.'); break }
+        if (transient(r.status)) { again = true; wait = Math.max(wait, retryAfter(r)); continue }
         if (r.status >= 400 && r.status < 500) {
           if (o === held) { held = null; banner('Not sent: ' + (j.error || 'refused') + '. Your message is still in the box.', true); continue }
           o.error = j.error || 'refused'; keep(o); render(); continue
@@ -1073,7 +1083,7 @@
       flushing = false
       if (again && (held || outbox.some(o => !o.error))) {
         clearTimeout(flushTimer)
-        flushTimer = setTimeout(flush, BACKOFF[Math.min(flushTries++, BACKOFF.length - 1)])
+        flushTimer = setTimeout(flush, Math.max(wait, BACKOFF[Math.min(flushTries++, BACKOFF.length - 1)]))
       }
     }
   }
