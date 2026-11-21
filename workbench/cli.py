@@ -36,11 +36,11 @@ PROTOCOL = """
 How to work (workbench protocol):
 - You are in a git worktree on branch {branch}. Git is read-only for you; leave the changes
   uncommitted. Claude commits, pushes and deploys.
-{test_line}- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
+{test_line}{experiment_protocol}- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
 question(s) for this task). Otherwise make reasonable choices and say what you assumed.
 - Stay inside the scope of the spec. No unrelated refactors, no new dependencies unless asked.
 - You can write only in this worktree, the temp directory and build caches: "Permission denied"
-  anywhere else is that limit, so don't probe it. Need a directory outside? Call `ask_reviewer`
+  anywhere else is that limit, so don't keep trying it. Need a directory outside? Call `ask_reviewer`
   with `path` set to it (this doesn't use the question budget).
 - CLAUDE.md and AGENTS.md are Claude's, and you can't edit them. When the task asks for a change
   to one, write the whole new file next to it as `<name>.proposed` (`CLAUDE.md.proposed`); Claude
@@ -1085,8 +1085,11 @@ def cmd_start(a):
     budget = a.ask_budget
     # round 1's prompt before task.json: a write that fails leaves a dead start for gc, not a
     # task with no status (#873)
+    exps = context.task_experiments()  # what this task's agent has: the prompt says it too
     prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
-                                                  test_line=test_line(a.test), budget=budget)
+                                                  test_line=test_line(a.test), budget=budget,
+                                                  experiment_protocol=context.experiment_protocol(
+                                                      experiments=exps))
     task.round_dir(1).mkdir(parents=True)
     task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
     # from the model's measured speed on this machine, else defaults; its identity (cached:
@@ -1127,7 +1130,7 @@ def cmd_start(a):
         # were 500K of one task's 1.2M (2026-11-17); the pane shows progress, and the warnings
         # (a nudge, a full window, handovers, a cut base check) still wake
         "checkin": a.checkin or 0, "self_review": a.self_review,
-        "experiments": context.task_experiments(),  # what this task's agent has: wb experiment
+        "experiments": exps,  # what this task's agent has: wb experiment
         "round_timeout": a.round_timeout or limits["round"],
         "silence_timeout": a.silence_timeout or limits["silence"],
         "think_timeout": a.think_timeout if a.think_timeout is not None else limits["think"],
@@ -1400,7 +1403,8 @@ def cmd_next(a):
         f"Step {step} of this task is done and committed ({commit or 'no changes to commit'}). "
         "The next step:\n\n"
         + nxt.rstrip()
-        + PROTOCOL.format(branch=spec["branch"], test_line=test_line(test), budget=budget),
+        + PROTOCOL.format(branch=spec["branch"], test_line=test_line(test), budget=budget,
+                          experiment_protocol=context.experiment_protocol(task)),
         encoding="utf-8")
     handled = store.now()
     # the next step's comparison base, whether this step committed or not: found by its trailer
@@ -1853,6 +1857,8 @@ def cmd_status(a):
               f"{(on + (st.get('last') or ''))[:70]}")
     if a.name and tasks[0].worktree.is_dir():
         print(f"worktree: {tasks[0].worktree}")
+    if a.name and (line := use_line(tasks[0])):
+        print(line)
     _say(parked_line)
     _say(_others_line(others, "open elsewhere"))
 
@@ -2336,6 +2342,33 @@ def _coding_gate(task: store.Task, user: bool) -> None:
         f"(then wb coding allow {task.name} --edit \"…\" --said \"<their words>\")", 3)
 
 
+def use_line(task: store.Task) -> str | None:
+    """What a task's agent has used of its experiments so far, live (#857), or None when none is on."""
+    on = [k for k, v in (task.spec.get("experiments") or {}).items() if v]
+    if not on:
+        return None
+    st = task.status
+    used = st.get("experiment_use") or {}
+    return ("; ".join(f"{k}: {used.get(k, 0)} call(s)" for k in on)
+            + f"; whole reads of files over {context.LONG_FILE_LINES} lines: {st.get('long_reads', 0)}")
+
+
+USE_RECENT = 5  # the tasks with an experiment on that wb experiment reports its use over
+
+
+def use_recent(name: str) -> str:
+    """Whether the agents used experiment ``name`` in the latest tasks that had it on (bench
+    replays and trials too), "" before any did: on and installed said nothing of whether the agent
+    ran it, and it never had in 14 replays (#857)."""
+    rows = [r for r in store.results(trials=True) if name in (r.get("experiments") or ())
+            and "experiment_use" in r][-USE_RECENT:]
+    if not rows:
+        return ""
+    calls = [(r.get("experiment_use") or {}).get(name, 0) for r in rows]
+    return (f"; the agent used it in {sum(c > 0 for c in calls)} of the last {len(rows)} task(s) "
+            f"with it on ({sum(calls)} call(s))")
+
+
 def experiment_lines() -> list[str]:
     """One line per experiment: its setting and whether it can work here (probe installed)."""
     on = context.experiments()
@@ -2350,7 +2383,7 @@ def experiment_lines() -> list[str]:
                        "probe-code 0.6.0)")
         else:
             found = _tool_version([path])[1] if name == "probe" else ""
-            out.append(f"{name}: on" + (f" and working ({found})" if found else ""))
+            out.append(f"{name}: on" + (f" and working ({found})" if found else "") + use_recent(name))
     return out
 
 
@@ -3293,10 +3326,14 @@ def cmd_stats(a):
     head, shown = stats.summary(f), f.get("model_lines") or {}
     # the models OpenCode has now, as the Stats tab shows them; --all every one that ran (#638)
     only = None if a.all or not shown else {v for x in shown.get("lines", []) for v in x["variants"]}
-    old = shown.get("older") if only is not None else None
+    # the newest stats.STATS_MODEL_LINES of them, the rest counted on one line (2026-11-21)
+    more, old = (shown.get("more"), shown.get("older")) if only is not None else (None, None)
+    rest = "; ".join(([f"{more['models']} more model(s) used in the last {stats.OLD_DAYS} days: "
+                       f"{more['tasks']} task(s)"] if more else [])
+                     + ([f"{old['models']} older model(s), retired or idle {stats.OLD_DAYS}+ days: "
+                         f"{old['tasks']} task(s)"] if old else []))
     print("\n".join(head + [""] if head else []) + results.table(only)
-          + (f"\n{old['models']} older model(s), retired or idle {stats.OLD_DAYS}+ days: "
-             f"{old['tasks']} task(s) (wb stats --all)" if old else ""))
+          + (f"\n{rest} (wb stats --all)" if rest else ""))
 
 
 def cmd_savings(a):

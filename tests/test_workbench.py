@@ -15260,6 +15260,39 @@ class Stats(Base):
         self.assertIn("strata/strata", out)
         self.assertNotIn("older model", out)
 
+    def test_thirty_recent_models_give_three_lines_and_the_rest_counted_as_more(self):
+        # the owner, 2026-11-21: a machine with a ton of models drew a line each, and the Stats
+        # tab's menu sat a long scroll below a new user's first look
+        from workbench import stats
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        ids = [f"exp-{i}" for i in range(30)]
+        for k in ids + ["exp-0-64k"]:
+            cfg["provider"]["ollama"]["models"][k] = {"name": k}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        # a wb optimize variant that ran nothing yet: its window and bench run are its source's line's
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"ollama/exp-0-64k": {"variant_of": "ollama/exp-0"}}))
+        now = time.time()
+        for i, k in enumerate(ids):
+            for _ in range(1 + i % 2):
+                store.append_jsonl(store.home() / "results.jsonl", {
+                    "model": f"ollama/{k}", "size": "trivial", "outcome": "accepted", "ran": True,
+                    "ts": now - (i + 1) * 3600})
+        f = stats.feed(now)
+        self.assertEqual(stats.STATS_MODEL_LINES, 3)
+        self.assertEqual([x["model"] for x in f["model_lines"]["lines"]],
+                         ["ollama/exp-0", "ollama/exp-1", "ollama/exp-2"])     # the newest first
+        self.assertEqual(f["model_lines"]["lines"][0]["variants"], ["ollama/exp-0", "ollama/exp-0-64k"])
+        self.assertEqual(f["model_lines"]["more"], {"models": 27, "tasks": 41})  # 45, 4 on the three shown
+        self.assertNotIn("older", f["model_lines"])
+        self.assertEqual(len(f["models"]), 30)                    # the feed's split stays whole
+        out = run_wb("stats")
+        self.assertIn("ollama/exp-2", out)
+        self.assertNotIn("ollama/exp-3 ", out)
+        self.assertIn("27 more model(s) used in the last 90 days: 41 task(s) (wb stats --all)", out)
+        out = run_wb("stats", "--all")
+        self.assertTrue(all(f"ollama/{k} " in out for k in ids))  # every model, none folded
+        self.assertNotIn("more model", out)
+
     def test_wb_stats_counts_only_real_spec_gap_discards_and_names_tasks_that_never_ran(self):
         # #817: every row the table left out (another model's, one that never ran) was called a
         # discard put down to the spec: 40 on a retired model read "(41 discards ... left out)"
@@ -21796,6 +21829,74 @@ class ProbeExperiment(Base):
         self.assertTrue(handbook.startswith(context.HANDBOOK.read_text()))
         self.assertTrue(handbook.endswith(context.EXPERIMENT_NOTES["probe"]))
         self.assertIn("probe: on and working (probe-code 0.6.0)", cli.experiment_lines())
+        # and the round's protocol says it too: the handbook alone went unread, 0 probe calls in
+        # 14 replays (2026-11-21)
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertIn(context.EXPERIMENT_PROTOCOL["probe"], prompt)
+        # its search output capped: one query printed 42K tokens (#857); the user's own cap kept
+        self.assertEqual(runner.agent_env(task).get("PROBE_MAX_TOKENS"), str(context.PROBE_MAX_TOKENS))
+        with mock.patch.dict(os.environ, {"PROBE_MAX_TOKENS": "900"}):
+            self.assertEqual(runner.agent_env(task)["PROBE_MAX_TOKENS"], "900")
+        self.assertIn("--allow-tests", context.EXPERIMENT_NOTES["probe"])
+        # probe aborts with a core dump when a pipe closes early: steered to its own limits (#857)
+        self.assertIn("Never pipe probe into `head`", context.EXPERIMENT_NOTES["probe"])
+        # the second A/B (2026-11-21, #857): an order to outline every file over 300 lines and
+        # full-code searches (~4K tokens each) filled a 40K window; now a condition from
+        # PROBE_FILE_LINES, locations-only search first, and probe's own stop rules
+        note, rule = context.EXPERIMENT_NOTES["probe"], context.EXPERIMENT_PROTOCOL["probe"]
+        self.assertIn("--dry-run -o plain", note)
+        self.assertIn("never repeat one", note)
+        self.assertIn("After two searches that miss, use `grep -n`", note)
+        self.assertIn(f"over {context.PROBE_FILE_LINES} lines", note)
+        self.assertIn(f"When you need one function from a file over {context.PROBE_FILE_LINES} lines", rule)
+        self.assertNotIn("Before you read", rule)
+        self.assertNotIn("{probe_lines}", note + rule)
+        self.assertNotIn("don't probe it", prompt)
+
+    def test_what_the_agent_used_of_probe_is_counted_live_and_reported(self):
+        # #857: the first A/B learnt only after 28 replays, by searching their events, that the
+        # agent had never once run probe
+        self.fake_probe()
+        self.start("t-used", "probing")
+        wait_phase("t-used", {"review"})
+        task = store.Task("t-used")
+        st = task.status
+        self.assertEqual(st.get("experiment_use"), {"probe": 1})   # the compound line, not grep's
+        self.assertEqual(st.get("long_reads"), 1)                   # the whole read, not the part
+        self.assertIn("probe: 1 call(s); whole reads of files over 300 lines: 1", run_wb("status", "t-used"))
+        run_wb("discard", "t-used")
+        row = [r for r in store.results(trials=True) if r["task"] == "t-used"][-1]
+        self.assertEqual((row["experiment_use"], row["long_reads"]), ({"probe": 1}, 1))
+        self.assertIn("and working (probe-code 0.6.0); the agent used it in 1 of the last 1 task(s) "
+                      "with it on (1 call(s))", cli.experiment_lines()[0])
+        context.set_experiment("probe", False)                    # off: nothing is counted as its use
+        self.start("t-unused", "probing")
+        wait_phase("t-unused", {"review"})
+        self.assertNotIn("experiment_use", store.Task("t-unused").status)
+        self.assertNotIn("probe:", run_wb("status", "t-unused"))
+
+    def test_bench_report_says_how_many_replays_used_the_experiment(self):
+        from workbench import bench
+        on = [{"experiments": ["probe"], "experiment_use": {"probe": 3}, "long_reads": 2},
+              {"experiments": ["probe"], "experiment_use": {}, "long_reads": 1}]
+        self.assertEqual(bench.use_lines({("probe-on", "o/m"): on, ("probe-off", "o/m"): [{"experiments": []}]}),
+                         ["probe-on m: probe used in 1 of 2 replay(s), 3 call(s); whole reads of long files: 3"])
+
+    def test_the_programs_a_shell_line_runs_are_read_past_wrappers_and_assignments(self):
+        from workbench.events import shell_programs
+        for line, want in (("cd x && FOO=1 probe extract a.py#f | head -5", ["cd", "probe", "head"]),
+                           ("timeout -k 5 60s probe symbols a.py", ["probe"]),
+                           ("env A=1 nice -n 5 /usr/local/bin/probe grep x", ["probe"]),
+                           ("(probe symbols a.py 2>/dev/null || cat a.py)", ["probe", "cat"]),
+                           ("grep -n probe a.py; echo probe", ["grep", "echo"]),
+                           # the probe A/B's own lines (2026-11-21): a pattern's quoted | and
+                           # 2>&1's & read as separators, so "fresh_ceiling" and "1" were programs
+                           ('probe symbols r.py 2>&1 | grep -iE "compaction_buffer|fresh_ceiling"',
+                            ["probe", "grep"]),
+                           ("cd w && python3 -m unittest t 2>&1 | tail -5", ["cd", "python3", "tail"]),
+                           ("echo hi >&2 && 2>/dev/null ls", ["echo", "ls"]),
+                           ("grep -n 'a;b' f; echo $(date)", ["grep", "echo", "date"])):
+            self.assertEqual(shell_programs(line), want, line)
 
     def test_with_probe_on_the_agent_may_run_only_probes_reads(self):
         # 2026-11-21, testing the experiment: `probe *` let the agent start probe's LSP daemon
@@ -21822,6 +21923,8 @@ class ProbeExperiment(Base):
         self.assertEqual(task.spec["experiments"], {"probe": False})
         self.assertEqual(self.probe_rules(task), [])
         self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(), context.HANDBOOK.read_text())
+        self.assertNotIn("probe", task.round_dir(1).joinpath("prompt.md").read_text())
+        self.assertNotIn("PROBE_MAX_TOKENS", runner.agent_env(task))
 
     def probe_that(self, script: str) -> Path:
         """A `probe` first on PATH running `script`, and the file each of its runs is noted in."""

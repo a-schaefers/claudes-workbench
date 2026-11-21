@@ -121,7 +121,10 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            **({"trial": True} if spec.get("trial") else {}),
            # on only: a task with every experiment off ran as main does
            **({"experiments": on} if (on := sorted(k for k, v in (spec.get("experiments") or {}).items()
-                                                    if v)) else {}), **for_stats(task), **extra}
+                                                    if v)) else {}),
+           # how much the agent used each (#857), and its whole reads of long files
+           **({"experiment_use": {k: (st.get("experiment_use") or {}).get(k, 0) for k in on}} if on else {}),
+           "long_reads": st.get("long_reads", 0), **for_stats(task), **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row
 

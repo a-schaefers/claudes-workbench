@@ -1881,7 +1881,7 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   the install writable, though the user's own shell runs it outside the lane later. This is all
   that applies without Landlock.
 - *Asking for more.* A refused write is "Permission denied" (the protocol says so, and not to
-  probe it); the agent calls `ask_reviewer` with `path`, which raises a PERMISSION question naming
+  keep trying it); the agent calls `ask_reviewer` with `path`, which raises a PERMISSION question naming
   `wb allow <task> --path <dir>`. That grants read and write (`--always` keeps it in
   `commands.json`; `wb start --allow-path` grants it up front). `_lane_dir` refuses a path through
   a link, naming its target (the agent can plant `/tmp/out` -> another project and ask for
@@ -2341,13 +2341,17 @@ rounds, whatever came of them), `auto_fixed_tasks` (their tests then passed), `h
 (`router.speed`), `write_trend` (`[[ts, tok/s]…]`, the newest 30 rows' own `speed.write`) and,
 from `TREND_MIN` 6 rows, `write_change_pct`: the newest third's median against the oldest
 third's), `model_lines` (what the tab draws, #638: `{lines: [{model, variants, windows, last,
-…the same}], older: {models, tasks}}`: the models OpenCode has now (`models.discover`), a `wb
-optimize` variant folded under its source (models.json `variant_of`, a retired variant's too),
+…the same}], more: {models, tasks}, older: {models, tasks}}`: the models OpenCode has now
+(`models.discover`), a `wb optimize` variant folded under its source (models.json `variant_of`,
+a retired variant's too; `variants` names each id folded in, the ones that ran and the configured
+ones that haven't yet, so their optimized window and bench run are the line's),
 an id the model had before folded under the one it has now (`renamed_from`, or an id gone from
 the config on the Ollama digest a configured one's rows ran on: #818),
-the most recently used first, its speeds the newest variant's; a model no longer configured or
-with no task in `stats.OLD_DAYS` 90 days is counted in `older`; `models` keeps every one
-split), `sizes`, `stacks` (`{tasks, accepted_pct}`), `days` (the last 30 local days: `{day,
+the most recently used first, its speeds the newest variant's, at most `stats.STATS_MODEL_LINES`
+3 lines and the other recent ones counted in `more` (the owner, 2026-11-21: a machine with a ton
+of models put the tab's menu a long scroll down); a model no longer configured or with no task
+in `stats.OLD_DAYS` 90 days is counted in `older`; each of `more` and `older` only when it
+counts any; `models` keeps every one split), `sizes`, `stacks` (`{tasks, accepted_pct}`), `days` (the last 30 local days: `{day,
 tasks, landed}`; the streak's and the days' arithmetic is on local dates, never `now - 86400`, which
 skipped or repeated a date across a daylight-saving change, #563), `guards` (summed), `helps` (`progress.helped`, per model tried), `bench` (each
 model's newest finished run: `{run, day, passed, of}`, the cases passed of those graded; a newer
@@ -2706,7 +2710,9 @@ nothing until a surface attaches.
   tab opened, the last `BUSY_KEEP` 60 samples, in memory only), a line per running task (phase,
   round, its time, tok/s, said `(last call)` when not live, context %), the rack (one line per
   model: resident, split, cpu, idle or can't run, where its memory is, its speeds and load time, the
-  tasks on it) and the queue. A line longer than the pane wraps at spaces, the rest indented
+  tasks on it; more than `RACK_FOLD_MIN` 2 idle, can't-run or remote models with no task, top.FOLD's
+  states as `RACK_FOLD`, fold into one dim "+N more models idle, can't run or remote (wb top)",
+  2026-11-21, so the tab stays a few rows high however many models a machine has) and the queue. A line longer than the pane wraps at spaces, the rest indented
   (`wrapParts`, colours kept): cut at the edge, a long GPU name took its busy bar, watts and
   sparkline. One child (`runTop`, read by `pumpTop`), started by `syncTop` only
   while the tab is shown, the pane not minimized and Live view on, checked at each poll, a tab's
@@ -2737,10 +2743,18 @@ Live view off: no child, no **Now**. The newest tick is the `top` atom
   questions (asked, and answered only as `wb answer` did), one
   line per model of `model_lines`, newest first, its windows beside the name when a variant
   folded in (`ollama/q (32K, 40K, 64K)`; tasks, landed, rounds, minutes, write speed with its trend as a sparkline,
-  `spark`, and the change, Claude's cost a task), then "Older models: N older models: M tasks (wb
-  stats --all)" (a feed without `model_lines`, an older wb's: a line per `models` entry), by size, the last 30 days as a sparkline, bests,
+  `spark`, and the change, Claude's cost a task), then one row for the rest, "Other models: N more
+  · M older models: T tasks (wb stats --all)" (a part that is 0 left out). The pane caps the
+  lines at `STATS_SHOWN` 3 itself and adds the rest to N and T: the mod tracks main while `wb`
+  runs from the user's clone, so a wb from before the cap sends every line and no `more`, and an
+  older one no `model_lines` (its `models` entries stand in), by size, the last 30 days as a sparkline, bests,
   the newest milestone, what stopped agents (`GUARD_WORDS`), what helps, bench (the last finished run, and "newer run k of N so far" beside it), the optimized
-  windows. A section with no data is left out; a feed with no section at all (a new install's)
+  windows. What helps, Bench and Optimized name only the models of the lines shown (a line's
+  `model` and `variants`; with no line shown, the first `STATS_SHOWN` 3), the rest counted with
+  where to see them: Bench and Optimized on their row, " · N more (wb bench report)" / "(wb
+  optimize report)", or "N models (…)" when none shown has one; What helps on a row of its own,
+  "What helps: N more models (wb stats --json)" ("N models" when none shown has one), not on the
+  last model's, where it read as that model's (2026-11-21). A section with no data is left out; a feed with no section at all (a new install's)
   says to delegate one with /workbench, while one with no judged task but an optimized window,
   a bench result or a period still shows them (#549). It is read (`refreshStats`) only while the tab is shown (`pane.tab` and `$.ui.panes()`
   `isShown`): on each press of the tab, then at each poll when the size or mtime of a file the
@@ -5454,10 +5468,94 @@ failed the start after its branch and worktree were made (#518); its output is r
 `errors="replace"`. On, the task's shell rules allow probe's read-only subcommands, `context.PROBE_READS`
 (`symbols`, `extract`, `search`, `grep`, `query`; `shell_rules`, after `ALLOWED_COMMANDS`), and
 refuse `--lsp` on any of them; its copy of the handbook ends with `EXPERIMENT_NOTES["probe"]`
-(`instruction_files`; `agent/HANDBOOK.md` itself is unchanged). So it stays read-only: no index,
+(`instruction_files`; `agent/HANDBOOK.md` itself is unchanged), and each round prompt's protocol
+carries `EXPERIMENT_PROTOCOL["probe"]` beside the acceptance line (`context.experiment_protocol`,
+the protocol's `{experiment_protocol}`). Its shell gets `PROBE_MAX_TOKENS` (the user's, else
+`context.PROBE_MAX_TOKENS` 2000, `runner.agent_env`): `probe search` has no output limit of its
+own, and one plain query on workbench printed 169 KB, about 42K tokens, more than a 40K window
+holds (#857). The cap is on the matched code, not on what probe prints: in its default `outline`
+format a search capped at 2000 printed about 4,000 tokens, so the note's search is `--dry-run -o
+plain`, which prints only files and line ranges (156 tokens for the same query, measured
+2026-11-21). Both apply from `context.PROBE_FILE_LINES` (1500) lines, as a condition, not an
+order: "when you need one function from a file over 1500 lines, `probe extract` it instead of
+reading the whole file". The note adds `probe symbols` for a name not yet known and probe's own
+agent's stop rules (never repeat or re-spell a search, as one already matches case and
+snake/camel variants; after two misses, `grep -n`; "No results" doesn't mean absent; stop exploring
+once you know the function to change and its callers). Until the second A/B both were an order,
+"before you read a file over 300 lines, run `probe symbols`", with full-code searches: the agent
+outlined and searched mid-sized files it didn't need to and filled its window (below). The note
+and the protocol line were added after the first measurement, in which
+the agent never ran probe in 14 replays: the note was in the handbook only, said "read a whole file
+only when you need most of it" on cases whose largest file was 312 lines, didn't name
+`--allow-tests` (without it `probe symbols` leaves out a test file's tests), and didn't say what to
+do when probe refuses a file over 1 MB ("File too large"; it has no setting to raise that). It
+also says never to pipe probe into `head`: probe-code 0.6.0 aborts when a pipe closes early
+(Rust's println! panics on EPIPE: SIGABRT, a core dump, a desktop crash dialog each time, seen
+throughout the A/B of 2026-11-21), and to filter with `grep` instead. The
+protocol's line on refused writes said "don't probe it" until then. So it stays read-only: no index,
 no daemon, no network. The rule was `probe *` until 2026-11-21, when testing the experiment found
 that it let the agent run `probe lsp` (a daemon and language servers), `--lsp` on a read (the
 same), `probe config set|reset` (probe's config) and `probe benchmark`.
+
+**Measured (2026-11-21, the second A/B).** Four large-file cases made from workbench's own
+commits (each step changes a file of 1,500–3,000 lines, graded by the commit's own tests), one
+local model (a 27B at Q3 on a 16 GB card, 40K window), paired probe-off and probe-on replays, 3
+hours:
+
+| case | arm | passed | min | tokens read | handovers | tool calls | probe calls |
+|---|---|---|---|---|---|---|---|
+| big-this-host (models.py, ~2,700 lines) | off | 1/1 | 41 | 273K | 1 | 142 | 0 |
+| | on | 1/1 | 21 | 120K | 1 | 114 | 4 |
+| big-logout (cli.py) | off | 0/1 | 8 | 70K | 0 | 40 | 0 |
+| | on | 1/1 | 36 | 148K | 1 | 112 | 5 |
+| big-compaction (runner.py) | off | 2/2 | 4–17 | 31–40K | 0 | 28–42 | 0 |
+| | on | 2/2 | 11–20 | 117–166K | 1 each | 73–108 | 1–5 |
+
+big-gpu-power didn't fit the 3 hours. Tokens read are the prompt tokens the GPU read uncached
+(the step events' `in`); minutes ran beside other CPU work, so they are weaker. What it showed:
+- **Adoption is solved:** probe used in 4 of 4 probe-on replays (15 calls), and no long file read
+  whole (`long_reads` 0, against 2 in the off arm). The protocol line, `--allow-tests`, the 1 MB
+  note and the output cap were what changed from the first A/B, where it was never used.
+- **It pays on the very large file and costs on the others.** On big-this-host it halved the
+  time and the tokens. On big-compaction the agent explored more (2–3× the tool calls); the
+  outlines, extracts and extra greps stayed in its context until the window overflowed, OpenCode
+  compacted and the runner handed over, in both replays, where the off arm never did.
+- By the criteria set before the run (used in most replays; passes as many; reads down 20% or
+  minutes down 15%; handovers not up), it is not yet better: median tokens read 55K → 134K,
+  handovers 0 → 1, with passes 3/4 → 4/4 (one in four is noise).
+
+So it stays opt-in and off by default, with no "recommended" note in Settings (the user's call,
+2026-11-21: the A/B decides only that note). The research that followed (#857: SWE-agent's and Agentless's
+ablations, probe's own agent, OpenCode's, Qwen Code's and Codex's output limits, prompting guides
+on over-triggering) pointed at three causes: each search printed twice its cap, the order fired on
+files where probe saves little, and OpenCode 2.x prunes no old tool output. The first two are what
+the note and protocol line above now change; the next A/B measures them against the arm above.
+**Measured again (2026-11-21, the quick A/B).** Each new wording on the two cases above, against
+the replays of that morning (the off arm doesn't change), one replay each, about 20 minutes:
+
+| case | arm | passed | min | tokens read | handovers | probe calls |
+|---|---|---|---|---|---|---|
+| big-this-host | off (a second run) | yes | 13 | 95K | 1 | 0 |
+| | a condition ("when you need one function …") | yes | 11 | 68K | 1 | 0 |
+| | an order from 1,500 lines ("never read … whole") | yes | 16 | 110K | 1 | 12 |
+| big-compaction | a condition | yes | 5 | 30K | 0 | 1 |
+| | an order from 1,500 lines | **no** | 14 | 67K | 1 | 8 |
+
+- On big-this-host every arm handed over once, probe or not: the task needs more than the 40K
+  window, and probe changed where the tokens came from (the order: 36 paged reads, 42K, in place
+  of whole reads), not how many. The two off runs, 41 and 13 minutes, show how far one replay's
+  time moves.
+- The harder the prompt pushed probe, the more the agent explored and the sooner it overflowed;
+  the order failed big-compaction, the only failure on that case in any arm.
+- The condition is the only wording that never did worse than off: on the mid-sized case one
+  extract and the best run of all, on the big one probe not used at all.
+
+So, on this model and window, no wording made probe better than not having it. The experiment
+keeps the condition (what an opted-in user gets does no harm), stays opt-in and off by default,
+and gets no "recommended" note. What filled the window in every arm was OpenCode's own reads
+(one `read` returns up to 2,000 lines or 50 KB, 14K tokens for models.py), which a per-call output
+cap (`tool_output`) sized to the window would bound for every task, probe or not; a `probe` shim
+and the outline in round 1's prompt are the other levers left untried. `wb bench report --label <arm>` prints the use line per arm (`bench.use_lines`).
 
 ## Verifying a fix against the base
 
@@ -6716,7 +6814,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb progress [on\|off]` | `--after MIN` (with `on`, or alone to move the threshold of checks already on; refused with `off` or while off, #602; default: the task's typical length on its model; kept through a bare `on`/`off`, `0` clears it) | The user's opt-in to progress checks; with no argument, what it is (*Progress checks*). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (a smaller step: the note opens with `STEP_NOTE`; after a progress check, recorded as a `smaller` intervention, else a `hint`) | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
-| `wb experiment [<name> [on\|off]]` | | The experiments (*Experiments*): with no argument, each one's purpose and state (`cli.experiment_lines`: `probe: on and working (probe-code 0.6.0)`, `probe: on, but not set up: no probe with `+"`symbols`"+` is on PATH, so it changes nothing yet (probe, a code-search tool: github.com/probelabs/probe; its release binary from …)`, `probe: off (wb experiment probe on)`); with a name, its state; with `on`/`off`, sets it in `experiments.json` for the tasks started from then (`; tasks already started keep theirs`). An unknown name is refused. |
+| `wb experiment [<name> [on\|off]]` | | The experiments (*Experiments*): with no argument, each one's purpose and state (`cli.experiment_lines`: `probe: on and working (probe-code 0.6.0)`, then, once a task with it on has closed, whether the agents used it (`cli.use_recent`: `; the agent used it in 2 of the last 5 task(s) with it on (14 call(s))`, the latest `USE_RECENT` 5 results rows that have it on, bench replays and trials too, #857), `probe: on, but not set up: no probe with `+"`symbols`"+` is on PATH, so it changes nothing yet (probe, a code-search tool: github.com/probelabs/probe; its release binary from …)`, `probe: off (wb experiment probe on)`); with a name, its state; with `on`/`off`, sets it in `experiments.json` for the tasks started from then (`; tasks already started keep theirs`). An unknown name is refused. |
 | `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent; with `--when`, a one-task exception granted ahead, spent only once Claude has started on it. `used` records what Claude changed under it and says to hand the testing back; exit 1 with none. |
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat` (post the pair to the web chat), `--setup` (run the setup in each checkout) | At review, for a visual task: the project's capture command run on the base and on the candidate, each in a scratch checkout under the task's lane; where each PNG is, or why a side has none (*Screenshots of the base and the candidate*). |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions` (from Claude Code's Bash, without `--repo`/`--session`, the scope is the calling session's: `cli._caller`, every id its process had, `claude-sessions/<CLAUDE_PID>`, and its directory, #693; this flag, or a terminal, takes every session's), `--user` | Stops the runner, phase `review`, "Claude took over", status `taken_over`; Claude edits in the worktree and accepts, or hands back with feedback. Refuses (exit 1) a task whose checkout hasn't finished, running or failed (`its worktree isn't ready yet: wait for it, or wb discard <task>`): the hand-back's runner made the checkout again from nothing, and Claude's edits went with it (#655). Outside "Let Claude decide" it needs the user's recorded yes for the task, else exit 3; `--user` (the mod's hand-back command) is the user's own ask, and records one (*Claude coding*). `--all`: every task that isn't closed; a task refused (the coding gate, exit 3) is said and the rest are still taken over, then it exits with the refusal's code (#601: the first refusal left every other runner going). A task not checked out yet, or failed at checkout, is skipped, not refused (`not ready: <task> (its checkout hasn't finished): wait for it, or wb discard <task>`), so it can't fail every hand-back (#918). `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR or inside it, or DIR is inside the task's spot (its package, else its `cwd` inside the repo, else the repo: #695), or its `cwd` is DIR or inside it, by whole components of real paths (in lower case where the file system ignores case), never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
@@ -6731,7 +6829,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb wait [<task>]` | `--timeout S` (0: none), unnamed: `--repo DIR`, `--session ID…`, `--all-sessions` (as `wb status`'s scope, `_caller`: from Claude Code's Bash, the calling session's tasks only, #696) | Reaps dead runners, then blocks (inotify) until a notice past a task's `acked` arrives, prints `[<kind>] <task>\n<text>` and acks it (under the task's ack lock, `cli.claim_ack`: of two waits, or a wait and the mod, one takes it, #696; a bare wait skips another session's tasks, whose mod then never woke for a notice it took) (skipping notices no longer true, rows that aren't whole and removed tasks'). Named: a closed task exits 2; a task already waiting whose notice was taken elsewhere prints it again "(already delivered once)"; one stopped or taken over by hand prints `[<phase>] <task> (no notice: <last>)`. Bare, with no open task: exits 2. |
-| `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID`, `--all-sessions` (from Claude Code's Bash, without `--repo`/`--session`, the scope is the calling session's: `cli._caller`, every id its process had, `claude-sessions/<CLAUDE_PID>`, and its directory, #693; this flag, or a terminal, takes every session's) | Reaps dead runners. One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died within `REAP_GRACE`. Named: also `worktree: <path>` while it exists. A task `wb stop --all` parked (`store.parked`: still stuck, `parked` set) shows as phase `parked`, and without `--all` or a name is left out of the table for one line, `parked by wb stop --all (/workbench-quit): …; leave them unless the user asks`, after it ("no open tasks" first when it was all there was, so the mod's context block stays out; #541). `--session ID`, `--repo DIR` (the mod's context block): only that session's tasks (as for `wb stop`), then `open elsewhere (other sessions'): …`, by name. |
+| `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID`, `--all-sessions` (from Claude Code's Bash, without `--repo`/`--session`, the scope is the calling session's: `cli._caller`, every id its process had, `claude-sessions/<CLAUDE_PID>`, and its directory, #693; this flag, or a terminal, takes every session's) | Reaps dead runners. One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died within `REAP_GRACE`. Named: also `worktree: <path>` while it exists, and with an experiment on, what its agent has used of it so far (`cli.use_line`: `probe: 3 call(s); whole reads of files over 300 lines: 1`, #857). A task `wb stop --all` parked (`store.parked`: still stuck, `parked` set) shows as phase `parked`, and without `--all` or a name is left out of the table for one line, `parked by wb stop --all (/workbench-quit): …; leave them unless the user asks`, after it ("no open tasks" first when it was all there was, so the mod's context block stays out; #541). `--session ID`, `--repo DIR` (the mod's context block): only that session's tasks (as for `wb stop`), then `open elsewhere (other sessions'): …`, by name. |
 | `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden: one pass of JSON lines, the mod's pane), `--last N` (hidden, with `--json`: the newest N transcript lines) | The live transcript (`transcript.follow`); default task: the most recently updated open one, else the most recently updated task, never a `wb bench` replay (#555). |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, and one line for each kind `wb watch` shows (`transcript.EVENT_KINDS`, one set for both: questions, answers, stops, auto-fixes, rounds, tests, errors, retries, the runner's gpu, handover, compaction, load, steer and interrupt rows among them; it once printed nine kinds, #861). `-n` counts the lines printed, the rows that never print (one `step` per model request) left out first: they once used up the count (#861). `-f` follows until the task needs Claude or is closed, looking at the phase before each wait (on a finished task it returns at once: it waited 30 s, #90) and printing the events that came with it; each pass reaps a task whose runner died (`cli.reap`), so the follow ends on its error instead of following it for ever, and each line is flushed, so a pipe or a file gets it as it comes (#545). |
 | `wb report <task>` | `--round N` | The round's summary.md. |
@@ -6763,14 +6861,14 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb notes` / `add "…"` / `drop N…` | | The user's standing delegation preferences (`notes.md`, `- ` lines, at most 20 of 300 characters). |
 | `wb bench add <task>` | `--step N` (the last), `--hidden PATH…` (the test files the step changed), `--check CMD`, `--name CASE` (the task's; `<task>-sN` for a step of several) | Makes a case of one step of an accepted task (*Bench*): the base as a bundle, the spec, the acceptance command, the hidden checks, the grants. Refused: not accepted or a trial, the repo moved (`wb relocate` named; a removed linked worktree's main one is used, #909) or the commit gone, no acceptance command, no hidden checks, ones that pass on the base already, submodules or Git LFS files the repo can't supply (named), or ones its own commit fails in the agent's lane (no replay could pass them). |
 | `wb bench rm <case…>` | | Removes the cases with their bundles and hidden checks (`bench.remove`); their runs.jsonl rows stay in the report. Refused for an unknown case or while a run goes. Nothing removed one before (#740). |
-| `wb bench list` / `wb bench report` / `wb bench stop` | `report`: `--run ID`, `--label TEXT` | The cases; pass rates, rounds, auto-fixes, minutes and local tokens per label and model, then each case against the original's model and review rounds (with the running run's progress), the preempted count, and each replay that didn't start with why and its `wb.log`, or that the machine broke off (`broke off: <infra>: …`, its task's `runner.log`, #508) (the last 10; a run of only those said "no replays yet", #89); stop the driver, which closes its replay. |
+| `wb bench list` / `wb bench report` / `wb bench stop` | `report`: `--run ID`, `--label TEXT` | The cases; pass rates, rounds, auto-fixes, minutes and local tokens per label and model; for a label whose replays had an experiment on, how many used it (`bench.use_lines`: `probe-on qwen: probe used in 4 of 5 replay(s), 31 call(s); whole reads of long files: 6`, #857); then each case against the original's model and review rounds (with the running run's progress), the preempted count, and each replay that didn't start with why and its `wb.log`, or that the machine broke off (`broke off: <infra>: …`, its task's `runner.log`, #508) (the last 10; a run of only those said "no replays yet", #89); stop the driver, which closes its replay. |
 | `wb bench self <case>` | `--yes` (required: it spends Claude tokens), `--turns N` (40) | Claude Code writes the case (`claude -p`, edits and the acceptance command only), graded by its hidden checks in the original task's lane; one runs.jsonl row (`arm: claude`) and its line: PASS or fail, the weighted tokens, the handoff's cost of the case's step and the ratio, or for a row with only a whole multi-step task's cost, that cost marked not comparable and no ratio (*Bench*). |
 | `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. First trims the runs older than the newest `RUNS_KEPT` (20) to
 their `plan.json` (`bench.prune_runs`: each replay's `wb.log`, `diff.patch` and `grade.txt` went
 for good otherwise, #740), and closes what a killed driver left (`bench.sweep`), and refuses while a replay's runner still lives. Skips what an earlier run with the same label already passed or failed (an `error` runs again); with nothing left, says so and starts no driver. |
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run), archived tasks included (#270): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`; without a name, `[{backlog, tasks, open}]` (it printed the text, #602). |
 | `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X\|off` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive and finite, else exit 1) writes savings.json first; `--price off` removes `kwh_price`, its other keys kept (`savings.set_price(None)`, #609). The cost reads `GPU 600 Wh, cost 0.15`: no currency sign. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price}` (`price`: the kWh price set, or null; the pane's Settings row shows it). `--card FILE.svg`: the badge as an image (*The badge*). |
-| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (the feed, *The Stats feed*), `--all` (every model that ran a task) | `wb stats set` changes the Stats tab's settings (stats.json, *Stats recording*) and prints them. `wb stats` starts with the feed's headline (`stats.summary` over `feed(only=stats.SUMMARY)`: the week and all time, the streak, what the agents absorbed, their questions, the guards that fired), then the results by model and size (judged rows: it says how many spec-gap discards, tasks whose agent never ran and trials it left out, each among the models shown, #817; the models the Stats tab shows, each variant on its own row, then "N older model(s), retired or idle 90+ days: M task(s) (wb stats --all)"; `--all`: every model, #638), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
+| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (the feed, *The Stats feed*), `--all` (every model that ran a task) | `wb stats set` changes the Stats tab's settings (stats.json, *Stats recording*) and prints them. `wb stats` starts with the feed's headline (`stats.summary` over `feed(only=stats.SUMMARY)`: the week and all time, the streak, what the agents absorbed, their questions, the guards that fired), then the results by model and size (judged rows: it says how many spec-gap discards, tasks whose agent never ran and trials it left out, each among the models shown, #817; the models the Stats tab shows, each variant on its own row, the newest `stats.STATS_MODEL_LINES` 3, then "N more model(s) used in the last 90 days: T task(s); M older model(s), retired or idle 90+ days: U task(s) (wb stats --all)", each part only when it counts any; `--all`: every model, #638), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
 | `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`), the scratch directories (`store.SCRATCH_PREFIXES`: `.verify-`, `.base-`, `.check-`, `.submodule-`, `wb-index-`, `wb-merge-`, `.wb-image-`, `.wb-audio-`, each named `<prefix><maker's pid>.<start tag>.<machine tag>-` by `store.scratch`, the tag `models.start_tag`, a crc32 of its start, the machine's `store.machine_tag`, a crc32 of `store.machine()`: another machine's is left to that machine's gc for `FAR_SCRATCH_AGE`, a day, since gc here removed a live base check or verify clone there, its pid not in this process table, #876; and `wb bench add`'s half-made case `.<case>.<pid>.tmp`) in the state directory, `bench/`, `bench/cases/` and each default output directory of `wb image` and `wb audio` (`_scratch_homes`: only the top level was swept, and a bench add or a generation killed at Claude's Bash limit left its clone or temp directory for good, #589) `SCRATCH_AGE` (an hour) old whose maker is gone (`bench/`: a killed `wb bench add`'s clones, #439) (`_drop_scratches`, `_maker_alive`: a pid live again under a process with another start is gone, #532; an untagged name goes by the pid), half-made starts (`_dead_start`, `_drop_start`: a task directory with no task.json whose `starting.json` pid is gone or now another process's (its `start`, #532), or with none past `RULES_GRACE`; one another machine wrote (its `machine`) only once its `at` is `RULES_GRACE` old, #876; its worktree (unlocked first: killed mid-checkout, git leaves it locked "initializing", which remove and the registration's drop skip), its registration only (#641) and rules go too, and the branch only when `starting.json` says this start made it and only while it still points at `branch_at` (`delete_branch(at=)`: one `update-ref -d` compare-and-delete; an earlier task's unmerged `delegate/<task>` was deleted after a start killed before its worktree, #416); killed commands left full clones that `_disk_room` counted, and a killed start's name was refused for good: #376, the audit of 1.6), the web chat's uploads older than N days whose message has its receipt (an expired one is retired with one, #741), or that no unread message names (`chat.drop_old_uploads`, #623), and the delegate branches of accepted tasks that have landed, merged by `--merge` before accept deleted them itself or by hand after a plain accept (`_merged_branches`: each repo's `refs/heads/delegate/` listed once with `for-each-ref`, the tip recorded first, then `gitops.drop_landed_branch`: `branch 
 -d`, else a compare-and-delete when the task's `base_branch` holds the tip, never while a worktree has the branch checked out (`gitops.checked_out_in`, from `worktree list --porcelain`; update-ref skips git's own check, and a second worktree's HEAD was left naming no ref, every file staged, #930; skipped, it is asked again next time); a branch moved past the tip accept recorded is the user's and stays (#930: the tip compared was the one gc read); a branch gone or deleted is recorded, status `branch_gone`, and never looked at again: only `--merge` rows were considered, so a hand-merged branch stayed for good, and every merged task ever recorded cost a git call on every run, #686). A branch squash-merged elsewhere (a pull request) holds commits its target lacks, so it stays: `git branch -D` it. Then each accepted task's `refs/workbench/accepted/<task>`, which accept kept in the user's repo before the steps bundle (or when it couldn't make one) (`_released_refs`, `gitops.drop_accepted`, a compare-and-delete; status `accepted_ref_gone` then, never looked at again): deleted outright when its tip is in the task's `base_branch` (one `for-each-ref --merged` per repo and base branch), which keeps every step alive, else moved into the task's `steps.bundle` first (`gitops.bundle_steps`), which `wb bench add` reads (deleted without it only when the bundle can't be made and each step has its bench case); kept on every accept for good, each task's steps showed in `git log --all`, mirrors copied them and git gc could never prune them (#799). A `steps.bundle` stays as long as its task, every step cased or not: removed then, a case taken out with `wb bench rm` could never be made again after a squash accept (#940). And what history kept for good (#740, the 2026-11-21 audit): archived tasks closed over `store.SLIM_DAYS` (90) days lose `store.SLIM_GLOBS` (`runner.log`, `base-tests.txt`, `setup.txt`, `rounds/*/tests.txt`, verify's and shot's outputs, the earlier sessions' exports `.export-<sid>.json`, a cache `transcript.finished_export` fills again on demand; and wb shot's PNGs, each side of its shots.json marked `pruned` first, which `chat.shots` reports as no image and `/api/shot` answers with 410, so the web chat says the screenshot expired, not that it failed or couldn't load, #821; task.json, status.json, the prompts, summaries, events and asks stay: names stay taken, bench add reads the prompts, the lessons the events; `store.slim_archive`), `notify.old.jsonl` past `NOTIFY_OLD_MAX` (8 MiB) keeps its newest half from a whole line (`_cap_old_notices`), and `_drop_leftovers` removes `imports/` entries older than N days and `claude-sessions/<pid>` files older than that whose process is gone and that no open task records. 
 Prints the counts and the bytes freed; writes `gc.json`. Then (not in `cli.gc`, which a discard runs) `bench.sweep`: the bench replays a driver killed without warning left (*Bench*, #511), with a line naming them. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
@@ -7045,6 +7143,7 @@ check-ins off), not `wb start`'s.
 | `failed_before` | `setup` or `load`: the runner failed the task on its setup or its model's load before the agent ran (`_prepare`, `_load_failed`); the results row copies it (#581) |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
+| `experiment_use`, `long_reads` | `{name: calls}`: the calls that used each experiment the task has on, live (`context.experiment_use`: probe when a shell line runs `probe`, by `events.shell_programs`); the whole reads (no `offset`/`limit`) of files over `context.LONG_FILE_LINES` 300 lines (`context.long_read`). `wb status <task>`, the results row and the bench row carry both, so an A/B sees within a replay whether the agent takes a tool up (#857) |
 | `live_used` | `{session, used}`: the context the round's last `step_finish` carried (input + cache + output + reasoning, #644), what the between-rounds check uses when the session export fails (#262) |
 | `gpu_wh` | the GPU energy its rounds used so far, in Wh (the runner's `_Power`, its share while tasks share the GPU: #706; absent for a remote model or no reading) |
 | `gpu_w_sum`, `gpu_w_n`, `gpu_w_peak` | the same sampler's readings in watts: their sum, count and peak, for the row's `gpu_w` (*Stats recording*) |
@@ -7107,7 +7206,8 @@ when its model ran on another machine, whose energy nothing here measures), `act
 removed}` and `deleted` `{files, removed}` when a step had any (`gitops.footprint`, #725); *What a
 task saved*), `landed_steps` (discarded only:
 the steps `wb next` committed and the discard kept, when any; `steps_dropped` true after `--drop-steps`,
-#722), `backlog` (task.json's), `trial` (when set);
+#722), `backlog` (task.json's), `trial` (when set), `experiment_use` (with `experiments`: each one's
+calls, status's, #857), `long_reads` (status's);
 with stats recording on (`results.for_stats`, each only when measured), `started_at`, `load_secs`, `setup_secs`,
 `nudges`, `asks` (`{questions, permissions, refused, answered}`), `guards`, `speed` (`{write, read, ttft}`, the
 medians of status `speeds`) and `gpu_w` (`{mean, peak}`); `commit` and `merged` on accept (and `merge_refused`, git's reason, when `--merge` was refused), `reason` on
@@ -7138,7 +7238,8 @@ top: #425), `skills` (the original's), `original` (`model`, `rounds`,
 `model`, `task`, `wb_commit`, `skills`, `outcome` (`passed`, `failed`, `preempted`, `error`:
 it didn't start, or the machine broke it, `<infra>: <last>`, #508), `why`, and from the replay's status `phase`, `rounds`, `auto_fixes`, `tok_in`, `tok_out`,
 `minutes`, `asks_refused`, `visible_ok` (its own last run of the acceptance command, before the
-hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_run`) has `arm:
+hidden files), `handovers` (fresh sessions), `experiments` (the ones on: the arm it ran in),
+`experiment_use` and `long_reads` (status's, #857). A `wb bench self` row (`bench.self_run`) has `arm:
 "claude"`, `model` and `label` `"claude"`, `claude` (spend's usage shape), `turns`,
 `claude_model`, `minutes`, `outcome` and `why`.
 
@@ -7505,7 +7606,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 
 - **A file a round's children load** (the lane, the git shim, the ask server, and what they
   import) → `runner.CHILD_CODE`, so an update under a running task is caught (*The runner, inside*).
-- **An experiment** (`context.EXPERIMENTS`) → its effects (`shell_rules`, `EXPERIMENT_NOTES`),
+- **An experiment** (`context.EXPERIMENTS`) → its effects (`shell_rules`, `EXPERIMENT_NOTES`, `EXPERIMENT_PROTOCOL`),
   `task_experiments` (when it can work), `cli.experiment_lines`, the pane's Settings row
   (`PROBE_STOPS`, `probeMode`, `probeStatus` and `probeSaid`, which read `experiment_lines`' wording,
   `PROBE_SETUP_NOTE`), and *Experiments*.
@@ -7598,6 +7699,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
 - **A `$.state` atom's type** in the mod → its tag (`tasks-8`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`, `top-1`, `said-1`).
+- **What the Stats tab folds** (2026-11-21): `top.FOLD`'s states → the mod's `RACK_FOLD`;
+  `stats.STATS_MODEL_LINES` → the mod's `STATS_SHOWN`; `model_lines`' `more`/`older` and
+  `variants` → `statsLines` and `cli.cmd_stats`.
 - **The Claude coding choices** (`cli.CODING`: modes, labels, sentences) → the mod's
   `CODING_STOPS` (the Settings row) and `CODING_RULES` (the context block), and the skill's *Claude
   coding* bullet.

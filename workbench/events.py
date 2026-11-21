@@ -4,6 +4,8 @@ and the detector that decides a run is going nowhere.
 import hashlib
 import json
 import os
+import re
+import shlex
 import time
 from collections import deque
 
@@ -20,6 +22,71 @@ def _brief(tool: str, inp: dict) -> str:
             text = str(inp[key]).replace("\n", " ")
             return text if len(text) <= 90 else text[:87] + "..."
     return ""
+
+
+# the words that only wrap the program a simple command runs: `env X=1 probe …`, `time probe …`
+WRAPPERS = {"env", "command", "exec", "time", "nice", "nohup", "timeout", "stdbuf"}
+
+
+def _simple_commands(command: str) -> list[str]:
+    """A shell line split at its operators (&& || ; | & newline, $( ` ( )), but not inside
+    quotes or at a redirection's & (2>&1, >&2, &>): `grep -E "a|b" f 2>&1` is one command.
+    Split blind, the pattern's | made "b" a program and 2>&1's & made "1" one (the probe A/B of
+    2026-11-21, #857)."""
+    parts, cur, quote, i = [], [], "", 0
+    while i < len(command):
+        c = command[i]
+        if quote:
+            cur.append(c)
+            if c == "\\" and quote == '"' and i + 1 < len(command):
+                cur.append(command[i + 1])
+                i += 1
+            elif c == quote:
+                quote = ""
+        elif c == "\\" and i + 1 < len(command):
+            cur += [c, command[i + 1]]
+            i += 1
+        elif c in "'\"":
+            quote = c
+            cur.append(c)
+        elif c == "&" and ((cur and cur[-1] == ">") or command[i + 1:i + 2] == ">"):
+            cur.append(c)                                  # a redirection, not a separator
+        elif c in ";|&\n`()" or command.startswith("$(", i):
+            parts.append("".join(cur))
+            cur = []
+            if command.startswith(("&&", "||", "$("), i):
+                i += 1
+        else:
+            cur.append(c)
+        i += 1
+    parts.append("".join(cur))
+    return parts
+
+
+def shell_programs(command: str) -> list[str]:
+    """The program each simple command in a shell line runs, in order, its path and the
+    variable assignments before it dropped: `cd x && FOO=1 probe symbols a.py | head` is
+    ["cd", "probe", "head"]. Which tools an agent really used (the experiments' use, #857):
+    its 90-character brief cut the line short and a tool was found only by searching events."""
+    out = []
+    for part in _simple_commands(command or ""):
+        try:
+            words = shlex.split(part)
+        except ValueError:                                 # an unclosed quote: its words as they are
+            words = part.split()
+        while words and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]) or words[0] in WRAPPERS):
+            wrapper = words.pop(0)
+            while wrapper in ("timeout", "nice", "stdbuf") and words and words[0].startswith("-"):
+                flag = words.pop(0)
+                if flag in ("-k", "-s", "-n") and words:
+                    words.pop(0)  # its value
+            if wrapper == "timeout" and words and re.match(r"^[0-9.]+[smhd]?$", words[0]):
+                words.pop(0)  # the duration
+        while words and re.match(r"^[0-9]*[<>]", words[0]):  # a redirection first: `2>/dev/null cmd`
+            words.pop(0)
+        if words and not words[0].startswith(("-", "#")):
+            out.append(os.path.basename(words[0].strip("{}")))
+    return out
 
 
 def _obj(v) -> dict:
@@ -48,6 +115,12 @@ def normalize(raw: dict, round_no: int):
         inp = state.get("input") if isinstance(state.get("input"), dict) else {}
         if tool in EDIT_TOOLS and (inp.get("filePath") or inp.get("path")):
             row["path"] = str(inp.get("filePath") or inp.get("path"))  # whole: brief is cut at 90
+        elif tool == "read" and (inp.get("filePath") or inp.get("path")):
+            row["path"] = str(inp.get("filePath") or inp.get("path"))
+            if not inp.get("offset") and not inp.get("limit"):
+                row["whole"] = True  # the whole file: the runner counts a long one (#857)
+        elif tool in ("shell", "bash") and isinstance(inp.get("command"), str):
+            row["programs"] = list(dict.fromkeys(shell_programs(inp["command"])))[:8]
         # The signature is what "the same call again" means to the stuck detector: the whole
         # input. Cut to its first 400 characters, `content` sorting before `filePath`, four new
         # files opening with one licence header were "the same call 4 times" (#497).
