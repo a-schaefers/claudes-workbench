@@ -13106,6 +13106,18 @@ class Projects(Base):
         gpg.write_text(f"#!/bin/sh\necho '{':'.join(row)}'\nexit 1\n")
         self.assertIsNone(gitops.presence_signer(self.repo))
 
+    def test_ssh_signing_whose_key_comes_from_a_default_key_command_starts_without_a_traceback(self):
+        # #662: no user.signingkey (gpg.ssh.defaultKeyCommand picks the key) built Path(""), and
+        # its .pub raised a ValueError past main: every wb start was a traceback
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        os.environ.pop("SSH_AUTH_SOCK", None)                       # never the user's agent
+        for k, v in (("gpg.format", "ssh"), ("gpg.ssh.defaultKeyCommand", "true"),
+                     ("commit.gpgsign", "true")):
+            g("config", k, v)
+        self.assertIsNone(gitops.presence_signer(self.repo))
+        gitops.sign_problem(self.repo, "HEAD")                     # says what it says, no raise
+        self.assertIn("started t-dkc", self.start("t-dkc", "ok", "--queue"))
+
     def test_a_monorepo_package_with_its_own_claude_md_is_where_the_agent_and_tests_run(self):
         # #375 (the audit of 1.6, reproduced): from packages/app, whose CLAUDE.md Claude Code reads,
         # wb start refused the repo for a CLAUDE.md at its root, and the agent worked from the root

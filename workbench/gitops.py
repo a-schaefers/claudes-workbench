@@ -1096,7 +1096,10 @@ def presence_signer(repo: Path) -> str | None:
     key = git(repo, "config", "user.signingkey", check=False).strip()
     if fmt == "ssh":
         text = key.removeprefix("key::")
-        if not text.startswith(("sk-", "ssh-", "ecdsa-")):  # a path: the key file, or its .pub
+        # a path: the key file, or its .pub. None at all (gpg.ssh.defaultKeyCommand picks the
+        # key): Path("") has no name, and its .pub raised a ValueError past main, a traceback at
+        # every wb start (#662)
+        if text and not text.startswith(("sk-", "ssh-", "ecdsa-")):
             path = Path(os.path.expanduser(text))
             for f in (path, path.with_name(path.name + ".pub")):
                 with contextlib.suppress(OSError, ValueError):

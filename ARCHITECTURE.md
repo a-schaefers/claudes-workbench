@@ -3720,7 +3720,7 @@ a refusal says how to unlock the key (`UNLOCK`: `ssh-add`, or one GPG signature 
 `--no-sign`; `wb start` tries a dry `commit-tree -S` of the base's tree first (`sign_problem`,
 `SIGN_SECS` 10) and prints the same line, since accept failed only at the end of the task with
 "incorrect passphrase supplied" (#374, the audit of 1.6). A signer that asks the user each time
-(`gitops.presence_signer`: an `sk-` SSH key, by `user.signingkey`'s literal or its file or `.pub`;
+(`gitops.presence_signer`: an `sk-` SSH key, by `user.signingkey`'s literal or its file or `.pub`, no file looked for when it is unset and `gpg.ssh.defaultKeyCommand` picks the key: `Path("")` raised a ValueError, a traceback at every wb start, #662;
 a `gpg.ssh.program` of its own, 1Password's op-ssh-sign; an SSH agent whose socket says it asks,
 `ASKING_AGENTS`: Secretive, 1Password; an OpenPGP signing key on a card, whose `gpg
 --list-secret-keys --with-colons` row has a token serial in field 15) gets no dry run, which made
