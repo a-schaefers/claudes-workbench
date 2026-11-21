@@ -43,16 +43,24 @@ def library() -> Path:
     return Path(os.environ.get("WB_SKILLS") or Path.home() / ".local/share/workbench/skills")
 
 
-def _git(*args: str) -> str:
-    lib = library()
-    if not (lib / ".git").exists():
-        lib.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "-C", str(lib), "init", "-q", "-b", "master"], check=True)
-    r = subprocess.run(["git", "-C", str(lib), "-c", "log.showSignature=false", *args],  # its
+def _run_git(*args: str) -> str:
+    r = subprocess.run(["git", "-C", str(library()), "-c", "log.showSignature=false", *args],  # its
                        capture_output=True, text=True)  # log lines are parsed (the 2026-11-16 audit)
     if r.returncode:
         raise RuntimeError((r.stderr or r.stdout).strip())
     return r.stdout
+
+
+def _git(*args: str) -> str:
+    """git in the library, made on first use. Its branch is master, set after a plain init: git
+    before 2.28 has no `init -b`, and the library was never made, every skill command ending in
+    a traceback (#527)."""
+    lib = library()
+    if not (lib / ".git").exists():
+        lib.mkdir(parents=True, exist_ok=True)
+        _run_git("init", "-q")
+        _run_git("symbolic-ref", "HEAD", "refs/heads/master")
+    return _run_git(*args)
 
 
 def rev(name: str) -> str:

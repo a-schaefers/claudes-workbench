@@ -2306,17 +2306,21 @@ class Lifecycle(Base):
         g("config", "filter.wb.clean", "cat")
         g("config", "filter.wb.smudge", "false")    # a required filter that fails: the add fails
         g("config", "filter.wb.required", "true")
-        err = io.StringIO()
-        with self.assertRaises(SystemExit), redirect_stderr(err):
-            self.start("t-smudge", "ok")
-        self.assertIn("smudge filter wb failed", err.getvalue())   # a message, no traceback
-        self.assertFalse(store.Task("t-smudge").dir.exists())
+        # the runner's checkout since #529: a failed notice before any round, no traceback
+        self.start("t-smudge", "ok", "--queue")
+        st = wait_phase("t-smudge", {"failed"})
+        self.assertIsNone(st.get("session"))
+        note = [r for r in store.notices() if r["task"] == "t-smudge"][-1]["text"]
+        self.assertIn("making the worktree failed", note)
+        self.assertIn("smudge filter wb failed", note)
+        self.assertNotIn("Traceback", note)
         self.assertEqual(self.branch("delegate/t-smudge"), "")
         self.assertNotIn("t-smudge", subprocess.run(["git", "-C", str(self.repo), "worktree", "list"],
                                                     capture_output=True, text=True).stdout)
+        run_wb("discard", "t-smudge")
         g("config", "--remove-section", "filter.wb")
-        self.assertIn("started t-smudge", self.start("t-smudge", "ok"))   # the name is still free
-        wait_phase("t-smudge", {"review"})
+        self.assertIn("started t-smudge2", self.start("t-smudge2", "ok"))
+        wait_phase("t-smudge2", {"review"})
 
     def test_a_sparse_checkout_diff_counts_only_what_changed(self):
         # the audit: the review diff's scratch index came from read-tree, with no skip-worktree
@@ -2625,8 +2629,14 @@ class WorktreeSetup(Base):
         g("tag", "v0")
         self.ignore("local-input.dat")
         (self.repo / "local-input.dat").write_text("LOCAL\n")
-        err = self.refused("t-c8", "--copy", "local-input.dat", "--base", "v0")
-        self.assertIn("not at v0", err)
+        # checked where the runner checks the worktree out (#529): a failed notice, no round
+        self.start("t-c8", "ok", "--copy", "local-input.dat", "--base", "v0")
+        st = wait_phase("t-c8", {"failed"})
+        self.assertIsNone(st.get("session"))                        # the agent never ran
+        note = [r for r in store.notices() if r["task"] == "t-c8"][-1]
+        self.assertIn("--copy local-input.dat: ignored in", note["text"])
+        self.assertIn("not at v0", note["text"])
+        run_wb("discard", "t-c8")
         self.assertFalse(subprocess.run(["git", "-C", str(self.repo), "branch", "--list",
                                          "delegate/t-c8"], capture_output=True, text=True).stdout.strip())
         self.assertEqual(subprocess.run(["git", "-C", str(self.repo), "worktree", "list",
@@ -4041,6 +4051,58 @@ class SkillLibrary(Base):
         self.assertIn("added svg-charts", run_wb("skill", "add", "svg-charts", "--from",
                                                  str(self.draft("svg-charts")), "-m", "signed nowhere"))
 
+    def test_the_library_is_made_on_a_git_without_init_b_and_doctor_names_a_git_below_the_floor(self):
+        # #527 (the audit of v1.90): git before 2.28 refused `init -b`, the library was never
+        # made and `wb skill add` ended in a traceback; wb doctor accepted any git
+        shim = Path(self.tmp.name) / "old-git"
+        shim.mkdir()
+        real = shutil.which("git")
+        (shim / "git").write_text(
+            '#!/bin/sh\nfor a in "$@"; do [ "$a" = -b ] && [ "$prev" = -q ] && [ "$init" ] && '
+            '{ echo "error: unknown switch b" >&2; exit 129; }; [ "$a" = init ] && init=1; '
+            'prev=$a; done\n'
+            f'[ "$1" = --version ] && {{ echo "git version 2.25.1"; exit 0; }}\nexec {real} "$@"\n')
+        (shim / "git").chmod(0o755)
+        lib = Path(os.environ["WB_SKILLS"])
+        with mock.patch.dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}"):
+            self.assertNotEqual(subprocess.run(["git", "init", "-q", "-b", "x", str(lib) + "-x"],
+                                               capture_output=True).returncode, 0)  # the shim bites
+            self.assertIn("added svg-charts", run_wb("skill", "add", "svg-charts", "--from",
+                                                     str(self.draft("svg-charts")), "-m", "old git"))
+            gitops.version.cache_clear()
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    try:
+                        cli.main(["doctor"])
+                    except SystemExit:
+                        pass
+            finally:
+                gitops.version.cache_clear()
+        self.assertEqual(subprocess.run(["git", "-C", str(lib), "symbolic-ref", "HEAD"], text=True,
+                                        capture_output=True).stdout.strip(), "refs/heads/master")
+        self.assertIn("BAD git version 2.25.1: workbench needs git 2.34 or newer", buf.getvalue())
+
+    def test_a_library_skill_a_personal_one_later_shadows_is_still_handed_and_listed_as_such(self):
+        # #515 (the audit of v1.90): the app synced a personal `pdf` after the library had one,
+        # and the handed skill was denied by name to every agent it went to
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            run_wb("skill", "add", "pdf", "--from", str(self.draft("pdf", "Use when reading PDFs.")),
+                   "-m", "first")
+            write_skill(home / ".claude" / "skills" / "synced" / "org" / "pdf", "pdf", "Use when PDF.")
+            write_skill(home / ".claude" / "skills" / "mine", "mine", "Use when mine.")
+            self.start("t-pdf", "ok", "--skill", "pdf")
+            wait_phase("t-pdf", {"review"})
+            layer = context.layer(store.Task("t-pdf"))
+            listed = run_wb("skill", "list")
+        denied = {r["resource"] for r in layer["permissions"] if r["action"] == "skill"}
+        self.assertNotIn("pdf", denied)
+        self.assertTrue({"mine", "workbench"} <= denied)
+        self.assertEqual(layer["skills"], [str(Path(os.environ["WB_SKILLS"]) / "pdf")])
+        self.assertIn("one of the user's own skills has this name too", listed)
+
     def test_the_users_own_skill_names_are_off_limits(self):
         home = Path(self.tmp.name) / "home"
         write_skill(home / ".claude" / "skills" / "publishing-arm", "publishing-arm", "Use when publishing.")
@@ -4249,10 +4311,11 @@ class RealOpenCode(Base):
             self.assertTrue("CANARY-PROJ-SKILL" in text, flag)  # (not assertIn: a prompt per failure)
 
 
-    def run_calls(self, name, calls, *extra, before=None):
-        """Run real opencode in a task's worktree, in its lane, against a fake model that makes
-        these tool calls; returns the tool results it got back, in order. `before(task)` runs
-        once the task is set up, before OpenCode starts."""
+    def run_calls(self, name, calls, *extra, before=None, in_lane=True):
+        """Run real opencode in a task's worktree, in its lane (unless not ``in_lane``: a machine
+        without Landlock), against a fake model that makes these tool calls; returns the tool
+        results it got back, in order. `before(task)` runs once the task is set up, before
+        OpenCode starts."""
         self.start(name, "ok", *extra)
         wait_phase(name, {"review"})
         task = store.Task(name)
@@ -4275,14 +4338,39 @@ class RealOpenCode(Base):
                                "limit": {"context": 32768, "output": 1024}}}}}
         layer_path.write_text(json.dumps(layer))
         time.sleep(0.5)
-        cmd = lane.wrap(context.writable(task), ["opencode", "run", "--standalone", "-m",
-                                                 "cap/cap", "--auto", "--format", "json", "go"])
+        cmd = ["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format", "json", "go"]
+        if in_lane:
+            cmd = lane.wrap(context.writable(task), cmd)
         subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
         reqs = [json.loads(line) for line in out.read_text().splitlines()]
         last = max(reqs, key=lambda r: len(r.get("messages", [])))
         answers = [json.dumps(m["content"]) for m in last["messages"] if m.get("role") == "tool"]
         self.assertEqual(len(answers), len(calls), "not every fake call came back")
         return task, answers
+
+    def test_a_handed_skill_named_like_a_personal_one_loads_the_librarys_in_and_out_of_the_lane(self):
+        # #515 (the audit of v1.90, reproduced): the app synced a personal `pdf` after the
+        # library had one; denied by name, every load of the handed skill failed, unexplained
+        home = Path(self.tmp.name) / "home"
+        write_skill(home / ".claude" / "skills" / "pdf", "pdf",
+                    "Use when CANARY-PERSONAL-PDF.", "CANARY-PERSONAL-BODY\n")
+        write_skill(home / ".claude" / "skills" / "mine", "mine", "Use when CANARY-MINE.")
+        lib = Path(os.environ["WB_SKILLS"])
+        write_skill(lib / "pdf", "pdf", "Use when CANARY-LIBRARY-PDF.", "CANARY-LIBRARY-BODY\n")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for lane_on in (True, False):
+                task, answers = self.run_calls(f"t-pdf-{int(lane_on)}", [
+                    {"name": "skill", "arguments": {"id": "pdf"}},
+                    {"name": "skill", "arguments": {"id": "mine"}}], "--skill", "pdf",
+                    in_lane=lane_on)
+                rules = json.loads((context.rules_dir(task) / "opencode.json").read_text())
+                denied = {r["resource"] for r in rules["permissions"]
+                          if r["action"] == "skill" and r["effect"] == "deny"}
+                self.assertIn("mine", denied)                   # a personal one: still denied
+                self.assertNotIn("pdf", denied)                 # the handed one: not
+                self.assertIn("CANARY-LIBRARY-BODY", answers[0], lane_on)
+                self.assertNotIn("CANARY-PERSONAL", answers[0], lane_on)
+                self.assertNotIn("CANARY-MINE", answers[1], lane_on)
 
     def test_everyday_tools_run_and_the_rest_waits_for_claude(self):
         wt = str(store.Task("t-cmds").worktree)
@@ -6477,37 +6565,26 @@ class Cleanup(Base):
         self.assertEqual(gitops.step_commit(task, 1, 1), tip)
         self.assertFalse((store.home() / "rules" / "t-merged").exists())
 
-    def test_a_start_killed_in_worktree_add_frees_its_name_and_gc_its_scratches(self):
+    def test_a_half_made_start_frees_its_name_and_gc_clears_it_and_its_scratches(self):
         # #376 (the audit of 1.6): a wb start killed by Claude's Bash limit left tasks/<name>/
         # without a task.json, its branch and worktree, and the name was refused for good; killed
         # commands' scratch clones stayed in the state directory, counted against every new task
-        shim = Path(self.tmp.name) / "slow-git"
-        shim.mkdir()
-        real = shutil.which("git")
-        (shim / "git").write_text(f'#!/bin/sh\ncase " $* " in *" worktree add "*) '
-                                  f'{real} "$@"; sleep 300;; esac\nexec {real} "$@"\n')
-        (shim / "git").chmod(0o755)
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True,  # noqa
                                       text=True).stdout
 
-        def killed_start(name):  # killed once its worktree and branch exist: no cleanup at all
-            proc = subprocess.Popen([str(ROOT / "bin" / "wb"), "start", name, "--spec",
-                                     str(self.spec), "--repo", str(self.repo), "--model", "mimo"],
-                                    env={**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"},
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                    start_new_session=True)
-            end = time.monotonic() + 60
-            while f"delegate/{name}" not in g("branch", "--list") and time.monotonic() < end:
-                time.sleep(0.1)
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+        def killed_start(name):  # as a start killed in worktree add left it, before #529
             task = store.Task(name)
+            task.dir.mkdir(parents=True)
+            wt = task.dir / "worktree"
+            g("worktree", "add", "-q", "-b", f"delegate/{name}", str(wt))
+            # killed mid-checkout, as a slow CI runner caught it: git's "initializing" lock stays
+            g("worktree", "lock", "--reason", "initializing", str(wt))
+            # a start from before #529 made the branch itself, and recorded so (#416)
+            store.write_json(task.dir / cli.STARTING, {
+                "repo": str(self.repo), "worktree": str(wt), "pid": 999999999, "at": store.now(),
+                "branch": f"delegate/{name}", "branch_at": g("rev-parse", "HEAD").strip()})
             self.assertTrue(task.dir.is_dir() and not task.exists)
             self.assertIn(name, g("worktree", "list"))
-            # killed mid-checkout, as a slow CI runner caught it: git's "initializing" lock stays
-            wt = store.read_json(task.dir / cli.STARTING)["worktree"]
-            subprocess.run(["git", "-C", str(self.repo), "worktree", "lock", "--reason",
-                            "initializing", wt], capture_output=True)
 
         killed_start("t-half")
         self.start("t-half", "ok")                      # the same name again: it cleans up first
@@ -6536,58 +6613,115 @@ class Cleanup(Base):
     def test_gc_deletes_only_the_branch_a_killed_start_made_and_only_where_it_made_it(self):
         # #416 (the audit of 1.8, reproduced): an unmerged delegate/<task> holding a commit of its
         # own, left by an earlier task; a wb start under that name killed before its worktree was
-        # made, and wb gc deleted the branch, the commit then reachable from no ref
+        # made, and wb gc deleted the branch, the commit then reachable from no ref. Since #529
+        # the runner makes the branch, so its checkout is the one cut short, wb discard (or a
+        # rerun) the cleanup; gc still honours a record left by a start from before
         real = shutil.which("git")
 
-        def killed_start(name, where):  # killed while git sleeps in `where`
+        def cut_short(name, where):  # the runner killed while git sleeps in `where`
             shim = Path(self.tmp.name) / f"slow-git-{name}"
             shim.mkdir()
             after = "worktree add" in where  # the branch is made, then it sleeps
             (shim / "git").write_text(f'#!/bin/sh\ncase " $* " in *" {where} "*) '
-                                      + (f'{real} "$@"; sleep 300;;' if after else 'sleep 300;;')
+                                      + (f'{real} "$@"; exec sleep 300;;' if after else 'exec sleep 300;;')
                                       + f' esac\nexec {real} "$@"\n')
             (shim / "git").chmod(0o755)
-            proc = subprocess.Popen([str(ROOT / "bin" / "wb"), "start", name, "--spec",
-                                     str(self.spec), "--repo", str(self.repo), "--model", "mimo"],
-                                    env={**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"},
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                    start_new_session=True)
-            starting = store.Task(name).dir / cli.STARTING
+            with mock.patch.dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}"):
+                self.start(name, "ok", "--queue")
+            task = store.Task(name)
             end = time.monotonic() + 60
             while time.monotonic() < end and not (
-                    starting.exists() and (not after or name in self.git("worktree", "list").stdout)):
+                    task.status.get("last") == "checking out the base"
+                    and (not after or name in self.git("worktree", "list").stdout)):
                 time.sleep(0.1)
             time.sleep(0.5)  # into the sleep
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-            self.assertTrue(starting.exists())
+            os.killpg(os.getpgid(task.status["pid"]), signal.SIGKILL)
+            end = time.monotonic() + 10
+            while cli.runner_alive(task) and time.monotonic() < end:
+                time.sleep(0.1)
+            self.assertFalse(runner.checked_out(task))
+            return task
 
         def tip(name):
             return self.git("rev-parse", "--verify", "-q", f"refs/heads/delegate/{name}").stdout.strip()
 
-        # before the branch: an earlier task's delegate/t-partial, with a commit nothing else has
-        self.git("checkout", "-q", "-b", "delegate/t-partial")
-        (self.repo / "work.txt").write_text("unmerged work\n")
-        self.git("add", "work.txt")
-        self.git("commit", "-qm", "unmerged work")
-        held = tip("t-partial")
-        self.git("checkout", "-q", "main")
-        killed_start("t-partial", "branch --list")       # create_worktree's check: none made yet
-        # after it: the branch this start made, then moved on by someone else
-        killed_start("t-moved", "worktree add")
+        def unmerged(name):  # an earlier task's delegate/<name>, with a commit nothing else has
+            self.git("checkout", "-q", "-b", f"delegate/{name}")
+            (self.repo / "work.txt").write_text(f"unmerged work of {name}\n")
+            self.git("add", "work.txt")
+            self.git("commit", "-qm", "unmerged work")
+            self.git("checkout", "-q", "main")
+            return tip(name)
+
+        # an earlier task's branch: wb start refuses the name and leaves the branch alone
+        held = unmerged("t-partial")
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            self.start("t-partial", "ok", "--queue")
+        self.assertIn("branch delegate/t-partial already exists", err.getvalue())
+        self.assertEqual(tip("t-partial"), held)
+        # before the branch: killed at the runner's own check, and one made meanwhile is kept
+        cut_short("t-before", "rev-parse --verify -q refs/heads/delegate/t-before")
+        self.assertIsNone(store.Task("t-before").status.get("branch_made"))
+        held = unmerged("t-before")
+        self.assertIn("didn't make it", run_wb("discard", "t-before"))
+        self.assertEqual(tip("t-before"), held)               # not this task's: kept
+        # after it: the branch this checkout made, then moved on by someone else
+        task = cut_short("t-moved", "worktree add")
         base = tip("t-moved")
+        self.assertEqual(task.status["branch_made"], base)
         moved = self.git("commit-tree", "-p", base, "-m", "moved on", f"{base}^{{tree}}").stdout.strip()
         self.git("update-ref", "refs/heads/delegate/t-moved", moved, base)
-        self.assertIn("2 half-made start(s)", run_wb("gc"))
-        self.assertEqual(tip("t-partial"), held)          # not this start's: kept
-        self.assertEqual(tip("t-moved"), moved)           # this start's, but moved: kept
+        self.assertIn("moved since", run_wb("discard", "t-moved"))
+        self.assertEqual(tip("t-moved"), moved)               # this task's, but moved: kept
         self.assertNotIn("t-moved", self.git("worktree", "list").stdout)  # its worktree went
-        self.assertFalse(store.Task("t-partial").dir.exists())
-        # and one the start made and nothing moved goes (as #376's test sees, from the record)
-        killed_start("t-made", "worktree add")
+        # and one it made and nothing moved goes
+        cut_short("t-made", "worktree add")
         self.assertTrue(tip("t-made"))
-        self.assertIn("1 half-made start(s)", run_wb("gc"))
+        run_wb("discard", "t-made")
         self.assertEqual(tip("t-made"), "")
+        # a start from before #529, killed with no record of making the branch: gc keeps it
+        held = unmerged("t-old")
+        half = store.Task("t-old")
+        half.dir.mkdir(parents=True)
+        store.write_json(half.dir / cli.STARTING, {"repo": str(self.repo), "worktree":
+                                                   str(half.dir / "worktree"), "pid": 999999999,
+                                                   "at": store.now()})
+        self.assertIn("1 half-made start(s)", run_wb("gc"))
+        self.assertEqual(tip("t-old"), held)
+        self.assertFalse(half.dir.exists())
+
+    def test_wb_start_returns_before_the_checkout_and_discard_undoes_one_cut_short(self):
+        # #529 (the audit of v1.90): wb start made the whole checkout in the foreground, so a big
+        # repo, one on /mnt/c or with Git LFS data passed Claude's two-minute Bash limit, and the
+        # next start was killed the same way. The runner checks out now; this git takes 300 s
+        shim = Path(self.tmp.name) / "slow-git"
+        shim.mkdir()
+        real = shutil.which("git")
+        (shim / "git").write_text(f'#!/bin/sh\ncase " $* " in *" worktree add "*) '
+                                  f'{real} "$@"; exec sleep 300;; esac\nexec {real} "$@"\n')
+        (shim / "git").chmod(0o755)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True,  # noqa
+                                      text=True).stdout
+        t0 = time.monotonic()
+        with mock.patch.dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}"):
+            out = self.start("t-slow", "ok")
+        self.assertLess(time.monotonic() - t0, 60)
+        self.assertIn("started t-slow", out)
+        task = store.Task("t-slow")
+        self.assertEqual(task.spec["checkout"], "runner")
+        end = time.monotonic() + 60
+        while "delegate/t-slow" not in g("branch", "--list") and time.monotonic() < end:
+            time.sleep(0.1)
+        self.assertEqual(task.status["last"], "checking out the base")
+        self.assertFalse(task.status.get("checked_out"))
+        # wb discard stops the runner mid-checkout: git's "initializing" lock, which remove and
+        # prune skip, goes with the worktree and the branch
+        g("worktree", "lock", "--reason", "initializing", str(task.worktree))
+        run_wb("discard", "t-slow")
+        self.assertNotIn("delegate/t-slow", g("branch", "--list"))
+        self.assertNotIn("t-slow", g("worktree", "list"))
+        self.assertFalse(task.worktree.exists())
 
     def test_wb_gc_deletes_branches_merged_before_and_keeps_the_rest(self):
         self.start("t-old", "ok")
@@ -9055,6 +9189,45 @@ class Projects(Base):
                               capture_output=True, text=True, check=True).stdout
         self.assertIn("gpgsig", body)
 
+    def test_a_signer_that_asks_for_a_touch_gets_no_dry_signature_and_is_told_apart_from_ssh_add(self):
+        # #528 (the audit of v1.90): the dry signature made a security key blink on every wb
+        # start, and on a timeout advised ssh-add, which can't make a touch-required key sign
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        pub = Path(self.tmp.name) / "id_ed25519_sk.pub"
+        pub.write_text("sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t x@y\n")
+        signed = Path(self.tmp.name) / "signed"
+        prog = Path(self.tmp.name) / "signer"
+        prog.write_text(f"#!/bin/sh\necho >> {signed}\nexit 1\n")
+        prog.chmod(0o755)
+        for k, v in (("gpg.format", "ssh"), ("user.signingkey", str(pub)), ("commit.gpgsign", "true")):
+            g("config", k, v)
+        out = self.start("t-touch", "ok")
+        self.assertIn("signed by a security key (an sk- SSH key), which asks for a touch", out)
+        self.assertIn("--no-sign commits unattended", out)
+        self.assertNotIn("ssh-add", out)
+        g("config", "user.signingkey", "key::ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA x@y")
+        g("config", "gpg.ssh.program", str(prog))   # an op-ssh-sign: asks on each use
+        out = self.start("t-touch2", "ok", "--queue")
+        self.assertIn("signed by signer (gpg.ssh.program)", out)
+        self.assertFalse(signed.exists())                          # no dry signature asked for
+        wait_phase("t-touch2", {"review"})
+        err = self.refused("accept", "t-touch2", "-m", "feat: answer")
+        self.assertIn("asks for a touch or an approval: none came; or --no-sign", err)
+        self.assertNotIn("ssh-add", err)
+        # an OpenPGP key on a card: gpg lists it with the card's serial number
+        gpg = Path(self.tmp.name) / "gpg"
+        row = ["sec", "u", "255", "22", "ABCDEF0123456789", "1700000000", "", "", "u", "", "",
+               "scESC", "", "", "D2760001240100000006", "", ""]
+        gpg.write_text(f"#!/bin/sh\necho '{':'.join(row)}'\n")
+        gpg.chmod(0o755)
+        for k in ("gpg.format", "user.signingkey", "gpg.ssh.program"):
+            g("config", "--unset", k)
+        g("config", "gpg.program", str(gpg))
+        self.assertIn("signed by an OpenPGP card", gitops.sign_problem(self.repo, "HEAD"))
+        row[14] = "+"                                                # a key on disk: dry-run
+        gpg.write_text(f"#!/bin/sh\necho '{':'.join(row)}'\nexit 1\n")
+        self.assertIsNone(gitops.presence_signer(self.repo))
+
     def test_a_monorepo_package_with_its_own_claude_md_is_where_the_agent_and_tests_run(self):
         # #375 (the audit of 1.6, reproduced): from packages/app, whose CLAUDE.md Claude Code reads,
         # wb start refused the repo for a CLAUDE.md at its root, and the agent worked from the root
@@ -9678,6 +9851,54 @@ class DiskRoom(Base):
         with mock.patch.object(store, "free_bytes", return_value=None):  # unknown: no refusal
             self.start("t-unknown", "ok", "--queue")
         wait_phase("t-unknown", {"review"})
+
+    def test_the_disk_check_sizes_only_the_sparse_cone_and_fetches_nothing_in_a_blobless_clone(self):
+        # #436 (the audit of v1.8): a cone of two files counted the whole tree's 6 MB, and in a
+        # blobless clone each blob the count needed was fetched, one at a time
+        g = lambda d, *a: subprocess.run(["git", "-C", str(d), *a], check=True,  # noqa
+                                         capture_output=True, text=True).stdout
+        for d in ("app", "huge"):
+            (self.repo / d).mkdir()
+        (self.repo / "app" / "f.txt").write_bytes(b"a" * 1000)
+        for i in range(3):
+            (self.repo / "huge" / f"{i}.bin").write_bytes(os.urandom(200_000))
+        g(self.repo, "add", ".")
+        g(self.repo, "commit", "-qm", "two packages")
+        whole, unknown = gitops.checkout_size(self.repo, "HEAD")
+        self.assertGreater(whole, 600_000)
+        self.assertEqual(unknown, 0)
+        g(self.repo, "sparse-checkout", "set", "app")
+        cone, _ = gitops.checkout_size(self.repo, "HEAD")
+        self.assertLess(cone, 100_000)                       # the top's files and app/ alone
+        self.assertGreater(cone, 1000)
+        g(self.repo, "sparse-checkout", "set", "--no-cone", "/huge/0.bin")
+        self.assertLess(abs(gitops.checkout_size(self.repo, "HEAD")[0] - 200_000), 1000)
+        g(self.repo, "sparse-checkout", "disable")
+        g(self.repo, "config", "uploadpack.allowFilter", "true")
+        clone = Path(self.tmp.name) / "blobless"
+        g(self.tmp.name, "clone", "-q", "--filter=blob:none", "--no-checkout",
+          self.repo.as_uri(), str(clone))
+        objects = store.dir_size(clone / ".git" / "objects")[0]
+        size, unknown = gitops.checkout_size(clone, "HEAD")
+        self.assertEqual(store.dir_size(clone / ".git" / "objects")[0], objects)  # nothing fetched
+        if gitops.version() >= (2, 44):
+            self.assertGreater(unknown, 3)
+        self.assertLess(size, 600_000)
+        err = io.StringIO()
+        with mock.patch.object(gitops, "checkout_size", return_value=(10**6, 7)), \
+                mock.patch.object(store, "free_bytes", return_value=10**6), \
+                redirect_stderr(err), self.assertRaises(SystemExit):
+            self.start("t-partial", "ok")
+        self.assertIn("7 of its files aren't fetched yet (a partial clone)", err.getvalue())
+
+    def test_a_single_file_given_to_copy_counts_at_its_size(self):
+        # #436 (Codex's 21): dir_size scanned a file as a directory, counted nothing and called
+        # the count whole, so one large --copy input passed the disk check
+        f = Path(self.tmp.name) / "input.dat"
+        f.write_bytes(os.urandom(65_536))
+        size, whole = store.dir_size(f)
+        self.assertGreaterEqual(size, 65_536)
+        self.assertTrue(whole)
 
     def test_doctor_says_what_the_state_dir_holds_and_what_is_free(self):
         def doctor(free):

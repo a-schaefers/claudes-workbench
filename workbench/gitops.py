@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 from collections import Counter
 from pathlib import Path
+from typing import Callable
 
 from . import store
 
@@ -257,21 +258,95 @@ def lfs_filter(repo: Path) -> list[tuple[str, str]]:
     return [(k, v) for k, _, v in (line.partition(" ") for line in out.splitlines()) if k]
 
 
-def checkout_size(repo: Path, commit: str) -> int:
-    """The bytes a checkout of ``commit`` writes: each blob's size, and where the repo runs Git
-    LFS, for a pointer the size of the file it stands for. Counted as pointers, a repo of
-    LFS-tracked data read as a few kilobytes, and wb start's disk check passed it (#382, the
-    audit of 1.6)."""
-    size, pointers = 0, []
-    for row in git(repo, "ls-tree", "-r", "-l", "-z", commit, check=False).split("\0"):
-        f = row.partition("\t")[0].split()
-        if len(f) == 4 and f[1] == "blob" and f[3].isdigit():
+# The oldest git workbench supports: Ubuntu 22.04's 2.34, where the fallbacks for what came later
+# (merge-tree --write-tree, 2.38; GIT_NO_LAZY_FETCH, 2.44) are checked. wb doctor flags an older
+# one (#527).
+GIT_FLOOR = (2, 34)
+
+
+@functools.lru_cache(maxsize=1)
+def version() -> tuple[int, ...] | None:
+    """The git on PATH as numbers ((2, 44, 0)), None when it can't say."""
+    try:
+        out = subprocess.run(["git", "--version"], capture_output=True, text=True).stdout
+    except OSError:
+        return None
+    word = next((w for w in out.split() if w[:1].isdigit()), "")
+    nums = [int(n) for n in word.split(".")[:3] if n.isdigit()]
+    return tuple(nums) or None
+
+
+def partial_clone(repo: Path) -> bool:
+    """A clone made with --filter: the blobs it lacks are fetched one by one when asked for. Its
+    remote is a promisor (an older git also set extensions.partialClone, a newer one may not)."""
+    if git(repo, "config", "extensions.partialClone", check=False).strip():
+        return True
+    out = git(repo, "config", "--get-regexp", r"^remote\..*\.promisor$", check=False)
+    return any(line.rpartition(" ")[2].lower() in ("true", "yes", "on", "1")
+               for line in out.splitlines())
+
+
+def _sparse_keeps(repo: Path) -> Callable[[str], bool] | None:
+    """Whether a path is in the checkout's sparse cone (or its patterns), None when it isn't
+    sparse. Cone mode: every file at the top and in a cone directory's parents, everything under
+    a cone directory. Otherwise (patterns, which only git matches): what the checkout's own index
+    keeps, its entries without the skip-worktree bit."""
+    sparse = sparse_of(repo)
+    if not sparse:
+        return None
+    if sparse[1]:
+        cones = [d.strip("/") for d in git(repo, "sparse-checkout", "list", check=False).splitlines()
+                 if d.strip("/")]
+        def keeps(path: str) -> bool:
+            d = os.path.dirname(path)
+            return not d or any(d == c or d.startswith(c + "/") or c.startswith(d + "/")
+                                for c in cones)
+        return keeps
+    kept = {row[2:] for row in git(repo, "ls-files", "-t", "-z", check=False).split("\0")
+            if row[:2] != "S "}
+    return kept.__contains__
+
+
+def checkout_size(repo: Path, commit: str) -> tuple[int, int]:
+    """The bytes a checkout of ``commit`` writes, and how many of its files' sizes aren't known
+    here: each blob's size, and where the repo runs Git LFS, for a pointer the size of the file it
+    stands for. Counted as pointers, a repo of LFS-tracked data read as a few kilobytes, and wb
+    start's disk check passed it (#382, the audit of 1.6). Only what the sparse cone checks out
+    counts, and in a partial clone only the blobs it holds, asked with lazy fetching off (git
+    2.44+; an older one's are all unknown): the whole tree of a 30 GB monorepo was counted for a
+    1 GB cone, and a blobless clone fetched every blob, one at a time, to size it (#436)."""
+    keeps = _sparse_keeps(repo)
+    lazy = partial_clone(repo)
+    no_fetch = {"GIT_NO_LAZY_FETCH": "1"}
+    size, unknown, pointers, blobs = 0, 0, [], []
+    for row in git(repo, "ls-tree", "-r", *([] if lazy else ["-l"]), "-z", commit,
+                   check=False).split("\0"):
+        head, _, path = row.partition("\t")
+        f = head.split()
+        if len(f) < 3 or f[1] != "blob" or (keeps and not keeps(path)):
+            continue
+        if lazy:
+            blobs.append(f[2])
+        elif len(f) == 4 and f[3].isdigit():
             size += int(f[3])
             if LFS_POINTER_MIN <= int(f[3]) <= LFS_POINTER_MAX:
                 pointers.append(f[2])
+    if blobs and (version() or (0,)) < (2, 44):
+        return size, len(blobs)
+    if blobs:
+        out = _run(repo, ("cat-file", "--batch-check"), env=no_fetch, check=False,
+                   input="".join(f"{sha}\n" for sha in blobs).encode()).stdout
+        for line in out.decode("ascii", "replace").splitlines():
+            f = line.split()
+            if len(f) == 3 and f[2].isdigit():
+                size += int(f[2])
+                if LFS_POINTER_MIN <= int(f[2]) <= LFS_POINTER_MAX:
+                    pointers.append(f[0])
+            else:  # "<sha> missing": not fetched yet
+                unknown += 1
     if not pointers or not lfs_filter(repo):
-        return size
-    out = _run(repo, ("cat-file", "--batch"), check=False,
+        return size, unknown
+    out = _run(repo, ("cat-file", "--batch"), env=no_fetch, check=False,
                input="".join(f"{sha}\n" for sha in pointers).encode()).stdout
     at = 0
     while (nl := out.find(b"\n", at)) >= 0:
@@ -285,7 +360,7 @@ def checkout_size(repo: Path, commit: str) -> int:
             for line in body.splitlines():
                 if line.startswith(b"size ") and line[5:].isdigit():
                     size += int(line[5:]) - n
-    return size
+    return size, unknown
 
 
 def share_lfs(repo: Path, clone: Path) -> None:
@@ -316,7 +391,7 @@ def submodules(repo: Path, commit: str) -> list[str]:
 SUBMODULES = "submodules.json"  # rules/<task>/: the submodules filled in its worktree (#419)
 
 
-def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
+def fill_submodules(repo: Path, commit: str, checkout: Path, dry: bool = False) -> list[str]:
     """Each submodule of ``commit`` filled in ``checkout`` (a task's worktree or a scratch one)
     with its files at the commit ``commit`` records, from the user's own checkout of it: written
     by git itself (a scratch index, `checkout-index`), with no `.git` for the agent to repoint
@@ -327,7 +402,11 @@ def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
     submodules are filled the same way, from the user's checkout of each inside it, and the ones
     it couldn't fill come back by their whole path: only the top `.gitmodules` was read, and a
     nested one stayed an empty directory (#383, the audit of 1.6). In a task's worktree each one
-    filled is recorded (SUBMODULES, beside gitdir.json, with its index: submodule_edits)."""
+    filled is recorded (SUBMODULES, beside gitdir.json, with its index: submodule_edits).
+    ``dry``: only the ones it couldn't fill, nothing written or recorded (wb start says them
+    before the runner's checkout, #529)."""
+    if dry:
+        return _fill(repo, commit, checkout, None, [], "", dry=True)
     rec, filled = _record(checkout), []
     left = _fill(repo, commit, checkout, rec.parent if rec else None, filled, "")
     if rec is not None and filled:
@@ -335,17 +414,21 @@ def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
     return left
 
 
-def _fill(repo: Path, commit: str, checkout: Path, keep: Path | None, filled: list, at: str) -> list[str]:
+def _fill(repo: Path, commit: str, checkout: Path, keep: Path | None, filled: list, at: str,
+          dry: bool = False) -> list[str]:
     left = []
     for path in submodules(repo, commit):
         row = git(repo, "ls-tree", commit, "--", path, check=False).split()
         sha = row[2] if len(row) >= 3 and row[1] == "commit" else ""
         src, dest = Path(repo) / path, Path(checkout) / path
-        if dest.is_dir() and any(dest.iterdir()):
+        if not dry and dest.is_dir() and any(dest.iterdir()):
             continue
         if not sha or not (src / ".git").exists() or \
                 _run(src, ("cat-file", "-e", f"{sha}^{{commit}}"), check=False).returncode:
             left.append(path)
+            continue
+        if dry:
+            left += [f"{path}/{p}" for p in _fill(src, sha, dest, None, filled, "", dry=True)]
             continue
         store.home().mkdir(parents=True, exist_ok=True)  # the scratch index: never in the lane
         with tempfile.TemporaryDirectory(prefix=store.scratch(".submodule-"), dir=store.home()) as scratch:
@@ -667,17 +750,83 @@ UNLOCK = f"commits here are signed and the key needs unlocking first: {UNLOCK_HO
 NO_TERMINAL = {"GPG_TTY": "", "DISPLAY": "", "WAYLAND_DISPLAY": "", "SSH_ASKPASS_REQUIRE": "never"}
 
 
+def _unlock(repo: Path) -> str:
+    signer = presence_signer(repo)
+    return (f"commits here are signed by {signer}, which asks for a touch or an approval: none "
+            "came; or --no-sign") if signer else UNLOCK
+
+
 def signs(repo: Path) -> bool:
     return git(repo, "config", "--bool", "commit.gpgsign", check=False).strip() == "true"
+
+
+# SSH agents that ask on each use (macOS's Secretive, 1Password's), by their socket's path
+ASKING_AGENTS = {"secretive": "Secretive", "1password": "1Password"}
+
+
+def presence_signer(repo: Path) -> str | None:
+    """What signs ``repo``'s commits when it asks the user each time (a touch, an approval), else
+    None: an SSH security key (`sk-`), a `gpg.ssh.program` of its own (1Password's op-ssh-sign), an
+    SSH agent that asks per use, an OpenPGP key on a card. A dry signature made the key blink on
+    every wb start, and on a timeout advised ssh-add, which can't make it sign (#528)."""
+    fmt = git(repo, "config", "gpg.format", check=False).strip().lower() or "openpgp"
+    key = git(repo, "config", "user.signingkey", check=False).strip()
+    if fmt == "ssh":
+        text = key.removeprefix("key::")
+        if not text.startswith(("sk-", "ssh-", "ecdsa-")):  # a path: the key file, or its .pub
+            path = Path(os.path.expanduser(text))
+            for f in (path, path.with_name(path.name + ".pub")):
+                with contextlib.suppress(OSError, ValueError):
+                    head = f.read_bytes()[:4096]
+                    if head.startswith(b"sk-"):
+                        text = "sk-"
+                        break
+        if text.startswith("sk-"):
+            return "a security key (an sk- SSH key)"
+        if prog := git(repo, "config", "gpg.ssh.program", check=False).strip():
+            return f"{os.path.basename(prog)} (gpg.ssh.program)"
+        sock = os.environ.get("SSH_AUTH_SOCK", "").lower()
+        return next((name for word, name in ASKING_AGENTS.items() if word in sock), None)
+    if fmt != "openpgp":
+        return None
+    gpg = git(repo, "config", "gpg.program", check=False).strip() or "gpg"
+    try:  # field 15 of a secret key's row: a token's serial number when the key is on a card
+        out = subprocess.run([gpg, "--batch", "--with-colons", "--list-secret-keys",
+                              *([key] if key else [])], capture_output=True, text=True,
+                             timeout=SIGN_SECS, stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for row in out.splitlines():
+        f = row.split(":")
+        if len(f) > 14 and f[0] in ("sec", "ssb") and "s" in f[11] and f[14] not in ("", "#", "+"):
+            return "an OpenPGP card"
+    return None
+
+
+def touch_line(signer: str) -> str:
+    return (f"commits here are signed by {signer}, which asks for a touch or an approval: wb accept "
+            f"waits {COMMIT_SECS} s for it; --no-sign commits unattended")
+
+
+def unlock_how(repo: Path) -> str:
+    """Why a signed commit failed and what makes it work: unlock a passphrase key, or be there
+    for a key that asks each time, which ssh-add can't make sign (#528)."""
+    signer = presence_signer(repo)
+    return (f"{signer} asks for a touch or an approval nobody gave" if signer
+            else f"the key needs unlocking first ({UNLOCK_HOW})")
 
 
 def sign_problem(repo: Path, rev: str) -> str | None:
     """UNLOCK when ``repo``'s commits are signed and signing can't happen unattended (a key with a
     passphrase no agent holds, a pinentry that needs a terminal), else None. A dry commit-tree -S
     of ``rev``'s tree, with no terminal or display: wb accept failed at the very end of the task
-    with "incorrect passphrase supplied" (#374, the audit of 1.6). It leaves a loose object."""
+    with "incorrect passphrase supplied" (#374, the audit of 1.6). It leaves a loose object. A key
+    that asks each time gets no dry run, which only made it ask on every start (#528): it is
+    said instead (touch_line)."""
     if not signs(repo):
         return None
+    if signer := presence_signer(repo):
+        return touch_line(signer)
     r = None
     with contextlib.suppress(GitError):
         r = _run(repo, ["commit-tree", "-S", "-m", "workbench: can it sign?", f"{rev}^{{tree}}"],
@@ -708,10 +857,11 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
             r = _run(worktree, [*NO_HOOKS, "commit", "-q", "-m", message], NO_TERMINAL,
                      check=False, timeout=COMMIT_SECS)
         except GitError as e:  # no answer: a pinentry waiting on an unattended desktop
-            raise GitError(f"not committed: {UNLOCK} ({e})") from None
+            raise GitError(f"not committed: {_unlock(worktree)} ({e})") from None
         if r.returncode:
             said = (r.stderr or r.stdout).decode("utf-8", "replace").strip().splitlines()
-            raise GitError(f"not committed: {UNLOCK} (git: {said[0] if said else r.returncode})")
+            raise GitError(f"not committed: {_unlock(worktree)} "
+                           f"(git: {said[0] if said else r.returncode})")
     else:
         git(worktree, *NO_HOOKS, "commit", "-q", "-m", message)
     return git(worktree, "rev-parse", "--short", "HEAD").strip()
@@ -758,6 +908,8 @@ def remove_worktree(repo: Path, worktree: Path) -> str:
     embedded repo, a repo moved or deleted), a task's own worktree is deleted by hand: accept and
     discard once wedged there for good (the 2026-11-16 audit)."""
     worktree, warn = Path(worktree), ""
+    if Path(repo).is_dir():
+        _unlock_cut_short(repo, worktree)
     if worktree.exists() or worktree.is_symlink():
         try:
             if not Path(repo).is_dir():
@@ -772,6 +924,24 @@ def remove_worktree(repo: Path, worktree: Path) -> str:
     if Path(repo).is_dir():
         git(repo, "worktree", "prune", check=False)
     return warn
+
+
+def _unlock_cut_short(repo: Path, worktree: Path) -> None:
+    """`git worktree add` locks its worktree "initializing" until the checkout is done: killed in
+    between (a runner's checkout stopped by wb discard, a reboot), the lock stayed, remove --force
+    and prune both skipped it, and the branch checked out there couldn't be deleted (#376, #529).
+    Only that lock goes, and only for a task's own worktree: one the user locked stays locked."""
+    if _record(worktree) is None:
+        return
+    at = {os.path.abspath(worktree), os.path.realpath(worktree)}
+    entry = None
+    for line in git(repo, "worktree", "list", "--porcelain", check=False).splitlines():
+        if line.startswith("worktree "):
+            entry = line[9:]
+        elif entry and line == "locked initializing" and \
+                {os.path.abspath(entry), os.path.realpath(entry)} & at:
+            git(repo, "worktree", "unlock", entry, check=False)
+            return
 
 
 def delete_branch(repo: Path, task: str, at: str | None = None) -> None:
@@ -901,7 +1071,7 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     def failed(what, e):
         why = str(e)
         if signed and any(w in why for w in ("no answer in", "failed to sign", "failed to write commit")):
-            why = (f"the commit is signed and the key needs unlocking first ({UNLOCK_HOW}); then "
+            why = (f"the commit is signed and {unlock_how(repo)}; then "
                    f"merge it by hand ({why.splitlines()[0]})")
         return GitError(f"{what} {branch_name(task)} failed and was backed out: {why}")
 

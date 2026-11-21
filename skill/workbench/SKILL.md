@@ -47,8 +47,9 @@ it works, explain the why in feedback.
 **Commits are the user's.** Delegated work is committed under the user's own git identity with
 no `Co-Authored-By` or other AI credit line; `wb accept` writes only the task's provenance
 trailers. Don't add one yourself. When `wb start` or `wb accept` says the signing key needs
-unlocking, ask the user to unlock it (`ssh-add`, or one GPG signature in their terminal); use
-`--no-sign` only when they say unsigned is fine.
+unlocking, ask the user to unlock it (`ssh-add`, or one GPG signature in their terminal); when
+it says the signer asks for a touch or an approval, tell the user before `wb accept`, which waits
+for it; use `--no-sign` only when they say unsigned is fine.
 
 ## Workbench mode
 `/workbench` turns workbench mode on for the rest of this session; the Workbench pane opening is
@@ -261,7 +262,8 @@ wb start <kebab-name> --spec <file|-> --repo <repo> --size significant|trivial \
 The worktree holds only committed files. When the acceptance command needs what the user
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
 path>`; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
-directories it lacks, and a failing setup fails the task before any round. A note that the
+directories it lacks, and a failing setup fails the task before any round (so does a checkout
+that fails: the runner makes the worktree, so `wb start` returns at once on any repo). A note that the
 active Python environment is the checkout's: the agent leaves it out (it would import the user's
 checkout, not the worktree), so give it its own, `--setup 'uv sync' --test 'uv run pytest'` or
 `--setup 'python3 -m venv .venv && .venv/bin/pip install -e .'`; that .venv comes first on the

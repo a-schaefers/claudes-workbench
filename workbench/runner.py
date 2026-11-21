@@ -1272,6 +1272,67 @@ def _ignored_paths(wt: Path) -> list[str]:
     return [p.rstrip("/") for p in out.split("\0") if p.rstrip("/")]
 
 
+def checked_out(task: store.Task) -> bool:
+    """Whether the task's worktree has been made: by wb start itself for a task started before
+    #529, else by the runner (task.json `checkout`, status `checked_out`)."""
+    return task.spec.get("checkout") != "runner" or bool(task.status.get("checked_out"))
+
+
+def _checkout_failed(task: store.Task, what: str, fix: str) -> bool:
+    task.set_status(phase="failed", last=what[:200])
+    task.notify("failed", f"task {task.name}: {what}, before any round. {fix}")
+    return False
+
+
+def checkout(task: store.Task) -> bool:
+    """Once, first: the task's worktree and branch at its base, its submodules filled, then the
+    --copy paths checked against the base's own ignore rules. wb start made all three, and on a
+    big repo, one on /mnt/c or with Git LFS data the checkout passed Claude's two-minute Bash
+    limit; the next start made the same checkout and was killed again (#529). A checkout cut
+    short (a kill, a reboot) is made again from nothing: the agent never ran there."""
+    if checked_out(task):
+        return True
+    spec, wt = task.spec, task.worktree
+    repo = Path(spec["repo"])
+    task.set_status(last="checking out the base")
+    began = time.monotonic()
+    branch = gitops.branch_name(task.name)
+    try:
+        if os.path.lexists(wt):  # an earlier run's, cut short: unlocked and removed
+            if warn := gitops.remove_worktree(repo, wt):
+                raise gitops.GitError(warn)
+        tip = gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}",
+                         check=False).strip()
+        made = task.status.get("branch_made")
+        if tip and tip == made:  # this task's own, from that run: deleted only while unmoved
+            gitops.delete_branch(repo, task.name, at=made)
+        elif tip:  # an earlier task's, or moved since: never this checkout's to delete (#416)
+            raise gitops.GitError(f"branch {branch} already exists in {repo}, and this task "
+                                  "didn't make it")
+        # recorded before worktree add makes it, so every cleanup of a checkout cut short (wb
+        # discard, this rerun) deletes only the branch this task made, at that commit (#416)
+        task.set_status(branch_made=spec["base"])
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        gitops.create_worktree(repo, task.name, wt, spec["base"])
+    except (gitops.GitError, OSError) as e:
+        return _checkout_failed(task, f"making the worktree failed ({e})",
+                                f"Fix it, then wb discard {task.name} and start again")
+    # Ignored in the checkout isn't ignored where the task starts: at a tag older than the ignore
+    # rule, a copied local-input.dat was a new file in the worktree, and wb accept committed it
+    # (#322, the audit of 1.4). The task's worktree has the base's own .gitignore files.
+    # (a directory as `dir/`: nothing is there yet to tell a `dir/` rule it is one)
+    if loose := [p for p in spec.get("copy") or ()
+                 if not gitops.ignored(wt, p + "/" * (repo / p).is_dir())]:
+        return _checkout_failed(
+            task, f"--copy {loose[0]}: ignored in {repo}, but not at {spec.get('base_ref') or spec['base']}, "
+            "where the task starts: a copy would show in the review diff and be committed",
+            f"wb discard {task.name}, ignore it in a commit the base holds or start from a newer "
+            "--base, then start again")
+    gitops.fill_submodules(repo, spec["base"], wt)  # the ones it can't, wb start said
+    task.set_status(checked_out=True, checkout_secs=round(time.monotonic() - began, 1))
+    return True
+
+
 def _prepare(task: store.Task) -> bool:
     """Once, before the base check and the GPU: prepare() the worktree, its output in
     setup.txt. Failing, the task fails before any round, saying what the setup printed."""
@@ -1900,6 +1961,8 @@ def drive(task: store.Task) -> None:
     CURRENT["remote"] = m.remote  # the GPU is not ours to measure when the model is remote
     if m.remote:
         task.set_status(remote_gpu=True)  # so its savings say the energy wasn't measured (#117)
+    if not checkout(task):  # the worktree itself, out of wb start's foreground (#529)
+        return
     if not _prepare(task):  # the project as the user has it, before the base check (#201)
         return
     if _down(m):  # before the lease: a server that is down holds no GPU from other tasks

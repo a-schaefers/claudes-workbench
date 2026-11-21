@@ -236,6 +236,9 @@ def reap(task: store.Task) -> bool:
 def _need_worktree(task: store.Task) -> None:
     """A worktree removed by hand turned the next round into a runner crash (the 2026-11-16
     audit). Its committed steps are on the branch; discard --keep-branch keeps them."""
+    if not task.worktree.is_dir() and not runner.checked_out(task):
+        die(f"{task.name} never got its worktree (its checkout didn't finish): wb discard "
+            f"{task.name}, then start the task again under a new name")
     if not task.worktree.is_dir():
         die(f"{task.name}'s worktree is gone ({task.worktree}): its committed work is on branch "
             f"{task.spec.get('branch')}; wb discard {task.name} --keep-branch drops the task and "
@@ -568,17 +571,22 @@ def _disk_room(repo: Path, base: str, setup: dict) -> None:
     free = store.free_bytes()
     if free is None:
         return
-    size = gitops.checkout_size(repo, base)  # Git LFS files at their own size (#382)
+    # Git LFS files at their own size (#382), the sparse cone only, a partial clone's local blobs
+    size, unknown = gitops.checkout_size(repo, base)  # (#436)
     for p in setup.get("copy", ()):
         size += store.dir_size(repo / p, budget=5)[0]
     need = size * DISK_COPIES + DISK_SPARE
+    gap = (f"; {unknown} of its files aren't fetched yet (a partial clone), so their size isn't "
+           "counted" if unknown else "")
     if free >= need:
+        if unknown:
+            print(f"note: the disk check counted {store.gb(size)} of the checkout{gap}")
         return
     held = sorted(((store.dir_size(t.dir, budget=2)[0], t.name) for t in store.all_tasks()
                    if t.status.get("phase") not in store.CLOSED), reverse=True)
     die(f"{store.gb(free)} free where the state directory is ({store.home()}), and a task of this "
         f"repo wants {store.gb(need)} (its checkout and --copy paths, {store.gb(size)}, three "
-        "times over, and 2 GB): free some, or wb discard an open task"
+        f"times over, and 2 GB{gap}): free some, or wb discard an open task"
         + ("; the open tasks: " + ", ".join(f"{n} {store.gb(b)}" for b, n in held[:8]) if held else ""))
 
 
@@ -654,36 +662,17 @@ def cmd_start(a):
                 "pick a new name")
         _drop_start(task, half)  # killed (Claude's Bash limit): its name was refused for good (#376)
         task.dir.mkdir(parents=True)
-    try:
-        wt = context.tree(task.dir, repo, setup.get("siblings"), "worktree")  # #261
-        wt.parent.mkdir(parents=True, exist_ok=True)
-        # the branch this start makes, and at which commit, only when there is none yet: gc
-        # deleted a delegate/<task> an earlier task had left, unmerged, after a start killed
-        # before its worktree (#416, the audit of 1.8)
-        commit = gitops.base_commit(repo, a.base)
-        mine = not gitops.git(repo, "rev-parse", "--verify", "-q",
-                              f"refs/heads/{gitops.branch_name(a.name)}", check=False).strip()
-        store.write_json(task.dir / STARTING, {
-            "repo": str(repo), "worktree": str(wt), "pid": os.getpid(), "at": store.now(),
-            **({"branch": gitops.branch_name(a.name), "branch_at": commit} if mine else {})})
-        base = gitops.create_worktree(repo, a.name, wt, commit or a.base)
-    except gitops.GitError as e:
-        shutil.rmtree(task.dir, ignore_errors=True)  # create_worktree removed its own leftovers
-        die(str(e))
-    # Ignored in the checkout isn't ignored where the task starts: at a tag older than the ignore
-    # rule, a copied local-input.dat was a new file in the worktree, and wb accept committed it
-    # (#322, the audit of 1.4). The task's worktree has the base's own .gitignore files.
-    # (a directory as `dir/`: nothing is there yet to tell a `dir/` rule it is one)
-    if loose := [p for p in setup.get("copy", ())
-                 if not gitops.ignored(wt, p + "/" * (repo / p).is_dir())]:
-        gitops.remove_worktree(repo, wt)
-        gitops.delete_branch(repo, a.name)
+    # The checkout is the runner's (runner.checkout): made here, a big repo, one on /mnt/c or with
+    # Git LFS data passed Claude's two-minute Bash limit, and each start was killed the same way
+    # (#529). What it would refuse is checked here first, the branch, a commit's own submodules.
+    wt = context.tree(task.dir, repo, setup.get("siblings"), "worktree")  # #261
+    base = gitops.base_commit(repo, a.base)
+    if gitops.git(repo, "branch", "--list", gitops.branch_name(a.name)).strip():
         shutil.rmtree(task.dir, ignore_errors=True)
-        shutil.rmtree(context.rules_dir(task), ignore_errors=True)
-        die(f"--copy {loose[0]}: ignored in {repo}, but not at {a.base}, where the task starts: a "
-            "copy would show in the review diff and be committed. Ignore it in a commit the base "
-            "holds, or start from a newer --base")
-    subs = gitops.fill_submodules(repo, base, wt)
+        die(f"branch {gitops.branch_name(a.name)} already exists in {repo}: pick a new name")
+    store.write_json(task.dir / STARTING, {"repo": str(repo), "worktree": str(wt),
+                                           "pid": os.getpid(), "at": store.now()})
+    subs = gitops.fill_submodules(repo, base, wt, dry=True)
     budget = a.ask_budget
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
@@ -698,6 +687,7 @@ def cmd_start(a):
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
         **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
         **({"worktree": str(wt.relative_to(task.dir))} if wt != task.dir / "worktree" else {}),
+        "checkout": "runner",  # the runner makes the worktree, before its setup (#529)
         **({"backlog": a.backlog} if a.backlog else {}),  # a batch left to run: wb backlog
         # a replay of the bench driver's (bench.replay): no notices, no results row, not listed
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
@@ -1953,11 +1943,7 @@ def _drop_start(task: store.Task, info: dict) -> None:
     task's branch, or one moved since, stays (#416)."""
     repo = Path(info.get("repo") or "/nonexistent")
     if repo.is_dir():
-        if info.get("worktree"):
-            # Killed mid-checkout, `git worktree add` leaves its worktree locked "initializing":
-            # remove --force and prune both skip it, and the branch checked out there can't go,
-            # so the name stayed refused (CI, 2026-11-20). The agent never ran: nothing to keep.
-            gitops.git(repo, "worktree", "unlock", info["worktree"], check=False)
+        if info.get("worktree"):  # unlocked first when git left it "initializing" (#376, #529)
             gitops.remove_worktree(repo, Path(info["worktree"]))
         gitops.git(repo, "worktree", "prune", check=False)
         if info.get("branch") == gitops.branch_name(task.name) and info.get("branch_at"):
@@ -2135,6 +2121,19 @@ def cmd_discard(a):
         pass
     elif not repo.is_dir():
         said = f"; {repo} is gone, so its branch with it"
+    elif not runner.checked_out(task):
+        # a checkout cut short (#529): the branch is this task's only where its runner recorded
+        # making it, and only while it still points there; an earlier task's, or one moved
+        # since, stays (#416)
+        made = task.status.get("branch_made")
+        tip = gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}",
+                         check=False).strip()
+        if tip and made and tip == made:
+            gitops.delete_branch(repo, a.name, at=made)
+            said = f"; branch {branch} deleted"
+        elif tip:
+            said = (f"; branch {branch} kept: this task's checkout "
+                    + ("made it, but it has moved since" if made else "didn't make it"))
     elif tip := gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}",
                            check=False).strip():
         task.set_status(tip=tip)  # before any delete: the commits stay findable (#494)
@@ -2552,10 +2551,14 @@ def cmd_skill(a):
             print(f"the skill library is empty ({skills.library()}); "
                   "wb skill add <name> --from <file> -m \"why\" starts it")
             return
+        personal = set(context.denied_skills()) - {"workbench"}
         for name, info in have.items():
             note = skills.advice(use.get(name), now)
             print(f"{name}: {info['description']}\n  {skills.record_line(use.get(name))}"
-                  + (f" · {note}" if note else ""))
+                  + (f" · {note}" if note else "")
+                  # handed, the library's loads (#515); unhanded, the agent sees neither
+                  + (" · one of the user's own skills has this name too: a task it is handed "
+                     "to gets this one" if name in personal else ""))
         return
     if a.action == "show":
         have = skills.available()
@@ -3651,7 +3654,10 @@ def cmd_doctor(a):
     print(f"ok  python {sys.version.split()[0]} ({sys.executable})"
           + ("; python3 on PATH is older, so the launcher found this one" if handed else ""))
     good, said = version(["git"])
-    line(good, said)
+    have = gitops.version() if good else None
+    old = bool(have) and have < gitops.GIT_FLOOR  # #527: init -b and the rest, unchecked
+    line(good and not old, said + (f": workbench needs git {'.'.join(map(str, gitops.GIT_FLOOR))} "
+                                   "or newer; upgrade it" if old else ""))
     # Claude's Bash runs `wb` by name whatever WB_BIN says: WB_BIN only moves the mod's own calls
     # (the 2026-11-16 audit: doctor said ok beside "the mod can't run it")
     on_path, wb_bin = shutil.which("wb"), os.environ.get("WB_BIN")
