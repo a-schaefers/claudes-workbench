@@ -4051,8 +4051,13 @@ Then describe the engine in `~/.config/workbench/images.json` (`$WB_IMAGES`). Tw
 - A **url** is any server with the OpenAI images API (SGLang, vLLM-Omni, LocalAI and others),
   or, with `"api": "a1111"` (a url with `/sdapi/` says so itself), AUTOMATIC1111's, Forge's or
   SD.Next's: `{"url": "http://127.0.0.1:7860/sdapi/v1/txt2img", "steps": 20, "unload":
-  "http://127.0.0.1:7860/sdapi/v1/unload-checkpoint"}`. ComfyUI's isn't spoken yet: wrap it in a
-  command engine.
+  "http://127.0.0.1:7860/sdapi/v1/unload-checkpoint"}`, or, with `"api": "comfyui"` (a `workflow`
+  says so itself), ComfyUI's: `{"url": "http://127.0.0.1:8188", "workflow": "flux.json"}`. The
+  workflow is one saved with ComfyUI's **Export (API)** (not Save: that format has `nodes` and
+  `links`, which `/prompt` refuses), a path from the engine file's directory or `~`, with
+  `{prompt}` in its text node and `{seed}`, `{width}`, `{height}` wherever it wants them (a value
+  that is only `{seed}`, `{width}` or `{height}` becomes the number). Its first SaveImage output
+  is the image (a PreviewImage's if there is none).
   One started with an API key takes `"key"` (`{env:NAME}` and `{file:path}` work, as in
   OpenCode's config, a relative path from the engine file's directory), sent as a Bearer token.
 - `notes` is shown to Claude. Put the model's licence there: some licences limit where and how
@@ -4072,18 +4077,19 @@ a task holds the GPU, `wb image` refuses at once and names it; `--wait` queues b
 done, so its memory is free for the next task. A url engine is a server you run: it keeps its
 model in GPU memory for as long as it is up, so a coding model loaded beside it may spill into
 RAM. Give it an `unload` URL, POSTed after each batch, and `unload_body` when it wants one
-(ComfyUI: `"unload": "http://127.0.0.1:8188/free"`, `"unload_body": {"unload_models": true,
+(a ComfyUI engine has one unless it says `"unload": ""`: its `/free` with `{"unload_models": true,
 "free_memory": true}`; A1111/Forge: `/sdapi/v1/unload-checkpoint`; LocalAI: `/backend/shutdown`
 with `{"model": …}`); without one, start it to make images and stop it afterwards (or give it a
 GPU of its own). The listing marks such a server `(no unload URL)`. `wb scout` and `wb image --list` show each engine, whether it's ready, and which are
-servers.
+servers. `wb scout` also probes ComfyUI's and A1111's default ports here (8188, 7860) and names a
+server answering there that no engine uses, with the entry that would.
 Prefer weights in safetensors or GGUF from the model's own publisher or a well-known
 quantizer. Prefer tools that load models without running code that comes with them (ComfyUI's
 custom-node packs do run their own Python).
 
 **How it works** (`workbench/images.py`, `cli.cmd_image`; what audio shares is in `workbench/media.py`).
 - `images.json` (`$WB_IMAGES`, default `~/.config/workbench/images.json`) maps an engine name to an
-  entry; the first entry is the default, non-object values are ignored. Keys: `command` or `url` (with `api`, `steps`),
+  entry; the first entry is the default, non-object values are ignored. Keys: `command` or `url` (with `api`, `steps`, `workflow`),
   `ref_arg`, `model`, `label`, `notes` (shown to Claude: put the licence there), `timeout` (s,
   default 1800), `unload` and `unload_body` (a JSON object, else `{}`: `media.unload` POSTs it to
   `unload` when the batch ends, inside the lease, failed or not, `media.unloading`; it was checked
@@ -4107,8 +4113,27 @@ custom-node packs do run their own Python).
   []}` or a page that isn't JSON a traceback, a 400 only "Bad Request" (#597). An `a1111` engine
   (`images.api`, `_a1111`) POSTs `{prompt, width, height, seed, batch_size: 1, n_iter: 1, steps?}`
   and decodes `images[0]` (a `data:` prefix dropped); a Forge url got an OpenAI body and "sent no
-  image" while listed ready (#753). `ready` refuses an `api` outside `images.APIS` and a `steps`
-  that isn't a whole number.
+  image" while listed ready (#753). A `comfyui` engine (`_comfyui`; its root is the url less a
+  trailing `/prompt`, `images.comfy_root`) reads its workflow (`images.workflow`), fills it in
+  (`images._fill`: a string that is only `{seed}`, `{width}` or `{height}` becomes the number,
+  ComfyUI's KSampler refusing "3"; any other string gets the placeholders as text, in one pass),
+  POSTs `{"prompt": <graph>}` to `/prompt`, polls `/history/<prompt_id>` every `COMFY_POLL` (0.5 s)
+  until its entry appears or `timeout` passes, fails with the `execution_error`'s
+  `exception_message` when its `status_str` is "error", and GETs `/view?filename&subfolder&type`
+  for the first image with type "output" (else the first at all). Stopped before it finished (the
+  timeout, a failed poll, wb ended) it POSTs `/queue {"delete": [id]}` and `/interrupt
+  {"prompt_id": id}`: the prompt would otherwise draw on after the lease was released.
+  `images.engines` gives a comfyui entry with no `unload` key `<root>/free`, `{"unload_models":
+  true, "free_memory": true}` (`_defaults`): ComfyUI keeps every model it loaded. ComfyUI rejected
+  the OpenAI body outright (#753). `ready` refuses an `api` outside `images.APIS`, a `steps` that
+  isn't a whole number, and a comfyui engine whose workflow is missing, unreadable, not JSON, not
+  the API format (every value an object with `class_type`), or without `{prompt}`.
+- `wb scout` (`cli.image_server_lines`, `images.servers_here`): GETs `/system_stats` on
+  127.0.0.1:8188 and `/sdapi/v1/options` on 127.0.0.1:7860 (`images.PORTS`; no proxy, 1 s each);
+  a JSON object is that API, any other answer "something answers … but not its API" (an
+  AUTOMATIC1111 started without `--api`). A port an engine's url already names on this host is
+  left out; each other gets a line with the entry that would use it. None under
+  `WB_FAKE_MODELS`. The skill proposed an 11 GB install to users already running one (#753).
 - Ready (`ready`, shown by `wb image --list` and `wb scout`): an entry `media.problem` finds
   nothing wrong with (the string keys strings, a command `shlex.split` accepts, `timeout` and
   `seconds` positive numbers, `voices` a list of names, `gpu` true or false, a known `kind` for
@@ -5968,7 +5993,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL, and a host no URL can carry; an IPv6 address is bracketed either way (#707). `--remove` undoes it; not while OpenCode's default model or `small_model` is one of them (#708), nor for a provider wb didn't add or that now points elsewhere. |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default `model` nor its `small_model`, each refusal naming the field: #708) and drops its models.json overrides but `variant_of` and `replaces` (its tasks stay in its source's record, #723); `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). A flag or size for another action is refused, not ignored (#602): `--url`, `--start`, `--stop`, `--label`, `--context` and `--pull` go with `add`, `--delete` with `retire`, sizes with `sizes`. |
-| `wb scout` | `--done [--notes "…"]` (`--notes` without `--done` refused, #602), `--due`, `--watch "…"`, `--unwatch N` (1-based; 0 refused) | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers (on WSL2, at the Windows host too when nothing answers here, and `models.WSL_NAT` when nothing answers at all: *A server on Windows, from WSL2*, #663), flagged when OpenCode has no provider for it, compared by `models.server_key`, so `::1`, `localhost` or this host's name is one server, #588); the image and audio engines (`audio.coverage`: what the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
+| `wb scout` | `--done [--notes "…"]` (`--notes` without `--done` refused, #602), `--due`, `--watch "…"`, `--unwatch N` (1-based; 0 refused) | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers (on WSL2, at the Windows host too when nothing answers here, and `models.WSL_NAT` when nothing answers at all: *A server on Windows, from WSL2*, #663), flagged when OpenCode has no provider for it, compared by `models.server_key`, so `::1`, `localhost` or this host's name is one server, #588); the image and audio engines (`audio.coverage`: what the audio ones cover), and an image server answering on ComfyUI's or A1111's port that no engine uses (`cli.image_server_lines`, #753); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill with its history, the scan alone. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…`, `--reviewed RULE…` (a scan rule whose critical findings Claude read and judged safe: they pass, recorded in the commit; never one in `scan.UNREVIEWABLE`) | Check, scan, copy, commit. |
 | `wb skill patch <n> --old … --new … -m "…"` | `--old-file`, `--new-file`, `--lesson` | An exact, unique replacement, then as add. |
