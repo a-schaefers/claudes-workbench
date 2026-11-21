@@ -2206,6 +2206,11 @@ records (`judged`). A knob that acts only on a filling session (`Knob.fills`: `f
 a task only when one of its sessions reached the smallest allowed value (`tuning.acted`, from the
 row's `peak_share`; a row from before it was recorded counts): most tasks never fill 40% of the
 window, and one fast trivial task at 0.5 flipped the pick, one discard flipped it back (#721).
+A knob that acts only after a round whose tests passed (`Knob.passed`: `self_review`) counts a
+task only when one did (the row's `self_review_due`, set by the runner whether or not
+self-review then ran; a row from before it, only when its last tests passed, `tests_ok`): a task
+without `--test`, or whose tests failed through every auto-fix, ran alike under 0 and 1, and its
+noise could turn self-review off for the tasks it exists for (#816).
 Each value's mean is smoothed toward the others' (`PRIOR`, two tasks' worth), and a value other
 than the default can be the pick only once `TRY_MIN` (3) tasks ran at it (an untried value sits at
 the pooled mean, so any one task above it won), so one lucky task moves nothing, and the pick
@@ -6478,6 +6483,7 @@ check-ins off), not `wb start`'s.
 | `full_pct`, `handovers`, `full_compacted` | the fill at the last mid-round handover; how many; whether OpenCode had compacted the session first (#774) |
 | `window`, `load_secs`, `loads` | the model's context window; the load time, summed over every runner of the task (`wb feedback`, `next`, `resume`) and the reloads before later rounds (`runner._loaded`); each load that happened, alone (`[secs…]`: the typical load's samples, #577) |
 | `tuned`, `explored`, `tuned_max` | the knob values this task runs at (`tuning.tune`) |
+| `self_review_due` | true once a round's tests passed, so self-review could run, whether or not it did: the row says whether `self_review` could act (`tuning.acted`, #816) |
 | `peak_share` | the fullest any of its sessions got, a share of the window (`runner.peak`: each `step_finish`, and each session export's last message), so the row says whether `fresh_at` could act (#721) |
 | `steer_taken`, `nudges`, `nudged_round`, `checkin_at` | notes delivered; nudges sent; the round that ended in one; the last check-in |
 | `active_s` | the agent's active work so far, in seconds: rounds less answers and a frozen machine (*Progress checks*) |
@@ -6513,7 +6519,7 @@ questions `ask {id}`, `answer {id}`. From `wb`:
 review included), `tok_in`, `tok_out`, `ran` (whether the agent ever got a request to its model, `results.ran`: a
 session began or a token was written), `failed_before` (`setup` or `load`, when it never ran:
 status's), `skills_offered`, `skills_loaded`, `skills_rev`, `experiments` (the
-names on for the task, when any), `steps` (one `results.step` per step), `window`, `weights_id` (task.json's, when known: #726), `tuned`, `explored`, `tuned_max`, `peak_share` (status's, when recorded: `tuning.acted`), `spec_gaps`, `claude`
+names on for the task, when any), `steps` (one `results.step` per step), `window`, `weights_id` (task.json's, when known: #726), `tuned`, `explored`, `tuned_max`, `peak_share` (status's, when recorded: `tuning.acted`), `self_review_due` (status's, false when unset: `tuning.acted`, #816), `spec_gaps`, `claude`
 (when known: `spend.usage`, `{turns, calls, input, cache_write_5m, cache_write_1h, cache_read,
 output}`, *What a task cost Claude*), `gpu_wh` (status's, when measured), `remote_gpu` (true
 when its model ran on another machine, whose energy nothing here measures), `active_minutes`

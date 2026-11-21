@@ -3980,6 +3980,15 @@ class Context(Base):
         self.start("t-off", "ok", "--test", TEST_CMD, "--no-self-review")
         st = wait_phase("t-off", {"review"})
         self.assertEqual((st["round"], st["tuned"]["self_review"], st["explored"]), (1, 0, []))
+        # #816: its tests passed, so self-review could have run: the row is evidence of the knob
+        self.assertTrue(st["self_review_due"])
+        run_wb("accept", "t-off", "-m", "x")
+        self.start("t-none", "ok", "--no-self-review")     # no --test: it never could
+        self.assertNotIn("self_review_due", wait_phase("t-none", {"review"}))
+        run_wb("accept", "t-none", "-m", "x")
+        rows = {r["task"]: r for r in store.results()}
+        self.assertEqual((rows["t-off"]["self_review_due"], rows["t-none"]["self_review_due"]),
+                         (True, False))
 
     def test_a_session_that_fills_up_reading_carries_on_instead_of_handing_over(self):
         self.start("t-c7", "read", "--test", TEST_CMD)
@@ -11382,13 +11391,32 @@ class Tuning(Base):
         self.assertEqual(tuning.best("self_review", self.M, self.W), 1)
         row = lambda v, reviews: {"model": self.M, "window": self.W, "outcome": "accepted",  # noqa
                                   "reviews": reviews, "active_minutes": 10 if v == 0 else 14,
-                                  "tuned": {"self_review": v}}
+                                  "tuned": {"self_review": v}, "self_review_due": True}
         for v, reviews in [(1, 1)] * 3 + [(0, 1)] * 3:   # reviewed itself, Claude still sent it back
             store.append_jsonl(store.home() / "results.jsonl", row(v, reviews))
         self.assertEqual(tuning.best("self_review", self.M, self.W), 0)   # the time was for nothing
         for _ in range(6):                                # where it spares Claude's rounds, it's on
             store.append_jsonl(store.home() / "results.jsonl", row(1, 0))
         self.assertEqual(tuning.best("self_review", self.M, self.W), 1)
+
+    def test_a_task_whose_tests_never_passed_is_no_evidence_of_self_review(self):
+        # #816: self-review runs only after passing tests, yet a task with no --test scored its
+        # value too: clean test-less tasks at 0 turned self-review off for the tasks it is for
+        from workbench import tuning
+        row = lambda v, **x: {"model": self.M, "window": self.W, "outcome": "accepted",  # noqa
+                              "reviews": 1 if v else 0, "active_minutes": 10, "tuned": {"self_review": v}, **x}
+        for _ in range(3):
+            store.append_jsonl(store.home() / "results.jsonl", row(1, self_review_due=True))
+        for _ in range(6):                                 # no --test: ran alike under either
+            store.append_jsonl(store.home() / "results.jsonl", row(0, self_review_due=False))
+            store.append_jsonl(store.home() / "results.jsonl", row(0, tests_ok=None))  # before the key
+        self.assertEqual(tuning.record("self_review", self.M, self.W)[0], [])
+        self.assertEqual(tuning.best("self_review", self.M, self.W), 1)
+        for _ in range(3):                                 # before the key, its tests passed: counts
+            store.append_jsonl(store.home() / "results.jsonl", row(0, tests_ok=True))
+        self.assertEqual(len(tuning.record("self_review", self.M, self.W)[0]), 3)
+        self.assertEqual(tuning.best("self_review", self.M, self.W), 0)
+        self.assertTrue(tuning.acted("fresh_at", row(0, self_review_due=False)))  # fresh_at's own rule
 
     def test_wb_tune_shows_the_record_and_the_pick(self):
         self.result(0.6, n=2)

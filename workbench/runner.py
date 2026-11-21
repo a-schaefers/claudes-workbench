@@ -2838,6 +2838,10 @@ def drive(task: store.Task) -> None:
                 task.event({"ts": store.now(), "round": n, "kind": "autofix",
                             "text": "tests failed; sent the output back to the agent"})
                 continue
+            if tests and tests["ok"] and not task.status.get("self_review_due"):
+                # self-review could run, whether or not it does: only such a task is evidence
+                # of the knob, which a test-less one could turn off (tuning.acted, #816)
+                task.set_status(self_review_due=True)
             mark = [task.status.get("steps", 1), task.status.get("reviews", 0)]
             if tuning.value(task, "self_review") and tests and tests["ok"] \
                     and task.status.get("self_reviewed") != mark:

@@ -6,7 +6,8 @@ says otherwise). At a task's start, choose() takes the value with the best recor
 and window, each value's mean reward smoothed toward the record of all values (PRIOR tasks'
 worth), among the default and the values tried TRY_MIN times, so one lucky task doesn't win; ties
 go to the default. A knob that acts only on a filling session (fresh_at) learns only from the
-tasks whose sessions reached its smallest value. One task in EXPLORE tries a
+tasks whose sessions reached its smallest value, and one that acts only after passing tests
+(self_review) only from the tasks with a round whose tests passed. One task in EXPLORE tries a
 neighbouring value instead, the one tried less, so evidence keeps growing beside the pick and
 the pick walks toward a better value one step at a time, never jumping across the range.
 
@@ -54,6 +55,8 @@ class Knob:
     help: str
     fills: bool = False  # acts only on a session that fills: a task whose sessions never reached
     # the smallest value (results' `peak_share`) is no evidence of it (#721)
+    passed: bool = False  # acts only after a round whose tests passed: a task with no --test, or
+    # whose tests never passed, ran alike under every value (results' `self_review_due`, #816)
 
 
 KNOBS = {
@@ -67,7 +70,8 @@ KNOBS = {
     # feedback round, a whole extra wake (2026-11-18: a trivial handoff came in under Claude
     # writing it only when the first change Claude saw was right). On by default; a model whose
     # own reviews don't spare Claude's rounds learns it off.
-    "self_review": Knob((0, 1), 1, "whether the agent reviews its own change before Claude is woken"),
+    "self_review": Knob((0, 1), 1, "whether the agent reviews its own change before Claude is woken",
+                        passed=True),
 }
 
 
@@ -173,9 +177,16 @@ def acted(name: str, row: dict, ceiling=None) -> bool:
     """Whether the knob could have acted on the task: a `fills` knob, only when one of its
     sessions reached the smallest value (a row from before `peak_share` was recorded counts).
     Most tasks are small and never fill 40% of the window: one fast trivial task at 0.5 flipped
-    the pick, one discard flipped it back (#721)."""
+    the pick, one discard flipped it back (#721). A `passed` knob, only when a round's tests
+    passed (`self_review_due`; a row from before it, when its last tests passed): a task without
+    --test scored 0 or 1 though it ran alike under both, and could turn self-review off (#816)."""
+    k = KNOBS[name]
+    if k.passed:
+        due = row.get("self_review_due")
+        if not (due if isinstance(due, bool) else row.get("tests_ok") is True):
+            return False
     peak = row.get("peak_share")
-    return not KNOBS[name].fills or not isinstance(peak, (int, float)) \
+    return not k.fills or not isinstance(peak, (int, float)) \
         or peak >= min(allowed(name, ceiling)) - 1e-9
 
 
