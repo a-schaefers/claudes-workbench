@@ -7543,7 +7543,7 @@ class GitGuard(unittest.TestCase):
                   "merge x", "rebase main", "cherry-pick x", "revert x", "fetch", "pull",
                   "branch new", "branch -D x", "tag v1", "tag -d v1", "config user.name x",
                   "config --unset user.name", "worktree add ../x", "remote add o u", "remote -v add o u",
-                  "reflog expire --all", "apply p.diff", "am p", "gc", "notes add -m x",
+                  "reflog expire --all", "apply --index p.diff", "am p", "gc", "notes add -m x",
                   "symbolic-ref HEAD refs/heads/x", "update-ref HEAD x", "st", "-C . commit"]
         for line in reads:
             _, sub, rest = gitguard.split(line.split())
@@ -7561,8 +7561,8 @@ class GitGuard(unittest.TestCase):
                  "archive -o x.tar HEAD", "apply --check p.diff", "apply --stat p.diff",
                  "apply --numstat p.diff", "hash-object src/a.c", "check-mailmap A <a@b>",
                  "interpret-trailers msg.txt", "fsck", "fsck --full"]
-        writes = ["tag v1", "tag -a v1 --contains HEAD", "apply p.diff", "apply --index p.diff",
-                  "apply --check --apply p.diff", "hash-object -w src/a.c",
+        writes = ["tag v1", "tag -a v1 --contains HEAD", "apply --index p.diff",
+                  "apply --cached p.diff", "hash-object -w src/a.c",
                   "fsck --lost-found"]
         for line in reads:
             _, sub, rest = gitguard.split(line.split())
@@ -7570,6 +7570,45 @@ class GitGuard(unittest.TestCase):
         for line in writes:
             _, sub, rest = gitguard.split(line.split())
             self.assertFalse(gitguard.reads(sub, rest), line)
+
+    def test_a_plain_git_apply_passes_the_shim_and_one_that_writes_the_index_is_refused(self):
+        # #890 (the third 2026-11-21 audit): `git apply p` and `-R` write only working-tree files,
+        # yet were refused, so a setup or test script that applies patches failed every round
+        from workbench import gitguard
+        for line in ["apply p.diff", "apply -R p.diff", "apply --reject p.diff", "apply -p3 p",
+                     "apply -Rv p", "apply --check --apply p.diff", "apply --no-3way p"]:
+            _, sub, rest = gitguard.split(line.split())
+            self.assertTrue(gitguard.reads(sub, rest), line)
+        for line in ["apply --index p", "apply --cached p", "apply --3way p", "apply -3 p",
+                     "apply -R3 p", "apply -N p", "apply --intent-to-add p", "apply --ind p",
+                     "apply --build-fake-ancestor=x p"]:
+            _, sub, rest = gitguard.split(line.split())
+            self.assertFalse(gitguard.reads(sub, rest), line)
+        with tempfile.TemporaryDirectory() as d:
+            d, repo = Path(d), Path(d) / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "a.txt").write_text("one\n")
+            subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                            "commit", "-qm", "a"], check=True)
+            (repo / "a.txt").write_text("two\n")
+            patch = subprocess.run(["git", "-C", str(repo), "diff"], capture_output=True,
+                                   text=True, check=True).stdout
+            subprocess.run(["git", "-C", str(repo), "checkout", "-q", "a.txt"], check=True)
+            (d / "p.diff").write_text(patch)
+            env = {**os.environ, **gitguard.install(d / "bin", repo, ROOT, os.environ["PATH"],
+                                                    repo)}
+            shim = lambda *a: subprocess.run([str(d / "bin" / "git"), *a], cwd=repo,  # noqa
+                                             env=env, capture_output=True, text=True)
+            out = shim("apply", str(d / "p.diff"))
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual((repo / "a.txt").read_text(), "two\n")
+            out = shim("apply", "-R", str(d / "p.diff"))
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual((repo / "a.txt").read_text(), "one\n")
+            out = shim("apply", "--index", str(d / "p.diff"))
+            self.assertIn("read-only", out.stderr)
+            self.assertEqual((repo / "a.txt").read_text(), "one\n")
 
     def test_config_writes_to_a_file_of_their_own_pass_and_reads_from_a_file_are_reads(self):
         # #794 (the second 2026-11-21 audit): `git config --global user.name t` with HOME at a

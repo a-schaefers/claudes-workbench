@@ -4864,8 +4864,10 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   `status`, `diff`, `log`, `show`, `blame`, `grep`, `rev-parse`, `ls-files`, `archive`,
   `check-mailmap`, `interpret-trailers`, …) reads; `branch` and `tag` read only when listing (for
   `tag`, `TAG_LISTS`: `-l`, `--points-at`, `--contains`, `--merged` and their `--no-` forms, which
-  version scripts in Makefiles, `setup.py` and `build.rs` run: #443); `apply` only with
-  `--check`, `--stat`, `--numstat` or `--summary` and no `--apply`; `hash-object` without `-w`;
+  version scripts in Makefiles, `setup.py` and `build.rs` run: #443); `apply` without
+  `APPLY_INDEX` (`--index`, `--cached`, `--3way`/`-3`, `--intent-to-add`/`-N`,
+  `--build-fake-ancestor`, abbreviations too), since it then writes only working-tree files
+  (plain `git apply p` and `-R` were refused: #890); `hash-object` without `-w`;
   `fsck` without `--lost-found`; `config` only with a read option or one name (the values of
   `CONFIG_VALUED`, `-f`, `--blob`, `--type` and the like, not counted: `git config -f .gitmodules
   <key>` was refused, #794); `stash` only `list`

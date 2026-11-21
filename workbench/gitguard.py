@@ -43,7 +43,11 @@ TAG_LISTS = {"-l", "--list", "--points-at", "--contains", "--no-contains", "--me
              "--no-merged"}
 TAG_WRITES = {"-a", "-s", "-u", "-d", "-f", "-m", "-F", "--annotate", "--sign", "--delete",
               "--force", "--message", "--file"}
-APPLY_REPORTS = {"--check", "--stat", "--numstat", "--summary"}
+# apply's options that write the index or the object store (--build-fake-ancestor writes an index
+# file); without them `git apply` writes only working-tree files, which the agent may edit
+# anyway: plain `git apply p` and `-R` were refused, and a setup or test script applying patches
+# failed every round (#890, the third 2026-11-21 audit). Matched by prefix too: git takes `--ind`
+APPLY_INDEX = {"--index", "--cached", "--3way", "--intent-to-add", "--build-fake-ancestor"}
 CONFIG_READS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "get",
                 "list"}
 # init's and clone's options that take the next argument as their value
@@ -101,8 +105,9 @@ def reads(sub: str | None, rest: list[str]) -> bool:
         return first is None or first in ("show", "exists") or first.startswith("-")
     if sub in ("notes", "submodule"):
         return first in (None, "list", "show", "status")
-    if sub == "apply":  # only reports on the patch, applying nothing
-        return bool(flags & APPLY_REPORTS) and "--apply" not in flags
+    if sub == "apply":  # reports on the patch, or applies it to working-tree files only
+        return not any(o.startswith(f) for f in flags if f.startswith("--") and len(f) > 2
+                       for o in APPLY_INDEX) and not _apply_shorts(rest) & {"3", "N"}
     if sub == "hash-object":  # prints the id; -w writes the object
         return "-w" not in flags
     if sub == "fsck":  # --lost-found writes into the git dir
@@ -110,6 +115,21 @@ def reads(sub: str | None, rest: list[str]) -> bool:
     if sub == "symbolic-ref":
         return len(plain) == 1 and not flags & {"-d", "--delete", "-m"}
     return False
+
+
+def _apply_shorts(rest: list[str]) -> set[str]:
+    """apply's single-letter options, clusters split (`-3R`); `-p` and `-C` take the rest of
+    their word as a value (`-p3` isn't `-3`)."""
+    letters = set()
+    for a in rest:
+        if a == "--":
+            break
+        if a.startswith("-") and not a.startswith("--"):
+            for c in a[1:]:
+                letters.add(c)
+                if c in "pC":
+                    break
+    return letters
 
 
 def _config_plain(rest: list[str]) -> list[str]:
