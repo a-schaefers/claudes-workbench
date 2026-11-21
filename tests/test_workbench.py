@@ -3477,6 +3477,36 @@ class Context(Base):
         runner._early_notes(t, 4)                           # a note as round 4's model reloads
         self.assertIn("And log it.", "\n".join(runner.round_asks(t, 4)))
 
+    def test_the_runners_nudge_is_never_one_of_what_a_later_fresh_session_was_asked(self):
+        # #681 (Claude's audit of main): a nudge round's prompt ("Claude, your reviewer,
+        # interrupted you… thinking for 12 minutes") went to every later fresh session in the
+        # step under "What you were asked to do", and a fresh round after it was stopped at its
+        # first long think "even after a nudge"
+        from workbench import lessons, runner
+        t = store.Task("t-nudged")
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": "t-nudged", "created_at": store.now()})
+        t.set_status(step_round=1, round=2)
+        for r, text in ((1, "Write the answer."), (2, lessons.FEEDBACK_HEAD + " 1. Use a heap.")):
+            t.round_dir(r).mkdir(parents=True)
+            t.round_dir(r).joinpath("prompt.md").write_text(text)
+        nudge = runner.NUDGE.format(mins=12)
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": nudge, "now": True,
+                                                   "by": "workbench"})
+        runner._steer_round(t, 2, True)
+        self.assertIn(nudge, store.round_prompt(t, 3).read_text())    # the agent still gets it
+        self.assertEqual(runner.round_asks(t, 3), [lessons.FEEDBACK_HEAD + " 1. Use a heap."])
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": nudge, "now": True,
+                                                   "by": "workbench"})
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": "Use v2.", "now": True})
+        runner._steer_round(t, 3, True)                    # Claude's note beside a nudge is kept
+        asks = "\n".join(runner.round_asks(t, 4))
+        self.assertIn("Use v2.", asks)
+        self.assertNotIn("without a tool call", asks)
+        self.assertTrue(runner.renudged({"nudged_round": 3, "session": "ses_1"}, 4))
+        self.assertFalse(runner.renudged({"nudged_round": 3, "session": None}, 4))  # a fresh one
+        self.assertFalse(runner.renudged({"nudged_round": 2, "session": "ses_1"}, 4))
+
     def test_a_fresh_session_after_a_feedback_round_still_carries_the_feedback(self):
         # Between rounds, an auto-fix round that started fresh carried only the failing tests:
         # the agent fixed them and reported done with the feedback never made (the 2026-11-16

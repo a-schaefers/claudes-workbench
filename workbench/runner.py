@@ -787,6 +787,13 @@ class _Clock:
 NOT_THE_MODEL = frozenset({"step_start", "retry", "error", "background_wait"})
 
 
+def renudged(st: dict, n: int) -> bool:
+    """Round n stalling is stopped, not nudged: the last round ended in the runner's nudge and
+    this is the session it nudged. A fresh one never thought for long, and its first long think
+    was stopped "even after a nudge" (#681)."""
+    return st.get("nudged_round") == n - 1 and bool(st.get("session"))
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -844,7 +851,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # (`background_wait`), no nudge, and silence runs to the test timeout; the round's limit holds.
     wait_hush = max(silence, float(spec.get("test_timeout") or 900))
     nudged = False
-    renudge = task.status.get("nudged_round") == n - 1  # the last round ended in our nudge
+    renudge = renudged(st, n)
     edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
     started = time.time()  # the wall clock, for check-ins: they compare with timestamps in files
     clock = _Clock(time.monotonic())
@@ -2549,6 +2556,12 @@ RESUME = ("Claude stopped your last session and is resuming the task in a fresh 
           "then finish them and run the tests.{asked}")
 
 
+# A round whose prompt is the runner's own think nudge (_steer_round): round_asks skips it, or a
+# later fresh session was told, under "What you were asked to do", that Claude interrupted it
+# after 12 minutes of thinking it never did (#681).
+NUDGED = "nudged"
+
+
 # Claude's notes folded into a round's prompt after its opening (a carry-on, a resume, the
 # notes that came before the round began): round_asks skips a carry-on or resume whole, so it
 # reads them from here (#677).
@@ -2575,7 +2588,8 @@ def round_asks(task: store.Task, n: int) -> list[str]:
     for r in range(n, first, -1):
         f = store.round_prompt(task, r)
         raw = f.read_text().strip() if f.is_file() else ""
-        if not raw or raw.startswith((CARRY_ON[:60], RESUME[:60])):
+        if (not raw or raw.startswith((CARRY_ON[:60], RESUME[:60]))
+                or (task.round_dir(r) / NUDGED).exists()):
             # but the notes folded into it (folded_notes): skipped with it, a note sent as a
             # session filled reached that successor alone, and the next was never told (#677)
             if (notes := task.round_dir(r) / FOLDED).is_file() and (kept := notes.read_text().strip()):
@@ -2664,6 +2678,10 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
     notes = pending_steer(task)
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
     task.round_dir(n + 1).joinpath("prompt.md").write_text(steer_prompt(notes, interrupted))
+    if any(r.get("by") == "workbench" for r in notes):  # the nudge isn't an ask (#681) ...
+        task.round_dir(n + 1).joinpath(NUDGED).touch()
+        if theirs := [r for r in notes if r.get("by") != "workbench"]:  # ... Claude's notes are
+            folded_notes(task, n + 1, theirs)
     task.set_status(round=n + 1, steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
 

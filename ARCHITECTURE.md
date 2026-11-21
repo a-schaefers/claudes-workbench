@@ -946,6 +946,11 @@ next round starts with it; `status.nudges` counts them, and each raises a `check
 nudged it: N min of thinking with no tool call"). A round right after a nudge that again passes
 the think budget is stopped as stuck ("… even after a nudge"), whatever it did first: a command
 that prints nothing for longer than the budget was otherwise nudged, killed and rerun forever.
+Only in the session that was nudged (`runner.renudged`: status `nudged_round` the last round and a
+session carried on): a round that starts fresh gets a nudge of its own, where it was stopped at its
+first long think (#681). A nudge round is marked `rounds/<n>/nudged` (`runner.NUDGED`), which
+`round_asks` skips (Claude's notes sent beside the nudge kept through `notes.md`): the nudge went
+to every later fresh session in the step as "What you were asked to do", put down to Claude (#681).
 
 A note still pending when the runner exits (sent as the round stopped, or before a stuck stop)
 is never delivered by it: the stuck report lists Claude's ("NOTE: not delivered…"), and the next
@@ -5674,6 +5679,7 @@ $WB_HOME (~/.local/state/workbench)
     tree/<parents>/worktree/     the worktree instead, with a sibling more than one level up (task.json `worktree`), the links around it (#261)
     rounds/<n>/                  prompt.md  instructions.md (before a handover rewrote it)  summary.md  tests.txt
                                  notes.md (Claude's notes folded into prompt.md after its opening: runner.folded_notes, #677)
+                                 nudged (empty: prompt.md is the runner's think nudge, which round_asks skips, #681)
     ask/<id>.json  <id>.answer   questions and permission requests; their answers (all the lane writes here, with worktree/)
     worktree/                    the agent's git worktree, branch delegate/<task>
 ~/.local/share/workbench/skills/ ($WB_SKILLS) the skill library, its own git repo; retired/
