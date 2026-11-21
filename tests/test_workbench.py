@@ -14842,6 +14842,30 @@ class Update(Base):
         self.assertTrue((self.copy / "more.txt").exists())
         self.assertEqual(store.read_json(store.home() / "update.json")["behind"], 0)
 
+    def test_a_clone_ahead_of_its_upstream_or_tracking_another_remote_still_updates(self):
+        # #875 (Claude's audit of 1.90.24): a clone with a local patch and nothing to pull died
+        # "has commits its upstream hasn't", skipping the plugin steps; and the fetch was always
+        # `origin`'s, so a clone tracking upstream/main read a stale ref, and with no origin
+        # couldn't check at all
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "elsewhere")   # a clone
+        git = lambda d, *a: subprocess.run(["git", "-C", str(d), *a], check=True,  # noqa
+                                           capture_output=True)
+        git(self.copy, "remote", "rename", "origin", "upstream")                 # no origin now
+        self.assertIn("update available: 1 new commit(s)", self.update("--check"))
+        (self.origin / "more.txt").write_text("y")
+        git(self.origin, "add", "more.txt"); git(self.origin, "commit", "-qm", "more")
+        self.assertIn("update available: 2 new commit(s)", self.update("--check"))
+        self.assertIn("updated clone", self.update())
+        self.assertTrue((self.copy / "more.txt").exists())
+        self.calls.unlink()
+        (self.copy / "mine.txt").write_text("x")
+        git(self.copy, "add", "mine.txt"); git(self.copy, "commit", "-qm", "a local patch")
+        out = self.update()
+        self.assertIn("already up to date", out)
+        self.assertNotIn("a fast-forward pull can't", out)
+        self.assertEqual(self.calls.read_text().splitlines(),                   # the plugin refreshed
+                         ["plugin marketplace update workbench", "plugin update workbench@workbench"])
+
     def test_a_clone_pulls_unless_it_has_changes_or_tasks_are_running(self):
         os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "elsewhere")   # not Claude Code's clone
         (self.copy / "README.md").write_text("mine")

@@ -4564,17 +4564,25 @@ def _fetch_origin() -> None:
     """The update check's fetch: never prompts and never hangs. The user's own ssh command
     (GIT_SSH_COMMAND, GIT_SSH, core.sshCommand) is kept, as replacing it picked the wrong key for
     good; with none, ssh runs in BatchMode. No terminal, so nothing can ask, and a time limit
-    inside the mod's (the 2026-11-16 audit)."""
+    inside the mod's (the 2026-11-16 audit). From the remote the branch's upstream is on
+    (`branch.<name>.remote`), origin only when there is none: a fork's clone tracking
+    `upstream/main` read "already up to date" against a stale ref, and a clone with no origin
+    couldn't check at all (#875, Claude's audit of 1.90.24)."""
+    branch = gitops.git(PKG_ROOT, "symbolic-ref", "-q", "--short", "HEAD", check=False).strip()
+    remote = branch and gitops.git(PKG_ROOT, "config", f"branch.{branch}.remote",
+                                   check=False).strip() or "origin"
+    if remote == ".":  # its upstream is a local branch: nothing to fetch
+        return
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "SSH_ASKPASS_REQUIRE": "never"}
     if not (env.get("GIT_SSH_COMMAND") or env.get("GIT_SSH")
             or gitops.git(PKG_ROOT, "config", "core.sshCommand", check=False).strip()):
         env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15"
     try:
-        r = subprocess.run(["git", "-C", str(PKG_ROOT), "fetch", "-q", "origin"], env=env,
+        r = subprocess.run(["git", "-C", str(PKG_ROOT), "fetch", "-q", "--", remote], env=env,
                            capture_output=True, stdin=subprocess.DEVNULL, start_new_session=True,
                            timeout=FETCH_SECS)
     except subprocess.TimeoutExpired:
-        raise gitops.GitError(f"origin didn't answer in {FETCH_SECS}s") from None
+        raise gitops.GitError(f"{remote} didn't answer in {FETCH_SECS}s") from None
     if r.returncode:
         raise gitops.GitError(r.stderr.decode("utf-8", "replace").strip() or "git fetch failed")
 
@@ -4629,8 +4637,11 @@ def cmd_update(a):
             behind = int(gitops.git(PKG_ROOT, "rev-list", "--count", "HEAD..@{u}"))
         except (gitops.GitError, ValueError) as e:
             die(f"couldn't check for an update: {e}")
-        if subprocess.run(["git", "-C", str(PKG_ROOT), "merge-base", "--is-ancestor", "HEAD", "@{u}"],
-                          capture_output=True, stdin=subprocess.DEVNULL).returncode:
+        # only a clone behind and diverged: one only ahead (a local patch) has nothing to pull,
+        # and died here, skipping the plugin steps too (#875)
+        if behind and subprocess.run(["git", "-C", str(PKG_ROOT), "merge-base", "--is-ancestor",
+                                      "HEAD", "@{u}"], capture_output=True,
+                                     stdin=subprocess.DEVNULL).returncode:
             die(f"{PKG_ROOT} has commits its upstream hasn't: a fast-forward pull can't update it "
                 "(push or rebase them, then wb update)")
         if behind:  # nothing to pull: no task needs stopping, the plugin steps still run
