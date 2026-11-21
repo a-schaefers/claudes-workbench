@@ -2016,11 +2016,24 @@ What else the layer sets is said there again
 too, so a project config can't change it either (#519, checked on OpenCode 2.3.2: the project's
 document won each): `RESTATED` (`small_model`, `autoupdate`, `compaction`: a project's
 `compaction.auto: false` left a session past the handover point with no backstop, its
-`small_model` got the titles, its `autoupdate` moved OpenCode past `OPENCODE_TESTED`), and the
+`small_model` got the titles, its `autoupdate` moved OpenCode past `OPENCODE_TESTED`; and
+`tool_output`, the probe experiment's output cap below, which a project's own `tool_output`
+lifted, checked by RealOpenCode), and the
 task model's `limit` and `options.max_tokens` from wb's own reading of the entry (`model_pins`:
 a `provider` overlay, merged over the user's providers and the layer's timeouts, never a `baseURL` or key; a
 wider window there moved OpenCode's compaction off the one wb planned the handover against).
-The layer's `small_model` is the task's model, which is how `rules_env` finds it. A project
+The layer's `small_model` is the task's model, which is how `rules_env` finds it.
+With the probe experiment on, at any level (*Experiments*), the layer also sets `tool_output`
+(`runner.output_cap`): `max_bytes` about a tenth (`OUTPUT_CAP_SHARE`) of the model's usable input
+(`usable_input`) at `context.CHARS_PER_TOKEN` bytes a token, never under `OUTPUT_CAP_MIN` 8,000
+nor over `OUTPUT_CAP_MAX` 51,200 (OpenCode 2.3's own default, about 13–14K tokens: a third of a 40K
+window from one call), and `max_lines` a line per `OUTPUT_CAP_LINE` 40 bytes; 16,384 bytes and 409
+lines at 40K (the owner's design, 2026-11-21, #857). Measured on OpenCode 2.3.2 with
+`tests/capture_llm.py` (RealOpenCode, from the layer and from `OPENCODE_CONFIG_CONTENT` alike): it
+bounds the shell's output, keeping the last lines with `[showing lines A-B of N; full output saved
+to <OpenCode's data dir>/opencode/shell/…/sh_….out]`; it does **not** bound the built-in `read`,
+which keeps its own 2,000 lines or 50 KB and ends `[Output truncated. Continue reading with offset:
+N]`, so the probe note says how to read on instead. Off, the layer has no `tool_output`. A project
 config can still change what the layer doesn't set: another provider's entries, the task model's
 other options (`temperature`) and its provider's `baseURL`. The layer's `edit` rule also denies
 `OPENCODE_FILES` (`*opencode.json`, `*opencode.jsonc`, `.opencode/*`, `*/.opencode/*`), and the
@@ -5516,7 +5529,12 @@ reads as adaptable, `context.setting`), the same in the pane's row:
 | **adaptable** | moderate, until this machine's results move it to aggressive (the `probe_aggressive` knob, *Self-tuning*) |
 | **aggressive** | the order, `PROBE_AGGRESSIVE_PROTOCOL`: "Never read a file over 1500 lines whole: `probe extract <file>#<name>` the function you need (`probe symbols <file>` first when you don't know its name)." |
 
-The handbook note, the shell rules and `PROBE_MAX_TOKENS` are the same at every level.
+The handbook note, the shell rules and `PROBE_MAX_TOKENS` are the same at every level, and so is
+what every level adds besides: **a read cap**, OpenCode's `tool_output` in the config layer sized
+to a tenth of the window and restated so a project can't lift it (`runner.output_cap`, *What the
+agent knows*: it bounds the shell's output, not the built-in `read`, which keeps 2,000 lines or
+50 KB; so the note's last sentence, "A read of a long file returns only its first 2,000 lines (or
+50 KB): read further with `offset` and `limit`, or `probe extract` the function").
 `context.experiment(task, "probe")` is true at any level. task.json `experiments.probe` records the
 level the task's agent got, `moderate` or `aggressive` (`context.probe_level`; `true` on a task from
 before the levels reads as moderate, whose condition it had), `probe_setting` the setting it came
@@ -5590,8 +5608,10 @@ So, on this model and window, no wording made probe better than not having it. T
 keeps the condition (what an opted-in user gets does no harm), stays opt-in and off by default,
 and gets no "recommended" note. What filled the window in every arm was OpenCode's own reads
 (one `read` returns up to 2,000 lines or 50 KB, 14K tokens for models.py), which a per-call output
-cap (`tool_output`) sized to the window would bound for every task, probe or not; a `probe` shim
-and the outline in round 1's prompt are the other levers left untried. `wb bench report --label <arm>` prints the use line per arm (`bench.use_lines`).
+cap (`tool_output`) sized to the window was expected to bound; measured since (OpenCode 2.3.2,
+2026-11-21), `tool_output` bounds the shell's output but not `read`, so the levels' cap (*Levels*)
+bounds probe's, `cat`'s and the tests' output, and the note tells the agent how to page a long
+read. A `probe` shim is the lever left untried. `wb bench report --label <arm>` prints the use line per arm (`bench.use_lines`).
 
 ## Verifying a fix against the base
 
@@ -7438,7 +7458,8 @@ main (*Shipping to main*).
 - `tests/test_workbench.py`: end to end, one class per feature (Lifecycle, Context, Steering,
   WorktreeSetup, Watch, AskServer, ConfigLayer, AgentContext, SkillLibrary, RealOpenCode, GitGuard, Lane,
   Permission, Images, Audio, Discovery, Routing, Tuning, Notes, Setup, Update, Projects, ModelSet,
-  WebChat, ChatUploads, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, RealOpenCodeRun, Drift).
+  WebChat, ChatUploads, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, RealOpenCodeRun, Drift,
+  ProbeExperiment, ProbeLevels).
 - `tests/test_gpu.py`: sharing the GPU (side by side, taking turns, unknown VRAM, an exclusive
   holder, `wb start` refused or `--queue`d behind a holder, `wb image` refused or `--wait`ing,
   `wb audio` refused while a CPU engine runs beside a task, stale holders, a share Ollama couldn't keep), `can_share` (with `OLLAMA_MAX_LOADED_MODELS`) and
@@ -7534,7 +7555,8 @@ read (default 1), so a test can fill the window without sending it; a request ca
 compaction template (`<template>`, `## Objective`) gets the template's headings back, which
 OpenCode accepts as a summary (anything else fails the compaction: `compaction.failed`).
 `RealOpenCode` and `RealOpenCodeSkillFiles` cover the MCP shape, skills, denials, compound shell
-commands, rule order, git by path, the edit rule, PATH and the lane; `RealOpenCodeRun` the
+commands, rule order, git by path, the edit rule, PATH, the lane and `tool_output` (it cuts the
+shell's output, not `read`'s, and a project's config can't lift it); `RealOpenCodeRun` the
 events, the export, `--session`, compaction and the header wait (CLAUDE.md's *OpenCode quirks*
 points here).
 With `CAPTURE_HEADER_DELAY=<seconds>` every POST waits that long before its headers: RealOpenCodeRun

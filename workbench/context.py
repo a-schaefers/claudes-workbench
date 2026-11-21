@@ -358,7 +358,9 @@ PROBE_FILE_LINES = 1500
 # what an experiment adds to the agent's copy of the handbook, after its own text. probe aborts
 # (SIGABRT, a core dump, a desktop crash dialog) when a pipe closes early: Rust's println! panics
 # on EPIPE. Agents piped it into `head` (the A/B of 2026-11-21), so the note steers them to its
-# own limits and to `grep`, which reads to the end (#857)
+# own limits and to `grep`, which reads to the end (#857). OpenCode's `read` returns at most 2,000
+# lines or 50 KB, which the layer's `tool_output` cap doesn't bound (runner.output_cap, measured
+# on 2.3.2, 2026-11-21): the note says how to read on, since the agent paged through a long file
 EXPERIMENT_NOTES = {
     "probe": "\n## Reading code: probe\nWhen you need one function from a file over "
              "{probe_lines} lines, read just that function, not the whole file. You know its name: "
@@ -371,7 +373,9 @@ EXPERIMENT_NOTES = {
              "searches that miss, use `grep -n`. Stop exploring once you know the function you will "
              "change and what calls it. Never pipe probe into `head` (it crashes when its output is "
              "cut off): filter with `grep`. When probe says \"File too large\" (over 1 MB), use "
-             "`grep -n` for the names and read those lines.\n",
+             "`grep -n` for the names and read those lines. A read of a long file returns only its "
+             "first 2,000 lines (or 50 KB): read further with `offset` and `limit`, or `probe "
+             "extract` the function.\n",
 }
 # what an experiment adds to every round prompt's protocol, beside the acceptance line: the
 # handbook alone went unread (probe: 0 calls in 14 replays, 2026-11-21). A condition, not an

@@ -7392,6 +7392,36 @@ class RealOpenCode(Base):
         _, off = self.run_calls("t-probe-off", shell("t-probe-off"))
         self.assertIn("permission.rejected", off[0])
 
+    def test_probes_output_cap_bounds_the_shell_but_not_the_read_tool_and_no_project_lifts_it(self):
+        # the owner's design (2026-11-21, #857): tool_output sized to the window, in the layer
+        # and in OPENCODE_CONFIG_CONTENT (RESTATED). Measured on OpenCode 2.3.2: it cuts the
+        # shell's output to its last lines; `read` keeps its own 2,000 lines or 50 KB
+        fake_probe(Path(self.tmp.name))
+        run_wb("experiment", "probe", "moderate")
+        lines = 1000  # 42 KB for the shell, under a 32K window whole; 3000 for `read`, past its own limit
+        def before(task):
+            for f, n in (("big.txt", 3000), ("mid.txt", lines)):
+                (task.worktree / f).write_text("".join(f"line {i:05d} {'x' * 30}\n" for i in range(n)))
+            # a project's own config, loaded after the layer: it must not lift the cap
+            (task.worktree / "opencode.json").write_text(json.dumps(
+                {"tool_output": {"max_bytes": 1_000_000, "max_lines": 100_000}}))
+        name = "t-cap"
+        wt = lambda: str(store.Task(name).worktree)  # noqa: E731
+        task, answers = self.run_calls(name, [
+            {"name": "read", "arguments": {"path": f"{wt()}/big.txt"}},
+            {"name": "shell", "arguments": {"command": "cat mid.txt", "workdir": wt()}}], before=before)
+        cap = json.loads((context.rules_dir(task) / "opencode.json").read_text())["tool_output"]
+        shell = json.loads(answers[1])
+        shell = shell if isinstance(shell, str) else json.dumps(shell)
+        self.assertLess(len(shell.encode()), cap["max_bytes"] + 1000)     # cut, with its notice
+        self.assertIn(f"of {lines}; full output saved to ", shell)
+        self.assertIn(f"line {lines - 1:05d}", shell)                     # the last lines kept
+        read = json.loads(answers[0])
+        read = read if isinstance(read, str) else json.dumps(read)
+        self.assertGreater(len(read.encode()), 2 * cap["max_bytes"])       # read: not bounded by it
+        self.assertIn("[Output truncated. Continue reading with offset: ", read)
+        self.assertIn("2,000 lines (or 50 KB)", context.EXPERIMENT_NOTES["probe"])
+
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     @home_outside_the_lane
     def test_writes_and_file_tools_stay_in_the_lane_until_claude_widens_it(self):
@@ -22096,6 +22126,33 @@ class ProbeLevels(Base):
         self.assertEqual(task.status["tuned"]["probe_aggressive"], 1)
         self.assertIn("probe_aggressive", task.status["explored"])
         self.assertIn("probe (adaptable → aggressive, a try)", run_wb("status", name))
+
+    def test_any_level_caps_one_tool_output_to_a_tenth_of_the_window_where_no_project_can_lift_it(self):
+        from workbench import models, runner
+        run_wb("experiment", "probe", "aggressive")
+        self.start("t-capped", "ok")
+        wait_phase("t-capped", {"review"})
+        task = store.Task("t-capped")
+        cfg = models.resolve(task.spec["model"]).config
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        want = runner.output_cap(cfg)
+        self.assertEqual(layer["tool_output"], want)
+        self.assertIn("tool_output", runner.RESTATED)
+        pinned = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(pinned["tool_output"], want)                      # said again, last
+        # about a tenth of the usable input at ~4 bytes a token, floor 8000, ceiling OpenCode's own
+        self.assertEqual(runner.output_cap({"limit": {"context": 40960}}),
+                         {"max_bytes": 16384, "max_lines": 409})
+        self.assertEqual(runner.output_cap({"limit": {"context": 8192}})["max_bytes"], 8000)
+        self.assertEqual(runner.output_cap({"limit": {"context": 262144}})["max_bytes"], 51_200)
+        self.assertEqual(runner.output_cap({"limit": {"context": 131072, "input": 20000}})["max_bytes"], 8000)
+        self.assertEqual(runner.output_cap({})["max_bytes"], 51_200)
+        run_wb("experiment", "probe", "off")                              # off: no cap at all
+        self.start("t-uncapped", "ok")
+        wait_phase("t-uncapped", {"review"})
+        off = json.loads(runner.write_config_layer(store.Task("t-uncapped")).read_text())
+        self.assertNotIn("tool_output", off)
+        self.assertNotIn("tool_output", json.loads(runner.rules_env(off)["OPENCODE_CONFIG_CONTENT"]))
 
     def test_aggressive_becomes_adaptables_pick_after_five_better_long_file_tasks_and_not_four(self):
         from workbench import tuning

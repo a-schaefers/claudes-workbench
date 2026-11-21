@@ -263,9 +263,10 @@ def write_config_layer(task: store.Task) -> Path:
     path = context.rules_dir(task) / "opencode.json"
     wait_ms = int(task.spec.get("ask_timeout", 1200) + 60) * 1000
     try:
-        buffer = compaction_buffer(models.resolve(task.spec["model"]).config)
+        cfg = models.resolve(task.spec["model"]).config
     except KeyError:
-        buffer = None
+        cfg = {}
+    buffer = compaction_buffer(cfg)
     store.write_json(path, {
         "$schema": "https://opencode.ai/config.json",
         **models._merge(models.agent_providers(), provider_timeouts(task)),
@@ -281,6 +282,8 @@ def write_config_layer(task: store.Task) -> Path:
         # queued ahead of the agent's next step on a one-slot server and evicting its cache,
         # then thrown away at the handover (#661)
         "compaction": {"background": False, **({"auto": True, "buffer": buffer} if buffer else {})},
+        # with probe on, at any level, one tool call's output sized to the window (output_cap)
+        **({"tool_output": output_cap(cfg)} if context.experiment(task, "probe") else {}),
         "mcp": {"servers": {**users_servers_off(), "workbench": {  # 2.x shape: mcp.servers.<name>
             "type": "local",
             "command": [sys.executable, str(PKG_ROOT / "bin" / "wb-ask-mcp")],
@@ -292,6 +295,29 @@ def write_config_layer(task: store.Task) -> Path:
     })
     os.chmod(path, 0o600)  # a provider copied in may carry its apiKey
     return path
+
+
+# One tool call's output, at most, with probe on (the config layer's `tool_output`): about a tenth
+# of the usable input. OpenCode's default, 51,200 bytes, is about 13-14K tokens, a third of a 40K
+# window from one result; the outlines, extracts and greps that stayed in context filled the
+# window in the A/B (2026-11-21, #857). Measured on OpenCode 2.3.2 (RealOpenCode): it bounds the
+# shell's output (the last lines kept, "[showing lines A-B of N; full output saved to <file>]"),
+# not the built-in `read`, which keeps its own 2,000 lines or 50 KB ("[Output truncated. Continue
+# reading with offset: N]"): the probe note says so instead.
+OUTPUT_CAP_SHARE = 0.1
+OUTPUT_CAP_MIN = 8000     # bytes: under it a test failure's traceback is cut
+OUTPUT_CAP_MAX = 51_200   # bytes: OpenCode 2.3's own default, never raised
+OUTPUT_CAP_LINE = 40      # bytes a line, for max_lines
+
+
+def output_cap(cfg: dict) -> dict:
+    """`tool_output` for a model entry: max_bytes about OUTPUT_CAP_SHARE of its usable input
+    (usable_input, at context.CHARS_PER_TOKEN bytes a token), within OUTPUT_CAP_MIN and
+    OUTPUT_CAP_MAX; max_lines at OUTPUT_CAP_LINE bytes a line."""
+    usable = usable_input(cfg.get("limit") or {})
+    cap = int(usable * OUTPUT_CAP_SHARE * context.CHARS_PER_TOKEN) if usable else OUTPUT_CAP_MAX
+    cap = max(OUTPUT_CAP_MIN, min(OUTPUT_CAP_MAX, cap))
+    return {"max_bytes": cap, "max_lines": cap // OUTPUT_CAP_LINE}
 
 
 def users_servers_off() -> dict:
@@ -321,8 +347,9 @@ CONFIG_CONTENT_MAX = 120_000
 # the compaction backstop past the handover point, the model for titles and summaries, OpenCode
 # updating itself (#353). A project config set compaction `auto: false` (a session past the
 # handover point then overflowed), sent titles to its cloud small_model, and turned updates on
-# past OPENCODE_TESTED (#519).
-RESTATED = ("small_model", "autoupdate", "compaction")
+# past OPENCODE_TESTED (#519). And probe's output cap (output_cap, #857), which a project's
+# `tool_output` would lift.
+RESTATED = ("small_model", "autoupdate", "compaction", "tool_output")
 
 
 def model_pins(model_id) -> dict:
