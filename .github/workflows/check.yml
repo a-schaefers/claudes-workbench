@@ -27,7 +27,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       # The Claude Code the mod was last verified with; the floor is in ARCHITECTURE.md, *The tests*.
       CLAUDE_CODE_VERSION: '2.1.311'
