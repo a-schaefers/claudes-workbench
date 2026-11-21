@@ -17,7 +17,9 @@ when the prefix is taken.
 """
 from __future__ import annotations
 
+import collections
 import hashlib
+import math
 import re
 from pathlib import Path
 
@@ -168,28 +170,66 @@ def repos(ids: list[str]) -> set:
 
 
 def _similar(a: set, b: set) -> bool:
-    return len(a & b) >= 3 and len(a & b) / len(a | b) >= SIMILAR
+    shared = len(a & b)  # Jaccard without building the union: |a | b| = |a| + |b| - shared
+    return shared >= 3 and shared >= SIMILAR * (len(a) + len(b) - shared)
 
 
-def survey() -> list[dict]:
+def _prefix(n: int) -> int:
+    """How many of a lesson's n words, in one fixed order (rarest first), any lesson similar to it
+    must share one of: two similar lessons share at least 3 words and SIMILAR of their union,
+    which is at least SIMILAR * n, so both hold one of each one's first n - that + 1."""
+    return max(0, n - max(3, math.ceil(SIMILAR * n)) + 1)
+
+
+def _pairs(bags: dict[str, set], only: set | None) -> dict[str, set]:
+    """Each lesson's similar ones, by prefix filtering (exact for `_similar`): only lessons that
+    share a word of their prefixes are compared. For every lesson, each pair is compared once, as
+    the index fills; for ``only``, those against the whole index."""
+    df = collections.Counter(w for bag in bags.values() for w in bag)
+    prefix = {j: sorted(bag, key=lambda w: (df[w], w))[:_prefix(len(bag))] for j, bag in bags.items()}
+    out: dict[str, set] = {j: set() for j in bags}
+    index: dict[str, list[str]] = {}
+    if only is not None:
+        for j, words in prefix.items():
+            for w in words:
+                index.setdefault(w, []).append(j)
+    for i, words in prefix.items():
+        if only is not None and i not in only:
+            continue
+        for j in {k for w in words for k in index.get(w, ())}:
+            if j != i and _similar(bags[i], bags[j]):
+                out[i].add(j)
+                out[j].add(i)
+        if only is None:
+            for w in words:
+                index.setdefault(w, []).append(i)
+    return out
+
+
+def survey(only: set | None = None) -> list[dict]:
     """The open lessons, each with `again` (other tasks with the same lesson; a closed one there
     means it came back after it was handled), and `skill` (the library skill it seems to belong
-    to); the ones that recur first."""
+    to); the ones that recur first. ``only``: just those ids (nudge's new ones).
+
+    Lessons are compared only where `_pairs`' prefixes meet, and the skills' descriptions are read
+    into words once: every open lesson against all of lessons.jsonl, never pruned, made each
+    accept, feedback and discard wait seconds past a thousand tasks (5 s at 3,000 lessons, #556)."""
     lessons, closed = _all()
     have = skills.available()
     bags = {i: skills.words(x["text"]) for i, x in lessons.items() if x["kind"] != "skill"}
+    near = _pairs(bags, only)
+    described = [(n, skills.words(f"{n} {v['description']}")) for n, v in have.items()]
     out = []
     for i, x in lessons.items():
-        if i in closed:
+        if i in closed or only is not None and i not in only:
             continue
-        again = sorted({(o["task"], closed.get(j, {}).get("how", "")) for j, o in lessons.items()
-                        if j in bags and i in bags and o["task"] != x["task"] and _similar(bags[i], bags[j])})
+        again = {(lessons[j]["task"], closed.get(j, {}).get("how", "")) for j in near.get(i, ())
+                 if lessons[j]["task"] != x["task"]}
         skill = next((s for s in x.get("skills") or [] if s in have), None)
         if not skill and i in bags:
-            best = max(((len(bags[i] & skills.words(f"{n} {v['description']}")), n) for n, v in have.items()),
-                       default=(0, None))
+            best = max(((len(bags[i] & bag), n) for n, bag in described), default=(0, None))
             skill = best[1] if best[0] >= 3 else None
-        out.append({**x, "again": again, "skill": skill})
+        out.append({**x, "again": sorted(again), "skill": skill})
     return sorted(out, key=lambda x: (-len(x["again"]), x["skill"] is None, -x.get("ts", 0)))
 
 
@@ -209,7 +249,7 @@ def nudge(task: store.Task, outcome: str | None = None) -> str:
     if not new:
         return ""
     ids = {x["id"] for x in new}
-    open_ = [x for x in survey() if x["id"] in ids]
+    open_ = survey(only=ids)  # the new ones only, not a survey of every open lesson (#556)
     again = sum(bool(x["again"]) for x in open_)
     return (f"lessons: {len(open_)} from this task" + (f", {again} seen in other tasks too" if again else "")
             + " (wb lessons: write or patch a skill now, while it's fresh)") if open_ else ""

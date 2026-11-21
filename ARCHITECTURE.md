@@ -3315,8 +3315,14 @@ round, text), `lessons.ID_LEN` (6) characters, two more at a time while it is ta
 collided past a few thousand lessons, and the new lesson was never written: the 2026-11-16 audit). A close row is `{close: id, ts, how: "skill:<name>" |
 "dropped", why}`. `survey` finds recurrence: a lesson recurs when one in another task (open or
 closed, kind `skill` excepted) shares 3+ words with Jaccard ≥ 0.35; a closed match means it came
-back after it was handled. Each lesson is attributed to the first loaded skill still in the
-library, else the library skill whose name and description share the most words (3+). `wb lessons`
+back after it was handled. Only lessons whose prefixes meet are compared (`lessons._pairs`,
+prefix filtering, exact for that rule: each lesson's words rarest first, its first n − max(3,
+⌈0.35 n⌉) + 1, `_prefix`; each pair once), the skills' descriptions are read into words once a
+survey, and `nudge` (the line feedback, next, resume, accept and discard end with) surveys only
+the task's new lessons (`survey(only=)`): every open lesson against all of lessons.jsonl, never
+pruned, was 5 s at 3,000 lessons and 30 s at 5,000, on each of those commands (#556). Each
+lesson is attributed to the first loaded skill still in the library, else the library skill
+whose name and description share the most words (3+). `wb lessons`
 lists the open ones, recurring first, at most 12 (`--all`, `--task`); `wb lessons close <id> -m
 why` closes one (a one-task detail, an environment problem, a dead end); `wb skill add|patch
 --lesson <id>` closes it as written into a skill. The weekly check counts what's waiting.

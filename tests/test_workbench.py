@@ -13507,6 +13507,32 @@ class SkillLearning(Base):
         self.assertIn("closed:", run_wb("lessons", "close", ids[0], "-m", "a one-task detail"))
         self.assertNotIn(ids[0], [x["id"] for x in lessons.survey()])
 
+    def test_surveying_five_thousand_lessons_takes_seconds_not_half_a_minute_and_still_finds_a_repeat(self):
+        # #556: every open lesson was compared with every lesson in lessons.jsonl, never pruned:
+        # 5 s at 3,000, so each accept, feedback and discard waited seconds past 1,000 tasks
+        import random
+        from workbench import lessons
+        rnd = random.Random(556)
+        # words as text has them: a few common ones, a long tail of rare ones (Zipf's 1/rank)
+        vocab = [f"w{chr(97 + i % 26)}{chr(97 + i // 26 % 26)}{chr(97 + i // 676)}x" for i in range(4000)]
+        weights = [1 / (r + 1) for r in range(len(vocab))]
+        rows = [{"ts": n, "id": f"{n:08x}", "task": f"t{n // 3}", "kind": "feedback", "round": 2,
+                 "text": " ".join(rnd.choices(vocab, weights, k=25))} for n in range(5000)]
+        same = "the answer file needs a trailing newline or grep misses the last line"
+        rows += [{"ts": 9e9, "id": "aaaa0001", "task": "t-x", "kind": "feedback", "round": 2, "text": same},
+                 {"ts": 9e9, "id": "aaaa0002", "task": "t-y", "kind": "feedback", "round": 2, "text": same}]
+        lessons.path().write_text("".join(json.dumps(r) + "\n" for r in rows))
+        began = time.monotonic()
+        got = lessons.survey()
+        self.assertLess(time.monotonic() - began, 8)                  # 1.6 s here; 30 s before
+        self.assertEqual(len(got), 5002)
+        by = {x["id"]: x for x in got}
+        self.assertEqual((by["aaaa0001"]["again"], by["aaaa0002"]["again"]), ([("t-y", "")], [("t-x", "")]))
+        began = time.monotonic()
+        (one,) = lessons.survey(only={"aaaa0001"})                    # nudge's: the new ones alone
+        self.assertLess(time.monotonic() - began, 1)
+        self.assertEqual(one["again"], [("t-y", "")])
+
     def test_lessons_whose_short_ids_collide_are_both_kept_and_closed_apart(self):
         # the 2026-11-16 audit: ids were 6 hex characters; a new lesson whose id was taken was
         # never written, and closing the id closed whichever came first
