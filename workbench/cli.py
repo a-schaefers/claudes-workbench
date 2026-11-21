@@ -1681,6 +1681,11 @@ def _lane_dir(raw: str, guard: set[str] = frozenset()) -> str:
             "git runs there, and a hook planted in it would run outside the lane); take what the "
             "task needs there yourself")
     path = Path(real)
+    # a file not made yet (debug.keystore, a lockfile) is no directory: made as one, it broke the
+    # next round's keytool or Gradle with 'Is a directory' and stayed (#670)
+    if not path.exists() and path.suffix:
+        die(f"{raw} doesn't exist and its name looks like a file's: allow the directory it goes "
+            f"in ({path.parent}), or make {raw} first if it is a directory")
     if not path.exists():
         path.mkdir(parents=True)
     return str(path)

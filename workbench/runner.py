@@ -1207,6 +1207,22 @@ def clip_tail(output: str, lines: int, width: int = 300, total: int = 4000) -> s
 # (`https://h/x`), nor one inside a word.
 REFUSAL = re.compile(r"permission denied|operation not permitted", re.I)
 ABS_PATH = re.compile(r"(?<![\w:/.~-])/[\w.+@~-]+(?:/[\w.+@~-]+)*")
+# and where a path may hold spaces (/mnt/c/Users/John Smith, ~/Library/Application Support):
+# quoted, or running up to the refusal itself. ABS_PATH stopped at the first space, and the
+# suggested grant walked up from `/mnt/c/Users/John` to the whole Users folder (#670). Not across
+# " /", where a second path begins.
+QUOTED_PATH = re.compile(r"[\"'`\u2018](/[^\"'`\u2019\n]+)[\"'`\u2019]")
+MARKED_PATH = re.compile(r"(?<![\w:/.~-])(/(?:[^\n:'\"`\s]|\s(?!/))*?)(?::\s*|\s+\()"
+                         r"(?:permission denied|operation not permitted)", re.I)
+
+
+def refused_paths(line: str) -> list[str]:
+    """The absolute paths on one line, in order: quoted ones and one that runs up to the refusal
+    whole (spaces too), then ABS_PATH's that aren't part of those."""
+    spans = [(m.start(1), m.end(1)) for r in (QUOTED_PATH, MARKED_PATH) for m in r.finditer(line)]
+    spans += [(m.start(), m.end()) for m in ABS_PATH.finditer(line)
+              if not any(a <= m.start() and m.end() <= b for a, b in spans)]
+    return [line[a:b].rstrip(". ") for a, b in sorted(set(spans))]
 
 
 def lane_refused(task: store.Task, output: str) -> list[str]:
@@ -1223,8 +1239,7 @@ def lane_refused(task: store.Task, output: str) -> list[str]:
     for line in output[-200_000:].splitlines():
         if not REFUSAL.search(line):
             continue
-        for m in ABS_PATH.finditer(line):
-            path = m.group(0).rstrip(".")
+        for path in refused_paths(line):
             grant = lane_grant(path)
             if path not in found and grant and not any(
                     path == w or path.startswith(str(w).rstrip("/") + "/") for w in lane) \
@@ -1835,7 +1850,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
             lines.append("```\n" + "\n".join(tests["tail"].splitlines()[-25:]) + "\n```")
         for node in tests.get("lane") or ():
             grant = lane_grant(node) or node
-            lines.append(f"the lane refused {node}: wb allow {task.name} --path {grant} if the "
+            lines.append(f"the lane refused {shlex.quote(node)}: wb allow {task.name} --path "
+                         f"{shlex.quote(grant)} if the "
                          "tests need it (not the agent's bug)")
         if tests.get("proxy"):  # #380
             lines.append(f"{proxy_line(tests['proxy'])}, if the tests need the network (not the "
@@ -2091,8 +2107,11 @@ def not_the_code(task: store.Task, tests) -> str:
                 "the change; run it in the worktree yourself, or narrow it (wb next --test); "
                 "start a slow suite's task with a larger --test-timeout")
     if nodes := tests.get("lane"):
-        return (f"the lane refused {', '.join(nodes)}: "
-                + "; ".join(f"wb allow {task.name} --path {n}" for n in nodes)
+        # the grant that reaches each, as the report names it: the path itself, when it was a
+        # file not made yet, sent Claude's `wb allow --path` to make a directory of that name (#670)
+        grants = list(dict.fromkeys(lane_grant(n) or n for n in nodes))
+        return (f"the lane refused {', '.join(map(shlex.quote, nodes))}: "
+                + "; ".join(f"wb allow {task.name} --path {shlex.quote(g)}" for g in grants)
                 + ", then wb feedback, if the tests need it")
     return ""
 

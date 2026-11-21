@@ -6756,6 +6756,29 @@ class Lane(Base):
                       f"{outside} if the tests need it", report)
         self.assertNotIn("example.org", "".join(st["tests"]["lane"]))   # a URL's path isn't one
 
+    def test_a_refused_file_not_made_yet_is_named_by_the_directory_a_grant_makes(self):
+        # #670 (the 2026-11-21 audit): the auto-fix line said `--path <the keystore>`, which made
+        # a directory of that name, and a path with a space was cut at it, granting its parent's
+        task = self.bare_task("t-670", self.repo)
+        outside = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-670-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        (outside / "John Smith" / "AppData").mkdir(parents=True)
+        spaced = outside / "John Smith" / "AppData" / "x.keystore"
+        keystore = outside / "keys" / "debug.keystore"
+        out = (f"java.io.FileNotFoundException: {keystore} (Permission denied)\n"
+               f"java.io.FileNotFoundException: {spaced} (Permission denied)\n"
+               f"PermissionError: [Errno 13] Permission denied: '{spaced}'\n")
+        self.assertEqual(runner.lane_refused(task, out), [str(keystore), str(spaced)])
+        line = runner.not_the_code(task, {"ok": False, "exit": 1, "lane": [str(keystore),
+                                                                           str(spaced)]})
+        self.assertIn(f"wb allow t-670 --path {outside}; wb allow t-670 --path "
+                      f"{shlex.quote(str(spaced.parent))}, then", line)
+        self.assertIn(shlex.quote(str(spaced)), line)
+        with self.assertRaises(SystemExit):
+            cli._lane_dir(str(keystore))
+        self.assertFalse(keystore.exists())
+        self.assertEqual(cli._lane_dir(str(keystore.parent)), str(keystore.parent))  # its dir
+
     @unittest.skipUnless((lane.abi() or 0) >= 9, "needs Landlock ABI 9")
     @home_outside_the_lane
     def test_a_socket_outside_the_lane_is_named_with_its_grant_and_docker_desktops_can_be_granted(self):
