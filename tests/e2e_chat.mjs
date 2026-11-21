@@ -602,6 +602,50 @@ async function run(engine, device) {
       if (rows.length !== 1 || new Set(rows.map(m => m.cid)).size !== 1) throw new Error(`landed ${rows.length} times`)
     } finally { await qc.close() }
   })
+  await check('a send whose reply body stalls after the headers is given up and sent again, and a later message still goes', async () => {
+    // #935 (the review of 1.90.24): post() cleared its timer at the headers, so a body that never
+    // came held flush, and every later send, until the page was reloaded. A proxy that answers
+    // the first send's headers and one byte, then holds the line
+    let stalled = 0
+    const socks = new Set()
+    const proxy = createServer(c => {
+      const up = dial(PORT, '127.0.0.1'), s = { c, up, held: false }
+      socks.add(s)
+      c.on('data', d => {
+        if (!s.held && !stalled && d.toString('latin1').startsWith('POST /api/send')) {
+          stalled++; s.held = true
+          c.write('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{')
+        }
+        if (!s.held) up.write(d)
+      })
+      up.on('data', d => { if (!s.held) c.write(d) })
+      for (const x of [c, up]) x.on('error', () => {}).on('close', () => { c.destroy(); up.destroy(); socks.delete(s) })
+    })
+    await new Promise(r => proxy.listen(PORT + 8, '127.0.0.1', r))
+    const p = await ctx.newPage()
+    p.on('pageerror', e => errors.push(String(e)))
+    try {
+      await p.goto(`http://localhost:${PORT + 8}/#token=${token}`)
+      await until(async () => await p.locator('#input').isEditable())
+      for (const text of ['its reply stalled', 'sent after the stall']) {
+        await p.fill('#input', text)
+        await p.click('#send')
+        await until(() => stalled === 1)
+      }
+      // POST_MS (15 s), then the first backoff
+      await until(() => ['its reply stalled', 'sent after the stall'].every(t => messages().some(m => m.text === t)), 25000)
+      await until(async () => (await p.locator('.row.user.pending').count()) === 0, 10000)
+      await sleep(1500)
+      for (const text of ['its reply stalled', 'sent after the stall']) {
+        const n = messages().filter(m => m.text === text).length
+        if (n !== 1) throw new Error(`${text}: landed ${n} times`)
+      }
+    } finally {
+      await p.close()
+      for (const s of socks) { s.c.destroy(); s.up.destroy() }
+      proxy.close()
+    }
+  })
   await check('a message over 6 h unread says it was not passed to Claude, never Delivered, and sends again', async () => {
     // #536 (the 2026-11-20 audit): the mod skipped it, and the page said "Delivered" for good
     listen(false)

@@ -600,8 +600,13 @@
   async function post(path, body) {  // a POST that gives up after POST_MS, so a dead line can't hold it
     const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), POST_MS)
     try {
-      return await fetch(path, { method: 'POST', cache: 'no-store', signal: ctrl.signal,
+      const r = await fetch(path, { method: 'POST', cache: 'no-store', signal: ctrl.signal,
         headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      // the body is read under the same timer: cleared at the headers, a reply whose body stalled
+      // (a phone changing networks between the two) held flush, and every later send, for as long
+      // as TCP took to give up (#935)
+      const text = await r.text()
+      return { ok: r.ok, status: r.status, headers: r.headers, json: async () => JSON.parse(text) }
     } finally { clearTimeout(timer) }
   }
   async function connect() {
@@ -1026,7 +1031,9 @@
     if (flushing || !token || !(outbox.length || held)) return
     flushing = true
     let again = false
-    for (const o of [...outbox, ...(held ? [held] : [])]) {
+    // in a finally: a throw from keep, render or apply left `flushing` set, and the page sent
+    // nothing more until a reload (#935)
+    try { for (const o of [...outbox, ...(held ? [held] : [])]) {
       if (o !== held && (o.error || !load(OUT + o.cid, null))) continue  // refused, or sent by another tab meanwhile
       let file = null
       try {  // its files first, each once (#623): a refusal says which file and why
@@ -1062,10 +1069,12 @@
         }
         again = true
       } catch { again = true }
-    }
-    flushing = false
-    if (again && (held || outbox.some(o => !o.error))) {
-      flushTimer = setTimeout(flush, BACKOFF[Math.min(flushTries++, BACKOFF.length - 1)])
+    } } finally {
+      flushing = false
+      if (again && (held || outbox.some(o => !o.error))) {
+        clearTimeout(flushTimer)
+        flushTimer = setTimeout(flush, BACKOFF[Math.min(flushTries++, BACKOFF.length - 1)])
+      }
     }
   }
   const newId = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2))
