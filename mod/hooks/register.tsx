@@ -1341,6 +1341,7 @@ const mem = {
   chatExpired: new Set<string>(), // web messages wb said are too old to pass on (#536): not asked again
   chatQueued: new Map<string, string>(), // web messages whose receipt says queued (id → by): read once a turn ends
   chatOwed: new Map<string, Owed>(), // web messages passed to Claude with no reply in the chat yet (#767)
+  submitted: false, // this mod submitted a prompt while Claude was idle, and no turn has started since (#837)
   chatUrlAt: 0, // when the web chat's link was last looked up
   savingsAt: 0, // when the week's saving was last read
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
@@ -2034,8 +2035,11 @@ async function checkUpdate($: any) {
 // limit) goes back on the queue and is tried again in a minute: the hand-back's turn was lost
 // after its agents were already stopped (the 2026-11-16 audit).
 async function sendQueued($: any, text: string) {
+  if (text === OWED_NOTE && !owedNudged()) return // answered, or the user came back, since it was queued (#837)
+  mem.submitted = true
   const r = await $.prompt.submit({ text }).catch((err: unknown) => ({ drop: String(err) }))
   if (!r?.drop) return
+  mem.submitted = false // dropped: no turn of its own comes
   mem.queued.unshift(text)
   mem.queuedRetryAt = (await $.clock.now()) + REWAKE_MS
   warnOnce($, `queued:${text.slice(0, 40)}`, `a turn for Claude was dropped (${r.drop}); trying again in a minute`)
@@ -2152,8 +2156,11 @@ async function listen($: any, now: number) {
       else void sendWeb($, id, text, 'queued', st.key)
       mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, nudged: false }) // queued: maybe the next turn's
     } else {
+      // behind a prompt submitted this poll (a wake, a queued turn, another web message) whose
+      // turn hasn't started yet, it enters only the turn after: that turn's end, Claude not yet
+      // having seen it, sent the follow-up for a message Claude then answered (#837)
+      mem.chatOwed.set(id, { at: now, grace: mem.submitted ? 1 : 0, nudged: false })
       void sendWeb($, id, text, 'now', st.key)
-      mem.chatOwed.set(id, { at: now, grace: 0, nudged: false })
     }
     await $.fs.write(awayFile(), JSON.stringify({ at: now / 1000, by: st.key })).catch(() => {})
     $.ui.toast('workbench: a message from the web chat')
@@ -2188,8 +2195,10 @@ async function unread($: any, dir: string): Promise<Row[]> {
 // A web message as a prompt of its own; the receipt only once it entered. A dropped one had a
 // "read" receipt for a message Claude never got (the 2026-11-16 audit): it is tried again.
 async function sendWeb($: any, id: string, text: string, how: string, by: string) {
+  mem.submitted = true
   const r = await $.prompt.submit({ text, asUser: true }).catch((err: unknown) => ({ drop: String(err) }))
   if (r?.drop) {
+    mem.submitted = false
     mem.chatSent.delete(id)
     mem.chatOwed.delete(id) // not given to Claude: nothing owed yet
     mem.chatRetry.set(id, (await $.clock.now()) + REWAKE_MS)
@@ -2215,8 +2224,15 @@ const OWED_NOTE =
   '`wb chat reply --text "…"` (the web thread is all they see), briefly. Nothing else to do.'
 const OWED_POSTED = 'Claude answered in the terminal; nothing was sent here.'
 const REPLIES = /\bwb\b[^\n|;&]*\bchat\s+(reply|listen)\b|\bwb\b[^\n|;&]*\bshot\b[^\n]*--chat\b/
+// The follow-up is owed while a message it was queued for is still unanswered: a reply or the
+// user's return before it went left it in mem.queued, and it went anyway (#837)
+const owedNudged = () => [...mem.chatOwed.values()].some(o => o.nudged)
+function owedSettled() {
+  if (owedNudged()) return
+  for (let i = mem.queued.indexOf(OWED_NOTE); i >= 0; i = mem.queued.indexOf(OWED_NOTE)) mem.queued.splice(i, 1)
+}
 async function owedAtTurnEnd($: any) {
-  if (!mem.chatOwed.size) return
+  if (!mem.chatOwed.size) return owedSettled()
   const tail = await readTail($, `${mem.root}/chat/messages.jsonl`, NOTIFY_TAIL)
   const replied = parseLines(tail?.text ?? '').filter(m => m.from === 'claude').map(m => Number(m.ts ?? 0) * 1000)
   let nudge = false
@@ -2228,6 +2244,7 @@ async function owedAtTurnEnd($: any) {
     await runWb($, ['chat', 'reply', `--text=${OWED_POSTED}`], 15_000)
   }
   if (nudge && !mem.queued.includes(OWED_NOTE)) mem.queued.push(OWED_NOTE)
+  owedSettled()
 }
 
 // A queued web message enters at the running turn's next step or as the next turn, so once that
@@ -2389,8 +2406,10 @@ async function asking($: any, name: string, id: string): Promise<boolean> {
 // lost for good (the 2026-11-16 audit): the mark goes back, unless something acted on the task
 // since, and rewake tries again after a minute.
 async function wake($: any, name: string, text: string, prev: number, ts: number) {
+  mem.submitted = true
   const r = await $.prompt.submit({ text: await awayToo($, text) }).catch((err: unknown) => ({ drop: String(err) }))
   if (!r?.drop) return
+  mem.submitted = false
   mem.dropped.set(name, await $.clock.now())
   await release($, name, prev, ts)
   warnOnce($, `drop:${name}`, `the wake for ${name} was dropped (${r.drop}); trying again in a minute`)
@@ -2674,7 +2693,10 @@ export const register: Register = (on, options) => {
     if (delegates(String(e.command ?? ''))) {
       await workbenchMode($, true)
     }
-    if (REPLIES.test(String(e.command ?? ''))) mem.chatOwed.clear() // answered in the chat (#767)
+    if (REPLIES.test(String(e.command ?? ''))) {
+      mem.chatOwed.clear() // answered in the chat (#767)
+      owedSettled()
+    }
     return next(e)
   })
 
@@ -2701,6 +2723,7 @@ export const register: Register = (on, options) => {
     if (byUser(e) && !e.text.startsWith(WEB) && !e.text.startsWith('[workbench]')) {
       await back($)
       mem.chatOwed.clear() // back at the terminal: an answer there reaches them (#767)
+      owedSettled()
     }
     return next(e)
   })
@@ -2789,6 +2812,7 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     if (!e.agentId) {
       mem.busy = true
+      mem.submitted = false
       void poll($) // the chat page shows "working" now
     }
     return next(e)

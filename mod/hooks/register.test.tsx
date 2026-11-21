@@ -2118,6 +2118,76 @@ test('a web message the turn didn\'t answer in the chat gets one follow-up, then
   expect([followUps().length, posted().length]).toEqual([1, 1])  // answered there: no follow-up, no note
 })
 
+test('a web message queued behind a task\'s wake is owed from its own turn, not the wake\'s (#837)', async ($, on) => {
+  // #837: the wake and the web message went in one poll; the wake's turn ended without a reply
+  // (Claude hadn't seen the message yet), so a follow-up went for a message Claude then answered
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project', session: 'sess-1' })
+  fakeTasks(on, files)
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  notice(files, { ts: ts0 + 40, task: 'fix-it', kind: 'review', text: 'REPORT-fix-it' })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: ts0 + 40, from: 'user', text: 'Status' }) + '\n'
+  await clock.advance(31_000)                                    // one poll: the wake, then the message
+  const at = (needle: string) => asked.findIndex(a => a.includes(needle))
+  expect(at('REPORT-fix-it')).toBeGreaterThanOrEqual(0)
+  expect(at('[web chat] Status')).toBeGreaterThan(at('REPORT-fix-it'))
+  await turn('t1')                                               // the wake's turn: no reply yet
+  await turn('t2', 'wb chat reply --text "One task in review."') // the message's turn answers it
+  await turn('t3')
+  expect(followUps()).toHaveLength(0)
+})
+
+test('a follow-up the engine dropped is not sent again once Claude answered in the chat (#837)', async ($, on) => {
+  // #837: only chatOwed was cleared on a reply; OWED_NOTE stayed in the queue and went anyway
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const asked: string[] = []
+  let drop = true
+  on('prompt.submit', (_: any, e: any) => {
+    asked.push(e.text)
+    if (drop && e.text.includes("hasn't heard back")) { drop = false; return { drop: 'a settings hook' } }
+    return { text: e.text }
+  })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'Status' }) + '\n'
+  await clock.advance(31_000)
+  await turn('t1')                                               // answered in the terminal only
+  expect(followUps()).toHaveLength(1)                            // tried, and dropped
+  await turn('t2', 'wb chat reply --text "All quiet."')          // then answered there after all
+  await clock.advance(61_000)                                    // past the retry
+  expect(followUps()).toHaveLength(1)
+})
+
 test('a /loop firing, another plugin\'s prompt or a channel message leaves the user away and the follow-up owed; the user\'s Enter ends it (#835)', async ($, on) => {
   // #835: any prompt that wasn't isMeta counted as the user back at the terminal, so a /loop
   // firing ended away for every session and cancelled the #767 follow-up

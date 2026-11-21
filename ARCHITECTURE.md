@@ -6098,8 +6098,13 @@ Each message passed to Claude is owed a reply in the chat (`mem.chatOwed`, `owed
 for two release cycles the owner's "Status" from the phone was answered in the terminal only, and
 the phone heard nothing): a `wb chat reply`/`listen` or `wb shot … --chat` in Bash, a row `from:
 claude` in messages.jsonl since, or a prompt typed in the terminal settles it; at the end of the
-main turn that had it (one queued behind a running turn may enter only the next: `grace` 1) with
-no reply, one follow-up turn is queued (OWED_NOTE: answer there with `wb chat reply`); that turn
+main turn that had it (one queued behind a running turn may enter only the next: `grace` 1; so
+may one submitted while idle behind a prompt the mod submitted in that poll whose turn hasn't
+started, a wake, a queued turn or another web message: `mem.submitted`, cleared at each main turn's
+start, #837, the wake's turn ending sent the follow-up for a message Claude then answered) with
+no reply, one follow-up turn is queued (OWED_NOTE: answer there with `wb chat reply`; taken back
+out of `mem.queued`, and skipped by `sendQueued`, once no nudged message is owed: a reply or the
+user's return before it went left it queued, and it went anyway, #837); that turn
 ending without one too, `wb chat reply --text="Claude answered in the terminal; nothing was sent
 here."` (OWED_POSTED) goes to the chat, once per message. Dialogs
 (`classic.PermissionRequest`; the terminal shows its dialog meanwhile, and the hook's answer
