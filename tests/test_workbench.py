@@ -10738,6 +10738,40 @@ class Verify(Base):
         self.assertEqual(verify.verdict(1, "FAIL src/slug.test.js\n  ✕ slugifies\n"
                                            "    Expected: \"a-b\"\n    Received: \"A B\"\n", 0), "proven")
 
+    def test_phpunit_xctest_swift_testing_catch2_and_bats_failures_are_proven(self):
+        # #730 (the 2026-11-21 audit, reproduced): none of these runners' failures matched
+        # ASSERTION or FAILED_TEST, so their genuine regressions were inconclusive
+        from workbench import verify
+        runs = {
+            "phpunit": ("There was 1 failure:\n\n1) SlugTest::testSlug\nFailed asserting that two "
+                        "strings are identical.\n--- Expected\n+++ Actual\n\nFAILURES!\n"
+                        "Tests: 1, Assertions: 1, Failures: 1.\n"),
+            "pest": "   FAILED  Tests\\Unit\\SlugTest > slugifies\n  Failed asserting that 'A B' is identical to 'a-b'.\n",
+            "xctest": ("/src/Tests/SlugTests/SlugTests.swift:5: error: -[SlugTests.SlugTests testSlug] : "
+                       "XCTAssertEqual failed: (\"A B\") is not equal to (\"a-b\")\n"
+                       "Test Case '-[SlugTests.SlugTests testSlug]' failed (0.001 seconds).\n"),
+            "swift-testing": ("✘ Test slugifies() recorded an issue at SlugTests.swift:5:3: "
+                              "Expectation failed: (slug(\"A B\") → \"A B\") == \"a-b\"\n"
+                              "✘ Test slugifies() failed after 0.001 seconds with 1 issue.\n"),
+            "catch2": ("-------------------------------------------------------------------------------\n"
+                       "slugifies\n------------------------------------------------------------------------------\n"
+                       "/src/test.cpp:5\n...............................................................................\n\n"
+                       "/src/test.cpp:5: FAILED:\n  REQUIRE( slug(\"A B\") == \"a-b\" )\nwith expansion:\n"
+                       "  \"A B\" == \"a-b\"\n"),
+            "bats": ("1..1\nnot ok 1 slugifies\n# (in test file test/slug.bats, line 4)\n"
+                     "#   `[ \"$output\" = \"a-b\" ]' failed\n"),
+        }
+        for runner_name, out in runs.items():
+            self.assertEqual(verify.verdict(1, out, 0), "proven", runner_name)
+            self.assertTrue(verify.assertion(out), runner_name)
+        # the same runners when what failed is missing, not wrong: still no proof
+        for out in ("1..1\nnot ok 1 slugifies\n# test/slug.bats: line 3: slugify: command not found\n",
+                    "1) SlugTest::testSlug\nError: Call to undefined function slugify()\n\nERRORS!\n",
+                    "1) SlugTest::testSlug\nError: Call to undefined method Slug::slugify()\n"):
+            self.assertEqual(verify.verdict(1, out, 0), "inconclusive", out)
+        # and the wording no longer assumes the setup failed
+        self.assertIn("output it doesn't read, which --expect TEXT can name", verify.SAY["inconclusive"])
+
     def test_a_golden_file_the_candidate_adds_goes_to_the_base_and_one_left_out_proves_nothing(self):
         # #500 (the audit of 1.90): Go's testdata/ wasn't copied to the base, which failed on
         # `open testdata/case1.golden: no such file or directory`, and that was called proven

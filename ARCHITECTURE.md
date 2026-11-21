@@ -4415,8 +4415,11 @@ its preparation made, copied; `--setup` runs the setup command there instead) be
 Neither run touches the user's checkout or the worktree under review. The verdict (`verdict`):
 `proven` (the base fails on an assertion and the candidate passes), `base-passes` (the test
 doesn't show the bug), `candidate-fails`, or `inconclusive`: a run timed out, overran its
-output or couldn't be set up, the base failed without an assertion, or the candidate left out
-files accept can land (#642). A missing module or a command not found says
+output or couldn't be set up, the base failed without an 
+assertion the check recognises (the
+report's wording names an error first and output it doesn't read, which `--expect` names, not a
+setup error alone: #730), or the candidate left out files accept can land (#642). 
+A missing module or a command not found says
 nothing about the bug, so it can never count as proof. Proof is positive evidence only: with
 `--expect TEXT`, that text in the base's output; else, unless a setup error (`SETUP`: a syntax,
 import or module error, pytest's collection errors, a fixture not found, a failed build or
@@ -4424,13 +4427,18 @@ compile) says the tests never ran, or a line saying a file is missing (`MISSING`
 or directory", `FileNotFoundError`, `ENOENT`) names one the candidate adds and the base didn't get
 (`missing`; the report says which, for `--files`: #500), an assertion line (`ASSERTION`: `AssertionError`, pytest's
 `E assert`, a line opening `Expected`, an "expected … but/got/received/to be" phrase, jest's
-`expect(`, a Go `panic:`) or a failed test's header. A bare "expected" once matched Python's
+`expect(`, a Go `panic:`, PHPUnit's and Pest's `Failed asserting`, XCTest's `XCTAssert… failed`,
+swift-testing's `Expectation failed`) or a failed test's header (`FAILED_TEST`: `FAIL`, Go's `---
+FAIL`, jest's `✕`, PHPUnit's `FAILURES!`, Catch2's `file.cpp:5: FAILED:`, TAP's and bats' `not ok
+N`, swift-testing's `✘`; those runners were never proven without `--expect`, #730, the 2026-11-21
+audit; ctest's own output rarely carries an assertion line, so `--expect` is the way there). A bare "expected" once matched Python's
 `SyntaxError: expected ':'`, and a base that never ran an assertion was called proven (#193,
 the 2026-11-19 audit); and the setup error is checked first, since a SyntaxError's traceback
 quoting `assert 2 = 2` was proof too (#326, the audit of 1.4). Nor is an API the candidate adds
 and the base lacks (`MISSING_API`: "has no attribute '", "is not a function", `NameError: name`,
 `ReferenceError: … is not defined`, an unexpected keyword argument, a wrong count of positional
-arguments, Ruby's undefined method or uninitialized constant) proof, nor pytest output whose first
+arguments, Ruby's undefined method or uninitialized constant, PHP's undefined function, a
+command not found, as bats prints a script the candidate adds) proof, nor pytest output whose first
 `E` line (`PYTEST_E`) isn't an assertion's (`assert`, `AssertionError`, `Failed: ` as in `DID NOT
 RAISE`: `PYTEST_PROOF`): pytest's quoted `>` source line `assert mod.slugify(…)` matched
 ASSERTION above `E AttributeError`, and jest's `is not a function` under a `✕` header was proof,

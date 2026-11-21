@@ -43,8 +43,13 @@ MISSING = re.compile(r"no such file or directory|FileNotFoundError|\bENOENT\b"
 # and a base that never ran an assertion was called proven (#193, the 2026-11-19 audit).
 ASSERTION = re.compile(r"AssertionError|^E\s+assert|\bassert(ion)?\b|^\s*Expected\b"
                        r"|\bexpected\b.*\b(but|got|received|to (be|equal|have))\b"
-                       r"|Error: expect\(|panic: ", re.I)
-FAILED_TEST = re.compile(r"^(FAIL[:\s]|--- FAIL|\s*✕)")
+                       r"|Error: expect\(|panic: "
+                       # PHPUnit and Pest, XCTest, swift-testing: none satisfied the `\b` after
+                       # `assert`, so these stacks were never proven without --expect (#730)
+                       r"|Failed asserting|\bXCT\w*Assert\w* failed|\bExpectation failed\b", re.I)
+# PHPUnit's `FAILURES!`, Catch2's `file.cpp:5: FAILED:`, TAP and bats' `not ok 1`, swift-testing's
+# `✘` (#730)
+FAILED_TEST = re.compile(r"^(FAIL[:\s]|--- FAIL|\s*✕|FAILURES!|\S+:\d+: FAILED:|not ok \d+|\s*✘)")
 # a run that failed before any test could: the code didn't parse, import, build or collect. A
 # failed test's header beside one of these is the setup's failure, not an assertion's (Go prints
 # `FAIL pkg [build failed]`)
@@ -62,7 +67,9 @@ MISSING_API = re.compile(r"has no attribute '|\bis not a (function|constructor)\
                          r"|\bReferenceError: \S+ is not defined|unexpected keyword argument"
                          r"|takes (from )?\d+ (to \d+ )?positional arguments? but"
                          r"|missing \d+ required (positional|keyword-only) argument"
-                         r"|\bundefined method\b|\buninitialized constant\b")
+                         r"|\bundefined method\b|\buninitialized constant\b"
+                         # a script the candidate adds (bats), PHP's function (#730)
+                         r"|\bcommand not found\b|\bCall to undefined function\b")
 # pytest's own lines: `E   ` says what went wrong (the first one, what went wrong first); `>` quotes
 # the source line it went wrong on, which is no evidence of anything (#729)
 PYTEST_E = re.compile(r"^E\s{2,}(\S.*)$", re.M)
@@ -346,10 +353,12 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
 SAY = {"proven": "proven: it fails on the base and passes on the candidate",
        "base-passes": "not proven: it already passes on the base, so it doesn't show the bug",
        "candidate-fails": "the candidate fails it",
-       "inconclusive": "inconclusive: the base run didn't fail on an assertion (a setup error: "
-                       "syntax, import, build or collection; a file the candidate adds missing; "
-                       "or not the --expect text), a run timed out, the setup command failed, "
-                       "or the candidate left out files accept --include would land"}
+        # not a setup error alone: a runner whose output the check doesn't read lands here too (#730)
+        "inconclusive": "inconclusive: the base run didn't fail on an assertion the check "
+                        "recognises (an error first: syntax, import, build, collection, or an API "
+                        "or file the candidate adds; output it doesn't read, which --expect TEXT "
+                        "can name; or not the --expect text), a run timed out, the setup command "
+                        "failed, or the candidate left out files accept --include would land"}
 
 
 def lines(r: dict) -> list[str]:
