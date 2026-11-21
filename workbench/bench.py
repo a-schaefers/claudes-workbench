@@ -310,6 +310,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         raise RuntimeError("a case name is lowercase letters, digits and hyphens, at most 48")
     if case_dir(case_name).exists():
         raise RuntimeError(f"case {case_name} exists (wb bench list)")
+    gitops.restore_steps(task)  # from the task's own bundle, once git's gc pruned them (#799)
     ref = gitops.step_commit(task, step, steps)
     if not ref:
         raise RuntimeError(f"no commit of step {step} on {spec.get('branch')} in {repo}: the branch "

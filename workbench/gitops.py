@@ -1146,14 +1146,17 @@ def stack(repo, subdir: str | None = None) -> list[str]:
     return [lang for lang, n in langs.most_common(2) if n >= STACK_SHARE * total]
 
 
-ACCEPTED_REF = "refs/workbench/accepted/{}"  # an accepted task's tip, kept for wb bench add
+# an accepted task's tip, kept for wb bench add until #799 (STEPS_BUNDLE now): one from before
+# then is moved into the bundle and deleted by wb gc (cli._released_refs)
+ACCEPTED_REF = "refs/workbench/accepted/{}"
 
 
 def keep_accepted(repo: Path, task: str, tip: str) -> None:
     """A ref of workbench's own at the accepted ``tip``, so its commits, every step's, outlive the
     delegate branch: a hash in status.json keeps no object alive, and after a squash accept (no
     ancestor of main), its branch deleted and git's reflogs and gc done, wb bench add could no
-    longer find the step (#649, Codex's audit of 1.90.6). Never fails the accept."""
+    longer find the step (#649, Codex's audit of 1.90.6). Only when bundle_steps couldn't make
+    the bundle (#799). Never fails the accept."""
     git(repo, "update-ref", "-m", "workbench: accepted", ACCEPTED_REF.format(task), tip, check=False)
 
 
@@ -1167,11 +1170,50 @@ def drop_accepted(repo: Path, task: str, tip: str) -> bool:
                     check=False).returncode
 
 
+STEPS_BUNDLE = "steps.bundle"  # tasks/<task>/: an accepted task's steps, which wb bench add reads
+
+
+def bundle_steps(repo: Path, base: str, tip: str, dest: Path) -> bool:
+    """Keep an accepted task's steps, ``base``..``tip``, as a git bundle at ``dest`` in its own
+    state, for wb bench add: a hash in status.json keeps no object alive (#649), and the ref of
+    workbench's own that did, kept in the user's repo after a squash accept, showed each task's
+    steps in `git log --all`, went out with every `clone --mirror` and kept whatever the agent
+    once committed from git's gc (#799, the second 2026-11-21 audit). Made in a ``--shared``
+    scratch clone, whose ref is the only one: the user's repo gets none, even for a moment.
+    Whether it is there (made now or before); never fails the accept."""
+    if dest.is_file():
+        return True
+    with tempfile.TemporaryDirectory(prefix="wb-steps-") as tmp:
+        clone, part = Path(tmp) / "c", dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
+        try:
+            git(tmp, "clone", "-q", "--bare", "--shared", "--no-tags", str(repo), str(clone))
+            git(clone, "update-ref", "refs/heads/steps", tip)
+            git(clone, "bundle", "create", "-q", str(part.resolve()), f"{base}..steps")
+            os.replace(part, dest)
+        except (GitError, OSError):
+            part.unlink(missing_ok=True)
+            return False
+    return True
+
+
+def restore_steps(task: store.Task) -> None:
+    """Put an accepted task's steps back in its repo from its STEPS_BUNDLE when git's gc has
+    pruned them (a squash accept, a branch deleted by hand: #799): ``bundle unbundle`` stores
+    the objects alone, with no ref and no FETCH_HEAD, so `git log --all` never shows them and
+    git's gc may prune them again once wb bench add has made its case."""
+    tip, f = task.status.get("tip"), task.dir / STEPS_BUNDLE
+    repo = repo_of(task.spec)
+    if tip and f.is_file() and _run(repo, ("cat-file", "-e", f"{tip}^{{commit}}"),
+                                    check=False).returncode:
+        git(repo, "bundle", "unbundle", str(f.resolve()), check=False)
+
+
 def step_commit(task: store.Task, step: int, steps: int) -> str | None:
     """The commit that landed step `step`: `wb next` marks its steps "(step N)", `wb accept` the last."""
     spec = task.spec
     want = f"Workbench-Task: {task.name}" + (f" (step {step})" if step < steps else "")
-    # the branch is deleted once merged (cli.gc); the tip is kept by ACCEPTED_REF (#649)
+    # the branch is deleted once merged (cli.gc); the tip is kept in STEPS_BUNDLE (bench add
+    # restores it: restore_steps), or by ACCEPTED_REF for a task accepted before #799
     tip = task.status.get("tip") or spec["branch"]
     log = git(repo_of(spec), "log", "--format=%H%x00%B%x01", f"{spec['base']}..{tip}", check=False)
     for entry in log.split("\x01"):

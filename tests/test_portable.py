@@ -1313,7 +1313,7 @@ class Real(unittest.TestCase):
                     {"box": {"local": True}})
         warned = []
         with mock.patch.object(models, "_this_host", lambda h: False), \
-                mock.patch.object(models, "INFLIGHT_WAIT", 0), mock.patch.object(models, "INFLIGHT_WATCH", 0):
+                mock.patch.object(models, "BOX_WAIT", 0), mock.patch.object(models, "BOX_QUIET", 1):
             x = models.discover()["box/x"]
             self.assertTrue(x.remote)
             self.assertEqual(models.box_others(x), ["theirs"])
@@ -1339,6 +1339,92 @@ class Real(unittest.TestCase):
                           warned[0])
             local = models.Model(id="o/x", provider="o", name="x", base_url=x.base_url, engine="ollama", label="o/x")
             self.assertEqual(models.box_others(local), [])                    # this machine's: free_gpu's
+
+    def test_a_wb_remote_box_client_loads_over_another_clients_model_only_once_it_has_gone_quiet(self):
+        # #812: the clients of one box share no lease, and each load watched the other client's
+        # model for a moment only: one between two requests of its round (a tool running) was
+        # loaded over, and the two swapped on every request after. Now a load waits until the
+        # other's model has gone BOX_QUIET without a request: the box is taken a round at a time
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        theirs = {"name": "theirs", "size": 10, "size_vram": 10, "expires_at": at(300)}
+        loaded, posts = [theirs], []
+        srv, port = fake_ollama(loaded, ["x", "theirs"], posts)
+        self.servers.append(srv)
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"x": {}}}},
+                    {"box": {"local": True}})
+        said, warned, requests = [], [], []
+
+        def request():  # the other client's next request in its round finishes
+            requests.append(time.monotonic())
+            theirs["expires_at"] = at(300 + len(requests))
+        for delay in (0.6, 1.2):
+            threading.Timer(delay, request).start()
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "INFLIGHT_WATCH", 0.3), \
+                mock.patch.object(models, "BOX_QUIET", 1.5), mock.patch.object(models, "BOX_POLL", 0.1):
+            x = models.discover()["box/x"]
+            models.make_resident(x, say=said.append, warn=warned.append)
+            loaded_at = time.monotonic()
+        self.assertEqual(len(requests), 2)
+        self.assertGreaterEqual(loaded_at - requests[-1], 1.5)       # quiet that long first
+        self.assertEqual([p["model"] for p in posts], ["x"])
+        self.assertIn("theirs on 127.0.0.1 is another client's: loading x once it has gone 1.5 s "
+                      "without a request", said[0])
+        self.assertEqual(len(warned), 1)
+        self.assertIn("theirs on 127.0.0.1 is answering another client's requests", warned[0])
+        # an idle one, its round over: loaded over once BOX_QUIET passes, with nothing to warn of
+        loaded[:], posts[:], warned[:] = [theirs], [], []
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "BOX_QUIET", 0.5), mock.patch.object(models, "BOX_POLL", 0.1):
+            began = time.monotonic()
+            models.make_resident(models.discover()["box/x"], say=said.append, warn=warned.append)
+            self.assertGreaterEqual(time.monotonic() - began, 0.5)
+        self.assertEqual(warned, [])
+        self.assertEqual([p["model"] for p in posts], ["x"])
+
+    def test_a_model_this_machine_left_on_its_box_is_loaded_over_without_waiting(self):
+        # reviewing #812 (2026-11-21): every model on the box that the task wasn't using read as
+        # another client's, so one user with one box waited BOX_QUIET at every model switch for
+        # the model their own last task had left loaded
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        loaded, posts = [], []
+        srv, port = fake_ollama(loaded, ["x", "y"], posts)
+        self.servers.append(srv)
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+                             "models": {"x": {}, "y": {}}}}, {"box": {"local": True}})
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "BOX_QUIET", 30), mock.patch.object(models, "BOX_POLL", 0.1):
+            found = models.discover()
+            models.make_resident(found["box/x"], say=lambda *_: None, warn=lambda *_: None)
+            self.assertIn("x", models.box_mine(found["box/x"].root))
+            loaded[:] = [{"name": "x", "size": 10, "size_vram": 10, "expires_at": at(300)}]
+            self.assertEqual(models.box_others(found["box/y"]), [])     # this machine's own
+            began = time.monotonic()
+            models.make_resident(found["box/y"], say=lambda *_: None, warn=lambda *_: None)
+            self.assertLess(time.monotonic() - began, 5)                # no BOX_QUIET wait
+            loaded[:] = [{"name": "theirs", "size": 10, "size_vram": 10, "expires_at": at(300)}]
+            self.assertEqual(models.box_others(found["box/y"]), ["theirs"])   # still another's
+
+    def test_a_remote_task_hears_when_another_client_unloaded_its_model_between_rounds(self):
+        # #812: the other client's load evicted this task's model, and nothing told this task why
+        # its next round began with a reload
+        loaded, posts = [], []
+        srv, port = fake_ollama(loaded, ["x", "theirs"], posts)
+        self.servers.append(srv)
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"x": {}}}},
+                    {"box": {"local": True}})
+        with mock.patch.object(models, "_this_host", lambda h: False):
+            lease = models.GpuLease(models.discover()["box/x"], "", say=lambda *_: None)
+            warned = []
+            lease.warn = warned.append
+            lease.load()
+            self.assertEqual(warned, [])                                 # its first load
+            loaded[:] = [{"name": "theirs", "size": 10, "size_vram": 10}]  # theirs evicted it
+            with mock.patch.object(models, "BOX_QUIET", 0):
+                lease.load()
+        self.assertIn("x was unloaded from 127.0.0.1 since the last round, which has theirs loaded "
+                      "for another client", warned[0])
+        self.assertEqual([p["model"] for p in posts], ["x", "x"])
 
     def test_lm_studio_says_each_models_size_window_and_tool_training(self):
         from workbench import cli

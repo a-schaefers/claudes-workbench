@@ -1086,7 +1086,8 @@ def cmd_start(a):
         print("note: the runner loads it onto the GPU first, unloading what is there")
     if state["available"] and (others := models.box_others(m)):  # another machine's task on the same box (#812)
         print(f"note: {urlparse(m.root).hostname} has {', '.join(others)} loaded, which no task here "
-              f"runs: {models.BOX_SHARED}")
+              f"runs: the runner loads {m.name} once it has gone {models.BOX_QUIET} s without a "
+              f"request (up to {models.BOX_WAIT // 60} min); {models.BOX_SHARED}")
     measured = (optimize.state().get("models") or {}).get(m.id)
     if measured and (fit := optimize.advice(m.id, measured)):
         print(f"note: {fit} (ask the user first: it adds to their OpenCode config)")
@@ -2395,7 +2396,13 @@ def cmd_accept(a):
         task.set_status(closing=close, tip=tip)  # before anything is removed
         _spec_gaps(task, a.spec_gap)
     tip = task.status["tip"]
-    gitops.keep_accepted(repo, a.name, tip)  # before the branch can go: wb bench add reads it (#649)
+    # before the branch can go: wb bench add reads the steps (#649), from a bundle in the task's
+    # own state, not a ref in the user's repo (#799); the ref only if the bundle can't be made
+    if gitops.bundle_steps(repo, spec["base"], tip, task.dir / gitops.STEPS_BUNDLE):
+        gitops.drop_accepted(repo, a.name, tip)  # a retry's, made when an earlier try's failed
+        task.set_status(accepted_ref_gone=True)
+    else:
+        gitops.keep_accepted(repo, a.name, tip)
     if warn := gitops.remove_worktree(repo, task.worktree):  # committed: the rest is cleanup
         print(f"wb: {warn}", file=sys.stderr)
     context.drop_runtime_dir(task)
@@ -2433,9 +2440,11 @@ def cmd_accept(a):
                 print(f"wb: not merged: {e}", file=sys.stderr)
         if merged:
             task.set_status(closing={**close, "merged_head": merged})
-    # landed by a merge or a fast-forward, the target keeps the steps alive; a squash doesn't
+    # landed by a merge or a fast-forward, the target keeps the steps alive; a squash doesn't.
+    # Only a ref kept because the steps bundle couldn't be made (#799)
     into = close.get("merge_into")
-    if merged and into and into != "HEAD" and gitops.contains(repo, f"refs/heads/{into}", tip):
+    if merged and into and into != "HEAD" and not task.status.get("accepted_ref_gone") and \
+            gitops.contains(repo, f"refs/heads/{into}", tip):
         if gitops.drop_accepted(repo, a.name, tip):  # (#799)
             task.set_status(accepted_ref_gone=True)
     if merged and gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{spec['branch']}",
@@ -2775,21 +2784,29 @@ def _merged_branches() -> int:
 
 
 def _released_refs() -> int:
-    """Delete each accepted task's refs/workbench/accepted/<task> that nothing needs any more: its
-    tip landed in the task's base branch (merged by hand after a plain accept), which then keeps
-    every step alive, or each of its steps has a bench case, the only thing it was kept for
-    (#649). One accepted after a squash, whose steps no branch holds, stays until then (#799, the
-    second 2026-11-21 audit). A ref gone, or deleted here, is recorded (status
-    `accepted_ref_gone`) and never looked at again, and each repo's refs are listed once, with one
-    `for-each-ref --merged` per base branch: not a call per task on every run (#686)."""
+    """Delete each accepted task's refs/workbench/accepted/<task>, the ref wb accept kept in the
+    user's repo before #799 (or when it couldn't write the task's steps bundle): kept for good, each
+    task's steps showed in `git log --all`, mirrors copied them and git's gc never pruned them (the
+    second 2026-11-21 audit). wb bench add reads the steps from gitops.STEPS_BUNDLE now, so one
+    that still has a step to make a case of is moved into that bundle first; one whose tip landed
+    in the task's base branch (which keeps every step alive), or each of whose steps has its case
+    (the only thing it was kept for, #649), just goes. And a bundle whose every step has its case
+    goes too. A ref gone, or deleted here, is recorded (status `accepted_ref_gone`) and never
+    looked at again, and each repo's refs are listed once, with one `for-each-ref --merged` per
+    base branch: not a call per task on every run (#686)."""
     cased: dict[str, set] = {}
     for c in bench.cases().values():
         cased.setdefault(c.get("task"), set()).add(c.get("step"))
     by_repo: dict[Path, list] = {}
+    done: dict[str, bool] = {}
     for name in sorted({r["task"] for r in store.results(trials=True) if r.get("outcome") == "accepted"}):
         t = store.Task(name)
-        if t.exists and not t.status.get("accepted_ref_gone") and \
-                (repo := gitops.repo_of(t.spec)).is_dir():
+        if not t.exists:
+            continue
+        done[name] = set(range(1, int(t.status.get("steps") or 1) + 1)) <= cased.get(name, set())
+        if done[name]:
+            (t.dir / gitops.STEPS_BUNDLE).unlink(missing_ok=True)
+        if not t.status.get("accepted_ref_gone") and (repo := gitops.repo_of(t.spec)).is_dir():
             by_repo.setdefault(repo, []).append(t)
     n = 0
     for repo, tasks in by_repo.items():
@@ -2808,9 +2825,9 @@ def _released_refs() -> int:
             if not (tip := refs.get(ref)):  # one from before #649, or deleted by hand
                 t.set_status(accepted_ref_gone=True)
                 continue
-            done = set(range(1, int(t.status.get("steps") or 1) + 1)) <= cased.get(t.name, set())
-            if (done or ref in landed.get(t.spec.get("base_branch"), ())) and \
-                    gitops.drop_accepted(repo, t.name, tip):
+            if (done[t.name] or ref in landed.get(t.spec.get("base_branch"), ()) or
+                    gitops.bundle_steps(repo, t.spec["base"], tip, t.dir / gitops.STEPS_BUNDLE)) \
+                    and gitops.drop_accepted(repo, t.name, tip):
                 t.set_status(accepted_ref_gone=True)
                 n += 1
     return n
