@@ -1680,7 +1680,7 @@ def _resume(task: store.Task) -> None:
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
     task.round_dir(n + 1).joinpath("prompt.md").write_text(runner.RESUME.format(
         asked=runner.ASKED.format("\n\n".join(asks)).rstrip() if asks else "")
-        + (f"\n\n{runner.steer_prompt(notes, False)}" if notes else ""))
+        + (f"\n\n{runner.folded_notes(task, n + 1, notes)}" if notes else ""))
     handled = store.now()
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer")

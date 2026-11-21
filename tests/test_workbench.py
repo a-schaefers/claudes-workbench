@@ -3430,6 +3430,31 @@ class Context(Base):
         from workbench import runner
         self.assertEqual(len(runner.round_asks(store.Task("t-c6"), 4)), 1)  # a carry-on adds nothing
 
+    def test_a_note_folded_into_a_carry_on_reaches_every_later_fresh_session(self):
+        # #677 (Claude's audit of main): round_asks skipped a carry-on whole, the note folded into
+        # it included, so the second handover's session never got the note, and steer_taken
+        # already counted it, so nothing said it went missing
+        from workbench import lessons, runner
+        t = store.Task("t-fold")
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": "t-fold", "created_at": store.now()})
+        t.set_status(window=32768, step_round=1, round=2)
+        for r, text in ((1, "Write the answer."), (2, lessons.FEEDBACK_HEAD + " 1. Use a heap.")):
+            t.round_dir(r).mkdir(parents=True)
+            t.round_dir(r).joinpath("prompt.md").write_text(text)
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": "Use the v2 API, not v1"})
+        rnd = {"full": 26000, "texts": ["Halfway there."]}
+        runner._full_round(t, 2, rnd)                       # the note goes with the first carry-on
+        self.assertIn("Use the v2 API", store.round_prompt(t, 3).read_text())
+        runner._full_round(t, 3, rnd)                       # and the second still carries it
+        self.assertIn("Use the v2 API", store.round_prompt(t, 4).read_text())
+        asks = runner.round_asks(t, 4)
+        self.assertEqual(sum("Use the v2 API" in a for a in asks), 1)   # once, not per handover
+        self.assertTrue(asks[0].startswith(lessons.FEEDBACK_HEAD))
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": "And log it."})
+        runner._early_notes(t, 4)                           # a note as round 4's model reloads
+        self.assertIn("And log it.", "\n".join(runner.round_asks(t, 4)))
+
     def test_a_fresh_session_after_a_feedback_round_still_carries_the_feedback(self):
         # Between rounds, an auto-fix round that started fresh carried only the failing tests:
         # the agent fixed them and reported done with the feedback never made (the 2026-11-16

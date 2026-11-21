@@ -2549,6 +2549,21 @@ RESUME = ("Claude stopped your last session and is resuming the task in a fresh 
           "then finish them and run the tests.{asked}")
 
 
+# Claude's notes folded into a round's prompt after its opening (a carry-on, a resume, the
+# notes that came before the round began): round_asks skips a carry-on or resume whole, so it
+# reads them from here (#677).
+FOLDED = "notes.md"
+
+
+def folded_notes(task: store.Task, n: int, notes: list[dict]) -> str:
+    """The notes as round n's prompt carries them, kept beside it for round_asks."""
+    text = steer_prompt(notes, False)
+    path = task.round_dir(n) / FOLDED
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text((path.read_text().rstrip() + "\n\n" if path.is_file() else "") + text + "\n")
+    return text
+
+
 def round_asks(task: store.Task, n: int) -> list[str]:
     """The instructions rounds n, n-1, ... gave since the step's task, back to the last review
     feedback: what a fresh session taking over mid-round must still carry out. A handover's own
@@ -2561,6 +2576,10 @@ def round_asks(task: store.Task, n: int) -> list[str]:
         f = store.round_prompt(task, r)
         raw = f.read_text().strip() if f.is_file() else ""
         if not raw or raw.startswith((CARRY_ON[:60], RESUME[:60])):
+            # but the notes folded into it (folded_notes): skipped with it, a note sent as a
+            # session filled reached that successor alone, and the next was never told (#677)
+            if (notes := task.round_dir(r) / FOLDED).is_file() and (kept := notes.read_text().strip()):
+                out.insert(0, kept)
             continue
         out.insert(0, raw)
         if raw.startswith(lessons.FEEDBACK_HEAD):
@@ -2616,7 +2635,7 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
     task.round_dir(n + 1).joinpath("prompt.md").write_text(CARRY_ON.format(
         asked=ASKED.format("\n\n".join(asks)) if asks else "",
         last="> " + last.replace("\n", "\n> ") if last else "(none)")
-        + (f"\n\n{steer_prompt(notes, False)}" if notes else ""))
+        + (f"\n\n{folded_notes(task, n + 1, notes)}" if notes else ""))
     task.set_status(round=n + 1, context="full", full_pct=pct,
                     handovers=task.status.get("handovers", 0) + 1,
                     steer_taken=task.status.get("steer_taken", 0) + len(notes))
@@ -2637,7 +2656,7 @@ def _early_notes(task: store.Task, n: int) -> None:
     if not (notes := pending_steer(task)):
         return
     path = task.round_dir(n).joinpath("prompt.md")
-    path.write_text(path.read_text().rstrip() + "\n\n" + steer_prompt(notes, False))
+    path.write_text(path.read_text().rstrip() + "\n\n" + folded_notes(task, n, notes))
     task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
 

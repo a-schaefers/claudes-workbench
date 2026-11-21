@@ -904,7 +904,12 @@ handover the instructions are `CARRY_ON` ("Your last session filled up… re-rea
 changing, then finish them and run the tests"), plus what the step's rounds asked since the last
 review feedback (`round_asks`, so a feedback round survives handovers), the agent's last words
 (the last two texts, 1200 characters) and any notes that came in as it filled. `wb resume` writes `RESUME` the same way. `status.handovers`
-counts mid-round handovers.
+counts mid-round handovers. A note folded into a round's prompt after its opening (a carry-on's,
+a resume's, or one that came before the round began, `_early_notes`) is also written to
+`rounds/<n>/notes.md` (`runner.folded_notes`, `FOLDED`): `round_asks` skips a carry-on or resume
+whole but keeps its notes from there, so the session after the next handover still gets them (it
+once got only the first: the note was skipped with the carry-on and `steer_taken` already
+counted it, #677).
 
 **OpenCode's own compaction** is a small model's summary of its session, which drops details and
 can lose the task itself (seen: an agent that built CLAUDE.md's "next step" after one). The config
@@ -1119,7 +1124,7 @@ by prefix; rewording one silently changes those:
 | `INTERRUPT_HEAD`, `NOTE_HEAD` | `_steer_round` | `transcript` |
 | `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's) |
 | `Claude picked these skills`, `Claude handed you more skills`, `Claude took back:` | `skills_note` | `transcript.SKILLS_HEADS` (skips the note to label what follows) |
-| `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them |
+| `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`) |
 | `agent's summary:` | `summary_text` | `lessons` |
 | `--title "wb: <task>"` | `run_round` | `transcript.find_session` |
 
@@ -5660,6 +5665,7 @@ $WB_HOME (~/.local/state/workbench)
     <name> → ../<name>           a sibling's link, beside the worktree (`--sibling`; not one of context.TASK_FILES)
     tree/<parents>/worktree/     the worktree instead, with a sibling more than one level up (task.json `worktree`), the links around it (#261)
     rounds/<n>/                  prompt.md  instructions.md (before a handover rewrote it)  summary.md  tests.txt
+                                 notes.md (Claude's notes folded into prompt.md after its opening: runner.folded_notes, #677)
     ask/<id>.json  <id>.answer   questions and permission requests; their answers (all the lane writes here, with worktree/)
     worktree/                    the agent's git worktree, branch delegate/<task>
 ~/.local/share/workbench/skills/ ($WB_SKILLS) the skill library, its own git repo; retired/
