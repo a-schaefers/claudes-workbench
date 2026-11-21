@@ -5971,6 +5971,50 @@ class SkillLibrary(Base):
                 "paths", "Use when drawing.", f"Read {path} first.\n")), "-m", "warned")
             self.assertIn("outside the repo", out, path)
 
+    def test_two_skill_changes_at_once_each_commit_only_their_own_skill(self):
+        # #822: B's `git add` landed between A's add and its path-less commit, so A committed both
+        # under its message and B's own message, source and review record never reached the history
+        from workbench import skills
+        run_wb("skill", "add", "first", "--from", str(self.draft("first")), "-m", "the library")
+        lib = skills.library()
+        write_skill(lib / "b-skill", "b-skill", "Use when B.")             # B, between add and commit
+        skills._git("add", "-A", "--", "b-skill")
+        run_wb("skill", "add", "a-skill", "--from", str(self.draft("a-skill")), "-m", "A's reason")
+        self.assertEqual(skills._git("show", "--name-only", "--format=", "HEAD").split(),
+                         ["a-skill/SKILL.md"])
+        run_wb("skill", "add", "b-skill", "--from", str(self.draft("b-skill", "Use when B.")), "-m", "B's reason")
+        self.assertEqual(skills.history("b-skill")[0].split(" ", 1)[1], "b-skill: B's reason")
+        run_wb("skill", "retire", "a-skill", "-m", "done")
+        self.assertEqual(sorted(skills._git("show", "--no-renames", "--name-only", "--format=", "HEAD").split()),
+                         ["a-skill/SKILL.md", "retired/a-skill/SKILL.md"])
+
+    def test_a_skill_change_waits_for_the_library_lock_and_a_failed_commit_leaves_nothing_live(self):
+        # #822: unlocked, overlapping git calls met each other's index.lock, and one skill was left
+        # in place but uncommitted, live with the previous version's rev
+        from workbench import skills
+        lock = store.home() / "locks" / "skills.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        held = subprocess.Popen([sys.executable, "-c", (
+            "import fcntl, sys, time\nf = open(sys.argv[1], 'a+')\nfcntl.flock(f, fcntl.LOCK_EX)\n"
+            "print('held', flush=True)\ntime.sleep(1.5)"), str(lock)], stdout=subprocess.PIPE, text=True)
+        self.assertEqual(held.stdout.readline().strip(), "held")
+        began = time.monotonic()
+        skills.add(self.draft("waited"), "waited", "after the other")
+        self.assertGreater(time.monotonic() - began, 1.0)                    # it waited its turn
+        held.wait()
+        rev = skills.rev("waited")
+        with mock.patch.object(skills, "_commit", side_effect=RuntimeError(
+                "Unable to create '.git/index.lock': File exists")):
+            with self.assertRaises(RuntimeError):
+                skills.add(self.draft("fresh"), "fresh", "new")
+            with self.assertRaises(RuntimeError):
+                skills.add(self.draft("waited", body="Changed.\n"), "waited", "an update")
+        self.assertNotIn("fresh", skills.available())                       # not live, uncommitted
+        self.assertFalse((skills.library() / "fresh").exists())
+        self.assertEqual((skills.library() / "waited" / "SKILL.md").read_text(),
+                         (self.draft("waited") / "SKILL.md").read_text())    # the committed copy
+        self.assertEqual((skills.rev("waited"), skills._git("status", "--porcelain").strip()), (rev, ""))
+
     def test_a_skill_md_opening_with_a_utf8_bom_is_read_and_kept_without_it(self):
         # #479 (the audit of 1.8, reproduced): a Windows editor's BOM before the `---` hid the
         # front matter: "front matter name is ''", "no description"

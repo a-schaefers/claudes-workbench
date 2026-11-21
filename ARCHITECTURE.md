@@ -4075,7 +4075,13 @@ bytes: what reading the skill can't judge), and a rule with no finding is a warn
   version as it was: copied straight in, a link it couldn't follow left the skill half there,
   live but uncommitted (#604). A failed copy or git call prints one `not added: …` line (`not
   patched`, `not retired`, `not restored`: `cli._skill_failure`). `git add -A -- <name>`, commit only if something changed
-  (an identical re-add prints "updated" and commits nothing). Refuses the names in
+  (an identical re-add prints "updated" and commits nothing), and only that skill's paths
+  (`commit -- <name>`; retire and restore `-- <name> retired/<name>`); a commit that fails puts
+  the committed copy back (`skills._undo_put`: the old version, or none for a new skill). Add,
+  patch (from reading the text it replaces), retire and restore each hold `locks/skills.lock`
+  (`skills._library_lock`, reentrant) throughout: two sessions adding at once once committed
+  both skills under one's message, the other's message, source and review record lost, or met
+  each other's `index.lock` and left a skill live but uncommitted (#822). Refuses the names in
   `context.denied_skills()` (`workbench` and the user's personal skills), because skill denies
   are by name, and `retired` (the library's own directory, refused by `check`); refuses a source
   inside the library (it would be scanned against itself: use `patch`, or add a copy from
@@ -6323,6 +6329,7 @@ $WB_HOME (~/.local/state/workbench)
   locks/prepare.json, prepare-<n>.lock  the setups' and base checks' queue ({pid: {task, since, start,
                                  holding}}) and their turns, PREP_SLOTS of them (runner.prep_turn, #590)
   locks/signal-stop.lock         one runner at a time writing a shutdown's one notice (runner._signal_notice, #544)
+  locks/skills.lock              one change to the skill library at a time, add to commit (skills._library_lock, #822)
   locks/config-<key>.lock        one read-modify-write at a time of a user's config file (store.config_lock:
                                  <key> from the path a write lands in; beside the file it would be a stray
                                  file in the user's dotfiles; #495)
