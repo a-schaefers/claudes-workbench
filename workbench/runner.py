@@ -3322,7 +3322,7 @@ def _signal_notice(task: store.Task, at: float) -> None:
         ts = store.now()
         # the steps `wb next` committed, which a discard keeps (#494), for each task they are in
         kept = [line for t in batch if (line := steps_line(t))]
-        batch[0].notify("stuck", (
+        row = batch[0].notify("stuck", (
             f"task {task.name}: {SIGNAL_STOP}. wb resume {task.name} continues it in a fresh "
             f"session, wb discard {task.name} drops it" if len(batch) == 1 else
             f"{len(batch)} tasks' runners were stopped by a signal (a shutdown, a logout or a "
@@ -3333,8 +3333,7 @@ def _signal_notice(task: store.Task, at: float) -> None:
             + "".join(f"\n{k}" for k in kept),
             round=batch[0].status.get("round"), ts=ts, tasks=names,
             cause="signal")  # not the step's size (#582)
-        for t in batch[1:]:
-            store.write_ack(t, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
+        store.ack_batch(batch, row, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
 
 
 def lock_file(name: str, kind: str):

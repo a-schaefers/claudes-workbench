@@ -5678,6 +5678,34 @@ class Watch(Base):
         self.assertEqual([float((t.dir / "noticed").read_text()) for t in tasks], [batch, batch])
         self.assertFalse((store.home().parent / "x" / "noticed").exists())
 
+    def test_a_batch_notice_stamped_later_than_asked_acknowledges_its_other_tasks_up_to_that_stamp(self):
+        # #874 (Claude's audit of 1.90.24): append_jsonl moved the batch's stamp past a notice
+        # dated in the future (a backward clock step), each named task's `noticed` took the moved
+        # stamp, but batch[1:] were acked at the stamp asked for: the mod's idle net then woke
+        # Claude once a task, the wake the batch was for
+        def tasks(*names):
+            out = []
+            for name in names:
+                t = store.Task(name)
+                store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now(),
+                                                       "session": "s-1", "cwd": "/w"})
+                out.append(t)
+            return out
+        store.append_jsonl(store.home() / "notify.jsonl", {"ts": time.time() + 3600, "task": "t-z",
+                                                           "kind": "review", "text": "ahead"})
+        a, b = tasks("t-u1", "t-u2")
+        with mock.patch.object(cli, "_stop_runner"):
+            cli._stop_for_update([a, b])
+        noticed = float((b.dir / "noticed").read_text())
+        self.assertGreater(noticed, time.time() + 3000)
+        self.assertGreaterEqual(cli._acked(b), noticed)
+        at = time.time()
+        c, d = tasks("t-s1", "t-s2")
+        for t in (c, d):
+            t.set_status(phase="stuck", last=runner.SIGNAL_STOP, signalled=at)
+        runner._signal_notice(c, at)  # no runner of theirs left to wait for
+        self.assertGreaterEqual(cli._acked(d), float((d.dir / "noticed").read_text()))
+
     def test_a_malformed_notice_breaks_neither_wait_nor_the_commands_that_acknowledge(self):
         # one row without a task made every acknowledging command raise KeyError, and a task
         # named ../../x put wb wait's ack outside the state directory (the 2026-11-16 audit)

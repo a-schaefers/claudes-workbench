@@ -441,15 +441,14 @@ def _restart_notice(task: store.Task) -> None:
     ts = store.now()
     # the batch by name: `wb resume --all --repo <cwd>` resumed nothing for a session in ~ (a
     # broad directory claims no task) and, in a repo two sessions share, the other's tasks too (#692)
-    batch[0].notify("failed", (f"task {task.name}: {RESTARTED}" if len(batch) == 1 else
+    row = batch[0].notify("failed", (f"task {task.name}: {RESTARTED}" if len(batch) == 1 else
                                f"{len(batch)} tasks were {RESTARTED.replace('it)', 'them)')}: "
                                + ", ".join(t.name for t in batch))
                     + f". wb resume {' '.join(t.name for t in batch)}"
                     + " continues them in the order they were started (one that never ran a "
                     "round starts it again)", round=batch[0].status.get("round"), ts=ts,
                     tasks=[t.name for t in batch], cause="died")  # not the step's size (#582)
-    for t in batch[1:]:
-        _write_ack(t, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
+    store.ack_batch(batch, row, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
 
 
 def _whose(t) -> str:
@@ -479,13 +478,12 @@ def _stop_for_update(tasks) -> str:
         groups.setdefault(store.owner(t), []).append(t)
     for batch in groups.values():
         names, ts = [t.name for t in batch], store.now()
-        batch[0].notify("stuck", (f"task {names[0]}: {UPDATE_STOP}" if len(batch) == 1 else
+        row = batch[0].notify("stuck", (f"task {names[0]}: {UPDATE_STOP}" if len(batch) == 1 else
                                   f"{len(batch)} tasks were {UPDATE_STOP}: " + ", ".join(names))
                         + f". wb resume {' '.join(names)} continues "
                         + ("it" if len(batch) == 1 else "them") + " in a fresh session",
                         round=batch[0].status.get("round"), ts=ts, tasks=names, cause="update")
-        for t in batch[1:]:
-            _write_ack(t, ts)  # had with the first's notice, as a restart's batch (#544)
+        store.ack_batch(batch, row, ts)  # had with the first's notice, as a restart's batch (#544)
     return "stopped for the update: " + (", ".join(f"{t.name} ({_whose(t)})" for t in stopped)
                                           or "nothing was running")
 

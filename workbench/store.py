@@ -822,9 +822,11 @@ class Task:
     def event(self, row: dict) -> None:
         append_jsonl(self.dir / "events.jsonl", row)
 
-    def notify(self, kind: str, text: str, **extra) -> None:
+    def notify(self, kind: str, text: str, **extra) -> dict | None:
+        """The notice, as notify.jsonl has it (its `ts` maybe moved later), or None for a bench
+        replay's, which wakes no one."""
         if self.spec.get("bench"):  # a replay of wb bench's: no one is to be woken
-            return
+            return None
         # stamped after every notice before it and after the task's acknowledgement, whatever
         # the clock did since: corrected backwards (a dual boot with a local-time RTC), a notice
         # raised after a mark came out at or before it, and wb wait, the mod's wake and its idle
@@ -849,6 +851,7 @@ class Task:
                 was = 0.0
             if d.is_dir() and not was >= row["ts"]:
                 replace_bytes(d / "noticed", str(row["ts"]).encode())
+        return row
 
 
 # The scratch directories workbench makes in its home, each named <prefix><maker's pid>-…: wb gc
@@ -884,6 +887,21 @@ def write_ack(task: "Task", ts: float) -> None:
     between a truncate and the write (or a write that failed after it) saw 0, every old notice
     news again (the 2026-11-16 audit)."""
     replace_bytes(task.dir / "acked", str(ts).encode())  # synced: read back empty, all news (#734)
+
+
+def ack_batch(batch: list, row: dict | None, ts: float) -> None:
+    """The rest of a batch notice's tasks (batch[1:]) acknowledged with it: up to the stamp
+    notify.jsonl has (`row`), which append_jsonl may have moved past `ts`, and never lower than
+    each one's own mark. Acked at the `ts` asked for, each was left below its `noticed`, and the
+    mod's idle net woke Claude once a task, the wake the batch was for (#874, Claude's audit of
+    1.90.24)."""
+    upto = row["ts"] if row else ts
+    for t in batch[1:]:
+        try:
+            acked = float((t.dir / "acked").read_text() or 0)
+        except (OSError, ValueError):
+            acked = 0.0
+        write_ack(t, max(acked, upto) if math.isfinite(acked) else upto)
 
 
 def all_tasks(archived: bool = False):

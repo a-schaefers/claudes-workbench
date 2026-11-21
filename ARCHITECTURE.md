@@ -738,7 +738,7 @@ its signal, while another task of its session (`store.owner`: task.json `session
 `repo`) still runs a live runner; then, under `locks/signal-stop.lock`, one notice names every
 task of the session the signal stopped within that span (`tasks`), raised on the first started
 with `wb resume <a> <b> …` (by name, #692; and each one's `steps_line`; `cause` `signal`), the others
-acknowledged with it (`store.write_ack`); a runner a notice already named raises none. One
+acknowledged with it (`store.ack_batch`); a runner a notice already named raises none. One
 stopped alone keeps its own notice, with `wb resume <n>`. Any other exception writes the traceback to `runner.log`, sets
 `failed` and raises a `failed` notice with the traceback's tail. On the way out `_end_agent` runs
 once more and `pid` and `stopping` are cleared.
@@ -2416,7 +2416,11 @@ A notice's `ts` is the clock's, but later than every notice before it and than i
 `acked` mark, under the file's lock (`append_jsonl(…, after=)`, `store.newest_ts`): a clock
 corrected backwards (a dual boot with a local-time RTC) put a notice raised after a mark at or
 before it, and `wb wait`, the mod's wake and its idle net skipped it as handled (#473, the audit
-of 1.8).
+of 1.8). `Task.notify` returns the row as written, and a batch's other tasks are acknowledged up
+to that stamp, never below their own mark (`store.ack_batch`, for a restart's, a shutdown's and
+`wb update --stop`'s batch): acked at the stamp asked for, a batch whose stamp was moved (a notice
+in the same millisecond, or one dated ahead after a backward clock step) left each below its
+`noticed`, and rewake woke Claude once a task (#874, Claude's audit of 1.90.24).
 
 - **Ears.** The mod runs `wb events`, which prints a line the moment anything in the state
   directory changes (*Waiting without polling*). Each line makes the mod re-read the tasks.
