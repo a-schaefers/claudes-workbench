@@ -1881,6 +1881,10 @@ def _drop_start(task: store.Task, info: dict) -> None:
     repo = Path(info.get("repo") or "/nonexistent")
     if repo.is_dir():
         if info.get("worktree"):
+            # Killed mid-checkout, `git worktree add` leaves its worktree locked "initializing":
+            # remove --force and prune both skip it, and the branch checked out there can't go,
+            # so the name stayed refused (CI, 2026-11-20). The agent never ran: nothing to keep.
+            gitops.git(repo, "worktree", "unlock", info["worktree"], check=False)
             gitops.remove_worktree(repo, Path(info["worktree"]))
         gitops.git(repo, "worktree", "prune", check=False)
         gitops.delete_branch(repo, task.name)

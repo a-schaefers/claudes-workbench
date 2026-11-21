@@ -5647,6 +5647,10 @@ class Cleanup(Base):
             task = store.Task(name)
             self.assertTrue(task.dir.is_dir() and not task.exists)
             self.assertIn(name, g("worktree", "list"))
+            # killed mid-checkout, as a slow CI runner caught it: git's "initializing" lock stays
+            wt = store.read_json(task.dir / cli.STARTING)["worktree"]
+            subprocess.run(["git", "-C", str(self.repo), "worktree", "lock", "--reason",
+                            "initializing", wt], capture_output=True)
 
         killed_start("t-half")
         self.start("t-half", "ok")                      # the same name again: it cleans up first
