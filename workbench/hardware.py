@@ -539,20 +539,42 @@ def _ollama_container() -> tuple[dict, str] | None:
                 host = json.loads(_run(tool, "inspect", "--format", "{{json .HostConfig}}", cid) or "{}")
             except ValueError:
                 host = {}
-            return ({**_environ(raw, OLLAMA_KNOBS), **container_mask(host)},
+            return ({**_environ(raw, OLLAMA_KNOBS), **container_mask(host, _environ(raw, SET_ONLY))},
                     f"the {tool} container {name or cid}")
     return None
 
 
-def container_mask(host) -> dict:
+def _within(granted: str | None, inner: str | None) -> str | None:
+    """A container's own device mask ``inner`` in this host's numbering, its ordinals indexing
+    the devices ``granted`` (the HostConfig's, None: all, numbered as here); a UUID is the same
+    everywhere. Like CUDA, the list stops at the first entry that names no device."""
+    if inner is None:
+        return granted
+    if granted is None:
+        return inner
+    cards, out = [x.strip() for x in granted.split(",") if x.strip()], []
+    for item in (x.strip() for x in inner.split(",")) if inner.strip() else ():
+        if item.isdigit() and int(item) < len(cards):
+            out.append(cards[int(item)])
+        elif item and not item.isdigit() and not item.startswith("-"):
+            out.append(item)
+        else:
+            break
+    return ",".join(out)
+
+
+def container_mask(host, inner: dict | None = None) -> dict:
     """The devices a container's HostConfig gives it, as the masks visible() reads, in this
     host's numbering: `--gpus device=0` or compose `device_ids` (DeviceRequests' DeviceIDs, or a
     Count of the first N; NVIDIA's toolkit numbers them as nvidia-smi does, PCI order), and an AMD
-    card passed as `--device /dev/dri/renderD129` (Devices). The container's own masks number
-    its own devices, so only these say which of this host's cards it has; unread, an Ollama
-    limited to one card was budgeted every card (#463, the audit of 1.8). {} when it has all."""
+    card passed as `--device /dev/dri/renderD129` (Devices). Unread, an Ollama limited to one card
+    was budgeted every card (#463, the audit of 1.8). ``inner``: the container's own environment's
+    masks, which number the devices it was given (_within): dropped, an Ollama granted two cards
+    and set to CUDA_VISIBLE_DEVICES=0 was budgeted both (#651, Codex's audit of 1.90.6). {} when
+    it has all and sets none."""
+    inner = inner or {}
     if not isinstance(host, dict):
-        return {}
+        host = {}
     out = {}
     for req in host.get("DeviceRequests") or []:
         if not isinstance(req, dict):
@@ -575,6 +597,13 @@ def container_mask(host) -> dict:
         picked = [str(amd.index(s)) for r in renders if (s := slot(DRM / r / "device")) in amd]
         if picked:
             out["ROCR_VISIBLE_DEVICES"] = ",".join(dict.fromkeys(picked))
+    for key in ("CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+        if (got := _within(out.get(key), inner.get(key))) is not None:
+            out[key] = got
+    if "CUDA_VISIBLE_DEVICES" in inner and "CUDA_DEVICE_ORDER" not in out and inner.get("CUDA_DEVICE_ORDER"):
+        out["CUDA_DEVICE_ORDER"] = inner["CUDA_DEVICE_ORDER"]  # all its cards: its own order
+    if "HIP_VISIBLE_DEVICES" in inner:  # it numbers what ROCR leaves, inside as here
+        out["HIP_VISIBLE_DEVICES"] = inner["HIP_VISIBLE_DEVICES"]
     return out
 
 

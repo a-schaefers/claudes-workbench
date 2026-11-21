@@ -15903,6 +15903,34 @@ class Hardware(unittest.TestCase):
         self.assertEqual(hw.container_mask({"DeviceRequests": [{**gpus, "Count": -1}]}), {})  # --gpus all
         self.assertEqual(hw.container_mask(["not", "a", "host config"]), {})
 
+    def test_an_ollama_containers_own_device_mask_counts_within_the_cards_it_was_given(self):
+        # #651 (Codex's audit of 1.90.6): two cards granted, CUDA_VISIBLE_DEVICES=0 in the
+        # container's environment, and wb rebuilt the mask from the grants alone: both counted
+        gpus = {"Capabilities": [["gpu"]], "Driver": ""}
+        two = {"DeviceRequests": [{**gpus, "DeviceIDs": ["0", "1"]}]}
+        from workbench import hardware
+        mask = lambda host, **env: hardware.container_mask(host, env)  # noqa: E731
+        self.assertEqual(mask(two, CUDA_VISIBLE_DEVICES="0"),
+                         {"CUDA_VISIBLE_DEVICES": "0", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
+        remapped = {"DeviceRequests": [{**gpus, "DeviceIDs": ["2", "3"]}]}
+        self.assertEqual(mask(remapped, CUDA_VISIBLE_DEVICES="1")["CUDA_VISIBLE_DEVICES"], "3")
+        self.assertEqual(mask(remapped, CUDA_VISIBLE_DEVICES="1,0")["CUDA_VISIBLE_DEVICES"], "3,2")
+        self.assertEqual(mask(remapped, CUDA_VISIBLE_DEVICES="0,5,1")["CUDA_VISIBLE_DEVICES"], "2")  # stops, as CUDA does
+        self.assertEqual(mask(remapped, CUDA_VISIBLE_DEVICES="GPU-abc")["CUDA_VISIBLE_DEVICES"], "GPU-abc")
+        self.assertEqual(mask(remapped, CUDA_VISIBLE_DEVICES="")["CUDA_VISIBLE_DEVICES"], "")  # none
+        self.assertEqual(mask(remapped)["CUDA_VISIBLE_DEVICES"], "2,3")              # its own: unset
+        everything = {"DeviceRequests": [{**gpus, "Count": -1}]}                     # --gpus all
+        self.assertEqual(mask(everything, CUDA_VISIBLE_DEVICES="1", CUDA_DEVICE_ORDER="PCI_BUS_ID"),
+                         {"CUDA_VISIBLE_DEVICES": "1", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
+        self.assertEqual(mask(everything, CUDA_VISIBLE_DEVICES="1"), {"CUDA_VISIBLE_DEVICES": "1"})
+        self.assertEqual(mask(everything), {})
+        hw = self.fake("Linux", runs={
+            ("docker", "ps"): "beef ollama/ollama llm",
+            ("docker", "inspect", "--format", "{{json .Config.Env}}"): json.dumps(
+                ["OLLAMA_NUM_PARALLEL=2", "CUDA_VISIBLE_DEVICES=0"]),
+            ("docker", "inspect", "--format", "{{json .HostConfig}}"): json.dumps(remapped)})
+        self.assertEqual(hw.ollama_env()["CUDA_VISIBLE_DEVICES"], "2")
+
     def test_an_ollama_containers_readable_process_still_gets_the_cards_its_container_was_given(self):
         # the review of #463: rootless docker's processes are this user's, so /proc read first
         # found the container's ollama serve, which gives its knobs only, and its HostConfig's

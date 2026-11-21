@@ -3187,10 +3187,15 @@ a space; an `EnvironmentFile` isn't in it); a running container of an `ollama` i
 `HostConfig` gives it, `container_mask`: `DeviceRequests`' `DeviceIDs`, or a `Count` of the first
 N, as `CUDA_VISIBLE_DEVICES` with `CUDA_DEVICE_ORDER=PCI_BUS_ID`, and `Devices`' `/dev/dri/renderD…`
 as `ROCR_VISIBLE_DEVICES`, this host's numbering; unread, `--gpus device=0` was budgeted every
-card, #463, the audit of 1.8); on macOS launchctl (what the
+card, #463, the audit of 1.8; and within those, the container's own `CUDA_VISIBLE_DEVICES` and
+`ROCR_VISIBLE_DEVICES` from its `Config.Env`, each ordinal an index into the granted list
+(`hardware._within`: grants 2,3 and its `CUDA_VISIBLE_DEVICES=1` is this host's 3; a UUID as it
+is; with every card granted, its mask and `CUDA_DEVICE_ORDER` as they are; its
+`HIP_VISIBLE_DEVICES` passes through): dropped, two cards granted and one set were budgeted as
+two, #651; the host-UUID mapping on a real two-card machine is unchecked); on macOS launchctl (what the
 app reads); a unit that isn't running. A process in another mount namespace than wb's, and a
 container, give only `OLLAMA_KNOBS` (`OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`,
-`OLLAMA_MAX_LOADED_MODELS`): their paths, bind address and device numbers are the container's.
+`OLLAMA_MAX_LOADED_MODELS`), and a container its device masks mapped as above: their paths, bind address and device numbers are the container's.
 A process in a container gives way to the container's own answer when `docker`/`podman` lists
 one, since only its `HostConfig` says which cards it has (rootless docker or podman, whose
 processes this user can read, and wb as root, were budgeted every card: the review of #463).
