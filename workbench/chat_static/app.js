@@ -222,8 +222,8 @@
         : ' · Claude is waiting for your answer')))
       return meta
     }
-    if (m.from === 'notice') {
-      meta.append(span('', clock(m.ts) + ' · answer it in the terminal'))
+    if (m.from === 'notice') {  // settled once its dialog was answered in the terminal (#959)
+      meta.append(span('', clock(m.ts) + (m.answered ? ' · answered in the terminal ' + clock(m.answered) : ' · answer it in the terminal')))
       return meta
     }
     if (m.from === 'claude') {
@@ -1400,16 +1400,17 @@
   // page coming on screen (shown, focused, back from the cache) or a tap or key in it tells the
   // computer, at most once per ACTIVE_MS while it stays in use, again at once when it comes
   // back. Only a page on screen and focused: one merely open in a background tab, or visible
-  // beside the terminal, says nothing.
+  // beside the terminal, says nothing. A post that failed is not tried again on a timer: a page
+  // left in front on a phone put down retried until the line came back, after the user had typed
+  // in the terminal, and made them away with no use at all (the #959 review). The next real use
+  // reports at once instead.
   const ACTIVE_MS = 30_000
-  let activeAt = 0, activeRetry = 0
+  let activeAt = 0
   function reportActive() {
     if (document.hidden || !document.hasFocus() || !token) return
     if (Date.now() - activeAt < ACTIVE_MS) return
     activeAt = Date.now()
-    clearTimeout(activeRetry)
-    // a line dead from the phone's sleep: tried again in a few seconds while still in use
-    post('/api/active', {}).catch(() => { activeAt = 0; activeRetry = setTimeout(reportActive, 5000) })
+    post('/api/active', {}).catch(() => { activeAt = 0 })
   }
   document.addEventListener('visibilitychange', () => { if (document.hidden) activeAt = 0; else reportActive() })
   addEventListener('focus', reportActive)

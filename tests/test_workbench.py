@@ -18865,6 +18865,33 @@ class WebChat(Base):
         # the mod's owed-reply check reads only Claude's own rows: a notice is no reply (#767)
         self.assertNotIn(pushed["id"], [m["id"] for m in chat.thread() if m["from"] == "claude"])
 
+    def test_a_notice_whose_dialog_was_answered_in_the_terminal_is_never_pushed_and_says_answered_959(self):
+        # the #959 review: nothing settled a notice when its dialog was answered, so a prompt
+        # approved at the terminal in two seconds still buzzed the phone ten seconds later,
+        # saying Claude waited, and the thread said so for good
+        chat = self.chat
+        from workbench import webpush as wp
+        wp.subscribe("https://fcm.googleapis.com/fcm/send/abc")
+        row = chat.notice("Bash", "make deploy")
+        self.assertEqual(run_wb("chat", "notice", "--done", row["id"]).strip(), f"answered {row['id']}")
+        hub = chat.Hub()
+        self.addCleanup(hub.close)
+        sent = []
+        pusher = chat.Pusher(hub, send=lambda eps: (sent.append(eps), {e: 201 for e in eps})[1])
+        self.assertEqual(pusher.tick(row["ts"] + chat.PUSH_DELAY + 1), [])  # due, but settled: no push
+        self.assertEqual(sent, [])
+        got = chat.thread()[-1]
+        self.assertEqual((got["id"], bool(got["answered"])), (row["id"], True))  # the page says answered
+        self.assertEqual(chat.latest()["messages"], [])                         # and no push shows it
+        reply = chat.send("done", "claude")
+        self.assertEqual(chat.latest()["messages"][-1]["id"], reply["id"])
+        self.assertEqual(chat.pending(), [])                  # a notice's receipt is no user message's
+        # only a notice settles: a user's message or an unknown id is refused
+        mine = chat.send("hi", "user")
+        self.assertFalse(chat.notice_done(mine["id"]))
+        with self.assertRaises(SystemExit):
+            run_wb("chat", "notice", "--done", "123-abc")
+
     def test_vapid_signatures_are_es256_that_openssl_and_push_services_can_check(self):
         from workbench import webpush as wp
         # RFC 6979 A.2.5, P-256 with SHA-256, "sample": the known key, nonce and signature

@@ -263,9 +263,9 @@ async function run(engine, device) {
     if (await page.locator('#settings').isHidden()) await page.click('#gear')  // the last check left it open
     await until(async () => await page.locator('#settings').isVisible())
     const said = await page.textContent('#away-when')
-    for (const want of ['use this page (open it or send a message here) after typing in the terminal',
-                        'until you type in the terminal again',
-                        "While you're at the terminal, prompts stay there and this page is told."])
+    for (const want of ['use this page (open it or send a message here) after using the terminal',
+                        'until you type or answer a prompt in the terminal again',
+                        "While you're at the terminal, prompts stay there, and one still waiting after half a minute is told here."])
       if (!said.includes(want)) throw new Error(said)
     await page.click('#gear')
     await until(async () => await page.locator('#settings').isHidden())
@@ -308,6 +308,28 @@ async function run(engine, device) {
       await page.evaluate(() => { delete document.hidden; if (document._hasFocus) document.hasFocus = document._hasFocus })
     }
   })
+  await check('a failed activity post is not tried again on a timer, only on the next use (the #959 review)', async () => {
+    // the #959 review: a page left in front on a phone put down retried every 5 s until the line
+    // came back, after the user had typed in the terminal, and made them away with no use at all
+    // a dead line, by the page's own fetch: WebKit routes no requests once the worker is registered
+    await page.evaluate(() => {
+      window._fetch = window.fetch; window._tries = 0
+      window.fetch = (u, o) => String(u).includes('/api/active')
+        ? (window._tries++, Promise.reject(new TypeError('Load failed'))) : window._fetch(u, o)
+    })
+    const tries = () => page.evaluate(() => window._tries)
+    try {
+      await sleep(31_000)                                        // past the last report's 30 s
+      await page.locator('.thread').click({ position: { x: 5, y: 5 } })
+      await until(async () => await tries() === 1)
+      await sleep(6500)                                          // the old retry came at 5 s
+      if (await tries() !== 1) throw new Error(`tried ${await tries()} times with no use`)
+      await page.locator('.thread').click({ position: { x: 5, y: 5 } })  // used again: at once
+      await until(async () => await tries() === 2)
+    } finally {
+      await page.evaluate(() => { window.fetch = window._fetch })
+    }
+  })
   await check('a prompt waiting in the terminal shows as a notice, with no buttons (#959)', async () => {
     const id = wb('chat', 'notice', '--tool', 'Bash', '--text', 'rm -rf runs/*').trim()
     if (id.startsWith('skipped')) throw new Error(id)
@@ -316,6 +338,9 @@ async function run(engine, device) {
     if ((await row.locator('.notice-what').textContent()) !== 'rm -rf runs/*') throw new Error(await row.textContent())
     if (await row.locator('button').count()) throw new Error('a notice with buttons')
     if (!(await row.locator('.meta').textContent()).includes('answer it in the terminal')) throw new Error(await row.textContent())
+    // answered there: settled, so the thread no longer says it waits (the #959 review)
+    if (!wb('chat', 'notice', '--done', id).startsWith('answered')) throw new Error('not settled')
+    await until(async () => (await row.locator('.meta').textContent()).includes('answered in the terminal'))
   })
   await check('the gear shows what the week\'s tasks saved Claude, as an estimate', async () => {
     const usage = { turns: 2, calls: 5, input: 1000, cache_write_5m: 0, cache_write_1h: 10000, cache_read: 200000, output: 3000 }

@@ -501,6 +501,8 @@ def thread(limit: int = 200) -> list[dict]:
             got = receipts.get(r["id"])
             gone = got.get("how") == "expired" if got else _expired(r, now)  # retired (#741)
             r = {**r, "received": None if gone else got, **({"expired": True} if gone else {})}
+        elif r["from"] == "notice" and r["id"] in receipts:  # its dialog answered in the terminal (#959)
+            r = {**r, "answered": receipts[r["id"]].get("ts")}
         out.append(r)
     return out
 
@@ -594,7 +596,10 @@ def latest() -> dict:
     if ask and ask.get("kind") == "plan":
         ask = {k: v for k, v in ask.items() if k != "detail"}
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)
-    last = next((r for r in reversed(rows) if r.get("from") in NEWS), None)
+    # a notice whose dialog was answered in the terminal is no news (#959)
+    answered = {r.get("id") for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", LATEST_BYTES)
+                if r.get("how") == "answered"}
+    last = next((r for r in reversed(rows) if r.get("from") in NEWS and r.get("id") not in answered), None)
     return {"now": store.now(), "asks": [ask] if ask else [], "messages": [last] if last else [],
             "push": {"test": (store.read_json(chat_dir() / "push-test.json", None) or {}).get("ts")}}
 
@@ -1016,9 +1021,10 @@ def set_prefs(**changes) -> dict:
 # and "Let Claude go ahead" set; a permission prompt came up in the terminal, never reached the
 # phone and wasn't allowed (2026-11-21, #959). So using the page counts as using the phone: a page
 # on screen and in use posts /api/active, and that marks the user away as a web message does
-# (chat/away.json's `at`, which the mod reads), until they type in the terminal again (the mod's
-# `back`). chat/page.json `{at}`: when a page was last in use, so a dialog at the terminal is
-# announced only to a user who uses the chat: a page in use within PAGE_RECENT, or push on.
+# (chat/away.json's `at`, which the mod reads), until they type in the terminal again or answer a
+# dialog there (the mod's `back`). chat/page.json `{at}`: when a page was last in use, so a dialog
+# at the terminal is announced only to a user who uses the chat: a page in use within
+# PAGE_RECENT, or push on.
 PAGE_RECENT = 86400
 NOTICE_WHAT = {"permission": "a permission", "plan": "a plan", "question": "a question"}
 
@@ -1053,6 +1059,21 @@ def notice(tool: str, what: str, kind: str = "permission") -> dict | None:
         return None
     return send(f"Claude is waiting on {NOTICE_WHAT[kind]} in the terminal", "notice",
                 tool=tool[:200], what=what[:ASK_TEXT])
+
+
+def notice_done(msg_id: str) -> bool:
+    """The notice's dialog was answered in the terminal (#959): no push is owed for it (one not yet
+    due is never sent), and the thread shows it answered (a receipt `{id, ts, by: "terminal", how:
+    "answered"}`). Unsettled, every prompt approved at the terminal in two seconds still buzzed
+    the phone ten seconds later, saying it waited (the #959 review). False for an id that is no
+    notice in the thread."""
+    if not any(r.get("id") == msg_id and r.get("from") == "notice"
+               for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)):
+        return False
+    mark_seen([msg_id], "terminal")
+    store.append_jsonl(chat_dir() / "receipts.jsonl",
+                       {"id": msg_id, "ts": store.now(), "by": "terminal", "how": "answered"})
+    return True
 
 
 # The web chat's switch (the user, 2026-11-19): off unless they turn it on, from the pane or `wb chat
