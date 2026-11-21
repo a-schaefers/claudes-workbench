@@ -79,7 +79,7 @@ def export(session: str, strict: bool = False) -> dict | None:
         if r.returncode:
             _complain("export", r)
         if r.returncode == 0 and r.stdout.strip():
-            return json.loads(r.stdout)
+            return store.loads(r.stdout)  # its strings written out again (#438)
     except (OSError, subprocess.TimeoutExpired, ValueError):  # a busy or broken store: nothing known
         pass
     return None if strict else {}

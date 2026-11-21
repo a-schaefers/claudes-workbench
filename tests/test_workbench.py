@@ -449,6 +449,17 @@ class Lifecycle(Base):
         wait_phase("t-bg", {"review"})
         self.assertTrue(wait_gone(int(pidfile.read_text())))
 
+    def test_half_an_emoji_in_an_event_is_written_as_a_replacement_character(self):
+        # #438: a lone surrogate (valid JSON, kept by json.loads) failed the status write and the
+        # task with UnicodeEncodeError
+        os.environ["FAKE_SURROGATE"] = "1"
+        self.start("t-sur", "ok")
+        st = wait_phase("t-sur", {"review", "failed"})
+        self.assertEqual(st["phase"], "review", st)
+        events = (store.Task("t-sur").dir / "events.jsonl").read_text(encoding="utf-8")
+        self.assertIn("caf�.txt", events)
+        self.assertIn("half �", events)
+
     def test_an_agent_that_closes_its_output_and_lingers_is_stopped(self):
         # #83 (the 2026-11-18 audit): EOF left the watchdog loop for an unbounded wait, so an
         # OpenCode hung in its shutdown held the task and the GPU lease for good
