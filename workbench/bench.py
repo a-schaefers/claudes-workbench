@@ -109,12 +109,79 @@ def _checkout_at(d: Path, case: dict) -> Path:
     return work
 
 
+def _clone_base(bundle_path: Path, dest: Path, repo: Path) -> None:
+    """A bundle's main checked out at `dest`, its Git LFS files as data from `repo`'s own LFS
+    objects (gitops.share_lfs), which no bundle carries: a plain clone of one checked out pointer
+    files where the tests wanted the data (#509, the audit of 1.90). RuntimeError naming LFS
+    when they can't be had."""
+    gitops.git(dest.parent, "clone", "-q", "--no-checkout", "-b", "main", str(bundle_path), str(dest))
+    lfs = bool(gitops.git(dest, "grep", "-l", "-e", "filter=lfs", "main", "--",
+                          ":(glob)**/.gitattributes", check=False).strip())
+    if lfs and not repo.is_dir():
+        raise RuntimeError(f"the case's base has Git LFS files, which come from {repo}, and it is "
+                           "gone: it can't be checked out as the task had it")
+    if lfs:
+        gitops.share_lfs(repo, dest)
+    try:
+        gitops.git(dest, "reset", "-q", "--hard")
+    except gitops.GitError as e:
+        if not lfs:
+            raise
+        raise RuntimeError(f"the case's Git LFS files can't be checked out from {repo}'s LFS "
+                           f"objects (git lfs fetch there?): {str(e)[-300:]}") from None
+
+
+def _filled(repo: Path, commit: str, work: Path, where: str) -> None:
+    """`commit`'s submodules filled in a scratch checkout from the user's checkout of each, as
+    verify's are (gitops.fill_submodules): empty, a C/C++ or vendored build failed there and add
+    blamed the case (#509). RuntimeError naming the ones it couldn't fill."""
+    if left := gitops.fill_submodules(repo, commit, work):
+        raise RuntimeError(f"the submodules {', '.join(left[:5])} can't be filled in {where} from "
+                           f"{repo}, whose checkout lacks them or their commits (git submodule "
+                           "update --init --recursive there): the checks would fail for that")
+
+
+def _submodule_repos(src: Path, commit: str, dest: Path) -> list[str]:
+    """Each submodule of `commit` made a repository of its own in the checkout `dest`, at the
+    commit `commit` records: its objects borrowed from the user's checkout of it (alternates),
+    no ref but a detached HEAD, so no later commit of it is in sight. wb start and the scratch
+    checkouts then fill a replay's worktree from it as they fill a task's from the user's
+    checkout (gitops.fill_submodules): the bundle carries no submodule, and a replay's stayed
+    empty (#509, the audit of 1.90). The ones it couldn't make come back by their whole path."""
+    left = []
+    for path in gitops.submodules(src, commit):
+        row = gitops.git(src, "ls-tree", commit, "--", path, check=False).split()
+        sha = row[2] if len(row) >= 3 and row[1] == "commit" else ""
+        s, d = src / path, dest / path
+        if not sha or not (s / ".git").exists() or gitops.git(
+                s, "cat-file", "-t", sha, check=False).strip() != "commit":
+            left.append(path)
+            continue
+        objects = (s / gitops.git(s, "rev-parse", "--git-path", "objects").strip()).resolve()
+        d.mkdir(parents=True, exist_ok=True)
+        gitops.git(d, "init", "-q")
+        (d / ".git" / "objects" / "info" / "alternates").write_text(f"{objects}\n")
+        gitops.git(d, "update-ref", "--no-deref", "HEAD", sha)
+        gitops.git(d, "reset", "-q", "--hard")
+        left += [f"{path}/{p}" for p in _submodule_repos(s, sha, d)]
+    return left
+
+
 def checkout(case: dict, dest: Path) -> None:
-    """The case's base, checked out at `dest`, with an identity of its own (nothing commits)."""
-    gitops.git(dest.parent, "clone", "-q", "-b", "main", str(case_dir(case["name"]) / "base.bundle"),
-               str(dest))
+    """The case's base, checked out at `dest`, with an identity of its own (nothing commits), and
+    its Git LFS files and submodules as the task had them, from the case's repo (#509).
+    RuntimeError naming what it couldn't reproduce."""
+    repo = Path(case["repo"])
+    _clone_base(case_dir(case["name"]) / "base.bundle", dest, repo)
     gitops.git(dest, "config", "user.name", "workbench bench")
     gitops.git(dest, "config", "user.email", "bench@workbench.invalid")
+    if gitops.submodules(dest, "HEAD"):
+        left = _submodule_repos(repo, case["base"], dest) if repo.is_dir() else \
+            gitops.submodules(dest, "HEAD")
+        if left:
+            raise RuntimeError(f"the submodules {', '.join(left[:5])} can't be filled from "
+                               f"{repo}: it is gone, or its checkout lacks them or their commits "
+                               "(git submodule update --init --recursive there)")
 
 
 def overlay(case: dict, worktree: Path, src: Path | None = None) -> None:
@@ -260,7 +327,8 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
         with tempfile.TemporaryDirectory(prefix=store.scratch(".base-"), dir=home()) as scratch:
             work = _checkout_at(Path(scratch), case)
-            gitops.git(scratch, "clone", "-q", "-b", "main", str(tmp / "base.bundle"), str(work))
+            _clone_base(tmp / "base.bundle", work, repo)  # its LFS files and submodules (#509)
+            _filled(repo, base, work, "the base")
             overlay(case, work, tmp)  # as a replay gets them (#346)
             at = _At(name, work)
             _prepared(at, "the base")
@@ -276,9 +344,11 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         with tempfile.TemporaryDirectory(prefix=store.scratch(".check-"), dir=home()) as scratch:
             work = _checkout_at(Path(scratch), case)
             gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
+            gitops.share_lfs(repo, work)  # its LFS files as data, as verify's (#382, #509)
             if sparse := gitops.sparse_of(Path(repo)):  # as the task's worktree was (#263)
                 gitops.apply_sparse(work, sparse)
             gitops.git(work, "checkout", "-q", "--detach", ref)
+            _filled(repo, ref, work, f"step {step}'s own commit")
             # the hidden checks overlaid as on a replay: graded straight from the commit, a check
             # the overlay broke (its execute bit lost) still let the case in (#346, the audit of 1.4)
             overlay(case, work, tmp)
@@ -479,7 +549,10 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
     log = open(d / "wb.log", "a")
     work = _checkout_at(d, case)
     try:
-        checkout(case, work)
+        try:
+            checkout(case, work)
+        except RuntimeError as e:  # its LFS files or submodules (#509): the next run tries again
+            return {**row, "outcome": "error", "why": str(e)[:300]}
         _inputs(case, work)
         with redirect_stdout(log):
             try:

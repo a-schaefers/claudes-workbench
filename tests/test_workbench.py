@@ -6346,6 +6346,92 @@ class Bench(Base):
         self.assertTrue((bench.home() / "runs" / "r1" / good["task"] / "diff.patch").exists())
         self.assertNotIn("bench-", run_wb("status"))
 
+    def test_a_case_with_a_submodule_is_checked_and_replayed_with_it_filled(self):
+        # #509 (the audit of 1.90): add's clones and each replay's had empty submodules, so add
+        # refused a task whose build needed one ("fails on step 1's own commit") and a case that
+        # got in counted every replay against the model
+        from workbench import bench
+        lib = Path(self.tmp.name) / "lib"
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        commit = ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm"]
+        (lib / "lib.c").write_text("int x;\n")
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), *commit, "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
+        g("commit", "-qm", "a submodule")
+        mine = self.repo / "vendor" / "lib"                               # the user's checkout of it
+        (mine / "lib.c").write_text("int later;\n")                        # past the base's commit
+        subprocess.run(["git", "-C", str(mine), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(mine), *commit, "later"], check=True)
+        self.accepted("t-sub", test="test -f vendor/lib/lib.c && sh tests/check.sh")
+        self.assertIn("on the base: fails", "\n".join(bench.add("t-sub")))
+        case = bench.cases()["t-sub"]
+        clone = Path(self.tmp.name) / "c"
+        bench.checkout(case, clone)
+        self.assertEqual((clone / "vendor/lib/lib.c").read_text(), "int x;\n")
+        self.assertEqual(gitops.git(clone / "vendor/lib", "for-each-ref").strip(), "")  # no history in sight
+        os.environ["FAKE_SCENARIO"] = "ok"
+        row = bench.replay(case, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(row["outcome"], "passed", row)
+        # the user's checkout without it: named, not graded, and no case made
+        g("-c", "protocol.file.allow=always", "submodule", "deinit", "-q", "-f", "vendor/lib")
+        row = bench.replay(case, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(row["outcome"], "error")
+        self.assertIn("submodules vendor/lib can't be filled", row["why"])
+        with self.assertRaisesRegex(RuntimeError, "submodules vendor/lib can't be filled in the base"):
+            bench.add("t-sub", case_name="t-sub-2")
+
+    def test_a_bundle_checkout_runs_the_repos_lfs_filter_and_names_lfs_once_the_repo_is_gone(self):
+        # #509 without git-lfs: a stand-in filter shows the clone takes the repo's filter.lfs.*
+        # before it checks anything out (the test below does it with git-lfs itself)
+        from workbench import bench
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("config", "filter.lfs.clean", "sed s/DATA/POINTER/")
+        g("config", "filter.lfs.smudge", "sed s/POINTER/DATA/")
+        (self.repo / ".gitattributes").write_text("*.bin filter=lfs\n")
+        (self.repo / "d.bin").write_text("DATA\n")
+        g("add", ".")
+        g("commit", "-qm", "data")
+        base = gitops.git(self.repo, "rev-parse", "HEAD").strip()
+        tmp = Path(self.tmp.name)
+        bench.bundle(self.repo, base, tmp / "b.bundle")
+        bench._clone_base(tmp / "b.bundle", tmp / "c", self.repo)
+        self.assertEqual((tmp / "c" / "d.bin").read_text(), "DATA\n")      # not the stored POINTER
+        with self.assertRaisesRegex(RuntimeError, "Git LFS files, which come from .* gone"):
+            bench._clone_base(tmp / "b.bundle", tmp / "c2", tmp / "gone")
+
+    @unittest.skipUnless(GIT_LFS, "needs git-lfs")
+    def test_a_case_with_git_lfs_files_is_checked_and_replayed_on_the_data(self):
+        # #509 (the audit of 1.90): no bundle carries LFS objects, so add's base check, a
+        # replay's checkout and bench self's had pointer files where the tests read the data
+        from workbench import bench
+        identity = Path(self.tmp.name) / "gitconfig"
+        identity.write_text("[user]\n\tname = t\n\temail = t@t\n")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(identity), GIT_CONFIG_NOSYSTEM="1")
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("lfs", "install", "--local")
+        g("lfs", "track", "*.bin")
+        (self.repo / "data.bin").write_bytes(b"DATA" + bytes(10**4))
+        g("add", ".")
+        g("commit", "-qm", "LFS data")
+        self.accepted("t-lfs", test="grep -q DATA data.bin && sh tests/check.sh")
+        self.assertIn("on the base: fails", "\n".join(bench.add("t-lfs")))
+        case = bench.cases()["t-lfs"]
+        clone = Path(self.tmp.name) / "c"
+        bench.checkout(case, clone)
+        self.assertEqual((clone / "data.bin").stat().st_size, 10**4 + 4)   # the data, not a pointer
+        os.environ["FAKE_SCENARIO"] = "ok"
+        row = bench.replay(case, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(row["outcome"], "passed", row)
+        # the repo gone: its LFS files can't be had, said so
+        shutil.move(self.repo, Path(self.tmp.name) / "moved")
+        with self.assertRaisesRegex(RuntimeError, "Git LFS files, which come from .* gone"):
+            bench.checkout(case, Path(self.tmp.name) / "c2")
+
     def test_a_package_case_is_replayed_set_up_and_graded_in_its_package(self):
         # #425 (the audit of 1.8): the case kept no package path, so a replay ran from the repo's
         # root, and an answer.txt written there passed a check of app/answer.txt
