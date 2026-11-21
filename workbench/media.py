@@ -7,6 +7,7 @@ whatever the kind of media adds. The first entry is the default; non-object valu
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import os
 import re
@@ -68,6 +69,9 @@ def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:
     for k in STRINGS:
         if k in e and not isinstance(e[k], str):
             return f"{k} must be a string"
+    for k in ("url", "unload"):
+        if e.get(k) and (why := _not_url(e[k])):
+            return f"{k} isn't a URL ({why})"
     if e.get("command"):
         try:
             if not shlex.split(e["command"]):
@@ -85,6 +89,20 @@ def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:
     if kinds and "kind" in e and e["kind"] not in kinds:
         return f"kind must be one of {', '.join(kinds)}"
     return ""
+
+
+def _not_url(url: str) -> str:
+    """Why ``url`` can't be posted to, or ''. A placeholder left in it (`:port`), a port past
+    65535 or a missing `:` ended `wb scout`, the listings and generation in a traceback from
+    http.client or urlparse, neither OSError nor RuntimeError (#748)."""
+    try:
+        u = urlparse(url)
+        u.port  # raises on a port that isn't a number in range
+    except ValueError as err:
+        return str(err)
+    if u.scheme not in ("http", "https"):
+        return "it needs http:// or https://"
+    return "" if u.hostname else "it names no host"
 
 
 def starts(path: Path) -> str:
@@ -143,7 +161,7 @@ def ready(e: dict, kinds: tuple[str, ...] = (), base: Path | None = None) -> str
             if err.code in (401, 403):  # it was listed as ready, then failed every generation (#597)
                 return (f"{root} refused the key (HTTP {err.code})" if e.get("key")
                         else f"{root} wants an API key (HTTP {err.code}): `key` in its entry")
-        except OSError:
+        except (OSError, ValueError, http.client.HTTPException):  # ValueError and InvalidURL: a backstop (#748)
             return f"nothing answers at {root}"
         return ""
     return "neither command nor url"
@@ -193,7 +211,10 @@ def on_gpu(e: dict) -> bool:
     if "gpu" in e:
         return e["gpu"] is not False
     if isinstance(e.get("url"), str) and not e.get("command"):
-        return models._this_host(urlparse(e["url"]).hostname)
+        try:
+            return models._this_host(urlparse(e["url"]).hostname)
+        except ValueError:  # a url that doesn't parse: listed as not usable, never run (#748)
+            return True
     return True
 
 

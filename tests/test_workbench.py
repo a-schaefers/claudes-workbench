@@ -8518,6 +8518,33 @@ class Audio(Base):
         self.assertEqual(calls[-1][calls[-1].index("--seconds") + 1], "3")   # not "3.0"
         self.assertEqual(media.fill("x {s}", {"s": 2.5}), ["x", "2.5"])
 
+    def test_a_url_that_doesnt_parse_is_listed_as_not_usable_and_refused_before_the_gpu(self):
+        # #748 (the 2026-11-21 audit, finding 94): a placeholder `:port` ended wb image --list,
+        # wb scout and generation in http.client's InvalidURL; `:99999` a ValueError in generate
+        from workbench import images, media
+        tmp = Path(self.tmp.name)
+        bad = {"port": ("http://127.0.0.1:port/v1/images/generations", "url isn't a URL"),
+               "range": ("http://127.0.0.1:99999/v1/images/generations", "url isn't a URL"),
+               "colon": ("http//host/v1/images/generations", "url isn't a URL (it needs http"),
+               "nohost": ("http:///v1/images/generations", "url isn't a URL (it names no host)"),
+               "ipv6": ("http://[::1/v1/images/generations", "url isn't a URL (Invalid IPv6 URL)")}
+        (tmp / "images.json").write_text(json.dumps(
+            {**{k: {"url": u} for k, (u, _) in bad.items()},
+             "unload": {"url": "http://127.0.0.1:1/v1/images/generations", "unload": "localhost:port/free"}}))
+        self.engines({"say": {"url": "http://127.0.0.1:port/v1/audio/speech"}})
+        held = []
+        with mock.patch.dict(os.environ, {"WB_IMAGES": str(tmp / "images.json")}), \
+                mock.patch.object(media, "gpu", lambda *a, **k: held.append(a) or nullcontext()):
+            listed = run_wb("image", "--list")
+            for name, (_, why) in bad.items():
+                self.assertRegex(listed, rf"  {name}\b.*not usable: {re.escape(why)}", name)
+                with self.assertRaisesRegex(RuntimeError, f"image engine {name}: not usable"):
+                    images.generate("a fox", tmp / "img", n=1, name=name, say=lambda m: None)
+            self.assertIn("not usable: unload isn't a URL", listed)
+            self.assertIn("not usable: url isn't a URL", run_wb("audio", "--list"))
+            run_wb("scout")                                                   # no traceback
+        self.assertEqual(held, [])
+
     def test_a_second_run_keeps_the_first_clip_and_an_engine_that_writes_nothing_fails(self):
         tmp = Path(self.tmp.name)
         fake = tmp / "fake.py"

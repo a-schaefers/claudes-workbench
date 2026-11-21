@@ -4067,7 +4067,9 @@ custom-node packs do run their own Python).
   `seconds` positive numbers, `voices` a list of names, `gpu` true or false, a known `kind` for
   audio; else "not usable: <why>", refused by `generate` before the lease: an open quote or
   `"timeout": "10m"` ended `wb scout` in a traceback or crashed a generation after the unloads,
-  `"voices": "af_heart"` passed the voice "a", #596), then a command whose first token is on
+  `"voices": "af_heart"` passed the voice "a", #596; a `url` or `unload` that isn't an http(s)
+  URL with a host and a port in range, "url isn't a URL (<why>)": a `:port` placeholder ended the
+  listings, `wb scout` and generation in http.client's InvalidURL, #748), then a command whose first token is on
   PATH or a file; a url whose server answers a GET within 2 s (any status but 401 and 403, "wants
   an API key" or "refused the key": #597, it was listed as ready and failed every generation).
 - `generate`: an engine off this GPU (`media.on_gpu`) runs with no lease and frees nothing; any
