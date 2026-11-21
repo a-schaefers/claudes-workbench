@@ -2397,9 +2397,14 @@ def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
     # read no further than the room: a 300 MB generated file, not ignored, was read whole into
     # the runner at each handover only to be cut, risking an OOM kill (#474, the audit of 1.8)
     diff = gitops.diff(wt, "HEAD", limit=room)
+    # its stat capped as the review's is: uncapped, a venv or a build directory the repo doesn't
+    # ignore put 3,000 stat lines ahead of "## Now", past the fresh session's reach (#863)
     work = (f"```diff\n{diff}\n```" if diff is not None else
             "The diff is too long to include; read the changed files:\n"
-            f"```\n{gitops.diff(wt, 'HEAD', stat=True)}\n```")
+            f"```\n{gitops.diff(wt, 'HEAD', stat=True, stat_count=gitops.CHANGED_SHOWN)}\n```"
+            + "".join(f"\n{d} holds {k:,} new files the project doesn't ignore: build output, "
+                      "probably; don't read them" for d, k in
+                      gitops.build_dirs(wt, gitops.changed(wt))[:gitops.CHANGED_SHOWN]))
     return (f"You are picking this task up in a fresh session ({why}). Nothing from the earlier "
             f"session carries over except what is in the working tree, so start from what is "
             f"below and re-read the files you need.\n\n## The task\n\n"

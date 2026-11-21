@@ -4152,6 +4152,23 @@ class Context(Base):
         (task.worktree / "answer.txt").unlink()
         self.assertIn("No uncommitted changes yet.", runner.handoff_prompt(task, "why", "Carry on."))
 
+    def test_a_handover_with_thousands_of_new_files_lists_a_capped_stat_ahead_of_its_instructions(self):
+        # #863 (the third 2026-11-21 audit): the stat fallback had no cap, so a venv the repo
+        # doesn't ignore put a stat line per file ahead of "## Now", out of a small window's reach
+        self.start("t-863", "ok")
+        wait_phase("t-863", {"review"})
+        task = store.Task("t-863")
+        venv = task.worktree / "venv" / "lib"
+        venv.mkdir(parents=True)
+        for i in range(400):
+            (venv / f"mod{i}.py").write_text(f"x = {i}\n" * 40)
+        with mock.patch.object(runner, "HANDOFF_DIFF_MAX", 2000):
+            prompt = runner.handoff_prompt(task, "why", "Carry on.")
+        work = prompt.split("## The work so far")[1].split("## Now")[0]
+        self.assertIn("The diff is too long to include", work)
+        self.assertLess(work.count("\n"), gitops.CHANGED_SHOWN + 20, work[-500:])  # not 400
+        self.assertIn("venv/ holds 400 new files the project doesn't ignore", work)
+
     def test_the_handover_point_is_the_tasks_tuned_one(self):
         os.environ["FAKE_FILL"] = "25000"          # 76%: past the default 0.6, short of 0.8
         store.home().mkdir(parents=True, exist_ok=True)

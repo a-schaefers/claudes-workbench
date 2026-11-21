@@ -1020,7 +1020,9 @@ base..HEAD`, and the uncommitted diff, `git diff HEAD` with new files; a diff ov
 over `HANDOFF_DIFF_MAX` (60K characters), is replaced by its `--stat` and "read the changed files";
 the diff is read only that far, `gitops.diff(…, limit=)`: read whole and then cut, a 300 MB
 generated file not ignored was hundreds of MB in the runner at each handover, #474, the audit of
-1.8), then, when Claude answered any of the step's questions, `## Claude's answers to your
+1.8; the stat capped at `gitops.CHANGED_SHOWN` files, as the review's, and each new directory of
+build output the repo doesn't ignore named, `gitops.build_dirs`, "don't read them": uncapped, a
+venv not ignored put 3,000 stat lines ahead of `## Now`, #863), then, when Claude answered any of the step's questions, `## Claude's answers to your
 questions` ("An earlier session asked, and Claude answered; follow these, and don't ask them
 again:", then `Q: …`/`A: …` pairs: `runner.answered`, from the runner's own `ask` and `answer`
 events since `step_round`, plain questions only, never `NO_ANSWER`, the latest kept first within
