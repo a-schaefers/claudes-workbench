@@ -13581,6 +13581,41 @@ class Update(Base):
         os.environ["FAKE_SCENARIO"] = "ok"
         self.assertIn("resumed t-theirs", run_wb("resume", "--all", "--session", "sess-b"))
 
+    def test_update_stop_stops_nothing_when_the_update_would_refuse_or_find_nothing_new(self):
+        # #775: --stop stopped every session's tasks first, then died on a dirty clone, a
+        # diverged one, or found nothing to pull, each task resumed in a fresh session for nothing
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "elsewhere")   # a clone
+        git = lambda *a: subprocess.run(["git", "-C", str(self.copy), *a], check=True,  # noqa
+                                        capture_output=True)
+        self.start("t", "hang")
+        running("t")
+        (self.copy / "README.md").write_text("mine")
+        self.assertIn("uncommitted changes", self.update("--stop"))
+        self.assertTrue(cli.runner_alive(store.Task("t")))
+        git("checkout", "-q", "README.md")
+        (self.copy / "mine.txt").write_text("x")
+        git("add", "mine.txt"); git("commit", "-qm", "local")                  # diverged from origin
+        self.assertIn("a fast-forward pull can't update it", self.update("--stop"))
+        self.assertTrue(cli.runner_alive(store.Task("t")))
+        git("reset", "-q", "--hard", "origin/HEAD")
+        git("pull", "-q", "--ff-only")                                          # already current
+        out = self.update("--stop")
+        self.assertIn("already up to date", out)
+        self.assertNotIn("stopped for the update", out)
+        self.assertTrue(cli.runner_alive(store.Task("t")))
+        self.assertEqual(self.calls.read_text().splitlines(),                   # the plugin still refreshed
+                         ["plugin marketplace update workbench", "plugin update workbench@workbench"])
+
+    def test_a_step_failing_after_update_stop_says_how_to_resume_the_stopped_tasks(self):
+        # #775: a marketplace copy can't count its news beforehand, so a failed step comes after
+        # the stop: its line says the tasks were stopped and how to go on
+        (Path(self.tmp.name) / "fakebin" / "claude").write_text("#!/bin/sh\necho offline >&2\nexit 1\n")
+        self.start("t", "hang")
+        running("t")
+        out = self.update("--stop")
+        self.assertIn("claude plugin marketplace update failed: offline", out)
+        self.assertIn("the tasks were stopped for it: wb resume t continues them", out)
+
 
 class Projects(Base):
     """wb init, and wb start's demand for a CLAUDE.md."""

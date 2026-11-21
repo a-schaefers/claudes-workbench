@@ -4328,7 +4328,31 @@ def cmd_update(a):
         print(f"update available: {behind} new commit(s); /workbench-update (or wb update) installs it"
               if behind else "up to date")
         return
-    live = [t for t in store.all_tasks() if runner_alive(t)]
+    # every check that can refuse comes before any task is stopped: --stop stopped every
+    # session's tasks, then died on a dirty clone, a missing claude, a failed fetch, or found
+    # nothing new, each task resumed in a fresh session on the same code (#775)
+    steps = [["claude", "plugin", "marketplace", "update", "workbench"],
+             ["claude", "plugin", "update", "workbench@workbench"]]
+    behind = None  # a marketplace copy is one commit deep: its news can't be counted beforehand
+    if kind == "clone":  # a clone is its own marketplace: pull, then let Claude Code re-read it
+        if gitops.git(PKG_ROOT, "status", "--porcelain", "--untracked-files=no").strip():
+            die(f"{PKG_ROOT} has uncommitted changes: commit or stash them, then wb update")
+    if not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
+        die("claude isn't on PATH: wb update refreshes the plugin through it (run /workbench-update "
+            "in Claude Code, or put claude on PATH)")
+    if kind == "clone":
+        try:
+            _fetch_origin()
+            behind = int(gitops.git(PKG_ROOT, "rev-list", "--count", "HEAD..@{u}"))
+        except (gitops.GitError, ValueError) as e:
+            die(f"couldn't check for an update: {e}")
+        if subprocess.run(["git", "-C", str(PKG_ROOT), "merge-base", "--is-ancestor", "HEAD", "@{u}"],
+                          capture_output=True, stdin=subprocess.DEVNULL).returncode:
+            die(f"{PKG_ROOT} has commits its upstream hasn't: a fast-forward pull can't update it "
+                "(push or rebase them, then wb update)")
+        if behind:  # nothing to pull: no task needs stopping, the plugin steps still run
+            steps.insert(0, ["git", "-C", str(PKG_ROOT), "pull", "-q", "--ff-only"])
+    live = [t for t in store.all_tasks() if runner_alive(t)] if behind != 0 else []
     if live and not a.stop:  # a pull would change the git shim, the lane and the ask server under them
         # whose each is: the advice was an unscoped `wb stop --all`, which parked other live
         # sessions' agents and acknowledged their news, so no wake ever came there (#694)
@@ -4337,17 +4361,12 @@ def cmd_update(a):
             t.name + (" (this session's)" if t.name in mine else f" ({_whose(t)})") for t in live)
             + "): update when they finish, or wb update --stop (stops them; each one's session is "
             "told to wb resume it)")
+    stopped = ""
     if live:
         print(_stop_for_update(live))
-    steps = [["claude", "plugin", "marketplace", "update", "workbench"],
-             ["claude", "plugin", "update", "workbench@workbench"]]
-    if kind == "clone":  # a clone is its own marketplace: pull, then let Claude Code re-read it
-        if gitops.git(PKG_ROOT, "status", "--porcelain", "--untracked-files=no").strip():
-            die(f"{PKG_ROOT} has uncommitted changes: commit or stash them, then wb update")
-        steps.insert(0, ["git", "-C", str(PKG_ROOT), "pull", "-q", "--ff-only"])
-    if not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
-        die("claude isn't on PATH: wb update refreshes the plugin through it (run /workbench-update "
-            "in Claude Code, or put claude on PATH)")
+        names = [t.name for t in live if t.status.get("last") == UPDATE_STOP]
+        if names:  # a step failing after the stop says what was stopped and how to go on (#775)
+            stopped = f"; the tasks were stopped for it: wb resume {' '.join(names)} continues them"
     before = gitops.git(PKG_ROOT, "rev-parse", "HEAD").strip()
     pulled = ""
     for step in steps:
@@ -4357,7 +4376,7 @@ def cmd_update(a):
         except (OSError, subprocess.TimeoutExpired) as e:
             err = str(e)
         if err is not None:
-            die(f"{' '.join(step[:4])} failed: {err}" + pulled)
+            die(f"{' '.join(step[:4])} failed: {err}" + pulled + stopped)
         if step[0] == "git":  # landed: the count is 0 whatever the claude steps do next
             store.write_json(path, {"checked_at": time.time(), "behind": 0, "kind": kind})
             pulled = ("; the pull is done: finish with claude plugin marketplace update workbench "
