@@ -66,12 +66,13 @@ def cases() -> dict[str, dict]:
 # --- making a case ------------------------------------------------------------------------------
 
 def _step_prompt(task: store.Task, step: int) -> str | None:
-    """The prompt that handed the agent step `step`: round 1's, or the one `wb next` wrote."""
-    rounds = sorted((int(p.name), p) for p in (task.dir / "rounds").iterdir()
+    """The prompt that handed the agent step `step`: round 1's, or the one `wb next` wrote; a
+    round's own (`store.round_prompt`), not the handoff a fresh session got in its place (#503)."""
+    rounds = sorted(int(p.name) for p in (task.dir / "rounds").iterdir()
                     if p.name.isdigit()) if (task.dir / "rounds").is_dir() else []
-    for n, p in rounds:
+    for n in rounds:
         try:
-            text = (p / "prompt.md").read_text(encoding="utf-8")
+            text = store.round_prompt(task, n).read_text(encoding="utf-8")
         except OSError:
             continue
         head = STEP_HEAD.match(text)
@@ -108,12 +109,79 @@ def _checkout_at(d: Path, case: dict) -> Path:
     return work
 
 
+def _clone_base(bundle_path: Path, dest: Path, repo: Path) -> None:
+    """A bundle's main checked out at `dest`, its Git LFS files as data from `repo`'s own LFS
+    objects (gitops.share_lfs), which no bundle carries: a plain clone of one checked out pointer
+    files where the tests wanted the data (#509, the audit of 1.90). RuntimeError naming LFS
+    when they can't be had."""
+    gitops.git(dest.parent, "clone", "-q", "--no-checkout", "-b", "main", str(bundle_path), str(dest))
+    lfs = bool(gitops.git(dest, "grep", "-l", "-e", "filter=lfs", "main", "--",
+                          ":(glob)**/.gitattributes", check=False).strip())
+    if lfs and not repo.is_dir():
+        raise RuntimeError(f"the case's base has Git LFS files, which come from {repo}, and it is "
+                           "gone: it can't be checked out as the task had it")
+    if lfs:
+        gitops.share_lfs(repo, dest)
+    try:
+        gitops.git(dest, "reset", "-q", "--hard")
+    except gitops.GitError as e:
+        if not lfs:
+            raise
+        raise RuntimeError(f"the case's Git LFS files can't be checked out from {repo}'s LFS "
+                           f"objects (git lfs fetch there?): {str(e)[-300:]}") from None
+
+
+def _filled(repo: Path, commit: str, work: Path, where: str) -> None:
+    """`commit`'s submodules filled in a scratch checkout from the user's checkout of each, as
+    verify's are (gitops.fill_submodules): empty, a C/C++ or vendored build failed there and add
+    blamed the case (#509). RuntimeError naming the ones it couldn't fill."""
+    if left := gitops.fill_submodules(repo, commit, work):
+        raise RuntimeError(f"the submodules {', '.join(left[:5])} can't be filled in {where} from "
+                           f"{repo}, whose checkout lacks them or their commits (git submodule "
+                           "update --init --recursive there): the checks would fail for that")
+
+
+def _submodule_repos(src: Path, commit: str, dest: Path) -> list[str]:
+    """Each submodule of `commit` made a repository of its own in the checkout `dest`, at the
+    commit `commit` records: its objects borrowed from the user's checkout of it (alternates),
+    no ref but a detached HEAD, so no later commit of it is in sight. wb start and the scratch
+    checkouts then fill a replay's worktree from it as they fill a task's from the user's
+    checkout (gitops.fill_submodules): the bundle carries no submodule, and a replay's stayed
+    empty (#509, the audit of 1.90). The ones it couldn't make come back by their whole path."""
+    left = []
+    for path in gitops.submodules(src, commit):
+        row = gitops.git(src, "ls-tree", commit, "--", path, check=False).split()
+        sha = row[2] if len(row) >= 3 and row[1] == "commit" else ""
+        s, d = src / path, dest / path
+        if not sha or not (s / ".git").exists() or gitops.git(
+                s, "cat-file", "-t", sha, check=False).strip() != "commit":
+            left.append(path)
+            continue
+        objects = (s / gitops.git(s, "rev-parse", "--git-path", "objects").strip()).resolve()
+        d.mkdir(parents=True, exist_ok=True)
+        gitops.git(d, "init", "-q")
+        (d / ".git" / "objects" / "info" / "alternates").write_text(f"{objects}\n")
+        gitops.git(d, "update-ref", "--no-deref", "HEAD", sha)
+        gitops.git(d, "reset", "-q", "--hard")
+        left += [f"{path}/{p}" for p in _submodule_repos(s, sha, d)]
+    return left
+
+
 def checkout(case: dict, dest: Path) -> None:
-    """The case's base, checked out at `dest`, with an identity of its own (nothing commits)."""
-    gitops.git(dest.parent, "clone", "-q", "-b", "main", str(case_dir(case["name"]) / "base.bundle"),
-               str(dest))
+    """The case's base, checked out at `dest`, with an identity of its own (nothing commits), and
+    its Git LFS files and submodules as the task had them, from the case's repo (#509).
+    RuntimeError naming what it couldn't reproduce."""
+    repo = Path(case["repo"])
+    _clone_base(case_dir(case["name"]) / "base.bundle", dest, repo)
     gitops.git(dest, "config", "user.name", "workbench bench")
     gitops.git(dest, "config", "user.email", "bench@workbench.invalid")
+    if gitops.submodules(dest, "HEAD"):
+        left = _submodule_repos(repo, case["base"], dest) if repo.is_dir() else \
+            gitops.submodules(dest, "HEAD")
+        if left:
+            raise RuntimeError(f"the submodules {', '.join(left[:5])} can't be filled from "
+                               f"{repo}: it is gone, or its checkout lacks them or their commits "
+                               "(git submodule update --init --recursive there)")
 
 
 def overlay(case: dict, worktree: Path, src: Path | None = None) -> None:
@@ -245,6 +313,9 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 # own commit rejected, the scratch clone without it (#250, the audit of 1.2)
                 "setup": spec.get("setup") or "", "copy": spec.get("copy") or [],
                 "siblings": spec.get("siblings") or [],
+                # the package the task ran in (#375), where each replay runs, sets up and is
+                # graded: from the root, an answer written there passed a package's check (#425)
+                "subdir": spec.get("subdir") or "",
                 "original": {"model": spec.get("model"), "rounds": row.get("rounds"),
                              "reviews": step_row.get("reviews", row.get("reviews")),
                              "minutes": row.get("minutes"), "steps": steps},
@@ -256,7 +327,8 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
         with tempfile.TemporaryDirectory(prefix=store.scratch(".base-"), dir=home()) as scratch:
             work = _checkout_at(Path(scratch), case)
-            gitops.git(scratch, "clone", "-q", "-b", "main", str(tmp / "base.bundle"), str(work))
+            _clone_base(tmp / "base.bundle", work, repo)  # its LFS files and submodules (#509)
+            _filled(repo, base, work, "the base")
             overlay(case, work, tmp)  # as a replay gets them (#346)
             at = _At(name, work)
             _prepared(at, "the base")
@@ -272,9 +344,11 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         with tempfile.TemporaryDirectory(prefix=store.scratch(".check-"), dir=home()) as scratch:
             work = _checkout_at(Path(scratch), case)
             gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
+            gitops.share_lfs(repo, work)  # its LFS files as data, as verify's (#382, #509)
             if sparse := gitops.sparse_of(Path(repo)):  # as the task's worktree was (#263)
                 gitops.apply_sparse(work, sparse)
             gitops.git(work, "checkout", "-q", "--detach", ref)
+            _filled(repo, ref, work, f"step {step}'s own commit")
             # the hidden checks overlaid as on a replay: graded straight from the commit, a check
             # the overlay broke (its execute bit lost) still let the case in (#346, the audit of 1.4)
             overlay(case, work, tmp)
@@ -305,16 +379,44 @@ def wb_commit() -> str:
 
 
 def driver() -> dict:
-    """The driver running now ({pid, run}), or {}."""
+    """The driver running now ({pid, run, start}), or {}. `start` is when it started (#511): a
+    recycled pid of ours that runs the bench again isn't it."""
     d = store.read_json(home() / "driver.json", {}) or {}
     pid = d.get("pid")
-    if not isinstance(pid, int) or pid <= 0:
-        return {}
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    if not isinstance(pid, int) or pid <= 0 or not models._alive(pid, d.get("start")):
         return {}
     return d if models.runs(pid, "-m", "workbench.bench") else {}  # a recycled pid runs something else
+
+
+def sweep() -> list[str]:
+    """What a driver killed without warning (SIGKILL, the OOM killer, a hard reset) left: its
+    replay, not closed, and its clone. Only `replay`'s finally closed them, so each such run
+    left a task open for good and a full clone with its copied dependencies under
+    bench/runs/, and a runner that outlived its driver replayed beside the next run's (#511,
+    the audit of 1.90). Each replay not closed whose run's driver is gone is discarded (a live
+    runner stopped first) and each such run's clones removed; `wb gc` and `start` call it. The
+    replays' names."""
+    from . import cli  # cli imports this module
+    live = driver().get("run")
+    out = []
+    for t in store.all_tasks():
+        b = t.spec.get("bench")
+        if not isinstance(b, dict) or b.get("run") == live:
+            continue
+        if t.status.get("phase") not in store.CLOSED:
+            with open(os.devnull, "w") as quiet, redirect_stdout(quiet):
+                try:
+                    cli.cmd_discard(SimpleNamespace(name=t.name, reason="bench: its driver died",
+                                                    spec_gap=None, keep_branch=False))
+                except SystemExit:
+                    pass
+            out.append(t.name)
+        d = home() / "runs" / str(b.get("run")) / t.name
+        for left in (d / "repo", d / "tree"):  # tree/ for a sibling further up (_checkout_at)
+            if left.exists():
+                shutil.rmtree(left, ignore_errors=True)
+                out += [t.name] if t.name not in out else []
+    return out
 
 
 def stop_driver() -> int | None:
@@ -335,10 +437,15 @@ def plan(run: str) -> dict:
 
 
 def start(model_ids: list[str], case_names: list[str], skills: list[str], label: str,
-          repeat: int) -> tuple[str, list[str]]:
-    """Write a run's plan and spawn its driver; the run id and the report's lines."""
+          repeat: int) -> tuple[str | None, list[str]]:
+    """Write a run's plan and spawn its driver; the run id (None: nothing left to replay) and
+    the report's lines."""
     if d := driver():
         raise RuntimeError(f"bench run {d.get('run')} is running (wb bench stop)")
+    sweep()  # a killed driver's replay, its runner perhaps still going (#511)
+    from . import cli  # cli imports this module
+    if alive := [t.name for t in store.all_tasks() if t.spec.get("bench") and cli.runner_alive(t)]:
+        raise RuntimeError(f"replay {alive[0]}'s runner still runs: wb discard {alive[0]}")
     have = cases()
     if not have:
         raise RuntimeError("no cases yet: wb bench add <accepted task>")
@@ -355,7 +462,17 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
         raise RuntimeError("no model that can run (wb models)")
     pairs = [(c, m.id) for c in chosen for m in ms
              if model_ids or router.allowed(m, chosen[c].get("size") or "significant")]
-    run = time.strftime("%m%d-%H%M%S")
+    done = done_keys()
+    if pairs and all((c, m, label, rep) in done for c, m in pairs for rep in range(1, repeat + 1)):
+        # a driver that skips them all said "N replay(s)" and did nothing (#508)
+        return None, [f"all {len(pairs) * repeat} replay(s) already done"
+                      + (f" under label {label}" if label else " (no --label)")
+                      + ": --label <name> runs them again"]
+    run = stamp = time.strftime("%m%d-%H%M%S")
+    for n in range(2, 100):  # two runs in one second: the second's mkdir failed (#511's test)
+        if not (home() / "runs" / run).exists():
+            break
+        run = f"{stamp}-{n}"
     d = home() / "runs" / run
     d.mkdir(parents=True)
     store.write_json(d / "plan.json", {"run": run, "label": label or "", "pairs": pairs,
@@ -368,7 +485,8 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
         proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.bench", run], cwd=d,
                                 env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                 start_new_session=True)
-    store.write_json(home() / "driver.json", {"pid": proc.pid, "run": run})
+    store.write_json(home() / "driver.json", {"pid": proc.pid, "run": run,
+                                              "start": models._started(proc.pid)})
     return run, [f"bench run {run}: {len(pairs)} replay(s) × {repeat}"
                  + (f", label {label}" if label else "") + ", one at a time; real tasks go first",
                  f"follow: wb bench report --run {run}   stop: wb bench stop"]
@@ -376,6 +494,12 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
 
 def _done(row: dict) -> bool:
     return row.get("outcome") in ("passed", "failed")
+
+
+def done_keys() -> set[tuple]:
+    """(case, model, label, rep) of every replay graded: an error, the machine's, isn't (#508)."""
+    return {(r.get("case"), r.get("model"), r.get("label", ""), r.get("rep", 1))
+            for r in store.read_jsonl(runs_file())[0] if _done(r)}
 
 
 def _idle() -> bool:
@@ -395,10 +519,7 @@ def drive(run: str) -> None:
     label, reps = p.get("label", ""), int(p.get("repeat") or 1)
     for rep in range(1, reps + 1):
         for case_name, model in p.get("pairs") or []:
-            key = (case_name, model, label, rep)
-            done = {(r.get("case"), r.get("model"), r.get("label", ""), r.get("rep", 1))
-                    for r in store.read_jsonl(runs_file())[0] if _done(r)}
-            if key in done:
+            if (case_name, model, label, rep) in done_keys():
                 continue
             case = cases().get(case_name)
             if not case:
@@ -413,9 +534,21 @@ def drive(run: str) -> None:
                     break
 
 
+def subdir(case: dict) -> str | None:
+    """The package a case's task ran in ('' for the repo's top), None when that can't be known:
+    a case made before it was kept (#425, the audit of 1.8) reads it from its task, while the
+    task lasts."""
+    if "subdir" in case:
+        return case["subdir"] or ""
+    task = store.Task(case.get("task") or "")
+    return (task.spec.get("subdir") or "") if case.get("task") and task.exists else None
+
+
 def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str], meta: dict) -> None:
     from . import cli  # cli imports this module
-    argv = ["start", name, "--spec", str(case_dir(case["name"]) / "spec.md"), "--repo", str(repo),
+    # from the package, so wb start finds it as the task's start did (cli._package, #425)
+    argv = ["start", name, "--spec", str(case_dir(case["name"]) / "spec.md"),
+            "--repo", str(repo / (subdir(case) or "")),
             "--size", case.get("size") or "significant", "--model", model, "--test", case["test_cmd"],
             "--test-timeout", str(case.get("test_timeout") or 900), "--ask-budget", "0",
             "--checkin", "0", "--queue", "--trial", "--no-claude-md"]
@@ -441,15 +574,22 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
     from . import cli
     stamp = f"{int(time.time() * 1000) % 10 ** 9:09d}"
     name = f"bench-{case['name'][:30].rstrip('-')}-{stamp}"
-    d = home() / "runs" / run / name
-    d.mkdir(parents=True)
     row = {"ts": store.now(), "run": run, "label": label, "rep": rep, "case": case["name"],
            "model": model, "task": name, "wb_commit": wb_commit(), "skills": skills}
+    if (sub := subdir(case)) is None:  # graded from the root, a package's case can pass wrongly
+        return {**row, "outcome": "error", "why": f"case {case['name']} predates the package path "
+                f"cases keep, and its task {case.get('task')} is gone: where it ran is unknown "
+                "(#425); make it again from a task"}
+    d = home() / "runs" / run / name
+    d.mkdir(parents=True)
     began = time.time()
     log = open(d / "wb.log", "a")
     work = _checkout_at(d, case)
     try:
-        checkout(case, work)
+        try:
+            checkout(case, work)
+        except RuntimeError as e:  # its LFS files or submodules (#509): the next run tries again
+            return {**row, "outcome": "error", "why": str(e)[:300]}
         _inputs(case, work)
         with redirect_stdout(log):
             try:
@@ -461,6 +601,9 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
         if not task.exists:
             return {**row, "outcome": "error", "why": "wb start refused"}
         CURRENT["task"] = task
+        if (task.spec.get("subdir") or "") != sub:  # its package's CLAUDE.md gone from the base
+            return {**row, "outcome": "error", "why": f"wb start didn't take {sub or 'the top'} as "
+                    "the package the case's task ran in"}
         st, asks_refused = _wait(task)
         phase = st.get("phase")
         row.update(phase=phase, rounds=st.get("round", 1),
@@ -472,6 +615,9 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
                                  store.read_jsonl(task.dir / "events.jsonl")[0]))
         if st.get("last") == PREEMPTED:
             return {**row, "outcome": "preempted"}
+        if phase == "failed" and st.get("infra"):  # the setup, the server, the runner, the disk
+            # the machine's doing, not the model's: an error, run again next time (#508)
+            return {**row, "outcome": "error", "why": f"{st['infra']}: {st.get('last') or ''}"[:200]}
         if phase != "review":
             return {**row, "outcome": "failed", "why": (st.get("last") or phase)[:200]}
         (d / "diff.patch").write_text(gitops.diff(task.worktree, task.spec["base"]))
@@ -589,7 +735,7 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
         argv = [claude, "-p", "--output-format", "json", "--max-turns", str(turns),
                 "--permission-mode", "acceptEdits", "--allowedTools", *allow, "--", prompt]
         try:
-            p = subprocess.run(argv, cwd=work, capture_output=True, text=True,
+            p = subprocess.run(argv, cwd=work / (subdir(case) or ""), capture_output=True, text=True,
                                timeout=int(case.get("test_timeout") or 900) * 4)
         except subprocess.TimeoutExpired:
             return {**row, "outcome": "error", "why": "claude -p timed out"}
@@ -658,11 +804,16 @@ def report(run: str | None = None, label: str | None = None) -> str:
     # why a replay never started, and where its log is: a run whose every replay failed to start
     # said only "no replays yet" (the 2026-11-18 audit, #89)
     errors = [r for r in other if r.get("outcome") == "error"]
-    unstarted = [f"{r.get('case')} on {r.get('model')}: didn't start: {r.get('why') or '?'} "
-                 f"({home() / 'runs' / str(r.get('run')) / str(r.get('task')) / 'wb.log'})"
+    # one that started and broke for the machine's reasons (a `phase`: #508) points at its runner
+    unstarted = [f"{r.get('case')} on {r.get('model')}: "
+                 + (f"broke off: {r.get('why') or '?'} ({store.task_dir(str(r.get('task'))) / 'runner.log'})"
+                    if r.get("phase") else f"didn't start: {r.get('why') or '?'} "
+                    f"({home() / 'runs' / str(r.get('run')) / str(r.get('task')) / 'wb.log'})")
                  for r in errors[-10:]]
     if not rs:
-        return "\n".join(head + ([f"no replay finished; {len(errors)} didn't start:"] + unstarted
+        return "\n".join(head + ([f"no replay finished; {len(errors)} didn't start"
+                                  + (" or broke off" if any(r.get("phase") for r in errors) else "")
+                                  + ":"] + unstarted
                                  if errors else
                                  ["no replays yet" + (" (wb bench add, then wb bench run)"
                                                       if not cases() else "")]) + self_lines(mine))

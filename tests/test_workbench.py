@@ -1081,6 +1081,7 @@ class Lifecycle(Base):
         self.assertIn("[failed] t-killed", out)
         self.assertIn("the runner died", out)
         self.assertEqual(store.Task("t-killed").status["last"], cli.RUNNER_DIED)
+        self.assertEqual(store.Task("t-killed").status["infra"], "runner died")  # bench: no grade (#508)
         os.environ["FAKE_SCENARIO"] = "ok"
         run_wb("resume", "t-killed")
         wait_phase("t-killed", {"review"})
@@ -6565,6 +6566,32 @@ class Bench(Base):
         self.assertEqual((bench.case_dir("t-steps-s2") / "spec.md").read_text(), "Now add the check.\n")
         self.assertEqual(case["test_cmd"], "sh tests/check.sh")
 
+    def test_a_step_that_began_in_a_fresh_session_can_be_made_a_case(self):
+        # #503 (the audit of 1.90): the handover rewrote the step's prompt.md as its handoff and
+        # kept the step's own in instructions.md, and bench add said "step 2's prompt is gone"
+        from workbench import bench
+        self.start("t-fresh", "ok", "--test", TEST_CMD)
+        wait_phase("t-fresh", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now add the check.\n")
+        run_wb("next", "t-fresh", "--spec", str(step2), "-m", "feat: the answer",
+               "--test", "sh tests/check.sh", "--fresh")
+        wait_phase("t-fresh", {"review"})
+        task = store.Task("t-fresh")
+        n = task.status["step_round"]
+        self.assertTrue(task.round_dir(n).joinpath("prompt.md").read_text().startswith(
+            "You are picking this task up in a fresh session"))
+        self.assertEqual(store.round_prompt(task, n), task.round_dir(n) / "instructions.md")
+        wt = task.worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt && test -f notes.txt\n")
+        (wt / "notes.txt").write_text("step 2\n")
+        run_wb("accept", "t-fresh", "-m", "test: the check")
+        out = run_wb("bench", "add", "t-fresh", "--step", "2")
+        self.assertIn("case t-fresh-s2: step 2 of t-fresh", out)
+        self.assertEqual((bench.case_dir("t-fresh-s2") / "spec.md").read_text(), "Now add the check.\n")
+        self.assertEqual(bench.cases()["t-fresh-s2"]["test_cmd"], "sh tests/check.sh")
+
     def test_an_executable_hidden_check_stays_executable_on_the_reference_and_every_replay(self):
         # #346 (the audit of 1.4): the overlay wrote ./test_check.sh at 0644, so the right answer
         # exited 126, and the reference, graded from its commit, never saw it
@@ -6608,6 +6635,130 @@ class Bench(Base):
         self.assertTrue((bench.home() / "runs" / "r1" / good["task"] / "diff.patch").exists())
         self.assertNotIn("bench-", run_wb("status"))
 
+    def test_a_case_with_a_submodule_is_checked_and_replayed_with_it_filled(self):
+        # #509 (the audit of 1.90): add's clones and each replay's had empty submodules, so add
+        # refused a task whose build needed one ("fails on step 1's own commit") and a case that
+        # got in counted every replay against the model
+        from workbench import bench
+        lib = Path(self.tmp.name) / "lib"
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        commit = ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm"]
+        (lib / "lib.c").write_text("int x;\n")
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), *commit, "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
+        g("commit", "-qm", "a submodule")
+        mine = self.repo / "vendor" / "lib"                               # the user's checkout of it
+        (mine / "lib.c").write_text("int later;\n")                        # past the base's commit
+        subprocess.run(["git", "-C", str(mine), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(mine), *commit, "later"], check=True)
+        self.accepted("t-sub", test="test -f vendor/lib/lib.c && sh tests/check.sh")
+        self.assertIn("on the base: fails", "\n".join(bench.add("t-sub")))
+        case = bench.cases()["t-sub"]
+        clone = Path(self.tmp.name) / "c"
+        bench.checkout(case, clone)
+        self.assertEqual((clone / "vendor/lib/lib.c").read_text(), "int x;\n")
+        self.assertEqual(gitops.git(clone / "vendor/lib", "for-each-ref").strip(), "")  # no history in sight
+        os.environ["FAKE_SCENARIO"] = "ok"
+        row = bench.replay(case, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(row["outcome"], "passed", row)
+        # the user's checkout without it: named, not graded, and no case made
+        g("-c", "protocol.file.allow=always", "submodule", "deinit", "-q", "-f", "vendor/lib")
+        row = bench.replay(case, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(row["outcome"], "error")
+        self.assertIn("submodules vendor/lib can't be filled", row["why"])
+        with self.assertRaisesRegex(RuntimeError, "submodules vendor/lib can't be filled in the base"):
+            bench.add("t-sub", case_name="t-sub-2")
+
+    def test_a_bundle_checkout_runs_the_repos_lfs_filter_and_names_lfs_once_the_repo_is_gone(self):
+        # #509 without git-lfs: a stand-in filter shows the clone takes the repo's filter.lfs.*
+        # before it checks anything out (the test below does it with git-lfs itself)
+        from workbench import bench
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("config", "filter.lfs.clean", "sed s/DATA/POINTER/")
+        g("config", "filter.lfs.smudge", "sed s/POINTER/DATA/")
+        (self.repo / ".gitattributes").write_text("*.bin filter=lfs\n")
+        (self.repo / "d.bin").write_text("DATA\n")
+        g("add", ".")
+        g("commit", "-qm", "data")
+        base = gitops.git(self.repo, "rev-parse", "HEAD").strip()
+        tmp = Path(self.tmp.name)
+        bench.bundle(self.repo, base, tmp / "b.bundle")
+        bench._clone_base(tmp / "b.bundle", tmp / "c", self.repo)
+        self.assertEqual((tmp / "c" / "d.bin").read_text(), "DATA\n")      # not the stored POINTER
+        with self.assertRaisesRegex(RuntimeError, "Git LFS files, which come from .* gone"):
+            bench._clone_base(tmp / "b.bundle", tmp / "c2", tmp / "gone")
+
+    @unittest.skipUnless(GIT_LFS, "needs git-lfs")
+    def test_a_case_with_git_lfs_files_is_checked_and_replayed_on_the_data(self):
+        # #509 (the audit of 1.90): no bundle carries LFS objects, so add's base check, a
+        # replay's checkout and bench self's had pointer files where the tests read the data
+        from workbench import bench
+        identity = Path(self.tmp.name) / "gitconfig"
+        identity.write_text("[user]\n\tname = t\n\temail = t@t\n")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(identity), GIT_CONFIG_NOSYSTEM="1")
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("lfs", "install", "--local")
+        g("lfs", "track", "*.bin")
+        (self.repo / "data.bin").write_bytes(b"DATA" + bytes(10**4))
+        g("add", ".")
+        g("commit", "-qm", "LFS data")
+        self.accepted("t-lfs", test="grep -q DATA data.bin && sh tests/check.sh")
+        self.assertIn("on the base: fails", "\n".join(bench.add("t-lfs")))
+        case = bench.cases()["t-lfs"]
+        clone = Path(self.tmp.name) / "c"
+        bench.checkout(case, clone)
+        self.assertEqual((clone / "data.bin").stat().st_size, 10**4 + 4)   # the data, not a pointer
+        os.environ["FAKE_SCENARIO"] = "ok"
+        row = bench.replay(case, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(row["outcome"], "passed", row)
+        # the repo gone: its LFS files can't be had, said so
+        shutil.move(self.repo, Path(self.tmp.name) / "moved")
+        with self.assertRaisesRegex(RuntimeError, "Git LFS files, which come from .* gone"):
+            bench.checkout(case, Path(self.tmp.name) / "c2")
+
+    def test_a_package_case_is_replayed_set_up_and_graded_in_its_package(self):
+        # #425 (the audit of 1.8): the case kept no package path, so a replay ran from the repo's
+        # root, and an answer.txt written there passed a check of app/answer.txt
+        from workbench import bench
+        app = self.repo / "app"
+        app.mkdir()
+        (app / "CLAUDE.md").write_text("# app\n")
+        (app / ".gitignore").write_text("made-here\n")                    # the setup's
+        subprocess.run(["git", "-C", str(self.repo), "add", "app"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "the app"], check=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-pkg", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo",
+               "--test", "sh tests/check.sh", "--setup", "touch made-here")
+        wait_phase("t-pkg", {"review"})
+        wt = store.Task("t-pkg").worktree
+        self.assertTrue((wt / "app" / "answer.txt").exists())
+        (wt / "app" / "tests").mkdir()
+        (wt / "app" / "tests" / "check.sh").write_text("test -f made-here && grep -qx 42 answer.txt\n")
+        run_wb("accept", "t-pkg", "-m", "feat: the answer")
+        bench.add("t-pkg")
+        case = bench.cases()["t-pkg"]
+        self.assertEqual((case["subdir"], case["hidden"]), ("app", ["app/tests/check.sh"]))
+        good = bench.replay(case, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(good["outcome"], "passed", good)
+        self.assertEqual(store.Task(good["task"]).spec.get("subdir"), "app")
+        diff = (bench.home() / "runs" / "r1" / good["task"] / "diff.patch").read_text()
+        self.assertIn("app/answer.txt", diff)
+        self.assertNotIn("b/answer.txt", diff)
+        # a case made before the package path was kept reads it from its task, while it lasts
+        old = {k: v for k, v in case.items() if k != "subdir"}
+        self.assertEqual(bench.replay(old, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])["outcome"],
+                         "passed")
+        # and without the task, it can't say where it ran: not replayed, never passed
+        shutil.move(store.Task("t-pkg").dir, Path(self.tmp.name) / "gone")
+        row = bench.replay(old, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(row["outcome"], "error")
+        self.assertIn("package", row["why"])
+
     def test_a_run_replays_in_the_background_and_a_second_run_skips_what_is_done(self):
         from workbench import bench
         self.accepted("t-src")
@@ -6625,6 +6776,78 @@ class Bench(Base):
         self.assertIn("bench: 1 of 1 case(s) passed", run_wb("models"))
         bench.drive(run)                                                  # nothing left to do
         self.assertEqual(len(bench.rows()), 1)
+
+    def test_a_replay_the_machine_broke_is_an_error_kept_out_of_pass_rates_and_run_again(self):
+        # #508 (the audit of 1.90): a setup with the network out, a server asleep past DOWN_WAIT,
+        # a crashed or killed runner was graded as the model failing, and never replayed again
+        from workbench import bench
+        model = "ollama/mimo-v2.6:9b-q8_0"
+        self.accepted("t-src")
+        bench.add("t-src")
+        case = bench.cases()["t-src"]
+        os.environ["FAKE_SCENARIO"] = "ok"
+        row = bench.replay({**case, "setup": "echo offline; exit 5"}, model, 1, "r0", "", [])
+        self.assertEqual((row["outcome"], row["phase"]), ("error", "failed"), row)
+        self.assertIn("setup", row["why"])
+        store.append_jsonl(bench.runs_file(), row)
+        self.assertIsNone(bench.model_line(model))                        # no case failed
+        self.assertIn("t-src on ollama/mimo-v2.6:9b-q8_0: broke off: setup", run_wb("bench", "report"))
+        # the load failure and the reaped runner are the machine's too
+        runner._load_failed(store.Task(row["task"]), RuntimeError("lan/m can't run: asleep"))
+        self.assertEqual(store.Task(row["task"]).status["infra"], "model")
+        # so a run replays it, and one with nothing left to replay says so and starts nothing
+        out = run_wb("bench", "run", "--model", "mimo")
+        run = out.split()[2].rstrip(":")
+        deadline = time.time() + 60
+        while time.time() < deadline and (bench.driver() or not bench.rows(run)):
+            time.sleep(0.3)
+        self.assertEqual([r["outcome"] for r in bench.rows(run)], ["passed"])
+        self.assertIn("bench: 1 of 1 case(s) passed", run_wb("models"))
+        out = run_wb("bench", "run", "--model", "mimo")
+        self.assertIn("all 1 replay(s) already done (no --label): --label <name> runs them again", out)
+        self.assertFalse(bench.driver())
+
+    def test_what_a_driver_killed_without_warning_left_is_closed_by_gc_or_the_next_run(self):
+        # #511 (the audit of 1.90): only replay's finally closed its task and removed its clone,
+        # so a SIGKILL, the OOM killer or a hard reset left both for good, and the replay's
+        # runner went on beside the next run's
+        from workbench import bench, models
+        self.accepted("t-src")
+        bench.add("t-src")
+
+        def killed() -> tuple[store.Task, Path]:
+            os.environ["FAKE_SCENARIO"] = "hang"
+            run = run_wb("bench", "run", "--model", "mimo").split()[2].rstrip(":")
+            d = bench.driver()
+            self.assertEqual((d["run"], d["start"]), (run, models._started(d["pid"])))
+            deadline = time.time() + 30
+            while time.time() < deadline and not (ts := [
+                    t for t in store.all_tasks() if t.spec.get("bench") and t.status.get("agent_pid")]):
+                time.sleep(0.2)
+            os.kill(d["pid"], signal.SIGKILL)
+            deadline = time.time() + 10
+            while time.time() < deadline and bench.driver():
+                time.sleep(0.1)
+            self.assertFalse(bench.driver())
+            clone = bench.home() / "runs" / run / ts[0].name / "repo"
+            self.assertTrue(cli.runner_alive(ts[0]) and clone.is_dir())    # left behind
+            return ts[0], clone
+
+        task, clone = killed()
+        out = run_wb("gc")
+        self.assertIn(f"closed 1 bench replay(s) whose driver died, with their clones: {task.name}", out)
+        self.assertEqual(task.status["phase"], "discarded")
+        self.assertFalse(cli.runner_alive(task) or clone.exists())
+        task, clone = killed()
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run = run_wb("bench", "run", "--model", "mimo").split()[2].rstrip(":")  # closes it first
+        self.assertEqual(task.status["phase"], "discarded")
+        self.assertFalse(cli.runner_alive(task) or clone.exists())
+        deadline = time.time() + 60
+        while time.time() < deadline and (bench.driver() or not bench.rows(run)):
+            time.sleep(0.3)
+        self.assertEqual([r["outcome"] for r in bench.rows(run)], ["passed"])
+        self.assertNotIn("bench replay", run_wb("gc"))                    # nothing left
 
     def test_the_report_says_why_replays_never_started_and_where_their_logs_are(self):
         # #89 (the 2026-11-18 audit): a run whose every replay failed to start said "no replays yet"

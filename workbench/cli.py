@@ -198,7 +198,8 @@ def reap(task: store.Task) -> bool:
         st = task.set_status_if(  # one reaper wins: two waiters, one notice
             lambda st: st.get("phase") in LIVE and not runner_alive(task)
             and time.time() - (st.get("updated_at") or 0) >= REAP_GRACE,
-            phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None, asking=None)
+            phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None, asking=None,
+            infra="runner died")  # the machine's: wb bench grades none of it (#508)
     except OSError as e:
         if not store.disk_full(e):
             raise
@@ -2080,6 +2081,9 @@ def cmd_gc(a):
           f"{out['notices']} old notice(s) to notify.old.jsonl; removed {out['rules']} rules "
           f"dir(s), {out['runtime']} runtime dir(s), {out['scratch']} scratch dir(s), "
           f"{out['starts']} half-made start(s), {out['branches']} merged branch(es)")
+    if left := bench.sweep():  # not in gc(): a discard runs that, and this discards (#511)
+        print(f"closed {len(left)} bench replay(s) whose driver died, with their clones: "
+              + ", ".join(left[:5]))
 
 
 def _landed(task: store.Task) -> str | None:

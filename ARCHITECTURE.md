@@ -188,7 +188,7 @@ stuck, failed, asking (`asking` is in both); `CLOSED` = accepted, discarded. Who
 | `asking` | the runner while a question of the round is open (`ask_mcp.relay`) |
 | `review` | the runner (tests pass; tests fail with auto-fix spent; no `--test`); `wb takeover` |
 | `stuck` | the runner (a guard stop; a SIGTERM that wasn't wb's: `runner.SIGNAL_STOP`); `wb stop`; `wb accept` when a live task's commit fails ("accept failed: …", the work kept in the worktree) |
-| `failed` | the runner (opencode exited non-zero with no text; the model couldn't load; a crash); `cli.reap` (the runner died without a report) |
+| `failed` | the runner (opencode exited non-zero with no text; the setup failed; the model couldn't load; a crash or a full disk); `cli.reap` (the runner died without a report). All but the first set status `infra`: the machine's doing, which `wb bench` doesn't grade (#508) |
 | `accepted` / `discarded` | `wb accept` / `wb discard` |
 
 Inside one runner, rounds follow each other with no `queued` in between: a steer, a handover, an
@@ -708,8 +708,8 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
 **A fresh session's prompt** (`_start_fresh`, `handoff_prompt`). The raw prompt is kept as
 `rounds/<n>/instructions.md`, and `prompt.md` becomes: "You are picking this task up in a fresh
 session (why)…", `## The task` (the current step's prompt, `current_task_prompt`: `rounds/<step_round>/`
-`instructions.md` when the step began in a fresh session, else its `prompt.md`; the spec plus the
-protocol), `## The work so far` (the committed steps, `git log --oneline
+`instructions.md` when the step began in a fresh session, else its `prompt.md`, `store.round_prompt`,
+which `round_asks`, the lessons and `wb bench add` read too; the spec plus the protocol), `## The work so far` (the committed steps, `git log --oneline
 base..HEAD`, and the uncommitted diff, `git diff HEAD` with new files; a diff over
 `HANDOFF_DIFF_SHARE` (9%) of the window at 4 characters a token, about 12K characters on 32K, and never
 over `HANDOFF_DIFF_MAX` (60K characters), is replaced by its `--stat` and "read the changed files"), and `## Now`: "Start on the task above"
@@ -2550,11 +2550,17 @@ tasks every model passed in one round in a minute, so it told them apart by noth
 `wb models`, `wb scout` and `wb bench report` print it, and the router doesn't read it.
 
 **A case** (`wb bench add <task> [--step N]`, by default a `wb next` task's last step) comes from
-a closed, accepted task, not a trial. It keeps the task's setup, copies, siblings and grants, and
+a closed, accepted task, not a trial. It keeps the task's setup, copies, siblings, grants and
+package (task.json `subdir`, kept as case.json `subdir`), and
 its base check, its reference check, each replay (`wb start --setup/--copy/--sibling/--allow`,
 the copies and siblings put beside the replay's checkout first, `bench._inputs`) and `wb bench
 self` run with them; a setup that fails there refuses the case, saying it can't reproduce the
-task's dependencies. A task's `--setup` once made an ignored stamp its tests needed, and its
+task's dependencies. A replay starts from the package (`--repo <checkout>/<subdir>`), so it
+works, sets up and is graded there: without it a package's case ran from the root, and an
+`answer.txt` written there passed a check of `app/answer.txt` (#425, the audit of 1.8). A case
+made before `subdir` was kept reads it from its task (`bench.subdir`); with the task gone too, its
+replays are `error` rows, never graded; a replay `wb start` didn't put in that package is an
+`error` too. A task's `--setup` once made an ignored stamp its tests needed, and its
 own commit was rejected, and its grants, deleted with its rules at the close, were empty
 (#250, the audit of 1.2; `cli._keep_grants` keeps them in status `grants_kept`, which
 `context.grants` reads once the rules are gone). It holds:
@@ -2563,9 +2569,21 @@ own commit was rejected, and its grants, deleted with its rules at the close, we
   reference's parent;
 - the base as `base.bundle`: branch `main` at the base, made in a `--shared` scratch clone, so the
   user's repo gets no ref and the commits after the base (the answer) aren't in it: the agent can
-  read only the base's history;
+  read only the base's history. A bundle carries no Git LFS objects and no submodule, so every
+  checkout of the case takes them from the case's repo (#509, the audit of 1.90: add refused a
+  C/C++ task whose build needed `third_party/`, blaming the case): a clone of the bundle gets the
+  repo's `filter.lfs.*` and LFS objects (`gitops.share_lfs`) before it checks anything out
+  (`_clone_base`); add's scratch checkouts fill the submodules from the user's checkout of each
+  (`gitops.fill_submodules`, as wb verify's are); a replay's or `bench self`'s checkout makes each
+  submodule a repository of its own at the recorded commit, its objects borrowed from the user's
+  checkout (alternates) and no ref but a detached HEAD (`_submodule_repos`), so `wb start` and the
+  scratch checkouts fill the replay's worktree from it as from a user's checkout. When the repo is
+  gone, or its checkout lacks a submodule, its commit or the LFS objects, add refuses and a replay
+  is an `error` row, each naming the submodules or LFS;
 - the spec (`spec.md`): the step's prompt (`rounds/<n>/prompt.md`, round 1's or the one opening
-  `Step N-1 of this task is done`), cut at the protocol's fold (`FOLD`), and its acceptance
+  `Step N-1 of this task is done`; `instructions.md` when the step began in a fresh session,
+  `store.round_prompt`: read from prompt.md alone, every step sent with `wb next --fresh` was
+  refused as gone, #503), cut at the protocol's fold (`FOLD`), and its acceptance
   command, from the protocol's `- The acceptance command is` line (`TEST_LINE`; `wb next --test`
   can change it per step);
 - the hidden checks: `--hidden` paths, by default the files the step added or changed that look
@@ -2578,7 +2596,8 @@ own commit was rejected, and its grants, deleted with its rules at the close, we
 
 It is refused when the task isn't accepted or is a trial, the repo or the step's commit is gone,
 the step had no acceptance command, there are neither hidden files nor `--check`, or the hidden
-checks already pass on the base (a replay that changed nothing would pass): that is run once, in a
+checks already pass on the base (a replay that changed nothing would pass), or its submodules or
+Git LFS files can't be had (above): that is run once, in a
 scratch clone of the bundle under `bench/`, in the original task's lane and environment as the
 reference check below is (`runner.run_in_lane` on `_At`: a plain shell with the caller's
 environment saw other files and variables, and left a hung check's children running, #81), for at
@@ -2594,11 +2613,13 @@ chose others.
 **A run** (`wb bench run`) writes its plan (`bench/runs/<run>/plan.json`: each case paired with
 each `--model`, by default every model that can run and takes the case's size) and detaches a
 driver (`python -m workbench.bench <run>`, cwd its run directory, no Claude Code session in its
-environment; `bench/driver.json` holds its pid, which counts only while that process runs `-m
-workbench.bench`: `models.runs`, below). For each pair and `--repeat`, one at a time:
+environment; `bench/driver.json` holds its pid and start time, which count only while that
+process, started then, runs `-m workbench.bench`: `models._alive` and `models.runs`, below; a
+run id taken in the same second gets `-2`, `-3`…). For each pair and `--repeat`, one at a time:
 1. It waits while any real task is active (queued for the GPU too): real work comes first.
 2. It clones the bundle into `bench/runs/<run>/<task>/repo` (an identity of its own: nothing
-   commits) and starts a task there through `cli.parser()` and `cmd_start`: `--trial`, task.json
+   commits; its LFS files and submodules from the case's repo, above) and starts a task there (in the case's package, `subdir`) through `cli.parser()` and
+   `cmd_start`: `--trial`, task.json
    `bench` (`{case, run, label}`), the case's size, test, test timeout and grants, `--ask-budget
    0`, `--checkin 0`, `--queue`, `--no-claude-md`, and `--skill` for the run's. Everything else is
    as a real task runs: the same guards, nudges, auto-fix rounds and handovers.
@@ -2608,7 +2629,10 @@ workbench.bench`: `models.runs`, below). For each pair and `--repeat`, one at a 
    the agent planted on the way is replaced, never written through: the driver runs outside the
    lane), and runs the acceptance command and `--check` in the agent's lane
    (`runner.run_in_lane`), output in `grade.txt`. Passed is both exiting 0; stuck or failed is
-   failed.
+   failed, unless the machine failed it (status `infra`: the setup, a model that couldn't load or
+   whose server slept past `DOWN_WAIT`, a crashed or reaped runner, a full disk): that is an
+   `error` row with the reason, graded neither way and replayed by the next run. Counted failed,
+   one asleep remote server marked a case lost for good (#508, the audit of 1.90).
 5. It discards the task and the clone, and appends a row to `bench/runs.jsonl`.
 
 A replay is kept out of real work: task.json `bench` makes `Task.notify` write nothing (no wake,
@@ -2617,14 +2641,23 @@ the mod skip it; `--trial` keeps its lessons out. Its speeds do go to speed.json
 measured on this machine. When `wb start`, feedback, next or resume would wait for the GPU behind a
 replay (or `wb optimize`, *Optimize*), `cli._preempt_bench` stops it (phase stuck, `PREEMPTED`), says so in one line, and the
 driver records `preempted` and replays it later. `wb bench stop` (or `wb stop --all` without
-`--repo`/`--session`) ends the driver, which closes its replay. `wb bench run` again skips each
-(case, model, label, repeat) already passed or failed, so a stopped run picks up where it was.
+`--repo`/`--session`) ends the driver, which closes its replay. A driver killed without warning
+(SIGKILL, the OOM killer, a hard reset) closes nothing: its replay stayed open for good, its clone
+on disk, and its runner went on beside the next run's (#511, the audit of 1.90). So `wb gc` and
+the next `wb bench run` call `bench.sweep`: each replay not closed whose run's driver is gone is
+discarded (a live runner stopped first, `cmd_discard`) and that run's clones
+(`bench/runs/<run>/<task>/repo` or `tree`) removed; `wb bench run` then refuses while a replay's
+runner still lives. `wb bench run` again skips each
+(case, model, label, repeat) already passed or failed (`done_keys`; an `error` is replayed), so a
+stopped run picks up where it was; when every one is done it starts no driver and says "all N
+replay(s) already done (no --label): --label <name> runs them again" (or `under label X`).
 Each row has `wb_commit` (the workbench clone's HEAD) and `label`: run a branch of workbench with
 `--label` and compare it with main's rows in `wb bench report --label`.
 
 **Claude writing it** (`wb bench self <case> --yes [--turns N]`, `bench.self_run`, #118) is the
 other side of the handoff's cost. It runs Claude Code on the case: `claude -p --output-format
-json --max-turns N` (40, `SELF_TURNS`) in a scratch checkout of the case's base. The spec is
+json --max-turns N` (40, `SELF_TURNS`) in a scratch checkout of the case's base, from its package
+(`subdir`). The spec is
 followed by `SELF_PROMPT` (the acceptance command, run before finishing).
 - **What Claude may do.** Edits are allowed (`--permission-mode acceptEdits`), and of the shell
   only the acceptance command (`--allowedTools Bash(<cmd>:*)`, one rule per simple command of
@@ -4372,14 +4405,14 @@ the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 d
 | `wb skill hand\|take <task> <n…>` | | Change a task's skills from its next run. |
 | `wb lessons` / `wb lessons close <id…> -m "…"` | `--task`, `--all` | Open lessons, recurring first (12 unless `--all`); close with why. |
 | `wb notes` / `add "…"` / `drop N…` | | The user's standing delegation preferences (`notes.md`, `- ` lines, at most 20 of 300 characters). |
-| `wb bench add <task>` | `--step N` (the last), `--hidden PATH…` (the test files the step changed), `--check CMD`, `--name CASE` (the task's; `<task>-sN` for a step of several) | Makes a case of one step of an accepted task (*Bench*): the base as a bundle, the spec, the acceptance command, the hidden checks, the grants. Refused: not accepted or a trial, the repo or commit gone, no acceptance command, no hidden checks, ones that pass on the base already, or ones its own commit fails in the agent's lane (no replay could pass them). |
-| `wb bench list` / `wb bench report` / `wb bench stop` | `report`: `--run ID`, `--label TEXT` | The cases; pass rates, rounds, auto-fixes, minutes and local tokens per label and model, then each case against the original's model and review rounds (with the running run's progress), the preempted count, and each replay that didn't start with why and its `wb.log` (the last 10; a run of only those said "no replays yet", #89); stop the driver, which closes its replay. |
+| `wb bench add <task>` | `--step N` (the last), `--hidden PATH…` (the test files the step changed), `--check CMD`, `--name CASE` (the task's; `<task>-sN` for a step of several) | Makes a case of one step of an accepted task (*Bench*): the base as a bundle, the spec, the acceptance command, the hidden checks, the grants. Refused: not accepted or a trial, the repo or commit gone, no acceptance command, no hidden checks, ones that pass on the base already, submodules or Git LFS files the repo can't supply (named), or ones its own commit fails in the agent's lane (no replay could pass them). |
+| `wb bench list` / `wb bench report` / `wb bench stop` | `report`: `--run ID`, `--label TEXT` | The cases; pass rates, rounds, auto-fixes, minutes and local tokens per label and model, then each case against the original's model and review rounds (with the running run's progress), the preempted count, and each replay that didn't start with why and its `wb.log`, or that the machine broke off (`broke off: <infra>: …`, its task's `runner.log`, #508) (the last 10; a run of only those said "no replays yet", #89); stop the driver, which closes its replay. |
 | `wb bench self <case>` | `--yes` (required: it spends Claude tokens), `--turns N` (40) | Claude Code writes the case (`claude -p`, edits and the acceptance command only), graded by its hidden checks in the original task's lane; one runs.jsonl row (`arm: claude`) and its line: PASS or fail, the weighted tokens, the handoff's cost and the ratio (*Bench*). |
-| `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. Skips what an earlier run with the same label already replayed. |
+| `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. First closes what a killed driver left (`bench.sweep`), and refuses while a replay's runner still lives. Skips what an earlier run with the same label already passed or failed (an `error` runs again); with nothing left, says so and starts no driver. |
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run), archived tasks included (#270): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`. |
 | `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive, else exit 1) writes savings.json first. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price}` (`price`: the kWh price set, or null; the pane's Settings row shows it). `--card FILE.svg`: the badge as an image (*The badge*). |
 | `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (the feed, *The Stats feed*) | `wb stats set` changes the Stats tab's settings (stats.json, *Stats recording*) and prints them. `wb stats` starts with the feed's headline (`stats.summary`: the week and all time, the streak, what the agents absorbed, the guards that fired), then the results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
-| `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`), the scratch directories in the state directory (`store.SCRATCH_PREFIXES`: `.verify-`, `.base-`, `.check-`, `.submodule-`, `wb-index-`, `wb-merge-`, each named with its maker's pid by `store.scratch`) `SCRATCH_AGE` (an hour) old whose maker is gone (`_drop_scratches`), half-made starts (`_dead_start`, `_drop_start`: a task directory with no task.json whose `starting.json` pid is gone, or with none past `RULES_GRACE`; its worktree (unlocked first: killed mid-checkout, git leaves it locked "initializing", which remove and prune skip), registration, branch and rules go too; killed commands left full clones that `_disk_room` counted, and a killed start's name was refused for good: #376, the audit of 1.6) and the delegate branches of tasks accepted with `--merge` before accept deleted them itself (`_merged_branches`: tip recorded first, `branch -d`). Prints the counts; writes `gc.json`. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
+| `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`), the scratch directories in the state directory (`store.SCRATCH_PREFIXES`: `.verify-`, `.base-`, `.check-`, `.submodule-`, `wb-index-`, `wb-merge-`, each named with its maker's pid by `store.scratch`) `SCRATCH_AGE` (an hour) old whose maker is gone (`_drop_scratches`), half-made starts (`_dead_start`, `_drop_start`: a task directory with no task.json whose `starting.json` pid is gone, or with none past `RULES_GRACE`; its worktree (unlocked first: killed mid-checkout, git leaves it locked "initializing", which remove and prune skip), registration, branch and rules go too; killed commands left full clones that `_disk_room` counted, and a killed start's name was refused for good: #376, the audit of 1.6) and the delegate branches of tasks accepted with `--merge` before accept deleted them itself (`_merged_branches`: tip recorded first, `branch -d`). Prints the counts; writes `gc.json`. Then (not in `cli.gc`, which a discard runs) `bench.sweep`: the bench replays a driver killed without warning left (*Bench*, #511), with a line naming them. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
 
 ### Other
 | Command | Flags | What it does |
@@ -4417,7 +4450,7 @@ $WB_HOME (~/.local/state/workbench)
   update.json                    wb update: when origin was last asked, how far behind this copy was
   bench/cases/<case>/            case.json  spec.md  base.bundle  hidden/<path>…  reference.patch
   bench/runs/<run>/              plan.json  driver.log  <task>/{wb.log,diff.patch,grade.txt} (repo/ while it runs)
-  bench/runs.jsonl  driver.json  one row per replay; the driver's {pid, run}
+  bench/runs.jsonl  driver.json  one row per replay; the driver's {pid, run, start}
                                  (bench.jsonl and bench/repos/ are the old suite's: nothing reads them)
   optimize.json  optimize.log    wb optimize: {pid, start, began, done, stopped, hardware (fingerprint: [name, vram] per GPU, then ["remote", root, [[name, size]…]] per remote Ollama),
                                  secs_per_load, models: {<id>: {window, fits, spill, clamped, tried:
@@ -4557,6 +4590,7 @@ check-ins off), not `wb start`'s.
 | `reviewed` | `{step, tree}`: the working tree the last review notice showed, a tree object (`gitops.snapshot`); the next review notice of the same step shows the diff since it |
 | `tests` | `{ok, exit, tail, round, lane?, proxy?}` of the last test run (`exit`: a code, `timeout` or `output limit`; `lane`: the device nodes it was refused outside the lane, #331; `proxy`: the proxy variables the agent's environment left out, when the run failed on a connection, #380) |
 | `base_check` | `{ok, exit, tail, limit}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`, `"setup failed"` when its scratch checkout couldn't be set up); the runner, before round 1, only with `--test` and without `--no-base-check` |
+| `infra` | why the machine, not the agent, failed the task: `setup` (`runner._prepare`), `model` (`_load_failed`: it couldn't load, or its server stayed down past `DOWN_WAIT`), `crash`, `disk full` (the runner's crash handler), `runner died` (`cli.reap`); cleared at each runner's start. A replay with it is an `error` row, not `failed` (*Bench*, #508) |
 | `prepared` | true once the worktree is set up (`runner._prepare`: `setup`, `copy`, `siblings`), so a later run of the runner doesn't again |
 | `prepared_paths`, `setup_secs` | set with `prepared`: the worktree's ignored paths the preparation left, which each scratch checkout copies instead of running the setup (#249), unless one is a virtualenv (#325); how long it took, in the first report |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
@@ -4620,11 +4654,12 @@ with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
 **bench/cases/<case>/case.json** (`bench.add`): `name`, `task`, `step`, `repo`, `base`,
 `reference`, `size`, `stack`, `test_cmd`, `test_timeout`, `check_cmd`, `hidden` (paths, their
 files in `hidden/`), `allow`, `paths` (the task's grants, from status `grants_kept` once its
-rules are gone), `setup`, `copy`, `siblings` (its worktree's setup: #250), `skills` (the original's), `original` (`model`, `rounds`,
+rules are gone), `setup`, `copy`, `siblings` (its worktree's setup: #250), `subdir` (the package it ran in, '' for the repo's
+top: #425), `skills` (the original's), `original` (`model`, `rounds`,
 `reviews`, `minutes`, `steps`), `base_check` (`fails` or `not checked (timed out)`),
 `created_at`. **bench/runs.jsonl** (`bench.replay`): `ts`, `run`, `label`, `rep`, `case`,
-`model`, `task`, `wb_commit`, `skills`, `outcome` (`passed`, `failed`, `preempted`, `error`),
-`why`, and from the replay's status `phase`, `rounds`, `auto_fixes`, `tok_in`, `tok_out`,
+`model`, `task`, `wb_commit`, `skills`, `outcome` (`passed`, `failed`, `preempted`, `error`:
+it didn't start, or the machine broke it, `<infra>: <last>`, #508), `why`, and from the replay's status `phase`, `rounds`, `auto_fixes`, `tok_in`, `tok_out`,
 `minutes`, `asks_refused`, `visible_ok` (its own last run of the acceptance command, before the
 hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_run`) has `arm:
 "claude"`, `model` and `label` `"claude"`, `claude` (spend's usage shape), `turns`,
@@ -4969,6 +5004,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `codingRefusal` pattern.
 - **A prompt's opening words** (the heads in *The runner, inside*) → `transcript` labels,
   `round_asks`, `lessons`, the fake OpenCode, and the tests that quote them.
+- **Where a round's own prompt is** (`instructions.md` once `_start_fresh` makes prompt.md the
+  handoff) → `store.round_prompt`, which `current_task_prompt`, `round_asks`, `lessons` and
+  `bench._step_prompt` all read it through (#503).
 - **A task.json `bench` key** → `Task.notify`, `results.record`, `cmd_status`, `_preempt_bench`
   and the mod's task listing (register.tsx) all leave a replay out of real work; the Bench tests
   and the mod's replay test.

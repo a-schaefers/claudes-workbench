@@ -340,6 +340,15 @@ def _rows(data: bytes) -> list:
     return rows
 
 
+def round_prompt(task, n: int) -> Path:
+    """Round n's own prompt: `instructions.md` once a fresh session's handoff took prompt.md's
+    place (runner._start_fresh), else prompt.md. Read by current_task_prompt, round_asks, the
+    lessons and wb bench add: bench read prompt.md alone and refused every step sent to a fresh
+    session, "step 2's prompt is gone" (#503, the audit of 1.90). Of anything with `round_dir`,
+    as the runner's readers are called."""
+    d = task.round_dir(n)
+    return d / "instructions.md" if (d / "instructions.md").is_file() else d / "prompt.md"
+
 class Task:
     """A task directory. ``spec`` is task.json, ``status`` is status.json (re-read on access)."""
 
@@ -372,6 +381,7 @@ class Task:
 
     def round_dir(self, n: int) -> Path:
         return self.dir / "rounds" / str(n)
+
 
     def set_status(self, **fields) -> dict:
         # The runner and wb both write status; the lock keeps their edits whole.
