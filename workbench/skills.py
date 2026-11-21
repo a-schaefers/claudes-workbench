@@ -382,8 +382,8 @@ def _tally() -> dict:
 
 def _count(t: dict, r: dict) -> None:
     t["n"] += 1
-    t["accepted"] += r.get("outcome") == "accepted"
-    t["first_try"] += r.get("outcome") == "accepted" and not tuning.agent_reviews(r)
+    t["accepted"] += tuning.agent_landed(r)  # Claude's work after a takeover isn't the skill's (#647)
+    t["first_try"] += tuning.agent_landed(r) and not tuning.agent_reviews(r)
     t["reviews"] += tuning.agent_reviews(r)  # a round the spec cost isn't the skill's
 
 
@@ -402,7 +402,7 @@ def usage(current: dict[str, str] | None = None) -> dict[str, dict]:
             u["last"] = max(u["last"], r.get("ts", 0))
             if n in (r.get("skills_loaded") or []):
                 u["loaded"] += 1
-                u["accepted"] += r.get("outcome") == "accepted"
+                u["accepted"] += tuning.agent_landed(r)
                 u["repos"].add(r.get("repo"))
                 _count(u["with"], r)
                 if current and current.get(n) and (r.get("skills_rev") or {}).get(n) == current[n]:

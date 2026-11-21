@@ -8,7 +8,8 @@ worth), so one lucky task doesn't win; ties go to the default. One task in EXPLO
 neighbouring value instead, the one tried less, so evidence keeps growing beside the pick and
 the pick walks toward a better value one step at a time, never jumping across the range.
 
-A task's reward is how well it went for what it cost: accepted, discounted by the review rounds
+A task's reward is how well it went for what it cost: accepted (and not taken over: Claude's
+work isn't the agent's), discounted by the review rounds
 the agent caused (Claude's time is the expensive part; a round Claude marked as the spec's gap
 isn't the agent's), less COMPACT_PENALTY when OpenCode still had to compact a session, plus or
 minus up to SPEED_WEIGHT for taking less or more time than that model's usual task. Discarded
@@ -85,13 +86,26 @@ def judged(row: dict) -> bool:
     return row.get("outcome") == "accepted" or row.get("tok_out") != 0
 
 
+def took_over(row: dict) -> bool:
+    """Whether Claude took a step of the task over (wb takeover): what it accepted is Claude's."""
+    return any(isinstance(s, dict) and s.get("took_over") for s in row.get("steps") or [])
+
+
+def agent_landed(row: dict) -> bool:
+    """Whether the agent's own work was accepted: accepted, and no step taken over. A task Claude
+    finished after wb takeover counted as the agent's win in the router, the tuning and the skill
+    records, so the model that most often needed taking over looked best, and its knob values
+    scored highest (#647, the audit of main)."""
+    return row.get("outcome") == "accepted" and not took_over(row)
+
+
 def agent_reviews(row: dict) -> int:
     """The review rounds a task (or a step) needed that weren't the spec's fault (--spec-gap)."""
     return max(0, (row.get("reviews") or 0) - (row.get("spec_rounds") or 0))
 
 
 def reward(row: dict, usual_minutes: float | None = None) -> float:
-    if row.get("outcome") != "accepted":
+    if not agent_landed(row):  # a discard, or Claude's work after a takeover (#647)
         return 0.0
     r = 1 / (1 + agent_reviews(row))
     if any(s.get("compacted") for s in row.get("steps") or []):

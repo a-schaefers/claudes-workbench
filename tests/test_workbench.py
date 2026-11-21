@@ -4325,6 +4325,35 @@ class Steering(Base):
         with self.assertRaises(SystemExit):                  # nothing left to steer
             run_wb("steer", "t-take", "--text", "x")
 
+    def test_a_task_claude_took_over_and_accepted_is_no_win_for_its_model_knobs_or_skills(self):
+        # #647 (the audit of main): results.step marked the step took_over, but the router, the
+        # tuning and the skill records read `outcome: accepted` alone, so a takeover's accept
+        # raised the model's quality and scored its knob values 1.0, above an honest accept
+        from workbench import models, progress, router, skills, tuning
+        self.start("t-took", "slow", "--test", TEST_CMD)
+        self.wait_session("t-took")
+        run_wb("takeover", "t-took")
+        task = store.Task("t-took")
+        (task.worktree / "answer.txt").write_text("42\n")
+        run_wb("accept", "t-took", "-m", "feat: answer")
+        row = [r for r in store.results() if r["task"] == "t-took"][-1]
+        self.assertEqual(row["outcome"], "accepted")
+        self.assertTrue(tuning.took_over(row) and not tuning.agent_landed(row))
+        sc = router.score(models.resolve(row["model"]), row["size"])
+        self.assertEqual((sc.tries, sc.wins), (1, 0))       # tried, and Claude finished it
+        self.assertEqual(tuning.reward(row, 10), 0.0)
+        tally = skills._tally()
+        skills._count(tally, row)
+        self.assertEqual((tally["accepted"], tally["first_try"]), (0, 0))
+        own = {**row, "steps": [{**s, "took_over": False} for s in row["steps"]]}
+        self.assertTrue(tuning.agent_landed(own))
+        self.assertGreater(tuning.reward(own, 10), 0.0)
+        # progress.helped judges rows as the Stats feed does: a spec-gap discard isn't a miss
+        store.append_jsonl(store.home() / "results.jsonl", {
+            "model": "x/y", "outcome": "discarded", "spec_gaps": [{"round": 1}], "ran": True,
+            "interventions": [{"kind": "hint"}]})
+        self.assertEqual(progress.helped("x/y")["hint"], [0, 0])
+
 
 class Watch(Base):
     def test_watch_shows_the_whole_exchange(self):

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import store
+from . import store, tuning
 
 KINDS = ("hint", "smaller")
 MIN_TRIES = 2  # below this many tries of each, the evidence decides nothing
@@ -61,7 +61,10 @@ def due(task: store.Task, active_s: float, typical_min: float | None) -> bool:
 def helped(model: str) -> dict[str, list[int]]:
     """{kind: [helped, tried]} on this model: a task an intervention was tried on helped when it
     was accepted without Claude taking it over."""
-    return helped_by_model(store.results()).get(model) or {k: [0, 0] for k in KINDS}
+    # judged, as the Stats feed's rows are: a spec-gap discard or a task that never ran isn't
+    # the intervention's failure, and the two readers disagreed (#647)
+    rows = [r for r in store.results() if tuning.judged(r)]
+    return helped_by_model(rows).get(model) or {k: [0, 0] for k in KINDS}
 
 
 def helped_by_model(rows: list[dict]) -> dict[str, dict[str, list[int]]]:
@@ -72,7 +75,7 @@ def helped_by_model(rows: list[dict]) -> dict[str, dict[str, list[int]]]:
         kinds = {i.get("kind") for i in r.get("interventions") or [] if isinstance(i, dict)} & set(KINDS)
         if not kinds:
             continue
-        ok = r.get("outcome") == "accepted" and not any(s.get("took_over") for s in r.get("steps") or [])
+        ok = tuning.agent_landed(r)
         by = out.setdefault(r.get("model"), {k: [0, 0] for k in KINDS})
         for k in kinds:
             by[k][1] += 1

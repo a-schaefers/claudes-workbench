@@ -114,11 +114,11 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     s = Score(model=m, state=state, stack=tuple(stack),
               weights=models.weights(m) if state["available"] or m.extra.get("weights_gb") else 0)
     s.tries = len(real)
-    s.wins = sum(r.get("outcome") == "accepted" for r in real)
+    s.wins = sum(tuning.agent_landed(r) for r in real)  # a takeover's accept is Claude's (#647)
     if stack:
         like = [r for r in real if set(row_stack(r)) & set(stack)]
         s.like_tries = len(like)
-        s.like_wins = sum(r.get("outcome") == "accepted" for r in like)
+        s.like_wins = sum(tuning.agent_landed(r) for r in like)
     # the agent's active work, median: wall minutes held the queue, Claude's review and a night
     # before an accept (480 min for a 12-minute task), and a mean let one such row set every
     # ETA and progress check at many times the real length (#543). Rows without it are skipped.

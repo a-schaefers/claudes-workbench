@@ -1921,8 +1921,9 @@ default, nothing below runs and the timing is the check-ins'.
   it.
 - **Learning.** The first `wb steer` after a check (status `progress_open`) is recorded in status
   `interventions` `[{kind: hint|smaller, ts, round, step}]`, and from there in the results row.
-  `progress.helped(model)` (`helped_by_model(rows)`, every model in one pass) counts, per kind, the tasks it was tried on and those accepted without
-  a takeover; the next check cites them ("on this model before: a hint helped 3 of 4").
+  `progress.helped(model)` (`helped_by_model(rows)`, every model in one pass; over the rows
+  `tuning.judged` keeps, as the Stats feed's are, #647) counts, per kind, the tasks it was tried on and those accepted without
+  a takeover (`tuning.agent_landed`); the next check cites them ("on this model before: a hint helped 3 of 4").
 
 **Stats recording** (`workbench/stats.py`, #404) keeps what only the pane's Stats tab reads, so
 its history has begun before anything draws it. The user's rule (2026-11-20): a measurement that
@@ -2050,7 +2051,7 @@ sets for one task (`--self-review`/`--no-self-review`) wins over the record and 
 `fixed`), and that task is evidence for the value it ran. `tune(task, ceilings)` picks each knob once per task (`status.tuned`, with
 `status.explored` and `status.tuned_max`): usually the best value so far, while one task in five
 (`EXPLORE`) tries the value next to it. When a task closes, its value scores the result (`reward`):
-1 for accepted, divided by one plus the review rounds the agent caused (every step's), less
+1 for accepted (`agent_landed`: a takeover's accept is Claude's and scores 0, #647), divided by one plus the review rounds the agent caused (every step's), less
 `COMPACT_PENALTY` 0.25 if OpenCode still had to compact, and up to ± `SPEED_WEIGHT` 0.15 for being
 faster or slower than that model's usual task, both in active minutes (the median; the wall clock
 counted the wait for Claude's review as the agent being slow, #543). Discarded scores 0; a discard Claude marks
@@ -3001,7 +3002,9 @@ apply` variant and its source, #584). `judged` drops a discard marked `--spec-ga
 agent never ran (row `ran` false: its setup or its model's load failed, `failed_before`; a row
 from before `ran` was recorded: not accepted and `tok_out` 0): three discards of a lockfile
 problem scored a model 0/3, and the router passed it by for good (#581). Quality is the acceptance rate with a uniform prior, overall =
-(accepted + 1) / (tried + 2); on the repo's stack (`gitops.stack`: up to two languages, each at
+(accepted + 1) / (tried + 2), where accepted is the agent's own (`tuning.agent_landed`: accepted
+and no step `took_over`; a task Claude finished after `wb takeover` is a try, not a win: it
+counted as the agent's, so the model most often taken over looked best, #647); on the repo's stack (`gitops.stack`: up to two languages, each at
 least 20% of the tracked source files; a row's stack is the one recorded, else read from its repo)
 quality = (like_accepted + `LIKE_PRIOR`·overall) / (like_tried + `LIKE_PRIOR`), `LIKE_PRIOR` = 2.
 The available models within `QUALITY_MARGIN` 0.15 of the best are ordered by the guess
@@ -3688,8 +3691,9 @@ skill drops out silently. `skills.loaded(task)` reads the `skill` tool calls fro
 
 **Judged on outcomes** (`skills.usage`, `record_line`, `advice`). Rows: `store.results()` (trials
 left out) that `tuning.judged` keeps (a discard marked `--spec-gap` is dropped). Per skill:
-offered (in `skills_offered`), loaded (in `skills_loaded`), and for loads: accepted, first-try
-(accepted with no agent-caused review round), review rounds a task; the same repos' tasks that
+offered (in `skills_offered`), loaded (in `skills_loaded`), and for loads: accepted
+(`tuning.agent_landed`: not after a takeover, #647), first-try (that, with no agent-caused review
+round), review rounds a task; the same repos' tasks that
 didn't load it; "since its last edit" (rows whose `skills_rev[name]` is the current rev); repos
 loaded in. `advice`, first match wins: never offered; offered 3+ times and never loaded (its
 description is wrong); 2+ tasks since its last edit and none accepted; 3+ loads under 50%
