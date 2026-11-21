@@ -21815,7 +21815,7 @@ class ProbeExperiment(Base):
         self.assertIn("never repeat one", note)
         self.assertIn("After two searches that miss, use `grep -n`", note)
         self.assertIn(f"over {context.PROBE_FILE_LINES} lines", note)
-        self.assertIn(f"When you need one function from a file over {context.PROBE_FILE_LINES} lines", rule)
+        self.assertIn(f"Never read a file over {context.PROBE_FILE_LINES} lines whole", rule)
         self.assertNotIn("Before you read", rule)
         self.assertNotIn("{probe_lines}", note + rule)
         self.assertNotIn("don't probe it", prompt)

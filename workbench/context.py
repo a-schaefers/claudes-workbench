@@ -365,13 +365,15 @@ EXPERIMENT_NOTES = {
              "`grep -n` for the names and read those lines.\n",
 }
 # what an experiment adds to every round prompt's protocol, beside the acceptance line: the
-# handbook alone went unread (probe: 0 calls in 14 replays, 2026-11-21). A condition, not an
-# order: "before you read a file over 300 lines, run probe symbols" made the agent outline and
-# search mid-sized files it didn't need to, filling a 40K window (the second A/B, 2026-11-21:
-# 2-3x the calls, a handover in every probe-on replay of big-compaction, #857)
+# handbook alone went unread (probe: 0 calls in 14 replays, 2026-11-21). An order, but only for
+# the files where a whole read is dear, and on what to read, not what to run first: "before you
+# read a file over 300 lines, run probe symbols" made the agent outline and search mid-sized files
+# it didn't need to, filling a 40K window (2-3x the calls, a handover in every probe-on replay of
+# big-compaction), and a condition ("when you need one function ...") was never acted on: the
+# agent read a 2,700-line file and its test file whole, 28K tokens (both 2026-11-21, #857)
 EXPERIMENT_PROTOCOL = {
-    "probe": "- When you need one function from a file over {probe_lines} lines, `probe extract "
-             "<file>#<name>` it instead of reading the whole file.\n",
+    "probe": "- Never read a file over {probe_lines} lines whole: `probe extract <file>#<name>` the "
+             "function you need (`probe symbols <file>` first when you don't know its name).\n",
 }
 EXPERIMENT_NOTES = {k: v.replace("{probe_lines}", str(PROBE_FILE_LINES)) for k, v in EXPERIMENT_NOTES.items()}
 EXPERIMENT_PROTOCOL = {k: v.replace("{probe_lines}", str(PROBE_FILE_LINES))

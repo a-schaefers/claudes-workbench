@@ -5462,9 +5462,13 @@ own, and one plain query on workbench printed 169 KB, about 42K tokens, more tha
 holds (#857). The cap is on the matched code, not on what probe prints: in its default `outline`
 format a search capped at 2000 printed about 4,000 tokens, so the note's search is `--dry-run -o
 plain`, which prints only files and line ranges (156 tokens for the same query, measured
-2026-11-21). Both apply from `context.PROBE_FILE_LINES` (1500) lines, as a condition, not an
-order: "when you need one function from a file over 1500 lines, `probe extract` it instead of
-reading the whole file". The note adds `probe symbols` for a name not yet known and probe's own
+2026-11-21). Both apply from `context.PROBE_FILE_LINES` (1500) lines. The protocol line is an
+order on what to read, not on what to run first: "never read a file over 1500 lines whole:
+`probe extract <file>#<name>` the function you need (`probe symbols <file>` first when you don't
+know its name)". Worded as a condition ("when you need one function from a file over 1500
+lines, `probe extract` it"), it was never acted on: the agent read a 2,700-line file and its
+test file whole, 28K tokens of a 40K window, though on a mid-sized case it extracted once and
+matched the best probe-off run (2026-11-21). The note adds `probe symbols` for a name not yet known and probe's own
 agent's stop rules (never repeat or re-spell a search, as one already matches case and
 snake/camel variants; after two misses, `grep -n`; "No results" doesn't mean absent; stop exploring
 once you know the function to change and its callers). Until the second A/B both were an order,
