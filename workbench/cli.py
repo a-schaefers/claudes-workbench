@@ -3312,7 +3312,8 @@ def server_lines(provs: dict) -> list[str]:
     keys = {models.server_key(p.get("url") or p["root"]) for p in provs.values()}  # ::1, a LAN IP (#588)
     lines = [f"  on PATH: {', '.join(on_path)}"] if on_path else []
     for x in answering:
-        listed = ", ".join(x["models"][:8]) + (", ..." if len(x["models"]) > 8 else "") or "no models"
+        listed = ", ".join(x["models"][:8]) + (", ..." if len(x["models"]) > 8 else "") or (
+            "it wants an API key (its provider's options.apiKey)" if x.get("key") else "no models")
         known = models.server_key(x["root"]) in keys
         if x.get("windows"):  # WSL2's Windows host, beyond this machine (#663)
             lines.append(f"  {x['root']} answers on Windows (usually {x['usually']}): {listed}"

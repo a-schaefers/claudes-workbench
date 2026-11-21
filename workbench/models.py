@@ -2688,8 +2688,11 @@ def remove_remote(host: str) -> tuple[str, list[str]]:
 # Where the common local model servers listen by default and what their command is called, for
 # wb scout: Claude works with whatever the user runs, so it needs to see what that is (only
 # Ollama was looked for, and the skill steered every first run to it).
+# Jan's local API server (1337) and text-generation-webui's OpenAI API (5000, --api) were never
+# probed: a running one was "none found", and first run offered servers to install (#810)
 SERVER_PORTS = ((11434, "Ollama"), (1234, "LM Studio"), (8080, "llama.cpp, llama-swap, LocalAI or MLX"),
-                (8000, "vLLM"), (5001, "KoboldCpp"), (30000, "SGLang"))
+                (8000, "vLLM"), (5001, "KoboldCpp"), (30000, "SGLang"), (1337, "Jan"),
+                (5000, "text-generation-webui"))
 SERVER_COMMANDS = ("ollama", "lms", "llama-server", "llama-swap", "vllm", "sglang", "koboldcpp",
                    "local-ai", "mlx_lm.server", "jan")
 
@@ -2725,17 +2728,43 @@ def windows_host() -> str | None:
     return None
 
 
-def _models_at(root: str, timeout: float) -> list[str] | None:
-    body = _get(f"{root}/v1/models", timeout=timeout)
+NEEDS_KEY = "needs an API key"  # what _models_at says of a server that answered 401
+
+
+def _models_at(root: str, timeout: float) -> list[str] | str | None:
+    """The ids ``root``'s /v1/models lists; NEEDS_KEY when it answered 401 (Jan or LM Studio
+    with an API key set: taken as no answer, it was invisible on its own port, #810); else None."""
+    try:
+        with _open(f"{root}/v1/models", timeout=timeout) as r:
+            body = json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            said = e.read(4096) if e.code == 401 else b""
+        except Exception:
+            said = b""
+        finally:
+            e.close()
+        # not 403: macOS's AirPlay receiver answers 5000 so; and not wb's own web chat, on 1337
+        # by default, whose 401 is for its token
+        return NEEDS_KEY if e.code == 401 and b"wb chat" not in said else None
+    except Exception:
+        return None
     if isinstance(body, dict) and isinstance(body.get("data"), list):
         return [str(x.get("id")) for x in body["data"] if isinstance(x, dict)]
     return None
 
 
+def _answer(root: str, usually: str, names: list[str] | str) -> dict:
+    """servers_here's entry for a server that answered: its models, or `key` when it wants one."""
+    return {"root": root, "usually": usually, "models": [], "key": True} if names == NEEDS_KEY \
+        else {"root": root, "usually": usually, "models": names}
+
+
 def servers_here() -> tuple[list[str], list[dict]]:
     """The model servers' commands on PATH, and the servers answering on their default ports here:
-    {"root", "usually", "models"} (the ids an OpenAI-compatible /v1/models lists), and on WSL2
-    those at the Windows host too, with "windows": its address (#663)."""
+    {"root", "usually", "models"} (the ids an OpenAI-compatible /v1/models lists; "key": true
+    and no models when it wants an API key, #810), and on WSL2 those at the Windows host too, with
+    "windows": its address (#663)."""
     on_path = [c for c in SERVER_COMMANDS if shutil.which(c)]
     if _fake():
         return on_path, []
@@ -2743,13 +2772,13 @@ def servers_here() -> tuple[list[str], list[dict]]:
     for port, usually in SERVER_PORTS:
         root = f"http://127.0.0.1:{port}"
         if (names := _models_at(root, 1)) is not None:
-            answering.append({"root": root, "usually": usually, "models": names})
+            answering.append(_answer(root, usually, names))
     if (win := windows_host()) and not answering:  # mirrored networking found them above
         from concurrent.futures import ThreadPoolExecutor
         roots = [(f"http://{win}:{port}", usually) for port, usually in SERVER_PORTS]
-        with ThreadPoolExecutor(len(roots)) as pool:  # a firewall that drops: one wait, not six
+        with ThreadPoolExecutor(len(roots)) as pool:  # a firewall that drops: one wait, not eight
             found = list(pool.map(lambda r: _models_at(r[0], 1), roots))
-        answering += [{"root": root, "usually": usually, "models": names, "windows": win}
+        answering += [{**_answer(root, usually, names), "windows": win}
                       for (root, usually), names in zip(roots, found) if names is not None]
     return on_path, answering
 

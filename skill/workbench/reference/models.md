@@ -6,7 +6,8 @@ updating workbench, or the weekly model check is due.
 **No local model yet?** If `wb models` lists none that can run, do the model check below first:
 recommend models for this hardware and offer to set them up in OpenCode (ask before any download).
 **Work with the model server the user already runs**, whichever it is: `wb scout` lists the server
-commands on PATH and the servers answering here. Never steer them to one they don't use. With
+commands on PATH and the servers answering here (one that "wants an API key" needs it in its
+provider's `options.apiKey`: ask the user for it). Never steer them to one they don't use. With
 none at all, lay out the options that fit the machine in a line each (llama.cpp's `llama-server`,
 alone or behind llama-swap; LM Studio; Ollama; vLLM on NVIDIA; MLX on Apple Silicon) and let the
 user pick; install nothing unasked. Asked which is most hands-off: Ollama (you download and remove

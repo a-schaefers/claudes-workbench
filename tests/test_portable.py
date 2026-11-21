@@ -1266,6 +1266,42 @@ class Real(unittest.TestCase):
         lms_loaded.clear()
         self.assertIsNotNone(models._respread(models.discover()["o/x"]))
 
+    def test_scout_finds_jan_and_text_generation_webui_and_a_server_that_wants_a_key(self):
+        # #810: Jan (1337) and text-generation-webui (5000) were never probed, and a 401 read as
+        # no answer: "none found", and first run offered servers to install
+        from workbench import cli
+        self.assertIn((1337, "Jan"), models.SERVER_PORTS)
+        self.assertIn((5000, "text-generation-webui"), models.SERVER_PORTS)
+
+        def refusing(code, said):
+            class H(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(code)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": said}).encode())
+
+                def log_message(self, *a):
+                    pass
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            self.servers.append(srv)
+            return srv.server_address[1]
+        jan = self.server({"/v1/models": {"data": [{"id": "qwen-coder"}]}})
+        keyed = refusing(401, "invalid api key")
+        chat = refusing(401, "bad or missing token: open the link from `wb chat url`")  # wb's own
+        airplay = refusing(403, "forbidden")                                              # macOS's 5000
+        ports = ((int(jan.rsplit(":", 1)[1]), "Jan"), (keyed, "LM Studio"), (chat, "Jan"),
+                 (airplay, "text-generation-webui"))
+        with mock.patch.object(models, "SERVER_PORTS", ports), \
+                mock.patch.object(models, "windows_host", return_value=None):
+            _, found = models.servers_here()
+            self.assertEqual(found, [{"root": jan, "usually": "Jan", "models": ["qwen-coder"]},
+                                     {"root": f"http://127.0.0.1:{keyed}", "usually": "LM Studio",
+                                      "models": [], "key": True}])
+            lines = cli.server_lines({})
+        self.assertIn(f"{jan} answers (usually Jan): qwen-coder", lines[-2])
+        self.assertIn(f"127.0.0.1:{keyed} answers (usually LM Studio): it wants an API key", lines[-1])
+
     def test_lm_studio_says_each_models_size_window_and_tool_training(self):
         from workbench import cli
         lms = self.server({"/api/v1/models": {"models": [
