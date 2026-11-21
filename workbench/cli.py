@@ -676,7 +676,8 @@ def cmd_start(a):
         shutil.rmtree(task.dir, ignore_errors=True)
         die(f"branch {gitops.branch_name(a.name)} already exists in {repo}: pick a new name")
     store.write_json(task.dir / STARTING, {"repo": str(repo), "worktree": str(wt),
-                                           "pid": os.getpid(), "at": store.now()})
+                                           "pid": os.getpid(), "at": store.now(),
+                                           "start": models._started(os.getpid())})
     subs = gitops.fill_submodules(repo, base, wt, dry=True)
     budget = a.ask_budget
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
@@ -685,7 +686,8 @@ def cmd_start(a):
         # the Claude Code session whose Bash ran this (_scope, the mod's `mine`); none by hand.
         # And its process: once that is gone, the directory rule may hand the task to a new one
         **({"session": sid} if (sid := os.environ.get("CLAUDE_CODE_SESSION_ID")) else {}),
-        **({"claude_pid": int(pid)} if (pid := os.environ.get("CLAUDE_PID", "")).isdigit() else {}),
+        **({"claude_pid": int(pid), "claude_start": models._started(int(pid))}
+           if (pid := os.environ.get("CLAUDE_PID", "")).isdigit() else {}),
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
@@ -1165,18 +1167,14 @@ def cmd_watch(a):
         sys.stdout = open(os.devnull, "w")
 
 
-def _gone(pid) -> bool:
+def _gone(pid, start=None) -> bool:
     """Whether the Claude Code process a task recorded (task.json `claude_pid`) has exited. One we
-    can't signal isn't it either: it ran as this user. Unknown (no pid) is not gone."""
+    can't signal isn't it either: it ran as this user. Nor is one that started at another time
+    than `claude_start` says: the pid was recycled, and a new `claude` in the project never
+    adopted the task (#532). Unknown (no pid) is not gone."""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return True
-    except OSError:
-        return False
-    return False
+    return not models._alive(pid, start if isinstance(start, str) else None)
 
 
 def _scope(tasks, where, sessions=None):
@@ -1212,7 +1210,7 @@ def _scope(tasks, where, sessions=None):
             cwd and cwd.is_relative_to(here)
             or repo and (repo.is_relative_to(here) or here.is_relative_to(repo)))
         if sessions and sid:
-            ok = sid in sessions or near and _gone(t.spec.get("claude_pid"))
+            ok = sid in sessions or near and _gone(t.spec.get("claude_pid"), t.spec.get("claude_start"))
         elif here is None or (not cwd and not repo):
             ok = True
         else:
@@ -1933,7 +1931,8 @@ def _dead_start(task: store.Task) -> dict | None:
         return None
     info = store.read_json(task.dir / STARTING)
     if isinstance(info, dict) and isinstance(info.get("pid"), int):
-        return None if models._alive(info["pid"]) else info
+        # with its start: a recycled pid refused a retry and kept the worktree from gc (#532)
+        return None if models._alive(info["pid"], info.get("start")) else info
     try:
         young = time.time() - task.dir.stat().st_mtime < RULES_GRACE
     except OSError:
@@ -1957,6 +1956,16 @@ def _drop_start(task: store.Task, info: dict) -> None:
     shutil.rmtree(context.rules_dir(task), ignore_errors=True)
 
 
+def _maker_alive(pid: str, tag: str) -> bool:
+    """Whether a scratch directory's maker (its name's <pid>.<start tag>, store.scratch) still
+    runs: a pid recycled since is another process, and its clone was kept for ever (#532). An
+    untagged name (made before the tag, or where no start could be read) goes by the pid alone."""
+    if not (pid.isdigit() and models._alive(int(pid))):
+        return False
+    now = models.start_tag(int(pid)) if tag else ""
+    return not now or now == tag
+
+
 def _drop_scratches() -> int:
     """The scratch directories (store.SCRATCH_PREFIXES) SCRATCH_AGE old whose maker is gone (#376)."""
     n = 0
@@ -1964,12 +1973,12 @@ def _drop_scratches() -> int:
         pre = next((p for p in store.SCRATCH_PREFIXES if d.name.startswith(p)), None)
         if not pre or not d.is_dir() or d.is_symlink():
             continue
-        pid = d.name[len(pre):].split("-")[0]
+        pid, _, tag = d.name[len(pre):].split("-")[0].partition(".")
         try:
             old = time.time() - d.stat().st_mtime > store.SCRATCH_AGE
         except OSError:
             continue
-        if old and not (pid.isdigit() and models._alive(int(pid))):
+        if old and not _maker_alive(pid, tag):
             gitops._rmtree(d)
             n += 1
     return n
@@ -3115,7 +3124,8 @@ def cmd_events(a):
     (home / "tasks").mkdir(parents=True, exist_ok=True)
     chat.chat_dir()
     parent = os.getppid()
-    print(json.dumps({"hello": os.getpid()}), flush=True)
+    # its start too: the mod records both in chat/listener.json, so a recycled pid isn't a listener (#532)
+    print(json.dumps({"hello": os.getpid(), "start": models._started(os.getpid())}), flush=True)
     # accepted and discarded are final and names aren't reused; tasks/ itself stays watched, so a
     # new task is picked up, and one that closes while this runs simply stays watched
     closed = tuple(f"tasks/{t.name}" for t in store.all_tasks() if t.status.get("phase") in store.CLOSED)

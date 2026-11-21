@@ -3456,6 +3456,10 @@ class Steering(Base):
         self.start("t-old", "slow")
         self.wait_session("t-old")
         self.assertEqual(store.Task("t-old").spec["claude_pid"], claude.pid)
+        from workbench import models
+        self.assertEqual(store.Task("t-old").spec["claude_start"], models._started(claude.pid))
+        self.assertFalse(cli._gone(claude.pid, models._started(claude.pid)))
+        self.assertTrue(cli._gone(claude.pid, "1"))  # #532: its pid, recycled: another process
         here, new = str(self.repo), ("--session", "sess-2")
 
         def elsewhere(*argv):
@@ -6831,6 +6835,31 @@ class Cleanup(Base):
 
     def git(self, *a):
         return subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True, text=True)
+
+    def test_a_recycled_pid_is_no_maker_of_a_scratch_clone_or_a_half_made_start(self):
+        # #532: a `.verify-<pid>-` clone, or a starting.json, whose pid was live again under
+        # another process was kept by every gc, and a retry of the start was refused
+        from workbench import models
+        me, tag = os.getpid(), models.start_tag(os.getpid())
+        self.assertTrue(tag)                                  # /proc or ps says when we started
+        self.assertTrue(store.scratch(".verify-").startswith(f".verify-{me}.{tag}-"))
+        home = store.home()
+        recycled = home / f".verify-{me}.{'0' * 8 if tag != '0' * 8 else '1' * 8}-a"
+        mine = home / f".verify-{me}.{tag}-b"
+        untagged = home / f".verify-{me}-c"                   # an older name: the pid alone
+        for d in (recycled, mine, untagged):
+            d.mkdir(parents=True)
+            os.utime(d, (time.time() - 7200, time.time() - 7200))
+        self.assertEqual(cli._drop_scratches(), 1)
+        self.assertEqual([d.exists() for d in (recycled, mine, untagged)], [False, True, True])
+
+        task = store.Task("t-half")
+        task.dir.mkdir(parents=True)
+        info = {"repo": "/nonexistent", "pid": me, "start": models._started(me)}
+        store.write_json(task.dir / cli.STARTING, info)
+        self.assertIsNone(cli._dead_start(task))              # its maker runs: under way
+        store.write_json(task.dir / cli.STARTING, {**info, "start": "1"})
+        self.assertEqual(cli._dead_start(task)["pid"], me)    # another process under its pid
 
     def test_a_merged_branch_goes_and_bench_still_finds_its_commit(self):
         # 8 merged delegate branches were left in one repo, and 55 rules directories here
@@ -10347,6 +10376,25 @@ class WebChat(Base):
         finally:
             for srv in servers:
                 srv.server_close()
+
+    def test_a_listener_or_server_under_a_recycled_or_foreign_pid_is_gone(self):
+        # #532: listener.json's pid, live again under a root daemon (EPERM), read as a session
+        # listening; one of ours started since, as the listener too
+        from workbench import models
+        me = os.getpid()
+        listener = self.chat.chat_dir() / "listener.json"
+        store.write_json(listener, {"session": "s", "pid": me, "start": models._started(me)})
+        self.assertEqual(self.chat.listener()["session"], "s")
+        store.write_json(listener, {"session": "s", "pid": me, "start": "1"})
+        self.assertIsNone(self.chat.listener())               # our pid, another process's start
+        store.write_json(listener, {"session": "s", "pid": 1})
+        if os.geteuid() != 0:
+            self.assertIsNone(self.chat.listener())           # init's: not this user's, so gone
+        ports = self.chat.chat_dir() / "port.json"
+        store.write_json(ports, {"port": 51583, "pid": me, "start": "1"})
+        self.assertEqual(self.chat.port(), self.chat.PORT)
+        store.write_json(ports, {"port": 51583, "pid": me, "start": models._started(me)})
+        self.assertEqual(self.chat.port(), 51583)
 
     def test_the_web_chat_is_off_until_turned_on_and_stays_as_left(self):
         # The user, 2026-11-19: off by default, a switch in the pane, remembered across /workbench runs.

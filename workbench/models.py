@@ -43,6 +43,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -1698,6 +1699,13 @@ def runs(pid: int, *words: str) -> bool:
             return True
     n = len(words)
     return any(toks[i:i + n] == list(words) for i in range(len(toks) - n + 1))
+
+
+def start_tag(pid: int) -> str:
+    """`_started` short enough for a file name (its crc32, in hex), '' when unknown: a scratch
+    directory's name carries its maker's, so wb gc knows a recycled pid isn't the maker (#532)."""
+    s = _started(pid)
+    return format(zlib.crc32(s.encode()), "08x") if s else ""
 
 
 def _alive(pid: int, start: str | None = None) -> bool:
