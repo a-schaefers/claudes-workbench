@@ -3617,7 +3617,12 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   is the substitutions, deletions and insertions over the script's words, not capped at 100%,
   `differences` the first four spans as `script → heard`. `difflib` paired an insert with a
   delete among repeated words: one wrong word in "go go go go" scored 100%, its differences
-  wrong too (#593). The line shows both, because a WER alone misled on the first
+  wrong too (#593). `words` keeps letters, digits, apostrophes and their combining marks (`\w`
+  split Hindi and Thai at each vowel sign), and splits a script written without spaces
+  (`UNSPACED`: Thai, Lao, Myanmar, Khmer, kana, CJK ideographs; not Hangul) into characters, a
+  mark kept with its base; `_join` writes such a span back without spaces; when most of the
+  script is such characters (`by_characters`) the sidecar has `cer: true` and the line says CER.
+  Counted as words, one wrong particle in a Japanese clause scored 100% (#598). The line shows both, because a WER alone misled on the first
   real run (#396): a perfect "Twenty twenty-six" read 30%, the listener having written "2026". A listener that fails is reported on the
   line, not raised.
 - The line reads `3.4 s (asked 3) · peak -1.2 dBFS · -16 LUFS · lead 0.1 s, tail 0.3 s · gaps … ·

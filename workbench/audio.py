@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import uuid
 import wave
 from pathlib import Path
@@ -309,8 +310,48 @@ def spectrogram(path: Path, png: Path) -> bool:
     return bool(r and r.returncode == 0 and png.is_file())
 
 
+# Scripts written without spaces between words (Thai, Lao, Myanmar, Khmer, kana, CJK ideographs):
+# each character is a unit, or one wrong particle in a Japanese clause scored the whole clause
+# (WER 100%) and a perfect take and a bad one looked alike (#598). Hangul is spaced: words.
+UNSPACED = re.compile("[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u31f0-\u31ff"
+                      "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f\U00020000-\U0003ffff]")
+
+
 def words(text: str) -> list[str]:
-    return re.findall(r"[\w']+", text.lower().replace("’", "'"))
+    """The units a listener is scored on: lower-case words (letters, digits, apostrophes, and
+    their combining marks: `\\w` split Hindi and Thai at each vowel sign), and each character of a
+    script written without spaces."""
+    out, cur, after_unit = [], "", False
+    for c in text.lower().replace("’", "'"):
+        if unicodedata.category(c).startswith("M"):  # a vowel sign or tone mark: its base's
+            if cur:
+                cur += c
+            elif after_unit:
+                out[-1] += c
+            continue
+        if UNSPACED.match(c):
+            out += [cur, c] if cur else [c]
+            cur, after_unit = "", True
+        elif c.isalnum() or c in "'_":
+            cur, after_unit = cur + c, False
+        else:
+            if cur:
+                out.append(cur)
+            cur, after_unit = "", False
+    return out + [cur] if cur else out
+
+
+def _join(units: list[str]) -> str:
+    """Units back into text: no space between two characters of a script written without them."""
+    return "".join(("" if k == 0 or (UNSPACED.match(units[k - 1]) and UNSPACED.match(u)) else " ") + u
+                   for k, u in enumerate(units))
+
+
+def by_characters(script: str) -> bool:
+    """Whether most of the script is written without spaces: its rate is then a character error
+    rate, and the line says CER (#598)."""
+    units = words(script)
+    return sum(bool(UNSPACED.match(u)) for u in units) * 2 > len(units) if units else False
 
 
 def _align(ref: list[str], hyp: list[str]) -> list[tuple[list[str], list[str], int]]:
@@ -349,8 +390,7 @@ def _spans(script: str, heard: str) -> tuple[int, list[tuple[str, str, int]]]:
     swain's") is a match: the first real run (#396) counted a perfect take of it as a miss."""
     ref, hyp = words(script), words(heard)
     flat = lambda ws: "".join(ws).replace("'", "")  # noqa: E731
-    spans = [(" ".join(a), " ".join(b), k) for a, b, k in _align(ref, hyp)
-             if k and flat(a) != flat(b)]
+    spans = [(_join(a), _join(b), k) for a, b, k in _align(ref, hyp) if k and flat(a) != flat(b)]
     return len(ref), spans
 
 
@@ -444,6 +484,8 @@ def inspect(path: Path, kind: str, script: str = "", seconds: float | None = Non
                 heard = transcribe(ear, clip, log or Path(tmp) / "listen.log")
                 found.update(transcript=heard, wer=wer(script, heard),
                              differences=differences(script, heard), listener=ear[0])
+                if by_characters(script):
+                    found["cer"] = True  # `wer` counts characters
             except (OSError, RuntimeError, subprocess.TimeoutExpired) as err:
                 found["listen_error"] = str(err)
     return found
@@ -469,7 +511,7 @@ def summary(found: dict, seconds: float | None) -> str:
         if found["gaps"]:
             bits.append("gaps " + ", ".join(f"{g[1]:g} s at {g[0]:g} s" for g in found["gaps"]))
     if "transcript" in found:
-        bits.append(f"heard \"{found['transcript']}\" WER {found['wer']:.0%}"
+        bits.append(f"heard \"{found['transcript']}\" {'CER' if found.get('cer') else 'WER'} {found['wer']:.0%}"
                     + (f" ({'; '.join(found['differences'])})" if found.get("differences") else ""))
     elif "listen_error" in found:
         bits.append(f"listener failed: {found['listen_error']}")

@@ -10,7 +10,8 @@ needs no wait).
 
 **You can't hear.** Every candidate comes with one line of checks: its length (and the length
 asked for), peak and clipping, loudness, lead and tail silence, gaps, and for speech what the
-listener heard and its word error rate (WER). With ffmpeg each also gets a spectrogram `.png`.
+listener heard and its word error rate (WER; CER, by character, for Chinese, Japanese, Thai and
+other scripts written without spaces). With ffmpeg each also gets a spectrogram `.png`.
 Never say a sound "sounds" good. Say what the checks show, and let the user's ears decide taste.
 
 1. **Brief it like a director.** Speech: the exact script, with numbers, acronyms and odd names

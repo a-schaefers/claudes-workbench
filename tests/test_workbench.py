@@ -7111,6 +7111,26 @@ class Audio(Base):
         self.assertEqual(audio.wer("the cat sat on the mat", "the cat on the the mat"), 0.333)
         self.assertEqual(audio.wer("one two", ""), 1.0)
 
+    def test_speech_written_without_spaces_is_scored_by_character(self):
+        # #598: '東京タワーに行きましょう。' heard with に→へ scored WER 100%, one character of a
+        # 15-character Chinese line 50%, the difference shown the whole clause
+        script = "東京タワーに行きましょう。"
+        self.assertEqual(audio.wer(script, "東京タワーへ行きましょう。"), round(1 / 12, 3))
+        self.assertEqual(audio.differences(script, "東京タワーへ行きましょう"), ["に → へ"])
+        self.assertEqual(audio.differences(script, "東京タワーにいくましょう"), ["行き → いく"])
+        zh = "今天的天气很好我们去公园散步吧"
+        self.assertEqual(audio.wer(zh, "今天的天气真好我们去公园散步吧"), round(1 / 15, 3))
+        self.assertEqual(audio.wer(zh, zh), 0.0)
+        self.assertEqual(audio.words("สวัสดี"), ["ส", "วั", "ส", "ดี"])    # Thai: a mark stays with its base
+        self.assertEqual(audio.wer("สวัสดีครับ", "สวัสดีครัป"), round(1 / 7, 3))
+        self.assertEqual(audio.words("नमस्ते दुनिया"), ["नमस्ते", "दुनिया"])          # its vowel signs kept
+        self.assertTrue(audio.by_characters(script))
+        self.assertFalse(audio.by_characters("The gate is open"))
+        found = {"duration": 1.0, "peak_db": -3.0, "clipped": 0.0, "lead": 0.0, "tail": 0.0,
+                 "gaps": [], "lufs": -20.0, "transcript": "東京タワーへ行きましょう", "cer": True,
+                 "wer": audio.wer(script, "東京タワーへ行きましょう"), "differences": ["に → へ"]}
+        self.assertIn('CER 8% (に → へ)', audio.summary(found, None))
+
     def test_an_engine_refuses_what_it_has_no_slot_for_and_the_wrong_kind(self):
         tmp, tone = Path(self.tmp.name), self.tone()
         self.engines({"tts": {"command": f"{sys.executable} {tone} --out {{out}}", "gpu": False,
