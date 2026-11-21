@@ -153,7 +153,9 @@ const STATS_RETRY_MS = 60_000
 const RETRY_MAX_MS = 10 * 60_000
 const SETTINGS_HINT = 'Click a row to see its options, then click one; or Tab to it and press Enter. A change applies at once.'
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
-const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web message
+// the user counts as away this long after they last used the web chat: a web message, or a page
+// in use (chat/away.json's `at`, written by `wb chat serve`'s /api/active, #959)
+const AWAY_MS = 6 * 3600 * 1000
 // ...or for as long as this session has a backlog task open: a night's batch outlasts six hours,
 // and its permission prompts then waited in the terminal until morning (#110, 2026-11-18)
 export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: WbTask) => boolean): boolean {
@@ -174,6 +176,9 @@ export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) =>
 // message in chat/away.json and a prompt typed in any session clears it, so every delegating
 // session relays its dialogs and says AWAY_NOTE. Kept in the listener's own state, only it did:
 // another session's overnight backlog left its permission dialogs in the empty terminal (#110 again).
+// The chat server writes it too when a page is in use (#959): the owner typed in the terminal,
+// then picked up the phone, and a prompt neither reached it nor was allowed by their setting. So
+// away is the device last used: the chat, used after the last prompt typed here.
 const awayFile = () => `${mem.root}/chat/away.json`
 // Whether a prompt is the user's own (at the terminal, or through Remote Control), by the
 // engine's stamp: a /loop or scheduled firing, another plugin's prompt or an MCP channel's
@@ -199,7 +204,7 @@ async function back($: any) {
 // per conversation, so a user who went to the web chat later was never told of, and a task's
 // news reached only the terminal they had left.
 const AWAY_NOTE =
-  'The user is away from the terminal and last wrote from the web chat. Tell them ' +
+  'The user is away from the terminal: they last used the web chat. Tell them ' +
   'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
   '`wb chat log` shows the thread. Typing in the terminal again ends this.'
 async function awayToo($: any, text: string): Promise<string> {
@@ -2057,6 +2062,17 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
   }
 }
 
+// A dialog while the user is at the terminal stays there, and the phone is told one waits (#959):
+// typing in the terminal and then picking up the phone left a prompt there with the phone told
+// nothing. A notice, not a card (only the terminal can answer it), pushed as Claude's messages
+// are; wb skips it for a user who doesn't use the chat. Not awaited: the dialog comes up at once.
+async function noticeOnChat($: any, tool: string, input: unknown) {
+  const kind = KIND[tool] ?? 'permission'
+  const { ok, out } = await runWb($, ['chat', 'notice', `--tool=${tool}`, `--kind=${kind}`,
+    `--text=${kind === 'permission' ? askText(input) : ''}`], 15_000)
+  if (!ok) warnOnce($, 'chat-notice', `the web chat wasn't told of a dialog here (${brief(out)})`)
+}
+
 async function waitOnChat($: any, id: string, kind: string, i: Record<string, unknown>, signal?: AbortSignal) {
   $.ui.toast(`workbench: ${kind === 'plan' ? 'the plan' : kind === 'question' ? "Claude's question" : 'a permission prompt'} is waiting for you in the web chat`)
   const deadline = (await $.clock.now()) + ASK_WAIT_MS
@@ -2783,12 +2799,17 @@ export const register: Register = (on, options) => {
 
   // A dialog while the user is away on the web chat goes there (askOnChat): the moment it would
   // come up, in the session the chat listens to. A settings hook's own answer stands, and a
-  // failed hook leaves the dialog to come up as usual.
+  // failed hook leaves the dialog to come up as usual. At the terminal, the dialog stays there and
+  // the chat gets one notice of it (noticeOnChat, #959): the hook runs once per dialog.
   on('classic.PermissionRequest', async ($, e, next) => {
     const r = await next(e)
     if (r.decision) return r
     const st = await read($, chat)
-    if (!st.delegating || !(await away($, st))) return r
+    if (!st.delegating || !st.web) return r
+    if (!(await away($, st))) {
+      void noticeOnChat($, e.tool_name, e.tool_input)
+      return r
+    }
     const decision = await askOnChat($, e.tool_name, e.tool_input, next.signal)
     return decision ? { ...r, decision } : r
   })

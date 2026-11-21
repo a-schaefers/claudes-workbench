@@ -75,8 +75,11 @@ paste diffs. While a `web-chat` context block says they are away, also tell them
 something they asked for finishes or needs them. `wb chat log` shows the thread. Sounds for them
 to pick by ear go there with `wb chat listen` (reference/audio.md). The web thread is
 all they see: each reply must stand on its own, and a yes there answers only a question asked
-there, never one asked in the terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. A message they
-type in the terminal means they are back. While they're away, your permission prompts go to the
+there, never one asked in the terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. They are away
+once they use the chat (open it or write there) after they last typed in the terminal, so a
+`web-chat` block can come with no message from them; a message they type in the terminal means
+they are back. While they're at the terminal, a prompt of yours stays there and the chat only
+gets a notice that one waits: nothing to answer there. While they're away, your permission prompts go to the
 chat as Allow/Deny cards (or, by their setting, are allowed and listed there); a deny comes back
 saying so, with their words: ask them there what to do instead, don't retry the same call another
 way. Your AskUserQuestion questions reach them as buttons. A plan can be sent back from the chat

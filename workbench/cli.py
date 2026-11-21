@@ -4585,6 +4585,11 @@ def cmd_chat(a):
         except ValueError as e:
             die(f"wb chat ask: {e}")
         print(row["id"], row["answer"] or "open")
+    elif a.action == "notice":  # the mod: a dialog waits in the terminal, the user not away (#959)
+        if not a.tool or a.kind not in chat.KINDS:
+            die("wb chat notice needs --tool, and --kind permission|plan|question")
+        row = chat.notice(a.tool, a.text or "", a.kind)
+        print(row["id"] if row else "skipped: no chat page in use in a day, and no device with push on")
     elif a.action == "wait":  # the mod: the answer once there is one; open at the timeout
         if not a.id:
             die("wb chat wait <ask id>")
@@ -4605,7 +4610,7 @@ def cmd_chat(a):
         print(cur["answer"])
     else:  # log
         for r in chat.thread()[-a.n:]:
-            who = "you" if r["from"] == "user" else "Claude"
+            who = {"user": "you", "notice": "notice"}.get(r["from"], "Claude")
             files = "".join(f" [attached: {f.get('path')}]" for f in r.get("files") or [] if isinstance(f, dict))
             print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}{files}")
         lst = chat.listener()
@@ -5761,16 +5766,17 @@ def parser() -> argparse.ArgumentParser:
                        "left), serve it, its link, reply to the user there, takes for the user "
                        "to pick by ear (listen), "
                        "the thread (log), receipts (ack, claim), what waits (pending), permission "
-                       "prompts for the away user (ask, wait, answer: the mod's)")
+                       "prompts for the away user (ask, wait, answer: the mod's), and a notice "
+                       "that one waits in the terminal (notice: the mod's)")
     s.add_argument("action", choices=["serve", "url", "on", "off", "reply", "listen", "log", "ack",
-                                      "claim", "pending", "ask", "wait", "answer"], nargs="?",
+                                      "claim", "pending", "ask", "notice", "wait", "answer"], nargs="?",
                    default="log")
     s.add_argument("id", nargs="?", help="ack, claim: the message id; wait, answer: the prompt's "
                    "id; listen: the clips (wb audio's takes, up to 8)")
     s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)  # listen's further clips
-    s.add_argument("--tool", help="ask: the tool asking")
-    s.add_argument("--kind", default="permission", help="ask: permission, plan or question")
+    s.add_argument("--tool", help="ask, notice: the tool asking")
+    s.add_argument("--kind", default="permission", help="ask, notice: permission, plan or question")
     s.add_argument("--detail", help="ask: JSON, a question's {questions} or a plan's {plan} "
                    "or {plan_file}")
     s.add_argument("--session", help="ask: the Claude Code session asking (its plan file)")
@@ -5785,7 +5791,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--bind", action="append", help="serve: an address to listen on, `tailscale` "
                    "or 0.0.0.0 (default: chat.json's `bind`, else localhost)")
     s.add_argument("--host", action="append", help="serve: another host name to answer to (* any)")
-    s.add_argument("--text", help="reply, ask, listen: the text"); s.add_argument("--message", help="reply: file, or -")
+    s.add_argument("--text", help="reply, ask, notice, listen: the text"); s.add_argument("--message", help="reply: file, or -")
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
     s.add_argument("--how", choices=["now", "queued"], default="now", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_chat)

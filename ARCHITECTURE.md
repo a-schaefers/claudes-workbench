@@ -5853,14 +5853,20 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   `chat/listener.json` listens; it is known by its `wb events` process's pid and start.
 - **Claude knows where the user is.** A web message carries the same authority as one typed in
   the terminal, with a note: reply there, briefly; the web thread is all the user sees; a yes there
-  answers only a question asked there; nothing hard to undo on an ambiguous OK. For six hours after
-  a web message (until the user types in the terminal again) Claude also tells the user there
-  when something they asked for finishes or needs them.
+  answers only a question asked there; nothing hard to undo on an ambiguous OK. While the user is away (below) Claude also tells the
+  user there when something they asked for finishes or needs them.
+- **Away is the device the user last used** (#959). The user is away once they use the web
+  chat after they last typed in the terminal: a web message, or a page on screen and in use
+  (shown, focused, back from the cache, or a tap or key in it: `POST /api/active`), and until
+  they type in the terminal again; for at most 6 h after that use, or longer while one of this
+  session's `--backlog` tasks is open (a night's batch outlasts six hours, #110). `chat/away.json`
+  holds it, the user's, not one session's (#688). Only a web message counted until #959 (the
+  owner, 2026-11-21): typing in the terminal and then picking up the phone with "Let Claude go
+  ahead" set, they had a prompt stay in the terminal, neither shown on the phone nor allowed,
+  and the phone was told nothing. A page merely open in a background tab, or visible beside the
+  terminal without the focus, doesn't count.
 - **Claude Code's dialogs** (the user, 2026-11-18: the terminal's dialog waited for nobody). While
-  the user is away (a web message within 6 h, or since then while one of this session's
-  `--backlog` tasks is open: a night's batch outlasts six hours, #110; none typed in the terminal
-  since: `chat/away.json`, the user's, not one session's, #688), every delegating
-  session's mod puts them on the page as cards (`kind`):
+  the user is away, every delegating session's mod puts them on the page as cards (`kind`):
   - `permission`: the tool and what it would run, with Deny and Allow, alike in weight (green made
     allowing look like the right answer, #103). When Claude said what the call is for (Bash's
     `description`, which the mod sends as `detail.purpose`), the card leads with the decision,
@@ -5878,12 +5884,21 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   the card says so and the dialog stays in the terminal as usual. The gear's *Tool permissions while you're away*
   setting (`prefs.json` `away`) can instead let Claude go ahead: a permission is allowed at once
   and listed in the thread ("allowed by your setting"); questions and plans still ask, and deny
-  rules still hold (they never reach a dialog). How the mod does it: *The web chat listener*,
-  under *The mod*.
+  rules still hold (they never reach a dialog). While the user is at the terminal (not away), a
+  dialog stays there and the page gets one notice of it (#959): "Claude is waiting on a
+  permission|plan|question in the terminal", a permission's command under it, no buttons (only
+  the terminal can answer it), and a push as Claude's messages get one. Only for a user of the
+  chat: a page in use within `PAGE_RECENT` (a day, `chat/page.json`) or a device with push on;
+  `wb chat notice` writes nothing otherwise. How the mod does it: *The web chat listener*, under
+  *The mod*.
 
 **Files** (`$WB_HOME/chat/`):
-- `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude", text (empty when a user's
-  message is files alone), cid?, shots?, audio?, about?, files?}`. `files` (the user's attachments) is
+- `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude"|"notice", text (empty when a user's
+  message is files alone), cid?, shots?, audio?, about?, files?}`. A `notice` (`wb chat notice`,
+  #959) is `{…, text: "Claude is waiting on a permission|plan|question in the terminal", tool,
+  what?}` (`what`: a permission's command, file or pattern, 2000 characters): news as Claude's
+  rows are (`chat.NEWS`: pushed, `/api/latest`), but not Claude's reply, so the mod's owed reply
+  (#767) reads only `from: claude`. `files` (the user's attachments) is
   `[{id, name, size, type, path}]`, from each upload's meta. A post whose `cid` the thread already holds returns that row instead of adding one
   (`_by_cid`: the file read on from where the last post stopped, the newest `CIDS_KEPT` 5000 ids
   kept; only the last 500 rows were checked, and a tab offline longer than that sent its message
@@ -5917,9 +5932,14 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   `CLAIM_STALE` (120 s) old (its session gone); exit 1 otherwise, and exit 1 with `<id> expired:
   over 6 hours unread, so not passed to Claude; the page offers to send it again` for an expired
   message (below).
-- `away.json`: `{at, by}`, written by the mod: when the listening session last passed on a web
-  message (seconds; `by` its key), `{at: 0}` once a prompt is typed in any session or the chat is
-  turned off. Every session reads it for whether the user is away (#688).
+- `away.json`: `{at, by}`: when the user last used the web chat (seconds), written by the mod when
+  the listening session passes on a web message (`by` its key) and by the server when a page is
+  in use while the chat is on (`POST /api/active`, `by: "page"`, #959); `{at: 0}` once a prompt is
+  typed in any session or the chat is turned off. Every session reads it for whether the user is
+  away (#688).
+- `page.json`: `{at}`, when a chat page was last in use (`POST /api/active`, written whether the
+  chat is on or not), so a dialog at the terminal is announced only to a user who uses the chat
+  (`chat.notice`, `PAGE_RECENT` a day, #959).
 - `listener.json`: `{session, cwd, pid, start, machine, busy}`, written by the mod when it changes (`start`:
   its `wb events` process's, from the hello; `machine`, the hello's: another machine's mod never
   reads that pid as gone and takes the listener, #922). A listener counts while its pid is this user's and
@@ -6139,6 +6159,8 @@ thread no longer):
   stands (an earlier one, when the prompt was already answered).
 - `POST /api/prefs`: the same checks, `{away: "ask"|"allow"}` and nothing else (400) → 200
   `{state}`.
+- `POST /api/active`: the same checks, `{}` and nothing else (400) → 200 `{}`: a page on screen and
+  in use (`chat.active`: `page.json`, and `away.json` `{at: now, by: "page"}` while the chat is on, #959).
 - `POST /api/seen`: `{ids: up to 200 ids, endpoint?: a push service's URL}` (400 otherwise) → 200;
   the ids go in seen.jsonl, with `endpoint` (no push owed to that device alone) when it is given.
 - `POST /api/push`: `{endpoint, on: true|false}` subscribes or drops a device (400 unless the
@@ -6228,10 +6250,22 @@ waiting for your answer" and a hidden page's title "Claude asks: allow?" (a perm
 "Claude needs you"; answered, the buttons go and the meta says "you allowed it", "allowed by
 your setting", "you said no", "you answered" (the picks shown), "you passed", "you asked for
 changes" (the note shown), "settled in the terminal" (an interrupt, or the dialog answered
-there) or "no answer in time: it waits in the terminal". The gear in the header drops a settings
+there) or "no answer in time: it waits in the terminal". A `notice` row (`makeNotice`, #959) is a
+centred, dashed box with its sentence and the command, no buttons, and "answer it in the
+terminal" in its meta. Using the page counts as using this device (#959): coming on screen
+(`visibilitychange` to visible, `focus`, `pageshow`, and the first load) or a `pointerdown` or
+`keydown` in it posts `/api/active` (`reportActive`), only while `!document.hidden` and
+`document.hasFocus()` (a tab in the background, or one visible beside the terminal, says nothing;
+nor does the page reloading itself unfocused), at most once per `ACTIVE_MS` 30 s while it stays in
+use, at once again when it comes back from hidden; a failed post is tried again 5 s later while
+it is still in use (a line dead from the phone's sleep). The gear in the header drops a settings
 sheet (`#settings`; closed by the gear, Escape or a tap outside), what people come back for first
 (#103): *Tool permissions while you're away* (Ask me here / Let Claude go ahead, posting
-`/api/prefs`, with what each means), *Notifications* and *What it saved* (`drawSaved`: the week's
+`/api/prefs`, with what each means, under when you're away, `#away-when`: "You're away from the
+moment you use this page (open it or send a message here) after typing in the terminal, until you
+type in the terminal again. Away ends by itself 6 hours after you last used this page, unless a
+night's batch is still running. While you're at the terminal, prompts stay there and this page is
+told."; it said away lasted "from your first message here", #959), *Notifications* and *What it saved* (`drawSaved`: the week's
 `savings`, in a sentence, called an estimate, the GPU's energy with `, cost 0.27` once a price is
 set, no currency sign, as `wb savings` and the pane: a `$` made a euro or pound price dollars,
 #845; "Nothing to compare yet" before a task can be), then
@@ -6289,7 +6323,9 @@ against RFC 6979's vectors and openssl), so nothing needs encrypting and nothing
 Claude write passes through Apple's, Google's or Mozilla's service: the worker fetches
 `/api/latest` (the whole `/api/state`, up to a megabyte with plans in it, until #755) with the key the page left it in Cache Storage (`wb-chat` `/key`, deleted before
 each write: WebKit drops a put over an entry a reloaded page wrote) and shows the newest open
-dialog that isn't `stale`, unless Claude's latest message is newer, else that message (or
+dialog that isn't `stale`, unless Claude's latest message (or notice) is newer, else that message
+(a notice as its own sentence for the title and the command as it is for the body, #959: `plain`
+would drop the `*` of `rm -rf runs/*`; or
 "Notifications work" for a test; a dead session's card beat every later reply, #538), tagged `wb-chat`; a
 tap focuses the chat or opens it. Which news is pushed: a page posts what it showed to
 `/api/seen`: for every device while it is in use (visible, focused, and a pointer, key, wheel or
@@ -6297,7 +6333,7 @@ touch within `USING_MS` 2 min; it reports again on focus and on each input), els
 device has notifications on, with its own `endpoint`, so only its push is spared; a page merely
 visible and unsubscribed reports nothing. Any visible tab counted for every device, so a desktop
 tab left open behind the terminal meant the phone was never notified (#537); the server's `Pusher` thread (woken by each change, and every `PUSH_DELAY`/2) sends
-one push to each device still owed Claude's messages and open dialogs that no page showed within
+one push to each device still owed Claude's messages, notices and open dialogs that no page showed within
 `PUSH_DELAY` 10 s and that are under `PUSH_WINDOW` 15 min old (never a backlog; with no device
 subscribed it works nothing out, and seen.jsonl is read on from where the last look stopped,
 `_seen_update` under `_seen_lock`: each tick reread the whole file, 94 ms at 60,000 rows with
@@ -6546,10 +6582,11 @@ skill, not a mod command.
 conversation's first message and after a compaction or `/clear`, not every turn):
 `workbench-mode` while delegating (MODE_NOTE: the mode lasts until a quit, follow the skill,
 every plan is a handoff plan, the SKILL.md path); `user-notes` while delegating and notes.md has
-notes; `web-chat` for six hours after a web message (longer while a backlog task of this
-session's is open: `awayNow`), until a prompt is typed in the terminal
-(AWAY_NOTE: reply with `wb chat reply`, `wb chat log` shows the thread; each wake says it too
-while away, below); `workbench-wake` with the `wake`
+notes; `web-chat` while the user is away: for six hours after they last used the web chat (a
+web message, or a page in use, #959; longer while a backlog task of this session's is open:
+`awayNow`), until a prompt is typed in the terminal (AWAY_NOTE: "The user is away from the
+terminal: they last used the web chat", reply with `wb chat reply`, `wb chat log` shows the
+thread; each wake says it too while away, below); `workbench-wake` with the `wake`
 setting off, while delegating or with a task of this session's open (WAKE_OFF_NOTE: no wake will
 come; tell the user, pick it up when asked); `workbench` whenever `wb status` with `scope()`
 exits 0 listing open tasks (the status, plus `wb report`/`wb watch`; a failing one toasts once
@@ -6625,7 +6662,9 @@ as the next turn; the page said "Queued for Claude" for good, 2026-11-21), `chat
 `{at: now, by: <key>}`, a toast. Away is the user's (#688: `away()` reads that file, so every
 session in workbench mode relays its dialogs and ends its wakes with AWAY_NOTE, not only the
 listener; kept in the listener's own state, another session's overnight backlog left its dialogs in
-the empty terminal, #110 again); a prompt typed in any session writes `{at: 0}` (`back`). Typed
+the empty terminal, #110 again); the chat server writes `{at, by: "page"}` too when a page is in
+use (`POST /api/active`, #959), so away follows the device last used; a prompt typed in any
+session writes `{at: 0}` (`back`). Typed
 is the engine's `origin.kind` (`byUser`): `composer`, `bridge`, `sdk`, `auto-continuation`, or an
 `unclassified` or unstamped one not `isMeta`; a /loop or scheduled firing, another plugin's
 prompt, an MCP channel's or a peer session's message ended away for every session and cancelled
@@ -6644,7 +6683,12 @@ user's return before it went left it queued, and it went anyway, #837); that tur
 ending without one too, `wb chat reply --text="Claude answered in the terminal; nothing was sent
 here."` (OWED_POSTED) goes to the chat, once per message. Dialogs
 (`classic.PermissionRequest`; the terminal shows its dialog meanwhile, and the hook's answer
-settles it): unless a settings hook already decided, or the session isn't delegating with
+settles it): unless a settings hook already decided, or the session isn't delegating with the
+chat on, the dialog goes one of two ways. At the terminal (not away), `noticeOnChat` runs `wb chat
+notice --tool=<t> --kind=<kind> --text=<a permission's askText>` once, not awaited, so the dialog
+comes up at once (the hook runs once per dialog, so one notice per prompt; wb skips it for a user
+who doesn't use the chat; a failure is said once, `warnOnce`), and passes the event on (#959: the
+phone was told nothing). Away, with
 `chat/away.json`'s `at` within AWAY_MS (6 h; a prompt typed in any session's terminal sets it to 0) or this session with a
 backlog task open (`awayNow`), `askOnChat` runs `wb
 chat ask --tool=<t> --kind=<KIND[tool], else permission> --text=<a permission's: the input's
@@ -6702,7 +6746,9 @@ per session until it's installed.
 link running `wb setup`, a wake held mid-turn and delivered once (and a stale one dropped), the transcript
 and pinned link, both quit commands (typed words stop nothing), KEEP_ON_COMPACT and the boundary
 compaction, the live header label, the weekly check, the chat listener (exact text, receipt,
-standing by, stopping after a quit), dialogs on the chat (only while away, allow and deny with
+standing by, stopping after a quit), dialogs on the chat (only while away, away after the page's
+use newer than the terminal's last input and not after an older one, one notice per dialog at the
+terminal, #959; allow and deny with
 a note, a plan sent back, a question's answers, the go-ahead setting, an expiry, back in the
 terminal, one wb refuses posted to the phone, a long plan or preview cut), Bash `wb start` turning the mode on and mid-turn delivery,
 rewake, Raster vs face, `/workbench` alone, the update check and `/workbench-update`, `wrapWords`;
@@ -6878,7 +6924,7 @@ Prints the counts and the bytes freed; writes `gc.json`. Then (not in `cli.gc`, 
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4; at least 1), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. An engine off this GPU (`"gpu": false`, or a url on another host) runs beside tasks; one pinned to a card (`devices`, `beside`) waits only for the tasks on it. A bare `list` or `ls` as the prompt acts as `--list`. |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music` (default: the first engine), `--n` (3; at least 1), `--seconds S` (engines with `{seconds}`; default the entry's `seconds`, else 5 for sfx, 30 for music, 10 otherwise), `--voice NAME` (default: the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check` (no listener, no spectrograms), `--list`, `--wait` | Clips from a local audio engine, each with one line of checks (see *Audio*). `--n` below 1 is refused (exit 2, before any lease: #592); a clip that isn't audio fails the command, unpublished. A GPU engine refuses while anything holds the GPU (`--wait` queues); a `"gpu": false` engine runs beside tasks. A bare `list` or `ls` acts as `--list`. An option the engine has no placeholder for is refused, naming it. |
-| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|wait\|answer]` | `listen <clip>… [--text]` (Claude's shortlist of `wb audio` takes for the user to play and pick, up to 8: *Listening by ear*, #397), `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses, leaving the switch off (#690), when another program or another account's chat answers there or its server didn't start, `off` stops only one it started; `url` first starts again one `on` started that is gone, #449), `--port` (the running server's, from `chat/port.json`, else the one `chat/serve.pid` names, else 1337: #349), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo --pid` (a plan's session and directory; `--pid`, the asking session's `wb events` process, #538; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|notice\|wait\|answer]` | `listen <clip>… [--text]` (Claude's shortlist of `wb audio` takes for the user to play and pick, up to 8: *Listening by ear*, #397), `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses, leaving the switch off (#690), when another program or another account's chat answers there or its server didn't start, `off` stops only one it started; `url` first starts again one `on` started that is gone, #449), `--port` (the running server's, from `chat/port.json`, else the one `chat/serve.pid` names, else 1337: #349), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo --pid` (a plan's session and directory; `--pid`, the asking session's `wb events` process, #538; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands), `notice --tool --kind --text` (a dialog waiting in the terminal while the user isn't away, #959: prints the notice's id, or `skipped: …` when no page was in use in a day and no device has push on) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb try` | `--model <id or fragment>` (the router's pick) | A sample task that proves the setup (#112): copies `workbench/try/project/` (a tiny `stats.py` with its tests and a committed CLAUDE.md; `from __future__ import annotations`, so its `list[float]` imports on Python 3.7 and 3.8 too) into `~/.local/share/workbench/try/<n>`, without Python's caches (a `__pycache__` left in the clone's sample made `wb init` refuse the copy as generated files, 2026-11-21) (beside `$WB_SKILLS`: the state directory is hidden from the lane, and its agent had no git there, #164), sets it up as `wb init` does, and starts `workbench/try/spec.md` (add `median`) as `try-<n>`, `--size trivial --trial --test '<wb's python> -m unittest'` (`sys.executable`, quoted: PATH's `python3` is 3.6 on RHEL 8, and the untouched base failed, #530): never the router's evidence or the lessons. Prints what `wb start` does, the project's path and the hidden check for review, `<wb's python> <pkg>/workbench/try/check.py <worktree>` (the agent never sees it; it fails on the untouched base, also when its Python can't read the module, passes once `median` meets the spec, and leaves no `__pycache__`). A refusal, by `wb init` (no git identity: #530; a home that is a git repo no longer refuses it, #684) or by the start (the GPU busy without `--queue`, no model), removes the copy again (#161). |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked; in a repo with commits only the link is committed, the user's CLAUDE.md edits left alone, #931, and nothing while a merge, cherry-pick, revert or rebase waits: `gitops.under_way`). Refuses the home directory or above, inside another repo (but a home kept as a git repo, dotfiles in `~`, or one above it: the project gets a repo of its own nested there, else every new project and `wb try` were refused there, #684), a repo git refuses (git's reason: no `git init` over it; "not a repo" is told apart in any language, `gitops.NotARepo`), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name) with the line for the user's `$SHELL` (`cli.path_advice`: zsh's `~/.zshrc`, bash's `~/.bashrc`, on macOS `~/.bash_profile`, fish's `fish_add_path`, else `~/.profile`) and to start Claude Code again from a new terminal (the desktop app or an IDE too); "add it" was all it said (#274, the audit of 1.2), and `wb doctor`'s "wb isn't on PATH" gives the same line when that link is there; exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. Ends with a `first run:` checklist (`cli.first_run`, #111), one line each, `ok` or `--` with the fix: OpenCode 2.x (else `runner.OPENCODE_GET`: OpenCode's `/v2/install`, or `opencode upgrade --major` on 1.x; npm's `opencode-ai`, `opencode.ai/install` and GitHub's Latest release are the 1.x line, #654), a model server answering (a configured provider, this machine's Ollama, or a server on a default port; on WSL2 one only at the Windows host is a `--` line that it needs `local: true`, and none at all adds `models.WSL_NAT`, #663; else: start yours, or run /workbench and Claude lays out the ones that fit the machine, never steering to one; `wb model add --url`), a local model registered (else: run /workbench, and Claude picks one for the machine), Landlock. It names no model, and changes no exit code. |
@@ -6930,6 +6976,7 @@ $WB_HOME (~/.local/state/workbench)
   chat/                          messages.jsonl  receipts.jsonl  asks.jsonl  prefs.json  listener.json  claims.json
                                  switch.json ({on}: wb chat on|off)  serve.pid ({pid, port, start}; wb chat url revives from it)  serve.log (the server wb chat on started)
                                  port.json ({port, pid, start}: the port wb chat serve runs on, read back without --port)
+                                 away.json ({at, by}: when the user last used the chat, 0 once they type in the terminal)  page.json ({at}: a page last in use, #959)
                                  audio/<batch>/ (wb chat listen's copies, <n>.<ext>, and audio.json; the newest 20)
                                  uploads/<id>/ (an attachment: <name> 0600 and .meta.json; *The web chat*)  uploads.lock
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
@@ -7527,7 +7574,9 @@ over https (no manifest link over localhost; a keyed one on an https origin rout
 the app (its worker runs and holds the
 key; the gear sends the install to https; notifications offered, or on iPhone sent to the installed app), what a page
 showed while in use reported to `/api/seen`, and not while only on screen (`hasFocus` false,
-#537), a server frozen (SIGSTOP) past the 40 s watchdog and then
+#537), the settings' words on when you're away, the page coming on screen in use posting
+`/api/active` (`page.json`, and `away.json` by `page` with the chat on) and not when unfocused,
+nor again within 30 s, a `wb chat notice` shown as a notice with no buttons (#959), a server frozen (SIGSTOP) past the 40 s watchdog and then
 let go (the page heals with no reload; a message sent meanwhile lands once), a changed page file
 (the page reloads itself, keyed, with the thread), wb shot's pair, `wb chat listen`'s shortlist
 (each take plays from its blob with its length and check line, and Keep sends the pick with its
@@ -7540,7 +7589,8 @@ was uploaded once; sent, one message with one path reaches `wb chat pending`, it
 whole) and one refused on its chip (over chat.json's `upload_mb`, then dropped with ✕; the test's
 own `WB_CHAT_CONFIG`), no script errors; and once, in node (`swSays`: `sw.js` in a `vm` against a
 given state, since no browser here shows a push), a push's text: Claude's newer reply over an older
-or stale prompt, a newer open prompt over the reply (#538).
+or stale prompt, a newer open prompt over the reply (#538), a notice's sentence and its command
+as it is (#959).
 
 **Conventions for a new test.** Names read as sentences (`test_a_note_does_not_swallow_a_failure_claude_has_not_seen`);
 one class per feature with a one-line docstring; end to end through `self.start`/`wait_phase`/
@@ -7728,6 +7778,12 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `drive` if it has one.
 - **`chat.py` or `chat_static/`** → the browser test (`chat.yml` runs it on the pull request too).
 - **`/api/state`'s asks or messages** → `sw.js`, which builds the notification from them.
+- **A message's `from`** (`user`, `claude`, `notice`: #959) → `chat.NEWS` (what is pushed and
+  `/api/latest`), `sw.js`, the page's `makeRow`, `metaFor` and `reportSeen`, `wb chat log`, and the
+  mod's owed reply (`owedAtTurnEnd`), which counts only `claude`.
+- **What makes the user away** (`chat/away.json`: the mod's `listen` and `back`, the server's
+  `chat.active`) → `awayNow` in register.tsx, AWAY_NOTE, the page's `#away-when`, and *The web
+  chat* (#959).
 - **A message's `about`** (a pair's `{task, n, step, round}`, a kept take's `{audio, n, name, path}`) → the mod's prefix for it in `listen` (register.tsx), the page's `aboutTag` and `aboutBody`, and `/api/send`'s check, which fills it in from the pair or the batch (#99, #397).
 - **`wb chat ask|wait|answer`'s output** (`<id> <state>` on the last line, `wait --json`'s ask) → `askOnChat` and `waitOnChat` in register.tsx, which parse it.
 - **AskUserQuestion's or ExitPlanMode's input shape** → `askOnChat` (`--detail`) and `makeAsk` in app.js.

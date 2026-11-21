@@ -259,6 +259,64 @@ async function run(engine, device) {
     await page.click('[data-away="ask"]')
     await until(() => JSON.parse(readFileSync(join(home, 'state/chat/prefs.json'), 'utf8')).away === 'ask')
   })
+  await check('the settings say you are away once you use this page after the terminal, and that the terminal\'s prompts are told here (#959)', async () => {
+    if (await page.locator('#settings').isHidden()) await page.click('#gear')  // the last check left it open
+    await until(async () => await page.locator('#settings').isVisible())
+    const said = await page.textContent('#away-when')
+    for (const want of ['use this page (open it or send a message here) after typing in the terminal',
+                        'until you type in the terminal again',
+                        "While you're at the terminal, prompts stay there and this page is told."])
+      if (!said.includes(want)) throw new Error(said)
+    await page.click('#gear')
+    await until(async () => await page.locator('#settings').isHidden())
+  })
+  await check('the page coming on screen in use tells the computer, and one hidden or unfocused does not (#959)', async () => {
+    // #959: only a message sent here made the user away, so a phone picked up after the terminal
+    // got none of the prompts. Using the page now counts; a background tab or one beside the terminal doesn't
+    const at = () => existsSync(join(home, 'state/chat/page.json')) ? JSON.parse(readFileSync(join(home, 'state/chat/page.json'), 'utf8')).at : 0
+    const show = h => page.evaluate(h => {
+      Object.defineProperty(document, 'hidden', { value: h, configurable: true })
+      document.dispatchEvent(new Event('visibilitychange'))
+    }, h)
+    await until(() => at() > 0)                                  // opened: in use
+    writeFileSync(join(home, 'state/chat/switch.json'), JSON.stringify({ on: true }))
+    try {
+      let was = at()
+      await page.evaluate(() => { document._hasFocus = document.hasFocus; document.hasFocus = () => false })
+      await show(true); await show(false)                        // on screen, but the terminal has the focus
+      await page.evaluate(() => dispatchEvent(new Event('focus')))
+      await sleep(1500)
+      if (at() !== was) throw new Error('an unfocused page said it was in use')
+      await page.evaluate(() => { document.hasFocus = document._hasFocus })
+      await show(true); await show(false)                        // back on screen, in use
+      await until(() => at() > was)
+      const away = JSON.parse(readFileSync(join(home, 'state/chat/away.json'), 'utf8'))
+      if (away.by !== 'page' || away.at !== at()) throw new Error(JSON.stringify(away))
+      was = at()
+      await show(true)
+      await page.evaluate(() => { Object.defineProperty(document, 'hidden', { value: false, configurable: true }) })
+      await page.evaluate(() => dispatchEvent(new Event('focus')))   // focused again
+      await until(() => at() > was)
+      was = at()
+      await page.locator('.thread').click({ position: { x: 5, y: 5 } })  // a tap within 30 s of that: no more
+      await sleep(1500)
+      if (at() !== was) throw new Error('reported again within 30 s')
+    } finally {
+      writeFileSync(join(home, 'state/chat/switch.json'), JSON.stringify({ on: false }))
+      // the document's own hidden again: left at false, the reload's own visibilitychange read
+      // as visible and dialled the stream from a page being unloaded (a WebKit page error)
+      await page.evaluate(() => { delete document.hidden; if (document._hasFocus) document.hasFocus = document._hasFocus })
+    }
+  })
+  await check('a prompt waiting in the terminal shows as a notice, with no buttons (#959)', async () => {
+    const id = wb('chat', 'notice', '--tool', 'Bash', '--text', 'rm -rf runs/*').trim()
+    if (id.startsWith('skipped')) throw new Error(id)
+    const row = page.locator('.row.notice').last()
+    await until(async () => (await row.textContent()).includes('Claude is waiting on a permission in the terminal'))
+    if ((await row.locator('.notice-what').textContent()) !== 'rm -rf runs/*') throw new Error(await row.textContent())
+    if (await row.locator('button').count()) throw new Error('a notice with buttons')
+    if (!(await row.locator('.meta').textContent()).includes('answer it in the terminal')) throw new Error(await row.textContent())
+  })
   await check('the gear shows what the week\'s tasks saved Claude, as an estimate', async () => {
     const usage = { turns: 2, calls: 5, input: 1000, cache_write_5m: 0, cache_write_1h: 10000, cache_read: 200000, output: 3000 }
     writeFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted',
@@ -924,6 +982,12 @@ await check("a push shows Claude's newer reply over an older or stale prompt, an
   if (await said({ asks: [ask], messages: [reply] }) !== 'Tests pass, ready for review') throw new Error('the older prompt won')
   if (await said({ asks: [{ ...ask, ts: 250, stale: true }], messages: [reply] }) !== 'Tests pass, ready for review') throw new Error('a stale prompt won')
   if (await said({ asks: [{ ...ask, ts: 250 }], messages: [reply] }) !== 'rm -rf build') throw new Error('the newer prompt lost')
+})
+await check('a push for a prompt waiting in the terminal says so, with the command as it is (#959)', async () => {
+  const note = { id: 'n1', ts: 250, from: 'notice', tool: 'Bash', what: 'rm -rf runs/*',
+    text: 'Claude is waiting on a permission in the terminal' }
+  const got = await swSays({ now: 300, push: {}, asks: [], messages: [note] })
+  if (got.title !== 'Claude is waiting on a permission in the terminal' || got.body !== 'rm -rf runs/*') throw new Error(JSON.stringify(got))
 })
 
 try {

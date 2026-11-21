@@ -2160,6 +2160,66 @@ test('a permission prompt while the user is away goes to the web chat, and their
   expect(runs.slice(n).some(a => a[2] === 'ask')).toBe(false)
 })
 
+test('the user is away once the chat page is used after their last terminal input, not before it, and at the terminal the phone gets one notice per prompt (#959)', async ($, on) => {
+  // #959: the owner typed in the terminal, then picked up the phone with "Let Claude go ahead"
+  // set; only a web message counted as the phone, so the prompt stayed in the terminal, neither
+  // shown on the phone nor allowed, and the phone was told nothing
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    const [, cmd, act] = e.argv
+    if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: 'ask-2-cd allow\n', stderr: '' } } // their setting
+    if (cmd === 'chat' && act === 'notice') return { value: { exitCode: 0, stdout: '1800000000000-abc123\n', stderr: '' } }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  on('classic.PermissionRequest', () => ({}))
+  const ask = async (tool_name: string, tool_input: unknown) => {
+    const r = await ($.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>)
+    await clock.advance(10)                                       // the notice isn't awaited: the dialog comes at once
+    return r
+  }
+  const of = (act: string, from = 0) => runs.slice(from).filter(a => a[1] === 'chat' && a[2] === act)
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+
+  // at the terminal: the dialog stays, and the phone is told, once
+  expect((await ask('Bash', { command: 'rm -rf runs/*' })).decision).toBeUndefined()
+  expect(of('notice')).toEqual([['wb', 'chat', 'notice', '--tool=Bash', '--kind=permission', '--text=rm -rf runs/*']])
+  expect(of('ask')).toEqual([])
+
+  // the page used now, after the terminal's last input (wb chat serve's /api/active): away, and
+  // their setting allows it at once, with no notice
+  files['/wb/chat/away.json'] = JSON.stringify({ at: ts0 + 3, by: 'page' })
+  let n = runs.length
+  expect((await ask('Bash', { command: 'rm -rf runs/*' })).decision).toEqual({ behavior: 'allow' })
+  expect(of('ask', n)).toHaveLength(1)
+  expect(of('notice', n)).toEqual([])
+
+  // typed in the terminal since: that page use is older than it, so not away
+  await $.prompt.submit({ text: 'back now' } as any)
+  expect(JSON.parse(files['/wb/chat/away.json']).at).toBe(0)
+  n = runs.length
+  expect((await ask('ExitPlanMode', {})).decision).toBeUndefined()
+  expect(of('ask', n)).toEqual([])
+  expect(of('notice', n)).toEqual([['wb', 'chat', 'notice', '--tool=ExitPlanMode', '--kind=plan', '--text=']])
+
+  // the chat turned off: neither
+  files['/wb/chat/switch.json'] = JSON.stringify({ on: false })
+  await clock.advance(31_000)
+  n = runs.length
+  expect((await ask('Bash', { command: 'make' })).decision).toBeUndefined()
+  expect([of('ask', n), of('notice', n)]).toEqual([[], []])
+})
+
 test('a session that isn\'t listening treats the user as away too, relaying its dialogs and saying so in its wakes (#688)', async ($, on) => {
   // #688: only the listening session set its own `webAt`, so another session's overnight backlog
   // left its permission dialogs in the empty terminal (#110 again) and its wakes never said
@@ -2277,7 +2337,7 @@ test('a task\'s wake while the user is away on the web chat tells Claude to answ
   await clock.advance(3000)
   expect(wakes()).toHaveLength(1)
   expect(wakes()[0]).toContain('REPORT-1')
-  expect(wakes()[0]).toContain('last wrote from the web chat')
+  expect(wakes()[0]).toContain('they last used the web chat')
   expect(wakes()[0]).toContain('wb chat reply')
 
   await $.prompt.submit({ text: 'back now' } as any)            // typed in the terminal: back
