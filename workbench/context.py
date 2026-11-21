@@ -241,17 +241,21 @@ def _simple_commands(line: str) -> list[str]:
 
 def test_allowances(test: str | None) -> tuple[list[str], list[str]]:
     """What `wb start --test` and `wb next --test` grant the task, as (allow, test_tools): the
-    acceptance command's own simple commands, as written and with more arguments (`npm test *`),
+    acceptance command's own simple commands as written, and with more arguments (`npm test *`)
     and their tools (`npm *`). The protocol tells the agent to run it; refused (`flutter test`,
     `just test`, `scripts/test.sh`), it spent an ask and a Claude wake on a command Claude chose,
     or finished untested (#514, the audit of 1.90). The tools go in a tier of their own, before
     ASK_FIRST (shell_rules): granted with the commands, after it, `--test 'npm test'` allowed
     `npm install left-pad`, `--test 'uv run pytest'` `uv add requests` (#646, the audit of main).
+    So does each command with more arguments: after the asks, `--test 'npm install && npm test'`
+    allowed `npm install left-pad`, `pip install -e . && pytest` `pip install -e . requests`
+    (#915, the third 2026-11-21 audit); only the command as written comes after them.
     The hard limits come later in the rules, so no grant here lifts them."""
     import shlex
     exact, tools = [], []
     for cmd in _simple_commands(test or ""):
-        exact += [cmd, f"{cmd} *"]
+        exact.append(cmd)
+        tools.append(f"{cmd} *")
         try:
             words = shlex.split(cmd)
         except ValueError:

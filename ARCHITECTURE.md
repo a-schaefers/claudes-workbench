@@ -1487,12 +1487,14 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `.venv/bin/*`, `venv/bin/*`, `node_modules/.bin/*`, `build/*`, `target/debug/*`,
    `target/release/*`, `bin/*`, `out/*`, `dist/*`, `zig-out/bin/*`, `vendor/bin/*` (Composer's),
    `scripts/*`, `tools/*`; then the tools of the acceptance command `wb start|next --test`
-   names (`grants.json` `test_tools`, from `context.test_allowances`: `<its command> *` and
-   `*=* <its command> *` for each of its simple commands), so the agent can run the tool's other
-   work (`npm run lint` under `npm test`, `earthly +lint` under `earthly +test`) but steps 5 and 6
-   still hold: granted in step 7, `--test 'npm test'` allowed `npm install left-pad`, `--test 'uv
-   run pytest'` `uv add requests`, `--test 'npx vitest run'` `npx -y cowsay` (#646, the audit of
-   main);
+   names (`grants.json` `test_tools`, from `context.test_allowances`: each of its simple commands
+   with more arguments, `npm test *`, and its tool, `<tool> *` and `*=* <tool> *`), so the agent
+   can run the tool's other work (`npm run lint` under `npm test`, `earthly +lint` under
+   `earthly +test`) but steps 5 and 6 still hold: granted in step 7, `--test 'npm test'` allowed
+   `npm install left-pad`, `--test 'uv run pytest'` `uv add requests`, `--test 'npx vitest run'`
+   `npx -y cowsay` (#646, the audit of main), and `--test 'npm install && npm test'`
+   `npm install left-pad` through `npm install *`, `--test 'pip install -e . && pytest'`
+   `pip install -e . requests` (#915, the third 2026-11-21 audit);
 5. deny `ASK_FIRST`: adding a dependency (`pip install *`, `npm install *`, `npm add *`,
    `pnpm i *`, `yarn global add *`, `bun i *`, `deno add *`, `deno install *`, `cargo add *`,
    `go get *`, `dotnet add * package *`, `python3.* -m pip install *`, `pdm add *`,
@@ -1531,9 +1533,9 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
 7. allow the user's standing patterns (`commands.json` `allow`) and the task's grants
    (`rules/<task>/grants.json` `allow`: `wb allow`, `wb start|next --allow`, and the acceptance
    command `wb start|next --test` names: `context.test_allowances`, each of its simple commands
-   as written and with more arguments, `npm test` and `npm test *`, so the agent can run what
-   the protocol tells it to (#514), even a command steps 5 and 6 would refuse; its tools are
-   step 4's); a `*` there lifts everything above;
+   as written, `npm test`, so the agent can run what the protocol tells it to (#514), even a
+   command steps 5 and 6 would refuse; the command with more arguments and its tools are step
+   4's, #915); a `*` there lifts everything above;
 8. deny the hard limits (`context.denied_shell()`): `DENIED_SHELL`, built from `_HARD` (`sudo`,
    `doas`, `pkexec`, `su`, `gh`), and the real git by its path (each `git` on the runner's PATH
    but the shim, its real path, and `GIT_PATHS`: `/usr/bin/git`, `/bin/git`,

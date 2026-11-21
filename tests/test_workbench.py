@@ -9550,6 +9550,24 @@ class Permission(Base):
         rules = context.shell_rules(task)
         self.assertEqual(self.verdict(rules, "npx -y vitest run"), "allow")
         self.assertEqual(self.verdict(rules, "npx -y cowsay"), "deny")
+        # #915 (the third 2026-11-21 audit): an acceptance command that installs first granted
+        # `npm install *` after the asks, so `npm install left-pad` was allowed, and `pip install
+        # -e . *` let `pip install -e . requests` past python_installs' ask (#490)
+        for n, (test, ran, adds) in enumerate((
+                ("npm install && npm test", ("npm install", "npm test -- --grep x"),
+                 "npm install left-pad"),
+                ("pip install -e . && pytest", ("pip install -e .", "pytest -k x"),
+                 "pip install -e . requests"))):
+            task = store.Task(f"t-915-{n}")
+            task.dir.mkdir(parents=True)
+            exact, tools = context.test_allowances(test)
+            context.grant(task, "allow", exact)
+            context.grant(task, "test_tools", tools)
+            with mock.patch.object(context, "python_installs", lambda t: (False, True)):
+                rules = context.shell_rules(task)
+            for r in ran:
+                self.assertEqual(self.verdict(rules, r), "allow", (test, r))
+            self.assertEqual(self.verdict(rules, adds), "deny", (test, adds))
 
     def test_a_commands_json_that_is_malformed_is_refused_not_ignored(self):
         # a string `allow` was spread letter by letter, its `*` allowing every command; a file
