@@ -776,15 +776,16 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         return GitError(f"{what} {branch_name(task)} failed and was backed out: {why}")
 
     # --commit and --no-squash outrank a branch.<name>.mergeOptions of --no-commit or --squash,
-    # which left the merge pending while accept said merged (#190, the 2026-11-19 audit). The
-    # squash says --ff: merge.ff=only refused it once the branch had moved, merge.ff=false every
-    # time ("cannot be used together", #429, the audit of 1.8)
+    # which left the merge pending while accept said merged (#190, the 2026-11-19 audit); a
+    # fast-forward needs --no-squash too: --ff-only under mergeOptions=--squash staged a squash
+    # and left HEAD (#430, the audit of 1.8). The squash says --ff: merge.ff=only refused it once
+    # the branch had moved, merge.ff=false every time ("cannot be used together", #429)
     try:
         if how == "squash":  # no MERGE_HEAD to abort: backed out with reset --merge
             git(repo, "merge", "--squash", "--ff", "--no-commit", source)
             committing([*NO_HOOKS, "commit", "--no-verify", "-q", "-C", source])
         else:
-            committing(["merge", *(("--ff-only",) if how == "ff" else
+            committing(["merge", *(("--ff-only", "--no-squash") if how == "ff" else
                                    ("--no-ff", "--commit", "--no-squash")), "--no-edit", source])
     except BaseException as e:  # a conflict, a timeout, a SIGTERM: the checkout as it was (#420)
         _back_out(repo, before)
@@ -797,8 +798,8 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         return git(repo, "rev-parse", "--short", "HEAD").strip()
     if _merging(repo) or _run(repo, ("merge-base", "--is-ancestor", source, "HEAD"),
                               check=False).returncode:
-        if _merging(repo):
-            git(repo, "merge", "--abort", check=False)
+        # HEAD or the index changed with no MERGE_HEAD (a squash staged) is backed out too (#430)
+        _back_out(repo, before)
         raise GitError(f"git didn't complete the merge of {branch_name(task)} (a merge setting "
                        "of yours?); it was backed out: merge it by hand")
     return git(repo, "rev-parse", "--short", "HEAD").strip()

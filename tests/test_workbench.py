@@ -1690,6 +1690,31 @@ class Lifecycle(Base):
             self.assertEqual(g("rev-parse", "--short", "HEAD").strip().decode(), head, ff)
             self.assertEqual(g("status", "--porcelain"), b"", ff)
 
+    def test_a_fast_forward_under_a_squash_merge_option_lands_or_is_backed_out_for_real(self):
+        # #430 (the audit of 1.8, reproduced): with branch.main.mergeOptions=--squash, --ff-only
+        # staged a squash and left HEAD; no MERGE_HEAD, so nothing was reset, and the checkout
+        # kept `A b.txt` while wb said "it was backed out"
+        repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
+                                   task={b"b.txt": b"b\n"}, ignore={},
+                                   config=[("branch.main.mergeOptions", "--squash")])
+        tip = g("rev-parse", "delegate/t").strip().decode()
+        g("reset", "-q", "--hard", "HEAD~1")  # main at the base: it can fast-forward
+        self.assertTrue(tip.startswith(gitops.merge(repo, "t", "main", how="ff")))
+        self.assertEqual(g("rev-parse", "HEAD").strip().decode(), tip)
+        self.assertEqual(g("status", "--porcelain"), b"")
+        # a git that stages without moving HEAD and says nothing (--no-squash not honoured): what
+        # wb says was backed out is
+        g("reset", "-q", "--hard", "HEAD~1")
+        real = gitops._run
+
+        def squashing(cwd, args, *rest, **kw):
+            return real(cwd, [x for x in args if x != "--no-squash"], *rest, **kw)
+        with mock.patch.object(gitops, "_run", squashing), \
+                self.assertRaisesRegex(gitops.GitError, "backed out"):
+            gitops.merge(repo, "t", "main", how="ff")
+        self.assertEqual(g("rev-parse", "HEAD"), g("rev-parse", f"{tip}~1"))
+        self.assertEqual(g("status", "--porcelain"), b"")
+
     def _signer(self, hang_on_merge: bool = False) -> Path:
         """A gpg.program that signs unattended with a made-up signature (git checks only the
         status line), or, `hang_on_merge`, waits on nobody for a commit with two parents: a
