@@ -1259,14 +1259,17 @@ def cmd_watch(a):
     if a.name:
         task = need(a.name)
     else:
-        tasks = sorted(store.all_tasks(), key=lambda t: t.status.get("updated_at") or 0)
+        # not a wb bench replay, as wb status leaves them out: a bare watch followed one (#555)
+        tasks = sorted((t for t in store.all_tasks() if not t.spec.get("bench")),
+                       key=lambda t: t.status.get("updated_at") or 0)
         live = [t for t in tasks if t.status.get("phase") not in store.CLOSED]
         if not tasks:
             die("no tasks yet")
         task = (live or tasks)[-1]
     try:
         transcript.follow(task, verbose=a.verbose, once=a.once or a.json, as_json=a.json,
-                          color=False if a.no_color else None, last=a.last if a.json else 0)
+                          color=False if a.no_color else None, last=a.last if a.json else 0,
+                          reap=reap)
     except KeyboardInterrupt:
         print()
     except BrokenPipeError:  # piped into head/less and the reader quit

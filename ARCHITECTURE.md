@@ -2085,7 +2085,12 @@ Live view off: no child, no **Now**. The newest tick is the `top` atom
   review`, or `⚒ wb · workbench mode` with nothing open. Outside workbench mode it counts only
   the session's own tasks (`mine`), and shows nothing without one: another session's running task
   filled it, and opened the pane, in a session the user kept off workbench (2026-11-17).
-- **`wb watch [task]`** (`workbench/transcript.py`) is the same transcript in a terminal.
+- **`wb watch [task]`** (`workbench/transcript.py`) is the same transcript in a terminal. It
+  exports the session again only when the task directory changed (the watcher's wake) or status
+  `session`/`updated_at` did, or `EXPORT_EVERY` (30 s) passed while the task is live; between
+  them the clock is redrawn from the last export, every 1.5 s while live and every 30 s once it
+  isn't (review, stuck, failed). It calls `cli.reap` every `REAP_EVERY` (60 s) while the task
+  looks live. Left open over a review it ran an export every 1.5 s (#555).
 - **`wb status`**, **`wb log [-f]`**, **`wb report [--round N]`** and **`wb diff [--stat] [--all]
   [paths]`** are the compact views Claude itself uses. `wb status` reaps a task whose runner died
   without saying so (`failed`), and marks one that died within the last `REAP_GRACE` with a `?`.
@@ -4829,7 +4834,7 @@ Every waiter and its bounded wake (a timeout to re-check what the kernel can't s
 | `wb events` | `$WB_HOME`, recursive, skipping `tasks/*/worktree`, `tasks/*/tree`, `tasks/*/rounds`, `rules`, `imports`, `images`, `audio`, `archive`, `chat/audio` (the takes `wb chat listen` copied, #397), the scratch clones and indexes (`SCRATCH`: `.?*`, `wb-index-*`, `wb-merge-*`, neither watched nor reported: one with a copied node_modules took it from 2 watches to 605, each write waking the mod, #373), the bench's (`bench/.?*`: `wb bench add`'s `.base-`/`.check-` clones; `bench/runs`: a run's replays; 1,209 of 1,211 watches were there, #439) and the tasks already closed when it starts (`EVENT_SKIP`) | 10 s (exits when its parent changes); every minute it reaps dead runners |
 | `wb wait` | the state directory and the named task's directory | 60 s (a dead runner: `reap`) |
 | `wb log -f` | the task directory | 30 s |
-| `wb watch` | the task directory | 1.5 s on a terminal, 30 s otherwise |
+| `wb watch` | the task directory | 1.5 s on a terminal while the task is live, 30 s otherwise; the session exported again only on a change or every 30 s while live (#555) |
 | the runner's steer bell | the task directory (`steer.jsonl`) and `ask/` | 5 s, while OpenCode runs |
 | `ask_reviewer` | `ask/` | 60 s, until the ask timeout |
 | the chat `Hub` | `chat/` and the listener's pidfd | 60 s |
@@ -4898,7 +4903,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 |---|---|---|
 | `wb wait [<task>]` | `--timeout S` (0: none) | Reaps dead runners, then blocks (inotify) until a notice past a task's `acked` arrives, prints `[<kind>] <task>\n<text>` and acks it (skipping notices no longer true, rows that aren't whole and removed tasks'). Named: a closed task exits 2; a task already waiting whose notice was taken elsewhere prints it again "(already delivered once)"; one stopped or taken over by hand prints `[<phase>] <task> (no notice: <last>)`. Bare, with no open task: exits 2. |
 | `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID` | Reaps dead runners. One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died within `REAP_GRACE`. Named: also `worktree: <path>` while it exists. `--session ID`, `--repo DIR` (the mod's context block): only that session's tasks (as for `wb stop`), then `open elsewhere (other sessions'): …`, by name. |
-| `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden: one pass of JSON lines, the mod's pane), `--last N` (hidden, with `--json`: the newest N transcript lines) | The live transcript (`transcript.follow`); default task: the most recently updated open one, else the most recently updated task. |
+| `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden: one pass of JSON lines, the mod's pane), `--last N` (hidden, with `--json`: the newest N transcript lines) | The live transcript (`transcript.follow`); default task: the most recently updated open one, else the most recently updated task, never a `wb bench` replay (#555). |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, questions, answers, stops, auto-fixes, rounds, tests, errors. `-f` follows until the task needs Claude or is closed, looking at the phase before each wait (on a finished task it returns at once: it waited 30 s, #90) and printing the events that came with it; each pass reaps a task whose runner died (`cli.reap`), so the follow ends on its error instead of following it for ever, and each line is flushed, so a pipe or a file gets it as it comes (#545). |
 | `wb report <task>` | `--round N` | The round's summary.md. |
 | `wb diff <task> [paths…]` | `--stat`, `--all` | The worktree against the task's base, or after `wb next` against the last committed step (`--all`: the whole branch); new files included. Once the worktree is gone (accepted, discarded), the git command for the branch's commits: from the base to status `tip`, the accepted commit, since `--merge` deletes the branch (#477); the branch for a task never accepted. |

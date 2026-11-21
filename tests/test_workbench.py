@@ -3973,6 +3973,55 @@ class Watch(Base):
         self.assertEqual([x["s"] for x in tail[4:]],                 # then what is happening
                          [x["s"] for x in full[-len(tail[4:]):]])  # (the clock ticks between)
 
+    def test_a_watch_left_open_over_a_review_exports_the_session_once_and_skips_bench_replays(self):
+        # #555: on a terminal, `wb watch` ran `opencode session export` every 1.5 s through review
+        # and stuck, nothing changing, and a bare watch picked a bench replay
+        for name, extra in (("t-rev", {}), ("t-bench", {"bench": {"case": "c"}})):
+            d = store.tasks_dir() / name
+            d.mkdir(parents=True)
+            store.write_json(d / "task.json", {"model": "ollama/m", "created_at": time.time() - 60, **extra})
+            store.write_json(d / "status.json", {"phase": "review", "round": 1, "session": "ses_x",
+                                                 "updated_at": time.time() + (5 if extra else 0)})
+        picked = []
+        with mock.patch.object(transcript, "follow", lambda task, **kw: picked.append(task.name)):
+            run_wb("watch")
+        self.assertEqual(picked, ["t-rev"])
+
+        class Tty(io.StringIO):
+            def isatty(self):
+                return True
+        exports = []
+        with mock.patch.object(transcript, "export", lambda sid, strict=False: exports.append(sid) or {}):
+            th = threading.Thread(target=transcript.follow, args=(store.Task("t-rev"),),
+                                  kwargs={"out": Tty(), "poll": 0.05}, daemon=True)
+            th.start()
+            time.sleep(1.0)
+            self.assertEqual(len(exports), 1)                            # nothing changed: not again
+            store.Task("t-rev").set_status(phase="accepted")
+            th.join(40)
+        self.assertFalse(th.is_alive())
+        self.assertLessEqual(len(exports), 2)
+
+    def test_a_watch_on_a_task_whose_runner_died_marks_it_failed(self):
+        # #555: the terminal follower never reaped, so a dead runner's task was watched as running
+        d = store.tasks_dir() / "t-gone"
+        d.mkdir(parents=True)
+        store.write_json(d / "task.json", {"model": "ollama/m", "created_at": time.time() - 600})
+        store.write_json(d / "status.json", {"phase": "running", "round": 1, "pid": None,
+                                             "updated_at": time.time() - cli.REAP_GRACE - 5})
+        with mock.patch.object(transcript, "REAP_EVERY", 0), \
+                mock.patch.object(transcript, "export", lambda sid, strict=False: {}):
+            th = threading.Thread(target=transcript.follow, args=(store.Task("t-gone"),),
+                                  kwargs={"out": io.StringIO(), "reap": cli.reap}, daemon=True)
+            th.start()
+            deadline = time.time() + 10
+            while store.Task("t-gone").status.get("phase") != "failed" and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(store.Task("t-gone").status["phase"], "failed")
+            store.Task("t-gone").set_status(phase="discarded")
+            th.join(40)
+        self.assertFalse(th.is_alive())
+
     def test_a_malformed_notice_breaks_neither_wait_nor_the_commands_that_acknowledge(self):
         # one row without a task made every acknowledging command raise KeyError, and a task
         # named ../../x put wb wait's ack outside the state directory (the 2026-11-16 audit)
