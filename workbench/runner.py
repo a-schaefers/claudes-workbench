@@ -2244,6 +2244,7 @@ def drive(task: store.Task) -> None:
                     return _load_failed(task, e)
             first = False
             n = task.status["round"]
+            _early_notes(task, n)
             why = fresh_reason(task) if n > 1 else None
             keep = task.status.get("context") == "keep"
             if why:
@@ -2433,6 +2434,17 @@ def _undelivered(task: store.Task) -> str:
     notes = [r for r in pending_steer(task) if r.get("by") != "workbench"]
     return ("\nNOTE: not delivered, the round stopped first: "
             + " | ".join(r["text"].strip().replace("\n", " ")[:200] for r in notes)) if notes else ""
+
+
+def _early_notes(task: store.Task, n: int) -> None:
+    """Notes that came in before the round began (queued for the GPU, its model or the base
+    check, or while the model reloaded) go with its prompt, as `wb steer` promises: they once
+    waited for the round to end and came as a round of their own (#452)."""
+    if not (notes := pending_steer(task)):
+        return
+    path = task.round_dir(n).joinpath("prompt.md")
+    path.write_text(path.read_text().rstrip() + "\n\n" + steer_prompt(notes, False))
+    task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
 
 def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:

@@ -667,7 +667,10 @@ while any runner is live; a manual pull is the case this catches.
 3. Each round n: after the first, the lease rejoined and `lease.load()` again, since each request resets Ollama's
    keep-alive to its own 5 minutes and a longer test run once left the auto-fix round paying for
    the reload inside its think budget (a reload adds to `load_secs` and `loads` and logs a `load` event;
-   resident already, it is one look at the server). For n > 1, `fresh_reason` decides whether a fresh session takes over
+   resident already, it is one look at the server). Notes still pending (they came in while the
+   task was queued, the model loaded or the auto-fix prompt was written) are added to the round's
+   `prompt.md` with `NOTE_HEAD` and counted taken (`_early_notes`): they once waited for the round
+   to end and came a round late (#452). For n > 1, `fresh_reason` decides whether a fresh session takes over
    (`_start_fresh`); a one-round `keep` is cleared and passed to `run_round`, so that round never
    hands over. Phase `running`, `round_started_at`, a `round` event, then `run_round`, then
    `_end_agent` (however the round ended, and while the lease is still held, so the GPU's next
@@ -1735,7 +1738,7 @@ the runner is woken by the note itself (`_steer_bell`), stops the agent within s
 starts the next round with the note first, marked as overriding anything earlier. The next round
 continues the session unless the between-rounds check hands it to a fresh one; during the tests
 there is nothing to interrupt, so the note waits for them, and while the task waits for the GPU it
-waits for the round to start: `wb steer` and `wb allow` say which (`cli._when_delivered`), not
+goes with the round's prompt when the round starts (`runner._early_notes`): `wb steer` and `wb allow` say which (`cli._when_delivered`), not
 "within a few seconds". A note the runner never delivered (it stopped first) goes to the stuck
 report, and the next `wb resume` carries it, `wb feedback` and `wb next` drop it and say so.
 

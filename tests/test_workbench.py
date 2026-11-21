@@ -3773,6 +3773,23 @@ class Steering(Base):
         self.assertEqual([r["kind"] for r in rows].count("tests"), 1)  # once, after the note
         self.assertTrue(self.sent()[-1].startswith(runner.NOTE_HEAD))
 
+    def test_a_plain_note_sent_while_queued_goes_with_the_first_rounds_prompt(self):
+        # #452: run_round acted only on --now notes, so a plain note sent while the task waited
+        # for the GPU came after round 1, as a round of its own
+        self.start("t-hold", "slow")
+        self.wait_session("t-hold")
+        self.start("t-qn", "ok", "--queue", "--test", TEST_CMD, "--no-base-check")
+        self.assertEqual(store.Task("t-qn").status["phase"], "queued")
+        self.assertIn("when the round starts", run_wb("steer", "t-qn", "--text", "Mention QN-77."))
+        run_wb("stop", "t-hold")
+        st = wait_phase("t-qn", {"review"}, timeout=30)
+        self.assertEqual(st["round"], 1)                      # no round of its own
+        self.assertEqual(st["steer_taken"], 1)
+        got = [p for p in self.sent() if "QN-77" in p]
+        self.assertEqual(len(got), 1)
+        self.assertIn(runner.NOTE_HEAD, got[0])
+        self.assertIn("Write the answer", got[0])             # the spec, then the note
+
     def test_a_note_sent_during_the_tests_says_it_waits_for_them(self):
         # --now promised "within a few seconds" while the tests ran for up to their timeout
         # (the 2026-11-16 audit).
