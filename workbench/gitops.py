@@ -761,6 +761,49 @@ def _untracked(path: Path) -> bytes:
         return b""
 
 
+def case_renames(worktree: Path, env=None) -> list[tuple[bytes, bytes]]:
+    """The index's paths the agent renamed by case only, as (old, new), on a file system that
+    folds case (empty elsewhere). There the task's git runs with core.ignorecase=true, which is
+    right, but it then matches Helpers.py in the index to helpers.py on disk: `add -A` staged no
+    rename, the review diff didn't show it and wb accept committed Helpers.py beside a main.py
+    importing helpers (#656). The agent can't `git mv` (the shim refuses it), so each component
+    is read back from its directory: an exact name missing, one name equal but for case (and
+    Unicode normalization, as APFS compares) present, is the agent's new name."""
+    if not _case_folds(os.path.dirname(os.path.abspath(worktree))):
+        return []
+    tracked = [p for p in _run(worktree, ("ls-files", "-z"), env).stdout.split(b"\0") if p]
+    have, listed, out = set(tracked), {}, []
+    top = os.fsencode(os.path.abspath(worktree))
+    for path in tracked:
+        here, real = top, []
+        for part in path.split(b"/"):
+            if here not in listed:
+                try:
+                    listed[here] = set(os.listdir(here))
+                except OSError:  # gone, or a file now: not a rename
+                    listed[here] = set()
+            if part not in listed[here]:
+                twin = [n for n in listed[here] if _folded(n) == _folded(part)]
+                if len(twin) != 1:
+                    break
+                part = twin[0]
+            real.append(part)
+            here = os.path.join(here, part)
+        else:
+            if (new := b"/".join(real)) != path and new not in have:
+                out.append((path, new))
+    return out
+
+
+def record_case_renames(worktree: Path, env=None) -> None:
+    """Stage case_renames in the index ``env`` names (a scratch one, or the worktree's own for
+    the commit), before `add -A`, so the review shows R Helpers.py -> helpers.py (#656)."""
+    if pairs := case_renames(worktree, env):
+        spec = lambda p: ":(literal)" + os.fsdecode(p)  # noqa: E731
+        _run(worktree, ["rm", "--cached", "-q", "--", *(spec(o) for o, _ in pairs)], env)
+        _run(worktree, ["add", "--", *(spec(n) for _, n in pairs)], env)
+
+
 def mark(worktree: Path) -> str:
     """A fingerprint of the working tree's uncommitted state, new files' contents included: it
     changes when, and only when, the agent changes a file (a new file past MARK_READ_MAX counts
@@ -771,6 +814,8 @@ def mark(worktree: Path) -> str:
     for f in git_bytes(worktree, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
         if f:
             h.update(f + b"\0" + _untracked(Path(worktree) / os.fsdecode(f)))
+    for old, new in case_renames(worktree):  # invisible to both above where case folds (#656)
+        h.update(b"R" + old + b"\0" + new + b"\0")
     return h.hexdigest()
 
 
@@ -798,6 +843,7 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
             shutil.copyfile(Path(worktree) / real, index)  # a relative path is the worktree's
         except (GitError, OSError):
             git(worktree, "read-tree", "HEAD", env=env)
+        record_case_renames(worktree, env)
         if new is not None:
             _run(worktree, ["add", "-u"], env)
             if new:
@@ -1124,6 +1170,7 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
     if not include and (why := _bulk(worktree)):
         raise GitError(f"not committed: {why}. Build output? Gitignore or remove it in "
                        f"{worktree}, or --include to commit it anyway")
+    record_case_renames(worktree)
     add_all(worktree, pre=NO_HOOKS)
     if not git(worktree, "diff", "--cached", "--name-only").strip():
         raise GitError("nothing to commit: the agent's worktree has no changes")

@@ -645,6 +645,35 @@ class Lifecycle(Base):
         self.assertIn("other.py", tree)
         self.assertNotIn("README.md", tree)
 
+    def test_a_case_only_rename_on_a_state_dir_that_folds_case_shows_in_the_review_and_lands(self):
+        # #656 (reproduced on a case-folding tmpfs): there the task's git runs ignorecase=true and
+        # matched Helpers.py in the index to helpers.py on disk; the review showed main.py alone,
+        # and accept committed Helpers.py beside a main.py importing helpers. Played here by the
+        # same git setting on this file system, where the rename read as a deletion alone
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        (self.repo / "Helpers.py").write_text("X = 1\n")
+        (self.repo / "main.py").write_text("import Helpers\n")
+        g("add", ".")
+        g("commit", "-qm", "helpers")
+        self.start("t-fold", "ok", "--test", TEST_CMD)
+        wait_phase("t-fold", {"review"})
+        t = store.Task("t-fold")
+        with mock.patch.object(gitops, "_case_folds", return_value=True):
+            before = gitops.mark(t.worktree)
+            (t.worktree / "Helpers.py").unlink()        # as the agent did it (Linux's rename
+            (t.worktree / "helpers.py").write_text("X = 1\n")  # to a case twin does nothing)
+            self.assertEqual(gitops.case_renames(t.worktree), [(b"Helpers.py", b"helpers.py")])
+            self.assertNotEqual(gitops.mark(t.worktree), before)        # the runner sees the edit
+            (t.worktree / "main.py").write_text("import helpers\n")
+            stat = gitops.diff(t.worktree, "HEAD", stat=True)
+            self.assertIn("Helpers.py => helpers.py", stat)              # what Claude reviews
+            run_wb("accept", "t-fold", "-m", "feat: snake case")
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "--name-only", "delegate/t-fold"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("helpers.py", tree)                                # is what lands
+        self.assertNotIn("Helpers.py", tree)
+
     def test_a_proposed_claude_md_is_shown_as_a_diff_and_taken_only_when_claude_says(self):
         # Claude making each CLAUDE.md change itself was a call over its whole context on most
         # tasks (2026-11-18): the agent proposes the file, accept takes it

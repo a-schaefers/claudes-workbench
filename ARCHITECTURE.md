@@ -4274,7 +4274,7 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   when it can't tell): with the repo's `core.ignorecase=true` (Git for Windows on `/mnt/c`, a repo
   from macOS) on a case-sensitive one, a case-only rename showed as a deletion alone and a new
   `OTHER.PY` beside `other.py` as nothing, and accept committed the deletion and removed the
-  worktree with the new names (#492, the audit of 1.90). A `.git` that isn't a regular file holding the recorded text stops the
+  worktree with the new names (#492, the audit of 1.90). Where it does fold case (macOS's default APFS, a case-folding mount), `ignorecase=true` matched `Helpers.py` in the index to the agent's `helpers.py` on disk, so `add -A` staged no rename: the review diff showed only the importing file and accept committed the old name (#656). `gitops.case_renames` reads each tracked path's components back from their directories (a missing exact name with one twin equal under casefold and NFC is the new name), and `record_case_renames` stages them (`rm --cached` the old, `add` the new) in the scratch index before the review diff and the snapshot, and in the worktree's own before `commit_all`; `mark` hashes them too. The agent can't `git mv` (the shim refuses it). A `.git` that isn't a regular file holding the recorded text stops the
   call with a `GitError` ("the worktree's .git was rewritten"): the runner fails the task, `wb
   accept` refuses. A task started before the record runs unpinned.
 - **No git hooks from the worktree.** With a relative `core.hooksPath` (husky's gitignored
