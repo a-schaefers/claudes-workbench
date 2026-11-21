@@ -2050,10 +2050,14 @@ nothing until a surface attaches.
   line per model (tasks, landed, rounds, minutes, write speed with its trend as a sparkline,
   `spark`, and the change, Claude's cost a task), by size, the last 30 days as a sparkline, bests,
   the newest milestone, what stopped agents (`GUARD_WORDS`), what helps, bench (the last finished run, and "newer run k of N so far" beside it), the optimized
-  windows. A section with no data is left out; a new install's says to delegate one with
-  /workbench. It is read (`refreshStats`) only while the tab is shown (`pane.tab` and `$.ui.panes()`
-  `isShown`): on the tab's press, then at each poll when results.jsonl's or stats.json's size or
-  mtime changed (`$.fs.stat`, the key kept with the feed), when the feed's `until` (its next local
+  windows. A section with no data is left out; a feed with no section at all (a new install's)
+  says to delegate one with /workbench, while one with no judged task but an optimized window,
+  a bench result or a period still shows them (#549). It is read (`refreshStats`) only while the tab is shown (`pane.tab` and `$.ui.panes()`
+  `isShown`): on each press of the tab, then at each poll when the size or mtime of a file the
+  feed is made from changed (`$.fs.stat`, the key kept with the feed: results.jsonl, stats.json,
+  optimize.json, bench/runs.jsonl, speed.json and the price's savings.json, `mem.savingsFile`:
+  with the first two alone, `wb optimize`, a bench run or a price left the tab stale for good,
+  #549), when the feed's `until` (its next local
   midnight) has passed, and after a Stats setting is picked; and once in each load
   (`mem.statsLoaded`), since the atom outlives a reload. Without the clock, an ended streak, last
   week's numbers and a 30-day chart ending days ago stayed until a task closed (#575).

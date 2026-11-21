@@ -1892,7 +1892,7 @@ test('a load reads the history once even when the feed an earlier load kept stil
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
   const pane = fakeTasks(on, files, [])
-  const kept = { key: `${files['/wb/results.jsonl'].length}@0 -`, feed: { ...FEED, until: 1_900_000_000 } }
+  const kept = { key: `${files['/wb/results.jsonl'].length}@0 - - - - -`, feed: { ...FEED, until: 1_900_000_000 } }
   on('state.get', (_: any, e: any, next: any) => e.key === 'stats' && e.plugin === 'workbench'
     ? { value: { value: { shape: 'stats-1', value: kept }, version: 1 } } : next(e))
   const reads: string[][] = []
@@ -1906,6 +1906,40 @@ test('a load reads the history once even when the feed an earlier load kept stil
   await ui.press({ key: 'tab-stats' })
   await clock.advance(10)
   expect(reads.length).toBe(1)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
+test('the Stats tab reads the history again after wb optimize, a bench run, a price, and on its press', async ($, on) => {
+  // #549: the key stamped results.jsonl and stats.json alone, so the tab kept a feed without the
+  // optimized windows, the bench result or the new price until a task closed, pressed or not
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  const pane = fakeTasks(on, files, [])
+  const reads: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'stats' && e.argv[2] === '--json') reads.push(e.argv)
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ ...FEED, until: 1_900_000_000 }) : '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(10)
+  expect(reads.length).toBe(1)
+  await clock.advance(31_000)
+  expect(reads.length).toBe(1)                                           // nothing changed
+  const steps: [string, string][] = [['/wb/optimize.json', '{"models": {}}'], ['/wb/bench/runs.jsonl', '{}\n'],
+    ['/home/u/.config/workbench/savings.json', '{"kwh_price": 0.3}']]
+  for (const [i, [path, text]] of steps.entries()) {
+    files[path] = text
+    await clock.advance(31_000)
+    expect(reads.length).toBe(2 + i)
+  }
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-stats' })                                   // pressed: read, files unchanged
+  await clock.advance(10)
+  expect(reads.length).toBe(5)
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })
@@ -2034,6 +2068,11 @@ test('a card is named by its product, never the vendor tag, as wb top names it (
 test('the history says nothing it has no data for, and a new install how to begin', () => {
   expect(statsLines(null)).toEqual([{ label: '', text: 'Reading the history…' }])
   expect(statsLines({ tasks: 0 })[0].text).toMatch(/^No finished tasks yet/)
+  // #549: optimized and benched before the first judged task, the tab said only the placeholder
+  const early = statsLines({ ts: 1, until: 2, settings: {}, tasks: 0,
+    optimized: { 'ollama/x': { window: 32768, fits: true } }, bench: { 'ollama/x': { run: 'r1', day: '2026-11-20', passed: 3, of: 4 } } })
+  expect(early).toEqual([{ label: 'Bench', text: 'ollama/x 3/4 (2026-11-20)' },
+    { label: 'Optimized', text: 'ollama/x 32K all on the GPU' }])
   const lines = statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, accepted_pct: 100 } } })
   expect(lines).toEqual([{ label: 'This week', text: '1 task · 1 landed (100%)' }])   // no savings, no zeros
   expect(spark([0, 0])).toBe('')

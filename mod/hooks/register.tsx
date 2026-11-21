@@ -136,8 +136,9 @@ const STRIP_HINT = 'minimized · restore: click, or Ctrl+X Tab then Enter'
 // Stats between them (#406): looked at more often than Settings
 const TABS: [string, string, string][] = [['tasks', 'Tasks', '1'], ['stats', 'Stats', '2'], ['settings', 'Settings', '3']]
 // The Stats tab's history (`wb stats --json`), read while the tab is shown: when it is first
-// shown in a load (`mem.statsLoaded`: the atom outlives a reload), again when results.jsonl or
-// stats.json changes, and once the feed's `until` (the next local midnight) has passed. No timer.
+// shown in a load (`mem.statsLoaded`: the atom outlives a reload), on each press of the tab, again
+// when a file it is made from changes (refreshStats), and once the feed's `until` (the next local
+// midnight) has passed. No timer.
 const statsFeed = atom({ plugin: 'workbench', key: 'stats' } as const, { key: '', feed: null } as WbStats,
   { shape: 'stats-1' })
 // The Stats tab's live view (#408): one `wb top --json` child, only while the tab is on screen
@@ -531,18 +532,21 @@ async function progressOn($: any): Promise<boolean> {
 }
 
 // The Stats tab's history: `wb stats --json`, only while the tab is shown, and only when what it
-// is made from changed since the last read (results.jsonl: a task closed; stats.json: a setting),
-// the day it was counted from has ended (its `until`: an ended streak and last week's numbers
-// stayed for days, #575), or not yet in this load. `force` after a settings pick. A stat is all a
-// poll costs while the tab is shown; nothing at all while it isn't.
+// is made from changed since the last read (results.jsonl: a task closed; stats.json: a setting;
+// optimize.json, bench/runs.jsonl, speed.json and the price's savings.json, which the feed reads
+// too and a stale tab kept for good, #549), the day it was counted from has ended (its `until`:
+// an ended streak and last week's numbers stayed for days, #575), or not yet in this load.
+// `force` on the tab's press and after a settings pick. A stat a file is all a poll costs while
+// the tab is shown; nothing at all while it isn't.
 async function refreshStats($: any, force = false) {
   if (mem.statsReading || (await read($, pane)).tab !== 'stats') return
   const shown = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
   if (!shown?.isShown) return
   const stamp = async (f: string) => {
-    try { const s = await $.fs.stat(`${mem.root}/${f}`); return `${s.size}@${s.mtimeMs}` } catch { return '-' }
+    try { const s = await $.fs.stat(f.startsWith('/') ? f : `${mem.root}/${f}`); return `${s.size}@${s.mtimeMs}` } catch { return '-' }
   }
-  const key = `${await stamp('results.jsonl')} ${await stamp('stats.json')}`
+  const key = (await Promise.all(['results.jsonl', 'stats.json', 'optimize.json', 'bench/runs.jsonl',
+    'speed.json', mem.savingsFile || '-'].map(stamp))).join(' ')
   const had = await read($, statsFeed)
   const dayOver = typeof had.feed?.until === 'number' && (await $.clock.now()) / 1000 >= had.feed.until
   if (!force && had.feed && key === had.key && mem.statsLoaded && !dayOver) return
@@ -743,8 +747,10 @@ const GUARD_WORDS: Record<string, string> = {
 // mentioned, only the best (the plan's rule: show what went right, never nag).
 export function statsLines(f: Record<string, any> | null): { label: string; text: string }[] {
   if (!f) return [{ label: '', text: 'Reading the history…' }]
-  // a period of spec-gap discards alone has a cost to say though no task is counted (#569)
-  if (!f.tasks && !f.periods) return [{ label: '', text: 'No finished tasks yet: delegate one with /workbench, and how it went shows here.' }]
+  // only when the feed has no section at all: with no judged task, a period of spec-gap
+  // discards (#569), the optimized windows and the bench results still have something to say (#549)
+  if (!f.tasks && !Object.keys(f).some(k => !['ts', 'until', 'settings', 'tasks'].includes(k)))
+    return [{ label: '', text: 'No finished tasks yet: delegate one with /workbench, and how it went shows here.' }]
   const out: { label: string; text: string }[] = []
   const period = (name: string, label: string) => {
     const p = f.periods?.[name]
@@ -947,6 +953,7 @@ const mem = {
   posed: '' as Pose | '', // its pose as last drawn in a Raster: the timer animates it while set
   shown: '' as Pose | '', // the frame on screen now
   skill: '', // the /workbench skill's SKILL.md, for the workbench-mode block
+  savingsFile: '', // savings.json, where wb keeps the kWh price ($WB_SAVINGS): the Stats key stamps it
   fold: false, // the session's directory is on a file system that ignores case (macOS): `within`
 }
 
@@ -1889,6 +1896,8 @@ export const register: Register = (on, options) => {
     mem.root = wbHome || `${home}/.local/state/workbench`
     mem.wb = (await $.env.get('WB_BIN')) || 'wb'
     mem.skill = `${(await $.env.get('CLAUDE_CONFIG_DIR')) || `${home}/.claude`}/skills/workbench/SKILL.md`
+    const priced = (await $.env.get('WB_SAVINGS')) || `${home}/.config/workbench/savings.json`
+    mem.savingsFile = priced.startsWith('~/') ? `${home}${priced.slice(1)}` : priced
     mem.startedAt = await $.clock.now()
     // 2026-11-17: /delegate became /workbench. A copy updated across it still has only the old
     // skill link, which now leads nowhere: wb setup makes the new one and drops the old.
@@ -2177,7 +2186,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="row" columnGap={2} marginTop={1}>
         {TABS.map(([tab, label, hotkey]) => (
           <Button key={`tab-${tab}`} label={label} hotkey={hotkey} plain dimColor={view.tab !== tab}
-            onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => { void refreshStats($); void syncTop($) }) }} />
+            onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => { void refreshStats($, true); void syncTop($) }) }} />
         ))}
       </Box>
     )

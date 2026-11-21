@@ -45,7 +45,8 @@ export type WbChat = { key: string; delegating: boolean; webAt: number; url: str
 export type WbPane = { tab: string; open: string; focus: string; minimized: boolean }
 
 /** The Stats tab's history: `wb stats --json` as last read (null before the first read), and the
- * key of the files it was read from (results.jsonl and stats.json: size and mtime). */
+ * key of the files it was read from (results.jsonl, stats.json, optimize.json, bench/runs.jsonl,
+ * speed.json and savings.json: size and mtime). */
 export type WbStats = { key: string; feed: Record<string, any> | null }
 
 /** The Stats tab's live view (#408): `wb top --json`'s newest tick (null before the first), and
