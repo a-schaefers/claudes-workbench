@@ -3898,7 +3898,8 @@ every card, HIP picked by discovery order (the 4 GB card for the 24 GB one), and
 was never read: #255, the audit of 1.2), `report()` (the lines `wb scout`
 prints). Unknowns stay unknown; nothing about the machine is hard-coded.
 
-**The weekly model check.** Models change fast. Once a week, in a quiet moment, the mod submits
+**The weekly model check.** Models change fast. Once a week, in a quiet moment of a session that
+delegates, with wakes on, the mod submits
 SCOUT_NOTE (see *The mod, inside*); `/workbench-models` asks now, and `/workbench` runs one first when
 no local model can run. `wb scout` prints the facts, read fresh: the machine (`hardware.report`),
 Ollama's default context, every registered model (size, quantization, context, slice, real-task
@@ -6398,7 +6399,10 @@ a toast says so once, and that the page offers to send it again (#536). The refu
 this session holds listener.json, writes it empty, so the page and other sessions see nobody
 listening at once.
 
-**The weekly model check** (`scoutIfDue`): once `wb events` has said hello (wb runs), Claude idle
+**The weekly model check** (`scoutIfDue`): in a session that delegates (workbench mode on, or
+on in this load: `mem.delegated`) with wakes on (the plugin runs in every session: one for another
+project got the check, spent the day's offer, and the `wake` setting didn't stop it, #919; such a
+session leaves scout.json alone, so the check stays due for the next one), once `wb events` has said hello (wb runs), Claude idle
 a minute after a main-loop turn (`SCOUT_QUIET_MS`: raised the moment a turn ended, it buried
 Claude's question to the user), quiet (`quietForJobs`: no task anywhere active, and none of this
 session's waiting on Claude (`waitsOnClaude`: not a parked one) within `REWAKE_MAX_MS`; any open task at any age once gated it, so

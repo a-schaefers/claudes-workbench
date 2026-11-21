@@ -1894,9 +1894,12 @@ async function poll($: any) {
       mem.boundary = false
       await compactAtBoundary($)
     }
-    // the weekly check needs wb to run (`wb events` said hello) and a quiet minute after a turn
+    // the weekly check needs wb to run (`wb events` said hello) and a quiet minute after a turn,
+    // in a session that delegates with wakes on: the plugin runs in every session, and one for
+    // another project got the check, spent the day's offer and ignored wake off (#919)
     const quiet = quietForJobs(list, now, mine)
-    if (mem.sawTurn && mem.earsOk && !mem.busy && !mem.scoutAsked && quiet &&
+    if ((on || mem.delegated) && mem.wake &&
+      mem.sawTurn && mem.earsOk && !mem.busy && !mem.scoutAsked && quiet &&
       now - mem.turnEndedAt >= SCOUT_QUIET_MS) await scoutIfDue($, now)
     if (mem.sawTurn && mem.earsOk && !mem.updateAsked) {
       mem.updateAsked = true

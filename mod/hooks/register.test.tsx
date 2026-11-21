@@ -1688,12 +1688,14 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
   const files: Record<string, string> = {}
   fakeTasks(on, files, [], false)
   on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   const asked: string[] = []
   on('prompt.submit', (_: any, e: any) => {
     asked.push(e.text)
     return { text: e.text }
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'delegate', frontmatter: {}, source: 'userSettings' })  // workbench mode (#919)
   await clock.advance(3000)
   expect(asked.length).toBe(0)                       // nobody has used the session yet
 
@@ -1720,6 +1722,28 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
   expect(asked.length).toBe(2)
   expect(asked[1]).toContain('The weekly model check is due')
 })
+
+for (const [what, options, mode] of [['a session that never used workbench', {}, false],
+  ['a session in workbench mode with wakes off', { wake: 'off' }, true]] as const) {
+  test(`#919: the weekly model check never starts a turn in ${what}, and stays due for another`, { options }, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_800_000_000_000 })
+    const files: Record<string, string> = {}
+    fakeTasks(on, files, [], false)
+    on('ui.toast', () => ({ value: undefined }))
+    on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+    on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+    on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+    const asked: string[] = []
+    on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    if (mode) await $.skill.prompt({ skill: 'workbench', text: 'delegate', frontmatter: {}, source: 'userSettings' })
+    await $.turn.start({ text: 'hi', turnId: 't1' })
+    await $.turn.complete(endTurn('t1'))
+    await clock.advance(120_000)
+    expect(asked.filter(t => t.includes('The weekly model check is due'))).toEqual([])
+    expect(files['/wb/scout.json']).toBe(undefined)           // offered_at untouched: still due
+  })
+}
 
 test('/workbench-models when the weekly check is due raises it once, not twice', async ($, on) => {
   // the 2026-11-16 audit: the weekly check followed at once, burying Claude's question to the user
