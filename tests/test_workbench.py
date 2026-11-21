@@ -2947,6 +2947,44 @@ class RepoMoved(Base):
         self.assertIn("branch delegate/t-l2 deleted", out)
         self.assertEqual(self.git(self.repo, "rev-parse", "-q", "--verify", "delegate/t-l2").stdout, "")
 
+    def test_a_task_from_a_removed_linked_worktree_takes_feedback_and_a_moved_repo_names_relocate(self):
+        # #776 (the second 2026-11-21 audit): after `git worktree remove` of the checkout a task
+        # started from, wb feedback's runner crashed in gitguard.install (`git -C <removed>`), the
+        # task failed with a CalledProcessError traceback, and nothing named wb relocate
+        w1 = Path(self.tmp.name) / "w1"
+        self.assertEqual(self.git(self.repo, "worktree", "add", "-q", "-b", "feat", str(w1)).returncode, 0)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-776", "--spec", str(self.spec), "--repo", str(w1), "--model", "mimo")
+        wait_phase("t-776", {"review"})
+        self.assertEqual(self.git(self.repo, "worktree", "remove", str(w1)).returncode, 0)
+        task = store.Task("t-776")
+        real = os.path.realpath(self.repo)
+        self.assertLessEqual({real, os.path.join(real, ".git")}, context.repo_dirs(task))
+        run_wb("feedback", "t-776", "--text", "1. Add a trailing comment line.")
+        st = wait_phase("t-776", {"review", "stuck", "failed"})
+        self.assertEqual((st["phase"], st["round"]), ("review", 2), st.get("last"))
+        # the repository itself moved: refused up front, and a runner sent anyway says so too
+        moved = Path(self.tmp.name) / "moved"
+        self.repo.rename(moved)
+        self.addCleanup(lambda: moved.exists() and moved.rename(self.repo))
+        for argv in (("feedback", "t-776", "--text", "1. More."), ("resume", "t-776"),
+                     ("next", "t-776", "--spec", str(self.spec), "-m", "step 1")):
+            if argv[0] == "resume":
+                task.set_status(phase="stuck")
+            self.assertIn(f"{w1} moved or was deleted: wb relocate t-776 --repo <its new path>",
+                          self.fails(*argv))
+            task.set_status(phase="review")
+        self.assertEqual(store.Task("t-776").status["phase"], "review")  # nothing was sent
+        task.set_status(phase="queued", round=3)
+        cli.spawn_runner(task)
+        st = wait_phase("t-776", {"review", "stuck", "failed"})
+        self.assertEqual(st["phase"], "failed")
+        self.assertEqual(st["last"], f"{w1} moved or was deleted: wb relocate t-776 --repo <its "
+                                     "new path>, then wb resume")
+        last = [r for r in store.notices() if r["task"] == "t-776"][-1]
+        self.assertEqual(last["kind"], "failed")
+        self.assertNotIn("Traceback", last["text"])
+
     def test_a_moved_repo_is_relocated_and_its_task_accepts(self):
         for name in ("t-m1", "t-m2"):
             self.start(name, "ok")

@@ -464,7 +464,9 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     # the lane's other directories are scratch to the shim too (#665): the kernel lets the
     # agent write there already, and writable() leaves the task's repo out of them
     scratch = [d for d in places or [] if os.path.isdir(d) and not d.startswith(("/dev", "/proc"))]
-    if gitguard.install(shim, Path(task.spec["repo"]), PKG_ROOT, outside, task.worktree, scratch):
+    # the repository's main worktree when the linked one the task started from was removed: its
+    # git dir stays, and `git -C <removed>` crashed the runner on every round (#776)
+    if gitguard.install(shim, gitops.repo_of(task.spec), PKG_ROOT, outside, task.worktree, scratch):
         env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
     return env
 
@@ -2437,6 +2439,16 @@ def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
                 "how": how, **({"guard": rnd["guard"]} if how == "stuck" and rnd.get("guard") else {})})
 
 
+def _repo_gone(task: store.Task) -> None:
+    """The task's repository is nowhere: not its checkout, nor a main worktree of its git dir.
+    A runner sent on (wb feedback, next, resume) crashed with a CalledProcessError traceback and
+    never named wb relocate, which accept's own check does (#776)."""
+    text = (f"{task.spec['repo']} moved or was deleted: wb relocate {task.name} --repo <its new "
+            "path>, then wb resume")
+    task.set_status(phase="failed", last=text[:200])
+    task.notify("failed", f"task {task.name}: {text}")
+
+
 def _load_failed(task: store.Task, e: Exception) -> None:
     if isinstance(e, store.Damaged):  # no model to name: task.json lost its contents (#475)
         task.set_status(phase="failed", last=str(e))
@@ -2552,6 +2564,8 @@ def drive(task: store.Task) -> None:
     CURRENT["remote"] = m.remote  # the GPU is not ours to measure when the model is remote
     if m.remote:
         task.set_status(remote_gpu=True)  # so its savings say the energy wasn't measured (#117)
+    if not gitops.repo_of(task.spec).is_dir():  # moved, renamed, or its git dir removed (#776)
+        return _repo_gone(task)
     if not checkout(task):  # the worktree itself, out of wb start's foreground (#529)
         return
     if not _prepare(task):  # the project as the user has it, before the base check (#201)

@@ -566,18 +566,22 @@ _COMMON: dict[str, str] = {}
 def repo_dirs(task: store.Task) -> set[str]:
     """The task's repo and its git directory, real paths: no lane entry may hold either, or the
     agent could write a hook or core.fsmonitor that wb's own git runs outside the lane (the
-    2026-11-16 audit: GOPATH=~/src, or ~/go with the repo in ~/go/src)."""
+    2026-11-16 audit: GOPATH=~/src, or ~/go with the repo in ~/go/src). A removed linked
+    worktree's: the repository's main worktree and its git dir (gitops.repo_of), not the removed
+    path and a `.git` under it (#776)."""
     repo = task.spec.get("repo")
     if not repo:
         return set()
-    real = os.path.realpath(repo)
+    real = gone = os.path.realpath(repo)
+    if not os.path.isdir(real):
+        real = os.path.realpath(gitops.repo_of(task.spec))
     if real not in _COMMON:
         try:
             _COMMON[real] = os.path.realpath(os.path.join(real, gitops.git(
                 Path(real), "rev-parse", "--git-common-dir").strip()))
         except (gitops.GitError, OSError):
-            return {real, os.path.join(real, ".git")}
-    return {real, _COMMON[real]}
+            return {gone, real, os.path.join(real, ".git")}
+    return {gone, real, _COMMON[real]}
 
 
 # What a task's directory holds beside its worktree: a sibling's link (`../<name>` from the

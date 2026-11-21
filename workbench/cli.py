@@ -409,7 +409,12 @@ def _stop_for_update(tasks) -> str:
 def _worktree_problem(task: store.Task) -> str | None:
     """Why the task can't go on where it stands, its worktree missing. A worktree removed by hand
     turned the next round into a runner crash (the 2026-11-16 audit). Its committed steps are on
-    the branch; discard --keep-branch keeps them."""
+    the branch; discard --keep-branch keeps them. Or its repository is nowhere (moved, renamed:
+    not even a main worktree of its git dir): wb feedback, next and resume sent a runner that
+    crashed and never named wb relocate, as accept's _repo does (#776)."""
+    if not gitops.repo_of(task.spec).is_dir():
+        return (f"{task.spec['repo']} moved or was deleted: wb relocate {task.name} --repo <its "
+                "new path>, then try again")
     if task.worktree.is_dir():
         return None
     if not runner.checked_out(task):
