@@ -197,6 +197,41 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.assertEqual(models.holders(), {})                           # this machine's GPU untouched
         self.assertEqual(models.holders(pool="gpu-gpu-pc-invalid-11434"), {})   # the turn let go of
 
+    def test_an_engine_in_wsl_waits_for_a_task_on_ollama_for_windows_on_the_same_gpu(self):
+        # #750 (the 2026-11-21 audit, finding 97): a task on Ollama for Windows took pool
+        # gpu-<winhost> and a command engine in WSL pool gpu, so the engine ran beside the task's
+        # model on the one card. `same_gpu` (or WSL2's gateway, models.windows_host) makes it one pool
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama-win"] = {"options": {"baseURL": "http://winhost.invalid:11434/v1"},
+                                         "models": {"coder": {"limit": {"context": 32768}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"ollama-win": {"local": True, "same_gpu": True}}))
+        win = models.discover()["ollama-win/coder"]
+        self.assertTrue(win.remote)
+        self.assertEqual(models.pool(win), "gpu")
+        tmp = Path(self.tmp.name)
+        (tmp / "images.json").write_text(json.dumps(
+            {"wsl": {"command": "sd-cli -p {prompt} -o {out}"},
+             "win": {"url": "http://winhost.invalid:30000/v1/images/generations"}}))
+        os.environ["WB_IMAGES"] = str(tmp / "images.json")
+        self.start("t-w1", "hang", "--model", win.id)
+        wait_running("t-w1")
+        self.assertEqual([h["task"] for h in models.holders().values()], ["t-w1"])   # this machine's
+        png = lambda e, v, *rest: Path(v["out"]).write_bytes(b"\x89PNG\r\n\x1a\n")  # noqa: E731
+        with mock.patch.object(images, "_server", png), mock.patch.object(images, "_command", png), \
+                mock.patch.object(images, "ready", lambda e: ""):
+            for name in ("wsl", "win"):
+                with self.assertRaisesRegex(RuntimeError, "t-w1"):        # its turn, not beside it
+                    images.generate("a fox", tmp / "o", n=1, name=name, say=lambda m: None)
+            run_wb("stop", "t-w1")
+            self.assertEqual(len(images.generate("a fox", tmp / "o", n=1, name="wsl", say=lambda m: None)), 1)
+        self.assertEqual(models.holders(), {})
+        with mock.patch.object(models, "windows_host", lambda: "winhost.invalid"):  # found, not said
+            Path(os.environ["WB_MODELS"]).write_text(json.dumps({"ollama-win": {"local": True}}))
+            self.assertEqual(models.pool(models.discover()["ollama-win/coder"]), "gpu")
+            Path(os.environ["WB_MODELS"]).write_text(json.dumps({"ollama-win": {"local": True, "same_gpu": False}}))
+            self.assertEqual(models.pool(models.discover()["ollama-win/coder"]), "gpu-winhost-invalid-11434")
+
     def test_a_task_sent_back_goes_ahead_of_one_started_after_it(self):
         # its review waits on that round: behind a night's backlog, it would wait for all of it
         os.environ["WB_FAKE_GPU_GB"] = "24"

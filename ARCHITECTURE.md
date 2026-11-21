@@ -298,8 +298,8 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   repo and model and the two ways out: `--queue` (start anyway and wait behind it) or doing the
   step yourself. Before this, the second session's task queued in silence, maybe for hours
   (the 2026-11-16 audit). The holders are gpu.json's live entries plus any task whose live runner
-  hasn't reached the lease yet (`cli._gpu_holders`). A remote model takes no lease and is never
-  refused. A known limit, left by choice (the 0.90 review): the check takes no lock, and a task
+  hasn't reached the lease yet (`cli._gpu_holders`). A remote model is checked against the
+  holders of its own server's pool (`models.pool`; this machine's for one on this GPU, #750). A known limit, left by choice (the 0.90 review): the check takes no lock, and a task
   is visible to it only once its runner's pid is in its status, after task.json is written, so
   two `wb start`s at the same moment (from two sessions) can both pass it. Nothing hangs
   silently then: the second runner waits for the GPU, and its status (`last`, the pane, `wb
@@ -2660,7 +2660,11 @@ at the Windows host (`models.windows_host`: the default gateway in `/proc/net/ro
 generated `/etc/resolv.conf`'s nameserver; all ports at once, a second each) and says a hit is
 "on Windows" and needs `local: true`; when nothing answers there either, both say
 `models.WSL_NAT`'s two ways. Seen: first run said no server answers, and Claude proposed a
-second server inside WSL (#663).
+second server inside WSL (#663). A provider at the Windows host is `remote` but on the same GPU
+(`models.same_gpu`, models.json `same_gpu` to say otherwise): its tasks share this machine's
+lease pool with WSL's own tasks and image or audio engines, and `free_gpu` unloads it. Before,
+its tasks took pool `gpu-<winhost>` and a command engine in WSL pool `gpu`: neither waited for
+the other, nothing was unloaded, and both ran on the one card (#750).
 
 #### The context window
 16K tokens at the least; 32K or more is recommended (the README says so). OpenCode's own
@@ -2771,7 +2775,9 @@ or `<label>.local`, or any of the machine's own addresses (`_own_addresses`: the
 `getaddrinfo` and `ip -o addr`, else `ifconfig -a` where there is no `ip` (macOS: the Mac's own
 LAN address counted as remote, the 2026-11-19 audit), so a LAN or Tailscale IP counts) (`_this_host`). A
 provider elsewhere counts when models.json gives it `"local": true`; it is then `remote`: it
-takes no lease on this machine's GPU, but one on its server's (tasks there take turns: *Sharing the GPU*).
+takes no lease on this machine's GPU, but one on its server's (tasks there take turns: *Sharing the GPU*),
+unless its server is on this GPU after all (`same_gpu`: WSL2's Windows host), when it takes this
+machine's.
 OpenCode talks to it directly at the baseURL (plain `http://` is unencrypted and the prompts carry
 the code: *A model on another machine* above suggests a firewall and Tailscale); nothing of workbench runs there, and no
 model is split across machines. `wb remote HOST` sets one up for an Ollama there (#114,
@@ -2877,6 +2883,13 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
 - `engine` (`ollama`/`server`): per provider only;
 - `local: true`: on a provider, counts it although it is on another host; on an Ollama cloud
   model's own id, allows that model.
+- `same_gpu: true|false`: on a provider (or a model id) that is `remote`, whether its server runs
+  on this machine's GPU after all (`models.same_gpu`). Unset, it does when its host is WSL2's
+  Windows host (`models.windows_host`, NAT's gateway: Ollama for Windows uses the very GPU WSL's
+  engines do); say `true` for another such setup (a container on its own address), `false` for a
+  Windows host with a card of its own. Then it is this machine's GPU in every way that matters
+  to sharing it: its tasks take this machine's pool (`gpu.*`, not `gpu-<host>.*`), take turns with
+  the tasks and image or audio engines here, and `free_gpu` unloads its Ollama's models (#750).
 - `remote: <root>`: on a provider, `wb remote` made it (for the Ollama at that root), so `wb
   remote --remove` may delete it (#197).
 - `keep_loaded` (top level, a list): model ids or Ollama names wb never unloads or stops to make
@@ -3164,7 +3177,17 @@ server (#116): its lease uses that server's own files, `gpu-<host>-<port>.{lock,
 memory (before, tasks on one server ran at once and its Ollama swapped their models on every
 request). It never waits on this machine's GPU, nor this machine's tasks on it; `wb start`'s
 exit 4 and `--queue`, and the bench's preemption, apply per server alike. `free_gpu` never
-unloads or stops a remote provider's models.
+unloads or stops a remote provider's models. **Which pool** (`models.pool`): `gpu` for a local
+model, and for a remote one whose server is on this GPU (`models.same_gpu`: models.json
+`same_gpu`, else WSL2's Windows host); `gpu-<host>-<port>` for any other remote one. A model on
+the same GPU still never shares (nothing here measures its server's memory), but `free_gpu`
+(`models.on_this_gpu`) unloads its Ollama's models, `make_resident` frees the GPU for it,
+`releasable` and `media.settle` count it, its unloaded tests (`step_aside`, `verify`) hold this
+GPU, and `wb optimize` probes it under its one lease (a second lease on `gpu` from the same
+process waited on itself). An image or audio engine joins `gpu` when it is on this GPU
+(`media.on_gpu`: a command, or a url here or on a host `media.shares_gpu` says is this GPU), the
+pool of each remote box a url engine is on otherwise (`media.boxes`), or none (`"gpu": false`, a
+host no task uses) (#750).
 
 **Routing** (`router.rank`, `choose`). Rows: `store.results()` (no trials) that `tuning.judged`
 keeps, for this model and size (and the models sharing its record, `lineage`: a `wb optimize
@@ -4078,8 +4101,9 @@ Then describe the engine in `~/.config/workbench/images.json` (`$WB_IMAGES`). Tw
   coding tasks use (a `wb remote` box, WSL2's Windows host), it takes its turn there: it queues
   with that box's tasks (refused while one runs, unless `--wait`) and that box's Ollama models are
   unloaded first (`media.turns`, `media.boxes`: it took no turn and generated beside a task's model
-  on that card, #750). A command engine in WSL beside an Ollama on Windows still takes this
-  machine's pool, not the Windows host's.
+  on that card, #750). WSL2's Windows host is this GPU (models.json `same_gpu`): an engine
+  there, or a command engine in WSL, takes this machine's turn, which the tasks on Ollama for
+  Windows take too, and their models are unloaded first.
 - On a machine with several cards, pin an engine to the one it uses so it runs beside tasks on
   the others: `"devices": "1"` (the cards as the engine's own `CUDA_VISIBLE_DEVICES` names them:
   numbers in nvidia-smi's order, so give the engine `CUDA_DEVICE_ORDER=PCI_BUS_ID` too, or a
@@ -4170,7 +4194,8 @@ custom-node packs do run their own Python).
   PATH or a file; a url whose server answers a GET within 2 s (any status but 401 and 403, "wants
   an API key" or "refused the key": #597, it was listed as ready and failed every generation).
 - `generate`: its turns come from `media.turns`: an engine on a remote box the tasks use
-  (`media.boxes`: a discovered remote model whose host is the url's, one per lease pool) takes
+  (`media.boxes`: a discovered remote model whose host is the url's and not on this GPU,
+  `models.same_gpu`, one per lease pool) takes
   `GpuLease(None, "wb image", wait=…, on=<that model>)` on each such pool, as `wb optimize`
   does, and unloads that box's Ollama models (not `keep_loaded`), #750; an engine off this GPU
   otherwise (`media.on_gpu`) runs with no lease and frees nothing; any
@@ -6704,10 +6729,15 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
   *Keeping the docs true* is the procedure; `tests/test_docs.py` checks what it can (every command
   and flag here, every module and environment variable in CLAUDE.md, CLAUDE.md's size).
-- **`wb image` and `wb audio` share `media.py`** (the engine file, `problem`, `ready`, `auth`, `post`, `fill`, `settle`, `gpu`, `on_gpu`, `cards`, `serving`,
+- **`wb image` and `wb audio` share `media.py`** (the engine file, `problem`, `ready`, `auth`, `post`, `fill`, `settle`, `gpu`, `on_gpu`, `shares_gpu`, `cards`, `serving`,
   `free`, `publish`): a change there changes both (`tests.Images`, `tests.Audio`). A new kind of
   generated media → its config path in `store.PATH_VARS` and `context.private_paths`, its output
   directory in `cli.EVENT_SKIP` (and the mod's ears), its engines in `wb scout`.
+- **`models.same_gpu`** (a remote server on this GPU, #750) → every place that tells this GPU's
+  models from another host's: `pool`, `on_this_gpu` (`free_gpu`, `_others_resident`),
+  `releasable`, `make_resident`, `GpuLease.step_aside`/`_unload_unshared`, `optimize.busy` and its
+  per-server lease, `verify`'s GPU tests, `media.boxes` and `media.shares_gpu`. One left out
+  takes a second lease on `gpu` in one process (it waits on itself) or leaves a model loaded.
 - **`progress.DEFAULT_MIN` and `TYPICAL_MIN`** → the pane's Progress checks sentence
   (`PROGRESS_STOPS` in `register.tsx`), which names them (#724).
 - **`ask_mcp.NO_ANSWER`'s opening** ("No answer arrived in time.") → the mod's `NO_ANSWER`, which

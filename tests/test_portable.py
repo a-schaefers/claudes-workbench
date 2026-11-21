@@ -514,6 +514,43 @@ class Real(unittest.TestCase):
             self.assertEqual(posts_a, [])                            # GPU 1's Ollama freed alone
             self.assertEqual([p["model"] for p in posts_b], ["y"])
 
+    def test_ollama_for_windows_seen_from_wsl_is_freed_and_leased_as_this_machines_gpu(self):
+        # #750 (the 2026-11-21 audit, finding 97): on WSL2 with NAT, a task on Ollama for Windows
+        # (the gateway, `local: true`, so remote) took pool gpu-<winhost> and a command engine in
+        # WSL pool gpu; neither waited for the other, free_gpu skipped the remote models, and both
+        # ran on the one card. 127.0.0.1 stands for the Windows host here, localhost for WSL.
+        for k in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+            os.environ.pop(k, None)
+        gb = 10 ** 9
+        posts_wsl, posts_win, on_wsl, on_win = [], [], [], []
+        srv_a, port_a = fake_ollama(on_wsl, ["x"], posts_wsl)
+        srv_b, port_b = fake_ollama(on_win, ["coder"], posts_win)
+        self.servers += [srv_a, srv_b]
+        providers = {"wsl": {"options": {"baseURL": f"http://localhost:{port_a}/v1"}, "models": {"x": {}}},
+                     "win": {"options": {"baseURL": f"http://127.0.0.1:{port_b}/v1"}, "models": {"coder": {}}}}
+        here = mock.patch.object(models, "_this_host", lambda h: h == "localhost")
+        here.start()
+        self.addCleanup(here.stop)
+        engine = {"url": "http://127.0.0.1:30000/v1/images/generations"}
+        for say, gateway in ((None, "127.0.0.1"), (True, None), (False, "127.0.0.1")):
+            self.config(providers, {"win": {"local": True, **({} if say is None else {"same_gpu": say})}})
+            posts_wsl.clear(), posts_win.clear()
+            on_wsl[:] = [{"name": "x", "size": 8 * gb, "size_vram": 8 * gb}]
+            on_win[:] = [{"name": "coder", "size": 14 * gb, "size_vram": 14 * gb}]
+            with mock.patch.object(models, "windows_host", lambda: gateway):
+                win = models.discover()["win/coder"]
+                self.assertTrue(win.remote)
+                shared = say is not False
+                self.assertEqual(models.same_gpu(win), shared)
+                self.assertEqual(models.pool(win), "gpu" if shared else f"gpu-127-0-0-1-{port_b}")
+                self.assertEqual(models.releasable(win), shared)
+                self.assertEqual(media.on_gpu(engine), shared)             # its turn is this GPU's
+                self.assertEqual(media.boxes(engine), [] if shared else [win])
+                models.free_gpu(say=lambda m: None)
+                self.assertEqual([p["model"] for p in posts_wsl], ["x"])
+                self.assertEqual([p["model"] for p in posts_win], ["coder"] if shared else [])
+        self.assertFalse(models.same_gpu(models.discover()["wsl/x"]))      # a local model: never remote
+
     def test_one_ollama_under_two_host_spellings_is_one_server(self):
         # free_gpu unloaded the very models it was told to keep (the 2026-11-16 audit)
         found, posts = self.own([{"name": "x", "size": 10, "size_vram": 10},

@@ -240,15 +240,28 @@ def settle(say, timeout: float = 90, keep=(), pinned: frozenset | None = None) -
 def on_gpu(e: dict) -> bool:
     """Whether the engine needs this machine's GPU: not one that says "gpu": false (a CPU build),
     nor, unless it says "gpu": true, a url engine on another host. A remote or CPU image engine
-    took the exclusive lease, unloaded the coding models and refused while any task ran (#587)."""
+    took the exclusive lease, unloaded the coding models and refused while any task ran (#587).
+    A host whose GPU is this one (shares_gpu: WSL2's Windows host) is this machine's (#750)."""
     if "gpu" in e:
         return e["gpu"] is not False
     if isinstance(e.get("url"), str) and not e.get("command"):
         try:
-            return models._this_host(urlparse(e["url"]).hostname)
+            host = urlparse(e["url"]).hostname
         except ValueError:  # a url that doesn't parse: listed as not usable, never run (#748)
             return True
+        return models._this_host(host) or shares_gpu(host)
     return True
+
+
+def shares_gpu(host: str | None) -> bool:
+    """Whether a server on another host runs on this machine's GPU: what models.same_gpu says of
+    the discovered models there, else whether it is WSL2's Windows host (models.windows_host)."""
+    host = (host or "").lower()
+    at = [m for m in models.discover().values()
+          if m.remote and not m.cloud and (urlparse(m.root).hostname or "").lower() == host]
+    if at:
+        return any(models.same_gpu(m) for m in at)
+    return bool(host) and host == (models.windows_host() or "").lower()
 
 
 def cards(e: dict) -> frozenset | None:
@@ -294,7 +307,8 @@ def boxes(e: dict) -> list:
     """The remote servers the coding tasks use on the host a url engine is on (a `wb remote`
     box, WSL2's Windows host): one discovered model per lease pool there. An engine there took no
     turn and posted while a task's model was loaded on that card, so one of them spilled or
-    crashed (#750). None for a command engine, one that says "gpu": false, or one on this host."""
+    crashed (#750). None for a command engine, one that says "gpu": false, or one on this host;
+    a model on this GPU after all (models.same_gpu) takes this machine's turn instead."""
     if e.get("command") or e.get("gpu") is False or not isinstance(e.get("url"), str):
         return []
     try:
@@ -304,8 +318,8 @@ def boxes(e: dict) -> list:
     if not host or models._this_host(host):
         return []
     found: dict = {}
-    for m in models.discover().values():
-        if m.remote and (urlparse(m.root).hostname or "").lower() == host:
+    for m in models.discover().values():  # one on this GPU after all takes this machine's turn
+        if m.remote and not models.same_gpu(m) and (urlparse(m.root).hostname or "").lower() == host:
             found.setdefault(models.pool(m), m)
     return list(found.values())
 

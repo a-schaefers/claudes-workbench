@@ -134,8 +134,8 @@ def remembered(old) -> list:
 def busy(m: models.Model) -> list[str]:
     """Other models its remote server has loaded: what else is using that card. A fit measured
     beside them would come out small, and they aren't this machine's to unload."""
-    if not m.remote:
-        return []  # free_gpu has emptied this machine's
+    if not m.remote or models.same_gpu(m):
+        return []  # free_gpu has emptied this machine's (WSL2's Windows host's too: #750)
     ps = models._get(f"{m.root}/api/ps", timeout=2) or {}
     return [x.get("name") for x in ps.get("models") or [] if not models._matches(m.name, {x.get("name")})]
 
@@ -510,8 +510,11 @@ def main() -> None:
                 if not every and (m.id in rows and not stale(m, rows[m.id], tags) or m.id in waiting):
                     continue  # due for a new or changed model only: the others' fits still hold
                 with contextlib.ExitStack() as turn:
-                    if m.remote:  # its server's own lease too: a task there may be using this very
-                        try:      # model, and probe unloads it (#198, the 2026-11-19 audit)
+                    # its server's own lease too: a task there may be using this very model, and
+                    # probe unloads it (#198, the 2026-11-19 audit); one on this GPU after all
+                    # (same_gpu) is under the lease above, and a second one here waited on itself
+                    if models.pool(m) != "gpu":
+                        try:
                             turn.enter_context(models.GpuLease(None, HOLDER, say=print, wait=False,
                                                                on=m))
                         except RuntimeError:
@@ -520,7 +523,7 @@ def main() -> None:
                     if others := busy(m):
                         _skip(m.id, "busy", f"{m.root} has {', '.join(others)} loaded")
                         continue
-                    if not m.remote and not freed:
+                    if (not m.remote or models.same_gpu(m)) and not freed:
                         # this machine's GPU emptied only for a local probe: a run due for a
                         # remote model alone unloaded the user's local models for nothing (#583)
                         models.free_gpu()
