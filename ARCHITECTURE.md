@@ -3390,8 +3390,11 @@ Then describe the engine in `~/.config/workbench/images.json` (`$WB_IMAGES`). Tw
 - A **url** is any server with the OpenAI images API (SGLang, vLLM-Omni, LocalAI and others).
 - `notes` is shown to Claude. Put the model's licence there: some licences limit where and how
   their output may be used.
+- `"gpu": false` marks an engine that isn't on this machine's GPU (a CPU build, another box): it
+  takes no lease and frees nothing, so it runs beside a coding task. A url on another host is off
+  this GPU by default (`"gpu": true` puts it back on).
 
-A generation takes the GPU lock and unloads the coding models first, just as a task does. While
+A generation on this GPU takes the GPU lock and unloads the coding models first, just as a task does. While
 a task holds the GPU, `wb image` refuses at once and names it; `--wait` queues behind it instead
 (run that in the background: it can take as long as the task). A command engine exits when it's
 done, so its memory is free for the next task. A url engine is a server you run: it keeps its
@@ -3407,7 +3410,9 @@ custom-node packs do run their own Python).
 - `images.json` (`$WB_IMAGES`, default `~/.config/workbench/images.json`) maps an engine name to an
   entry; the first entry is the default, non-object values are ignored. Keys: `command` or `url`,
   `ref_arg`, `model`, `label`, `notes` (shown to Claude: put the licence there), `timeout` (s,
-  default 1800).
+  default 1800), `gpu` (`media.on_gpu`: false is off this GPU; unset, a url on another host is off
+  it and anything else on; #587: a remote or CPU engine took the exclusive lease, unloaded the
+  coding models and refused while any task ran).
 - A command engine (`_argv`, through `media.fill`): `shlex.split(command)`, `~` expanded per token, then `{prompt}`,
   `{out}`, `{width}`, `{height}`, `{seed}` filled in, token by token, in one pass (a prompt that
   says `{seed}` reaches the engine as written; it used to get the seed and the out path), never
@@ -3418,11 +3423,14 @@ custom-node packs do run their own Python).
   model]}` (no auth header), decode `data[0].b64_json`.
 - Ready (`ready`, shown by `wb image --list` and `wb scout`): a command whose first token is on
   PATH or a file; a url whose server answers a GET (any status) within 2 s.
-- `generate`: holds the GPU for the whole batch through `media.gpu`, that is `models.GpuLease(None, "wb image",
+- `generate`: an engine off this GPU (`media.on_gpu`) runs with no lease and frees nothing; any
+  other holds the GPU for the whole batch through `media.gpu`, that is `models.GpuLease(None, "wb image",
   wait=…)` (any live holder in gpu.json: a RuntimeError naming them, unless `--wait`; then it
   queues in gpu.json behind the running tasks; while it holds or waits, `wb start` refuses a new
   task (exit 4) unless `--queue`, and `wb feedback`/`next`/`resume` queue behind it), calls
-  `models.free_gpu()` with nothing kept, then `media.settle` (up to 90 s for what free_gpu lets
+  `models.free_gpu(keep=media.serving(engine))`, keeping only the discovered models on a url
+  engine's own server (one LocalAI or vLLM serving coding and images was stopped just before the
+  POST, #587), then `media.settle` (up to 90 s for what free_gpu lets
   go of, `models.freed`: local Ollama models and servers with a stop command, less what it keeps
   (`keep_loaded`), to go, and used VRAM
   to stop falling, after an engine started a second after the unload found 1.1 GB of 16 free; a
@@ -3546,8 +3554,10 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
   `/v1/audio/transcriptions` server. The first one in the file checks
   every speech batch.
 - `"gpu": false` marks an engine that runs on the CPU. It takes no GPU lease and frees nothing,
-  so it can run beside a coding task. Any other engine has the GPU to itself, exactly as
-  `wb image` does.
+  so it can run beside a coding task. A url engine on another host is off this GPU unless it
+  says `"gpu": true` (`media.on_gpu`, as for images). Any other engine has the GPU to itself,
+  exactly as `wb image` does, and `free_gpu` keeps the models on the engine's or the listener's
+  own server (`media.serving`).
 
 **How it works** (`workbench/audio.py`, `cli.cmd_audio`; shared with images: `workbench/media.py`).
 - `audio.json` keys: `command` or `url`, `kind` (`speech`, `sfx`, `music`, `listen`; default
@@ -3557,7 +3567,7 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
   listener.
 - `generate` refuses, before anything runs, a voice not in `voices` and a `--voice`, `--lyrics`,
   `--seconds` or `--ref` the engine has no slot for. It runs under `media.gpu("wb audio", …)`
-  (the lease, `free_gpu`, `settle`) unless both the engine and the listener say `"gpu": false`.
+  (the lease, `free_gpu`, `settle`) unless both the engine and the listener are off this GPU.
   Each clip is made in a temporary directory (`.wb-audio-*`), checked there (`inspect`), then
   published with its sidecar and spectrogram under the first free `<slug>-<seed>.wav`
   (`media.free`, #267). A url engine POSTs `{model, input, voice, seed, response_format: "wav"}`
@@ -4961,7 +4971,7 @@ the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 d
 ### Other
 | Command | Flags | What it does |
 |---|---|---|
-| `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. A bare `list` or `ls` as the prompt acts as `--list`. |
+| `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. An engine off this GPU (`"gpu": false`, or a url on another host) runs beside tasks. A bare `list` or `ls` as the prompt acts as `--list`. |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music` (default: the first engine), `--n` (3), `--seconds S` (engines with `{seconds}`; default the entry's `seconds`, else 5 for sfx, 30 for music, 10 otherwise), `--voice NAME` (default: the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check` (no listener, no spectrograms), `--list`, `--wait` | Clips from a local audio engine, each with one line of checks (see *Audio*). A GPU engine refuses while anything holds the GPU (`--wait` queues); a `"gpu": false` engine runs beside tasks. A bare `list` or `ls` acts as `--list`. An option the engine has no placeholder for is refused, naming it. |
 | `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|wait\|answer]` | `listen <clip>… [--text]` (Claude's shortlist of `wb audio` takes for the user to play and pick, up to 8: *Listening by ear*, #397), `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses when another program or another account's chat answers there, `off` stops only one it started; `url` first starts again one `on` started that is gone, #449), `--port` (the running server's, from `chat/port.json`, else the one `chat/serve.pid` names, else 1337: #349), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo --pid` (a plan's session and directory; `--pid`, the asking session's `wb events` process, #538; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb try` | `--model <id or fragment>` (the router's pick) | A sample task that proves the setup (#112): copies `workbench/try/project/` (a tiny `stats.py` with its tests and a committed CLAUDE.md; `from __future__ import annotations`, so its `list[float]` imports on Python 3.7 and 3.8 too) into `~/.local/share/workbench/try/<n>` (beside `$WB_SKILLS`: the state directory is hidden from the lane, and its agent had no git there, #164), sets it up as `wb init` does, and starts `workbench/try/spec.md` (add `median`) as `try-<n>`, `--size trivial --trial --test '<wb's python> -m unittest'` (`sys.executable`, quoted: PATH's `python3` is 3.6 on RHEL 8, and the untouched base failed, #530): never the router's evidence or the lessons. Prints what `wb start` does, the project's path and the hidden check for review, `<wb's python> <pkg>/workbench/try/check.py <worktree>` (the agent never sees it; it fails on the untouched base, also when its Python can't read the module, passes once `median` meets the spec, and leaves no `__pycache__`). A refusal, by `wb init` (no git identity, a home that is a git repo: #530) or by the start (the GPU busy without `--queue`, no model), removes the copy again (#161). |
@@ -5565,7 +5575,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
   *Keeping the docs true* is the procedure; `tests/test_docs.py` checks what it can (every command
   and flag here, every module and environment variable in CLAUDE.md, CLAUDE.md's size).
-- **`wb image` and `wb audio` share `media.py`** (the engine file, `fill`, `settle`, `gpu`,
+- **`wb image` and `wb audio` share `media.py`** (the engine file, `fill`, `settle`, `gpu`, `on_gpu`, `serving`,
   `free`, `publish`): a change there changes both (`tests.Images`, `tests.Audio`). A new kind of
   generated media → its config path in `store.PATH_VARS` and `context.private_paths`, its output
   directory in `cli.EVENT_SKIP` (and the mod's ears), its engines in `wb scout`.

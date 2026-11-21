@@ -6804,6 +6804,46 @@ class Images(Base):
         self.engines({})
         self.assertIn("no image engine", run_wb("image", "--list"))
 
+    def test_an_engine_off_this_gpu_runs_beside_a_task_and_a_shared_server_is_kept_up(self):
+        # #587: a remote or CPU image engine took the exclusive lease, unloaded the coding models
+        # and refused while any task ran; and an images url on a coding provider's server with a
+        # stop command was stopped by free_gpu just before the POST
+        from workbench import images, media, models
+        tmp = Path(self.tmp.name)
+        sleeper = subprocess.Popen(["sleep", "60"])  # a task's runner, holding the GPU
+        self.addCleanup(sleeper.kill)
+        store.home().mkdir(parents=True, exist_ok=True)
+        store.write_json(store.home() / "gpu.json", {str(sleeper.pid): {"model": "strata/strata",
+                                                                       "task": "t-big"}})
+        fake = tmp / "fake_image.py"
+        fake.write_text("import sys\nopen(sys.argv[1], 'wb').write(b'PNG')\n")
+        self.engines({"cpu": {"command": f"{sys.executable} {fake} {{out}}", "gpu": False},
+                      "here": {"command": f"{sys.executable} {fake} {{out}}"}})
+        freed = []
+        with mock.patch.object(models, "free_gpu", lambda **k: freed.append(k)):
+            self.assertIn("1 image(s)", run_wb("image", "a fox", "--n", "1", "--out", str(tmp / "o")))
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err):
+                run_wb("image", "a fox", "--n", "1", "--engine", "here", "--out", str(tmp / "o"))
+        self.assertIn("t-big", err.getvalue())                     # one on the GPU still refuses
+        self.assertEqual(freed, [])
+        self.assertIn("cpu (off the GPU): ", run_wb("image", "--list"))
+        self.assertFalse(media.on_gpu({"url": "http://gpu-box.lan:30000/v1/images/generations"}))
+        self.assertTrue(media.on_gpu({"url": "http://gpu-box.lan:30000/v1/x", "gpu": True}))
+        self.assertTrue(media.on_gpu({"url": "http://localhost:30000/v1/images/generations"}))
+        self.assertTrue(media.on_gpu({"command": "sd-cli {out}"}))
+        self.assertEqual(media.serving({"url": "http://localhost:8080/v1/images/generations"}),
+                         ["strata/strata"])                       # the coding provider's server
+        self.assertEqual(media.serving({"url": "http://127.0.0.1:9999/v1/images/generations"},
+                                       {"command": "x"}), [])
+        store.write_json(store.home() / "gpu.json", {})
+        self.engines({"srv": {"url": "http://127.0.0.1:8080/v1/images/generations"}})
+        with mock.patch.object(models, "free_gpu", lambda **k: freed.append(k)), \
+                mock.patch.object(images, "_server", lambda e, v: Path(v["out"]).write_bytes(b"PNG")), \
+                mock.patch.object(images, "ready", lambda e: ""):
+            images.generate("a fox", tmp / "o2", n=1, say=lambda m: None)
+        self.assertEqual(freed[0]["keep"], ["strata/strata"])
+
     def test_a_model_kept_loaded_doesnt_hold_the_settle_for_its_whole_timeout(self):
         # #467 (the audit of 1.8): settle waited for every releasable resident model, the one
         # keep_loaded leaves loaded too, so each wb image waited its full 90 s and then said the
@@ -7034,7 +7074,9 @@ class Audio(Base):
                           speech["response_format"]), ("Hello there.", "kokoro", "af", 9, "wav"))
         self.assertTrue(got[1][1].startswith("multipart/form-data"))
         self.assertIn(b'name="model"\r\n\r\nasr', got[1][2])
-        self.assertIn("a server", run_wb("audio", "--list"))
+        self.assertNotIn("GPU memory", run_wb("audio", "--list"))  # a CPU server holds none (#587)
+        self.engines({"srv": {"url": root + "/v1/audio/speech"}})
+        self.assertIn("a server: it holds its GPU memory", run_wb("audio", "--list"))
 
 
     def test_scout_lists_the_audio_engines_what_they_cover_and_a_licence_never_noted(self):

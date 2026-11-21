@@ -21,9 +21,9 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons, models,
-               optimize, progress, results, router, savings, scan, skills, spend, stats, store, transcript,
-               tuning, verify, webpush)
+from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons,
+               media, models, optimize, progress, results, router, savings, scan, skills, spend, stats, store,
+               transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
 from .runner import PKG_ROOT
@@ -2922,10 +2922,11 @@ def image_lines() -> list[str]:
     out = []
     for name, e in images.engines().items():
         why = images.ready(e)
-        out.append(f"  {name}: {e.get('label') or e.get('command', e.get('url', ''))[:60]}"
+        out.append(f"  {name}{'' if media.on_gpu(e) else ' (off the GPU)'}: "
+                   f"{e.get('label') or e.get('command', e.get('url', ''))[:60]}"
                    f" · {'ready' if not why else why}"
                    + (" · a server: it holds its GPU memory while it runs" if e.get("url")
-                      and not e.get("command") else "")
+                      and not e.get("command") and media.on_gpu(e) else "")
                    + (f"\n    {e['notes']}" if e.get("notes") else ""))
     return out
 

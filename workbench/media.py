@@ -15,6 +15,7 @@ import shutil
 import time
 import urllib.error
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import hardware, models
 
@@ -83,15 +84,37 @@ def settle(say, timeout: float = 90, keep=()) -> None:
     say(f"the GPU's memory was still being released after {timeout:.0f} s; generating anyway")
 
 
+def on_gpu(e: dict) -> bool:
+    """Whether the engine needs this machine's GPU: not one that says "gpu": false (a CPU build),
+    nor, unless it says "gpu": true, a url engine on another host. A remote or CPU image engine
+    took the exclusive lease, unloaded the coding models and refused while any task ran (#587)."""
+    if "gpu" in e:
+        return e["gpu"] is not False
+    if e.get("url") and not e.get("command"):
+        return models._this_host(urlparse(e["url"]).hostname)
+    return True
+
+
+def serving(*engines: dict) -> list[str]:
+    """The discovered models on the server a url engine is (one LocalAI or vLLM serving both
+    coding and images): free_gpu keeps them, or it stopped the server just before the POST (#587)."""
+    roots = {models.server_key(re.sub(r"/v1/.*$", "", e["url"]))
+             for e in engines if e.get("url") and not e.get("command")}
+    if not roots:
+        return []
+    return [m.id for m in models.discover().values() if m.server in roots]
+
+
 @contextlib.contextmanager
-def gpu(who: str, say, wait: bool):
+def gpu(who: str, say, wait: bool, keep=()):
     """The GPU to itself, queued with the tasks (`models.GpuLease` with no model), the coding
-    models unloaded and their memory released. While anything holds it, it refuses at once unless
-    ``wait``: queued behind a running task, `wb image` used to block silently past the Bash tool's
-    limit, and Claude couldn't answer that task's question meanwhile (the 2026-11-16 audit)."""
+    models unloaded (except ``keep``: the engine's own server) and their memory released. While
+    anything holds it, it refuses at once unless ``wait``: queued behind a running task, `wb image`
+    used to block silently past the Bash tool's limit, and Claude couldn't answer that task's
+    question meanwhile (the 2026-11-16 audit)."""
     with models.GpuLease(None, who, say, wait=wait):
-        models.free_gpu(say=say)
-        settle(say)
+        models.free_gpu(keep=keep, say=say)
+        settle(say, keep=keep)
         yield
 
 

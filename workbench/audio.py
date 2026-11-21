@@ -10,7 +10,8 @@ music and a voice's character Claude shortlists and asks the user to listen.
 Engines are described in ~/.config/workbench/audio.json (`$WB_AUDIO`), name -> entry, shaped like
 images.json: {"command": "<argv template>"} or {"url": "<an OpenAI /v1/audio/speech server>"},
 plus "kind" (speech, sfx, music, or listen: the checker; default speech), "gpu" (false: it runs on
-the CPU, without the GPU lease, so beside a task), "voices", "seconds" (the default length),
+the CPU, without the GPU lease, so beside a task; a url on another host is off this GPU unless
+true), "voices", "seconds" (the default length),
 "unload" (a URL POSTed after a batch, so a server lets its GPU memory go), "ref_arg", "model",
 "label", "notes" (the licence: shown to Claude), "timeout" (s). Placeholders: {text} {out} {seed}
 {seconds} {voice} {lyrics}, and {in} for a listener, which prints its transcript on stdout. No
@@ -155,9 +156,10 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
         ear = None
     out_dir.mkdir(parents=True, exist_ok=True)
     seed = int(time.time()) % 1_000_000 if seed is None else seed
-    on_gpu = e.get("gpu", True) is not False or bool(ear and ear[1].get("gpu", True) is not False)
+    on_gpu = media.on_gpu(e) or bool(ear and media.on_gpu(ear[1]))
     made = []
-    hold = media.gpu("wb audio", say, wait) if on_gpu else contextlib.nullcontext()
+    hold = (media.gpu("wb audio", say, wait, media.serving(e, *([ear[1]] if ear else [])))
+            if on_gpu else contextlib.nullcontext())
     with hold:
         try:
             for i in range(n):
@@ -417,12 +419,12 @@ def lines() -> list[str]:
     out = []
     for name, e in engines().items():
         why = media.ready(e)
-        out.append(f"  {name} ({kind_of(e)}{', CPU' if e.get('gpu') is False else ''}): "
+        out.append(f"  {name} ({kind_of(e)}{'' if media.on_gpu(e) else ', CPU'}): "
                    f"{e.get('label') or e.get('command', e.get('url', ''))[:60]}"
                    f" · {'ready' if not why else why}"
                    + (" · a server: it holds its GPU memory while it runs"
                       + ("" if e.get("unload") else " (no unload URL)")
-                      if e.get("url") and not e.get("command") else "")
+                      if e.get("url") and not e.get("command") and media.on_gpu(e) else "")
                    + (f"\n    voices: {', '.join(e['voices'])}" if e.get("voices") else "")
                    + (f"\n    {e['notes']}" if e.get("notes") else
                       "\n    licence: not noted (check it, then put it in notes)"))
