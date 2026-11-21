@@ -18215,6 +18215,32 @@ class WebChat(Base):
             self.assertEqual(chat.tailscale()["ip"], "100.64.0.9")
         self.assertEqual(ran.call_args[0][0][0], chat.TAILSCALE_APP)
 
+    def test_a_tailnet_node_with_only_an_ipv6_address_binds_it_and_a_stopped_one_is_not_running(self):
+        # #937 (the review of 1.90.24): only IPs with a "." were kept, so a node with IPv4 turned
+        # off was reported "tailscale (not running)" and the chat listened on localhost alone
+        chat, conf = self.chat, Path(os.environ["WB_CHAT_CONFIG"])
+
+        def status(ips, state="Running"):
+            me = {"BackendState": state, "Self": {"TailscaleIPs": ips, "DNSName": "box.ts.net.",
+                                                  "HostName": "box"}}
+            return mock.patch.object(chat.subprocess, "run", return_value=types.SimpleNamespace(
+                stdout=json.dumps(me)))
+        with mock.patch.object(chat.shutil, "which", return_value="/usr/bin/tailscale"):
+            with status(["fd7a:115c:a1e0::9"]):
+                p = chat.plan(["localhost", "tailscale"])
+                self.assertEqual((p["binds"], p["skipped"]), (["127.0.0.1", "fd7a:115c:a1e0::9"], []))
+                self.assertTrue({"box", "box.ts.net", "fd7a:115c:a1e0::9"} <= p["hosts"])
+                conf.write_text(json.dumps({"bind": ["tailscale"]}))
+                self.assertTrue(chat.url(1337).startswith("http://[fd7a:115c:a1e0::9]:1337/#token="))
+                conf.write_text("{}")
+            with status(["fd7a:115c:a1e0::9", "100.64.0.9"]):          # dual stack: the IPv4
+                self.assertEqual(chat.plan(["tailscale"])["binds"], ["100.64.0.9"])
+            with status(["100.64.0.9"], state="Stopped"):
+                self.assertEqual(chat.plan(["localhost", "tailscale"])["skipped"], ["tailscale (not running)"])
+            with status([]):
+                self.assertEqual(chat.plan(["localhost", "tailscale"])["skipped"],
+                                 ["tailscale (no Tailscale address)"])
+
     def test_a_taken_port_is_one_line_not_a_traceback(self):
         with self.assertRaisesRegex(RuntimeError, f"can't listen on 127.0.0.1:{self.port}: the port is taken"):
             self.chat.make_servers(self.port, ["127.0.0.1"])

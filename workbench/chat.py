@@ -123,8 +123,10 @@ def token() -> str:
 
 
 def tailscale(windows: bool = False) -> dict:
-    """This machine on the tailnet: {"ip", "names"}; {} when Tailscale isn't up; {"missing": True}
-    when there is no CLI to ask (said apart from "not running": the 2026-11-16 audit).
+    """This machine on the tailnet: {"ip", "names"}; {} when Tailscale isn't up (no Self, or a
+    BackendState other than Running); {"missing": True} when there is no CLI to ask (said apart
+    from "not running": the 2026-11-16 audit). The ip is the IPv4 one, else the first IPv6: a node
+    with IPv4 turned off was reported "not running" and the chat bound localhost alone (#937).
     ``windows``: under WSL with no Linux CLI, Windows' tailscale.exe (Tailscale's own setup for
     WSL2), for the name `tailscale serve` passes in through Windows' localhost forwarding: `which`
     never tries .exe, so the chat answered it 403 "unknown host" (#920). From PATH, else its
@@ -141,10 +143,13 @@ def tailscale(windows: bool = False) -> dict:
         return {"missing": True}
     try:
         r = subprocess.run([cli, "status", "--json"], capture_output=True, text=True, timeout=5)
-        me = json.loads(r.stdout)["Self"]
-    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        status = json.loads(r.stdout)
+        me = status["Self"]
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
         return {}
-    ips = [ip for ip in me.get("TailscaleIPs") or [] if "." in ip]
+    if status.get("BackendState", "Running") != "Running":  # stopped or logged out: not up
+        return {}
+    ips = sorted(me.get("TailscaleIPs") or [], key=lambda ip: ":" in ip)  # IPv4 first
     dns = (me.get("DNSName") or "").rstrip(".")
     names = {n for n in (dns, dns.split(".")[0], me.get("HostName", "")) if n}
     return {"ip": ips[0] if ips else None, "names": names, "dns": dns.lower()}
@@ -1987,7 +1992,7 @@ def plan(binds: list[str] | None = None, hosts: list[str] | None = None) -> dict
             ts = tailscale()
             if not ts.get("ip"):
                 skipped.append("tailscale (CLI not found: put `tailscale` on PATH)" if ts.get("missing")
-                               else "tailscale (not running)")
+                               else "tailscale (no Tailscale address)" if ts else "tailscale (not running)")
                 continue
             b = ts["ip"]
             allowed |= {n.lower() for n in ts["names"]}

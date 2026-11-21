@@ -5847,9 +5847,11 @@ each request (*Attachments* above) straight from the file (`chat.upload_limits`,
 every snapshot reads them, so a `bind` broken while the server runs must not fail each request).
 `bind`: addresses to listen
 on, which replace localhost (`localhost`, an address, `tailscale`: the tailnet IPv4 from
-`tailscale status --json`, the CLI found on PATH or, on macOS, in the app bundle
-(`TAILSCALE_APP`), never Windows' under WSL (#920); skipped as `tailscale (not running)`, or `tailscale (CLI not found: …)` when
-neither has it; `0.0.0.0` or `::`: every interface). `hosts`: extra host names to answer to (`*`: any).
+`tailscale status --json`, else its first IPv6 (a node with IPv4 turned off was "not running" and
+the chat bound localhost alone, #937), the CLI found on PATH or, on macOS, in the app bundle
+(`TAILSCALE_APP`), never Windows' under WSL (#920); skipped as `tailscale (not running)` (no
+`Self`, or a `BackendState` other than `Running`), `tailscale (no Tailscale address)`, or
+`tailscale (CLI not found: …)` when neither has it; `0.0.0.0` or `::`: every interface). `hosts`: extra host names to answer to (`*`: any).
 Each is a list of strings; a string is a one-item list (iterated, `"0.0.0.0"` became the binds `0`
 and `.`), and anything else stops `serve` with `chat.ConfigError` naming chat.json, exit 78, so the
 unit doesn't retry it (#534). A wildcard covers its family's other binds: with `0.0.0.0` the plan
