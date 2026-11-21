@@ -873,6 +873,41 @@ class Lifecycle(Base):
         self.assertIn("dropped the agent's proposed AGENTS.md",
                       run_wb("accept", "t-ign2", "-m", "feat: answer"))
 
+    def test_a_proposal_for_agents_md_linked_to_claude_md_goes_into_claude_md_and_keeps_the_link(self):
+        # #871 (Claude's audit of 1.90.24): wb init links AGENTS.md to CLAUDE.md; the agent's
+        # AGENTS.md.proposed was diffed against nothing, and --take-claude-md put a plain file
+        # over the link, leaving CLAUDE.md, the file Claude Code reads, unchanged
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout
+        (self.repo / "AGENTS.md").symlink_to("CLAUDE.md")
+        g("add", "AGENTS.md")
+        g("commit", "-qm", "AGENTS.md links to CLAUDE.md")
+        old = (self.repo / "CLAUDE.md").read_text()
+        self.start("t-link", "ok")
+        wait_phase("t-link", {"review"})
+        t = store.Task("t-link")
+        (t.worktree / "AGENTS.md.proposed").write_text(old + "Answers live in answer.txt.\n")
+        self.assertEqual(runner.proposals(t.worktree),
+                         [(t.worktree / "CLAUDE.md", t.worktree / "AGENTS.md.proposed")])
+        shown = runner.review_diff(t)
+        self.assertIn("the agent proposes this change to CLAUDE.md (as AGENTS.md.proposed", shown)
+        self.assertIn("+Answers live in answer.txt.", shown)
+        self.assertNotIn("+# repo", shown)                 # a diff, not the whole file as new
+        # both names proposed through the link: refused, nothing changed
+        (t.worktree / "CLAUDE.md.proposed").write_text(old + "Other.\n")
+        self.assertIn("--take-claude-md is refused", runner.review_diff(t))
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("accept", "t-link", "-m", "feat: answer", "--take-claude-md")
+        self.assertIn("both propose CLAUDE.md", err.getvalue())
+        self.assertTrue((t.worktree / "AGENTS.md").is_symlink())
+        (t.worktree / "CLAUDE.md.proposed").unlink()
+        out = run_wb("accept", "t-link", "-m", "feat: answer", "--take-claude-md")
+        self.assertIn("took the agent's proposed CLAUDE.md", out)
+        self.assertEqual(g("show", "delegate/t-link:CLAUDE.md"), old + "Answers live in answer.txt.\n")
+        self.assertTrue(g("ls-tree", "delegate/t-link", "AGENTS.md").startswith("120000 "))
+        self.assertEqual(g("show", "delegate/t-link:AGENTS.md"), "CLAUDE.md")
+
     def test_a_proposal_the_project_already_tracks_is_left_alone(self):
         # #321 (the audit of 1.4, reproduced): a CLAUDE.md.proposed committed before the task
         # was settled as the agent's, and accept deleted it, though wb diff never showed it

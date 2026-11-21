@@ -2145,7 +2145,12 @@ def proposals(worktree: Path) -> list[tuple[Path, Path]]:
     worktree: a new file, untracked at the step's start (HEAD), never a link (it could point
     anywhere). A `CLAUDE.md.proposed` the project already tracked was settled too, and accept
     deleted a draft the agent never touched and the review never showed; and an rglob walked
-    every copied node_modules on each review (#321, the audit of 1.4). Git skips ignored paths."""
+    every copied node_modules on each review (#321, the audit of 1.4). Git skips ignored paths.
+    An instruction file that is a link inside the worktree (wb init's AGENTS.md -> CLAUDE.md)
+    pairs its proposal with the link's target, so the diff and the write go to the real file:
+    paired with the link, the review diffed against nothing and --take-claude-md put a plain
+    AGENTS.md over the link, leaving CLAUDE.md unchanged (#871, Claude's audit of 1.90.24). A
+    link out of the worktree stays paired with the link, which `link_problem` refuses."""
     try:
         listed = gitops.git(worktree, "ls-files", "--others", "--exclude-standard", "-z", "--",
                             *(f":(glob)**/{name}.proposed" for name in PROPOSABLE))
@@ -2155,8 +2160,30 @@ def proposals(worktree: Path) -> list[tuple[Path, Path]]:
     for rel in sorted(p for p in listed.split("\0") if p):
         prop = worktree / rel
         if not prop.is_symlink() and prop.is_file():
-            out.append((prop.with_name(prop.name.removesuffix(".proposed")), prop))
+            real = prop.with_name(prop.name.removesuffix(".proposed"))
+            if real.is_symlink():
+                try:
+                    real = worktree / real.resolve().relative_to(worktree.resolve())
+                except (OSError, RuntimeError, ValueError):
+                    pass  # out of the worktree, or a loop: link_problem says so
+            out.append((real, prop))
     return out
+
+
+def link_problem(worktree: Path) -> str | None:
+    """Why the proposals can't be taken as they are, or None: two proposals for one file
+    (CLAUDE.md.proposed and AGENTS.md.proposed through wb init's link), or one whose file is a
+    link out of the worktree. Taking either replaced a link or kept one proposal at random (#871)."""
+    seen: dict[Path, Path] = {}
+    for real, prop in proposals(worktree):
+        if real.is_symlink():
+            return (f"{real.relative_to(worktree)} is a link out of the worktree, so no commit "
+                    f"would take {prop.name}: apply {prop} by hand")
+        if real in seen:
+            return (f"{seen[real].name} and {prop.name} both propose "
+                    f"{real.relative_to(worktree)}: delete one ({seen[real]} or {prop})")
+        seen[real] = prop
+    return None
 
 
 def proposal_diff(task: store.Task) -> str:
@@ -2172,9 +2199,12 @@ def proposal_diff(task: store.Task) -> str:
         old = read.read_text(errors="replace").splitlines(keepends=True) if read else []
         d = "".join(difflib.unified_diff(old, prop.read_text(errors="replace").splitlines(
             keepends=True), f"a/{rel}", f"b/{rel}"))
-        parts.append(f"\n\nthe agent proposes this change to {rel} (wb accept --take-claude-md "
-                     f"takes it; without it, accept drops it):\n{d or '(no change)'}")
-    return "".join(parts)
+        via = "" if prop.name == f"{real.name}.proposed" and prop.parent == real.parent else \
+            f" (as {prop.relative_to(task.worktree)}, through the link)"
+        parts.append(f"\n\nthe agent proposes this change to {rel}{via} (wb accept "
+                     f"--take-claude-md takes it; without it, accept drops it):\n{d or '(no change)'}")
+    problem = link_problem(task.worktree)
+    return "".join(parts) + (f"\n\n--take-claude-md is refused: {problem}" if problem else "")
 
 
 def review_diff(task: store.Task) -> str:

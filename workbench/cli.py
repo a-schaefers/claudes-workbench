@@ -1181,6 +1181,8 @@ def _settle_proposals(task: store.Task, take: bool):
     when it fails: wb next dropped the proposal, then died on its commit, so a retry with
     --take-claude-md had nothing to take (#507, Claude's audit of 1.90). Said once it stands."""
     done, local = [], {}
+    if take and (problem := runner.link_problem(task.worktree)):  # never over a link (#871)
+        raise gitops.GitError(problem)
     if take:  # a file git ignores is in no commit: the checkout's own copy takes it (#506)
         for real, prop in runner.proposals(task.worktree):
             rel = real.relative_to(task.worktree)

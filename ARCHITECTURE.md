@@ -1976,7 +1976,13 @@ the checkout's copy and taken over it once the commit stands ("written over <pat
 so in no commit)"); where that copy can't take it (a link, or not ignored there) `--take-claude-md`
 is refused before anything changes, naming the proposal to apply by hand: `add -A` skipped the
 ignored file, accept said "took", and the change went with the worktree (#506, Claude's audit of
-1.90). Claude making each change itself was a call over its whole context on most tasks
+1.90). A file that is a link inside the worktree (wb init's `AGENTS.md` -> `CLAUDE.md`) pairs its
+proposal with the link's target, so `AGENTS.md.proposed` is diffed against and taken into
+`CLAUDE.md` and the link stays a link (the notice says "(as AGENTS.md.proposed, through the
+link)"); `runner.link_problem` refuses `--take-claude-md` when two proposals name one file or a
+file is a link out of the worktree, and the notice says so: paired with the link, the proposal
+was diffed against nothing and taken as a plain `AGENTS.md` over the link, CLAUDE.md unchanged
+(#871, Claude's audit of 1.90.24). Claude making each change itself was a call over its whole context on most tasks
 (2026-11-18).
 
 **Git, read-only** (`gitguard.py`; *Git, commits and projects*). `runner.agent_env` writes a `git`
