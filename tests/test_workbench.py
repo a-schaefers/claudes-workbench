@@ -16366,6 +16366,30 @@ class Projects(Base):
                                         "--is-shallow-repository").strip(), "true")
             self.assertEqual(gitops.git(self.tmp.name, at, "count-objects").split()[0], "0")
 
+    def test_a_shallow_repos_scratch_clone_keeps_its_object_format(self):
+        # #884's review (reproduced on git 2.56): the hand-made clone's plain `git init` took
+        # git's default format, so a SHA-256 shallow repo, or a SHA-1 one under a SHA-256
+        # default, failed `update-ref --stdin` and with it every base check, verify and bundle
+        tmp = Path(self.tmp.name)
+        src = tmp / "sha256"
+        gitops.git(tmp, "init", "-q", "--object-format=sha256", "-b", "main", str(src))
+        (src / "f.txt").write_text("1\n")
+        gitops.git(src, "add", "f.txt")
+        gitops.git(src, "commit", "-qm", "one")
+        cases = {"sha256": (src, {}), "sha1": (self.repo, {"GIT_DEFAULT_HASH": "sha256"})}
+        for name, (origin, env) in cases.items():
+            shallow = tmp / f"shallow-{name}"
+            gitops.git(tmp, "clone", "-q", "--depth", "1", origin.as_uri(), str(shallow))
+            with mock.patch.dict(os.environ, env):
+                for bare in (False, True):
+                    dest = tmp / f"scratch-{name}-{bare}"
+                    gitops.scratch_clone(shallow, dest, bare=bare)
+                    at = f"--git-dir={dest if bare else dest / '.git'}"
+                    self.assertEqual(gitops.git(tmp, at, "rev-parse", "--show-object-format")
+                                     .strip(), name)
+                    self.assertEqual(gitops.git(tmp, at, "rev-parse", "HEAD").strip(),
+                                     gitops.git(shallow, "rev-parse", "HEAD").strip())
+
     def test_a_sparse_worktree_is_made_with_the_users_submodule_recurse_on(self):
         # #888 (the third 2026-11-21 audit, reproduced): with submodule.recurse=true, the sparse
         # worktree's `read-tree -mu HEAD` reset a submodule it had no git dir for and exited 128,

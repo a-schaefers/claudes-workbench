@@ -5352,8 +5352,10 @@ same), `probe config set|reset` (probe's config) and `probe benchmark`.
 one regression test twice, at review, each run in its own scratch checkout under the state
 directory and in the task's own lane and environment (`runner.run_in_lane` on a `verify._At`):
 - **The base**: a `--shared` clone (`gitops.scratch_clone`, every scratch checkout's and
-  `bundle_steps`'s: in a shallow repo, where git ignores `--shared`, made by hand, `init` with the
-  repo's objects as alternates, its `shallow` file, branches, tags and HEAD, since the clone
+  `bundle_steps`'s: in a shallow repo, where git ignores `--shared`, made by hand, `init` in the
+  repo's own object format (`rev-parse --show-object-format`: a plain init took git's default,
+  and a SHA-256 shallow repo, or a SHA-1 one under a SHA-256 default, refused every ref, #884's
+  review) with the repo's objects as alternates, its `shallow` file, branches, tags and HEAD, since the clone
   copied only what refs reach and the review snapshot's tree, or a squashed task's earlier step,
   wasn't there: wb verify and shot died "failed to unpack tree object", bench add on step 2,
   #884; its Git LFS files smudged from the repo's own objects: `gitops.share_lfs`, #382) at the task's original base for step one or the previous approved step commit for later steps (#252; status `step_base`, so a step with no changes keeps the commit before it, #652), with the candidate's test files

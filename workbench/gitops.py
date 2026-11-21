@@ -1238,14 +1238,19 @@ def scratch_clone(repo: Path, dest: Path, bare: bool = False, tags: bool = True)
     steps, which no ref reaches, weren't there (wb verify and shot died "failed to unpack tree
     object", bench add on step 2), and a big shallow checkout was copied whole for each base
     check (#884, the third 2026-11-21 audit). So there it is made by hand: init, alternates, the
-    repo's `shallow` file, its branches (and tags) and HEAD."""
+    repo's `shallow` file, its branches (and tags) and HEAD. In the repo's own object format:
+    a plain init takes git's default (or init.defaultObjectFormat), and a SHA-256 shallow repo's,
+    or a SHA-1 one's under a SHA-256 default, refused every ref ("invalid <new-oid>", #884's
+    review)."""
     dest = Path(dest)
     if git(repo, "rev-parse", "--is-shallow-repository", check=False).strip() != "true":
         git(dest.parent, "clone", "-q", "--shared", "--bare" if bare else "--no-checkout",
             *([] if tags else ["--no-tags"]), str(repo), str(dest))
         return
     common = Path(repo) / git(repo, "rev-parse", "--git-common-dir").strip()
-    git(dest.parent, "init", "-q", *(["--bare"] if bare else []), str(dest))
+    fmt = git(repo, "rev-parse", "--show-object-format").strip()
+    git(dest.parent, "init", "-q", f"--object-format={fmt}", *(["--bare"] if bare else []),
+        str(dest))
     gd = dest if bare else dest / ".git"
     info = gd / "objects" / "info"
     info.mkdir(parents=True, exist_ok=True)
