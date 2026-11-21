@@ -85,6 +85,26 @@ def export(session: str, strict: bool = False) -> dict | None:
     return None if strict else {}
 
 
+def finished_export(task: store.Task, sid: str) -> dict:
+    """An earlier session of the task's (status `sessions`, before a handover), exported once and
+    kept beside the task (`.export-<sid>.json`, a dotfile `wb events` ignores): it never changes,
+    and the pane's `wb watch --json`, run on every status write of the followed task, exported
+    every one of them again each time, a core kept busy beside the model (#691)."""
+    if not re.fullmatch(r"[\w-]{1,128}", sid or ""):
+        return export(sid) if sid else {}
+    path = task.dir / f".export-{sid}.json"
+    kept = store.read_json(path, None)
+    if isinstance(kept, dict) and kept:
+        return kept
+    got = export(sid)
+    if got:
+        try:
+            store.write_json(path, got)
+        except OSError:  # a full disk: exported again next time
+            pass
+    return got
+
+
 def find_session(task: store.Task) -> str | None:
     """The task's OpenCode session: from its status, or by its title before the first event."""
     sid = task.status.get("session")
@@ -560,7 +580,7 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
             first = None
             for old in st.get("sessions") or []:  # earlier sessions, before a fresh start
                 if old not in done:
-                    got = export(old)
+                    got = finished_export(task, old)
                     if got:  # else a busy store: try again next time
                         done[old] = session_entries(got, worktree, verbose)
         entries = task_entries(task) + session_entries(data, worktree, verbose)

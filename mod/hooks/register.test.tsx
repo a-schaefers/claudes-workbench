@@ -1013,6 +1013,34 @@ test('the pane follows the running task: its whole history, then what it is doin
   expect(watches().length).toBeGreaterThan(1)
 })
 
+test('a running task writing its status on every tool call is re-read at most every few seconds (#691)', async ($, on) => {
+  // #691: each status write made a new key, and each new key ran `wb watch --json` (a Python start
+  // and an OpenCode export) at once, back to back for the whole round
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })
+  fakeTasks(on, files, ['fix-it'])
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    return { value: { exitCode: 0, stdout: JSON.stringify({ s: 'claude', t: `line ${runs.length}` }), stderr: '' } }
+  })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const watches = () => runs.filter(r => r[1] === 'watch').length
+  expect(watches()).toBe(1)
+  for (let i = 1; i <= 20; i++) {                               // a tool call every half second, for 10 s
+    files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'running', round: 1, updated_at: ts0 + i })
+    await clock.advance(500)
+  }
+  expect(watches()).toBeGreaterThanOrEqual(2)                   // it still moves
+  expect(watches()).toBeLessThanOrEqual(3)                      // but at most every LIVE_EVERY_MS
+  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts0 + 30 })
+  const n = watches()
+  await clock.advance(1600)
+  expect(watches()).toBe(n + 1)                                 // done: read at once
+})
+
 test('/workbench-quit stops everything; /workbench-quit-and-hand-back-claude hands the tasks to Claude', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, {})

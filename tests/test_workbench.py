@@ -4515,6 +4515,20 @@ class Watch(Base):
         self.assertNotIn("Σ", clock)
         self.assertLess(out.index("■ tests FAIL"), out.index("round 2"))
 
+    def test_an_earlier_session_of_a_handed_over_task_is_exported_once_for_every_watch(self):
+        # #691: the pane runs `wb watch --json` on every status write of the followed task, and
+        # each run exported every session before a handover again, a core kept busy
+        from workbench import transcript
+        t = store.Task("t-handed")
+        store.write_json(t.dir / "task.json", {"name": "t-handed", "created_at": store.now()})
+        t.set_status(phase="review", round=1, session="ses_new", sessions=["ses_old1", "ses_old2"])
+        exported = []
+        fake = lambda sid, strict=False: exported.append(sid) or {"info": {"id": sid}, "messages": []}  # noqa: E731
+        with mock.patch.object(transcript, "export", fake):
+            for _ in range(3):
+                run_wb("watch", "t-handed", "--json")
+        self.assertEqual(sorted(exported), ["ses_new"] * 3 + ["ses_old1", "ses_old2"])
+
     def test_json_lines_for_the_pane_end_with_what_is_happening(self):
         self.start("t-live", "hang")
         deadline = time.time() + 10

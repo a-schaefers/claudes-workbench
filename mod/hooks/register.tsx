@@ -108,7 +108,7 @@ const KEEP_LINES = 2000 // the pane scrolls back through this much history (`wb 
 // whole HISTORY_CHARS budget, hiding everything before it (the 2026-11-16 audit): each line is
 // cut to this first.
 const LINE_CHARS = 2000
-const LIVE_EVERY_MS = 5000 // a running task's transcript is re-read at most this often, unless its status moved
+const LIVE_EVERY_MS = 5000 // a running task's transcript is re-read this often, and no more often though its status moves (#691)
 // The engine draws a pane's first 100,000 characters of text and drops the rest, and the
 // apprentice comes after the history: a long task's history pushed its words (and its mouth)
 // past the cut, leaving an empty bubble (seen 2026-11-16, 119,728 characters). So the history
@@ -1645,6 +1645,12 @@ async function refreshLive($: any, list: WbTask[], now: number) {
   const focus = focusOf(list, followed)
   const key = focus ? `${focus.name}@${focus.updatedAt}` : ''
   if (key === mem.liveKey && !(focus && ACTIVE.has(focus.phase) && now - mem.liveAt >= LIVE_EVERY_MS)) return
+  // A running task writes its status on every tool call, and each write ran another `wb watch`
+  // (a Python start and an OpenCode export) back to back for the whole round, a core kept busy
+  // beside the model (#691): the same task, still running, is read at most every LIVE_EVERY_MS,
+  // the change kept for the clock's next poll. Another task, or one that stopped, is read at once.
+  if (focus && ACTIVE.has(focus.phase) && mem.liveKey.startsWith(`${focus.name}@`) &&
+    now - mem.liveAt < LIVE_EVERY_MS) return
   const pane = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
   if (!pane?.isShown) return // read when it shows again: the key still differs
   mem.watching = true

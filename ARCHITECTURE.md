@@ -2496,10 +2496,14 @@ lines (styles `claude`, `agent`, `think`, `tool`, `out`, `ok`, `bad`, `sys`, `ad
 or `""` for prompt bodies), `activity` if any, `clock` (always), then the phase line. Each line's
 text is cut to 2000 characters (`JSON_LINE_CHARS`), and `--last N` (hidden too) prints only the
 newest N transcript lines (meta, activity, clock and the phase line always): the engine keeps a
-command's first 4 MiB, so a long task's newest lines were the ones lost. One OpenCode export per
-run (the first pass reuses the header's). The mod runs it with `--last 2000` while the pane is
-shown: at most every 5 s while the followed task is active, at once when its `name@updatedAt`
-changes; cut at 4 MiB anyway, it keeps the lines it had and adds `transcript too long for the
+command's first 4 MiB, so a long task's newest lines were the ones lost. One OpenCode export of
+the current session per run (the first pass reuses the header's); each earlier session (status
+`sessions`, before a handover) is exported once ever and kept as `tasks/<t>/.export-<sid>.json`
+(`transcript.finished_export`: it never changes, and each run exported every one again, #691). The
+mod runs it with `--last 2000` while the pane is shown: every 5 s while the followed task is
+active, a status write in between kept for the next poll after that (each tool call writes one,
+and each ran another watch back to back, #691), at once when another task is followed or the
+followed one stops; cut at 4 MiB anyway, it keeps the lines it had and adds `transcript too long for the
 pane`. It cuts each line to 2000 characters (`LINE_CHARS`), shows the newest 60,000 characters of history, puts `meta` under the
 rule and `clock` under the speech, and uses `activity` as the apprentice's speech (the pose is
 `work` when it starts `Writing` or `Running`, else `think`). A new style needs an
@@ -5551,8 +5555,8 @@ the pane once per load when one of the session's own tasks (any task, in workben
 queued/running/testing or workbench mode is on (an open the
 user didn't ask for is placed only on a wide terminal; a pane the user closed stays closed for that
 load); refreshes the live transcript while the pane is shown (`wb watch <task> --json --last
-2000`, at most every 5 s (`LIVE_EVERY_MS`) while the followed task is active, at once when its
-`name@updatedAt` changes; the focus, `focusOf`, sticks to the followed task while it is active,
+2000`, every 5 s (`LIVE_EVERY_MS`) while the followed task is active, its status writes in
+between waiting for that (#691), at once when the followed task changes or stops; the focus, `focusOf`, sticks to the followed task while it is active,
 else the newest started running one, then queued, else the newest waiting for Claude); submits
 one queued turn when idle (one the engine drops goes back on the queue for a minute); detects a
 task boundary and compacts; offers the weekly check; starts the update check beside it; then
@@ -6029,6 +6033,7 @@ $WB_HOME (~/.local/state/workbench)
     base-tests.txt               the base check's output: the acceptance command on the base (`--test`)
     starting.json                a start under way: repo, worktree, wb start's pid and start (one from before #529, whose start made the branch, also the branch and its commit, #416); gone once task.json is (#376)
     setup.txt                    the setup's output (`--setup`, *Setting the worktree up*)
+    .export-<sid>.json           an earlier session's OpenCode export, before a handover: made once, for wb watch (#691)
     <name> → ../<name>           a sibling's link, beside the worktree (`--sibling`; not one of context.TASK_FILES)
     tree/<parents>/worktree/     the worktree instead, with a sibling more than one level up (task.json `worktree`), the links around it (#261)
     rounds/<n>/                  prompt.md  instructions.md (before a handover rewrote it)  summary.md  tests.txt
