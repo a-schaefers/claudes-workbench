@@ -1354,6 +1354,7 @@ const mem = {
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
   eventsStart: '', // its start, as its hello says: with the pid, listener.json's proof of life (#532)
   claudePid: 0, // this Claude Code process, the `wb events` child's parent, as its hello says: 0 unknown (#687)
+  machine: '', // this machine, as the hello says (store.machine): '' from a wb before #922
   claudeStart: '', // and its start
   earsOk: false, // `wb events` has said hello in this load: wb runs
   gone: new Set<string>(), // task directories closed past KEEP_CLOSED_MS: final, never read again
@@ -1415,11 +1416,17 @@ const mine = (t: { session?: string; repo?: string; cwd?: string; subdir?: strin
 const PID_CHECK_MS = 30_000
 const pidKey = (t: { claude_pid?: number; claude_start?: string }) =>
   `${Number(t.claude_pid ?? 0)}@${t.claude_start ?? ''}`
-async function noteClaude($: any, t: { session?: string; claude_pid?: number; claude_start?: string },
+// A pid recorded on another machine (task.json `claude_machine`, listener.json `machine`): it
+// means nothing in this one's /proc. On a state directory two machines share, each machine's mod
+// read the other's live session as gone and adopted its tasks, back and forth, and took the chat's
+// listener from it too (#922; the runners' own pids got the same fix in #849).
+const elsewhere = (machine: unknown) => typeof machine === 'string' && !!machine && !!mem.machine && machine !== mem.machine
+
+async function noteClaude($: any, t: { session?: string; claude_pid?: number; claude_start?: string; claude_machine?: string },
   now: number): Promise<void> {
   const pid = Number(t.claude_pid ?? 0)
   const key = pidKey(t)
-  if (!pid || !t.session || mem.deadPids.has(key)) return
+  if (!pid || !t.session || mem.deadPids.has(key) || elsewhere(t.claude_machine)) return
   // this session's own, unless stamped by an older process of it (`claude --resume`): that one's
   // death is what lets this process claim it back from the others (#687)
   if (mem.ids.has(t.session) && (!mem.claudePid || ownPid(t))) return
@@ -1768,6 +1775,7 @@ async function ears($: any) {
             mem.eventsStart = typeof ev.start === 'string' ? ev.start : '' // listener.json's start (#532)
             mem.claudePid = Number(ev.parent ?? 0) || 0 // whose tasks `wb adopt` claims (#687)
             mem.claudeStart = typeof ev.parent_start === 'string' ? ev.parent_start : ''
+            mem.machine = typeof ev.machine === 'string' ? ev.machine : ''
             mem.earsOk = hello = true
             wait = 2000
           }
@@ -2136,7 +2144,8 @@ async function listen($: any, now: number) {
   // (no /proc) each ask is a `kill` and a `ps`, run on every poll, 80 a minute, even for this
   // session's own claim, whose answer went unused (#839).
   let lives: boolean | null = false
-  if (theirs && claim.pid) {
+  if (theirs && claim.pid && elsewhere(claim.machine)) lives = true // can't be asked here (#922)
+  else if (theirs && claim.pid) {
     const key = `${Number(claim.pid)}@${claim.start ?? ''}`
     if (now - (mem.listenerAt.get(key) ?? -Infinity) < PID_CHECK_MS) lives = true
     else {
@@ -2150,7 +2159,7 @@ async function listen($: any, now: number) {
     : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens
   if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
   const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid,
-    ...(mem.eventsStart ? { start: mem.eventsStart } : {}), busy: mem.busy })
+    ...(mem.eventsStart ? { start: mem.eventsStart } : {}), ...(mem.machine ? { machine: mem.machine } : {}), busy: mem.busy })
   if (body !== mem.listenerBody || theirs || claim.session !== st.key) { // only on change: a write is an event
     mem.listenerBody = body
     await $.fs.write(`${dir}/listener.json`, body)

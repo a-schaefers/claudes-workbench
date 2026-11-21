@@ -464,6 +464,48 @@ test('a task whose Claude Code process is gone is claimed by the first session t
   expect(adopts.length).toBe(claims)                            // claimed once, not at every poll
 })
 
+test('#922: a Claude Code process or chat listener recorded on another machine is never read as gone here', async ($, on) => {
+  // on a state directory two machines share, each machine's mod read the other's live session as
+  // dead (its pid not in this /proc), adopted its tasks, and the two passed them back and forth
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'theirs', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-a', claude_pid: 4242, claude_machine: 'machine-a' })
+  task(files, 'ours', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4141, claude_machine: 'machine-b' })
+  for (const name of ['theirs', 'ours']) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, ['theirs', 'ours'], true, [], false)
+  chatOn(files)
+  const claim = JSON.stringify({ session: 'other-key', pid: 777, start: '1', machine: 'machine-a' })
+  files['/wb/chat/listener.json'] = claim                         // A's listener, its file stale
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout', text: '{"hello": 4343, "parent": 9000, "parent_start": "77", "machine": "machine-b"}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  on('session.id', () => ({ value: 'sess-new' }))
+  const adopts: string[] = []
+  on('process.run', (_: any, e: any) => {
+    const [cmd, ...args] = e.argv
+    if (cmd === 'kill') return { value: { exitCode: 1, stdout: '', stderr: '' } }   // no such pid here
+    if (cmd === 'wb' && args[0] === 'adopt') {
+      adopts.push(args[1])
+      const path = `/wb/tasks/${args[1]}/task.json`
+      files[path] = JSON.stringify({ ...JSON.parse(files[path]), session: 'sess-new', claude_pid: 9000, claude_machine: 'machine-b' })
+      return { value: { exitCode: 0, stdout: `adopted ${args[1]}`, stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(40_000)
+  expect(adopts).toEqual(['ours'])                                // this machine's gone process only
+  expect(woken.join('\n')).not.toContain('REPORT-theirs')
+  expect(files['/wb/chat/listener.json']).toBe(claim)              // A's listener stands
+})
+
 test('a session resumed in a new process comes back in workbench mode, and a quit ends it for good (#689)', async ($, on) => {
   // #689: the mode lived in the old process's state: `claude --continue` came back with it off,
   // so the chat didn't listen, the status line didn't show it and a compaction dropped it

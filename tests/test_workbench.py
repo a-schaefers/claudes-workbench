@@ -5311,6 +5311,44 @@ class Steering(Base):
         spec = store.Task("t-orphan").spec
         self.assertEqual((spec["session"], spec["claude_pid"]), ("sess-2", b.pid))  # its own id, new pid
 
+    def test_a_claude_code_process_recorded_on_another_machine_is_never_gone_here(self):
+        # #922: on a state directory two machines share, machine B read A's live session's pid as
+        # dead (not in B's /proc), adopted A's task, and A adopted it back, over and over
+        claude = subprocess.Popen(["sleep", "60"]); self.addCleanup(claude.kill)
+        os.environ.update(CLAUDE_CODE_SESSION_ID="sess-1", CLAUDE_PID=str(claude.pid))
+        self.start("t-here", "ok")
+        wait_phase("t-here", {"review"})
+        self.assertEqual(store.Task("t-here").spec["claude_machine"], store.machine())  # recorded
+        ears = subprocess.Popen([sys.executable, str(ROOT / "bin" / "wb"), "events"],
+                                stdout=subprocess.PIPE, text=True)
+        try:                                                       # and said in the hello, for the mod
+            self.assertEqual(json.loads(ears.stdout.readline())["machine"], store.machine())
+        finally:
+            ears.kill()
+            ears.wait()
+        gone = subprocess.Popen(["true"]); gone.wait()            # a pid that runs nothing here
+        b = subprocess.Popen(["sleep", "60"]); self.addCleanup(b.kill)
+        t = store.Task("t-theirs")
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": "t-theirs", "created_at": store.now(),
+                                               "repo": str(self.repo), "cwd": str(self.repo),
+                                               "session": "sess-a", "claude_pid": gone.pid,
+                                               "claude_machine": "machine-a"})
+        t.set_status(phase="review", round=1)
+        self.assertFalse(cli._gone(gone.pid, None, "machine-a"))
+        self.assertTrue(cli._gone(gone.pid, None, store.machine()))     # this machine's: gone
+        mine = cli._scope([store.Task("t-theirs")], str(self.repo), ["sess-b"])[0]
+        self.assertEqual(mine, [])                                 # not by directory either
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("adopt", "t-theirs", "--session", "sess-b", "--pid", str(b.pid))
+        self.assertIn(f"live Claude Code session (pid {gone.pid} on another machine)", err.getvalue())
+        self.assertEqual(store.Task("t-theirs").spec["session"], "sess-a")
+        spec = dict(store.Task("t-theirs").spec, claude_machine=store.machine())  # this one's: adopted
+        store.write_json(t.dir / "task.json", spec)
+        self.assertIn("adopted", run_wb("adopt", "t-theirs", "--session", "sess-b", "--pid", str(b.pid)))
+        self.assertEqual(store.Task("t-theirs").spec["claude_machine"], store.machine())
+
     def test_a_notice_is_taken_once_under_the_lock_whoever_asks_first(self):
         # #687, #696: the mod and wb wait each read `acked`, then wrote it, and both delivered
         t = store.Task("t-acked")

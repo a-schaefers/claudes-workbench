@@ -2543,16 +2543,19 @@ process (`CLAUDE_PID`, task.json `claude_pid`) and its start (`claude_start`, `m
 once it is gone (no `/proc/<pid>` where there is `/proc`, else `kill -0` fails: a container without
 procps has no `kill`, and no gone process was ever seen, #700; or the pid now runs a process that started at another time:
 a recycled pid, #532; the mod's `noteClaude`, a live one asked at most every 30 s, a gone one
-final; `cli._gone`, `models._alive`), the task is
+final; `cli._gone`, `models._alive`; never one recorded on another machine, task.json
+`claude_machine`: its pid means nothing here, #922), the task is
 also claimed by directory, so a new process in the project adopts the earlier one's tasks (the
 0.90 review: after a crash or an update, plain `claude` in the same repo got a new session id
 and was woken for none of them, and its quit left them running for nobody). The claim is
 recorded, and the first claimer wins (#687): the mod knows its own Claude Code process from
-`wb events`'s hello (`parent`, `parent_start`: the events child's parent) and, for an open task
+`wb events`'s hello (`parent`, `parent_start`: the events child's parent; `machine`,
+`store.machine`) and, for an open task
 whose recorded process is gone and that it would own (near it, or its own session id stamped by
 an earlier process of the session, as after `claude --resume`), runs `wb adopt <task> --pid <its
 process> --session <ids…>` (the mod's `claim`), which, under the task's command lock, rewrites
-task.json's `session` (kept when it is one of the given ids), `claude_pid` and `claude_start`,
+task.json's `session` (kept when it is one of the given ids), `claude_pid`, `claude_start` and
+`claude_machine`,
 and refuses (exit 1) while the recorded process lives; the mod re-reads task.json either way, so
 every other session sees a live process and drops the task (before, once the starting process
 ended, every nearby session and the resumed one owned it for good, and both woke for its
@@ -5675,8 +5678,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
 - `away.json`: `{at, by}`, written by the mod: when the listening session last passed on a web
   message (seconds; `by` its key), `{at: 0}` once a prompt is typed in any session or the chat is
   turned off. Every session reads it for whether the user is away (#688).
-- `listener.json`: `{session, cwd, pid, start, busy}`, written by the mod when it changes (`start`:
-  its `wb events` process's, from the hello). A listener counts while its pid is this user's and
+- `listener.json`: `{session, cwd, pid, start, machine, busy}`, written by the mod when it changes (`start`:
+  its `wb events` process's, from the hello; `machine`, the hello's: another machine's mod never
+  reads that pid as gone and takes the listener, #922). A listener counts while its pid is this user's and
   started at `start` (`chat._alive`, which is `models._alive`: a root daemon under a recycled pid
   answered EPERM and read as listening, #532), or, with no pid, while its `ts` is under 15 s old.
 - `asks.jsonl`: the dialogs. An ask row `{id: "ask-<ms>-<8 hex>", ts, tool (200 characters),
@@ -6148,7 +6152,7 @@ and two timers. A `claude -p` run or an SDK session (neither) stays quiet, no po
 `wb status` context, until `session.attach` (the desktop app attaching) starts them: such a run
 took the terminal session's wakes and the weekly check (the 2026-11-16 audit).
 
-**Ears and timers.** `ears` spawns `wb events` (cli.cmd_events: `{"hello": pid, "start": …, "parent": …, "parent_start": …}` first (the parent, its Claude Code process: `mem.claudePid`, whose tasks `claim` adopts, #687), then
+**Ears and timers.** `ears` spawns `wb events` (cli.cmd_events: `{"hello": pid, "start": …, "parent": …, "parent_start": …, "machine": …}` first (the parent, its Claude Code process: `mem.claudePid`, whose tasks `claim` adopts, #687), then
 `{"changed": [...]}` per batch; it skips tasks' `worktree/` and `rounds/`, closed tasks, `rules/`, `imports/`, `images/`, `audio/`,
 the bench's clones and runs, links, `runner.log`, `*.lock`, `*.tmp` and dotfiles, and exits when its parent changes); every line runs `poll()`; when the child ends
 it is respawned after 2 s. Until a child has said hello in this load (`mem.earsOk`: wb runs),
@@ -6338,8 +6342,11 @@ which reads `/proc/<pid>/stat` or `ps -o lstart=` as wb does (in UTC, then the i
 neither can say, while listener.json was written within 15 s, #700: read as gone, two sessions took
 it from each other on every poll; without a pid, its `ts` within 15 s; asked only of another
 session's claim, and a live one at most every PID_CHECK_MS, 30 s, `mem.listenerAt`: on macOS each
-ask is a `kill` and a `ps`, run on every poll even for the session's own claim, #839) makes this one stand by; otherwise it writes `chat/listener.json`
-`{session, cwd, pid, start, busy}` when that changes, and
+ask is a `kill` and a `ps`, run on every poll even for the session's own claim, #839; a claim
+whose `machine` is another one's always lives, as its pid can't be asked here: each machine took
+the listener from the other, #922; a crashed one there stands until a session on that machine
+or a quit clears it) makes this one stand by; otherwise it writes `chat/listener.json`
+`{session, cwd, pid, start, machine, busy}` when that changes, and
 delivers each user message without a receipt, once `wb chat claim <id> --by <key>` gives it the
 message (refused: another session's, looked at again a minute later; two sessions starting
 together both took the chat and both submitted it, #84): idle → `prompt.submit('[web chat] <words>', asUser)`
@@ -6491,7 +6498,7 @@ Every waiter and its bounded wake (a timeout to re-check what the kernel can't s
 | `wb stop` / `takeover` | `wait_exit(pid, 15)` | |
 | `wb top` | `select` on its nvidia-smi stream and, on a terminal, the keys | each tick (`--every`), when it also checks its parent |
 
-`wb events` prints `{"hello": <its pid>, "start": <its start>, "parent": <its parent's pid>, "parent_start": …}` (the mod's chat listener identity, and its Claude Code process: #687), then `{"changed":
+`wb events` prints `{"hello": <its pid>, "start": <its start>, "parent": <its parent's pid>, "parent_start": …, "machine": <store.machine()>}` (the mod's chat listener identity, and its Claude Code process: #687; the machine, #922), then `{"changed":
 [paths relative to $WB_HOME]}` for each batch of changes, dropping names
 ending `.lock`, `.tmp`, `runner.log` and dotfiles; it creates `tasks/` and `chat/`, and exits on a
 broken pipe or when its parent process changes.
@@ -6562,9 +6569,9 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb report <task>` | `--round N` | The round's summary.md. |
 | `wb diff <task> [paths…]` | `--stat`, `--all` | The worktree against the task's base, or after `wb next` against the last committed step (`--all`: the whole branch); new files included. Once the worktree is gone (accepted, discarded), the git command for the branch's commits: from the base to status `tip`, the accepted commit, since `--merge` deletes the branch (#477); the branch for a task never accepted. |
 | `wb top` | `--json` (one object per tick, until its parent exits), `--every S` (0.2 to 3600 s, else exit 1; default stats.json `every`, else 2) | A live view of the machine (*Seeing what the agent does*, `wb top`): each GPU's memory, busy % and watts, the running tasks, every model (the rack) and the GPU lease's queue; on a terminal redrawn in place, `q` or Ctrl-C quits; elsewhere one plain pass. Never a model call, a load or a session export. |
-| `wb adopt <task>` | `--session ID…` (required: the claimer's ids, the current first), `--pid PID` (default `CLAUDE_PID`, else wb's parent) | The mod's (#687): under the task's command lock, a task whose recorded Claude Code process is gone becomes the claimer's (task.json `session`, kept when it is one of the ids, `claude_pid`, `claude_start`); exit 1 while that process lives, for a task with no `session` (it goes by directory) or a pid that runs nothing. |
+| `wb adopt <task>` | `--session ID…` (required: the claimer's ids, the current first), `--pid PID` (default `CLAUDE_PID`, else wb's parent) | The mod's (#687): under the task's command lock, a task whose recorded Claude Code process is gone becomes the claimer's (task.json `session`, kept when it is one of the ids, `claude_pid`, `claude_start`, `claude_machine`); exit 1 while that process lives, or was recorded on another machine (`… (pid N on another machine)`, #922), for a task with no `session` (it goes by directory) or a pid that runs nothing. |
 | `wb ack <task> <ts>` | `--if TS` (the mod's rollback of a wake not delivered: the mark back to `ts` only while it is still `TS`, `cli.release_ack`, exit 3 otherwise, `released <task>`: #786) | The mod's, before a wake (#687): moves the task's `acked` to `ts` under its `ack` lock unless it is there already (`cli.claim_ack`, which `wb wait` uses too); exit 3 when another session or a wait took the notice first. |
-| `wb events` | | `{"hello": pid, "start": …, "parent": pid, "parent_start": …}` (the parent: the Claude Code process the mod claims tasks for, #687), then `{"changed": [paths]}` whenever `$WB_HOME` changes (not tasks' worktrees and rounds, closed tasks, `rules/`, `imports/`, `images/`, `audio/`, the bench's clones and runs, what a link leads to, `runner.log`, `*.lock`, `*.tmp`, dotfiles); reaps dead runners once a minute; exits when its parent does. The mod's ears. |
+| `wb events` | | `{"hello": pid, "start": …, "parent": pid, "parent_start": …, "machine": …}` (the parent: the Claude Code process the mod claims tasks for, #687; `store.machine`, #922), then `{"changed": [paths]}` whenever `$WB_HOME` changes (not tasks' worktrees and rounds, closed tasks, `rules/`, `imports/`, `images/`, `audio/`, the bench's clones and runs, what a link leads to, `runner.log`, `*.lock`, `*.tmp`, dotfiles); reaps dead runners once a minute; exits when its parent does. The mod's ears. |
 
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
@@ -6813,7 +6820,10 @@ which all its worktrees share: `gitops.repo_of` finds the repo there once `repo`
 Claude Code session whose Bash ran `wb start`; with `cwd` and `repo`, which session the task is
 `mine` to, and `_scope`'s `--session`/`--repo`), `claude_pid` (when set: `CLAUDE_PID`, that
 session's Claude Code process; once it is gone the directory rule adopts the task), `claude_start`
-(with it: when that process started, `models._started`, so a recycled pid isn't it: #532), `base` (the full sha), `base_ref`, `base_branch` (the branch
+(with it: when that process started, `models._started`, so a recycled pid isn't it: #532),
+`claude_machine` (with it: `store.machine()`; a process recorded on another machine is never gone
+here, `cli._gone`, and the mod's `noteClaude` never asks of it: on a state directory two machines
+share, each adopted the other's live session's tasks, back and forth, #922), `base` (the full sha), `base_ref`, `base_branch` (the branch
 `--merge` lands on: the one checked out for `HEAD`, or `--base` when it names a local branch; null
 on a detached HEAD, a tag or a commit), `branch`, `model`, `model_label`, `opencode_model`, `weights_id` (`models.identity`, when the server says: #726), `route` (the
 router's reason), `size`, `stack`, `trial` (when set), `backlog` (`--backlog`), `bench` (a replay's `{case, run, label}`:

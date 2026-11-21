@@ -1093,7 +1093,10 @@ def cmd_start(a):
         # the Claude Code session whose Bash ran this (_scope, the mod's `mine`); none by hand.
         # And its process: once that is gone, the directory rule may hand the task to a new one
         **({"session": sid} if (sid := os.environ.get("CLAUDE_CODE_SESSION_ID")) else {}),
-        **({"claude_pid": int(pid), "claude_start": models._started(int(pid))}
+        # and its machine: on a state directory two machines share, the other's pid means
+        # nothing there, and each machine's mod adopted the other's live session's tasks (#922)
+        **({"claude_pid": int(pid), "claude_start": models._started(int(pid)),
+            "claude_machine": store.machine()}
            if (pid := os.environ.get("CLAUDE_PID", "")).isdigit() else {}),
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         # the weights behind the id: a record on other weights under it isn't this model's (#726)
@@ -1559,7 +1562,8 @@ def cmd_ack(a):
 
 def cmd_adopt(a):
     """The mod's claim of a task whose Claude Code process is gone (#687): under the task's command
-    lock, task.json's `session`, `claude_pid` and `claude_start` become the claimer's, so the first
+    lock, task.json's `session`, `claude_pid`, `claude_start` and `claude_machine` (#922) become
+    the claimer's, so the first
     session to claim it owns it and the others drop it. Nothing recorded it: once the process that
     ran `wb start` ended, every live session near the task, and the one resumed with `claude
     --resume`, owned it for good, and both woke for its review. The resumed session (its id is the
@@ -1578,11 +1582,13 @@ def cmd_adopt(a):
             return
         if not spec.get("session"):
             die(f"{a.name} records no session: it goes by directory")
-        if not _gone(old, spec.get("claude_start")):
-            die(f"{a.name} belongs to a live Claude Code session (pid {old})")
+        if not _gone(old, spec.get("claude_start"), spec.get("claude_machine")):
+            die(f"{a.name} belongs to a live Claude Code session (pid {old}"
+                + (" on another machine" if store.elsewhere({"machine": spec.get("claude_machine")})
+                   else "") + ")")
         if spec.get("session") not in a.session:
             spec["session"] = a.session[0]
-        spec.update(claude_pid=pid, claude_start=start)
+        spec.update(claude_pid=pid, claude_start=start, claude_machine=store.machine())
         store.write_json(task.dir / "task.json", spec)
     print(f"adopted {a.name}")
 
@@ -1702,12 +1708,16 @@ def cmd_watch(a):
         sys.stdout = open(os.devnull, "w")
 
 
-def _gone(pid, start=None) -> bool:
+def _gone(pid, start=None, machine=None) -> bool:
     """Whether the Claude Code process a task recorded (task.json `claude_pid`) has exited. One we
     can't signal isn't it either: it ran as this user. Nor is one that started at another time
     than `claude_start` says: the pid was recycled, and a new `claude` in the project never
-    adopted the task (#532). Unknown (no pid) is not gone."""
+    adopted the task (#532). Unknown (no pid) is not gone, nor is one of another machine
+    (`claude_machine`): its pid means nothing here, and on a shared state directory each
+    machine's session adopted the other's tasks, back and forth (#922, as store.elsewhere, #849)."""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if isinstance(machine, str) and machine and machine != store.machine():
         return False
     return not models._alive(pid, start if isinstance(start, str) else None)
 
@@ -1751,7 +1761,8 @@ def _scope(tasks, where, sessions=None):
             cwd and cwd.is_relative_to(here)
             or repo and (repo.is_relative_to(here) or here.is_relative_to(spot)))
         if sessions and sid:
-            ok = sid in sessions or near and _gone(t.spec.get("claude_pid"), t.spec.get("claude_start"))
+            ok = sid in sessions or near and _gone(t.spec.get("claude_pid"), t.spec.get("claude_start"),
+                                                   t.spec.get("claude_machine"))
         elif here is None or (not cwd and not repo):
             ok = True
         else:
@@ -4287,8 +4298,11 @@ def cmd_events(a):
     parent = os.getppid()
     # its start too: the mod records both in chat/listener.json, so a recycled pid isn't a listener (#532)
     # and its parent's, the Claude Code process: the mod claims tasks for it (wb adopt, #687)
+    # and this machine, which the mod records beside its pids: on a shared state directory a pid
+    # of another machine's is never read as gone here (#922)
     print(json.dumps({"hello": os.getpid(), "start": models._started(os.getpid()),
-                      "parent": parent, "parent_start": models._started(parent)}), flush=True)
+                      "parent": parent, "parent_start": models._started(parent),
+                      "machine": store.machine()}), flush=True)
     # accepted and discarded are final and names aren't reused; tasks/ itself stays watched, so a
     # new task is picked up, and one that closes while this runs simply stays watched
     closed = tuple(f"tasks/{t.name}" for t in store.all_tasks() if t.status.get("phase") in store.CLOSED)
