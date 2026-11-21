@@ -1975,6 +1975,50 @@ test('a web message queued behind a running turn reads as read once that turn en
   expect(acks().length).toBe(2)                                    // once
 })
 
+test('a web message the turn didn\'t answer in the chat gets one follow-up, then a note on the phone (#767)', async ($, on) => {
+  // #767: Claude answered "Status" from the phone in the terminal only, release after release,
+  // and the phone heard nothing
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const posted = () => runs.filter(r => r[1] === 'chat' && r[2] === 'reply')
+  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const say = async (id: string, text: string, ts: number) => {
+    files['/wb/chat/messages.jsonl'] = (files['/wb/chat/messages.jsonl'] ?? '') + JSON.stringify({ id, ts, from: 'user', text }) + '\n'
+    await clock.advance(31_000)
+  }
+  const turn = async (id: string, command?: string) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  await say('m1', 'Status', 1_800_000_000)
+  expect(asked.filter(a => a.startsWith('[web chat] Status'))).toHaveLength(1)
+  await turn('t1')                                               // answered in the terminal only
+  expect(followUps()).toHaveLength(1)
+  expect(followUps()[0]).toContain('wb chat reply --text')
+  await turn('t2')                                               // the follow-up's turn: no reply either
+  expect(posted()).toEqual([['wb', 'chat', 'reply', '--text=Claude answered in the terminal; nothing was sent here.']])
+  await turn('t3')
+  expect([followUps().length, posted().length]).toEqual([1, 1])  // once per message
+
+  await say('m2', 'And now?', 1_800_000_100)
+  await turn('t4', 'wb chat reply --text "Two tasks run; done by six."')
+  await turn('t5')
+  expect([followUps().length, posted().length]).toEqual([1, 1])  // answered there: no follow-up, no note
+})
+
 test('only wb run as a command counts as delegating, read as bash reads it, not wb written in a string, a heredoc or a comment (#409, #560)', () => {
   // 2026-11-20: a Python patch whose string held "split it (wb next)" turned workbench mode on
   for (const run of ['wb start t --spec s.md', 'cd ~ && wb start step-2 --spec s.md --repo .', 'wb next t',

@@ -5743,7 +5743,15 @@ as the next turn; the page said "Queued for Claude" for good, 2026-11-21), `chat
 `{at: now, by: <key>}`, a toast. Away is the user's (#688: `away()` reads that file, so every
 session in workbench mode relays its dialogs and ends its wakes with AWAY_NOTE, not only the
 listener; kept in the listener's own state, another session's overnight backlog left its dialogs in
-the empty terminal, #110 again); a prompt typed in any session writes `{at: 0}` (`back`). Dialogs
+the empty terminal, #110 again); a prompt typed in any session writes `{at: 0}` (`back`).
+Each message passed to Claude is owed a reply in the chat (`mem.chatOwed`, `owedAtTurnEnd`, #767:
+for two release cycles the owner's "Status" from the phone was answered in the terminal only, and
+the phone heard nothing): a `wb chat reply`/`listen` or `wb shot … --chat` in Bash, a row `from:
+claude` in messages.jsonl since, or a prompt typed in the terminal settles it; at the end of the
+main turn that had it (one queued behind a running turn may enter only the next: `grace` 1) with
+no reply, one follow-up turn is queued (OWED_NOTE: answer there with `wb chat reply`); that turn
+ending without one too, `wb chat reply --text="Claude answered in the terminal; nothing was sent
+here."` (OWED_POSTED) goes to the chat, once per message. Dialogs
 (`classic.PermissionRequest`; the terminal shows its dialog meanwhile, and the hook's answer
 settles it): unless a settings hook already decided, or the session isn't delegating with
 `chat/away.json`'s `at` within AWAY_MS (6 h; a prompt typed in any session's terminal sets it to 0) or this session with a

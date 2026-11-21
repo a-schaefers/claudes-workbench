@@ -1329,6 +1329,7 @@ const mem = {
   chatRetry: new Map<string, number>(), // a web message whose prompt was dropped: tried again from then
   chatExpired: new Set<string>(), // web messages wb said are too old to pass on (#536): not asked again
   chatQueued: new Map<string, string>(), // web messages whose receipt says queued (id → by): read once a turn ends
+  chatOwed: new Map<string, Owed>(), // web messages passed to Claude with no reply in the chat yet (#767)
   chatUrlAt: 0, // when the web chat's link was last looked up
   savingsAt: 0, // when the week's saving was last read
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
@@ -2128,7 +2129,11 @@ async function listen($: any, now: number) {
         .catch(() => ({ isDelivered: false }))
       if (r.isDelivered) await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', 'now'])
       else void sendWeb($, id, text, 'queued', st.key)
-    } else void sendWeb($, id, text, 'now', st.key)
+      mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, nudged: false }) // queued: maybe the next turn's
+    } else {
+      void sendWeb($, id, text, 'now', st.key)
+      mem.chatOwed.set(id, { at: now, grace: 0, nudged: false })
+    }
     await $.fs.write(awayFile(), JSON.stringify({ at: now / 1000, by: st.key })).catch(() => {})
     $.ui.toast('workbench: a message from the web chat')
   }
@@ -2165,12 +2170,43 @@ async function sendWeb($: any, id: string, text: string, how: string, by: string
   const r = await $.prompt.submit({ text, asUser: true }).catch((err: unknown) => ({ drop: String(err) }))
   if (r?.drop) {
     mem.chatSent.delete(id)
+    mem.chatOwed.delete(id) // not given to Claude: nothing owed yet
     mem.chatRetry.set(id, (await $.clock.now()) + REWAKE_MS)
     return
   }
   const { ok, out } = await runWb($, ['chat', 'ack', id, '--by', by, '--how', how])
   if (!ok) warnOnce($, 'chat-ack', `wb chat ack failed: ${brief(out)}`)
   else if (how === 'queued') mem.chatQueued.set(id, by)
+}
+
+// A web message Claude was given and hasn't answered in the chat (#767): the skill and WEB_NOTE
+// say to answer with `wb chat reply`, and nothing checked. For two release cycles the owner wrote
+// "Keep me updated over here" and "Status" from the phone, Claude answered every one in the
+// terminal only, and the phone heard nothing (2026-11-21). At the end of the turn that had it
+// (`grace`: a message queued behind a running turn may only enter the next), no reply yet means
+// one follow-up turn naming `wb chat reply`; that one ending without a reply too, a plain note
+// goes to the chat, so the phone always hears something. A reply is a `wb chat reply` (or
+// `listen`, or `wb shot --chat`) in Bash, or a row of Claude's in messages.jsonl since; a prompt
+// typed in the terminal ends it (the user is back).
+type Owed = { at: number; grace: number; nudged: boolean }
+const OWED_NOTE =
+  '[workbench] The user wrote from the web chat and hasn\'t heard back: answer there with ' +
+  '`wb chat reply --text "…"` (the web thread is all they see), briefly. Nothing else to do.'
+const OWED_POSTED = 'Claude answered in the terminal; nothing was sent here.'
+const REPLIES = /\bwb\b[^\n|;&]*\bchat\s+(reply|listen)\b|\bwb\b[^\n|;&]*\bshot\b[^\n]*--chat\b/
+async function owedAtTurnEnd($: any) {
+  if (!mem.chatOwed.size) return
+  const tail = await readTail($, `${mem.root}/chat/messages.jsonl`, NOTIFY_TAIL)
+  const replied = parseLines(tail?.text ?? '').filter(m => m.from === 'claude').map(m => Number(m.ts ?? 0) * 1000)
+  let nudge = false
+  for (const [id, o] of [...mem.chatOwed]) {
+    if (replied.some(ts => ts >= o.at)) { mem.chatOwed.delete(id); continue }
+    if (o.grace > 0) { o.grace--; continue }
+    if (!o.nudged) { o.nudged = true; nudge = true; continue }
+    mem.chatOwed.delete(id)
+    await runWb($, ['chat', 'reply', `--text=${OWED_POSTED}`], 15_000)
+  }
+  if (nudge && !mem.queued.includes(OWED_NOTE)) mem.queued.push(OWED_NOTE)
 }
 
 // A queued web message enters at the running turn's next step or as the next turn, so once that
@@ -2598,6 +2634,7 @@ export const register: Register = (on, options) => {
     if (delegates(String(e.command ?? ''))) {
       await workbenchMode($, true)
     }
+    if (REPLIES.test(String(e.command ?? ''))) mem.chatOwed.clear() // answered in the chat (#767)
     return next(e)
   })
 
@@ -2621,7 +2658,10 @@ export const register: Register = (on, options) => {
 
   // Typed in the terminal: the user is back, so answers go here again
   on('prompt.submit', async ($, e, next) => {
-    if (!e.isMeta && !e.text.startsWith(WEB) && !e.text.startsWith('[workbench]')) await back($)
+    if (!e.isMeta && !e.text.startsWith(WEB) && !e.text.startsWith('[workbench]')) {
+      await back($)
+      mem.chatOwed.clear() // back at the terminal: an answer there reaches them (#767)
+    }
     return next(e)
   })
 
@@ -2722,6 +2762,7 @@ export const register: Register = (on, options) => {
       mem.busy = false
       mem.skillTurn = false
       if (mem.chatQueued.size) void readQueued($)
+      await owedAtTurnEnd($)
       mem.sawTurn = true
       mem.turnEndedAt = await $.clock.now()
       void poll($) // held wakes and chat messages go now, not at the next tick
