@@ -1663,8 +1663,10 @@ nothing until a surface attaches.
   <mode>`, and each draw reads `coding.json` again. **Web chat** (`CHAT_STOPS`, both saying what it
   is: `A localhost web server to interact with Claude.`): `Off (default)` and `On`; a pick runs `wb chat on|off` and reads the switch and the link back at once.
   **Agent code navigation (experimental, may go away)** (`PROBE_STOPS`, key `probe`, options `probe:off|on`,
-  *Experiments*): `Off (default)` and `On`; a pick runs `wb experiment probe off|on`, and each
-  draw reads `experiments.json` again (`probeMode`; no file or no `probe` key: off).
+  *Experiments*): `Off (default)` and `On`; a pick runs `wb experiment probe off|on` (`setProbe`), and each
+  draw reads `experiments.json` again (`probeMode`; no file or no `probe` key: off). When wb's
+  answer says `but no probe` (on, with no probe that has `symbols`), or wb fails, its last line is
+  a toast: the row alone read `On` while nothing changed (the user, 2026-11-20).
   Then the Stats tab's (#406), each a `wb` command, the mod writing no setting itself:
   **Stats recording** (`RECORD_STOPS`, `On (default)` / `Off`: `wb stats set recording`,
   *Stats recording*), **Live view** (`LIVE_STOPS`: `wb stats set live`), **Live refresh**
@@ -3282,7 +3284,8 @@ exactly those without the experiment.
 a file's outline (`probe symbols <file>`) and one function (`probe extract <file>#<name>`)
 instead of the whole file, where its context fills (about half the measured steps compacted or
 handed over, 2026-11-20). It needs probe on the agent's PATH (`context.probe_bin`, through
-`agent_path`), one whose `--help` lists `symbols`: crates.io's probe-code 0.6.0 hasn't it and
+`agent_path`), installed by the user (nothing in workbench installs it, and the skill doesn't
+ask Claude to; `wb experiment`, `wb doctor` and the pane's toast say when it's missing), one whose `--help` lists `symbols`: crates.io's probe-code 0.6.0 hasn't it and
 reports the same version as the release that has, and `probe symbols main.c` then searched for
 the word (the agent got no results and wrote a function named `symbols`, 2026-11-20). On, the task's shell rules allow `probe` (`shell_rules`, after `ALLOWED_COMMANDS`),
 and its copy of the handbook ends with `EXPERIMENT_NOTES["probe"]` (`instruction_files`;

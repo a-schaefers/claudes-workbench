@@ -35,9 +35,19 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
   time, and what tends to stop them. It all stays on your machine and costs nothing while the tab
   isn't on screen.
 - **Experimental: lighter code reading.** Turn on *Agent code navigation* in the pane's Settings
-  and agents read a file's outline and just the function they need, with probe (its release
-  binary, installed by you), instead of the whole file, which saves their context on big files.
-  It's off by default and may go away ([experiments](ARCHITECTURE.md#experiments)).
+  and agents read a file's outline and just the function they need, instead of the whole file,
+  which saves their context on big files. It needs [probe's release
+  binary](https://github.com/probelabs/probe/releases) on your PATH, which you install yourself
+  (crates.io's `probe-code` lacks the command it uses); without it the setting changes nothing,
+  and the pane says so. It's off by default and may go away
+  ([experiments](ARCHITECTURE.md#experiments)).
+- **Optional: Claude on your phone.** Off by default. Turn on *Web chat* in the pane's Settings
+  and a small web app, served on localhost, becomes another lane to the same Claude session in
+  your terminal: message Claude, answer its questions and permission prompts. Reach it over your
+  own network, such as Tailscale (`tailscale serve` gives it an https address), and it installs
+  on your phone as an app that notifies you when Claude answers or needs you. It does less than
+  the Claude app with Remote Control (`claude rc`); it's a simple alternative that talks to the
+  workbench plugin in your session directly ([the web chat](ARCHITECTURE.md#the-web-chat)).
 
 On bigger coding tasks, once the session is already open, handing the coding off to the local
 model typically costs Claude about half the tokens of writing the code itself
