@@ -4266,6 +4266,30 @@ class RealOpenCode(Base):
         self.assertNotIn("rejected", answers[0])
         self.assertIn("wide-ok", answers[1])
 
+    @home_outside_the_lane
+    def test_the_file_tools_read_the_installs_the_agent_runs_but_never_edit_them(self):
+        # #521, the audit of 1.90: with a conda env's bin on PATH, `read` on its site-packages got
+        # "Permission denied: external_directory", and the only remedy granted writes
+        env = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-conda-env-"))
+        self.addCleanup(shutil.rmtree, env, True)
+        (env / "bin").mkdir()
+        lib = env / "lib" / "site-packages" / "pandas"
+        lib.mkdir(parents=True)
+        (lib / "frame.py").write_text("CANARY_FRAME = 1\n")
+        calls = [{"name": "read", "arguments": {"path": str(lib / "frame.py")}},
+                 {"name": "grep", "arguments": {"pattern": "CANARY_FRAME", "path": str(lib)}},
+                 {"name": "write", "arguments": {"path": str(lib / "frame.py"), "content": "x"}},
+                 {"name": "write", "arguments": {"path": str(env / "planted.pth"), "content": "x"}}]
+        with mock.patch.dict(os.environ, {"PATH": f"{env / 'bin'}{os.pathsep}{os.environ['PATH']}"}):
+            task, answers = self.run_calls("t-ro", calls)
+            self.assertIn(str(env), context.read_only(task, context.writable(task)))
+        self.assertIn("CANARY_FRAME", answers[0])
+        self.assertIn("CANARY_FRAME", answers[1])
+        self.assertIn("rejected", answers[2])                  # read, never edited
+        self.assertIn("rejected", answers[3])
+        self.assertEqual((lib / "frame.py").read_text(), "CANARY_FRAME = 1\n")
+        self.assertFalse((env / "planted.pth").exists())
+
     def test_a_project_config_and_the_users_mcp_servers_lift_nothing(self):
         # the 2026-11-16 audit: an opencode.json in the worktree loaded after the task's layer and
         # its allow-all came last; the user's own MCP servers (a GitHub one with their token)

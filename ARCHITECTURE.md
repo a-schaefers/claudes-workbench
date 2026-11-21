@@ -1233,10 +1233,17 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   tools' paths and the shell's working directory and `cd` targets (not other arguments), is deny
   `*`, then allow `<dir>/*` for the lane, `READABLE` (`/usr`, `/etc`, `/opt`, `/lib*`, `/bin`,
   `/sbin`, `/proc`, `/sys`, `/nix`, `/run/current-system`, and macOS's `/Library`,
-  `/System`, `/Applications`), the task's `rounds/` (a prompt too long for one argument is read
-  from there) and the handed skills' directories; with the lane off, allow `*` (said outright:
-  the layer's rule for other MCP servers' tools, `*_*`, would match it). This is all that applies
-  without Landlock.
+  `/System`, `/Applications`), the installs the lane already lets the agent read (`read_only`:
+  `tool_roots`, the programs it runs, such as a conda, pyenv or mise env's site-packages, and the
+  toolchains split out of the write lane, `NOT_WRITABLE` and `$RUSTUP_HOME/toolchains`, rustup's
+  std sources; never one that holds a lane entry or lies in one), the task's `rounds/` (a prompt
+  too long for one argument is read from there) and the handed skills' directories; with the
+  lane off, allow `*` (said outright: the layer's rule for other MCP servers' tools, `*_*`, would
+  match it). The `read_only` places also get an `edit` deny (`read_only_rules`): read, never
+  edited. Before #521 (the audit of 1.90) `read` on an env's `pandas/core/frame.py` was refused,
+  each refusal counting toward the six-errors guard, and the only remedy, `wb allow --path`, made
+  the install writable, though the user's own shell runs it outside the lane later. This is all
+  that applies without Landlock.
 - *Asking for more.* A refused write is "Permission denied" (the protocol says so, and not to
   probe it); the agent calls `ask_reviewer` with `path`, which raises a PERMISSION question naming
   `wb allow <task> --path <dir>`. That grants read and write (`--always` keeps it in

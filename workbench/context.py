@@ -390,9 +390,9 @@ def shell_rules(task: store.Task) -> list[dict]:
 # The agent's lane: its worktree, the temp directory, and the caches and toolchain homes that
 # builds and package managers fill, so a build or test runs without asking (2026-11-16, the user:
 # keep agents in their lane with the least friction). Writes anywhere else are refused by the
-# kernel (lane.py), file tools and the shell's working directory are kept to the lane and the
-# READABLE places by OpenCode's `external_directory` rule, and the agent asks Claude for the rest
-# (`wb allow --path`). Reading through the shell stays free: `cat`, a compiler, an interpreter.
+# kernel (lane.py), file tools and the shell's working directory are kept to the lane, the
+# READABLE places and the installs it runs (read_only, never edited) by OpenCode's
+# `external_directory` rule, and the agent asks Claude for the rest (`wb allow --path`). Reading through the shell stays free: `cat`, a compiler, an interpreter.
 # A toolchain's caches, not the directories on the user's PATH or in their shell's startup: a file
 # the agent plants there runs later outside the lane (the 2026-11-16 audit: ~/.local/lib's user
 # site-packages, whose .pth files every python runs; ~/.cargo/bin; GOPATH holding the repo itself).
@@ -1217,15 +1217,45 @@ def readable(task: store.Task) -> list[str] | None:
     return out
 
 
+def read_only(task: store.Task, lane: list[str]) -> list[str]:
+    """The installs the lane lets the agent read but not write, for its file tools too: the
+    programs it runs (tool_roots: a conda, pyenv or mise env's site-packages) and the toolchains
+    split out of the write lane (NOT_WRITABLE, $RUSTUP_HOME/toolchains: rustup's std sources).
+    `read` on pandas' frame.py got "Permission denied: external_directory", counting toward the
+    six-errors guard, and the only remedy, `wb allow --path`, made the install writable (#521,
+    the audit of 1.90). Never one that holds a lane entry or lies in one: the lane's own rules
+    say what is done there."""
+    hidden = secret_paths() | private_paths()
+    home = Path.home()
+    split = [home / h for h in NOT_WRITABLE]
+    split += [Path(v) / d for v, d in ((os.environ.get("RUSTUP_HOME"), "toolchains"),
+                                       (os.environ.get("CARGO_HOME"), "bin")) if v]
+    places = tool_roots(hidden) | {os.path.realpath(p) for p in split if os.path.isdir(p)
+                                   and not any(_under(os.path.realpath(p), h) for h in hidden)}
+    real_lane = {os.path.realpath(p) for p in lane}
+    return sorted(p for p in places if p not in real_lane and not any(
+        _under(p, q) or _under(q, p) for q in real_lane))
+
+
+def read_only_rules(task: store.Task) -> list[dict]:
+    """The file tools may read `read_only` places but never edit there: the kernel refuses the
+    write too, with Landlock; without it (macOS) these rules are what keep the file tools out."""
+    lane = writable(task)
+    if lane is None:
+        return []
+    return [{"action": "edit", "resource": f"{p.rstrip('/')}/*", "effect": "deny"}
+            for p in _both(read_only(task, lane))]
+
+
 def external_rules(task: store.Task) -> list[dict]:
     """OpenCode's `external_directory` rule: its file tools and the shell's working directory
-    stay in the lane and READABLE, and the skills handed to the task."""
+    stay in the lane, READABLE and the read-only installs, and the skills handed to the task."""
     lane = writable(task)
     if lane is None:  # (explicit: layer's rule for other MCP servers' tools would match it)
         return [{"action": "external_directory", "resource": "*", "effect": "allow"}]
     have = skills.available()
     # and the rounds' prompts, read-only, where a prompt too long for one argument waits
-    places = [*lane, *READABLE, task.dir / "rounds", *siblings(task),
+    places = [*lane, *READABLE, *read_only(task, lane), task.dir / "rounds", *siblings(task),
               *(sibling_link(task.worktree, n) for n in task.spec.get("siblings") or ()),
               *(have[n]["path"] for n in task.status.get("skills") or [] if n in have)]
     rules = [{"action": "external_directory", "resource": "*", "effect": "deny"}]
@@ -1405,6 +1435,7 @@ def layer(task: store.Task) -> dict:
     rules += [{"action": t, "resource": "*", "effect": "deny"} for t in DENIED_TOOLS]
     rules += shell_rules(task)
     rules += external_rules(task)
+    rules += read_only_rules(task)
     rules += [{"action": "edit", "resource": f, "effect": "deny"}
               for f in CLAUDE_FILES + OPENCODE_FILES]
     rules += [{"action": "skill", "resource": n, "effect": "deny"}
