@@ -2291,7 +2291,7 @@ test('a period\'s energy is every task\'s, compared by the saving or not', () =>
   // #568: three tasks used 287 Wh and the tab said 12, the one task the saving could compare
   const week = (p: any) => statsLines({ tasks: 3, periods: { week: { tasks: 3, landed: 3, accepted_pct: 100, ...p } } })[0].text
   expect(week({ savings: { saved: 5000, wh: 12, cost: 0 }, energy: { wh: 287, cost: 0.09 } }))
-    .toBe('saved ~5K Claude tokens (estimate) · 3 tasks · 3 landed (100%) · 287 Wh (0.09)')
+    .toBe('saved ~5K Claude tokens (estimate) · 3 tasks · 3 landed (100%) · 287 Wh, cost 0.09')
   expect(week({ energy: { wh: 1500 } })).toBe('3 tasks · 3 landed (100%) · 1.5 kWh')  // nothing compared
 })
 

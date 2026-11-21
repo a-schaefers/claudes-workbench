@@ -8101,8 +8101,6 @@ class Cleanup(Base):
         self.assertEqual(gitops.step_commit(task, 1, 1), tip)
         self.assertFalse((store.home() / "rules" / "t-merged").exists())
 
-    def test_a_half_made_start_frees_its_name_and_gc_clears_it_and_its_scratches(self):
-
     def test_gc_sweeps_what_a_killed_bench_add_image_or_audio_run_left(self):
         # #589, the audit of 1.90: wb gc swept the home's top level only, so a bench add killed
         # at Claude's Bash limit left its clone and its half-made case, and a killed image or
@@ -8121,7 +8119,7 @@ class Cleanup(Base):
         self.assertIn("5 scratch dir(s)", run_wb("gc"))
         self.assertEqual([d.exists() for d in dead + kept], [False] * 5 + [True] * 3)
 
-    def test_a_start_killed_in_worktree_add_frees_its_name_and_gc_its_scratches(self):
+    def test_a_half_made_start_frees_its_name_and_gc_clears_it_and_its_scratches(self):
         # #376 (the audit of 1.6): a wb start killed by Claude's Bash limit left tasks/<name>/
         # without a task.json, its branch and worktree, and the name was refused for good; killed
         # commands' scratch clones stayed in the state directory, counted against every new task
