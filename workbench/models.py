@@ -1636,26 +1636,39 @@ def slept() -> float:
     return 0.0
 
 
-def _past(stamp: str) -> bool:
+def _stamp_time(stamp: str) -> float | None:
+    """An /api/ps expires_at as a Unix time; None when it doesn't parse or has no zone."""
+    try:  # Ollama writes nanoseconds; fromisoformat before 3.12 reads at most six digits
+        when = datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", stamp.replace("Z", "+00:00")))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return when.timestamp() if when.tzinfo is not None else None
+
+
+# How far a wb remote box's clock may be from this machine's, for its stamps (_past)
+BOX_SKEW = 10
+
+
+def _past(stamp: str, remote: bool = False) -> bool:
     """Whether an /api/ps expires_at has gone by (a request running past the keep-alive). Ollama
     sets it from the wall clock but times the unload on Go's monotonic clock, which stops in a
     suspend: after a lid closed and opened, an idle model's stamp is past while its timer still
     runs, and was read as answering someone, the next task waiting behind a warning for nothing
     (#716). So a stamp is past only by more than the machine has slept (slept: 0 on one that
-    never sleeps, a server, where #378's shared Ollamas run); a request on it still moves it."""
-    try:  # Ollama writes nanoseconds; fromisoformat before 3.12 reads at most six digits
-        when = datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", stamp.replace("Z", "+00:00")))
-    except (ValueError, TypeError):
-        return False
-    return when.tzinfo is not None and when.timestamp() < time.time() - 2 - slept()
+    never sleeps, a server, where #378's shared Ollamas run); a request on it still moves it.
+    ``remote``: a wb remote box's stamp, timed by the box's clocks: this machine's sleep is no
+    excuse there, only BOX_SKEW. A laptop that had slept for hours since boot never saw one past,
+    a request running past the keep-alive (#899)."""
+    when = _stamp_time(stamp)
+    return when is not None and when < time.time() - (BOX_SKEW if remote else 2 + slept())
 
 
-def _in_use(doomed: dict, watch: float | None = None) -> set:
+def _in_use(doomed: dict, watch: float | None = None, remote: bool = False) -> set:
     """The (root, name) pairs of ``doomed`` with a request on them, watched for ``watch`` seconds
-    (INFLIGHT_WATCH): expires_at moved, or is past. A server whose /api/ps gives no expires_at
-    has nothing to watch: none."""
+    (INFLIGHT_WATCH): expires_at moved, or is past (_past, ``remote`` for a box's). A server
+    whose /api/ps gives no expires_at has nothing to watch: none."""
     first = _stamps(doomed)
-    busy = {k for k, v in first.items() if _past(v)}
+    busy = {k for k, v in first.items() if _past(v, remote)}
     deadline = time.monotonic() + (INFLIGHT_WATCH if watch is None else watch)
     while first and len(busy) < len(first) and time.monotonic() < deadline:
         time.sleep(min(1.0, max(deadline - time.monotonic(), 0)))
@@ -1701,6 +1714,9 @@ BOX_SHARED = ("clients of one wb remote box don't share a GPU lease, so their mo
 BOX_QUIET = 150
 BOX_WAIT = 2400  # at most this long waiting for it: a round's default limit (router.ROUND_DEFAULT_S)
 BOX_POLL = 2.0   # seconds between two looks at the box's /api/ps meanwhile
+# Ollama's default keep-alive: a box's stamp less this is when the model's last request finished,
+# if the box keeps the default (box_quiet)
+BOX_KEEP_ALIVE = 300
 
 
 def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
@@ -1716,7 +1732,7 @@ def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
     taken as another client's (``others`` less this machine's idle ones)."""
     host, root = urlparse(m.root).hostname, m.root
     own = [n for n in others if any(_matches(x, {n}) for x in mine)]
-    used = {n for _, n in _in_use({root: own})} if own else set()
+    used = {n for _, n in _in_use({root: own}, remote=True)} if own else set()
     if used:
         _forget_mine(root, used)
     others = [n for n in others if n not in own or n in used]
@@ -1730,11 +1746,18 @@ def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
     busy = False
     while True:
         now = _stamps({root: others})
-        moved = sorted({k[1] for k, v in now.items() if _past(v) or last.get(k) not in (None, v)}
-                       | used)
+        moved = sorted({k[1] for k, v in now.items() if _past(v, remote=True)
+                        or last.get(k) not in (None, v)} | used)
         used = set()  # seen answering in the watch above: counted once, from now
-        if moved:
+        # a stamp that last moved over BOX_QUIET ago (its expires_at less BOX_KEEP_ALIVE) may be
+        # a request still running: a stamp stands still while one runs, and one longer than
+        # BOX_QUIET (a reasoning model, a long prefill) read as quiet, was loaded over, and the
+        # two swapped on every request after (#899). Idle, the model goes when its keep-alive
+        # ends, under BOX_KEEP_ALIVE - BOX_QUIET from now (a box keeping it longer, sooner)
+        if moved or any((t := _stamp_time(v)) is not None and time.time() - (t - BOX_KEEP_ALIVE) > BOX_QUIET
+                        for v in now.values()):
             quiet = time.monotonic()
+        if moved:
             if not busy:
                 warn(f"{', '.join(moved)} on {host} is answering another client's requests: "
                      f"waiting up to {BOX_WAIT // 60} min for it to go {BOX_QUIET} s unused before "

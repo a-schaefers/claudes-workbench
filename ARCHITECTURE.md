@@ -2977,14 +2977,20 @@ still watched for `INFLIGHT_WATCH`, since this machine runs one task at a time o
 request on it now is another client's: then its mark is dropped, `_forget_mine`, and it is waited
 for like another's, #893) has had a request in the last
 `BOX_QUIET` (150 s, watched from then on: `/api/ps` says when a model expires, not when it was
-last used), up to `BOX_WAIT` (40 min, a round's default limit); within a round the agent's
+last used; a stamp stands still while a request runs, so one whose last move, its `expires_at`
+less `BOX_KEEP_ALIVE`, Ollama's default 300 s, is over `BOX_QUIET` ago may be a request still
+running and is waited for until it moves or the model goes: an idle one goes within
+`BOX_KEEP_ALIVE` − `BOX_QUIET` of that, sooner on a box keeping models longer, and a long
+request, a reasoning model's or a slow prefill, was loaded over, #899; a box's stamp is past by
+more than `BOX_SKEW` 10 s, this machine's own sleep no excuse, `_past(remote=True)`, #899), up to `BOX_WAIT` (40 min, a round's default limit); within a round the agent's
 requests are seldom further apart, since OpenCode sends a shell command past 2 minutes to the
 background. Every client doing the same, they take the box a round at a time rather than a
 request at a time, and the waiting task's status says what it waits for (a `gpu` event when the
 model was answering). A load then waits a `BOX_QUIET` once for an idle model another client left loaded there
 (the load is skipped altogether while the task's own model is still on the box). What it can't
 stop: a round that begins while the other's model is quiet (its tool running past `BOX_QUIET`),
-a wait cut off by `BOX_WAIT`, or a client of an older wb, Open WebUI or anything else that loads
+a long request on a box that keeps models longer than `BOX_KEEP_ALIVE` (its stamp then reads
+as recent), a wait cut off by `BOX_WAIT`, or a client of an older wb, Open WebUI or anything else that loads
 without looking, still swap their models on each request. A model the load evicted anyway is
 named in a `gpu` event, and so is the task's own model found gone from the box at its next round
 while another client's is loaded there (`GpuLease.load`, counting the models this machine once
@@ -3322,7 +3328,8 @@ finishes and stops its clock while one runs, so a stamp that moves, or one alrea
 `CLOCK_BOOTTIME` less `CLOCK_MONOTONIC`, macOS's `CLOCK_MONOTONIC_RAW` less `CLOCK_UPTIME_RAW`;
 Ollama's unload timer stops in a suspend while its wall-clock stamp doesn't, and after a lid was
 opened an idle model read as busy, #716. On a machine that has slept, a request running past its
-keep-alive is seen once it ends and its stamp moves), is a model answering someone this account's lease doesn't know (another account's
+keep-alive is seen once it ends and its stamp moves; a wb remote box's stamps are timed by the
+box, so there only `BOX_SKEW` is allowed, #899), is a model answering someone this account's lease doesn't know (another account's
 tasks on a shared system Ollama whose machine has no shared lease, below; Open WebUI; an editor). Then it
 warns ("<names> on ollama is answering requests that aren't this account's tasks …: waiting up to
 10 min for it to go idle before unloading it") and waits, up to `INFLIGHT_WAIT` 10 min, for a

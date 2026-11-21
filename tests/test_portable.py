@@ -155,6 +155,11 @@ class Real(unittest.TestCase):
         awake = mock.patch.object(models, "slept", lambda: 0.0)  # this machine's suspends would
         awake.start()  # excuse the past stamps the tests set (#716); a test that wants one sets it
         self.addCleanup(awake.stop)
+        # the tests' stamps run minutes ahead while they scale BOX_QUIET to seconds: read with the
+        # real keep-alive, every idle model would look mid-request (#899); the test of that sets it
+        keep = mock.patch.object(models, "BOX_KEEP_ALIVE", 0)
+        keep.start()
+        self.addCleanup(keep.stop)
 
     def tearDown(self):
         for s in self.servers:
@@ -1407,6 +1412,37 @@ class Real(unittest.TestCase):
             self.assertGreaterEqual(time.monotonic() - began, 0.5)
         self.assertEqual(warned, [])
         self.assertEqual([p["model"] for p in posts], ["x"])
+
+    def test_a_box_model_whose_stamp_stands_still_past_box_quiet_is_waited_for_until_it_moves_or_goes(self):
+        # #899: a stamp stands still while a request runs, so another client's request running
+        # past BOX_QUIET read as quiet and was loaded over; and a laptop's suspend time since boot
+        # excused every box stamp from being past
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        theirs = {"name": "theirs", "size": 10, "size_vram": 10, "expires_at": at(250)}  # done 50 s ago
+        loaded, posts = [theirs], []
+        srv, port = fake_ollama(loaded, ["x", "theirs"], posts)
+        self.servers.append(srv)
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"x": {}}}},
+                    {"box": {"local": True}})
+        gone = []
+
+        def done():  # its keep-alive ends (or its long request did, and its round): Ollama unloads it
+            loaded.clear()
+            gone.append(time.monotonic())
+        threading.Timer(2.5, done).start()
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "BOX_KEEP_ALIVE", 300), mock.patch.object(models, "BOX_QUIET", 1), \
+                mock.patch.object(models, "BOX_POLL", 0.1):
+            models.make_resident(models.discover()["box/x"], say=lambda *_: None, warn=lambda *_: None)
+            loaded_at = time.monotonic()
+        self.assertTrue(gone and loaded_at >= gone[0])           # not after BOX_QUIET of no movement
+        self.assertEqual([p["model"] for p in posts], ["x"])
+        # a box's stamp past by more than BOX_SKEW is a request still running, however long this
+        # machine has slept since it booted
+        with mock.patch.object(models, "slept", lambda: 36000.0):
+            self.assertTrue(models._past(at(-60), remote=True))
+            self.assertFalse(models._past(at(-60)))                  # this machine's own Ollama: excused
+            self.assertFalse(models._past(at(-5), remote=True))      # within the clocks' skew
 
     def test_a_model_this_machine_left_on_its_box_is_loaded_over_without_waiting(self):
         # reviewing #812 (2026-11-21): every model on the box that the task wasn't using read as
