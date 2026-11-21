@@ -67,6 +67,14 @@ def die(msg: str, code: int = 1):
 
 
 def need(name: str) -> store.Task:
+    """The task a command names, by its name exactly. 'foo/', './foo' (or 'Foo' on macOS) opened
+    tasks/foo too, but the runner's command line says 'foo': its live runner read as dead, so
+    reap failed the task under a notice no reader takes, and discard removed the worktree under
+    the agent (#782)."""
+    if not store.NAME_RE.match(name):
+        canon = os.path.normpath(name.strip()).lower()
+        hint = f": wb … {canon}" if store.NAME_RE.match(canon) and store.Task(canon).exists else ""
+        die(f"{name!r} isn't a task name (lowercase letters, digits and hyphens){hint}")
     t = store.Task(name)
     if not t.exists:
         die(f"no task named {name!r} (wb status lists them)")

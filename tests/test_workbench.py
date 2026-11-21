@@ -4194,6 +4194,32 @@ class StartChecks(Base):
     """What wb start and the first report say about the setup itself: an OpenCode outside the
     tested range, a fixed prompt that fills the window, an ask tool OpenCode never listed."""
 
+    def test_a_task_named_in_another_spelling_is_refused_and_its_live_runner_left_alone(self):
+        # #782: 'foo/' opened tasks/foo, but the runner's command line says 'foo', so its live
+        # runner read as dead: reap failed the task under a notice no reader takes, and discard
+        # removed the worktree under the agent; and NAME_RE's `$` let 'foo\n' be started
+        self.start("t-name", "hang")
+        running("t-name")
+        task = store.Task("t-name")
+        store.write_json(task.dir / "status.json", {**task.status, "updated_at": time.time() - 60})
+        for spelling in ("t-name/", "./t-name", "T-Name", "t-name/."):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err):
+                run_wb("discard", spelling)
+            self.assertIn(f"{spelling!r} isn't a task name", err.getvalue())
+            self.assertIn("wb … t-name", err.getvalue())                # the name to use
+            with self.assertRaises(SystemExit):
+                run_wb("status", spelling)
+        self.assertTrue(cli.runner_alive(task))
+        self.assertNotIn(task.status["phase"], ("failed", *store.CLOSED))
+        self.assertTrue(task.worktree.is_dir())
+        self.assertIsNone(store.NAME_RE.match("t-new\n"))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            self.start("t-new\n", "ok")
+        self.assertIn("a task name is", err.getvalue())
+        run_wb("stop", "t-name")
+
     def test_start_says_when_opencode_is_outside_the_tested_range(self):
         # the 2026-11-19 audit (finding 26): only wb doctor looked, and only for 2.x or newer
         os.environ["FAKE_VERSION"] = "opencode v3.1.0"

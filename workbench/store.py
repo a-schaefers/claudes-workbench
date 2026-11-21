@@ -43,7 +43,8 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+# \Z, not $: `$` matches before a final newline, so `wb start 'foo\n'` passed the check (#782)
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}\Z")
 
 # Phases a task moves through. "review", "stuck", "failed" and "asking" need Claude.
 ACTIVE = {"queued", "running", "testing", "asking"}
