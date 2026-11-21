@@ -49,7 +49,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
   proportion to the task's size. The user types it once, then asks for things as usual;
   the mod keeps the mode (and reminds Claude of it after a compaction or `/clear`) until a quit
   command. Only the user starts it; Claude never delegates on its own (the mod also counts a
-  delegating `wb` command as the mode, for a session resumed mid-delegation).
+  delegating `wb` command as the mode, keeps the mode by session id in its `$.store` so a
+  session resumed in a new process comes back in it, and turns it on when it adopts a task: #689).
 - **`wb`** (`bin/wb` → `workbench/cli.py`) is the CLI Claude drives. Every command does one thing
   and prints a short, plain report, because Claude reads it and Claude's tokens are the scarce
   resource.
@@ -5486,7 +5487,7 @@ const bound to one; imports from the module's own files also pass). The helpers 
 and an atom read under an old tag is absent, so change the tag when its type changes:
 `tasks` (`tasks-7`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
 updatedAt, tokens, recent, repo, cwd, session, claude_pid, claude_start, backlog, parked, allowed), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
-`chat` (`chat-4`, {key, delegating, url, web}: workbench mode lives here, plus the session's
+`chat` (`chat-4`, {key, delegating, url, web}: workbench mode lives here (and by session id in `$.store` `modes`, #689), plus the session's
 listener key and the web chat's switch as last read), `pane` (`pane-1`, {tab, open, focus,
 minimized}: the pane's tab, the open settings row, the option under the ring, the strip), `sessions` (`sessions-1`, string[]: every Claude Code session id this process
 has had, `mem.ids` while loaded), `savings` (`savings-1`, string: the pane's saving line, '' for
@@ -5506,7 +5507,12 @@ rule: `~` expanded, relative to the session's directory, where the mod's `wb` ca
 pane empty and a trailing slash the Claude-coding guard off, #454),
 the chat key (`<start ms>-<6 base36>`, kept across reloads), `mem.cwd` and `mem.home` (the
 session's directory and the home directory, resolved: which tasks without a `session` are this
-session's, `mine`), `mem.ids` (the `sessions` atom plus `$.session.id()`), registers its `workbench-*` commands (*Commands*
+session's, `mine`), `mem.ids` (the `sessions` atom plus `$.session.id()`), turns workbench mode back on when
+`$.store`'s `modes` holds one of those ids (`modeKept`; `keepMode` writes `{<id>: <ms>}` for every id when the
+mode turns on, and for a /clear's new id while it is on, drops this process's ids when it turns off, and
+entries past MODES_KEEP_MS, 30 days: #689, `claude --continue` came back with the mode off, so the chat
+didn't listen and a compaction dropped it, until Claude happened to run a delegating command; a
+`wb adopt` that succeeds turns it on too), registers its `workbench-*` commands (*Commands*
 below), runs `wb setup` once with a toast when the `/workbench` skill link is missing
 but the old `skills/delegate` link is there (a copy updated across the 2026-11-17 rename), and, when a person can be at the session (`isInteractive`, or a surface), starts the ears
 and two timers. A `claude -p` run or an SDK session (neither) stays quiet, no poll, no wake, no

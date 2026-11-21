@@ -1406,6 +1406,8 @@ async function claim($: any, name: string, sp: Row): Promise<Row> {
   const r = await runWb($, ['adopt', name, '--pid', String(mem.claudePid), ...ids.flatMap(i => ['--session', i])], 15_000)
   const now = await readJson($, `${mem.root}/tasks/${name}/task.json`)
   if (!r.ok && now.claude_pid === sp.claude_pid) mem.deadPids.delete(pidKey(sp)) // wb couldn't say: not ours to claim
+  // a task adopted into this session was being delegated: the mode comes back with it (#689)
+  if (r.ok) await workbenchMode($, true)
   return now.name ? now : sp
 }
 
@@ -1416,6 +1418,7 @@ async function noteSession($: any): Promise<void> {
   if (!id || mem.ids.has(id)) return
   mem.ids.add(id)
   await update($, sessions, ids => (ids.includes(id) ? ids : [...ids, id]))
+  if (mem.delegated && (await read($, chat)).delegating) await keepMode($, true) // a /clear's id resumes in the mode too (#689)
 }
 
 // A toast shown once per load: something is wrong that the person should hear about once.
@@ -2334,6 +2337,7 @@ async function workbenchMode($: any, on: boolean) {
   if (on) mem.delegated = true
   if ((await read($, chat)).delegating === on) return
   await update($, chat, c => ({ ...c, delegating: on }))
+  await keepMode($, on)
   if (!on) {
     await update($, pane, p => ({ ...p, minimized: false })) // quit: no strip either
     await $.ui.close({ id: PANE }).catch(() => {})
@@ -2345,6 +2349,33 @@ async function workbenchMode($: any, on: boolean) {
     }
   }
   void poll($) // listen now: a message may already be waiting
+}
+
+// Workbench mode by session id, on disk (`$.store` `modes`: id → when it was turned on), so a
+// session resumed in a new process (`claude --continue`/`--resume`) comes back in it: the atom
+// died with the old process, and until Claude happened to run a delegating command the chat
+// didn't listen, the pane and status line didn't show it, and a compaction dropped it (#689).
+// Kept MODES_KEEP_MS; a quit clears every id this process has had.
+const MODES_KEEP_MS = 30 * 24 * 3600_000
+async function keepMode($: any, on: boolean) {
+  try {
+    const now = await $.clock.now()
+    const was = (await $.store.get('modes')) as Record<string, number> | undefined
+    const modes: Record<string, number> = {}
+    for (const [id, at] of Object.entries(was && typeof was === 'object' ? was : {})) {
+      if (typeof at === 'number' && now - at < MODES_KEEP_MS && !mem.ids.has(id)) modes[id] = at
+    }
+    if (on) for (const id of mem.ids) modes[id] = now
+    await $.store.set('modes', modes)
+  } catch {} // no store (an older Claude Code, a test without one): the mode lasts this process
+}
+async function modeKept($: any): Promise<boolean> {
+  try {
+    const modes = (await $.store.get('modes')) as Record<string, number> | undefined
+    return !!modes && typeof modes === 'object' && [...mem.ids].some(id => typeof modes[id] === 'number')
+  } catch {
+    return false
+  }
 }
 
 // Opens the pane, or brings it back: a pane the engine still holds but doesn't show (a tab behind
@@ -2467,6 +2498,7 @@ export const register: Register = (on, options) => {
     mem.home = home ? await real(home) : ''
     mem.ids = new Set(await read($, sessions))
     await noteSession($)
+    if (!(await read($, chat)).delegating && await modeKept($)) await workbenchMode($, true) // a resume (#689)
     // A `claude -p` run or an SDK session has no person at it until a surface attaches: it took
     // other sessions' wakes, the weekly check and a `wb status` before every prompt (the
     // 2026-11-16 audit). It stays quiet until then.

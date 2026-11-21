@@ -422,6 +422,62 @@ test('a task whose Claude Code process is gone is claimed by the first session t
   expect(adopts.length).toBe(claims)                            // claimed once, not at every poll
 })
 
+test('a session resumed in a new process comes back in workbench mode, and a quit ends it for good (#689)', async ($, on) => {
+  // #689: the mode lived in the old process's state: `claude --continue` came back with it off,
+  // so the chat didn't listen, the status line didn't show it and a compaction dropped it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const ui: string[] = []
+  fakeTasks(on, files, [], true, ui)
+  const kept: Record<string, unknown> = { modes: { 'sess-1': 1_800_000_000_000 - 3600_000, 'sess-stale': 1_000 } }
+  on('store.get', (_: any, e: any) => ({ value: kept[e.key] }))
+  on('store.set', (_: any, e: any) => { kept[e.key] = e.value; return { value: undefined } })
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(ui).toContain('status ⚒ wb · workbench mode')
+  expect(ui).toContain('open workbench')
+  expect(kept.modes).toEqual({ 'sess-1': 1_800_000_000_000 })  // the stale one pruned
+  await $.command.run({ command: 'workbench-quit', args: '' })
+  expect(kept.modes).toEqual({})
+  await clock.advance(3000)                                     // the quit's poll ends inside the test
+})
+
+test('a session that adopts a task whose process is gone turns workbench mode on with it (#689)', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const ui: string[] = []
+  task(files, 'orphan', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4242 })
+  fakeTasks(on, files, ['orphan'], true, ui, false)
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout', text: '{"hello": 4343, "parent": 9000, "parent_start": "77"}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', (_: any, e: any) => {
+    const [cmd, ...args] = e.argv
+    if (cmd === 'kill') return { value: { exitCode: args[1] === '4242' ? 1 : 0, stdout: '', stderr: '' } }
+    if (args[0] === 'adopt') {
+      const path = '/wb/tasks/orphan/task.json'
+      files[path] = JSON.stringify({ ...JSON.parse(files[path]), session: 'sess-new', claude_pid: 9000, claude_start: '77' })
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(JSON.parse(files['/wb/tasks/orphan/task.json']).session).toBe('sess-new')
+  await clock.advance(3000)
+  expect(ui.filter(l => l.startsWith('status')).at(-1)).toBe('status ⚒ wb · 1 awaiting review')
+  await $.command.run({ command: 'workbench-quit', args: '' })   // the mode was on: the quit says so
+  expect(ui).toContain('close workbench')
+  await clock.advance(3000)
+})
+
 test('a notice another session took under wb\'s lock wakes no one here (#687)', async ($, on) => {
   // #687: two sessions woken by one `wb events` line each read `acked`, then wrote it: both woke
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
