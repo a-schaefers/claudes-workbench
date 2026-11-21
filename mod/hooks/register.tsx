@@ -954,6 +954,50 @@ const WAKE_OFF_NOTE =
   'when it is ready; pick it up when they ask (`wb report <name>`), and wait (`wb wait <name>`) ' +
   'only if they ask you to.'
 
+// Back to "Let Claude decide" after a rule the conversation was given (#540)
+const CODING_DECIDE = 'Claude coding is now "Let Claude decide" (the user\'s choice; `wb coding` shows it): ' +
+  'the earlier Claude coding rule no longer applies; work as the /workbench skill says.'
+
+// What this conversation was told of the rules that depend on the state (#540): the user's notes,
+// that wakes are off, the Claude-coding rule. prompt.context fires once per conversation, at its
+// first message (again after a compaction or /clear), and a block the engine doesn't route can't
+// be added later: a session that entered workbench mode afterwards got no notes and no wake-off
+// note, and a coding change from the pane reached only the file-tool gates.
+type Said = { notes: string; wakeOff: boolean; coding: string }
+
+async function wanted($: any, delegating: boolean, notesToo = true): Promise<Said> {
+  const notes = delegating && notesToo ? (await $.fs.read(`${mem.root}/notes.md`).catch(() => '')).trim() : ''
+  const any = delegating || mem.open.size > 0
+  return { notes, wakeOff: !mem.wake && any, coding: any ? await codingMode($) : 'decide' }
+}
+
+// The rules this conversation lacks now, as text, counted as said. Notes come once (Claude adds
+// them itself, `wb notes add`); the coding rule again whenever it changes. Without a context block
+// answered in this load (a reload), nothing is known of what it holds: it is all still to say.
+async function unsaid($: any, delegating: boolean): Promise<string[]> {
+  const want = await wanted($, delegating, !mem.said?.notes) // said once: not read at every poll
+  const was = mem.said ?? { notes: '', wakeOff: false, coding: 'decide' } // after the await: no other caller in between
+  const out: string[] = []
+  if (want.notes && !was.notes) out.push(NOTES_NOTE(want.notes))
+  if (want.wakeOff && !was.wakeOff) out.push(WAKE_OFF_NOTE)
+  const any = delegating || mem.open.size > 0 // out of the mode with nothing open: nothing changes
+  if (any && want.coding !== was.coding) out.push(want.coding === 'decide' ? CODING_DECIDE : CODING_RULES[want.coding])
+  mem.said = { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding }
+  return out
+}
+
+// Mid-conversation, a rule the conversation lacks goes in as a row the model reads, starting no
+// turn; refused (an older Claude Code, a policy), a turn of its own.
+async function sayRules($: any, delegating: boolean) {
+  if (!mem.said) return // no context answered yet: the first message's blocks will say it
+  const lines = await unsaid($, delegating)
+  if (!lines.length) return
+  const text = `[workbench] ${lines.join('\n\n')}`
+  const r = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
+    .catch((err: unknown) => ({ deny: String(err) }))
+  if (r?.deny) mem.queued.push(`${text}\n\nNothing to do now; reply in one line.`)
+}
+
 // The module's own memory: reset by a reload, which runs register and session.start again.
 const mem = {
   wake: true,
@@ -993,6 +1037,8 @@ const mem = {
   probe: null as null | { at: number; said: ProbeState }, // wb's last word on the probe experiment (probeStatus)
   queuedRetryAt: 0, // a queued turn the engine dropped is tried again from then
   open: new Set<string>(), // this session's delegated tasks open at the last poll
+  said: null as Said | null, // what the conversation was told of the state's rules (#540); null: no context yet
+  skillTurn: false, // /workbench's text said them in this turn: the context block computed after it doesn't
   delegated: false, // workbench mode was on in this load (a hand-back's compaction still keeps the state)
   turnEndedAt: 0, // when Claude's last main-loop turn ended
   follow: true, // the pane sticks to the newest lines until the person scrolls up
@@ -1473,6 +1519,7 @@ async function poll($: any) {
     if ([...mem.open].some(name => !open.has(name))) mem.savingsAt = 0 // one closed: its row is new
     if (!on) mem.boundary = false
     mem.open = open
+    await sayRules($, on)
     if (mem.boundary && !mem.busy && !list.some(t => NEEDS.has(t.phase) && mine(t))) {
       mem.boundary = false
       await compactAtBoundary($)
@@ -2111,11 +2158,17 @@ export const register: Register = (on, options) => {
   on('skill.prompt', { skill: SKILL }, async ($, e, next) => {
     if (e.path) mem.skill = e.path
     const again = (await read($, chat)).delegating
+    // what the context block doesn't carry yet goes with the skill's text: before the poll the
+    // mode starts, which would say it as a row of its own (#540)
+    const extra = await unsaid($, true)
+    if (extra.length) mem.skillTurn = true
+    const add = (text: string) => extra.length ? `${text}\n\n${extra.join('\n\n')}` : text
     mem.paneOpened = true // before the poll workbenchMode starts, which would open it too
     await workbenchMode($, true)
     await showPane($)
-    if (again && !firstTask(e.text)) return { text: AGAIN_NOTE(mem.skill) }
-    return next(e)
+    if (again && !firstTask(e.text)) return { text: add(AGAIN_NOTE(mem.skill)) }
+    const r = await next(e)
+    return { ...r, text: add(r.text) }
   })
 
   // Typed in the terminal: the user is back, so answers go here again
@@ -2169,6 +2222,7 @@ export const register: Register = (on, options) => {
   // that delegated in this load, with a task of its own open. Any session's compaction got it
   // (the 2026-11-16 audit).
   on('session.compact', async ($, e, next) => {
+    if (!e.agentId) mem.skillTurn = false // the blocks computed after it say everything again
     if (e.agentId || !mem.open.size || e.instructions?.includes(KEEP_ON_COMPACT)) return next(e)
     if (!mem.delegated && !(await read($, chat)).delegating) return next(e)
     return next({ ...e, instructions: [e.instructions, KEEP_ON_COMPACT].filter(Boolean).join('\n\n') })
@@ -2182,17 +2236,20 @@ export const register: Register = (on, options) => {
     const isAway = await away($, st)
     const blocks = [...r.blocks]
     if (st.delegating) blocks.push({ name: 'workbench-mode', text: MODE_NOTE(mem.skill) })
-    const coding = st.delegating || mem.open.size ? await codingMode($) : 'decide'
-    if (coding !== 'decide') blocks.push({ name: 'claude-coding', text: CODING_RULES[coding] })
-    const notes = st.delegating ? (await $.fs.read(`${mem.root}/notes.md`).catch(() => '')).trim() : ''
-    if (notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(notes) })
+    const want = await wanted($, st.delegating)
+    // /workbench as the first message said them in its text already (#540)
+    const had = mem.skillTurn ? mem.said : null
+    mem.skillTurn = false
+    mem.said = want
+    if (want.coding !== 'decide' && had?.coding !== want.coding) blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
+    if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
     if (isAway) blocks.push({
       name: 'web-chat',
       text: 'The user is away from the terminal and last wrote from the web chat. Tell them ' +
         'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
         '`wb chat log` shows the thread. Typing in the terminal again ends this.',
     })
-    if (!mem.wake && (st.delegating || mem.open.size)) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
+    if (want.wakeOff && !had?.wakeOff) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
     const { ok, out: status } = await runWb($, ['status', ...(await scope($))])
     if (!ok) warnOnce($, 'status', `wb status failed: ${brief(status)}; wb doctor`)
     if (!ok || status.startsWith('no open tasks')) return { blocks }
@@ -2220,6 +2277,7 @@ export const register: Register = (on, options) => {
       for (const id of mem.asksOpen) void runWb($, ['chat', 'answer', id, 'expired', '--by', 'interrupted'], 15_000)
       mem.asksOpen.clear()
       mem.busy = false
+      mem.skillTurn = false
       mem.sawTurn = true
       mem.turnEndedAt = await $.clock.now()
       void poll($) // held wakes and chat messages go now, not at the next tick

@@ -1584,12 +1584,117 @@ test('with wakes off, Claude is told no wake will come', { options: { wake: 'off
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
   on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }] }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('workbench-wake')
-  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  // the context was computed before the mode: the skill's text says it (#540)
+  const r = await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  expect(r.text).toContain('Wakes are off')
   await clock.advance(2000)
+  // and a compacted conversation is told again
+  await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'hi', toolUses: [] }] } as any)
   const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'workbench-wake')
   expect(block?.text).toContain('Wakes are off')
+})
+
+test('a session that enters workbench mode after its first message gets the notes, the wake-off note and the coding rule, and a coding change mid-session reaches it (#540)', { options: { wake: 'off' } }, async ($, on) => {
+  // prompt.context fires once per conversation: computed with the mode off, the blocks never came
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {
+    '/wb/notes.md': '- merge only when asked',
+    '/wb/coding.json': JSON.stringify({ mode: 'ask' }),
+  }
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const names = (await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)
+  expect(names).not.toContain('user-notes')                       // the mode is off at the first message
+  const r = await $.skill.prompt({ skill: 'workbench', text: '**First task:** `add X`. Empty?', frontmatter: {}, source: 'userSettings' })
+  expect(r.text).toContain('add X')
+  expect(r.text).toContain('merge only when asked')
+  expect(r.text).toContain('Wakes are off')
+  expect(r.text).toContain('"Ask me first"')
+  await clock.advance(2000)
+  expect(rows).toEqual([])                                         // said once, in the skill's text
+  // the user picks "Only when I say" in the pane: a row the model reads, and no turn of its own
+  files['/wb/coding.json'] = JSON.stringify({ mode: 'only' })
+  await clock.advance(31_000)                                      // the poll a change in the files starts
+  expect(rows.length).toBe(1)
+  expect(rows[0]).toContain('"Only when I say"')
+  expect(rows[0]).not.toContain('merge only when asked')           // the notes aren't said again
+  // back to "Let Claude decide": the stale rule is taken back
+  files['/wb/coding.json'] = JSON.stringify({ mode: 'decide' })
+  await clock.advance(31_000)
+  expect(rows.length).toBe(2)
+  expect(rows[1]).toContain('no longer applies')
+  await clock.advance(31_000)
+  expect(rows.length).toBe(2)                                      // once per change
+  expect(asked).toEqual([])
+})
+
+test('a wb start that turns workbench mode on mid-session brings the notes as a row, or a turn when the row is refused (#540)', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/notes.md': '- merge only when asked' }
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))
+  let refuse = false
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => {
+    if (refuse) return { deny: 'policy' }
+    rows.push(e.message.content[0].text)
+    return next(e)
+  })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.prompt.context({ blocks: [] })
+  await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })
+  await clock.advance(2000)
+  expect(rows.length).toBe(1)
+  expect(rows[0]).toContain('merge only when asked')
+  await $.turn.complete(endTurn('t1'))
+  // refused (an older Claude Code, a policy): a turn of its own once Claude is free
+  refuse = true
+  files['/wb/coding.json'] = JSON.stringify({ mode: 'only' })
+  await clock.advance(31_000)
+  await clock.advance(2000)
+  expect(rows.length).toBe(1)
+  expect(asked.length).toBe(1)
+  expect(asked[0]).toContain('"Only when I say"')
+})
+
+test('/workbench as the first message says its rules once, in the context blocks or the skill, not both (#540)', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {
+    '/wb/notes.md': '- merge only when asked',
+    '/wb/coding.json': JSON.stringify({ mode: 'only' }),
+  }
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const r = await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  const blocks = (await $.prompt.context({ blocks: [] })).blocks
+  const said = [r.text, ...blocks.map((b: any) => b.text)].join('\n')
+  expect(said.split('merge only when asked').length).toBe(2)       // once
+  expect(said.split('"Only when I say"').length).toBe(2)
+  expect(blocks.map((b: any) => b.name)).toContain('workbench-mode')
+  await clock.advance(2000)
+  expect(rows).toEqual([])
 })
 
 test('the bubble wraps its words into lines that fit, never cutting a line short', () => {

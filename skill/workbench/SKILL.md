@@ -76,8 +76,9 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
 - **Claude coding** (the user's choice, `wb coding`): when you may write a task's code yourself,
   a one-line fix in review or `wb takeover` alike. "Let Claude decide" (the default) is this
   skill as written. Otherwise a `claude-coding` context block gives the rule: "Ask me first", or
-  "Only when I say". It covers shell edits too; the mod refuses your file edits in a task's
-  worktree, and `wb takeover`, until the user's yes is recorded (`wb coding allow`). The user
+  "Only when I say"; a later change comes as a `[workbench]` note with the new rule. It covers
+  shell edits too; the mod refuses your file edits in a task's worktree, and `wb takeover`,
+  until the user's yes is recorded (`wb coding allow`). The user
   may grant one task an exception ahead (`--when "<condition>"`): show them the task, the
   condition and the exact edit first; once used, `wb coding used <task> --did "…"`, then hand
   the testing back with `wb feedback`.

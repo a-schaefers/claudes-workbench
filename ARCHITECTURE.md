@@ -1932,7 +1932,8 @@ so what Claude learned about how the user likes delegation run in one repo would
 next. When the user says something that holds anywhere (their review bar, whether to merge, how
 much to ask them), Claude keeps it with `wb notes add "…"` (one sentence, at most 300
 characters; at most 20 notes) in `$WB_HOME/notes.md` (`- ` lines, under `notes.lock`). Every
-session in workbench mode, in any project, is handed them in a `user-notes` block. `wb notes`
+session in workbench mode, in any project, is handed them in a `user-notes` block (or, when the
+mode came on after the first message, with /workbench's text or a row of their own: #540). `wb notes`
 lists them and `wb notes drop N…` removes ones that have stopped holding. A fact about one repo
 goes in its CLAUDE.md instead.
 
@@ -2002,8 +2003,8 @@ of 1.8).
   notice (it said "no notice", and the notice came again on the next wait). A bare wait with no
   open task exits 2. `--timeout` exits 2 when it passes.
 - **Off switch.** The plugin's `wake` setting (`on`/`off`) stops the prompts and keeps the pane
-  and the toasts; a `workbench-wake` context block tells Claude no wake will come, so it doesn't
-  end its turn waiting for one.
+  and the toasts; a `workbench-wake` context block (or the same note said later, #540) tells
+  Claude no wake will come, so it doesn't end its turn waiting for one.
 
 The mod runs in every Claude Code session with the plugin and the state directory is global, so
 a session wakes, rewakes and compacts only for its own tasks (`mine`). `wb start` records the
@@ -4116,7 +4117,8 @@ for each task it hands over, since the user asked for exactly that. The mod deni
 Edit, MultiEdit, Write and NotebookEdit calls on a path under `$WB_HOME/tasks/<task>/worktree/`
 without one (`codingRefusal`, in the one unmatched `tool.call` hook; the deny names the rule), and
 outside `decide` adds a `claude-coding` context block with the rule (`CODING_RULES`) while
-delegating or with a task open. A shell edit isn't seen: the block says the rule covers it too.
+delegating or with a task open; a change mid-session (the pane, `wb coding`) reaches the
+conversation as a row with the new rule (`sayRules`, #540). A shell edit isn't seen: the block says the rule covers it too.
 
 ## Experiments
 
@@ -4828,7 +4830,7 @@ none), `stats` (`stats-1`, {key, feed}: the Stats tab's `wb stats --json` and th
 it was read from), `top` (`top-1`, {snap, busy}: `wb top --json`'s newest tick and each GPU's busy
 % since the Stats tab opened). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
 this session's open set, the session's resolved `cwd` and `home`, `person`, follow, sawTurn, scoutAsked,
-toasts sent, dropped wakes, the closed tasks no longer read, the events pid, …). The task facts
+toasts sent, dropped wakes, the closed tasks no longer read, the events pid, what the conversation was told of the rules (`said`, #540), …). The task facts
 themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.json's
 `offered_at` and `chat/listener.json`.
 
@@ -4928,7 +4930,8 @@ either quit command, which also closes the pane. While on: the `workbench-mode` 
 context blocks (and `claude-coding` outside "Let Claude decide", with a task open too), the idle status line, pane auto-open, web chat listening, the apprentice's
 "Workbench mode is on.", the boundary compaction. `mem.delegated` remembers the mode was on in
 this load, so a hand-back's compaction still keeps the state. No `$.ui.invalidate`: rewriting
-the first message would cost the conversation's prompt cache.
+the first message would cost the conversation's prompt cache, and an unrouted block isn't added
+after the first message anyway: *The rules said later* below.
 
 **Commands.** Every one is `/workbench` (the skill) or starts with `workbench-`, so typing
 `/workbench` lists them all (2026-11-17: they were `/delegate` and `/delegate-*`, no alias; the
@@ -4961,6 +4964,21 @@ setting off, while delegating or with a task of this session's open (WAKE_OFF_NO
 come; tell the user, pick it up when asked); `workbench` whenever `wb status` with `scope()`
 exits 0 listing open tasks (the status, plus `wb report`/`wb watch`; a failing one toasts once
 instead). None in a session with no person at it.
+
+**The rules said later** (#540). Claude Code computes those blocks once, and one it doesn't route
+can't be added afterwards, so a session that entered workbench mode after its first message (the
+usual way in) got no notes and no wake-off note, and a Claude coding change in the pane reached
+only the file gates. `mem.said` records what the conversation was told of the three rules that
+depend on the state (`Said`: the notes, the wake-off note, the coding mode; set by
+`prompt.context`, null before one in this load); `unsaid` returns what it lacks now and counts it
+said: the notes once (Claude edits them itself), the wake-off note once, the coding rule
+whenever the mode differs (CODING_DECIDE when it went back to "Let Claude decide": the earlier
+rule no longer applies). `/workbench` appends them to the skill's text (or to AGAIN_NOTE) and sets
+`mem.skillTurn`, so a `prompt.context` computed after it in the same turn (/workbench as the
+first message) leaves those blocks out; a compaction or the turn's end clears it. Every poll
+runs `sayRules`: what is still unsaid (the mode turned on by a Bash `wb start`, the pane's
+coding row, `wb coding` anywhere) goes in as a user-role row the model reads
+(`$.session.append`, which starts no turn), or, refused, as a queued `[workbench]` turn.
 
 **Compaction.** `session.compact` (main conversation only, while a task of this session's is
 open, in a session delegating or that delegated in this load) appends
