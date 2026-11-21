@@ -76,7 +76,8 @@ class Score:
     weights: int = 0               # bytes of weights, 0 when unknown
     tries: int = 0
     wins: float = 0                # accepted, and a discard's landed share (tuning.credit)
-    minutes: float | None = None   # mean wall time of a real task of this size
+    minutes: float | None = None   # median active minutes of a real task of this size
+    minutes_n: int = 0             # the tasks it is the median of
     fits: bool | None = None       # its need within the GPU's budget; None when unknown
     stack: tuple = ()              # the kind of work asked about, and the record on it
     like_tries: int = 0
@@ -183,7 +184,7 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     # ETA and progress check at many times the real length (#543). Rows without it are skipped.
     times = [r["active_minutes"] for r in real if isinstance(r.get("active_minutes"), (int, float))
              and not isinstance(r["active_minutes"], bool)]
-    s.minutes = statistics.median(times) if times else None
+    s.minutes, s.minutes_n = (statistics.median(times) if times else None), len(times)
     spent = [spend.weighted(r["claude"]) for r in real if isinstance(r.get("claude"), dict)]
     s.claude, s.claude_n = (statistics.fmean(spent) if spent else None), len(spent)
     return s
@@ -237,10 +238,16 @@ def _cheaper(close: list[Score]) -> list[Score]:
 def expected_minutes(model_id: str, size: str) -> float | None:
     """How long a task of this size usually takes on this model, from real tasks: the median of
     their active minutes (the agent's own working time), so compare it with a task's active time."""
+    return expected(model_id, size)[0]
+
+
+def expected(model_id: str, size: str) -> tuple[float | None, int]:
+    """expected_minutes, and how many timed tasks it is the median of."""
     m = models.discover().get(model_id)
     if not m:
-        return None
-    return score(m, size, state={"available": True, "resident": True}).minutes
+        return None, 0
+    s = score(m, size, state={"available": True, "resident": True})
+    return s.minutes, s.minutes_n
 
 
 def allowed(m: models.Model, size: str) -> bool:

@@ -1924,10 +1924,16 @@ default, nothing below runs and the timing is the check-ins'.
 - **Active work.** Each round adds its time, less Claude's answers and a frozen machine
   (`_Clock.ran`), to status `active_s`, on or off. Waiting for the GPU happens before a round,
   so it never counts. The results row carries `active_minutes`.
-- **The check.** It fires at each whole multiple of the threshold of active work, once
-  (`progress.due`, status `progress_checks`), and never while asking. The threshold is `--after`,
-  else `router.expected_minutes` for the task's size and model (`progress.threshold`: the median
-  of their `active_minutes`, active against active, #543). The check
+- **The check.** It fires when active work passes the threshold, then twice it, four times it
+  and so on, once each (`progress.due`, `progress.passed`, status `progress_checks`: the points
+  passed), and never while asking. The threshold is `--after`, else the typical length for the
+  task's size and model (`progress.typical`, `progress.threshold`): the median of their
+  `active_minutes` (`router.expected`, active against active, #543) once `TYPICAL_MIN` (3) of them
+  are timed, at least `FLOOR_MIN` (10) minutes; until then the size's `DEFAULT_MIN` (20 minutes
+  trivial, 45 significant), which the check's text calls the default. With no history the checks
+  never came though `wb progress on` said they would, and one 1.5-minute task made every whole
+  1.5 minutes a check, each waking Claude (#724). `wb progress on` and the pane's row name the
+  defaults (the pane's sentence repeats `DEFAULT_MIN` and `TYPICAL_MIN`: change them together). The check
   is a `checkin` notice (`progress: true`): the check-in digest, then `progress.text`. That is
   the active minutes against the threshold, the evidence (files changed, whether any changed
   since the last check: status `progress_mark`, a `gitops.mark`), the round's failed tool calls
@@ -6435,6 +6441,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `free`, `publish`): a change there changes both (`tests.Images`, `tests.Audio`). A new kind of
   generated media → its config path in `store.PATH_VARS` and `context.private_paths`, its output
   directory in `cli.EVENT_SKIP` (and the mod's ears), its engines in `wb scout`.
+- **`progress.DEFAULT_MIN` and `TYPICAL_MIN`** → the pane's Progress checks sentence
+  (`PROGRESS_STOPS` in `register.tsx`), which names them (#724).
 - **`ask_mcp.NO_ANSWER`'s opening** ("No answer arrived in time.") → the mod's `NO_ANSWER`, which
   tells a question that timed out unseen from one answered (#542).
 - **How wb reads a path variable** (`store.absolute_env`, `home()`) → the mod's `absolutePath`,

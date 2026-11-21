@@ -572,7 +572,8 @@ const EVERY_STOPS: [string, string, string][] = [
 const PROGRESS_OFF: [string, string, string] = ['off', 'Off (default)', 'No progress checks: each one wakes Claude, which spends its tokens.']
 const PROGRESS_STOPS: [string, string, string][] = [
   PROGRESS_OFF,
-  ['on', 'On', 'A task past its typical length gets a check and one recommendation, waking Claude.'],
+  // the defaults are progress.py's DEFAULT_MIN and TYPICAL_MIN (#724)
+  ['on', 'On', 'A task past its typical length (20 min trivial, 45 significant, until 3 of the size are timed on its model) gets a check, again at 2x and 4x, each with one recommendation, waking Claude.'],
 ]
 // With a threshold set (`wb progress on --after N`, kept through the row's bare on/off) On says
 // it: the typical length it named instead was the wrong one (#578)

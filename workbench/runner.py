@@ -1036,7 +1036,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             mark = gitops.mark(task.worktree)
             files = gitops.changed(task.worktree)
             moved = mark != task.status.get("progress_mark", edit_mark)
-            task.set_status(progress_checks=int(active // (typical * 60)), progress_mark=mark,
+            task.set_status(progress_checks=progress.passed(active, typical), progress_mark=mark,
                             progress_open=True)
             task.notify("checkin", checkin_text(task, n, out, since, active) + "\n" + progress.text(
                 task, active, typical, moved, len(files.splitlines()) if files else 0,

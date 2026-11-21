@@ -12314,6 +12314,33 @@ class Progress(Base):
         line = transcript.clock_line(task, now)
         self.assertIn("~6m00s left (typically 12m)", line)                 # 12 less 5 + 1 active
 
+    def test_with_too_few_timed_tasks_the_first_check_comes_at_the_sizes_default_then_spaced_out(self):
+        # #724: with no history the checks never came though `wb progress on` said they would,
+        # and one 1.5-minute task made the threshold 1.5 minutes: a check every 1.5 minutes
+        model = "ollama/mimo-v2.6:9b-q8_0"
+        self.assertIn("until a model and size have 3 timed tasks: 20 min trivial, 45 min significant",
+                      run_wb("progress", "on"))
+        spec = {"model": model, "size": "trivial"}
+        self.assertEqual(progress.typical(spec), (20.0, "default"))
+        self.assertEqual(progress.threshold({**spec, "size": "significant"}), 45.0)
+        row = {"model": model, "size": "trivial", "outcome": "accepted", "active_minutes": 1.5}
+        store.append_jsonl(store.home() / "results.jsonl", row)
+        self.assertEqual(progress.threshold(spec), 20.0)                    # one task isn't enough
+        for _ in range(2):
+            store.append_jsonl(store.home() / "results.jsonl", row)
+        self.assertEqual(progress.typical(spec), (10, "measured"))          # three: the floor
+        for _ in range(4):
+            store.append_jsonl(store.home() / "results.jsonl", {**row, "active_minutes": 14})
+        self.assertEqual(progress.threshold(spec), 14)
+        t = store.Task("x")
+        store.write_json(t.dir / "status.json", {})
+        hits = []
+        for active in range(0, 31 * 60, 5):          # 30 minutes of active work, a 1-minute typical
+            if progress.due(t, active, 1):
+                hits.append(active)
+                t.set_status(progress_checks=progress.passed(active, 1))
+        self.assertEqual(hits, [60, 120, 240, 480, 960])                    # 1x, 2x, 4x...: not 30
+
     def test_what_helped_more_on_the_model_decides_once_both_were_tried_enough(self):
         from workbench import progress
         self.assertEqual(progress.recommend(True, {"hint": [0, 0], "smaller": [0, 0]}), "hint")

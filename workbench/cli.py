@@ -1825,8 +1825,10 @@ def cmd_progress(a):
         progress.set_enabled(a.state == "on", a.after)  # --after kept unless given (0 clears it, #578)
     s = progress.settings()
     print("progress checks: " + (f"on: a task past {s['after']:g} min of active work" if s.get("after")
-                                  else "on: a task past its typical length of active work")
-          + " gets a check and a recommendation" if s.get("on") else
+                                  else "on: a task past its typical length of active work (until a model "
+                                  f"and size have {progress.TYPICAL_MIN} timed tasks: "
+                                  + ", ".join(f"{m} min {k}" for k, m in progress.DEFAULT_MIN.items()) + ")")
+          + " gets a check and a recommendation, again at 2x and 4x it" if s.get("on") else
           "progress checks: off (the default): check-ins only as --checkin sets them")
 
 
