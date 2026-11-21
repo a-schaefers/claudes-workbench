@@ -314,6 +314,32 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
             self.assertTrue(models._alive(sleeper.pid, start))
             self.assertFalse(models._alive(sleeper.pid, "1"))  # recycled: started at another time
 
+    def test_without_proc_a_start_reads_the_same_in_every_time_zone(self):
+        # #848: ps's lstart is local time, so a Mac that changed zones, or a writer and a reader
+        # under different TZ, read a live holder, listener or session as a recycled pid
+        real = Path.read_text
+        noproc = lambda self, *a, **kw: (_ for _ in ()).throw(OSError("no /proc")) \
+            if str(self).startswith("/proc/") else real(self, *a, **kw)  # noqa: E731
+        sleeper = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(sleeper.kill)
+        tz = os.environ.get("TZ")
+        self.addCleanup(lambda: os.environ.__setitem__("TZ", tz) if tz is not None
+                        else os.environ.pop("TZ", None))
+        with mock.patch.object(Path, "read_text", noproc):
+            os.environ["TZ"] = "EST5"
+            start, tag = models._started(sleeper.pid), models.start_tag(sleeper.pid)
+            old = models._ps_start(sleeper.pid, utc=False)          # what a wb before #848 wrote
+            self.assertNotEqual(old, start)
+            os.environ["TZ"] = "JST-9"                              # the laptop flew to Tokyo
+            self.assertEqual(models._started(sleeper.pid), start)
+            self.assertTrue(models._alive(sleeper.pid, start))
+            self.assertTrue(models.same_tag(sleeper.pid, tag))
+            self.assertFalse(models._alive(sleeper.pid, "Thu Jan  1 00:00:00 2026"))
+            os.environ["TZ"] = "EST5"                               # an old stamp, same zone
+            self.assertTrue(models._alive(sleeper.pid, old))
+            self.assertTrue(models.same_tag(sleeper.pid, models._tag(old)))
+            self.assertFalse(models.same_tag(sleeper.pid, "0badf00d"))
+
     def test_a_long_load_never_holds_the_admission_lock(self):
         # a finishing task waited on gpu.admit for another task's load, so its runner looked
         # alive after its review notice and wb feedback refused it (the 2026-11-16 audit)

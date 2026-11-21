@@ -3329,7 +3329,11 @@ happens under the `gpu.admit` flock: holders are the `gpu.json` entries whose pr
 checked by identity (`_alive`: a pid of another user's is dead, unless the entry is that user's in a
 shared lease (#393, above), and when available the process's start
 time from `/proc/<pid>/stat` field 22 or `ps -o lstart=` must match the entry's `start`), so a pid recycled after a
-reboot doesn't hold the GPU forever. `admits(m, held)`: no holder is waiting, every holder's
+reboot doesn't hold the GPU forever. ps runs with `TZ=UTC0` beside `LC_ALL=C` (`models._ps_start`): it prints
+local time, and a Mac that changed zones, or a writer and a reader under different `TZ` (the launchd chat server
+beside a shell's `export TZ`), read live holders, sessions and listeners as recycled pids (#848). A ps date that
+doesn't match is compared once more in ps's inherited zone (`_same_start`, `same_tag` for the scratch
+directories' tags), the format written before #848, so stamps from before the upgrade still match. `admits(m, held)`: no holder is waiting, every holder's
 model still resolves, and there are no holders or `can_share` passes; then a runner joins with
 `LOCK_SH|LOCK_NB` on `gpu.lock` (so a task alone holds the lock shared). Otherwise it marks
 itself `waiting`, says "waiting for the GPU (held by <task>…)" and waits its turn: first come,
@@ -6089,7 +6093,7 @@ frame in six, other poses blink one in eleven, except `sleep` and `slump`; FACE 
 
 **The web chat listener** (`listen`, workbench mode with the chat on, needs the events child): another
 session's live claim (its pid lives, `/proc/<pid>` on Linux, else `kill -0`, and, with a `start`, still started then: `alive`,
-which reads `/proc/<pid>/stat` or `ps -o lstart=` as wb does and compares only two of a kind; when
+which reads `/proc/<pid>/stat` or `ps -o lstart=` as wb does (in UTC, then the inherited zone: #848) and compares only two of a kind; when
 neither can say, while listener.json was written within 15 s, #700: read as gone, two sessions took
 it from each other on every poll; without a pid, its `ts` within 15 s; asked only of another
 session's claim, and a live one at most every PID_CHECK_MS, 30 s, `mem.listenerAt`: on macOS each
@@ -6703,7 +6707,7 @@ hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_
   place in the queue, the task's `created_at`; `waiting_since`: on a waiting entry, when this
   lease began to wait, kept across its rewrites until it is admitted, for `wb top`'s `waited_s`
   (#573); `start`: the holder's start time, `/proc/<pid>/stat` field 22, else
-  `ps -o lstart=` (macOS: #236), so a recycled pid isn't taken for it; null when neither says).
+  `ps -o lstart=` in UTC (macOS: #236, #848), so a recycled pid isn't taken for it; null when neither says).
 - `scout.json`: `{done_at, notes, offered_at}` (`offered_at` from the mod); `watch.json`: `[{ts, text}]`.
 - `update.json`: `{checked_at, behind, kind}` (`kind`: `marketplace` or `clone`); `checked_at`
   is written before the fetch, so a failed, timed-out or killed check waits a week too.

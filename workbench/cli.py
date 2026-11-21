@@ -2537,8 +2537,7 @@ def _maker_alive(pid: str, tag: str) -> bool:
     untagged name (made before the tag, or where no start could be read) goes by the pid alone."""
     if not (pid.isdigit() and models._alive(int(pid))):
         return False
-    now = models.start_tag(int(pid)) if tag else ""
-    return not now or now == tag
+    return not tag or models.same_tag(int(pid), tag)
 
 
 def _scratch_pid(name: str) -> str | None:

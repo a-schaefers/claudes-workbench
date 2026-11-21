@@ -2050,15 +2050,21 @@ async function sendQueued($: any, text: string) {
 }
 
 // When a process started, as wb's models._started says it: /proc/<pid>/stat's 22nd field, else
-// `ps -o lstart=` (macOS has no /proc); '' when neither says.
+// `ps -o lstart=` (macOS has no /proc) in UTC, since ps prints local time and a laptop that
+// changed zones read every live session as gone (#848); '' when neither says.
 async function startOf($: any, pid: number): Promise<string> {
   try {
     const stat = String(await $.fs.read(`/proc/${pid}/stat`))
     const field = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/)[19]
     if (field) return field
   } catch {}
+  return psStart($, pid, true)
+}
+
+// ps's lstart, in UTC, or (utc false) in the zone ps inherits, as stamps written before #848 were.
+async function psStart($: any, pid: number, utc: boolean): Promise<string> {
   try {
-    const r = await $.process.run(['env', 'LC_ALL=C', 'ps', '-o', 'lstart=', '-p', String(pid)], { timeoutMs: 5000 })
+    const r = await $.process.run(['env', 'LC_ALL=C', ...(utc ? ['TZ=UTC0'] : []), 'ps', '-o', 'lstart=', '-p', String(pid)], { timeoutMs: 5000 })
     if (r.exitCode === 0) return r.stdout.trim().split(/\s+/).join(' ')
   } catch {}
   return ''
@@ -2082,7 +2088,9 @@ async function alive($: any, pid: number, start?: string): Promise<boolean | nul
   }
   if (!start) return true
   const now = await startOf($, pid)
-  return !now || /^\d+$/.test(now) !== /^\d+$/.test(start) || now === start
+  if (!now || /^\d+$/.test(now) !== /^\d+$/.test(start) || now === start) return true
+  // a ps date recorded before #848, in local time, is still that process
+  return !/^\d+$/.test(now) && (await psStart($, pid, false)) === start
 }
 
 // The web chat's switch, as the user left it (chat/switch.json, written by `wb chat on|off`): turned

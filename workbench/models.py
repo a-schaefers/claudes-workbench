@@ -2442,13 +2442,30 @@ def _started(pid: int) -> str | None:
         return Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[19]
     except (OSError, IndexError):
         pass
+    return _ps_start(pid)
+
+
+def _ps_start(pid: int, utc: bool = True) -> str | None:
+    """ps's `lstart`, in UTC: it prints local time, so a laptop that changed zones, or a writer and
+    a reader under different TZ (the launchd chat server beside a shell's `export TZ`), read the
+    same live process as a recycled pid: live runners dropped from gpu.json, live sessions' tasks
+    adopted, no listener on the chat (#848). ``utc=False``: the zone ps inherits, as stamps written
+    before #848 were."""
+    env = {**os.environ, "LC_ALL": "C", **({"TZ": "UTC0"} if utc else {})}
     try:
         r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=5,
-                           env={**os.environ, "LC_ALL": "C"})
+                           encoding="utf-8", errors="replace", timeout=5, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return (" ".join(r.stdout.split()) or None) if r.returncode == 0 else None
+
+
+def _same_start(pid: int, now: str, start: str) -> bool:
+    """Whether ``pid``, whose stamp is ``now``, started when ``start`` says: the same stamp, else
+    (both ps dates) the one a wb before #848 wrote, in ps's inherited zone, so a holder, listener or
+    claimed session recorded then isn't read as recycled after the upgrade."""
+    return now == start or (not now.isdigit() and not start.isdigit()
+                            and _ps_start(pid, utc=False) == start)
 
 
 PROC = Path("/proc")
@@ -2479,8 +2496,18 @@ def runs(pid: int, *words: str) -> bool:
 def start_tag(pid: int) -> str:
     """`_started` short enough for a file name (its crc32, in hex), '' when unknown: a scratch
     directory's name carries its maker's, so wb gc knows a recycled pid isn't the maker (#532)."""
-    s = _started(pid)
+    return _tag(_started(pid))
+
+
+def _tag(s: str | None) -> str:
     return format(zlib.crc32(s.encode()), "08x") if s else ""
+
+
+def same_tag(pid: int, tag: str) -> bool:
+    """Whether ``pid``'s start_tag is ``tag``, or can't be read: as _same_start, a scratch
+    directory named before #848 (ps's local time) still matches its live maker."""
+    now = _started(pid)
+    return not now or _tag(now) == tag or (not now.isdigit() and _tag(_ps_start(pid, utc=False)) == tag)
 
 
 def _alive(pid: int, start: str | None = None, uid: int | None = None) -> bool:
@@ -2497,13 +2524,13 @@ def _alive(pid: int, start: str | None = None, uid: int | None = None) -> bool:
         # EPERM proves the pid exists. Under /proc mounted hidepid its start time can't be read
         # (None): taken as gone, B shared the GPU with A's live runner and unloaded its model (#806)
         now = _started(pid)
-        return now is None or now == start
+        return now is None or _same_start(pid, now, start)
     except ProcessLookupError:
         return False
     except (OverflowError, ValueError):
         return False
     now = _started(pid) if start else None
-    return now is None or now == start
+    return now is None or _same_start(pid, now, start)
 
 
 # ---- managing the set: what Claude's weekly model check uses to add and retire models ----

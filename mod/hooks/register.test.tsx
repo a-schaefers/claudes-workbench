@@ -705,6 +705,40 @@ test('a task whose Claude Code process\'s pid now belongs to another process is 
   expect(woken.join('\n')).not.toContain('REPORT-same')                    // the same process: still its own
 })
 
+test('without /proc, a live Claude Code process reads as alive whatever the time zone (#848)', async ($, on) => {
+  // #848: ps's lstart is local time, so after a zone change every live session's process read as
+  // recycled and the first session to poll adopted their tasks
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'utc', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-utc',
+    claude_pid: 4444, claude_start: 'Fri Nov 21 15:00:00 2026' })
+  task(files, 'old', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old',
+    claude_pid: 4545, claude_start: 'Fri Nov 21 10:00:00 2026' })       // local time, before #848
+  task(files, 'gone', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-gone',
+    claude_pid: 4646, claude_start: 'Thu Nov 20 09:00:00 2026' })
+  const names = ['utc', 'old', 'gone']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names)
+  on('session.id', () => ({ value: 'sess-new' }))
+  const local: Record<string, string> = { '4444': 'Fri Nov 21 10:00:00 2026', '4545': 'Fri Nov 21 10:00:00 2026', '4646': 'Fri Nov 21 11:00:00 2026' }
+  const utc: Record<string, string> = { '4444': 'Fri Nov 21 15:00:00 2026', '4545': 'Fri Nov 21 15:00:00 2026', '4646': 'Fri Nov 21 16:00:00 2026' }
+  on('process.run', (_: any, e: any) => {
+    if (e.argv.includes('lstart=')) {
+      const pid = e.argv[e.argv.length - 1]
+      return { value: { exitCode: 0, stdout: ` ${(e.argv.includes('TZ=UTC0') ? utc : local)[pid]}\n`, stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }  // kill -0: every pid is live
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-gone'))).toHaveLength(1)  // recycled: adopted
+  expect(woken.join('\n')).not.toContain('REPORT-utc')                 // the same process, in UTC
+  expect(woken.join('\n')).not.toContain('REPORT-old')                 // and in an old stamp
+})
+
 test('without a kill executable, /proc says which Claude Code processes are gone (#700)', async ($, on) => {
   // #700: `kill -0` threw ENOENT in a container without procps, so no gone process was ever seen
   // and nobody was woken for a crashed session's tasks
