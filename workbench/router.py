@@ -99,7 +99,7 @@ class Score:
     def line(self) -> str:
         if not self.tries:
             return "no real tasks yet"
-        t = f", ~{self.minutes:.1f} min of active work" if self.minutes is not None else ""
+        t = f", ~{self.minutes:.1f} min of active work a step" if self.minutes is not None else ""
         like = f", {round(self.like_wins, 1):g}/{self.like_tries} on {'/'.join(self.stack)}" if self.like_tries else ""
         c = f", ~{self.claude / 1000:.0f}K Claude tokens a task" if self.claude_n >= COST_MIN else ""
         return f"{round(self.wins, 1):g}/{self.tries} real tasks accepted{like}{t}{c}"
@@ -204,8 +204,9 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     # the agent's active work, median: wall minutes held the queue, Claude's review and a night
     # before an accept (480 min for a 12-minute task), and a mean let one such row set every
     # ETA and progress check at many times the real length (#543). Rows without it are skipped.
-    times = [r["active_minutes"] for r in real if isinstance(r.get("active_minutes"), (int, float))
-             and not isinstance(r["active_minutes"], bool)]
+    # A step's: a `wb next` chain's row holds every step's minutes, and set beside single tasks
+    # it put a step past "its typical" minutes into its chain (#815), as tuning's reward does
+    times = [t for r in real if (t := tuning._step_minutes(r)) is not None]
     s.minutes, s.minutes_n = (statistics.median(times) if times else None), len(times)
     spent = [spend.weighted(r["claude"]) for r in real if isinstance(r.get("claude"), dict)]
     s.claude, s.claude_n = (statistics.fmean(spent) if spent else None), len(spent)

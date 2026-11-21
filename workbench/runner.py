@@ -759,11 +759,13 @@ def _clock(secs: float) -> str:
 
 
 def active_so_far(task: store.Task, now: float | None = None) -> float:
-    """The task's active work in seconds, as the ETA compares it with the typical length: status
-    `active_s` (the rounds so far, written as each ends) plus the round under way, whole."""
+    """The step's active work in seconds, as the ETA compares it with the typical length (a
+    step's, router.score): status `active_s` (the rounds so far, written as each ends) less
+    `step_active_s` (the earlier steps': wb next, #815) plus the round under way, whole."""
     st, now = task.status, now or time.time()
     running = st.get("round_started_at") if st.get("phase") in ("running", "testing", "asking") else None
-    return float(st.get("active_s") or 0) + (max(0.0, now - running) if running else 0.0)
+    return float(st.get("active_s") or 0) - float(st.get("step_active_s") or 0) + \
+        (max(0.0, now - running) if running else 0.0)
 
 
 def checkin_text(task: store.Task, n: int, out: dict, since: float, active: float | None = None) -> str:
@@ -925,6 +927,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     started = time.time()  # the wall clock, for check-ins: they compare with timestamps in files
     clock = _Clock(time.monotonic())
     prior = float(task.status.get("active_s") or 0)  # earlier rounds' active work
+    # what the ETA and the progress checks compare: this step's alone (#815)
+    step_prior = prior - float(task.status.get("step_active_s") or 0)
     typical = progress.threshold(spec)  # the user's opt-in (#95); off (None), today's timing
     # The think budget starts at the round's first output: until then the model is reading its
     # prompt, which on the CPU or a model spilled into RAM takes many minutes, and a round nudged
@@ -1109,7 +1113,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 nudges = task.status.get("nudges", 0) + 1
                 task.set_status(nudges=nudges)
                 task.notify("checkin", checkin_text(task, n, out, max(started, float(
-                    task.status.get("checkin_at") or 0)), prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
+                    task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
                     f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
                     round=n)
         if out["stuck"]:
@@ -1121,7 +1125,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             break
         every = float(spec.get("checkin") or 0) * 60
         since = max(started, float(task.status.get("checkin_at") or 0))
-        active = prior + clock.ran(mono)
+        active = step_prior + clock.ran(mono)
         if every and now - since >= every and not asking:
             task.set_status(checkin_at=now)
             task.notify("checkin", checkin_text(task, n, out, since, active), round=n)

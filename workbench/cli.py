@@ -1255,7 +1255,10 @@ def cmd_next(a):
     # alone, a step with no changes left the following one with none, and wb verify and wb shot
     # refused it (#652, Claude's and Codex's audits)
     approved = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
+    # the step's own active work and progress checks start here: set against a step's typical
+    # length, the chain's total put step 2 past it in its first minutes (#815)
     advance = dict(round=n, steps=step + 1, step_round=n, reviews=0, step_base=approved,
+                   step_active_s=st.get("active_s") or 0, progress_checks=0,
                    step_sizes=(st.get("step_sizes") or []) + [measured],
                    context="fresh" if a.fresh else None,
                    auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),

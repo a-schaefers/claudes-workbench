@@ -13487,6 +13487,35 @@ class Progress(Base):
         line = transcript.clock_line(task, now)
         self.assertIn("~6m00s left (typically 12m)", line)                 # 12 less 5 + 1 active
 
+    def test_a_wb_next_step_is_timed_against_a_typical_step_not_its_whole_chain(self):
+        # #815: the typical length mixed whole chains with single tasks, and wb next left the
+        # chain's active work in place, so two minutes into step 2 read "past its typical 12m"
+        from workbench import router, transcript
+        model = "ollama/mimo-v2.6:9b-q8_0"
+        for _ in range(3):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": model, "size": "small", "outcome": "accepted", "active_minutes": 12})
+            store.append_jsonl(store.home() / "results.jsonl", {   # a 4-step chain of 12-min steps
+                "model": model, "size": "small", "outcome": "accepted", "active_minutes": 48,
+                "steps": [{}, {}, {}, {}]})
+        self.assertEqual(router.expected_minutes(model, "small"), 12)       # not 30
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        task = store.Task("t")
+        task.set_status(active_s=600, progress_checks=2)                  # step 1: 10 min, 2 checks
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("next", "t", "--spec", str(self.spec), "-m", "feat: step one")
+        st = wait_phase("t", {"review"})
+        self.assertEqual((st["step_active_s"], st["progress_checks"]), (600, 0))
+        now = time.time()
+        task.set_status(phase="running", active_s=st["active_s"] + 60, round_started_at=now - 60)
+        store.write_json(task.dir / "task.json", {**task.spec, "size": "small", "model": model})
+        ran = task.status["active_s"] - 600 + 60                           # step 2's work alone
+        line = transcript.clock_line(task, now)
+        self.assertIn("left (typically 12m)", line)
+        from workbench import runner
+        self.assertAlmostEqual(runner.active_so_far(task, now), ran, delta=2)
+
     def test_with_too_few_timed_tasks_the_first_check_comes_at_the_sizes_default_then_spaced_out(self):
         # #724: with no history the checks never came though `wb progress on` said they would,
         # and one 1.5-minute task made the threshold 1.5 minutes: a check every 1.5 minutes

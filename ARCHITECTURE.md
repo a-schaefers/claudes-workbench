@@ -1081,7 +1081,7 @@ are dropped silently.
 
 **Check-ins** (`checkin_text`), every `checkin` minutes of a round (not while asking): `task X ·
 label · round n · running <time> · ~Xm left (typically Nm)` (the typical length and the time so
-far both active work, *Progress checks*), then since the last check-in: tools
+far both the step's active work, *Progress checks*), then since the last check-in: tools
 used and failed, tokens read and written, `now:` the last action, the agent's latest words (400
 characters), the files changed so far, and a NOTE naming changed files the spec never mentions
 (`outside_spec`: a changed path or its basename that the step's prompt doesn't contain; silent
@@ -2027,12 +2027,17 @@ each dropped a `--after 30`, #578) until `--after` is given again; `--after 0` c
 default, nothing below runs and the timing is the check-ins'.
 - **Active work.** Each round adds its time, less Claude's answers and a frozen machine
   (`_Clock.ran`), to status `active_s`, on or off. Waiting for the GPU happens before a round,
-  so it never counts. The results row carries `active_minutes`.
+  so it never counts. The results row carries `active_minutes`. All of it is per step: `wb next`
+  records the active work so far as status `step_active_s` and sets `progress_checks` back to 0,
+  so the checks and the ETA count the current step's work alone (`runner.active_so_far`), against
+  a typical step's (#815: set against a chain's total, step 2 read "past its typical 12m" two
+  minutes in, and woke Claude for a step going normally).
 - **The check.** It fires when active work passes the threshold, then twice it, four times it
   and so on, once each (`progress.due`, `progress.passed`, status `progress_checks`: the points
   passed), and never while asking. The threshold is `--after`, else the typical length for the
   task's size and model (`progress.typical`, `progress.threshold`): the median of their
-  `active_minutes` (`router.expected`, active against active, #543) once `TYPICAL_MIN` (3) of them
+  `active_minutes` a step (`active_minutes` / `steps`, `tuning._step_minutes`; `router.expected`,
+  active against active, #543, #815) once `TYPICAL_MIN` (3) of them
   are timed, at least `FLOOR_MIN` (10) minutes; until then the size's `DEFAULT_MIN` (20 minutes
   trivial, 45 significant), which the check's text calls the default. With no history the checks
   never came though `wb progress on` said they would, and one 1.5-minute task made every whole
@@ -2566,9 +2571,9 @@ clock line:
   the same `live.state`.
 - *Clock:* `⏲ task T · round N t · model load t`, then while it runs (queued, running, testing, asking) the ETA (`~X left (typically
   Nm)`, `X past its typical Nm`, or no ETA yet; typical is `router.expected_minutes`, the median
-  active minutes of this model's judged results of this size (rows without `active_minutes`
-  skipped), against the task's active work so far (`runner.active_so_far`: status `active_s` plus
-  the round under way): a mean of wall minutes held queues, reviews and nights before an accept,
+  active minutes a step of this model's judged results of this size (rows without `active_minutes`
+  skipped; a chain's divided by its steps, #815), against the step's active work so far
+  (`runner.active_so_far`: status `active_s` less `step_active_s`, plus the round under way): a mean of wall minutes held queues, reviews and nights before an accept,
   108 minutes for a 12-minute task, #543), `context U of WK (P%)` and tokens written.
 
 A header first: the model line (label, reasoning effort, variant, context), repo, branch, test
@@ -6476,7 +6481,8 @@ check-ins off), not `wb start`'s.
 | `peak_share` | the fullest any of its sessions got, a share of the window (`runner.peak`: each `step_finish`, and each session export's last message), so the row says whether `fresh_at` could act (#721) |
 | `steer_taken`, `nudges`, `nudged_round`, `checkin_at` | notes delivered; nudges sent; the round that ended in one; the last check-in |
 | `active_s` | the agent's active work so far, in seconds: rounds less answers and a frozen machine (*Progress checks*) |
-| `progress_checks`, `progress_mark`, `progress_open`, `interventions` | progress checks raised; the worktree's mark at the last; a check not yet answered; the steers that answered one, `[{kind, ts, round, step}]` |
+| `step_active_s` | `active_s` when `wb next` started the current step: the ETA and the progress checks count the step's work from it (#815) |
+| `progress_checks`, `progress_mark`, `progress_open`, `interventions` | progress checks raised (this step's: `wb next` sets it to 0); the worktree's mark at the last; a check not yet answered; the steers that answered one, `[{kind, ts, round, step}]` |
 | `skills`, `skills_ever`, `skills_rev`, `skills_told` | the handed set; every skill held; the library rev of each; what this session was told |
 | `asking`, `agent_pid` | the oldest open question's id; the agent's pid while a round runs (cleared by `_end_agent`, or `reap`) |
 | `tip` | the branch's tip at `wb accept` (or `wb gc`, for a branch merged before): `gitops.step_commit` and `_landed` read it once the merged branch is deleted; accept also points `refs/workbench/accepted/<task>` (`gitops.ACCEPTED_REF`) at it in the repo, so git's gc keeps every step's commit (#649), until a branch holds it or each step has its bench case (#799) |
