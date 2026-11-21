@@ -113,15 +113,20 @@ def _server(e: dict, values: dict) -> None:
     Path(values["out"]).write_bytes(raw)
 
 
-def _unload(e: dict, say) -> None:
-    """A server engine keeps its model in GPU memory while it runs; one with an unload URL
-    (audio.cpp's /v1/tasks/unload_all_models) is asked to let it go after the batch."""
-    if not e.get("unload"):
-        return
-    try:
-        media.post(e, e["unload"], b"{}", "application/json", 30, config_path().parent)
-    except (OSError, RuntimeError) as err:
-        say(f"couldn't unload the audio server ({e['unload']}: {err}); it may still hold GPU memory")
+def _unload(used: list[dict], say) -> None:
+    """A server engine keeps its model in GPU memory while it runs; each the batch used with an
+    unload URL (audio.cpp's /v1/tasks/unload_all_models) is asked to let it go after the batch,
+    the listener too (only the maker was, so a GPU listener kept its VRAM after the lease was
+    let go: #594), each URL once."""
+    done = set()
+    for e in used:
+        if not e.get("unload") or e["unload"] in done:
+            continue
+        done.add(e["unload"])
+        try:
+            media.post(e, e["unload"], b"{}", "application/json", 30, config_path().parent)
+        except (OSError, RuntimeError) as err:
+            say(f"couldn't unload the audio server ({e['unload']}: {err}); it may still hold GPU memory")
 
 
 def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
@@ -194,8 +199,8 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
                 say(f"{out}  ({secs} s)\n  {summary(found, seconds)}"
                     + (f"\n  spectrogram: {out.with_suffix('.png')}" if out.with_suffix(".png").is_file() else ""))
                 made.append(out)
-        finally:
-            _unload(e, say)
+        finally:  # inside the lease: the next task loads beside nothing
+            _unload([e, *([ear[1]] if ear else [])], say)
     return made
 
 

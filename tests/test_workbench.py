@@ -7278,6 +7278,56 @@ class Audio(Base):
             with _wave.open(str(clip)) as w:
                 self.assertEqual(w.getnframes(), 800 * len(side["text"]))   # its own take
 
+    def test_the_listeners_unload_url_is_called_too_once_per_url_even_when_the_batch_fails(self):
+        # #594 (Codex's audit of 1.8 → 1.90): only the maker's unload URL was POSTed, so a GPU
+        # listener kept its weights after the batch let the GPU lease go
+        import threading
+        import wave as _wave
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        buf = io.BytesIO()
+        with _wave.open(buf, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\x00\x30" * 8000)
+        got, fail_after = [], [99]
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(404); self.end_headers()
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                got.append(self.path)
+                if self.path == "/v1/speech" and got.count(self.path) > fail_after[0]:
+                    self.send_response(500); self.end_headers(); return
+                reply = (buf.getvalue() if self.path == "/v1/speech" else
+                         b'{"text": "hello world"}' if self.path == "/v1/listen" else b"{}")
+                self.send_response(200); self.end_headers(); self.wfile.write(reply)
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        root, tmp = f"http://127.0.0.1:{srv.server_port}", Path(self.tmp.name)
+        both = {"tts": {"url": root + "/v1/speech", "unload": root + "/v1/unload-maker", "gpu": False},
+                "ear": {"kind": "listen", "url": root + "/v1/listen", "unload": root + "/v1/unload-ear",
+                        "gpu": False}}
+        self.engines(both)
+        audio.generate("hello world", tmp / "o", n=1, seed=1, say=lambda m: None)
+        self.assertEqual(got, ["/v1/speech", "/v1/listen", "/v1/unload-maker", "/v1/unload-ear"])
+        got.clear()
+        fail_after[0] = 1                       # the second take fails mid-batch
+        with self.assertRaises(RuntimeError):
+            audio.generate("hello world", tmp / "o", n=2, seed=1, say=lambda m: None)
+        self.assertEqual(got[-2:], ["/v1/unload-maker", "/v1/unload-ear"])
+        got.clear()
+        fail_after[0] = 99
+        both["ear"]["unload"] = both["tts"]["unload"]   # one server playing both roles
+        self.engines(both)
+        audio.generate("hello world", tmp / "o", n=1, seed=1, say=lambda m: None)
+        self.assertEqual(got.count("/v1/unload-maker"), 1)
+        self.assertNotIn("/v1/unload-ear", got)
+
     def test_a_server_engine_a_server_listener_and_the_unload_after_the_batch(self):
         import threading
         import wave as _wave

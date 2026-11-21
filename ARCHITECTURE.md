@@ -3567,7 +3567,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
 - A **url** engine is any OpenAI `/v1/audio/speech` server (audio.cpp's `audiocpp_server`,
   Kokoro-FastAPI, Speaches). It makes speech only, since sound effects and music have no common
   API. `unload` is POSTed after each batch so the server lets its GPU memory go (audio.cpp's
-  `/v1/tasks/unload_all_models`), which a url image engine can't do. `key` is sent as a Bearer
+  `/v1/tasks/unload_all_models`), which a url image engine can't do. A listener's `unload` is
+  POSTed too, each URL once (only the maker's was, so a GPU listener kept its weights after the
+  lease was let go: #594). `key` is sent as a Bearer
   token, as for images, to the speech, transcription and unload URLs alike; an error status
   says what the server said (`media.post`, #597).
 - A **listen** engine prints its transcript on stdout (`{in}` is the clip; JSON with `text`, and
@@ -3593,7 +3595,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   Each clip is made in a temporary directory (`.wb-audio-*`), checked there (`inspect`), then
   published with its sidecar and spectrogram under the first free `<slug>-<seed>.wav`
   (`media.free`, #267). A url engine POSTs `{model, input, voice, seed, response_format: "wav"}`
-  and saves the body. The `unload` URL is POSTed when the batch ends, whether it failed or not.
+  and saves the body. The `unload` URLs of the engine and the listener it used are POSTed
+  (`_unload`, each distinct URL once) when the batch ends, inside the lease, whether it failed or
+  not.
 - `inspect`: with ffmpeg, it makes a 16-bit PCM copy first at the clip's own rate and channels
   (the `wave` module reads only integer PCM), measures loudness with `ebur128` and draws the
   picture with `showspectrumpic`; the listener alone gets a 16 kHz mono copy. Without ffmpeg it
