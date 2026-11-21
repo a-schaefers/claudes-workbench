@@ -117,6 +117,23 @@ def free_bytes(path: Path | None = None) -> int | None:
     return st.f_bavail * st.f_frsize
 
 
+def noexec(path: Path | None = None) -> bool:
+    """Whether the state directory (or ``path``) is on a noexec mount (Linux's statvfs flag): the
+    agent's git shim, the worktree's own ./gradlew, node_modules/.bin and .venv/bin and the scratch
+    checkouts' built test binaries all live there, and each exec failed with EACCES that read as a
+    lane or project failure, while wb doctor called the directory fine (#851)."""
+    flag = getattr(os, "ST_NOEXEC", None)
+    if flag is None:  # macOS's statvfs carries no such flag
+        return False
+    p = Path(path or home())
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        return bool(os.statvfs(p).f_flag & flag)
+    except OSError:
+        return False
+
+
 def dir_size(path: Path, budget: float | None = None) -> tuple[int, bool]:
     """Bytes under ``path`` (links not followed, a hard-linked file once) and whether the count
     is whole: with a ``budget`` in seconds it stops there, a lower bound. A file is its own size:

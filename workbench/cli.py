@@ -827,6 +827,13 @@ def history_held(budget: float = 2) -> str:
     return "; ".join(parts)
 
 
+def noexec_line() -> str:
+    """wb start's refusal and wb doctor's BAD line for a state directory on a noexec mount (#851)."""
+    return (f"the state directory {store.home()} is on a noexec mount: the agent's git shim and the "
+            "worktree's own programs (./gradlew, node_modules/.bin, .venv/bin, built tests) can't run "
+            "there; set WB_HOME to a directory on a mount that allows exec, or remount it exec")
+
+
 def _disk_room(repo: Path, base: str, setup: dict) -> int | None:
     """Refuse a task the disk has no room for: a full one mid-round failed every status write.
     The checkouts the open tasks' runners haven't made yet count as taken: since the runner makes
@@ -900,6 +907,8 @@ def cmd_start(a):
     if (have := runner.opencode_version()) and have < (2, 0):
         die(f"OpenCode {have[0]}.{have[1]} can't run tasks: workbench needs OpenCode 2.x: "
             f"{runner.OPENCODE_GET}", 3)
+    if store.noexec():  # every git call the agent makes would exit 126 (#851)
+        die(noexec_line())
     # the package first: its stack is the task's, not the whole monorepo's (#820). Read again
     # below, after the base is checked; a base that names no commit finds none here
     stack = gitops.stack(repo, _package(repo, Path(a.repo).resolve(), a.base))
@@ -4823,6 +4832,8 @@ def cmd_doctor(a):
     except OSError as e:
         why = f"can't make it: {e.strerror or e}"
     line(not why, f"state dir {store.home()}" + (f": {why}" if why else ""))
+    if not why and store.noexec():  # os.access passes a noexec directory: search is allowed (#851)
+        line(False, noexec_line())
     if not why and (fs := store.network_fs(os.path.realpath(store.home()))):  # #849
         print(f"--  the state dir is on {fs}: every machine sharing it lists its tasks; each one "
               "runs, reaps and stops only its own, and takes the GPU under its own lease")

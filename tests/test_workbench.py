@@ -4347,6 +4347,26 @@ class StartChecks(Base):
         self.assertIn("opencode upgrade --major", runner.OPENCODE_GET)
         self.assertIn(runner.OPENCODE_GET, "\n".join(cli.first_run()))
 
+    @unittest.skipUnless(hasattr(os, "ST_NOEXEC"), "statvfs has no noexec flag here (macOS)")
+    def test_a_state_dir_on_a_noexec_mount_is_refused_by_start_and_named_by_doctor(self):
+        # #851: the git shim and the worktree's own programs live under WB_HOME, so on a noexec
+        # mount every exec failed with EACCES, and doctor's os.access check called the dir fine
+        with mock.patch.object(store.os, "statvfs", return_value=types.SimpleNamespace(f_flag=os.ST_NOEXEC)):
+            self.assertTrue(store.noexec())
+        with mock.patch.object(store.os, "statvfs", return_value=types.SimpleNamespace(f_flag=os.ST_NOSUID)):
+            self.assertFalse(store.noexec())
+        self.assertFalse(store.noexec())                    # the test's own temp directory
+        err = io.StringIO()
+        with mock.patch.object(store, "noexec", return_value=True):
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                self.start("t-noexec", "ok")
+            self.assertFalse(store.Task("t-noexec").exists)
+            self.assertIn(f"the state directory {store.home()} is on a noexec mount", err.getvalue())
+            buf = io.StringIO()
+            with redirect_stdout(buf), contextlib.suppress(SystemExit):
+                cli.main(["doctor"])
+            self.assertRegex(buf.getvalue(), r"BAD +the state directory .* is on a noexec mount")
+
     def test_start_says_when_the_fixed_prompt_takes_much_of_the_window(self):
         # the 2026-11-19 audit (finding 27): a 25 KB CLAUDE.md on a 32K window started the agent
         # near its handover point
