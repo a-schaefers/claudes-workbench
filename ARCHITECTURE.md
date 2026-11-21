@@ -4778,7 +4778,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   `color.diff`, `color.status`, `color.branch`, which outrank it), `-c core.quotePath=false` and
   `-c log.showSignature=false` (with signed commits it put "No signature" ahead of the hash a `git
   log --format=%h` was read for, and a finished `wb accept` exited 1; the skill library's git
-  runs with it too),
+  runs with it too) and `-c submodule.recurse=false` (with it true, a sparse worktree's `read-tree
+  -mu HEAD` tried to reset a submodule the new worktree has no git dir for, and no task could start:
+  #888; `fill_submodules` fills them),
   diffs with `--no-ext-diff --no-color`, and the changed files come from `status --porcelain`: the
   user's `diff.external`, colours, `status.branch` or quoted non-ASCII names once turned the review
   diff and the changed-files list into something else (the 2026-11-16 audit). Output is decoded as

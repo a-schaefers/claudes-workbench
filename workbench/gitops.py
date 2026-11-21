@@ -37,9 +37,12 @@ C_LOCALE = {"LC_ALL": "C", "LANGUAGE": ""}  # git's messages in English, to be m
 # codes in the changed-files list, and core.quotePath escaped every non-ASCII file name.
 # (color.diff/status/branch=always outrank color.ui, so each is named.) log.showSignature put
 # "No signature" ahead of the hash a `git log --format=%h` was read for, and a finished wb accept
-# died on it (the audit).
+# died on it (the audit). submodule.recurse=true made a sparse worktree's `read-tree -mu HEAD`
+# reset a submodule the new worktree has no git dir for, so no task could start there (#888, the
+# third 2026-11-21 audit): none of our checkouts, resets or merges recurse, fill_submodules fills them.
 PLAIN = ("-c", "color.ui=never", "-c", "color.diff=never", "-c", "color.status=never",
-         "-c", "color.branch=never", "-c", "core.quotePath=false", "-c", "log.showSignature=false")
+         "-c", "color.branch=never", "-c", "core.quotePath=false", "-c", "log.showSignature=false",
+         "-c", "submodule.recurse=false")
 
 
 # No git hook runs from workbench in a task's worktree: with a relative core.hooksPath (husky's

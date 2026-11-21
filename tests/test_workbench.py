@@ -15765,6 +15765,33 @@ class Projects(Base):
         self.assertIn("note: submodules (vendor/lib) are empty", self.start("t-sub2", "ok"))
         wait_phase("t-sub2", {"review"})
 
+    def test_a_sparse_worktree_is_made_with_the_users_submodule_recurse_on(self):
+        # #888 (the third 2026-11-21 audit, reproduced): with submodule.recurse=true, the sparse
+        # worktree's `read-tree -mu HEAD` reset a submodule it had no git dir for and exited 128,
+        # so no task could start in that repo
+        lib, conf = Path(self.tmp.name) / "lib", Path(self.tmp.name) / "recurse.gitconfig"
+        conf.write_text("[user]\n\tname = t\n\temail = t@t\n[submodule]\n\trecurse = true\n")
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        (lib / "lib.c").write_text("int x;\n")
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        (self.repo / "app").mkdir()
+        (self.repo / "app" / "f.txt").write_text("app")
+        g("add", "app")
+        g("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
+        g("commit", "-qm", "an app and a submodule")
+        g("sparse-checkout", "set", "--no-cone", "/app/", "/vendor/")
+        wt = Path(self.tmp.name) / "wt-recurse"
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(conf)}):
+            gitops.create_worktree(self.repo, "t-recurse", wt)
+            self.assertEqual(gitops.fill_submodules(self.repo, gitops.git(wt, "rev-parse", "HEAD")
+                                                    .strip(), wt), [])
+        self.assertTrue((wt / "app" / "f.txt").exists())
+        self.assertEqual((wt / "vendor" / "lib" / "lib.c").read_text(), "int x;\n")
+
     def test_a_submodule_at_a_path_with_a_space_is_filled_by_its_real_path(self):
         # #791 (the second 2026-11-21 audit): `submodule.my lib.path my lib` split at its first
         # space read as `lib.path my lib`: never filled, and wb start named a path not there
