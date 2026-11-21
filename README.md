@@ -46,7 +46,8 @@ model typically costs Claude about half the tokens of writing the code itself
 ### What you need
 
 - [Claude Code](https://claude.com/claude-code), with a Claude subscription or an API key
-- [OpenCode](https://opencode.ai) 2.3 or newer
+- [OpenCode](https://opencode.ai) 2.3 or newer: `curl -fsSL https://opencode.ai/v2/install | bash`
+  (or `opencode upgrade --major` from 1.x; npm's `opencode-ai` and GitHub's Latest release are 1.x)
 - Git 2.34 and Python 3.11 or newer, on Linux, macOS, or Windows through WSL2
 - A local model. **Already run a server** that speaks the OpenAI API? Claude uses it (tool calls
   and a 32K context window recommended, 16K at the least). **None yet?** Claude suggests one that fits your hardware and

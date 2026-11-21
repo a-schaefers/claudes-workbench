@@ -799,8 +799,13 @@ def cmd_start(a):
     lane_dirs = [_lane_dir(p, guard) for p in a.allow_path or []]
     if not shutil.which(exe := runner.opencode_bin()[0]):  # else the runner emptied the GPU, then
         # the round died as "opencode exited 1" (the 2026-11-16 audit)
-        die(f"{exe} isn't on PATH: install OpenCode (https://opencode.ai), or put it on the PATH "
-            "Claude Code runs wb with; wb doctor checks the setup")
+        die(f"{exe} isn't on PATH: install OpenCode 2.x ({runner.OPENCODE_GET}), or put it on the "
+            "PATH Claude Code runs wb with; wb doctor checks the setup")
+    # before anything is written: 1.x has no `run --standalone --auto` nor the layer's config
+    # shape, so every round died as "opencode exited 1" after the GPU was emptied (#654)
+    if (have := runner.opencode_version()) and have < (2, 0):
+        die(f"OpenCode {have[0]}.{have[1]} can't run tasks: workbench needs OpenCode 2.x: "
+            f"{runner.OPENCODE_GET}", 3)
     stack = gitops.stack(repo)
     m, state, why = pick_model(a.size, a.model, stack, a.name)
     if not state["available"] and not a.force:
@@ -3924,10 +3929,9 @@ def first_run() -> list[str]:
     good, said = _tool_version(runner.opencode_bin())
     major = re.search(r"(\d+)\.\d+", said) if good else None
     if not good:
-        out.append("--  OpenCode isn't installed: install OpenCode 2.x from https://opencode.ai "
-                   "(its own instructions)")
+        out.append(f"--  OpenCode isn't installed: install OpenCode 2.x: {runner.OPENCODE_GET}")
     elif major and int(major[1]) < 2:
-        out.append(f"--  opencode {said}: workbench needs OpenCode 2.x; upgrade it")
+        out.append(f"--  opencode {said}: workbench needs OpenCode 2.x: {runner.OPENCODE_GET}")
     else:
         out.append(f"ok  {said if said.lower().startswith('opencode') else 'opencode ' + said}")
     try:
@@ -4220,7 +4224,9 @@ def cmd_doctor(a):
     else:  # the config layer and `run --standalone --auto` are 2.x only (the 2026-11-16 audit)
         old = bool(major) and int(major[1]) < 2
         line(good and not old, f"opencode {said}"
-             + (": workbench needs OpenCode 2.x (checked against 2.3); upgrade it" if old else ""))
+             + (f": workbench needs OpenCode 2.x (checked against 2.3): {runner.OPENCODE_GET}"
+                if old else "")
+             + ("" if good else f": install OpenCode 2.x: {runner.OPENCODE_GET}"))
         if good and not old and (drift := runner.untested(runner.opencode_version())):
             print(f"--  {drift}")
     files = models.opencode_config_files()

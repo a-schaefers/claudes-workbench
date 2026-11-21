@@ -80,6 +80,12 @@ def opencode_bin() -> list[str]:
 # audit). Move it when the real-OpenCode tests pass on a newer one.
 OPENCODE_TESTED = ((2, 3), (3, 0))
 
+# How to get 2.x, said wherever wb finds it missing or older (#654): opencode.ai/install, npm's
+# opencode-ai and GitHub's "Latest" release are the 1.x line, so "upgrade it" led back to 1.x.
+# Checked against OpenCode's installers, 2026-11-21: /install refuses 2.x and names these two.
+OPENCODE_GET = ("curl -fsSL https://opencode.ai/v2/install | bash (on 1.x: opencode upgrade --major; "
+                "npm's opencode-ai and GitHub's Latest release are 1.x)")
+
 
 def opencode_version() -> tuple[int, int] | None:
     """OpenCode's major and minor version, or None when it doesn't run or say."""

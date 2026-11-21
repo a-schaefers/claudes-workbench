@@ -3952,6 +3952,18 @@ class StartChecks(Base):
         self.assertTrue(runner.untested((2, 2)))
         self.assertEqual(runner.untested((2, 9)), "")
 
+    def test_start_refuses_opencode_1x_before_writing_the_task_and_says_how_to_get_2x(self):
+        # #654: 1.x got only a "watch its first rounds" note; the runner then emptied the GPU and
+        # every round died as "opencode exited 1"
+        os.environ["FAKE_VERSION"] = "opencode v1.9.0"
+        with self.assertRaises(SystemExit) as e:
+            self.start("t-old", "ok")
+        self.assertEqual(e.exception.code, 3)
+        self.assertFalse(store.Task("t-old").exists)
+        self.assertIn("opencode.ai/v2/install", runner.OPENCODE_GET)
+        self.assertIn("opencode upgrade --major", runner.OPENCODE_GET)
+        self.assertIn(runner.OPENCODE_GET, "\n".join(cli.first_run()))
+
     def test_start_says_when_the_fixed_prompt_takes_much_of_the_window(self):
         # the 2026-11-19 audit (finding 27): a 25 KB CLAUDE.md on a 32K window started the agent
         # near its handover point
