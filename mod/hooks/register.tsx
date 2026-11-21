@@ -52,8 +52,13 @@ const SCOUT_NOTE =
   '`wb model sizes <id> …` if it should only take some task sizes, and ' +
   '`wb model retire <id> [--delete]` for what it replaces. Installed models that are not ' +
   'registered may belong to other tools: ask first.\n' +
-  '5. The skill library: rewrite or retire (`wb skill retire`) what `wb scout` flags.\n' +
-  '6. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
+  '5. The audio and image engines `wb scout` lists, if any (speech, sound effects, music, the ' +
+  'listener; images): check each model\'s licence today against its licence text, not its tag ' +
+  '(licences change: one audio model went non-commercial mid-2026), and whether a newer local ' +
+  'model of that kind fits this machine better. Recommend keep / add / retire as for the coding ' +
+  'models; keep each engine\'s `notes` (its licence) true.\n' +
+  '6. The skill library: rewrite or retire (`wb skill retire`) what `wb scout` flags.\n' +
+  '7. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
   'Keep it short; if nothing is worth changing, say so in one line.'
 // Workbench mode: /workbench turns it on for the rest of the session and opens the pane, its sign.
 // The user then asks for things in plain words, and Claude hands the coding to local agents as

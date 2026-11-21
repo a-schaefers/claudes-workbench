@@ -5646,6 +5646,31 @@ class Audio(Base):
         self.assertIn("a server", run_wb("audio", "--list"))
 
 
+    def test_scout_lists_the_audio_engines_what_they_cover_and_a_licence_never_noted(self):
+        # #398: the weekly model check re-checks the audio picks and their licences (one went
+        # non-commercial mid-2026), so scout says what each engine is, what has none, and which
+        # engine's licence was never written down
+        tone = self.tone()
+        self.engines({"tts": {"command": f"{sys.executable} {tone} --out {{out}}", "gpu": False,
+                              "notes": "licence: Apache-2.0"},
+                      "fx": {"kind": "sfx", "command": f"{sys.executable} {tone} --out {{out}}"}})
+        out = run_wb("scout")
+        section = out[out.index("audio engines (wb audio)"):]
+        self.assertIn("tts (speech, CPU)", section)
+        self.assertIn("licence: Apache-2.0", section)
+        self.assertIn("fx (sfx)", section)
+        self.assertIn("licence: not noted (check it, then put it in notes)", section)
+        self.assertIn("covers speech: tts; sfx: fx; none for music", section)
+        self.assertIn("no listener: speech takes go unchecked", section)
+        self.engines({"tts": {"command": f"{sys.executable} {tone} --out {{out}}", "notes": "x"},
+                      "ear": {"kind": "listen", "command": f"{sys.executable} {tone} {{in}}", "notes": "y"}})
+        section = run_wb("scout")
+        self.assertIn("covers speech: tts; listen: ear; none for sfx, music", section)
+        self.assertNotIn("no listener", section)
+        self.assertNotIn("not noted", section)
+        self.engines({})
+        self.assertIn("none: describe one in", run_wb("scout"))
+
 class Discovery(Base):
     def test_local_providers_only_with_overrides(self):
         from workbench import models

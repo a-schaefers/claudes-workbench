@@ -2525,7 +2525,10 @@ no local model can run. `wb scout` prints the facts, read fresh: the machine (`h
 Ollama's default context, every registered model (size, quantization, context, slice, real-task
 record), installed models that aren't registered, the watch list (`watch.json`: models set aside
 and what would bring each back; `--watch TEXT`, `--unwatch N`), flagged skills, waiting lessons,
-image and audio engines (their licences change too: OmniVoice went non-commercial in 2026-07). Claude researches what's newest from primary sources, recommends keep / add /
+image and audio engines (their licences change too: OmniVoice went non-commercial in 2026-07;
+each engine with no `notes` says "licence: not noted", and `audio.coverage` adds a line of what
+the audio engines cover: each kind's engines, the kinds with none, and speech with no listener,
+#398). Claude researches what's newest from primary sources, recommends keep / add /
 retire in a few lines and changes nothing without the user's yes; `wb scout --done --notes "…"`
 records it (`scout.json` `done_at`, notes). `--due` says whether one is due.
 
@@ -3033,9 +3036,9 @@ and the skill says which judgements stay the user's:
 Taste (a song, a voice's character) is the user's: Claude shortlists on the checks and asks the
 user to listen. The keeper goes into the project, converted with ffmpeg as the project needs, and
 is committed with what its `.json` sidecar says made it, like an image. The coding agents can't
-make audio; one that needs a sound asks Claude. Still to come (milestone 1.90.1): a player in the web
-chat so the user can pick by ear (#397), and the weekly model check re-checking the audio picks
-(#398).
+make audio; one that needs a sound asks Claude. The weekly model check re-checks the audio picks
+and their licences like the coding models (#398). Still to come (milestone 1.90.1): a player in
+the web chat so the user can pick by ear (#397).
 
 **Setting it up is optional.** Claude offers it the first time a project needs a sound and never
 installs anything unasked (the skill's `reference/audio.md`). The recommended runtime is
@@ -3153,6 +3156,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
 - The line reads `3.4 s (asked 3) · peak -1.2 dBFS · -16 LUFS · lead 0.1 s, tail 0.3 s · gaps … ·
   heard "…" WER 30% (twenty twenty six → 2026)`, then the spectrogram's path. Under 80% of the asked length it adds "cut
   short".
+- `lines()` (`wb audio --list`, `wb scout`) shows each engine's kind, whether it's ready, its
+  voices and its `notes`, or "licence: not noted" when it has none; `coverage()` is scout's line
+  of what the engines cover (#398: the weekly check re-checks audio picks and their licences).
 - The sidecar: `{text, kind, seed, seconds, voice, lyrics, refs, engine, secs, ts, duration,
   peak_db, clipped, lead, tail, gaps, silent?, lufs?, transcript?, wer?, differences?, listener?,
   listen_error?, unreadable?}`. `--out` defaults to `$WB_HOME/audio/<YYYYmmdd-HHMMSS>/`.
@@ -4142,7 +4148,8 @@ a minute after a main-loop turn (`SCOUT_QUIET_MS`: raised the moment a turn ende
 Claude's question to the user), no task open, once per
 load: when scout.json's `done_at` is 7+ days old and `offered_at` 1+ day old, it writes
 `offered_at` and submits SCOUT_NOTE (`wb scout`, research, recommend keep/add/retire, change
-nothing without a yes, `wb scout --done --notes`).
+nothing without a yes; the audio and image engines too, each model's licence checked against
+its text today and its `notes` kept true, #398; then `wb scout --done --notes`).
 
 **The weekly update check**: after the first main-loop turn of a load once wb runs, once, beside
 the poll rather than in it (a stalled fetch held every wake), `wb update --check
@@ -4291,7 +4298,8 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL. `--remove` undoes it; not while OpenCode's default model is one of them, nor for a provider wb didn't add or that now points elsewhere. |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). |
-| `wb scout` | `--done [--notes "…"]`, `--due`, `--watch "…"`, `--unwatch N` | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
+| `wb scout` | `--done [--notes "…"]`, `--due`, `--watch "…"`, `--unwatch N` | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it); the image and audio engines (`audio.coverage`: what
+the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill with its history, the scan alone. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…` | Check, scan, copy, commit. |
 | `wb skill patch <n> --old … --new … -m "…"` | `--old-file`, `--new-file`, `--lesson` | An exact, unique replacement, then as add. |

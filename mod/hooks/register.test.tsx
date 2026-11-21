@@ -946,6 +946,9 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
   expect(asked.length).toBe(1)
   expect(asked[0]).toContain('The weekly model check is due')
   expect(asked[0]).toContain('`wb scout`')
+  // the audio engines too, licences first: they change (#398)
+  expect(asked[0]).toContain('audio and image engines')
+  expect(asked[0]).toContain('licence today against its licence text')
   expect(JSON.parse(files['/wb/scout.json']).offered_at).toBeGreaterThan(1_800_000_000)  // raised: not again today
 
   await clock.advance(10_000)

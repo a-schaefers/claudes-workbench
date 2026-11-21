@@ -2340,6 +2340,8 @@ def cmd_scout(a):
     print("\n".join(image_lines()) or f"  none: describe one in {images.config_path()}")
     print("\naudio engines (wb audio)")
     print("\n".join(audio.lines()) or f"  none: describe one in {audio.config_path()}")
+    if said := audio.coverage():
+        print(said)
     provs = models.providers()
     registered = models.discover()
     print("\nmodel servers here (work with what the user runs)")
