@@ -13124,13 +13124,44 @@ class Update(Base):
         (self.copy / "README.md").write_text("mine")
         self.assertIn("uncommitted changes", self.update())
         subprocess.run(["git", "-C", str(self.copy), "checkout", "-q", "README.md"], check=True)
-        with mock.patch.object(store, "all_tasks", lambda: [types.SimpleNamespace(name="t-up")]), \
+        with mock.patch.object(store, "all_tasks", lambda: [types.SimpleNamespace(name="t-up", spec={})]), \
                 mock.patch.object(cli, "runner_alive", lambda t: True):
-            self.assertIn("tasks are running (t-up)", self.update())
+            self.assertIn("tasks are running (t-up (no session))", self.update())
         out = self.update()
         self.assertIn("updated clone", out)
         self.assertTrue((self.copy / "new.txt").exists())
         self.assertIn("up to date", self.update("--check"))
+
+
+    def test_update_stop_tells_each_tasks_own_session_to_resume_it_instead_of_parking_it(self):
+        # #694: the refusal advised an unscoped `wb stop --all`, which parked another live
+        # session's agents and acknowledged their news: that Claude waited for a wake that never came
+        os.environ.update(CLAUDE_CODE_SESSION_ID="sess-b")
+        self.start("t-theirs", "hang")
+        running("t-theirs")
+        os.environ.update(CLAUDE_CODE_SESSION_ID="sess-a")
+        self.start("t-ours", "hang", "--queue")
+        out = self.update()
+        self.assertIn("t-ours (this session's)", out)
+        self.assertIn(f"t-theirs (session sess-b in {os.getcwd()})", out)
+        self.assertIn("wb update --stop", out)
+        self.assertFalse((self.copy / "new.txt").exists())             # nothing pulled
+        before = len(store.read_jsonl(store.home() / "notify.jsonl")[0])
+        out = self.update("--stop")
+        self.assertIn("stopped for the update: ", out)
+        self.assertNotIn("tasks are running", out)                     # and on to the update
+        rows = store.read_jsonl(store.home() / "notify.jsonl")[0][before:]
+        self.assertEqual(sorted((r["task"], r["kind"], tuple(r["tasks"])) for r in rows),
+                         [("t-ours", "stuck", ("t-ours",)), ("t-theirs", "stuck", ("t-theirs",))])
+        self.assertIn("wb resume t-theirs continues it", next(r for r in rows if r["task"] == "t-theirs")["text"])
+        for name in ("t-ours", "t-theirs"):
+            t = store.Task(name)
+            self.assertFalse(cli.runner_alive(t))
+            self.assertEqual((t.status["phase"], t.status["last"]), ("stuck", cli.UPDATE_STOP))
+            self.assertFalse(store.parked(t.status))                    # still its session's to wake
+            self.assertLess(cli._acked(t), max(r["ts"] for r in rows))  # the news isn't swallowed
+        os.environ["FAKE_SCENARIO"] = "ok"
+        self.assertIn("resumed t-theirs", run_wb("resume", "--all", "--session", "sess-b"))
 
 
 class Projects(Base):

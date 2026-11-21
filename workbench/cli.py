@@ -368,6 +368,43 @@ def _restart_notice(task: store.Task) -> None:
         _write_ack(t, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
 
 
+def _whose(t) -> str:
+    """Whose a task is, for a line naming it: its Claude Code session and directory."""
+    sid, where = store.owner(t)
+    return (f"session {sid}" if sid else "no session") + (f" in {where}" if where else "")
+
+
+def _stop_for_update(tasks) -> str:
+    """`wb update --stop`: every running agent stopped, each task left stuck with UPDATE_STOP and
+    a notice per owner (store.owner, as a restart's batch) naming `wb resume`, so each session,
+    this one or another, is woken to continue its own. `wb stop --all` parked them and
+    acknowledged their news: another session's Claude waited for a wake that never came (#694)."""
+    stopped = []
+    for t in tasks:
+        with store.locked(runner.lock_file(t.name, "cmd")):
+            if t.status.get("phase") in store.CLOSED:
+                continue
+            _stop_runner(t)
+            t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
+                     "by": "user", "text": UPDATE_STOP})
+            t.set_status(phase="stuck", last=UPDATE_STOP, pid=None)
+            stopped.append(t)
+    groups: dict = {}
+    for t in stopped:
+        groups.setdefault(store.owner(t), []).append(t)
+    for batch in groups.values():
+        names, ts = [t.name for t in batch], store.now()
+        batch[0].notify("stuck", (f"task {names[0]}: {UPDATE_STOP}" if len(batch) == 1 else
+                                  f"{len(batch)} tasks were {UPDATE_STOP}: " + ", ".join(names))
+                        + f". wb resume {' '.join(names)} continues "
+                        + ("it" if len(batch) == 1 else "them") + " in a fresh session",
+                        round=batch[0].status.get("round"), ts=ts, tasks=names, cause="update")
+        for t in batch[1:]:
+            _write_ack(t, ts)  # had with the first's notice, as a restart's batch (#544)
+    return "stopped for the update: " + (", ".join(f"{t.name} ({_whose(t)})" for t in stopped)
+                                          or "nothing was running")
+
+
 def _worktree_problem(task: store.Task) -> str | None:
     """Why the task can't go on where it stands, its worktree missing. A worktree removed by hand
     turned the next round into a runner crash (the 2026-11-16 audit). Its committed steps are on
@@ -1481,8 +1518,9 @@ def _caller(a) -> tuple:
     directory it runs in; `--all-sessions`, or a terminal, every session's. Plain `wb status`,
     which the skill and the compaction note send Claude to, listed every session's open tasks
     as one, so one session could review, accept or discard another's (#693)."""
-    if a.repo or a.session or getattr(a, "all_sessions", False):
-        return a.repo, a.session
+    repo, sessions = getattr(a, "repo", None), getattr(a, "session", None)
+    if repo or sessions or getattr(a, "all_sessions", False):
+        return repo, sessions
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if not sid:
         return None, None
@@ -1688,9 +1726,11 @@ ALL_SESSIONS = ("every Claude Code session's tasks (from Claude Code's Bash, the
                 "calling session's: _caller)")
 
 
+# What `wb update --stop` leaves in status `last` (#694): resumed like a restart's
+UPDATE_STOP = "stopped for a workbench update (wb update --stop), not by Claude"
 # What `wb resume --all` continues: tasks interrupted from outside, not those stopped for a
 # reason of their own (a guard, a crash, a failed load), which want Claude's look first (#544)
-INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP)
+INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP, UPDATE_STOP)
 
 
 @one_at_a_time
@@ -4208,9 +4248,17 @@ def cmd_update(a):
         print(f"update available: {behind} new commit(s); /workbench-update (or wb update) installs it"
               if behind else "up to date")
         return
-    live = [t.name for t in store.all_tasks() if runner_alive(t)]
-    if live:  # a pull would change the git shim, the lane and the ask server under them
-        die(f"tasks are running ({', '.join(live)}): update when they finish, or wb stop --all first")
+    live = [t for t in store.all_tasks() if runner_alive(t)]
+    if live and not a.stop:  # a pull would change the git shim, the lane and the ask server under them
+        # whose each is: the advice was an unscoped `wb stop --all`, which parked other live
+        # sessions' agents and acknowledged their news, so no wake ever came there (#694)
+        mine = {t.name for t in _scope(live, *_caller(a))[0]} if _caller(a)[1] else set()
+        die("tasks are running (" + ", ".join(
+            t.name + (" (this session's)" if t.name in mine else f" ({_whose(t)})") for t in live)
+            + "): update when they finish, or wb update --stop (stops them; each one's session is "
+            "told to wb resume it)")
+    if live:
+        print(_stop_for_update(live))
     steps = [["claude", "plugin", "marketplace", "update", "workbench"],
              ["claude", "plugin", "update", "workbench@workbench"]]
     if kind == "clone":  # a clone is its own marketplace: pull, then let Claude Code re-read it
@@ -5128,6 +5176,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("update", help="update workbench (wb, the skill and the mod) from its origin")
     s.add_argument("--check", action="store_true", help="only say whether there is an update")
     s.add_argument("--if-due", action="store_true", help="with --check: ask origin at most weekly")
+    s.add_argument("--stop", action="store_true", help="stop the running tasks first; each one's "
+                   "session is told to wb resume it")
     s.set_defaults(f=cmd_update)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
     return ap
