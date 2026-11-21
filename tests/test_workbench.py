@@ -8786,6 +8786,18 @@ class Routing(Base):
         self.assertIn("t-open still open", err.getvalue())
         self.assertNotIn("aaaaaa", lessons._all()[1])
 
+    def test_an_accepted_chain_with_a_step_taken_over_credits_only_the_agents_steps(self):
+        # #647 and #722 together (merging the 2026-11-21 audit's fixes): a takeover's accept is
+        # Claude's, a landed step is the agent's; a chain of three where Claude took the last one
+        # over scores the agent's two thirds, one wholly taken over scores nothing
+        from workbench import tuning
+        row = {"outcome": "accepted", "steps": [{}, {}, {"took_over": True}]}
+        self.assertAlmostEqual(tuning.credit(row), 2 / 3)
+        self.assertFalse(tuning.agent_landed(row))
+        self.assertEqual(tuning.credit({"outcome": "accepted", "steps": [{"took_over": True}]}), 0.0)
+        self.assertEqual(tuning.reward({"outcome": "accepted", "steps": [{"took_over": True}]}), 0.0)
+        self.assertEqual(tuning.credit({"outcome": "accepted", "steps": [{}]}), 1.0)
+
     def test_a_discarded_chain_credits_the_steps_it_landed(self):
         # #722: four steps wb next committed and kept, the fifth stuck and discarded: the row
         # counted as a whole rejected task for the router, the tuning and the skills

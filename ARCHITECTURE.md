@@ -3853,9 +3853,8 @@ skill drops out silently. `skills.loaded(task)` reads the `skill` tool calls fro
 left out) that `tuning.judged` keeps (a discard marked `--spec-gap` is dropped). Per skill:
 offered (in `skills_offered`), loaded (in `skills_loaded`), and for loads: 
 accepted (the agent's kept share, `tuning.credit`: none after a takeover, #647; a discard's
-landed share, #722), first-try
-(`tuning.agent_landed`: not after a takeover, #647), first-try (that, with no agent-caused review
-round), review rounds a task; the same repos' tasks that
+landed share, #722), first-try (`tuning.agent_landed` with no agent-caused review round: not
+after a takeover, #647), review rounds a task; the same repos' tasks that
 didn't load it; "since its last edit" (rows whose `skills_rev[name]` is the current rev); repos
 loaded in. `advice`, first match wins: never offered; offered 3+ times and never loaded (its
 description is wrong); 2+ tasks since its last edit and none accepted; 3+ loads under 50%
