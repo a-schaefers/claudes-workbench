@@ -9844,6 +9844,39 @@ class Top(Base):
                                              "watts": 38.2})
         self.assertEqual(rows["x86_64"][1]["name"], "RAM")   # no GPU says a size: the RAM beside (#551)
 
+    def test_on_macos_the_gpu_shows_the_budgets_ceiling_and_the_memory_in_use(self):
+        # #574: an Apple Silicon Mac showed "64.0 GB unified, use not said" whatever was loaded,
+        # all of RAM where the budget allows three quarters, and no row at all when
+        # system_profiler failed
+        from workbench import models, top
+        ram, page = 64 * 2 ** 30, 16384
+        vm = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:     100000.\n"
+              "Pages active:   2000000.\nPages inactive:  300000.\nPages speculative:  50000.\n")
+        asked = []
+
+        def run(*argv):
+            asked.append(argv)
+            return {("sysctl", "-n", "hw.pagesize"): str(page), ("sysctl", "-n", "hw.memsize"): str(ram),
+                    ("vm_stat",): vm}.get(argv, "")
+        used = ram - (100000 + 300000 + 50000) * page
+        for gpus, want in (([{"name": "Apple M3 Max (40-core GPU)", "driver": "metal", "unified": True,
+                              "vram": ram, "wired_limit": None}],
+                            [{"name": "Apple M3 Max (40-core GPU)", "unified": True,
+                              "total": models.unified_default(ram), "used": used}]),
+                           ([{"name": "Apple M3 Max (40-core GPU)", "driver": "metal", "unified": True,
+                              "vram": ram, "wired_limit": 56 * 2 ** 30}],
+                            [{"name": "Apple M3 Max (40-core GPU)", "unified": True, "total": 56 * 2 ** 30,
+                              "used": used}]),
+                           ([], [{"name": "RAM (no GPU)", "ram": True, "total": ram, "used": used}])):
+            asked.clear()
+            with mock.patch.object(hardware, "system", lambda: "macos"), \
+                    mock.patch.object(hardware, "_mac_gpus", lambda: gpus), \
+                    mock.patch.object(hardware, "_run", run):
+                t = top.Top(2)
+                self.assertEqual(t.gpus(), want)
+                self.assertEqual(t.gpus(), want)
+            self.assertEqual(asked.count(("vm_stat",)), 1)   # once per probe interval, not per tick
+
     def test_on_wsl_a_failing_nvidia_smi_falls_back_to_windows_adapters_not_the_ram(self):
         # #547: on WSL a stream that started and then failed hid Windows' adapters too
         from workbench import top

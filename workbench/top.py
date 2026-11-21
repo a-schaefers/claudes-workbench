@@ -191,8 +191,14 @@ class Top:
             [c for c in hardware.drm_cards(drm) if not (self.names and c["driver"] == "nvidia")]
         for c in self.cards:
             self.names[c["slot"]] = hardware.card_name(c)
+        self.mac: dict = {}  # macOS: hw.pagesize and hw.memsize read once, the RAM in use per probe
         if self.where == "macos":
-            self.static = [{"name": g["name"], **({"total": g["vram"]} if g.get("vram") else {}),
+            self.mac = {"page": hardware._int(hardware._sysctl("hw.pagesize")) or 4096,
+                        "ram": hardware._int(hardware._sysctl("hw.memsize")) or None, "at": None}
+            # an Apple GPU's ceiling is the budget's (iogpu.wired_limit_mb, else macOS's default
+            # share), not all of RAM, and its use is the RAM's (#574)
+            self.static = [{"name": g["name"], **({"total": (g.get("wired_limit") or models.unified_default(g["vram"]))
+                                                   if g.get("unified") else g["vram"]} if g.get("vram") else {}),
                             **({"unified": True} if g.get("unified") else {})}
                            for g in hardware._mac_gpus()]
         elif self.where == "wsl" and not self.names and not self.cards:  # a failing nvidia-smi too (#547)
@@ -209,6 +215,15 @@ class Top:
     def close(self) -> None:
         if self.smi:
             self.smi.close()
+
+    def _mac_used(self) -> int | None:
+        """A Mac's RAM in use (hw.memsize less vm_stat's free, inactive and speculative pages),
+        asked every PROBE_EVERY seconds, not every tick."""
+        m = self.mac
+        if m.get("ram") and (m["at"] is None or time.monotonic() - m["at"] >= PROBE_EVERY):
+            free = hardware.mac_free(m["page"])
+            m["used"], m["at"] = (m["ram"] - free if free is not None else None), time.monotonic()
+        return m.get("used")
 
     def _start_smi(self) -> None:
         """Start the stream, or start it again once it has ended, backing off (every interval,
@@ -264,12 +279,19 @@ class Top:
                 # (an iGPU on i915, a BMC's ast, a VM's virtio-gpu) is no row (#551)
                 out.append(g)
         out += [dict(g) for g in self.static]
+        if self.where == "macos" and any(g.get("unified") for g in out) and (used := self._mac_used()) is not None:
+            for g in out:
+                if g.get("unified"):
+                    g["used"] = used
         # no GPU says a memory size: the models run in RAM, so that is what fills. Shown only while
         # there were no rows at all, any display adapter hid it (#551); a card that is merely
         # unread just now (stale) keeps it away (#547)
         self.gpu_memory = any(g.get("total") for g in out)
         if not self.gpu_memory and not any(g.get("stale") for g in out):
-            m = hardware.memory() if self.where != "macos" else {}  # /proc/meminfo: one read
+            # /proc/meminfo: one read; on macOS what was read once and vm_stat per probe (#574)
+            m = hardware.memory() if self.where != "macos" else \
+                {"ram": self.mac.get("ram"), "ram_free": self.mac["ram"] - used
+                 if self.mac.get("ram") and (used := self._mac_used()) is not None else None}
             if m.get("ram"):
                 out.append({"name": "RAM" if out else "RAM (no GPU)", "ram": True, "total": m["ram"],
                             **({"used": m["ram"] - m["ram_free"]} if m.get("ram_free") is not None else {})})

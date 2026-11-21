@@ -1910,7 +1910,11 @@ Each tick reads, cheapest first:
   A card nvidia-smi gives no memory (`[N/A]`) on ARM (`hardware.shares_ram`, `gpus`' rule: a DGX
   Spark, GB10, a Jetson) shows the RAM it shares: `total` `MemTotal`, `used` `MemTotal` less
   `MemAvailable` (`hardware.memory`, one read a tick), `unified`; it showed load and watts but no
-  memory (#572). An x86 card's `[N/A]` stays unknown. macOS: the GPUs from system_profiler once (no VRAM used, no busy %); WSL
+  memory (#572). An x86 card's `[N/A]` stays unknown. macOS: the GPUs from system_profiler once (no busy %); an Apple GPU's `total` is the
+  budget's ceiling (`wired_limit`, else `models.unified_default`) and its `used` the RAM in use
+  (`hw.memsize` less vm_stat's free, inactive and speculative pages, `hardware.mac_free`; the
+  sysctls read once, vm_stat every `PROBE_EVERY`), and with no GPU listed the RAM row shows there
+  too: it showed all of RAM, "use not said", and nothing when system_profiler failed (#574); WSL
   where nvidia-smi named no card (none, or one that fails): Windows' adapters once (names, and memory as `total` where the registry says).
   A sysfs card that reports nothing (no memory, busy % or watts: an iGPU on i915, a BMC's `ast`, a
   VM's virtio-gpu) is no row. When no row says a memory size (`total`) and none is `stale`, a RAM

@@ -401,14 +401,20 @@ def card_watts(dev: Path) -> float | None:
     return round(total, 1) if found and total else None
 
 
+def mac_free(page: int) -> int | None:
+    """Bytes of a Mac's RAM free for use now: vm_stat's free, inactive and speculative pages of
+    ``page`` bytes (hw.pagesize); None when vm_stat says nothing."""
+    stats = dict(re.findall(r"^(Pages [\w ]+):\s+(\d+)\.", _run("vm_stat"), re.M))
+    free = sum(_int(stats.get(k, "0")) for k in ("Pages free", "Pages inactive", "Pages speculative"))
+    return free * page or None
+
+
 def memory() -> dict:
     if system() == "macos":
-        page = _int(_sysctl("hw.pagesize")) or 4096
-        stats = dict(re.findall(r"^(Pages [\w ]+):\s+(\d+)\.", _run("vm_stat"), re.M))
-        free = sum(_int(stats.get(k, "0")) for k in ("Pages free", "Pages inactive", "Pages speculative"))
         swap = re.findall(r"(total|free) = ([\d.]+)M", _sysctl("vm.swapusage"))
         sw = {k: int(float(v) * 2 ** 20) for k, v in swap}
-        return {"ram": _int(_sysctl("hw.memsize")) or None, "ram_free": free * page or None,
+        return {"ram": _int(_sysctl("hw.memsize")) or None,
+                "ram_free": mac_free(_int(_sysctl("hw.pagesize")) or 4096),
                 "swap": sw.get("total"), "swap_free": sw.get("free")}
     info = {}
     for line in _read(Path("/proc/meminfo")).splitlines():
