@@ -2225,13 +2225,15 @@ goes in its CLAUDE.md instead.
 The runner appends notices to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts,
 task, kind, text, round?, id?, cause?, tasks?}`; `cause` on a `stuck` or `failed` notice with a round:
 `guard` (a guard stopped it), `agent` (OpenCode exited non-zero), `server` (the model's server gone again after the round's revive, #657), `updated` (workbench updated under the task, `runner._updated`: #660), `signal` (a
-SIGTERM from outside wb, `SIGNAL_STOP`) or `died` (`reap`, a restart's batch notice too); `tasks`:
-a restart's or a shutdown's batch, below and in *The runner, inside*). Kinds: `review` (the round report and `review_diff`), `stuck`, `failed` (the round report as text;
+SIGTERM from outside wb, `SIGNAL_STOP`), `died` (`reap`, a restart's batch notice too) or `update`
+(`wb update --stop`, `cli._stop_for_update`: one `stuck` notice per owner, #694); `tasks`:
+a restart's, a shutdown's or `wb update --stop`'s batch, below and in *The runner, inside*). Kinds: `review` (the round report and `review_diff`), `stuck`, `failed` (the round report as text;
 a load failure or crash without a round), `question` (with the question's `id`), `checkin`
 (periodic, a nudge, the mid-round handover before the last a round allows, a
 base check whose `--test-timeout` cut it short). `wb` itself writes only
-one: `reap`'s `failed` for a runner that died without a report (or one for a restart's batch;
-the runner raises a shutdown's). The agent never writes one: the
+these: `reap`'s `failed` for a runner that died without a report (or one for a restart's batch),
+and `wb update --stop`'s `stuck`, one per owner with `tasks` and `cause` `update`
+(`cli._stop_for_update`, #694); the runner raises a shutdown's. The agent never writes one: the
 file is out of its lane (the 2026-11-16 audit: it could forge any task's wake, or wipe them
 all). Readers take its rows through `store.notices()`, which keeps only whole ones (a dict with a
 `NAME_RE` task, a kind, a numeric ts): one row without a task once made every acknowledging
@@ -3302,7 +3304,7 @@ max(50, round(15s)·10), s = min(window/32768, `GUESS_MAX` 4): 3 files/150 lines
 the generated ones, `gitops.footprint`): `_went` is badly when the step compacted (in its last session, or in one a handover replaced: the `fresh` event's `compacted`), filled up
 reading (`read_full`), got stuck (a `stuck` or `failed` notice of its rounds, but not one whose
 `cause` is anything but `guard` or `agent` (`results.THE_STEP`, an allowlist: `signal`, `died`,
-`server`, `updated` are outside the step), nor one from before `cause` with
+`server`, `updated`, `update` are outside the step), nor one from before `cause` with
 `SIGNAL_STOP`'s, reap's or `UPDATED`'s text (an update mid-step had no cause and shrank the slice, #660): a shutdown mid-step shrank the slice for good, #582), or needed ≥ `BAD_REVIEWS` 2 agent-caused review rounds; well
 when it landed and wasn't taken over; else no evidence. Files and lines are each learned alone:
 the smallest bad step caps the slice below its size (files − 1, lines × 3/4); once `FIT_MIN` (2)
