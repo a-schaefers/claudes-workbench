@@ -14975,7 +14975,7 @@ class WebChat(Base):
         self.assertTrue(got[old["id"]]["expired"])                           # the page's mark
         self.assertNotIn("expired", got[fresh["id"]])
         self.assertEqual(chat.snapshot()["expire"], chat.MESSAGE_EXPIRE)     # the page's hours
-        self.assertEqual([m.get("expired") for m in chat.pending()], [True, None])
+        self.assertEqual([m["id"] for m in chat.pending()], [fresh["id"]])     # retired (#741)
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit):            # the mod is refused it
             run_wb("chat", "claim", old["id"], "--by", "s")
@@ -15622,6 +15622,25 @@ class ChatUploads(Base):
             (d / ".meta.json").write_text(json.dumps({**m, "ts": old}))
         self.assertIn("2 web chat upload(s)", run_wb("gc"))
         self.assertEqual(sorted(p.name for p in self.uploads().iterdir()), ["llllllll-2", "llllllll-4"])
+
+    def test_an_expired_message_leaves_the_open_index_once_and_gc_then_drops_its_uploads(self):
+        # #741 (the 2026-11-21 audit, finding 91): only an ack took a message out of open.json, and
+        # an expired one is never acked, so every new session claimed it again and toasted, `wb
+        # chat pending` listed it, and gc kept its photos, for good (reproduced 40 days on)
+        self.put("eeeeeeee-1", b"\xff\xd8 the photo")
+        sent = self.send({"text": "while nobody listened", "files": ["eeeeeeee-1"]})[1]["message"]
+        later = store.now() + 40 * 86400
+        with mock.patch.object(self.chat.store, "now", return_value=later):
+            self.assertEqual(self.chat.pending(), [])                        # not listed for good
+            self.assertNotIn(sent["id"], self.chat.open_work()["messages"])  # the mod won't see it
+            self.assertTrue(self.chat.expired(sent["id"]))                   # a stale reader is still refused
+            shown = {m["id"]: m for m in self.chat.thread()}[sent["id"]]
+            self.assertEqual((shown.get("expired"), shown["received"]), (True, None))  # not "read"
+            self.assertEqual(self.chat.drop_old_uploads(30), 1)
+        rows = [r for r in store.read_jsonl(self.chat.chat_dir() / "receipts.jsonl")[0]
+                if r["id"] == sent["id"]]
+        self.assertEqual([(r["by"], r["how"]) for r in rows], [("wb", "expired")])  # once
+        self.assertFalse((self.uploads() / "eeeeeeee-1").exists())
 
 
 class Top(Base):

@@ -429,11 +429,39 @@ def _open_update(change) -> dict:
 
 
 def open_work() -> dict:
-    """What still waits: {messages, asks}, each {id: row}."""
+    """What still waits: {messages, asks}, each {id: row}. A message past MESSAGE_EXPIRE leaves
+    it here (`_retire`)."""
     cur = store.read_json(_open_path(), None)
-    if isinstance(cur, dict) and isinstance(cur.get("messages"), dict) and isinstance(cur.get("asks"), dict):
-        return cur
-    return _open_update(lambda w: None)
+    if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict) and isinstance(cur.get("asks"), dict)):
+        cur = _open_update(lambda w: None)
+    now = store.now()
+    if any(isinstance(r, dict) and _expired(r, now) for r in cur["messages"].values()):
+        cur = _open_update(lambda w: _retire(w, store.now()))
+    return cur
+
+
+def _retire(work: dict, now: float) -> None:
+    """Under open.lock: take each message past MESSAGE_EXPIRE out of the index, with a receipt
+    `{id, ts, by: "wb", how: "expired"}` (thread shows it expired, not read). Only an ack popped
+    one, and an expired message is never acked: every new session claimed it again and toasted,
+    `wb chat pending` listed it, and gc kept its uploads, for good (#741)."""
+    for mid in [k for k, r in work["messages"].items() if isinstance(r, dict) and _expired(r, now)]:
+        store.append_jsonl(chat_dir() / "receipts.jsonl",
+                           {"id": mid, "ts": now, "by": "wb", "how": "expired"})
+        work["messages"].pop(mid, None)
+
+
+def _expired_receipt(msg_id: str) -> bool:
+    """Whether the message was retired as expired (`_retire`): read only when a claim names a
+    message the index no longer holds, so a mod that read the index before the retiring still
+    gets the refusal, not the message (#741)."""
+    try:
+        data = (chat_dir() / "receipts.jsonl").read_bytes()
+    except FileNotFoundError:
+        return False
+    key = msg_id.encode()
+    return any(r.get("id") == msg_id and r.get("how") == "expired" for line in data.splitlines()
+               if key in line for r in store._rows(line) if isinstance(r, dict))
 
 
 THREAD_BYTES = 4 << 20  # the last 200 messages fit with room to spare (a reply is a few KB)
@@ -447,9 +475,14 @@ def thread(limit: int = 200) -> list[dict]:
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)[-limit:]
     receipts = {r["id"]: r for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", THREAD_BYTES)}
     now = store.now()
-    return [{**r, "received": receipts.get(r["id"]),
-             **({"expired": True} if r["id"] not in receipts and _expired(r, now) else {})}
-            if r["from"] == "user" else r for r in rows]
+    out = []
+    for r in rows:
+        if r["from"] == "user":
+            got = receipts.get(r["id"])
+            gone = got.get("how") == "expired" if got else _expired(r, now)  # retired (#741)
+            r = {**r, "received": None if gone else got, **({"expired": True} if gone else {})}
+        out.append(r)
+    return out
 
 
 # Work still waiting is kept apart from what the page shows: an open question vanished from the
@@ -468,15 +501,15 @@ def _expired(row: dict, now: float) -> bool:
 
 def expired(msg_id: str) -> bool:
     """Whether the user's unread message ``msg_id`` is too old to pass to Claude."""
-    row = open_work()["messages"].get(msg_id)
-    return bool(row) and _expired(row, store.now())
+    row = open_work()["messages"].get(msg_id)  # retires what expired (#741)
+    return _expired(row, store.now()) if row else _expired_receipt(msg_id)
 
 
 def pending() -> list[dict]:
-    """Every message of the user's without a receipt, however far back (open_work, #329)."""
-    now = store.now()
+    """Every message of the user's without a receipt, however far back (open_work, #329), and
+    still deliverable: an expired one is retired (#741)."""
     rows = sorted(open_work()["messages"].values(), key=lambda r: (r.get("ts", 0), r.get("id", "")))
-    return [{**r, "received": None, **({"expired": True} if _expired(r, now) else {})} for r in rows]
+    return [{**r, "received": None} for r in rows]
 
 
 def snapshot() -> dict:
@@ -1352,8 +1385,9 @@ def upload_file(uid: str):
 
 
 def drop_old_uploads(days: float) -> int:
-    """`wb gc`: remove the uploads older than ``days`` whose message has its receipt, or that no
-    message waiting for one names (a draft never sent). The count removed."""
+    """`wb gc`: remove the uploads older than ``days`` whose message has its receipt (an expired
+    one's too: open_work retires it, #741), or that no message waiting for one names (a draft
+    never sent). The count removed."""
     root = chat_dir() / "uploads"
     if not root.is_dir() or root.is_symlink():
         return 0
