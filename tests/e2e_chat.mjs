@@ -594,8 +594,10 @@ async function run(engine, device) {
       base: { rev: '1a2b3c4d5e6f', image: true }, candidate: { rev: '9f8e7d6c5b4a', image: true } }
     appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: 'shots-again', ts: Date.now() / 1000, from: 'claude',
       text: 'screenshots of fix-nav again.', shots }) + '\n')
-    await until(async () => (await page.locator('text=Reply about these').count()) > 0)
-    await page.locator('text=Reply about these').last().click()
+    // its own row's button: #821's expired fix-old pair can sort after it in the thread
+    const pair = page.locator('.row', { hasText: 'screenshots of fix-nav again.' }).locator('text=Reply about these')
+    await until(async () => (await pair.count()) > 0)
+    await pair.last().click()
     await until(async () => (await page.textContent('#about-text')) === 'Replying about fix-nav, step 1')
     await page.fill('#input', 'x'.repeat(8001))                    // past MAX_TEXT: refused
     await page.click('#send')
