@@ -13986,6 +13986,29 @@ class Projects(Base):
         self.assertEqual(context.repo_conf(wt, "packages/web"), {"merge": "squash"})
         self.assertEqual(context.repo_conf(wt, "services/api"), {"merge": "ff"})
 
+    def test_accept_in_a_package_measures_the_packages_own_claude_md_not_the_root(self):
+        # #783: accept looked at the root only, so a package task in a repo whose root has no
+        # CLAUDE.md always ended "the repo has no CLAUDE.md: write one (wb init)"
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        app = self.repo / "packages" / "app"
+        app.mkdir(parents=True)
+        (app / "CLAUDE.md").write_text("# app\n")
+        g("rm", "-q", "CLAUDE.md")
+        g("add", "-A")
+        g("commit", "-qm", "a package, no root CLAUDE.md")
+        (self.repo / "other.txt").write_text("elsewhere")             # outside the package: not counted
+        g("add", "-A")
+        g("commit", "-qm", "outside the package")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-pk", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        wait_phase("t-pk", {"review"})
+        out = run_wb("accept", "t-pk", "-m", "feat: answer")
+        self.assertNotIn("no CLAUDE.md", out)
+        self.assertIn("packages/app/CLAUDE.md last changed 1 commit(s) before", out)   # the task's
+        self.assertIn("packages/app/CLAUDE.md is current with HEAD~1",
+                      cli.claude_md_status(self.repo, "HEAD~1", "packages/app"))
+        self.assertEqual(cli.claude_md_status(self.repo, "HEAD"), "no CLAUDE.md")    # the root's
+
     def test_from_a_folder_inside_a_package_the_nearest_package_claude_md_above_is_used(self):
         # #606 (the audit of v1.90): only --repo itself was looked at, so from packages/app/src
         # wb start refused the repo, or with a root CLAUDE.md ran the task at the root

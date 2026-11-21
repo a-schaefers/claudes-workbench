@@ -2377,7 +2377,8 @@ def cmd_accept(a):
     try:  # a reminder: it once turned a finished accept into exit 1 (the 2026-11-16 audit)
         # the task's own commit counts: by its recorded object, as --merge deleted the branch,
         # and every merged accept then said the repo had no CLAUDE.md (#269, the audit of 1.2)
-        note = claude_md_status(repo, gitops.git(repo, "rev-parse", "--short", tip).strip())
+        note = claude_md_status(repo, gitops.git(repo, "rev-parse", "--short", tip).strip(),
+                                spec.get("subdir") or "")  # the package's own (#783)
     except (gitops.GitError, OSError, ValueError):
         note = None
     if note:
@@ -3764,9 +3765,18 @@ def cmd_model(a):
 LOCAL_CLAUDE_MD = "CLAUDE.md is gitignored: agents get the checkout's copy"
 
 
-def claude_md_status(repo: Path, ref: str = "HEAD") -> str:
+def claude_md_status(repo: Path, ref: str = "HEAD", under: str = "") -> str:
     """One line on the repo's CLAUDE.md at ref: missing, local, or how far behind the code it
-    may be."""
+    may be. With ``under`` (a monorepo package, task.json `subdir`) the package's own file first,
+    measured against the package's commits only: accept said a repo whose packages each have
+    one had none, sending Claude to write a root CLAUDE.md nobody needed (#783)."""
+    if under and (md := _claude_md_at(repo, ref, under)):
+        md = f"{under}/{md}"
+        last = gitops.git(repo, "log", "-1", "--format=%h", ref, "--", md).strip()
+        since = int(gitops.git(repo, "rev-list", "--count", f"{last}..{ref}", "--", under,
+                               f":!{md}", f":!{under}/AGENTS.md").strip() or 0)
+        return (f"{md} is current with {ref}" if not since else
+                f"{md} last changed {since} commit(s) before {ref} ({last})")
     md = _claude_md_at(repo, ref)  # CLAUDE.md before .claude/CLAUDE.md: AGENTS.md links to it
     if not md:
         return LOCAL_CLAUDE_MD if _local_claude_md(repo) else "no CLAUDE.md"
