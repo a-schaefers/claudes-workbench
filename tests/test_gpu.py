@@ -985,6 +985,31 @@ class SharedLease(Base):
         self.assertFalse(models.lease_shared())
         self.assertEqual(models.unshared_lease_files(), [])
 
+    def test_the_lease_and_the_merge_lock_work_where_an_exclusive_flock_needs_a_writable_fd(self):
+        # #892: NFSv4 turns an exclusive flock into a whole-file write lock and refuses it with
+        # EBADF on an O_RDONLY fd: every task failed at the GPU lease, and wb accept --merge
+        # ended committed but unmerged with a bare "Bad file descriptor"
+        import errno
+        import fcntl
+        from workbench import gitops
+        real = fcntl.flock
+
+        def nfs4(fd, op):
+            f = fd if isinstance(fd, int) else fd.fileno()
+            if op & fcntl.LOCK_EX and fcntl.fcntl(f, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY:
+                raise OSError(errno.EBADF, "Bad file descriptor")
+            return real(fd, op)
+        with mock.patch.object(fcntl, "flock", nfs4):
+            with models.GpuLease(None, "an-image", say=lambda *_: None):
+                self.assertEqual([h["task"] for h in models.holders().values()], ["an-image"])
+            with gitops.merge_lock(self.repo):
+                pass
+        # a lock the file system refuses some other way is the accept's GitError, said plainly
+        with mock.patch.object(fcntl, "flock", side_effect=OSError(errno.ENOLCK, "No locks available")), \
+                self.assertRaisesRegex(gitops.GitError, "can't lock .* for the merge \\(No locks available\\)"):
+            with gitops.merge_lock(self.repo):
+                pass
+
     def test_a_refusal_names_another_accounts_task_as_theirs(self):
         held = {"1": {"task": "fix-it", "model": BIG, "uid": os.getuid() + 1, "user": "sam"}}
         self.assertIn(f"sam's task fix-it ({BIG})", models.busy(held, "wait"))

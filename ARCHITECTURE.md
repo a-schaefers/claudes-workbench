@@ -3315,8 +3315,10 @@ else `SHARED_GPU` (`/var/lib/workbench/gpu`) when it is a directory this account
 machines sharing a state directory pruned each other's holders as dead and took turns on GPUs they
 don't share, #849). An admin opts a machine in once (`sudo install -d -m 2775 -g <group>
 /var/lib/workbench/gpu`, the accounts in that group): every account's tasks then take turns or
-share there like one account's. Lock files are opened read-only (`_lease_lock`, `_lease_fd`:
-another account made them, and flock needs no write); `gpu.json` is replaced by rename (the
+share there like one account's. Lock files are opened read-write where this account may write
+them, else read-only (`_lease_lock`, `_lease_fd` through `store.lock_fd`: another account made
+them, and flock needs no write; read-only alone failed on NFSv4, whose client refuses an exclusive
+flock on a read-only fd with EBADF, so every task failed at the lease, #892); `gpu.json` is replaced by rename (the
 directory's write). In a shared lease every file is the group's to read (`LEASE_MODE` 0664:
 `_lease_fd` fchmods the lock files it owns, `GpuLease._set` writes `gpu.json` through
 `store.write_json(…, mode=)`): under one account's umask 077 they were 0600, and every other
@@ -5039,7 +5041,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   checkout take turns (`gitops.merge_lock`: a flock on `workbench-merge.lock` in its own git dir,
   shared by every profile and account merging there, held from `merge_from` through the merge;
   `wb: waiting for another merge into <repo>` once; past `MERGE_WAIT`, `COMMIT_SECS` + 15 s, the
-  merge is refused, never made, since an agent can read the git dir and so hold the lock). The
+  merge is refused, never made, since an agent can read the git dir and so hold the lock; the
+  file is opened read-write where it may be, `store.lock_fd`, and a flock the file system refuses
+  is a `GitError`, not a bare "Bad file descriptor": NFSv4, #892). The
   command lock is per task, so two tasks' accepts once interleaved: B read HEAD, A merged, B
   conflicted and reset to the HEAD it had read, rewinding A's merge while A's row said merged
   and its branch was gone (#639, Codex's audit of 1.90.6)); otherwise it prints the

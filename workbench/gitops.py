@@ -1618,10 +1618,12 @@ def merge_lock(repo: Path, say=None):
     A merged, B conflicted and its rollback reset to the HEAD it had read, rewinding A's merge
     while A's record said merged and its branch was gone (#639, Codex's audit of 1.90.6). The
     file is opened read-only (flock needs no write: another account made it). An agent can read
-    the git dir and so could hold the lock: past MERGE_WAIT the merge is refused, never made."""
+    the git dir and so could hold the lock: past MERGE_WAIT the merge is refused, never made.
+    Read-write where it may be (store.lock_fd): NFSv4 refuses an exclusive flock on a read-only
+    fd with EBADF, and the accept ended in a bare "Bad file descriptor" (#892)."""
     gd = git(repo, "rev-parse", "--absolute-git-dir").strip()
     try:
-        fd = os.open(os.path.join(gd, MERGE_LOCK), os.O_RDONLY | os.O_CREAT, 0o664)
+        fd = store.lock_fd(os.path.join(gd, MERGE_LOCK), 0o664)
     except OSError as e:
         raise GitError(f"can't lock {gd} for the merge ({e.strerror})") from None
     try:
@@ -1637,6 +1639,8 @@ def merge_lock(repo: Path, say=None):
                     say(f"waiting for another merge into {repo}")
                     said = True
                 time.sleep(0.2)
+            except OSError as e:  # a file system that can't lock it: say so, as a GitError (#892)
+                raise GitError(f"can't lock {gd} for the merge ({e.strerror})") from None
         yield
     finally:
         os.close(fd)  # releases the lock

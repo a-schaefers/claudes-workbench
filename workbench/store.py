@@ -608,6 +608,20 @@ def read_json(path: Path, default=None):
         return default
 
 
+def lock_fd(path: Path | str, mode: int = 0o664) -> int:
+    """An fd to flock `path` through, made if missing: read-write when this account may write it,
+    else read-only (another account's file in a shared lease or git dir: flock needs no write
+    there). Read-only alone failed on NFSv4, whose client turns an exclusive flock into a
+    whole-file write lock and refuses it with EBADF on an fd without write access: every task
+    failed at the GPU lease, and wb accept --merge ended committed but unmerged (#892)."""
+    try:
+        return os.open(path, os.O_RDWR | os.O_CREAT, mode)
+    except OSError as e:
+        if e.errno not in (errno.EACCES, errno.EPERM, errno.EROFS):
+            raise
+        return os.open(path, os.O_RDONLY | os.O_CREAT, mode)
+
+
 @contextmanager
 def locked(path: Path, shared: bool = False, blocking: bool = True):
     path.parent.mkdir(parents=True, exist_ok=True)

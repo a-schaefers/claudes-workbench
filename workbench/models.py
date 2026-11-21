@@ -1920,8 +1920,9 @@ def lease_shared() -> bool:
 
 @contextlib.contextmanager
 def _lease_lock(path: Path):
-    """store.locked for a lease file, opened read-only (flock needs no write): in a shared lease
-    another account made the file, 0644 under its umask, so opening it to append was refused."""
+    """store.locked for a lease file, opened read-only when it must be (store.lock_fd): in a
+    shared lease another account made the file, 0644 under its umask, so opening it to append
+    was refused."""
     fd = _lease_fd(path)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -1938,7 +1939,7 @@ LEASE_MODE = 0o664
 
 def _lease_fd(path: Path) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDONLY | os.O_CREAT, LEASE_MODE)
+    fd = store.lock_fd(path, LEASE_MODE)
     if lease_shared():
         st = os.fstat(fd)
         if st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) & LEASE_MODE != LEASE_MODE:
@@ -2321,7 +2322,9 @@ class GpuLease:
                         "text": msg})
 
     def __enter__(self):
-        self.fh = os.fdopen(_lease_fd(self.home / f"{self.pool}.lock"), "r")
+        fd = _lease_fd(self.home / f"{self.pool}.lock")
+        writable = fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDWR
+        self.fh = os.fdopen(fd, "r+" if writable else "r")  # the mode the fd has (#892)
         try:
             self._admit()
             return self
