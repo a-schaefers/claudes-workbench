@@ -4071,7 +4071,10 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   reading a file byte for byte failed there alone. `verify.checkout_settings` gives each clone,
   before its checkout, the repo's local `core.eol`, `core.autocrlf`, `core.safecrlf`,
   `core.symlinks`, `core.filemode`, `core.ignorecase` and `core.checkRoundtripEncoding`
-  (`CHECKOUT_KEYS`) and its `info/attributes`.
+  (`CHECKOUT_KEYS`) and its `info/attributes`. bench's clones too: `bench add`'s base and
+  reference checks and each replay's checkout (`bench._clone_base`, from the case's repo while it
+  lasts); without them the reference check read LF where the task read CRLF and refused the case,
+  and replays were graded on other bytes (#736, the 2026-11-21 audit).
 - **The split of roles.** The agent writes code and reads git freely (`status`, `diff`, `log`,
   `show`, `blame`). Everything that leaves its working tree is Claude's: commits, branches,
   merges, pushes, pull requests, CI/CD, deploys and infrastructure (`gh`, `wrangler` and the like),

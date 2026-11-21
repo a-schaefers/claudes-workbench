@@ -125,6 +125,8 @@ def _clone_base(bundle_path: Path, dest: Path, repo: Path) -> None:
     files where the tests wanted the data (#509, the audit of 1.90). RuntimeError naming LFS
     when they can't be had."""
     gitops.git(dest.parent, "clone", "-q", "--no-checkout", "-b", "main", str(bundle_path), str(dest))
+    if repo.is_dir():  # its line endings, as the task's worktree had them (#736)
+        verify.checkout_settings(repo, dest)
     lfs = bool(gitops.git(dest, "grep", "-l", "-e", "filter=lfs", "main", "--",
                           ":(glob)**/.gitattributes", check=False).strip())
     if lfs and not repo.is_dir():
@@ -362,6 +364,10 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         with tempfile.TemporaryDirectory(prefix=store.scratch(".check-"), dir=home()) as scratch:
             work = _checkout_at(Path(scratch), case)
             gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
+            # the repo's core.autocrlf and info/attributes: a clone has none of its local config,
+            # so the reference check read LF where the task read CRLF and refused the case, and
+            # each replay was graded on other bytes than the task saw (#736, the 2026-11-21 audit)
+            verify.checkout_settings(repo, work)
             gitops.share_lfs(repo, work)  # its LFS files as data, as verify's (#382, #509)
             if sparse := gitops.sparse_of(Path(repo)):  # as the task's worktree was (#263)
                 gitops.apply_sparse(work, sparse)

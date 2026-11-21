@@ -9147,6 +9147,26 @@ class Bench(Base):
         self.assertIn("--unload-for-tests", argv)
         self.assertNotIn("--unload-for-tests", argv_of({**case, "unload_for_tests": False}))
 
+    def test_a_cases_checkouts_read_the_bytes_the_task_read(self):
+        # #736 (the 2026-11-21 audit, reproduced by both audits): with the repo's own
+        # core.autocrlf the task read CRLF, and bench add's reference check and each replay's
+        # clone read LF: the case was refused as failing on its own commit
+        from workbench import bench
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        (self.repo / "data.txt").write_bytes(b"a\nb\n")
+        g("add", "-A")
+        g("commit", "-qm", "data")
+        g("config", "core.autocrlf", "true")
+        (self.repo / ".git" / "info" / "attributes").write_text("*.sh -text\nanswer.txt -text\n")
+        crlf = "python3 -c \"import sys; sys.exit(open('data.txt', 'rb').read() != b'a\\r\\nb\\r\\n')\""
+        test = f"{crlf} && sh tests/check.sh"
+        self.accepted("t-crlf", test)
+        out = run_wb("bench", "add", "t-crlf")
+        self.assertIn("on the base: fails", out)
+        clone = Path(self.tmp.name) / "c"
+        bench.checkout(bench.cases()["t-crlf"], clone)
+        self.assertEqual((clone / "data.txt").read_bytes(), b"a\r\nb\r\n")    # a replay's too
+
     def test_a_case_with_a_sibling_two_levels_up_checks_and_replays_inside_its_own_directory(self):
         # #261 (the audit of 1.2): the case's checkouts nest as the task's worktree did, so the
         # link to ../../shared/lib is made in the scratch, not in the bench's own directory
