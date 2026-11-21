@@ -87,11 +87,31 @@ def _pinned(cwd) -> list[str]:
         raise GitError(f"the worktree's .git was rewritten: git was not run there ({dotgit} "
                        f"must say gitdir: {want['gitdir']})")
     return [f"--git-dir={want['gitdir']}", f"--work-tree={os.path.abspath(cwd)}",
-            *NO_HOOKS, "-c", "core.fsmonitor=false",
-            *(("-c", f"core.filemode={'true' if modes else 'false'}")
-              if (modes := _modes_hold(os.path.dirname(os.path.abspath(cwd)))) is not None else ()),
-            *(("-c", f"core.ignorecase={'true' if folds else 'false'}")
-              if (folds := _case_folds(os.path.dirname(os.path.abspath(cwd)))) is not None else ())]
+            *NO_HOOKS, "-c", "core.fsmonitor=false", *fs_pins(cwd)]
+
+
+def fs_pins(worktree, differing: bool = False) -> list[str]:
+    """`-c core.filemode=… -c core.ignorecase=…` as the file system the task's worktree is on
+    really behaves (_modes_hold, _case_folds; one it can't tell is left out). ``differing``: only
+    those the repository's own config says otherwise (unset: git's defaults), for the agent's git
+    shim, which then checks the call is in the task's repository: only wb's own calls had them,
+    and the agent's `git status` on exFAT listed every file as changed to 100755, and on a
+    case-sensitive disk under a core.ignorecase=true repo a case-only rename as a deletion (#796,
+    the second 2026-11-21 audit)."""
+    d = os.path.dirname(os.path.abspath(worktree))
+    rec = _record(worktree) if differing else None
+    gitdir = (store.read_json(rec) or {}).get("gitdir") if rec else None
+    out = []
+    for key, now, default in (("core.filemode", _modes_hold(d), True),
+                              ("core.ignorecase", _case_folds(d), False)):
+        if now is None:
+            continue
+        if differing and gitdir:
+            said = _run(gitdir, ("config", "--bool", key), check=False).stdout.decode().strip()
+            if (said == "true" if said else default) == now:
+                continue
+        out += ["-c", f"{key}={'true' if now else 'false'}"]
+    return out
 
 
 @functools.lru_cache(maxsize=64)

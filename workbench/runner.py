@@ -466,7 +466,10 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     scratch = [d for d in places or [] if os.path.isdir(d) and not d.startswith(("/dev", "/proc"))]
     # the repository's main worktree when the linked one the task started from was removed: its
     # git dir stays, and `git -C <removed>` crashed the runner on every round (#776)
-    if gitguard.install(shim, gitops.repo_of(task.spec), PKG_ROOT, outside, task.worktree, scratch):
+    # the worktree's file system as wb's own git sees it, for the agent's git too (#796)
+    pins = gitops.fs_pins(task.worktree, differing=True) if task.worktree.is_dir() else []
+    if gitguard.install(shim, gitops.repo_of(task.spec), PKG_ROOT, outside, task.worktree, scratch,
+                        pins):
         env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
     return env
 

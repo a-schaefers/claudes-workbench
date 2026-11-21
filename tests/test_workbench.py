@@ -674,6 +674,38 @@ class Lifecycle(Base):
         gitops._modes_hold.cache_clear()
         self.assertIsNone(gitops._modes_hold(str(Path(self.tmp.name) / "nowhere")))
 
+    def test_the_agents_own_git_sees_the_worktrees_file_system_as_wbs_git_does(self):
+        # #796 (the second 2026-11-21 audit): core.filemode and core.ignorecase were pinned for
+        # wb's calls only, so on a file system unlike the repo's the agent's `git status` listed
+        # every file as changed to 100755, or a case-only rename as a deletion alone
+        self.start("t-pins", "ok")
+        wait_phase("t-pins", {"review"})
+        t = store.Task("t-pins")
+        d = os.path.dirname(os.path.abspath(t.worktree))
+        modes, folds = gitops._modes_hold(d), gitops._case_folds(d)
+        if modes is None or folds is None:
+            self.skipTest("can't tell what the state directory's file system does")
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        self.assertEqual(gitops.fs_pins(t.worktree, differing=True), [])   # nothing to say
+        g("config", "core.filemode", str(not modes).lower())   # the repo says otherwise
+        g("config", "core.ignorecase", str(not folds).lower())
+        env = runner.agent_env(t)
+        agent = lambda *a, cwd=t.worktree: subprocess.run(  # noqa
+            ["git", *a], cwd=cwd, env=env, capture_output=True, text=True)
+        self.assertEqual(agent("config", "--bool", "core.filemode").stdout.strip(), str(modes).lower())
+        self.assertEqual(agent("config", "--bool", "core.ignorecase").stdout.strip(), str(folds).lower())
+        if modes:
+            (t.worktree / "CLAUDE.md").chmod(0o755)
+            self.assertIn(" M CLAUDE.md", agent("status", "--porcelain").stdout)
+        # never forced on a repository of the test suite's own
+        scratch = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        subprocess.run(["git", "init", "-q", str(scratch)], check=True)
+        subprocess.run(["git", "-C", str(scratch), "config", "core.filemode", str(not modes).lower()],
+                       check=True)
+        self.assertEqual(agent("config", "--bool", "core.filemode", cwd=scratch).stdout.strip(),
+                         str(not modes).lower())
+
     @unittest.skipIf(gitops._case_folds(tempfile.gettempdir()) is not False,
                      "the temp directory folds case: no mismatch to make")
     def test_a_case_only_rename_and_a_case_twin_land_where_the_repo_says_ignorecase(self):

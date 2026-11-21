@@ -4527,7 +4527,7 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   when it can't tell): with the repo's `core.ignorecase=true` (Git for Windows on `/mnt/c`, a repo
   from macOS) on a case-sensitive one, a case-only rename showed as a deletion alone and a new
   `OTHER.PY` beside `other.py` as nothing, and accept committed the deletion and removed the
-  worktree with the new names (#492, the audit of 1.90). Where it does fold case (macOS's default APFS, a case-folding mount), `ignorecase=true` matched `Helpers.py` in the index to the agent's `helpers.py` on disk, so `add -A` staged no rename: the review diff showed only the importing file and accept committed the old name (#656). `gitops.case_renames` reads each tracked path's components back from their directories (a missing exact name with one twin equal under casefold and NFC is the new name), and `record_case_renames` stages them (`rm --cached` the old, `add` the new) in the scratch index before the review diff and the snapshot, and in the worktree's own before `commit_all`; `mark` hashes them too. The agent can't `git mv` (the shim refuses it). A `.git` that isn't a regular file holding the recorded text stops the
+  worktree with the new names (#492, the audit of 1.90). The agent's own git gets the same two (`gitops.fs_pins`, both measured, `differing=True`: only where the repo's config says otherwise, so mostly none), from the git shim, on a read in the task's repository only (`gitguard.main`'s `pins`, the call's common dir checked first; never forced on a test suite's scratch repos): its `git status` once listed every file as changed to 100755 on exFAT, or a case-only rename as a deletion alone (#796). Where it does fold case (macOS's default APFS, a case-folding mount), `ignorecase=true` matched `Helpers.py` in the index to the agent's `helpers.py` on disk, so `add -A` staged no rename: the review diff showed only the importing file and accept committed the old name (#656). `gitops.case_renames` reads each tracked path's components back from their directories (a missing exact name with one twin equal under casefold and NFC is the new name), and `record_case_renames` stages them (`rm --cached` the old, `add` the new) in the scratch index before the review diff and the snapshot, and in the worktree's own before `commit_all`; `mark` hashes them too. The agent can't `git mv` (the shim refuses it). A `.git` that isn't a regular file holding the recorded text stops the
   call with a `GitError` ("the worktree's .git was rewritten"): the runner fails the task, `wb
   accept` refuses. A task started before the record runs unpinned.
 - **No git hooks from the worktree.** With a relative `core.hooksPath` (husky's gitignored
@@ -4574,7 +4574,7 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   `rules/<task>/bin/git` every round (a `/bin/sh` wrapper, `exec '<python>' -I -c '<code>' "$@"`,
   quoted, since a shebang line splits at a space and a Python under `/home/John Smith/` broke
   every git call; the code inserts the package path, then `gitguard.main(<real git>, <the task
-  repo's common dir>, argv, <the temp roots>, [<the worktree>, <the lane's other writable directories>]`) and puts its directory first on the agent's `PATH`,
+  repo's common dir>, argv, <the temp roots>, [<the worktree>, <the lane's other writable directories>], <pins>`) and puts its directory first on the agent's `PATH`,
   so it's the git called from the shell, a script or `make`. `split` skips git's global options
   (and the values of `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--super-prefix`,
   `--attr-source`) to find the subcommand; `reads` decides: no subcommand or one of `READ` (41:
@@ -4589,7 +4589,8 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   and `show`; `worktree` only `list`; `remote` without arguments, `get-url`, `show` (with or without `-v`); `reflog`,
   `notes`, `submodule` and `symbolic-ref` in their read forms; anything else (aliases and `lfs`
   included) is a write. A read is exec'd with `GIT_OPTIONAL_LOCKS=0`, so the agent's `git status`
-  never refreshes the index while Claude diffs. A write is refused, with `REFUSAL` (leave the
+  never refreshes the index while Claude diffs, and in the task's repository with the pins
+  (`gitops.fs_pins`, #796). A write is refused, with `REFUSAL` (leave the
   change uncommitted for Claude; to undo an edit, edit it back or `git show HEAD:<path>`; ask if
   the task needs a git write), when it lands in the task's repository (`protected`: the same
   common dir; a `config` write with `--global`, `--system` or `-f` is judged by the file it

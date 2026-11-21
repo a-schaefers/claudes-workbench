@@ -240,13 +240,17 @@ with ask_reviewer or in your summary.
 """
 
 
-def main(real: str, task_git: str, args: list[str], temps=(), lanes=()) -> int:
+def main(real: str, task_git: str, args: list[str], temps=(), lanes=(), pins=()) -> int:
     """``lanes``: the worktree and the lane's tool homes, where a repository other than the
-    task's is writable (a test suite's own, a package manager's)."""
+    task's is writable (a test suite's own, a package manager's). ``pins``: the `-c` options
+    that make git see the worktree's file system as wb's own calls do (gitops.fs_pins), given
+    to a read in the task's repository only: forced on every git, a test suite's scratch repos
+    on other file systems would get them too (#796)."""
     opts, sub, rest = split(args)
     if reads(sub, rest):
+        pre = list(pins) if pins and common_dir(real, opts) == os.path.realpath(task_git) else []
         # no index refresh in the task's repo, which Claude may be diffing at the same moment
-        os.execve(real, [real, *args], {**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+        os.execve(real, [real, *pre, *args], {**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
     if sub == "config" and (files := config_files(rest, opts)) is not None:
         # a file of its own: refused only where it is the task's repository's (#794)
         # or a `.git` link, whose rewrite would point the worktree at a git dir of its own
@@ -265,7 +269,7 @@ def main(real: str, task_git: str, args: list[str], temps=(), lanes=()) -> int:
 
 
 def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str,
-            worktree: Path | None = None, scratch=()) -> dict | None:
+            worktree: Path | None = None, scratch=(), pins=()) -> dict | None:
     """Write the shim into bin_dir; returns the env the agent runs with, or None without git.
     ``worktree``: the task's, where repositories other than the task's are scratch; ``scratch``:
     the rest of the lane's writable places (the tool homes), where they are scratch too: a
@@ -293,7 +297,7 @@ def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str,
             "from workbench.gitguard import main\n"
             f"sys.exit(main({real!r}, {repo_dir!r}, sys.argv[1:], "
             f"{sorted({tempfile.gettempdir(), '/tmp', '/var/tmp'})!r}, "
-            f"{lanes!r}))\n")
+            f"{lanes!r}, {list(pins)!r}))\n")
     shim.write_text("#!/bin/sh\n"
                     "# workbench: git is read-only for the agent (see workbench/gitguard.py)\n"
                     f"exec {shlex.quote(sys.executable)} -I -c {shlex.quote(code)} \"$@\"\n")
