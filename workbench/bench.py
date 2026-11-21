@@ -16,6 +16,7 @@ round; these are the tasks this machine's models were actually given.
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -93,7 +94,17 @@ def _safe(path: str) -> bool:
 
 def bundle(repo: Path, commit: str, dest: Path) -> None:
     """A bundle of `commit`'s history alone, as branch main: made in a scratch clone, so the
-    user's repo gets no ref, and the commits after it (the answer) aren't in it."""
+    user's repo gets no ref, and the commits after it (the answer) aren't in it. Refused from a
+    shallow clone whose cut-off history `commit` reaches: its bundle can't be cloned ("remote did
+    not send all necessary objects", #478, the audit of 1.8)."""
+    shallow = Path(repo) / gitops.git(repo, "rev-parse", "--git-path", "shallow").strip()
+    try:
+        cut = shallow.read_text().split()
+    except OSError:  # not shallow
+        cut = []
+    if any(gitops.contains(repo, commit, c) for c in cut):
+        raise RuntimeError(f"{repo} is a shallow clone: a case needs the base's whole history "
+                           f"(git -C {shlex.quote(str(repo))} fetch --unshallow, then add it again)")
     with tempfile.TemporaryDirectory(prefix="wb-bench-") as tmp:
         clone = Path(tmp) / "c"
         gitops.git(tmp, "clone", "-q", "--no-checkout", "--shared", str(repo), str(clone))

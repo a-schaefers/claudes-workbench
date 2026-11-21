@@ -8345,6 +8345,25 @@ class Bench(Base):
             run_wb("bench", "add", "t-src")                               # once
         self.assertIn("t-src", run_wb("bench", "list"))
 
+    def test_a_case_from_a_shallow_clone_is_refused_rather_than_made_unclonable(self):
+        # #478 (the audit of 1.8, reproduced): the bundle of a shallow clone's history verified,
+        # and cloning it failed "remote did not send all necessary objects"
+        from workbench import bench
+        g = lambda *a: gitops.git(self.repo, *a)  # noqa: E731
+        for i in range(2):
+            (self.repo / "f.txt").write_text(f"{i}\n")
+            g("add", "f.txt")
+            g("commit", "-qm", f"c{i}")
+        shallow = Path(self.tmp.name) / "shallow"
+        gitops.git(self.tmp.name, "clone", "-q", "--depth", "2", f"file://{self.repo}", str(shallow))
+        dest = Path(self.tmp.name) / "base.bundle"
+        with self.assertRaisesRegex(RuntimeError, "is a shallow clone: .*fetch --unshallow"):
+            bench.bundle(shallow, "HEAD", dest)
+        self.assertFalse(dest.exists())
+        gitops.git(shallow, "fetch", "-q", "--unshallow")
+        bench.bundle(shallow, "HEAD", dest)                   # whole again: it bundles and clones
+        gitops.git(self.tmp.name, "clone", "-q", "-b", "main", str(dest), str(shallow) + "-c")
+
     def test_a_case_keeps_the_tasks_setup_and_grants_for_its_checks_and_replays(self):
         # #250 (the audit of 1.2): a task's --setup made an ignored stamp its tests need, and
         # bench add rejected the accepted commit itself, its scratch clone without the stamp;
