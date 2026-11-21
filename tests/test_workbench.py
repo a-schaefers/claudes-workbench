@@ -12074,7 +12074,7 @@ class LogoutStops(Base):
                         mock.patch.object(optimize, "estimate", return_value=60), \
                         mock.patch.object(models, "holders", return_value={}):
                     optimize.start()
-                with mock.patch.object(bench, "driver", return_value=None), \
+                with mock.patch.object(bench, "driver", return_value={}), \
                         mock.patch.object(bench, "cases", return_value={"c": {}}), \
                         mock.patch.object(models, "discover", return_value={}), \
                         mock.patch.object(models, "resolve", return_value=types.SimpleNamespace(id="m")):
@@ -14454,7 +14454,7 @@ class Detector(unittest.TestCase):
         before = time.time()
         row = events.normalize({"type": "text", "part": {"text": "x"}}, 1)
         self.assertGreaterEqual(row["ts"], round(before, 3) - 0.001)
-        self.assertLessEqual(row["ts"], time.time())
+        self.assertLessEqual(row["ts"], round(time.time(), 3) + 0.001)  # ts is rounded to the ms
         self.assertEqual(events.normalize({"type": "text", "timestamp": 1_800_000_000_000,
                                            "part": {"text": "x"}}, 1)["ts"], 1_800_000_000.0)
 
