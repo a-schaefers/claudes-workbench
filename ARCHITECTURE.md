@@ -3896,6 +3896,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   refactor was refused (#343, the audit of 1.4). An untracked link where the merge writes beneath
   it is in the way whatever it points at (named itself): `os.path.isdir` followed it, and git
   replaced a user's ignored link to a dataset with a plain directory (#367, the audit of 1.6).
+  Under `core.ignorecase` (macOS, Windows) a path matching a tracked one but for case (and
+  Unicode normalization) is that tracked file, not in the way: a case-only rename, `Readme.md`
+  to `README.md`, was refused as "would overwrite README.md" on APFS (#470, the audit of 1.8).
   Git's merge silently replaced an ignored `settings.ini`
   the task had un-ignored and committed, and its `--no-overwrite-ignore` doesn't stop the ort
   merge (#189). The paths come from the merge itself, done first in memory (`git merge-tree

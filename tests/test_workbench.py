@@ -1898,6 +1898,35 @@ class Lifecycle(Base):
         self.assertIn("changed.big 1", smudged)  # the trial's, LFS skipped
         self.assertEqual(g("worktree", "list", "--porcelain").count(b"worktree "), 1)
 
+    def test_a_case_only_rename_merges_on_a_case_insensitive_file_system(self):
+        # #470 (the audit of 1.8): renaming Readme.md to README.md, lexists("README.md") is true
+        # on APFS, and the merge was refused as "would overwrite README.md". The file system is
+        # made case-insensitive for the check, as core.ignorecase says it is
+        repo, g = self._merge_case(
+            base={b"Readme.md": b"r\n", b"a.txt": b"a\n"}, main={b"a.txt": b"A\n"},
+            task={b"Readme.md": None, b"README.md": b"r\n"}, ignore={})
+        g("config", "core.ignorecase", "true")
+        real = os.path.lexists
+
+        def lexists(path):
+            path = os.fsdecode(path)
+            parent, name = os.path.split(path)
+            return real(path) or os.path.isdir(parent) and any(
+                n.casefold() == name.casefold() for n in os.listdir(parent))
+        for old_git in (False, True):
+            with (mock.patch("os.path.lexists", lexists),
+                  mock.patch.object(gitops, "_merge_tree", return_value=None) if old_git
+                  else nullcontext()):
+                self.assertEqual(gitops._overwritten(repo, "delegate/t"), [])
+        gitops.merge(repo, "t", "main")
+        self.assertEqual((repo / "README.md").read_bytes(), b"r\n")
+        repo, g = self._merge_case(  # a case-sensitive git: in the way, as before
+            base={b"Readme.md": b"r\n"}, main={b"a.txt": b"A\n"},
+            task={b"Readme.md": None, b"README.md": b"r\n"}, ignore={})
+        g("config", "core.ignorecase", "false")  # git init sets it true on macOS
+        with mock.patch("os.path.lexists", lexists):
+            self.assertEqual(gitops._overwritten(repo, "delegate/t"), ["README.md"])
+
     def test_a_clean_merge_beside_ignored_files_still_merges(self):
         repo, g = self._merge_case(
             base={b"a.txt": b"a\n"}, main={b".gitignore": b"local.ini\n"},

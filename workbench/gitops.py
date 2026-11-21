@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Callable
@@ -1365,18 +1366,23 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
     is a file counts too. The paths come from the merge itself, done in memory (merge-tree): the
     branch's added paths missed a modify/delete conflict, whose abort deleted the personal copy, a
     directory rename that moved an added file onto one, and a non-UTF-8 name read with U+FFFD
-    (#241, the audit of 1.2). Raw bytes throughout."""
+    (#241, the audit of 1.2). Raw bytes throughout. Under core.ignorecase (macOS, Windows) a
+    path matching a tracked one but for case is that tracked file: a case-only rename (Readme.md
+    to README.md) was refused as "would overwrite README.md" on APFS (#470, the audit of 1.8)."""
     written = _merge_tree(repo, branch)
     if written is None:  # git before 2.38
         written = _trial_merge(repo, branch)
     tracked = set(_run(repo, ("ls-tree", "-r", "--name-only", "-z", "HEAD")).stdout.split(b"\0"))
+    ignorecase = git(repo, "config", "--bool", "core.ignorecase", check=False).strip() == "true"
+    folded = {_folded(t) for t in tracked} if ignorecase else set()
     top = os.fsencode(repo)
     out = []
     for p in (p for p in written.split(b"\0") if p and p not in tracked):
         parts = p.split(b"/")
         for i in range(1, len(parts) + 1):
             here = os.path.join(top, *parts[:i])
-            if b"/".join(parts[:i]) in tracked or not os.path.lexists(here):
+            if (b"/".join(parts[:i]) in tracked or not os.path.lexists(here)
+                    or folded and _folded(b"/".join(parts[:i])) in folded):
                 # a tracked file where the merge puts a directory is the merge's to replace: a
                 # clean file-to-directory refactor (pkg to pkg/init.py) was refused (#343, the
                 # audit of 1.4)
@@ -1400,6 +1406,12 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
             out.append(p.decode("utf-8", "replace"))
             break
     return out
+
+
+def _folded(path: bytes) -> str:
+    """A path as a case-insensitive file system compares it (APFS folds case and Unicode
+    normalization alike): for core.ignorecase (#470)."""
+    return unicodedata.normalize("NFC", os.fsdecode(path)).casefold()
 
 
 def _untracked_under(path: bytes, top: bytes, tracked: set[bytes]) -> list[str]:
