@@ -303,7 +303,9 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   repo and model and the two ways out: `--queue` (start anyway and wait behind it) or doing the
   step yourself. Before this, the second session's task queued in silence, maybe for hours
   (the 2026-11-16 audit). The holders are gpu.json's live entries plus any task whose live runner
-  hasn't reached the lease yet (`cli._gpu_holders`). A remote model is checked against the
+  hasn't reached the lease yet (`cli._gpu_holders`; status `leased`, the runner's pid, says it
+  has: one that stepped aside for its tests or a server's wait was counted, and a task the lease
+  would have let in was refused with exit 4 for the length of the other's test suite, #805). A remote model is checked against the
   holders of its own server's pool (`models.pool`; this machine's for one on this GPU, #750). A known limit, left by choice (the 0.90 review): the check takes no lock, and a task
   is visible to it only once its runner's pid is in its status, after task.json is written, so
   two `wb start`s at the same moment (from two sessions) can both pass it. Nothing hangs
@@ -6426,6 +6428,7 @@ check-ins off), not `wb start`'s.
 | `gpu_w_sum`, `gpu_w_n`, `gpu_w_peak` | the same sampler's readings in watts: their sum, count and peak, for the row's `gpu_w` (*Stats recording*) |
 | `speeds` | `{write, read, ttft}`: this task's own samples (`router.speed_samples`), the newest `TASK_SPEED_KEEP` 200 of each, with stats recording on |
 | `guards` | `{<guard>: n}`: the guards that stopped its rounds, with stats recording on (*Stats recording*) |
+| `leased` | the pid of the runner that entered its GPU lease (`drive`): that runner, alive and not in gpu.json, stepped aside (its tests, a server's wait), and `cli._gpu_holders` doesn't count it a holder (#805) |
 | `remote_gpu` | true when its model runs on another machine (set in `drive`): the results row carries it, and the savings say the energy wasn't measured |
 | `unrecorded` | set with an accept's or discard's closing phase, cleared once its results row is written: `{outcome, step, extra}`, what a retried accept or discard writes the row from |
 | `closing` | set by `wb accept` once its commit is made, before anything is removed, cleared with the phase: `{commit, step, merge, merge_into, merge_as, sign, merge_from?, merged_head?}` (`sign`: false after `--no-sign`, so a retry's merge is unsigned too; `merge_from`: the target's head, saved right before each merge attempt, from which a retry finds a squash already made, `gitops.squashed`, #432). The same status write saves the full object ID as `tip`. A retry uses that object and the original destination even if the delegate ref moved. A recovered refusal still exits 5. An interrupted accept recorded merged=false for a merge git had made, and stranded a last step with no new edits once its worktree was gone (#246, the audit of 1.2) |

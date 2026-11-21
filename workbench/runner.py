@@ -2672,6 +2672,9 @@ def drive(task: store.Task) -> None:
         _base_check(task)  # on the untouched base, before the agent and the GPU
     # beside the running tasks' models when all fit the GPU, else alone once they finish
     with models.GpuLease(m, task.name, say) as lease:
+        # this runner reached the lease: from now on gpu.json says whether it holds the GPU, so
+        # wb start no longer counts it as a holder while it steps aside for its tests (#805)
+        task.set_status(leased=os.getpid())
         try:
             _loaded(task, _load(task, lease, m))
             window = (m.config.get("limit") or {}).get("context")

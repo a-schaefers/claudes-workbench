@@ -523,7 +523,9 @@ def pick_model(size: str, wanted: str | None, stack=(), name: str | None = None)
 def _gpu_holders(me: str | None = None, of: models.Model | None = None) -> dict:
     """Who holds or waits for the GPU (``of``'s: a remote model's server, else this machine's),
     but ``me``: its gpu.json's live entries, plus each task whose runner is alive but hasn't
-    reached the lease yet (one just started), as an entry of its own."""
+    reached the lease yet (one just started), as an entry of its own. A runner that has (status
+    `leased`, its pid) and isn't in gpu.json stepped aside for its tests or a server's wait:
+    counted, wb start refused (exit 4) a task the lease would have let in (#805)."""
     pool = models.pool(of)
     held = {p: h for p, h in models.holders(pool=pool).items() if h.get("task") != me}
     named = {h.get("task") for h in held.values()}
@@ -531,7 +533,8 @@ def _gpu_holders(me: str | None = None, of: models.Model | None = None) -> dict:
     for t in store.all_tasks():
         m = found.get(t.spec.get("model") or "")
         if t.name not in named and t.name != me and m and models.pool(m) == pool \
-                and t.status.get("phase") in store.ACTIVE and runner_alive(t):
+                and t.status.get("phase") in store.ACTIVE and runner_alive(t) \
+                and t.status.get("leased") != t.status.get("pid"):
             held[f"task {t.name}"] = {"model": m.id, "task": t.name}
     return held
 

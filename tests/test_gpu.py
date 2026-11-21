@@ -97,6 +97,26 @@ class Sharing(Base):
         run_wb("stop", "t-big")
         wait_phase("t-small", {"review"})
 
+    def test_a_start_is_let_in_beside_a_task_whose_runner_stepped_aside_for_its_tests(self):
+        # #805: t-big's runner let the GPU go for its tests, yet wb start counted it a holder
+        # (alive, not in gpu.json) and refused t-small with exit 4 the lease would have let in
+        os.environ["WB_FAKE_GPU_GB"] = "24"           # the two can't share
+        mark = Path(self.tmp.name) / "base-checked"  # the base check runs quickly, the round's slowly
+        self.start("t-big", "ok", "--model", BIG, "--test", f"test -e {mark} && sleep 30; touch {mark}")
+        deadline = time.time() + 30
+        while store.Task("t-big").status.get("phase") != "testing" and time.time() < deadline:
+            time.sleep(0.1)
+        big = store.Task("t-big").status
+        self.assertEqual(big["leased"], big["pid"])
+        self.assertEqual(cli._gpu_holders(), {})
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-small", "--spec", str(self.spec), "--repo", str(self.repo),
+                     "--model", SMALL, "--test", TEST_CMD)  # no --queue: refused before
+        self.assertNotIn("the GPU is busy", out)
+        wait_phase("t-small", {"review"})              # while t-big's tests still run
+        self.assertEqual(store.Task("t-big").status["phase"], "testing")
+        run_wb("stop", "t-big")
+
     def runs_in_order(self, *marks):
         """Each mark's first fake run, in the order the runs came (FAKE_RUNS)."""
         runs = [json.loads(line)["prompt"] for line in Path(os.environ["FAKE_RUNS"]).read_text().splitlines()]
