@@ -67,7 +67,13 @@ class Sharing(Base):
         os.environ["WB_FAKE_GPU_GB"] = "24"           # 36 GB wanted: too much at once
         out = self.hold_big_then_start_small()
         self.assertIn("note: the GPU is busy with t-big; this task waits as queued", out)
-        time.sleep(1.5)
+        # its base check comes first: on the nightly's macOS runner it outlasted a fixed 1.5 s
+        # sleep, and `last` still said so (#950); the wait is the lease's, once it is in line
+        deadline = time.time() + 30
+        while not any(h["task"] == "t-small" and h.get("waiting") for h in models.holders().values()):
+            self.assertLess(time.time(), deadline, store.Task("t-small").status)
+            time.sleep(0.1)
+        time.sleep(0.5)                               # and it stays queued behind t-big
         st = store.Task("t-small").status
         self.assertEqual((st["phase"], st["last"]), ("queued", "waiting for the GPU (held by t-big)"))
         self.assertEqual(transcript.activity(store.Task("t-small"), {}),
@@ -263,9 +269,12 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.start("t-new", "ok", "--model", BIG, "--queue")
         os.environ["FAKE_SCENARIO"] = "ok"
         run_wb("feedback", "t-a", "--text", "feedback-for-t-a")
+        # both in line in gpu.json before the GPU comes free: status `last` read "waiting for the
+        # GPU" from the runner's start, before its checkout and its lease, so under CI's load
+        # t-big stopped while t-new was the only one in line, and it rightly went first (#950)
         deadline = time.time() + 30
-        while "waiting for the GPU" not in store.Task("t-a").status.get("last", ""):
-            self.assertLess(time.time(), deadline, store.Task("t-a").status)
+        while {"t-a", "t-new"} - {h["task"] for h in models.holders().values() if h.get("waiting")}:
+            self.assertLess(time.time(), deadline, (store.Task("t-a").status, models.holders()))
             time.sleep(0.1)
         run_wb("stop", "t-big")
         wait_phase("t-a", {"review"})
@@ -616,7 +625,13 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
             from workbench import models
             with models.GpuLease(models.resolve({BIG!r}), "t-act", lambda s: None):
                 Path({str(tmp / "act")!r}).write_text("in")
-                time.sleep(3)
+                # held until both loads have misfit beside it and queued: a fixed 3 s ran out
+                # first on the nightly's macOS runner, whose interpreters start slowly, and the
+                # second load, alone by then, rightly fit (#950)
+                deadline = time.time() + 30
+                while time.time() < deadline and not all(
+                        Path({str(tmp)!r}, n + "-queued").exists() for n in ("t-w1", "t-w2")):
+                    time.sleep(0.05)
             """)
         waiter = textwrap.dedent(f"""
             import sys, time
