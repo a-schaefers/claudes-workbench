@@ -469,6 +469,51 @@ class Real(unittest.TestCase):
         self.assertIsNone(models.server_devices(x.root))
         self.assertFalse(models.apart(x.root, y.root))      # unknown is never apart
 
+    def test_an_engine_pinned_to_one_card_waits_for_and_frees_that_card_alone(self):
+        # #752 (the 2026-11-21 audit, finding 99): with one Ollama per GPU, `wb image` refused
+        # while a task ran on either card, then unloaded both cards' models, whichever card its
+        # engine used (`env CUDA_VISIBLE_DEVICES=1 sd-cli …`)
+        gb = 10 ** 9
+        found, posts_a, posts_b = self.per_gpu([{"name": "chat", "size": 18 * gb, "size_vram": 18 * gb}],
+                                               [{"name": "y", "size": 18 * gb, "size_vram": 18 * gb}])
+        one, zero = frozenset({"GPU-11"}), frozenset({"GPU-00"})
+        self.assertEqual(media.cards({"command": "sd-cli", "beside": "b/y"}), one)
+        self.assertEqual(media.cards({"command": "sd-cli", "devices": "1"}), one)
+        self.assertEqual(media.cards({"command": "sd-cli", "devices": 1}), one)
+        self.assertEqual(media.cards({"command": "sd-cli", "devices": "GPU-11"}), one)
+        for unknown in ({"devices": "7"}, {"beside": "nobody/x"}, {}):    # every card, as before
+            self.assertIsNone(media.cards({"command": "sd-cli", **unknown}))
+        self.assertIn("devices must", media.problem({"command": "sd-cli", "devices": True}))
+        self.assertIn("beside must be a string", media.problem({"command": "sd-cli", "beside": 1}))
+        task_a = {"1": {"model": "a/x", "task": "t-a"}}
+        self.assertTrue(models.admits(None, task_a, one))            # beside a task on GPU 0
+        self.assertFalse(models.admits(None, task_a, zero))          # on its card: it waits
+        self.assertFalse(models.admits(None, task_a))                # not pinned: the whole GPU
+        image = {"2": {"model": None, "task": "wb image", "cards": ["GPU-11"]}}
+        self.assertTrue(models.admits(found["a/x"], image))          # a task on GPU 0 joins it
+        self.assertFalse(models.admits(found["b/y"], image))         # one on its card waits
+        self.assertFalse(models.admits(found["a/x"], {"3": {"model": None, "task": "wb image"}}))
+        os.environ["WB_GPU_DIR"] = str(Path(self.tmp.name, "lease"))
+        holder = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        store.write_json(models.lease_dir() / "gpu.json", {str(holder.pid): {
+            "model": "a/x", "task": "t-a", "since": 0, "start": models._started(holder.pid),
+            "uid": os.getuid()}})
+        said = []
+        with models.GpuLease(None, "wb image", said.append, wait=False, cards=one):
+            self.assertEqual(models.holders()[str(os.getpid())]["cards"], ["GPU-11"])
+        self.assertEqual(said, ["sharing the GPU with a/x"])
+        with self.assertRaisesRegex(RuntimeError, "in use by t-a: wb image needs its cards"):
+            with models.GpuLease(None, "wb image", said.append, wait=False, cards=zero):
+                pass
+        with self.assertRaisesRegex(RuntimeError, "in use by t-a"):   # not pinned: as before
+            with media.turns("wb image", said.append, False, {"command": "sd-cli"}):
+                pass
+        with media.turns("wb image", said.append, False, {"command": "sd-cli", "beside": "b/y"}):
+            self.assertEqual(posts_a, [])                            # GPU 1's Ollama freed alone
+            self.assertEqual([p["model"] for p in posts_b], ["y"])
+
     def test_one_ollama_under_two_host_spellings_is_one_server(self):
         # free_gpu unloaded the very models it was told to keep (the 2026-11-16 audit)
         found, posts = self.own([{"name": "x", "size": 10, "size_vram": 10},

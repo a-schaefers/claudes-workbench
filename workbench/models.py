@@ -1436,12 +1436,15 @@ def _kept_name(name: str, held: set[str]) -> bool:
     return bare(name) in want
 
 
-def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
+def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
+             cards: frozenset | None = None) -> None:
     """Stop every model server and unload every Ollama model holding the GPU, except the models
     in ``keep`` (ids): the task's own, and those of tasks running beside it; and those the user
     keeps loaded (keep_loaded). ``of``: the model the GPU is freed for; an Ollama known to use
     only other cards than its server's (apart) keeps its models: every server's were unloaded,
-    so with one Ollama per GPU a task on one card emptied the other (#460, the audit of 1.8)."""
+    so with one Ollama per GPU a task on one card emptied the other (#460, the audit of 1.8).
+    ``cards``: the cards an image or audio engine is pinned to (media.cards), likewise: an Ollama
+    known to use none of them keeps its models (#752: a generation emptied every card)."""
     warn = warn or say
     if _fake():
         return
@@ -1494,7 +1497,8 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
                      if not any(o.server == key and _matches(o.name, {name}) for o in kept_ollama)
                      and not _kept_name(name, held)]  # ours or another tool's
               for key, root in _roots(o for o in local if o.engine == "ollama").items()
-              if of is None or not apart(of.root, root, seen)}
+              if (of is None or not apart(of.root, root, seen))
+              and (cards is None or not apart_cards(cards, root, seen))}
     _wait_unused(doomed, warn)
     for root, names in doomed.items():
         for name in names:
@@ -1851,9 +1855,29 @@ def server_devices(root: str | None) -> frozenset | None:
     if not root or _fake() or _overrides().get("gpu_gb") is not None \
             or hardware.ollama_matched(root) is None:
         return None
-    devs = budget_devices(root)[1]
-    return frozenset(g.get("uuid") or f"{g.get('driver')}|{g.get('name')}|{g.get('vram')}"
-                     for g in devs) or None
+    return frozenset(_card(g) for g in budget_devices(root)[1]) or None
+
+
+def _card(g: dict) -> str:
+    """One card's identity, as server_devices and named_cards compare them: its UUID, else its
+    driver, name and size."""
+    return g.get("uuid") or f"{g.get('driver')}|{g.get('name')}|{g.get('vram')}"
+
+
+def named_cards(raw: str) -> frozenset | None:
+    """The cards a CUDA_VISIBLE_DEVICES-style list names (an image or audio engine's `devices`,
+    #752): numbers in nvidia-smi's order (CUDA's under CUDA_DEVICE_ORDER=PCI_BUS_ID; ROCm's for
+    AMD cards), or UUIDs or their unique starts, as hardware.visible reads them. None when that
+    can't be told (gpu_gb set by hand, no card read, a list that names none of them), and unknown
+    shares every card, as before."""
+    if _overrides().get("gpu_gb") is not None:
+        return None
+    devs = hardware.gpus(windows=False)
+    if any(g.get("discrete") for g in devs):
+        devs = [g for g in devs if g.get("discrete")]
+    picked = hardware.visible(devs, {"CUDA_VISIBLE_DEVICES": raw, "ROCR_VISIBLE_DEVICES": raw,
+                                     "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})[0]
+    return frozenset(_card(g) for g in picked) or None
 
 
 def apart(root: str | None, other: str | None, seen: dict | None = None) -> bool:
@@ -1866,6 +1890,15 @@ def apart(root: str | None, other: str | None, seen: dict | None = None) -> bool
             seen[r] = server_devices(r)
     a, b = seen[root], seen[other]
     return a is not None and b is not None and not a & b
+
+
+def apart_cards(cards: frozenset | None, root: str | None, seen: dict | None = None) -> bool:
+    """Whether the Ollama at ``root`` is known to use none of ``cards`` (an engine's, #752), as
+    apart() tells two servers. Unknown is never apart."""
+    seen = {} if seen is None else seen
+    if root not in seen:
+        seen[root] = server_devices(root)
+    return cards is not None and seen[root] is not None and not cards & seen[root]
 
 
 def need(m: Model) -> int:
@@ -1916,18 +1949,32 @@ def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
     return all(sizes) and sum(sizes) <= SHARE_AT * budget
 
 
-def admits(m: Model | None, held: dict) -> bool:
+def admits(m: Model | None, held: dict, cards: frozenset | None = None) -> bool:
     """Whether ``m`` may take the GPU now beside the live holders ``held`` (gpu.json's entries):
     nobody waits ahead of it (first come, first served), every holder's model is known, and they
     all fit together (can_share). Nothing (an image, ``m`` None) joins anyone, and on a remote
-    server, whose memory nothing here measures, nobody shares: tasks take turns (#116)."""
+    server, whose memory nothing here measures, nobody shares: tasks take turns (#116). But an
+    image or audio engine pinned to known ``cards`` (media.cards) joins holders whose Ollama
+    servers are known to use none of them (apart_cards), and a task joins such a holder (its
+    entry's `cards`) when its own server is apart from them: on a box with one Ollama per GPU, a
+    generation on the idle card refused while any task ran on any card (#752)."""
     if not held:
-        return m is not None
-    if m is None or m.remote or any(h.get("waiting") for h in held.values()):
+        return m is not None or cards is not None
+    if (m is not None and m.remote) or any(h.get("waiting") for h in held.values()):
         return False
-    found = discover()
-    running = [o for o in (found.get(h.get("model") or "") for h in held.values()) if o]
-    return len(running) == len(held) and can_share(m, running, gpu_budget(m.root))
+    on_cards = lambda h: h.get("model") is None and isinstance(h.get("cards"), list) and h["cards"]  # noqa: E731
+    pinned = [frozenset(h["cards"]) for h in held.values() if on_cards(h)]
+    rest = [h for h in held.values() if not on_cards(h)]
+    found, seen = discover(), {}
+    running = [o for o in (found.get(h.get("model") or "") for h in rest) if o]
+    if len(running) != len(rest):
+        return False  # an exclusive holder with no model (wb optimize, unloaded tests) or an unknown one
+    if m is None:
+        return cards is not None and all(not cards & c for c in pinned) and all(
+            o.engine == "ollama" and not o.remote and apart_cards(cards, o.root, seen) for o in running)
+    if pinned and (m.engine != "ollama" or not all(apart_cards(c, m.root, seen) for c in pinned)):
+        return False
+    return not running or can_share(m, running, gpu_budget(m.root))
 
 
 def holders(home: Path | None = None, pool: str = "gpu") -> dict:
@@ -1973,8 +2020,9 @@ class GpuLease:
     swapped their models in and out on every request."""
 
     def __init__(self, m: Model | None, task: str, say=print, wait: bool = True,
-                 on: Model | None = None):
+                 on: Model | None = None, cards: frozenset | None = None):
         self.m, self.task, self.say, self.wait = m, task, say, wait
+        self.cards = cards if m is None else None  # an engine pinned to these (admits, #752)
         self.home = lease_dir()
         self.pool = pool(m or on)  # ``on``: whose server a lease with no model takes (wb optimize)
         self.fh = None
@@ -2002,6 +2050,7 @@ class GpuLease:
             self.waiting_since = store.now()
         return {"model": self.m.id if self.m else None, "task": self.task, "since": self.since,
                 "start": _started(os.getpid()), "uid": os.getuid(), "user": _user(),
+                **({"cards": sorted(self.cards)} if self.cards else {}),
                 **({"waiting": True, "waiting_since": self.waiting_since} if waiting else {})}
 
     def warn(self, msg: str) -> None:
@@ -2025,23 +2074,29 @@ class GpuLease:
     def _admit(self) -> None:
         with _lease_lock(self.home / f"{self.pool}.admit"):
             held = {p: h for p, h in self._holders().items() if p != self.me}
-            if held and self.m is None and not self.wait:
-                raise RuntimeError(busy(held, f"{self.task} needs it to itself. Run it once they "
-                                        "are in review (answer one that asks first), or with "
-                                        "--wait, in the background, to queue behind them"))
-            if admits(self.m, held):
+            refuse = self.m is None and not self.wait
+            if held and refuse and not admits(None, held, self.cards):
+                raise RuntimeError(busy(held, self._needs()))
+            if admits(self.m, held, self.cards):
                 try:
                     fcntl.flock(self.fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
                 except BlockingIOError:
-                    pass  # something has the GPU to itself: wait below
+                    if refuse:  # something has the GPU to itself, with no entry yet
+                        raise RuntimeError(busy(held, self._needs())) from None
+                    # something has the GPU to itself: wait below
                 else:
                     self._set({**held, self.me: self._entry()})
                     if held:
                         self.say("sharing the GPU with " + ", ".join(
-                            sorted({h["model"] for h in held.values() if h.get("model")})))
+                            sorted({h.get("model") or h.get("task") or "?" for h in held.values()})))
                     return
             self._set({**held, self.me: self._entry(waiting=True)})
         self._take_alone(held)
+
+    def _needs(self) -> str:
+        return (f"{self.task} needs " + ("its cards" if self.cards else "it to itself")
+                + ". Run it once they are in review (answer one that asks first), or with "
+                "--wait, in the background, to queue behind them")
 
     def step_aside(self, unload: bool = False) -> None:
         """Let the GPU go while the task needs none of it: its tests (up to --test-timeout, every

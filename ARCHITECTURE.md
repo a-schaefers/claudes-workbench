@@ -3146,8 +3146,14 @@ or waiting on a question), not evicted (the 0.90 review: the other task unloaded
 for that one to finish). If not, it warns "ollama could not fit … waiting for the GPU to itself",
 unloads its own model (unless a holder runs the same model: it is theirs too), marks itself
 waiting and takes its turn as above (its shared lock dropped first), then loads alone.
-`gpu.json` is `{"<pid>": {model, task, since, start, uid, user, waiting?, waiting_since?, tests?}}` (`tests`: a task's
-`--unload-for-tests` tests hold the GPU, `model` null). `wb image` takes `gpu.lock` through
+`gpu.json` is `{"<pid>": {model, task, since, start, uid, user, waiting?, waiting_since?, tests?, cards?}}` (`tests`: a task's
+`--unload-for-tests` tests hold the GPU, `model` null; `cards`: an image or audio engine pinned to
+those cards, `model` null). A lease with no model is alone unless it is pinned (`GpuLease(None, …,
+cards=)`): `admits(None, held, cards)` lets it in, on a shared `gpu.lock`, when nobody waits and
+every holder is a task on a local Ollama known to use none of its cards (`apart_cards`) or
+another engine on other cards, and a task joins a `cards` holder when its own Ollama is apart
+from them (then `can_share` decides beside the other tasks as before); refused without `--wait`
+only when it couldn't join (#752). `wb image` takes `gpu.lock` through
 `GpuLease(None, "wb image", wait=…)` (`wb audio`: `"wb audio"`, and the refusal names which): with `--wait` it queues in `gpu.json` like a task with no
 model, waits for the running tasks to finish, then has the GPU to itself; while it holds or waits
 for the GPU, `wb start` refuses a new task (exit 4, see *Two projects, one GPU*) unless `--queue`,
@@ -3435,7 +3441,11 @@ the behaviour from before. Servers apart don't touch each other's memory: `free_
 `_others_resident` asks only those; `_room_beside` and `can_share` count only the models on them
 against `m`'s budget. Every server's models were unloaded, so a task on GPU 0's Ollama emptied
 GPU 1's, and every running model was summed against one card, which refused sharing that fit.
-`free_gpu()` with no `of` (`wb image`, `wb audio`, `wb optimize`) still frees every card.
+`free_gpu()` with no `of` (`wb optimize`, an image or audio engine not pinned) still frees every
+card; `free_gpu(…, cards=)` (an engine pinned with `devices` or `beside`, `media.cards`) unloads
+only on the Ollama servers not known apart from those cards (`models.apart_cards`), and
+`media.settle` waits only for those (#752: a generation on GPU 1 was refused while a task ran on
+GPU 0, then emptied both).
 `ollama_context()` (`OLLAMA_CONTEXT_LENGTH`
 with spaces and quotes trimmed, as Ollama reads it, and the raw value: `report` says when it isn't
 a number instead of crashing), `ollama_models_dir()` (`os.path.isdir`: a directory it can't read
@@ -4070,6 +4080,15 @@ Then describe the engine in `~/.config/workbench/images.json` (`$WB_IMAGES`). Tw
   unloaded first (`media.turns`, `media.boxes`: it took no turn and generated beside a task's model
   on that card, #750). A command engine in WSL beside an Ollama on Windows still takes this
   machine's pool, not the Windows host's.
+- On a machine with several cards, pin an engine to the one it uses so it runs beside tasks on
+  the others: `"devices": "1"` (the cards as the engine's own `CUDA_VISIBLE_DEVICES` names them:
+  numbers in nvidia-smi's order, so give the engine `CUDA_DEVICE_ORDER=PCI_BUS_ID` too, or a
+  card's UUID), or `"beside": "<provider/model>"` (the card that model's Ollama uses), e.g.
+  `"command": "env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 sd-cli …", "devices": "1"`.
+  It then waits only for tasks on its card and unloads only the Ollama models there (#752).
+  Unpinned, or where wb can't tell which cards each Ollama uses (one Ollama per GPU, each with its
+  own `CUDA_VISIBLE_DEVICES`, *Sharing the GPU*), a generation waits for every task and empties
+  every card.
 
 A generation on this GPU takes the GPU lock and unloads the coding models first, just as a task does. While
 a task holds the GPU, `wb image` refuses at once and names it; `--wait` queues behind it instead
@@ -4096,7 +4115,12 @@ custom-node packs do run their own Python).
   but never called, and an image server kept 6-12 GB beside the next task's model, #749), `key` (a url engine's API key, `media.auth`: `models._expand`, no agent filter),
   `gpu` (`media.on_gpu`: false is off this GPU; unset, a url on another host is off
   it and anything else on; #587: a remote or CPU engine took the exclusive lease, unloaded the
-  coding models and refused while any task ran).
+  coding models and refused while any task ran), `devices` (a string or number, as
+  `CUDA_VISIBLE_DEVICES` names cards: `models.named_cards` reads it through `hardware.visible`
+  in nvidia-smi's order, `CUDA_DEVICE_ORDER=PCI_BUS_ID`, and for AMD cards as
+  `ROCR_VISIBLE_DEVICES`) or `beside` (a discovered model id: its Ollama's
+  `models.server_devices`): `media.cards`, the cards it is pinned to; one that names no card, a
+  model not found or not a local Ollama, or `gpu_gb` set by hand is unknown, every card (#752).
 - A command engine (`_argv`, through `media.fill`): `shlex.split(command)`, `~` expanded per token, then `{prompt}`,
   `{out}`, `{width}`, `{height}`, `{seed}` filled in (a whole float without its `.0`: `--seconds
   30` reached an audio engine as "30.0", #596), token by token, in one pass (a prompt that
@@ -4136,7 +4160,8 @@ custom-node packs do run their own Python).
   `WB_FAKE_MODELS`. The skill proposed an 11 GB install to users already running one (#753).
 - Ready (`ready`, shown by `wb image --list` and `wb scout`): an entry `media.problem` finds
   nothing wrong with (the string keys strings, a command `shlex.split` accepts, `timeout` and
-  `seconds` positive numbers, `voices` a list of names, `gpu` true or false, a known `kind` for
+  `seconds` positive numbers, `voices` a list of names, `gpu` true or false, `devices` a
+  non-empty string or number, a known `kind` for
   audio; else "not usable: <why>", refused by `generate` before the lease: an open quote or
   `"timeout": "10m"` ended `wb scout` in a traceback or crashed a generation after the unloads,
   `"voices": "af_heart"` passed the voice "a", #596; a `url` or `unload` that isn't an http(s)
@@ -4294,13 +4319,15 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
 - `"gpu": false` marks an engine that runs on the CPU. It takes no GPU lease and frees nothing,
   so it can run beside a coding task. A url engine on another host is off this GPU unless it
   says `"gpu": true` (`media.on_gpu`, as for images), or is on a remote box the coding tasks use,
-  where it takes that box's turn (`media.turns`, as for images, #750). Any other engine has the GPU to itself,
+  where it takes that box's turn (`media.turns`, as for images, #750). `devices` and `beside` pin
+  an engine to its card, as for images (#752); the batch's lease is pinned only when the engine and
+  the listener both are (their cards together). Any other engine has the GPU to itself,
   exactly as `wb image` does, and `free_gpu` keeps the models on the engine's or the listener's
   own server (`media.serving`).
 
 **How it works** (`workbench/audio.py`, `cli.cmd_audio`; shared with images: `workbench/media.py`).
 - `audio.json` keys: `command` or `url`, `kind` (`speech`, `sfx`, `music`, `listen`; default
-  `speech`), `gpu`, `voices`, `seconds`, `unload`, `unload_body`, `key`, `ref_arg`, `model`, `label`, `notes`,
+  `speech`), `gpu`, `devices`, `beside`, `voices`, `seconds`, `unload`, `unload_body`, `key`, `ref_arg`, `model`, `label`, `notes`,
   `timeout` (s, default 1800; a listener's 600); `audio.ready` refuses a `kind` it doesn't know
   (it skipped the listener and took 10 s, #596). `engine(name, kind)` returns the named engine
   (refused when it's of another kind), else the first of `--kind`, else the first that isn't a
@@ -6019,7 +6046,7 @@ Prints the counts and the bytes freed; writes `gc.json`. Then (not in `cli.gc`, 
 ### Other
 | Command | Flags | What it does |
 |---|---|---|
-| `wb image "<prompt>"` | `--n` (4; at least 1), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. An engine off this GPU (`"gpu": false`, or a url on another host) runs beside tasks. A bare `list` or `ls` as the prompt acts as `--list`. |
+| `wb image "<prompt>"` | `--n` (4; at least 1), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. An engine off this GPU (`"gpu": false`, or a url on another host) runs beside tasks; one pinned to a card (`devices`, `beside`) waits only for the tasks on it. A bare `list` or `ls` as the prompt acts as `--list`. |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music` (default: the first engine), `--n` (3; at least 1), `--seconds S` (engines with `{seconds}`; default the entry's `seconds`, else 5 for sfx, 30 for music, 10 otherwise), `--voice NAME` (default: the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check` (no listener, no spectrograms), `--list`, `--wait` | Clips from a local audio engine, each with one line of checks (see *Audio*). `--n` below 1 is refused (exit 2, before any lease: #592); a clip that isn't audio fails the command, unpublished. A GPU engine refuses while anything holds the GPU (`--wait` queues); a `"gpu": false` engine runs beside tasks. A bare `list` or `ls` acts as `--list`. An option the engine has no placeholder for is refused, naming it. |
 | `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|wait\|answer]` | `listen <clip>… [--text]` (Claude's shortlist of `wb audio` takes for the user to play and pick, up to 8: *Listening by ear*, #397), `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses, leaving the switch off (#690), when another program or another account's chat answers there or its server didn't start, `off` stops only one it started; `url` first starts again one `on` started that is gone, #449), `--port` (the running server's, from `chat/port.json`, else the one `chat/serve.pid` names, else 1337: #349), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo --pid` (a plan's session and directory; `--pid`, the asking session's `wb events` process, #538; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb try` | `--model <id or fragment>` (the router's pick) | A sample task that proves the setup (#112): copies `workbench/try/project/` (a tiny `stats.py` with its tests and a committed CLAUDE.md; `from __future__ import annotations`, so its `list[float]` imports on Python 3.7 and 3.8 too) into `~/.local/share/workbench/try/<n>` (beside `$WB_SKILLS`: the state directory is hidden from the lane, and its agent had no git there, #164), sets it up as `wb init` does, and starts `workbench/try/spec.md` (add `median`) as `try-<n>`, `--size trivial --trial --test '<wb's python> -m unittest'` (`sys.executable`, quoted: PATH's `python3` is 3.6 on RHEL 8, and the untouched base failed, #530): never the router's evidence or the lessons. Prints what `wb start` does, the project's path and the hidden check for review, `<wb's python> <pkg>/workbench/try/check.py <worktree>` (the agent never sees it; it fails on the untouched base, also when its Python can't read the module, passes once `median` meets the spec, and leaves no `__pycache__`). A refusal, by `wb init` (no git identity: #530; a home that is a git repo no longer refuses it, #684) or by the start (the GPU busy without `--queue`, no model), removes the copy again (#161). |
@@ -6677,7 +6704,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
   *Keeping the docs true* is the procedure; `tests/test_docs.py` checks what it can (every command
   and flag here, every module and environment variable in CLAUDE.md, CLAUDE.md's size).
-- **`wb image` and `wb audio` share `media.py`** (the engine file, `problem`, `ready`, `auth`, `post`, `fill`, `settle`, `gpu`, `on_gpu`, `serving`,
+- **`wb image` and `wb audio` share `media.py`** (the engine file, `problem`, `ready`, `auth`, `post`, `fill`, `settle`, `gpu`, `on_gpu`, `cards`, `serving`,
   `free`, `publish`): a change there changes both (`tests.Images`, `tests.Audio`). A new kind of
   generated media → its config path in `store.PATH_VARS` and `context.private_paths`, its output
   directory in `cli.EVENT_SKIP` (and the mod's ears), its engines in `wb scout`.

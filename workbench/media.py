@@ -58,7 +58,7 @@ def load(path: Path) -> dict[str, dict]:
     return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
 
 
-STRINGS = ("command", "url", "ref_arg", "model", "unload", "label", "notes", "key", "api")
+STRINGS = ("command", "url", "ref_arg", "model", "unload", "label", "notes", "key", "api", "beside")
 
 
 def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:
@@ -86,6 +86,9 @@ def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:
         return "voices must be a list of names"
     if "gpu" in e and not isinstance(e["gpu"], bool):
         return "gpu must be true or false"
+    if "devices" in e and (isinstance(e["devices"], bool) or not isinstance(e["devices"], (str, int))
+                           or not str(e["devices"]).strip()):
+        return 'devices must name cards as CUDA_VISIBLE_DEVICES does ("1", "0,1" or a UUID)'
     if "unload_body" in e and not isinstance(e["unload_body"], dict):
         return "unload_body must be a JSON object"
     if kinds and "kind" in e and e["kind"] not in kinds:
@@ -218,16 +221,17 @@ def slug(text: str, fallback: str) -> str:
     return "-".join(re.findall(r"[a-z0-9]+", text.lower())[:6]) or fallback
 
 
-def settle(say, timeout: float = 90, keep=()) -> None:
+def settle(say, timeout: float = 90, keep=(), pinned: frozenset | None = None) -> None:
     """Wait until the unloaded models have let go of the VRAM. free_gpu's unload returns before
     the memory does: seen 2026-11-16, an engine starting a second later found 1.1 GB free of 16.
     Only what free_gpu(keep) lets go of is waited for (models.freed): a server it can't stop, or
     another host's model, used to cost every generation the whole timeout (the 2026-11-16 audit),
-    and so did a model it keeps loaded (#467)."""
+    and so did a model it keeps loaded (#467), and would one on another card than ``pinned`` (#752)."""
     if models._fake():
         return
-    deadline = time.time() + timeout
-    while any(models.freed(m, keep) for m in models.resident()) and time.time() < deadline:
+    deadline, seen = time.time() + timeout, {}
+    while any(models.freed(m, keep) and not (m.engine == "ollama" and models.apart_cards(pinned, m.root, seen))
+              for m in models.resident()) and time.time() < deadline:
         time.sleep(1)
     if not models.released(max(deadline - time.time(), 0)):  # then until the used VRAM stops falling
         say(f"the GPU's memory was still being released after {timeout:.0f} s; generating anyway")
@@ -247,6 +251,21 @@ def on_gpu(e: dict) -> bool:
     return True
 
 
+def cards(e: dict) -> frozenset | None:
+    """The cards an engine is pinned to (#752): `beside` a discovered model id, the cards its
+    Ollama uses (models.server_devices); `devices`, a CUDA_VISIBLE_DEVICES-style list
+    (models.named_cards). None when it names neither or they can't be told: then it shares every
+    card, its lease waits for every task and free_gpu empties every card, as before. On a box with
+    one Ollama per GPU, a generation on the idle card was refused while a task ran on the other,
+    then unloaded both cards' models."""
+    if isinstance(e.get("beside"), str):
+        m = models.discover().get(e["beside"])
+        return models.server_devices(m.root) if m and m.engine == "ollama" and not m.remote else None
+    if isinstance(e.get("devices"), (str, int)) and not isinstance(e.get("devices"), bool):
+        return models.named_cards(str(e["devices"]).strip())
+    return None
+
+
 def serving(*engines: dict) -> list[str]:
     """The discovered models on the server a url engine is (one LocalAI or vLLM serving both
     coding and images): free_gpu keeps them, or it stopped the server just before the POST (#587)."""
@@ -258,15 +277,16 @@ def serving(*engines: dict) -> list[str]:
 
 
 @contextlib.contextmanager
-def gpu(who: str, say, wait: bool, keep=()):
+def gpu(who: str, say, wait: bool, keep=(), pinned: frozenset | None = None):
     """The GPU to itself, queued with the tasks (`models.GpuLease` with no model), the coding
     models unloaded (except ``keep``: the engine's own server) and their memory released. While
     anything holds it, it refuses at once unless ``wait``: queued behind a running task, `wb image`
     used to block silently past the Bash tool's limit, and Claude couldn't answer that task's
-    question meanwhile (the 2026-11-16 audit)."""
-    with models.GpuLease(None, who, say, wait=wait):
-        models.free_gpu(keep=keep, say=say)
-        settle(say, keep=keep)
+    question meanwhile (the 2026-11-16 audit). ``pinned``: the engines' cards (`cards`): only
+    those, beside tasks on other cards, and only the Ollamas on them freed (#752)."""
+    with models.GpuLease(None, who, say, wait=wait, cards=pinned):
+        models.free_gpu(keep=keep, say=say, cards=pinned)
+        settle(say, keep=keep, pinned=pinned)
         yield
 
 
@@ -300,7 +320,9 @@ def turns(who: str, say, wait: bool, *engines: dict):
     here = [e for e in engines if on_gpu(e) and not boxes(e)]
     with contextlib.ExitStack() as stack:
         if here:
-            stack.enter_context(gpu(who, say, wait, serving(*engines)))
+            pins = [cards(e) for e in here]  # one engine that can't say: every card, as before
+            pinned = frozenset().union(*pins) if all(pins) else None
+            stack.enter_context(gpu(who, say, wait, serving(*engines), pinned))
         for m in remote.values():
             stack.enter_context(models.GpuLease(None, who, say, wait=wait, on=m))
             if m.engine == "ollama" and not models._fake():

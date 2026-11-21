@@ -21,7 +21,8 @@ asset at review), and make it once the GPU is free.
    and no alpha channel is needed.
 Mind the engine's `notes` in `wb image --list`: an image model's licence can restrict where and
 how its output may be used. An engine listed `(off the GPU)` (`"gpu": false` in images.json, or a
-url on another host) runs beside tasks. Any other generation needs the GPU to itself: while a task holds it,
+url on another host) runs beside tasks. One pinned to a card (`"devices"` or `"beside"` in
+images.json) waits only for tasks on that card. Any other generation needs the GPU to itself: while a task holds it,
 `wb image` refuses and names it; `--wait` (Bash `run_in_background: true`) queues behind it.
 While it runs (or waits), `wb start` refuses a new task (exit 4) unless `--queue`, which waits
 behind it; feedback, next and resume queue behind it. A url engine is a server that keeps its GPU
