@@ -1,14 +1,16 @@
-"""What this machine has to run models on, found fresh each time: nothing about it is written down.
+"""What this machine has to run models on, found fresh each time: nothing about it is written
+down, but WSL's reading of Windows' adapters, which takes a PowerShell start (an hour's cache).
 
 `wb scout` reports it next to the installed models, so Claude can judge each week which models
 are the best fit for this hardware right now (the /workbench skill's weekly model check).
 
-Linux reads sysfs and /proc; WSL2 adds what Windows says about its GPUs (only NVIDIA's are
-visible inside WSL); macOS asks sysctl and system_profiler, and on Apple Silicon the GPU's memory
-is the unified RAM. Anything a platform can't tell comes back as unknown, never as a guess.
+Linux reads sysfs and /proc; WSL2 adds what Windows says about its GPUs (a model served from
+Windows runs on any of them; Linux inside WSL sees few); macOS asks sysctl and system_profiler,
+and on Apple Silicon the GPU's memory is the unified RAM. Anything a platform can't tell comes back as unknown, never as a guess.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import platform
@@ -19,7 +21,9 @@ import subprocess
 import time
 from pathlib import Path
 
-GB = 1024 ** 3
+from . import store
+
+GIB = 1024 ** 3  # what system_profiler means by "GB"
 DRM = Path("/sys/class/drm")
 
 
@@ -46,6 +50,12 @@ WSL_SMI = "/usr/lib/wsl/lib/nvidia-smi"
 def smi() -> str:
     """nvidia-smi from PATH, else WSL's."""
     return "nvidia-smi" if shutil.which("nvidia-smi") or not os.path.isfile(WSL_SMI) else WSL_SMI
+
+
+def shares_ram() -> bool:
+    """Whether an NVIDIA GPU nvidia-smi gives no memory ([N/A]) uses the RAM: on ARM (a DGX Spark,
+    a Jetson) it does; on x86 a card's [N/A] stays unknown. gpus and wb top ask it alike (#572)."""
+    return platform.machine().lower() in ("aarch64", "arm64")
 
 
 def system() -> str:
@@ -80,20 +90,51 @@ def _mac_gpus() -> list[dict]:
         shared = not g.get("spdisplays_vram") and not unified  # an Intel iGPU's slice of RAM
         found.append({"name": name, "driver": "metal", "unified": unified,
                       "vram": (_int(_sysctl("hw.memsize")) if unified else None if shared else
-                               int(m.group(1)) * (GB if m.group(2) == "GB" else 2 ** 20) if m else None),
+                               int(m.group(1)) * (GIB if m.group(2) == "GB" else 2 ** 20) if m else None),
                       "vram_used": None,
                       "wired_limit": _int(_sysctl("iogpu.wired_limit_mb")) * 2 ** 20
                       if unified and _int(_sysctl("iogpu.wired_limit_mb")) else None})
     return found
 
 
+# Windows' display adapters, each with the memory its driver's registry key states
+# (HardwareInformation.qwMemorySize, 64 bits: Win32_VideoController's AdapterRAM caps at 4 GB),
+# one name and size a line, tab between. Sent as -EncodedCommand: no quoting through WSL's interop
+WINDOWS_SCRIPT = (
+    "$r = @(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\"
+    "{4d36e968-e325-11ce-bfc1-08002be10318}\\0*' -ErrorAction SilentlyContinue); "
+    "Get-CimInstance Win32_VideoController | ForEach-Object { $n = $_.Name; "
+    "$m = ($r | Where-Object { $_.DriverDesc -eq $n } | Select-Object -First 1).'HardwareInformation.qwMemorySize'; "
+    "$n + [char]9 + $m }")
+WINDOWS_CACHE = "wsl-gpus.json"  # under $WB_HOME: {ts, gpus: [{name, vram}]}
+WINDOWS_FOR = 3600  # seconds a reading serves: PowerShell takes seconds to start
+
+
 def _windows_gpus() -> list[dict]:
-    """From inside WSL2: the Windows host's adapters by name (WSL hides all but NVIDIA's from
-    Linux). Windows' AdapterRAM is capped at 4 GB, so VRAM stays unknown rather than wrong."""
-    out = _run("powershell.exe", "-NoProfile", "-Command",
-               "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name")
-    return [{"name": n.strip(), "driver": "windows (seen from WSL)", "vram": None, "vram_used": None}
-            for n in out.splitlines() if n.strip()]
+    """From inside WSL2: the Windows host's adapters, with their memory from the registry. A
+    model served from Windows (Ollama for Windows) runs on any of them, and WSL shows Linux only
+    NVIDIA's (and AMD's or Intel's to ROCm or Level Zero), so a 16 GB Radeon was "VRAM unknown"
+    and had no budget (#522). Read at most once per WINDOWS_FOR, in WINDOWS_CACHE: the budget
+    asks it on every admission when Linux sees no GPU."""
+    path = store.home() / WINDOWS_CACHE
+    hit = store.read_json(path, None)
+    if isinstance(hit, dict) and isinstance(hit.get("gpus"), list) \
+            and 0 <= time.time() - (hit.get("ts") or 0) < WINDOWS_FOR:
+        rows = hit["gpus"]
+    else:
+        out = _run("powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                   base64.b64encode(WINDOWS_SCRIPT.encode("utf-16-le")).decode())
+        rows = []
+        for line in out.splitlines():
+            name, _, mem = (x.strip() for x in line.partition("\t"))
+            if name:
+                rows.append({"name": name, "vram": int(mem) if mem.isdigit() and int(mem) else None})
+        try:
+            store.write_json(path, {"ts": time.time(), "gpus": rows})
+        except OSError:
+            pass  # unwritable state: asked again next time
+    return [{"name": r["name"], "driver": "windows (seen from WSL)", "vram": r.get("vram"), "vram_used": None}
+            for r in rows if isinstance(r, dict) and isinstance(r.get("name"), str)]
 
 
 def _int(text: str) -> int:
@@ -106,8 +147,10 @@ def _int(text: str) -> int:
 def gpus(windows: bool = True) -> list[dict]:
     """Every display adapter: name, driver, VRAM total and in use (bytes) where the driver says,
     and `discrete` when it is known to be a card with memory of its own (not an APU's carve-out).
-    ``windows`` False leaves out what WSL names from Windows (no VRAM, and a PowerShell start of
-    seconds): the GPU budget and wb image's settle asked it on every call (the 2026-11-16 audit)."""
+    On WSL, Windows' adapters too (_windows_gpus); ``windows`` False leaves them out whenever
+    Linux sees a GPU of its own (a PowerShell start takes seconds: the GPU budget and wb image's
+    settle asked it on every call, the 2026-11-16 audit), and takes them from the cache when it
+    sees none (#522)."""
     where = system()
     if where == "macos":
         return _mac_gpus()
@@ -122,10 +165,12 @@ def gpus(windows: bool = True) -> list[dict]:
         mib = lambda v: int(v) * 2 ** 20 if v.isdigit() else None  # noqa: E731 ("[N/A]" on some cards)
         g = {"name": name, "driver": f"nvidia {driver}", "vram": mib(total),
              "vram_used": mib(used), "discrete": True, "uuid": uuid}
-        if g["vram"] is None and platform.machine().lower() in ("aarch64", "arm64"):
+        if g["vram"] is None and shares_ram():
             # DGX Spark, Jetson: the GPU shares the RAM and nvidia-smi gives it no size ([N/A]),
             # so there was no budget at all (the 2026-11-19 audit). An x86 card's [N/A] stays unknown
-            g.update(vram=memory()["ram"], unified=True, discrete=False,
+            # (ram_free: what the system left, from which the budget takes its reserve, #524)
+            ram = memory()
+            g.update(vram=ram["ram"], ram_free=ram["ram_free"], unified=True, discrete=False,
                      memory="the RAM: nvidia-smi gives the GPU no memory of its own")
         found.append(g)
     if len({(g["name"], g["vram"]) for g in found}) > 1:
@@ -138,7 +183,7 @@ def gpus(windows: bool = True) -> list[dict]:
             if re.fullmatch(r"\d+\.\d+", cap := caps.get(g["uuid"], "")):
                 g["compute_cap"] = tuple(int(x) for x in cap.split("."))
     if where == "wsl":
-        if not windows:
+        if not windows and found:
             return found
         nvidia = {g["name"] for g in found}
         return found + [g for g in _windows_gpus()
@@ -154,14 +199,16 @@ def gpus(windows: bool = True) -> list[dict]:
         seen.add(slot)
         name = _run("lspci", "-s", slot).partition(": ")[2] or uevent.get("PCI_ID", "unknown")
         total, used = _read(dev / "mem_info_vram_total"), _read(dev / "mem_info_vram_used")
-        # amdgpu reports an APU's carve-out of system RAM as VRAM too; only a card's own memory
-        # has a vendor (mem_info_vram_vendor: samsung, hynix…), so that marks a discrete one.
-        # Without it the device stays unknown, not integrated (models.budget_devices)
+        # amdgpu reports an APU's carve-out of system RAM as VRAM too, so a device is discrete
+        # only on evidence: a vendor for its memory (mem_info_vram_vendor: samsung, hynix…), or
+        # an amdgpu hwmon that isn't an APU's (apu). Without either it stays unknown, not
+        # integrated (models.budget_devices)
+        kind = apu(dev) if driver == "amdgpu" else None
         g = {"name": name, "driver": driver, "vram": int(total) if total else None,
              "vram_used": int(used) if used else None,
-             **({"discrete": True} if _read(dev / "mem_info_vram_vendor") else {})}
+             **({"discrete": True} if _read(dev / "mem_info_vram_vendor") or kind is False else {})}
         gtt = _int(_read(dev / "mem_info_gtt_total"))
-        if driver == "amdgpu" and not g.get("discrete") and gtt:
+        if kind and gtt:
             # an APU's GPU also maps system RAM up to its GTT size, which is where a Strix Halo
             # with a 512 MiB carve-out keeps its models: counting the carve-out alone dropped it
             # as an iGPU, so no budget (the 2026-11-19 audit)
@@ -330,9 +377,18 @@ def gtt(dev: Path) -> tuple[int | None, int | None]:
     return _num(_read(dev / "mem_info_gtt_used")), _num(_read(dev / "mem_info_gtt_total"))
 
 
-def discrete(dev: Path) -> bool:
-    """Memory of its own: only a card's VRAM has a vendor (gpus' rule)."""
-    return bool(_read(dev / "mem_info_vram_vendor"))
+def apu(dev: Path) -> bool | None:
+    """Whether the amdgpu device at ``dev`` is an APU (its GPU on the CPU's die, its memory the
+    system RAM): True on the kernel's word, False when it says otherwise, None when it can't say.
+    The word is hwmon's vddnb (in1_label), the northbridge voltage amdgpu shows only on APUs
+    (amdgpu_pm.c: "only APUs ... have vddnb"); an amdgpu hwmon without it is a card's. Taken
+    from the lack of mem_info_vram_vendor, which the GCN cards' memory controllers never set,
+    an 8 GiB RX 580 with 24 GiB of GTT was a 34.4 GB unified budget, in gpus and in wb top
+    alike (#435). KFD's topology can't say: a GPU node never carries the CPU's cores."""
+    mons = list(dev.glob("hwmon/hwmon*"))
+    if any(_read(m / "in1_label") == "vddnb" for m in mons):
+        return True
+    return False if mons else None
 
 
 def card_watts(dev: Path) -> float | None:
@@ -345,14 +401,20 @@ def card_watts(dev: Path) -> float | None:
     return round(total, 1) if found and total else None
 
 
+def mac_free(page: int) -> int | None:
+    """Bytes of a Mac's RAM free for use now: vm_stat's free, inactive and speculative pages of
+    ``page`` bytes (hw.pagesize); None when vm_stat says nothing."""
+    stats = dict(re.findall(r"^(Pages [\w ]+):\s+(\d+)\.", _run("vm_stat"), re.M))
+    free = sum(_int(stats.get(k, "0")) for k in ("Pages free", "Pages inactive", "Pages speculative"))
+    return free * page or None
+
+
 def memory() -> dict:
     if system() == "macos":
-        page = _int(_sysctl("hw.pagesize")) or 4096
-        stats = dict(re.findall(r"^(Pages [\w ]+):\s+(\d+)\.", _run("vm_stat"), re.M))
-        free = sum(_int(stats.get(k, "0")) for k in ("Pages free", "Pages inactive", "Pages speculative"))
         swap = re.findall(r"(total|free) = ([\d.]+)M", _sysctl("vm.swapusage"))
         sw = {k: int(float(v) * 2 ** 20) for k, v in swap}
-        return {"ram": _int(_sysctl("hw.memsize")) or None, "ram_free": free * page or None,
+        return {"ram": _int(_sysctl("hw.memsize")) or None,
+                "ram_free": mac_free(_int(_sysctl("hw.pagesize")) or 4096),
                 "swap": sw.get("total"), "swap_free": sw.get("free")}
     info = {}
     for line in _read(Path("/proc/meminfo")).splitlines():
@@ -502,12 +564,17 @@ def disk_free(path: Path | None) -> int | None:
 
 
 def size(n: int | None) -> str:
-    return f"{n / GB:.1f} GB" if n else "?"
+    """Bytes in decimal GB, the unit models.json's gpu_gb and vram_gb take (and Ollama prints):
+    binary GiB labelled GB sat beside a decimal budget, and a hand-set gpu_gb came out 7% small
+    (#523)."""
+    return f"{n / 1e9:.1f} GB" if n else "?"
 
 
 SYSTEM_NOTE = {
-    "wsl": "WSL2: RAM is the VM's share (.wslconfig sets it); only NVIDIA GPUs are usable from "
-           "inside WSL, others are named from Windows without their VRAM",
+    "wsl": "WSL2: RAM is the VM's share (.wslconfig sets it); models served from Windows (Ollama "
+           "for Windows) can use any vendor's GPU, and inside WSL NVIDIA (CUDA), recent AMD (ROCm "
+           "for WSL) and Intel (Level Zero) work; Windows' adapters are read from Windows, their "
+           "memory from its registry",
     "macos": "macOS: Apple Silicon models run on the GPU through Metal, in the unified memory",
 }
 

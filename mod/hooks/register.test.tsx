@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { awayNow, delegates,priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
+import { awayNow, cardName, delegates, liveLines, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -1855,6 +1855,28 @@ test('the live view runs wb top only while the Stats tab is on screen with Live 
   expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'Now')).toBe(false)
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
+})
+
+test('a card wb top knows but has no reading for says so, not nothing (#547)', () => {
+  const text = (gpus: any[]) => liveLines({ snap: { ts: 0, every: 2, gpus, running: [], rack: [], queue: [] }, busy: {} } as any)
+    .map(r => r.map(p => p.text).join(''))
+  expect(text([{ index: 0, name: 'NVIDIA GeForce RTX 4090', driver: 'nvidia', stale: true }])[0]).toBe('GPU 0 NVIDIA GeForce RTX 4090 no reading ')
+})
+
+test('a model all in RAM on a machine with no GPU memory is in RAM, not split (#551)', () => {
+  const lines = liveLines({ snap: { ts: 0, every: 2, gpus: [], running: [], queue: [],
+    rack: [{ model: 'ollama/m', label: 'M', state: 'cpu', cpu_bytes: 2 ** 33 }] }, busy: {} } as any)
+  const row = lines.find(r => r.some(p => p.text.startsWith('M ')))!
+  expect(row.map(p => p.text).join('')).toBe('● M cpu 8.0 GiB in RAM')
+  expect(row[0].color).toBe('success')
+})
+
+test('a card is named by its product, never the vendor tag, as wb top names it (#576)', () => {
+  const amd = 'Advanced Micro Devices, Inc. [AMD/ATI]'
+  expect(cardName(`${amd} Phoenix1 (rev c4)`)).toBe('Phoenix1')
+  expect(cardName(`${amd} Device 1586 (rev c1)`)).toBe('Device 1586')
+  expect(cardName(`${amd} Navi 48 [Radeon RX 9070 XT] (rev c0)`)).toBe('Radeon RX 9070 XT')
+  expect(cardName('NVIDIA GeForce RTX 4090')).toBe('NVIDIA GeForce RTX 4090')
 })
 
 test('the history says nothing it has no data for, and a new install how to begin', () => {

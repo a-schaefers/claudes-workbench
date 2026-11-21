@@ -30,6 +30,7 @@ LOAD_EVERY = 300   # seconds between recomputing each model's typical load time
 LIVE = ("queued", "running", "testing", "asking")
 EVENTS_TAIL = 64 * 1024  # bytes of a running task's events.jsonl read for its newest steps
 SMI_FIELDS = "index,memory.used,memory.total,utilization.gpu,power.draw"
+SMI_RETRY_MAX = 60  # seconds: a stream that keeps exiting is started again at most this rarely
 MIB = 2 ** 20
 
 
@@ -71,6 +72,7 @@ class SmiStream:
         self.ms = max(100, int(every * 1000))
         self.rows: dict[int, tuple[float, dict]] = {}
         self.buf = b""
+        self.ended = False  # its stdout reached EOF
         self.proc = subprocess.Popen(
             [path, f"--query-gpu={SMI_FIELDS}", "--format=csv,noheader,nounits", "-lms", str(self.ms)],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -88,6 +90,7 @@ class SmiStream:
             except OSError:
                 chunk = b""
             if not chunk:
+                self.ended = True
                 return
             self.buf += chunk
             *lines, self.buf = self.buf.split(b"\n")
@@ -96,6 +99,14 @@ class SmiStream:
                 row = parse_smi(line.decode(errors="replace"))
                 if row:
                     self.rows[row["index"]] = (now, row)
+
+    def wait(self, timeout: float) -> None:
+        """Until its first row, the stream's end or ``timeout`` seconds: read before nvidia-smi's
+        first line, an NVIDIA machine's one pass said "RAM (no GPU)" (#547)."""
+        end = time.monotonic() + timeout
+        while not self.rows and not self.ended and (left := end - time.monotonic()) > 0:
+            select.select([self.fileno()], [], [], left)
+            self.drain()
 
     def latest(self) -> dict[int, dict]:
         """Each GPU's newest row, when it is fresh (three intervals): a stream that stopped gives nothing."""
@@ -165,51 +176,97 @@ class Top:
         self.smi: SmiStream | None = None
         self.names: dict = {}
         self.static: list[dict] = []  # GPUs read once: a Mac's, Windows' seen from WSL
-        smi = hardware.smi_path() if self.where != "macos" else None
+        self.smi_path = smi = hardware.smi_path() if self.where != "macos" else None
+        self.smi_wait, self.smi_retry = every, 0.0  # the stream's restart backoff
         if smi:
             for line in hardware._run(smi, "--query-gpu=index,name", "--format=csv,noheader").splitlines():
                 i, _, name = line.partition(",")
                 if i.strip().isdigit():
                     self.names[("nvidia", int(i))] = name.strip()
-            try:
-                self.smi = SmiStream(smi, every)
-            except OSError:
-                self.smi = None
+            self._start_smi()
+            if self.smi:
+                self.smi.wait(every)
+        # the NVIDIA cards nvidia-smi named are its rows; one that named none leaves them to sysfs
         self.cards = [] if self.where == "macos" else \
-            [c for c in hardware.drm_cards(drm) if not (smi and c["driver"] == "nvidia")]
+            [c for c in hardware.drm_cards(drm) if not (self.names and c["driver"] == "nvidia")]
         for c in self.cards:
             self.names[c["slot"]] = hardware.card_name(c)
+        self.mac: dict = {}  # macOS: hw.pagesize and hw.memsize read once, the RAM in use per probe
         if self.where == "macos":
-            self.static = [{"name": g["name"], **({"total": g["vram"]} if g.get("vram") else {}),
+            self.mac = {"page": hardware._int(hardware._sysctl("hw.pagesize")) or 4096,
+                        "ram": hardware._int(hardware._sysctl("hw.memsize")) or None, "at": None}
+            # an Apple GPU's ceiling is the budget's (iogpu.wired_limit_mb, else macOS's default
+            # share), not all of RAM, and its use is the RAM's (#574)
+            self.static = [{"name": g["name"], **({"total": (g.get("wired_limit") or models.unified_default(g["vram"]))
+                                                   if g.get("unified") else g["vram"]} if g.get("vram") else {}),
                             **({"unified": True} if g.get("unified") else {})}
                            for g in hardware._mac_gpus()]
-        elif self.where == "wsl" and not self.smi and not self.cards:
-            self.static = [{"name": g["name"]} for g in hardware._windows_gpus()]
+        elif self.where == "wsl" and not self.names and not self.cards:  # a failing nvidia-smi too (#547)
+            self.static = [{"name": g["name"], **({"total": g["vram"]} if g.get("vram") else {})}
+                           for g in hardware._windows_gpus()]
         self.probed = 0.0
         self.loads_at = 0.0
         self.load: dict[str, float] = {}
         self.rack: list[dict] = []
         self.live: dict[str, dict] = {}  # server root -> its /metrics live object
         self.found: dict | None = None
+        self.gpu_memory = True  # a GPU row says a memory size (gpus): else a model in RAM is `cpu`
 
     def close(self) -> None:
         if self.smi:
             self.smi.close()
 
+    def _mac_used(self) -> int | None:
+        """A Mac's RAM in use (hw.memsize less vm_stat's free, inactive and speculative pages),
+        asked every PROBE_EVERY seconds, not every tick."""
+        m = self.mac
+        if m.get("ram") and (m["at"] is None or time.monotonic() - m["at"] >= PROBE_EVERY):
+            free = hardware.mac_free(m["page"])
+            m["used"], m["at"] = (m["ram"] - free if free is not None else None), time.monotonic()
+        return m.get("used")
+
+    def _start_smi(self) -> None:
+        """Start the stream, or start it again once it has ended, backing off (every interval,
+        doubling to SMI_RETRY_MAX): a driver reset or an Xid error ended it for the session (#547)."""
+        now = time.monotonic()
+        if not self.smi_path or (self.smi and self.smi.proc.poll() is None) or now < self.smi_retry:
+            return
+        if self.smi:
+            self.smi.close()
+            self.smi_wait = min(self.smi_wait * 2, SMI_RETRY_MAX)
+        try:
+            self.smi = SmiStream(self.smi_path, self.every)
+        except OSError:
+            self.smi = None
+        self.smi_retry = now + self.smi_wait
+
     # ---- the GPUs ----
 
     def gpus(self) -> list[dict]:
         out = []
-        if self.smi:
-            for i, row in sorted(self.smi.latest().items()):
-                out.append({"name": self.names.get(("nvidia", i), f"NVIDIA GPU {i}"),
-                            "driver": "nvidia", **row})
+        self._start_smi()
+        latest = self.smi.latest() if self.smi else {}
+        if latest:
+            self.smi_wait = self.every
+        # every card nvidia-smi named stays a row, its readings left out and `stale` set while it
+        # has none: missing telemetry read as missing hardware, "RAM (no GPU)" (#547)
+        for i in sorted({i for _, i in (k for k in self.names if isinstance(k, tuple))} | set(latest)):
+            out.append({"name": self.names.get(("nvidia", i), f"NVIDIA GPU {i}"), "driver": "nvidia",
+                        "index": i, **latest.get(i, {}), **({} if i in latest else {"stale": True})})
+        if any("total" not in g for g in out) and hardware.shares_ram():
+            # a DGX Spark, a Jetson: nvidia-smi gives the GPU no memory ([N/A]), it is the RAM's
+            # (hardware.gpus' rule), so the view showed none of it filling (#572). One read a tick
+            m = hardware.memory()
+            for g in out if m.get("ram") else ():
+                if "total" not in g:
+                    g.update(total=m["ram"], unified=True,
+                             **({"used": m["ram"] - m["ram_free"]} if m.get("ram_free") is not None else {}))
         for n, c in enumerate(self.cards):
             dev = c["dev"]
-            g = {"index": len(out) if self.smi else n, "name": self.names.get(c["slot"], c["card"]),
+            g = {"index": len(out) if self.smi_path else n, "name": self.names.get(c["slot"], c["card"]),
                  "driver": c["driver"]}
             used, total = hardware.vram(dev)
-            if c["driver"] == "amdgpu" and not hardware.discrete(dev):
+            if c["driver"] == "amdgpu" and hardware.apu(dev):
                 gused, gtotal = hardware.gtt(dev)  # an APU: the carve-out and the GTT together
                 if gtotal:
                     used = (used or 0) + (gused or 0) if used is not None or gused is not None else None
@@ -218,12 +275,25 @@ class Top:
                          ("watts", hardware.card_watts(dev))):
                 if v is not None:
                     g[k] = v
-            out.append(g)
+            if any(k in g for k in ("used", "total", "busy", "watts")):  # one that reports nothing
+                # (an iGPU on i915, a BMC's ast, a VM's virtio-gpu) is no row (#551)
+                out.append(g)
         out += [dict(g) for g in self.static]
-        if not out:  # no GPU: the models run in RAM, so that is what fills
-            m = hardware.memory() if self.where != "macos" else {}  # /proc/meminfo: one read
+        if self.where == "macos" and any(g.get("unified") for g in out) and (used := self._mac_used()) is not None:
+            for g in out:
+                if g.get("unified"):
+                    g["used"] = used
+        # no GPU says a memory size: the models run in RAM, so that is what fills. Shown only while
+        # there were no rows at all, any display adapter hid it (#551); a card that is merely
+        # unread just now (stale) keeps it away (#547)
+        self.gpu_memory = any(g.get("total") for g in out)
+        if not self.gpu_memory and not any(g.get("stale") for g in out):
+            # /proc/meminfo: one read; on macOS what was read once and vm_stat per probe (#574)
+            m = hardware.memory() if self.where != "macos" else \
+                {"ram": self.mac.get("ram"), "ram_free": self.mac["ram"] - used
+                 if self.mac.get("ram") and (used := self._mac_used()) is not None else None}
             if m.get("ram"):
-                out.append({"name": "RAM (no GPU)", "ram": True, "total": m["ram"],
+                out.append({"name": "RAM" if out else "RAM (no GPU)", "ram": True, "total": m["ram"],
                             **({"used": m["ram"] - m["ram_free"]} if m.get("ram_free") is not None else {})})
         return out
 
@@ -377,6 +447,11 @@ class Top:
                     r["state"] = "idle"
                 else:
                     size, on_gpu = int(hit.get("size") or 0), int(hit.get("size_vram") or 0)
+                    if size and not on_gpu and not self.gpu_memory:
+                        # all in RAM with no GPU memory here: the normal state of a CPU-only
+                        # machine, not a warning's "split 0.0 GB GPU" (#551)
+                        r.update(state="cpu", cpu_bytes=size)
+                        return r
                     r["state"] = "resident" if size and on_gpu >= size else "split" if size else "resident"
                     if on_gpu or size:
                         r["gpu_bytes"] = on_gpu
@@ -407,6 +482,7 @@ class Top:
 
     def tick(self) -> dict:
         now = time.time()
+        gpus = self.gpus()  # first: the rack's states read gpu_memory
         if self._probe_due() or self.found is None:
             self.found = models.discover()  # the config, re-read with the servers' answers
         found = self.found
@@ -415,7 +491,7 @@ class Top:
             self.probe(found, running)
             running = self.running(found, now)  # with the servers' live objects
         pools = self.pools()
-        return {"ts": round(now, 1), "every": self.every, "gpus": self.gpus(), "running": running,
+        return {"ts": round(now, 1), "every": self.every, "gpus": gpus, "running": running,
                 "rack": self.rack_now(pools), "queue": self.queue(pools, now)}
 
 
@@ -433,7 +509,7 @@ def bar(frac: float, width: int = 16) -> str:
 
 
 def _gb(n) -> str:
-    return f"{n / 2 ** 30:.1f}"
+    return f"{n / 1e9:.1f}"  # decimal GB, as everything else wb prints (#523)
 
 
 def _secs(s: float) -> str:
@@ -442,9 +518,15 @@ def _secs(s: float) -> str:
 
 
 def short(name: str) -> str:
-    """lspci's long name cut to the card's own (its last bracket: Radeon RX 9070 XT), for the view."""
-    groups = re.findall(r"\[([^\]]+)\]", name)
-    return groups[-1] if groups else name
+    """lspci's long name cut to the card's own, for the view: its last bracket when the name ends
+    with one (Navi 48 [Radeon RX 9070 XT]), else what follows the last bracket, which is the
+    vendor's (Phoenix1, Device 1586 after [AMD/ATI], which a product with no bracket in pci.ids
+    and a card newer than hwdata were shown as, #576); "(rev c4)" dropped. The pane's cardName
+    is the same rule."""
+    name = re.sub(r"\s*\(rev [0-9a-fA-F]+\)\s*$", "", name).strip()
+    if name.endswith("]") and (groups := re.findall(r"\[([^\]]+)\]", name)):
+        return groups[-1]
+    return name.rpartition("]")[2].strip() or name
 
 
 def lines(snap: dict) -> list[list[tuple[str, str]]]:
@@ -461,6 +543,8 @@ def lines(snap: dict) -> list[list[tuple[str, str]]]:
                     ("", f" {_gb(g['used'])}/{_gb(g['total'])} GB  ")]
         elif g.get("total"):
             row += [("dim", f"{_gb(g['total'])} GB{' unified' if g.get('unified') else ''}, use not said  ")]
+        if g.get("stale"):
+            row += [("dim", "no reading  ")]
         if g.get("busy") is not None:
             row += [("dim", "busy "), ("warn" if g["busy"] > 80 else "ok", bar(g["busy"] / 100, 8)),
                     ("", f" {g['busy']:>3}%  ")]
@@ -491,9 +575,11 @@ def lines(snap: dict) -> list[list[tuple[str, str]]]:
     out += [[], [("head", "RACK")]]
     for r in snap["rack"]:
         state = r["state"]
-        style = {"resident": "ok", "split": "warn", "can't run": "bad"}.get(state, "dim")
+        style = {"resident": "ok", "cpu": "ok", "split": "warn", "can't run": "bad"}.get(state, "dim")
         where = ""
-        if r.get("gpu_bytes") is not None:
+        if state == "cpu":
+            where = f" {_gb(r['cpu_bytes'])} GB in RAM"
+        elif r.get("gpu_bytes") is not None:
             where = f" {_gb(r['gpu_bytes'])} GB GPU" + (f" + {_gb(r['cpu_bytes'])} GB CPU" if r.get("cpu_bytes") else "")
         row = [("name", f"  {p(r['label'])[:30].ljust(31)}"), (style, f"{state}{where}".ljust(31))]
         facts = [f"writes ~{r['write_tok_s']:.0f}" if r.get("write_tok_s") else "",

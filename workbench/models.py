@@ -1269,6 +1269,9 @@ IGPU_UNDER = 2 ** 30  # Ollama's own cutoff: a device with less is an integrated
 # three quarters above (iogpu.wired_limit_mb overrides it). 32-36 GB reports vary: two thirds is
 # the safe side, since too low only stops sharing and too high spills a model to the CPU.
 UNIFIED_SMALL = 36 * 2 ** 30
+# A GPU that shares the RAM with nothing set aside for the OS (a Jetson, a DGX Spark: nvidia-smi
+# gives it no memory) keeps back at least this, else what the system used when measured (#524)
+SYSTEM_FLOOR = 2 * 2 ** 30
 OLLAMA_MAX_LOADED = 3  # Ollama's own default (3 per GPU) when OLLAMA_MAX_LOADED_MODELS is unset
 QUEUE_POLL = 1.0  # a queued task looks again this often; gpu.json changing wakes it sooner
 
@@ -1276,6 +1279,19 @@ QUEUE_POLL = 1.0  # a queued task looks again this often; gpu.json changing wake
 def unified_default(ram: int) -> int:
     """What macOS lets the GPU wire of ``ram`` bytes of unified memory, by default."""
     return ram * 2 // 3 if ram <= UNIFIED_SMALL else ram * 3 // 4
+
+
+def system_reserve(g: dict) -> int:
+    """Bytes of a RAM-sharing NVIDIA GPU's memory (hardware.gpus: a Jetson's, a DGX Spark's) the
+    system keeps: what was in use when hardware read it, less the models this machine's Ollama
+    has loaded (theirs is the GPU's), and never under SYSTEM_FLOOR. All of MemTotal passed a
+    6.5 GB model as fitting an 8 GB Orin Nano whose desktop held 2 GB (#524). Another server's
+    loaded model counts as the system's: too little room only stops sharing."""
+    if g.get("ram_free") is None:
+        return SYSTEM_FLOOR
+    loaded = sum(int(x.get("size") or 0) for x in
+                 (_get(f"{ollama_root_here()}/api/ps", timeout=1.0) or {}).get("models") or [])
+    return max(SYSTEM_FLOOR, (g.get("vram") or 0) - g["ram_free"] - loaded)
 
 
 def budget_devices() -> tuple[int | None, list[dict], str]:
@@ -1290,7 +1306,8 @@ def budget_devices() -> tuple[int | None, list[dict], str]:
     16 GiB Radeon 780M carve-out beside an 8 GiB RTX became the budget, a 4 GiB one was added to
     an RX 7600S's 8). With none known, as before. Only the devices Ollama's environment lets it
     see count (hardware.visible). Apple Silicon: iogpu.wired_limit_mb, else macOS's default
-    share; another unified GPU (an APU's GTT, a DGX Spark's RAM): what hardware.gpus found."""
+    share; an APU: its carve-out and GTT, as hardware.gpus found; an NVIDIA GPU that shares the
+    RAM (a DGX Spark, a Jetson): the RAM less what the system uses (system_reserve, #524)."""
     hand = _overrides().get("gpu_gb")
     if hand is not None:
         try:
@@ -1312,6 +1329,10 @@ def budget_devices() -> tuple[int | None, list[dict], str]:
         if g.get("unified") and not g.get("memory"):  # Apple Silicon
             usable = g.get("wired_limit") or unified_default(g.get("vram") or 0)
             how = "iogpu.wired_limit_mb" if g.get("wired_limit") else "macOS's default share of the RAM"
+        elif g.get("unified") and (g.get("driver") or "").startswith("nvidia"):
+            keep = system_reserve(g)
+            usable = max(0, (g.get("vram") or 0) - keep)
+            how = f"{g['memory']}, less {hardware.size(keep)} the system uses"
         elif g.get("unified"):
             usable, how = g.get("vram") or 0, g["memory"]
         else:
@@ -1319,7 +1340,10 @@ def budget_devices() -> tuple[int | None, list[dict], str]:
             if usable < IGPU_UNDER:
                 continue
         if usable:
-            groups.setdefault((g.get("driver") or "?").split()[0], []).append((usable, g, how))
+            # an adapter named from Windows (WSL) is a group of its own: the registry can't tell
+            # a laptop's Radeon iGPU from its Radeon card, so the largest counts alone (#522)
+            key = (g.get("driver") or "?").split()[0]
+            groups.setdefault(f"{key}:{g['name']}" if key == "windows" else key, []).append((usable, g, how))
     if not groups:
         return None, [], ""
     best = max(groups.values(), key=lambda devs: sum(n for n, _, _ in devs))
@@ -2005,7 +2029,7 @@ def ollama_pull(root: str, name: str, say=print) -> None:
                 pct = int(100 * done / total)
                 if pct >= shown + 5 or pct == 100:
                     shown = pct
-                    say(f"{status}: {pct}% of {total / 1024 ** 3:.1f} GB")
+                    say(f"{status}: {pct}% of {total / 1e9:.1f} GB")  # decimal, as Ollama says it
             elif status != last:
                 say(status)
             last = status

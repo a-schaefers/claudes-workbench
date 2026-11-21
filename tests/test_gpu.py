@@ -536,6 +536,30 @@ class Budget(unittest.TestCase):
         self.assertEqual(self.budget([mac(64)])[0], 64 * 2 ** 30 * 3 // 4)
         self.assertEqual(self.budget([mac(16, 14 * 2 ** 30)])[0], 14 * 2 ** 30)  # wired_limit_mb wins
 
+    def test_a_jetson_or_dgx_spark_keeps_back_what_the_system_uses_from_the_ram(self):
+        # #524: off macOS a unified NVIDIA GPU's budget was all of MemTotal, so an 8 GB Orin
+        # Nano with 2 GB in the OS's hands passed a 6.5 GB model as fitting
+        def jetson(ram, free):
+            return {"name": "Orin", "driver": "nvidia 540.4", "vram": ram, "ram_free": free,
+                    "unified": True, "discrete": False,
+                    "memory": "the RAM: nvidia-smi gives the GPU no memory of its own"}
+
+        def budget(g, loaded=()):
+            ps = {"models": [{"name": f"m{i}", "size": n} for i, n in enumerate(loaded)]}
+            with mock.patch.object(models, "_get", lambda url, timeout=2.5: ps if url.endswith("/api/ps") else None):
+                return self.budget([g], why=True)
+        n, _, why = budget(jetson(7_950_000_000, 7_000_000_000))    # under the floor: the floor
+        self.assertEqual(n, 7_950_000_000 - models.SYSTEM_FLOOR)
+        self.assertIn("Orin (the RAM: nvidia-smi gives the GPU no memory of its own, less 2.1 GB "
+                      "the system uses)", why)
+        n, _, _ = budget(jetson(7_950_000_000, 3_950_000_000))      # 4 GB in use: all of it
+        self.assertEqual(n, 3_950_000_000)
+        n, _, _ = budget(jetson(7_950_000_000, 3_950_000_000), loaded=[1_000_000_000])
+        self.assertEqual(n, 4_950_000_000)                           # a loaded model is the GPU's
+        apu = {"name": "Radeon 8060S", "driver": "amdgpu", "vram": 96 * 2 ** 30, "unified": True,
+               "memory": "0.5 GB carve-out + 96.0 GB GTT"}
+        self.assertEqual(self.budget([apu])[0], 96 * 2 ** 30)       # GTT is the kernel's own limit
+
     def test_only_the_cards_ollama_may_see_count(self):
         # the 2026-11-19 audit: two 8 GiB cards with Ollama limited to one made a 16 GiB budget
         card = lambda uuid: {"name": "RTX 4060", "driver": "nvidia 560.94", "vram": 8 * 2 ** 30,  # noqa
@@ -615,6 +639,19 @@ class Budget(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "gpu_gb is 'lots', not a number of GB"):
                     models.gpu_budget()
 
+    def test_every_gb_wb_prints_is_the_decimal_gb_gpu_gb_takes_and_the_hint_names_it(self):
+        # #523: scout printed a 16 GiB card as "16.0 GB VRAM" (binary) beside "GPU budget 17 GB"
+        # (decimal), and a 12 GiB Arc's owner wrote {"gpu_gb": 12}, 7% short of the card
+        from workbench import top
+        self.assertEqual(hardware.size(16 * 2 ** 30), "17.2 GB")
+        self.assertEqual(top._gb(16 * 2 ** 30), "17.2")
+        with mock.patch.object(models, "budget_devices", lambda: (None, [], "")), \
+                mock.patch.dict(os.environ, {"WB_FAKE_MODELS": ""}), \
+                mock.patch.object(cli.hardware, "gpus", lambda windows=True: [
+                    {"name": "Intel Arc B580", "driver": "xe", "vram": None}]):
+            self.assertIn('{"gpu_gb": <the card\'s memory in decimal GB: 12.9 for a 12 GiB card>}',
+                          cli.gpu_line())
+
     def test_doctor_and_scout_say_what_the_budget_counts(self):
         with mock.patch.object(models, "budget_devices", lambda: (8 * 2 ** 30, [], "RTX 4060 (VRAM)")):
             self.assertIn("GPU budget 9 GB, from RTX 4060 (VRAM)", cli.gpu_line())
@@ -625,6 +662,13 @@ class Budget(unittest.TestCase):
             self.assertIn("GPU memory unknown here (xe): tasks take turns", cli.gpu_line())
             # #272 (the audit of 1.2): nothing said how; the line names the file and the key
             self.assertIn(f'set its memory in {models.overrides_path()}: {{"gpu_gb": ', cli.gpu_line())
+        # #522: the example fits the card it names: a Radeon seen from WSL is no Intel Arc
+        with mock.patch.object(models, "budget_devices", lambda: (None, [], "")), \
+                mock.patch.dict(os.environ, {"WB_FAKE_MODELS": ""}), \
+                mock.patch.object(cli.hardware, "gpus", lambda windows=True: [
+                    {"name": "AMD Radeon RX 7800 XT", "driver": "windows (seen from WSL)", "vram": None}]):
+            self.assertIn("if AMD Radeon RX 7800 XT has memory of its own (a Radeon card)", cli.gpu_line())
+            self.assertNotIn("Intel Arc", cli.gpu_line())
         # and a card that publishes no size beside one that does: the budget leaves it out
         with mock.patch.object(models, "budget_devices", lambda: (2 * 2 ** 30, [], "Radeon 780M (VRAM)")), \
                 mock.patch.dict(os.environ, {"WB_FAKE_MODELS": ""}), \

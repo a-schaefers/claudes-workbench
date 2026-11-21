@@ -1791,7 +1791,7 @@ nothing until a surface attaches.
   a line per GPU (memory and busy % as bars, `bar`, in eighths; watts; busy's sparkline since the
   tab opened, the last `BUSY_KEEP` 60 samples, in memory only), a line per running task (phase,
   round, its time, tok/s, said `(last call)` when not live, context %), the rack (one line per
-  model: resident, split, idle or can't run, where its memory is, its speeds and load time, the
+  model: resident, split, cpu, idle or can't run, where its memory is, its speeds and load time, the
   tasks on it) and the queue. One child (`runTop`), started by `syncTop` only while the tab is
   shown, the pane not minimized and Live view on, checked at each poll, a tab's press, a
   minimize, a bring-back and a Stats pick; it ends (`stopTop`, `return()` on the stream) the
@@ -1903,14 +1903,31 @@ a load or an `opencode session export`.
 
 Each tick reads, cheapest first:
 - **GPUs**: sysfs per card (`hardware.drm_cards`, connectors skipped, one entry per PCI slot):
-  `gpu_busy_percent`, `mem_info_vram_used`/`_total` (an amdgpu APU without a VRAM vendor adds
-  its GTT, `unified`), the card's hwmon watts (`hardware.card_watts`, the readers `gpu_power_w`
+  `gpu_busy_percent`, `mem_info_vram_used`/`_total` (an amdgpu APU, by `hardware.apu`, the rule
+  `gpus` uses, adds its GTT, `unified`), the card's hwmon watts (`hardware.card_watts`, the readers `gpu_power_w`
   uses); the card's name from lspci once at start (`card_name`), never per tick. NVIDIA: one
   `nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu,power.draw
   --format=csv,noheader,nounits -lms <ms>` for the life of the command (`SmiStream`, found by
   `hardware.smi_path`: PATH, else WSL's), read line by line as it prints; a row older than three
-  intervals drops out. macOS: the GPUs from system_profiler once (no VRAM used, no busy %); WSL
-  without NVIDIA: Windows' adapter names once; no GPU at all: the RAM, from /proc/meminfo.
+  intervals drops out. Every card the `--query-gpu=index,name` asked at start named stays a row,
+  its readings left out and `stale` set while it has none, and the first tick (and the one pass)
+  waits up to one interval for the stream's first line (`SmiStream.wait`); a stream that ended is
+  started again, after an interval, doubling to `SMI_RETRY_MAX` 60 s, back to one interval once it
+  reads. Before the first line and after an exit (a driver reset, an Xid), an NVIDIA machine said
+  "RAM (no GPU)" (#547). NVIDIA's sysfs cards are left out only when nvidia-smi named its cards.
+  A card nvidia-smi gives no memory (`[N/A]`) on ARM (`hardware.shares_ram`, `gpus`' rule: a DGX
+  Spark, GB10, a Jetson) shows the RAM it shares: `total` `MemTotal`, `used` `MemTotal` less
+  `MemAvailable` (`hardware.memory`, one read a tick), `unified`; it showed load and watts but no
+  memory (#572). An x86 card's `[N/A]` stays unknown. macOS: the GPUs from system_profiler once (no busy %); an Apple GPU's `total` is the
+  budget's ceiling (`wired_limit`, else `models.unified_default`) and its `used` the RAM in use
+  (`hw.memsize` less vm_stat's free, inactive and speculative pages, `hardware.mac_free`; the
+  sysctls read once, vm_stat every `PROBE_EVERY`), and with no GPU listed the RAM row shows there
+  too: it showed all of RAM, "use not said", and nothing when system_profiler failed (#574); WSL
+  where nvidia-smi named no card (none, or one that fails): Windows' adapters once (names, and memory as `total` where the registry says).
+  A sysfs card that reports nothing (no memory, busy % or watts: an iGPU on i915, a BMC's `ast`, a
+  VM's virtio-gpu) is no row. When no row says a memory size (`total`) and none is `stale`, a RAM
+  row follows, from /proc/meminfo (`RAM (no GPU)` alone, else `RAM`): shown only when there were
+  no rows at all, any display adapter hid it on the CPU-only machines it was written for (#551).
 - **Tasks**: every task's task.json and status.json, re-read only when one changes (`_Files`, by
   mtime and size), and a running task's newest `step` events (the last 64 KiB of events.jsonl).
 - **The lease**: gpu.json and each remote pool's `gpu-<host>.json` through `models.holders` (dead
@@ -1926,8 +1943,9 @@ Each tick reads, cheapest first:
 `--json` prints one object per tick (sizes in bytes; a field the platform can't give is left out,
 never 0):
 - `ts`, `every`;
-- `gpus`: `[{index, name, driver, used, total, busy (%), watts, unified?}]`, or `[{name: "RAM (no
-  GPU)", ram: true, used, total}]`;
+- `gpus`: `[{index, name, driver, used, total, busy (%), watts, unified?, stale?}]` (`stale`: a
+  card nvidia-smi named with no fresh reading; the terminal and the pane say "no reading"), then `{name: "RAM (no
+  GPU)" (or "RAM" beside GPU rows), ram: true, used, total}` when no GPU row says its memory;
 - `running` (queued, running, testing, asking): `[{task, model, label, phase, round, round_s,
   tok_s, tok_s_from, read_tok_s, read_from, context_used, context_window, context_pct, last,
   remote?, server?}]`. `tok_s_from` is `live` (the server's `live.tok_s`) or `last call`: the
@@ -1938,14 +1956,18 @@ never 0):
   one is not run.
 - `rack` (every discovered model): `[{model, label, state, why?, gpu_bytes?, cpu_bytes?,
   write_tok_s?, read_tok_s?, load_s?, tasks?}]`, `state` one of `resident` (all on the GPU),
-  `split` (Ollama's `size_vram` under its `size`: part on the CPU), `idle`, `can't run` (with
+  `split` (Ollama's `size_vram` under its `size`: part on the CPU), `cpu` (`size_vram` 0 where no
+  GPU row says a memory size: all in RAM, `cpu_bytes`, the normal state of a CPU-only machine,
+  shown as `split 0.0 GB GPU` in the warning colour before #551), `idle`, `can't run` (with
   status's `why`), `remote` (another machine: no telemetry); `tasks` the lease holders on it.
 - `queue`: the lease's waiters, oldest first: `[{task, model, since, waited_s, pool?}]` (`pool`
   for a remote server's).
 
 On a terminal (without `--json`) the same view fills the alternate screen and is redrawn in place
 each tick: bars in eighths (`▏▎▍▌▋▊▉█`) for VRAM and busy, models by their `label`, the card's
-short name (lspci's last bracket), colour only there; stdin in cbreak mode for `q`, restored on
+short name (`top.short`, the pane's `cardName` alike: lspci's last bracket when the name ends with
+one, else what follows the last bracket, the vendor tag's, so a Phoenix1 or a "Device 1586" newer
+than hwdata isn't shown as "AMD/ATI", #576; `(rev …)` dropped), sizes in decimal GB, colour only there; stdin in cbreak mode for `q`, restored on
 exit. Not on a terminal: one plain pass, then exit (as `wb watch --once`).
 
 ## Models: found, loaded, chosen
@@ -2278,7 +2300,8 @@ comes from, for `wb doctor` and `wb scout`'s `cli.gpu_line`) is models.json's to
 when set (decimal GB, the escape hatch for hardware this can't read; not a number: an error, as a
 malformed file; `gpu_line` names the file and the key whenever a GPU publishes no memory size,
 Intel's i915 and xe, whose sysfs has none: alone, as the fix for "GPU memory unknown here", and
-beside a budget from another device, as the card that budget leaves out. Nothing pointed there,
+beside a budget from another device, as the card that budget leaves out; its example card is of
+the vendor it names, `_card_example`: it said "an Intel Arc" of a Radeon seen from WSL, #522. Nothing pointed there,
 so tasks never shared and the user's other Ollama models were unloaded every round: #272, the
 audit of 1.2), else it comes from one runtime's GPUs: the GPUs are grouped by driver (`nvidia`, `amdgpu`,
 `metal`…) and the largest group's sum is taken, so several NVIDIA cards (which Ollama splits a
@@ -2286,18 +2309,28 @@ model across) add up but another vendor's GPU beside them doesn't; a discrete de
 `IGPU_UNDER` 1 GiB (an integrated GPU's carve-out, Ollama's own cutoff) is left out. Summing
 every GPU counted a laptop's Radeon iGPU into its RTX card's 8 GB (the 2026-11-16 audit). amdgpu
 reports an APU's carve-out of system RAM as VRAM too, so `hardware.gpus` marks a device
-`discrete` only on evidence: nvidia-smi's, and an amdgpu card that names its memory's vendor
-(`mem_info_vram_vendor`, which an APU's system memory never has); once any device with VRAM is
+`discrete` only on evidence: nvidia-smi's, an amdgpu card that names its memory's vendor
+(`mem_info_vram_vendor`, which an APU's system memory never has), and an amdgpu device whose
+hwmon isn't an APU's (`hardware.apu` False: GCN cards, RX 470-590, Fury, R9 390, name no vendor,
+#435); once any device with VRAM is
 known discrete, only those count, so a carve-out never outranks or adds to a card (the 0.90
 review: a 16 GiB Radeon 780M carve-out beside an 8 GiB RTX became the budget, and a 4 GiB one was
-added to an RX 7600S's 8). With none known discrete (an APU alone, a card that names no vendor)
+added to an RX 7600S's 8). With none known discrete (an APU alone, a card amdgpu gives no hwmon)
 the groups decide as above. Only the devices Ollama may see count (`hardware.visible` over
 `ollama_env()`): two 8 GiB cards with Ollama limited to one by `CUDA_VISIBLE_DEVICES` made a
-16 GiB budget (the 2026-11-19 audit). A unified GPU off macOS counts what `hardware.gpus` found
-(an APU's carve-out plus GTT, a DGX Spark's RAM). Apple Silicon: `iogpu.wired_limit_mb` when set, else macOS's default
+16 GiB budget (the 2026-11-19 audit). An APU counts what `hardware.gpus` found (its carve-out plus GTT, a
+limit the kernel already sets below the RAM). An NVIDIA GPU that shares the RAM (a DGX Spark, a
+Jetson: nvidia-smi gives it no memory) counts the RAM less `system_reserve`: what the system had
+in use when `gpus` read it (`MemTotal` less `MemAvailable`, its `ram_free`), less what this
+machine's Ollama has loaded (`/api/ps`, one ask, 1 s), never under `SYSTEM_FLOOR` 2 GiB; the
+budget's why says "less N GB the system uses". All of `MemTotal` passed a 6.5 GB model as fitting
+an 8 GB Orin Nano whose desktop held 2 GB (#524); another server's loaded model counts as the
+system's, which only stops sharing. `gpu_gb` still overrides it. Apple Silicon: `iogpu.wired_limit_mb` when set, else macOS's default
 (`unified_default`: two thirds of the RAM up to `UNIFIED_SMALL` 36 GiB, three quarters above,
 Metal's recommendedMaxWorkingSetSize; it was 75% everywhere, too much on 8-32 GB Macs). Unknown
-VRAM means no sharing. `gpus(windows=False)`: the budget never asks WSL's PowerShell. A model's
+VRAM means no sharing. `gpus(windows=False)`: the budget asks WSL's PowerShell only when Linux sees no GPU, and then
+at most hourly (`wsl-gpus.json`); each adapter named from Windows is a group of its own, since
+the registry can't tell a laptop's Radeon iGPU from its Radeon card: the largest counts (#522). A model's
 need: `vram_gb`, else Ollama's loaded size (weights and context), else weights × `KV_GUESS` 1.25.
 `can_share(m)`: every running model and `m` are Ollama and local, and their needs sum to at most
 `SHARE_AT` 0.9 of the budget; the same model again (the same `server` and name) needs a slot of
@@ -2464,18 +2497,36 @@ Ollama that answers while OpenCode has no provider at all.
 `gpu_budget` runs in routing and in the lease). `system()`: `macos`, `wsl` (`/proc/version`
 contains "microsoft"), `linux`. `gpus()`: `nvidia-smi` (`smi()`: from PATH, else WSL's `WSL_SMI`, `/usr/lib/wsl/lib/nvidia-smi`, which a systemd unit's PATH may lack; UUID, name, MiB total/used, driver; a name may hold commas) on Linux and
 WSL (`[N/A]` reads as unknown, except on ARM (`aarch64`/`arm64`: a DGX Spark, a Jetson), where
-the GPU shares the RAM: `unified` with `MemTotal`, the 2026-11-19 audit; a line of fewer than
-five fields is skipped); WSL adds Windows' adapters from `powershell.exe Get-CimInstance Win32_VideoController` (no
-VRAM: AdapterRAM caps at 4 GB), but only for the report (`wb scout`, `wb doctor`'s GPU line):
-`gpus(windows=False)`, which the budget and `wb image`'s settle use, reads nvidia-smi alone; Linux scans `DRM`'s (`/sys/class/drm`) `card*/device` (amdgpu's
-`mem_info_vram_total`/`_used`; an amdgpu device not known discrete with a `mem_info_gtt_total`
-is an APU: `unified`, its VRAM the carve-out plus the GTT, since that is where a Strix Halo with a
-512 MiB carve-out keeps its models (the 2026-11-19 audit); `unique_id` as `uuid` `GPU-<id>`;
+the GPU shares the RAM (`shares_ram`): `unified` with `MemTotal`, and `ram_free` (`MemAvailable`) for the
+budget's reserve, the 2026-11-19 audit and #524; a line of fewer than
+five fields is skipped); WSL adds Windows' adapters (`_windows_gpus`: one `powershell.exe
+-EncodedCommand` of `WINDOWS_SCRIPT`, no quoting through the interop: `Win32_VideoController`'s
+names, each one's memory from its driver's registry key, `HardwareInformation.qwMemorySize` under
+the display class `{4d36e968-e325-11ce-bfc1-08002be10318}`, since `AdapterRAM` caps at 4 GB),
+kept `WINDOWS_FOR` (an hour) in `$WB_HOME/wsl-gpus.json`, as a PowerShell start takes seconds.
+A model served from Windows (Ollama for Windows) runs on any vendor's GPU, and inside WSL NVIDIA,
+recent AMD (ROCm for WSL) and Intel (Level Zero) work: a 16 GB RX 7800 XT was "VRAM unknown", the
+note said only NVIDIA is usable, and with no budget tasks took turns (#522). `gpus(windows=False)`,
+which the budget and `wb image`'s settle use, leaves Windows' adapters out whenever Linux sees a
+GPU (nvidia-smi), and takes them from the cache when it sees none; Linux scans `DRM`'s (`/sys/class/drm`) `card*/device` (amdgpu's
+`mem_info_vram_total`/`_used`; an amdgpu device `apu` says is an APU, with a `mem_info_gtt_total`:
+`unified`, its VRAM the carve-out plus the GTT, since that is where a Strix Halo with a
+512 MiB carve-out keeps its models (the 2026-11-19 audit). `apu(dev)` is True when the card's
+hwmon has `in1_label` `vddnb`, the northbridge voltage amdgpu shows only on APUs, False when it
+has a hwmon without it, None without a hwmon (unknown: plain VRAM, not `discrete`). Taken from a
+missing `mem_info_vram_vendor`, which the GCN cards' memory controllers never set, an 8 GiB
+RX 580 with 24 GiB GTT was a 34.4 GB unified budget in `gpus` and in `wb top` alike (#435); KFD's
+topology can't say, since a GPU node never carries the CPU's cores; `unique_id` as `uuid` `GPU-<id>`;
 a unified device off macOS carries `memory`, what it counts, which `report` and the budget say;
 names from `lspci`; NVIDIA left to nvidia-smi when it answered,
 else listed from sysfs, VRAM unknown); macOS reads `system_profiler SPDisplaysDataType -json`
 (Apple Silicon: unified memory, `wired_limit`; an adapter with only shared memory, an Intel iGPU,
 has VRAM unknown).
+Every size `wb` prints is in decimal GB (`size`, `wb top`'s `_gb`, the progress of a pull `wb model add` starts), the
+unit `gpu_gb` and `vram_gb` take and Ollama prints: scout showed a 16 GiB card as "16.0 GB VRAM"
+beside "GPU budget 17 GB", and a 12 GiB card's owner who wrote `{"gpu_gb": 12}` got 7% less than
+the card has (#523), so `gpu_line`'s hint says "the card's memory in decimal GB: 12.9 for a 12
+GiB card". The pane's live view labels its sizes GiB, which they are.
 `gpu_power_w()`: the cards' draw right now, in watts (None on macOS, or when nothing reads):
 nvidia-smi's `power.draw` summed over the cards that report it, else each sysfs card's
 `device/hwmon/hwmon*/power1_average`, else its `power1_input` (amdgpu generations with no
@@ -4448,6 +4499,7 @@ $WB_HOME (~/.local/state/workbench)
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
   update.json                    wb update: when origin was last asked, how far behind this copy was
+  wsl-gpus.json                  WSL only: Windows' display adapters ({ts, gpus: [{name, vram}]}), re-read hourly (hardware.WINDOWS_FOR)
   bench/cases/<case>/            case.json  spec.md  base.bundle  hidden/<path>…  reference.patch
   bench/runs/<run>/              plan.json  driver.log  <task>/{wb.log,diff.patch,grade.txt} (repo/ while it runs)
   bench/runs.jsonl  driver.json  one row per replay; the driver's {pid, run, start}

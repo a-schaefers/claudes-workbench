@@ -3502,6 +3502,17 @@ def cmd_update(a):
               "the pane")
 
 
+def _card_example(names: list[str]) -> str:
+    """A card with memory of its own of the vendor ``names`` name, for gpu_line's hint: it said
+    "an Intel Arc" of a Radeon seen from WSL (#522)."""
+    text = " ".join(names).lower()
+    for words, example in ((("radeon", "amd"), "a Radeon card"), (("intel", "arc"), "an Intel Arc"),
+                           (("nvidia", "geforce", "rtx", "quadro"), "a GeForce card")):
+        if any(w in text for w in words):
+            return f" ({example})"
+    return ""
+
+
 def gpu_line() -> str:
     """What the GPU budget counts (wb doctor, wb scout): sharing and the router's fit rest on it."""
     budget, _, why = models.budget_devices()
@@ -3510,7 +3521,8 @@ def gpu_line() -> str:
     # none, tasks never share and the user's other Ollama models are unloaded every round; the
     # fix was gpu_gb, and nothing said how to set it (#272, the audit of 1.2)
     unknown = sorted({g["name"] for g in gs if g.get("vram") is None and not g.get("unified")})
-    hand = (f'set its memory in {models.overrides_path()}: {{"gpu_gb": <the card\'s GB>}}'
+    hand = (f'set its memory in {models.overrides_path()}: {{"gpu_gb": <the card\'s memory in '
+            'decimal GB: 12.9 for a 12 GiB card>}'
             if unknown else "models.json gpu_gb sets it by hand")
     if budget:
         return (f"GPU budget {budget / 1e9:.0f} GB, from {why or 'the GPU'}: tasks share the GPU when "
@@ -3520,8 +3532,8 @@ def gpu_line() -> str:
     if gs:
         return (f"GPU memory unknown here ({', '.join(sorted({g['driver'] for g in gs}))}): tasks take "
                 "turns on the GPU, and the router can't hold back a model too big for it; "
-                + (f"if {', '.join(unknown)} has memory of its own (an Intel Arc), {hand}" if unknown
-                   else hand))
+                + (f"if {', '.join(unknown)} has memory of its own{_card_example(unknown)}, {hand}"
+                   if unknown else hand))
     return ("no GPU memory found: local models run on the CPU, slowly; "
             "wb model sizes <id> trivial keeps a big one off small tasks")
 

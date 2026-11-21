@@ -627,10 +627,17 @@ export function bar(frac: number, width: number): string {
 const gib = (n: number) => (n / 2 ** 30).toFixed(1)
 const secs = (s: number) => (s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, '0')}s`
   : `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`)
-// lspci's long name cut to the card's own (its last bracket), as `wb top` draws it
-const cardName = (name: string) => [...name.matchAll(/\[([^\]]+)\]/g)].at(-1)?.[1] ?? name
-const RACK_MARK: Record<string, string> = { resident: '●', split: '◑', idle: '○', "can't run": '✗', remote: '⇢' }
-const RACK_COLOR: Record<string, string> = { resident: 'success', split: 'warning', "can't run": 'error' }
+// lspci's long name cut to the card's own, as `wb top` draws it (top.short): its last bracket
+// when the name ends with one, else what follows the last bracket, the vendor's ("[AMD/ATI]
+// Phoenix1" was shown as AMD/ATI, #576); "(rev c4)" dropped
+export function cardName(name: string): string {
+  const n = name.replace(/\s*\(rev [0-9a-f]+\)\s*$/i, '').trim()
+  if (n.endsWith(']')) return [...n.matchAll(/\[([^\]]+)\]/g)].at(-1)?.[1] ?? n
+  return n.slice(n.lastIndexOf(']') + 1).trim() || n
+}
+// cpu: all in RAM on a machine with no GPU memory, its normal state, not a split (#551)
+const RACK_MARK: Record<string, string> = { resident: '●', cpu: '●', split: '◑', idle: '○', "can't run": '✗', remote: '⇢' }
+const RACK_COLOR: Record<string, string> = { resident: 'success', cpu: 'success', split: 'warning', "can't run": 'error' }
 
 // The live view as lines of coloured parts: each GPU (memory and busy as bars, watts, busy's
 // sparkline), what runs now, the rack (every model: where it is, its speeds, its load time, the
@@ -647,6 +654,7 @@ export function liveLines(t: WbTop): { color?: string; dim?: boolean; bold?: boo
       row.push({ color: f > 0.95 ? 'error' : f > 0.8 ? 'warning' : 'success', text: bar(f, 12) },
         { text: ` ${gib(g.used)}/${gib(g.total)} GiB ` })
     } else if (g.total) row.push({ dim: true, text: `${gib(g.total)} GiB${g.unified ? ' unified' : ''} ` })
+    if (g.stale) row.push({ dim: true, text: 'no reading ' })            // known, not read just now (#547)
     if (typeof g.busy === 'number')
       row.push({ dim: true, text: '· busy ' }, { color: g.busy > 80 ? 'warning' : 'success', text: bar(g.busy / 100, 8) },
         { text: ` ${g.busy}% ` })
@@ -663,8 +671,9 @@ export function liveLines(t: WbTop): { color?: string; dim?: boolean; bold?: boo
   }
   if (!(s.running ?? []).length) out.push([{ dim: true, text: 'Nothing running.' }])
   for (const m of (s.rack ?? []) as Row[]) {
-    const where = typeof m.gpu_bytes === 'number'
-      ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
+    const where = m.state === 'cpu' && typeof m.cpu_bytes === 'number' ? ` ${gib(m.cpu_bytes)} GiB in RAM`
+      : typeof m.gpu_bytes === 'number'
+        ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
     const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}` : '',
       m.load_s ? `loads ~${secs(m.load_s)}` : '', m.state === 'remote' ? 'another machine: no telemetry' : m.why ?? ''].filter(Boolean)
     out.push([{ color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${RACK_MARK[m.state] ?? '•'} ` },

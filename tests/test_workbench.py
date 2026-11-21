@@ -4,6 +4,7 @@ import base64
 import contextlib
 import errno
 import glob
+import fnmatch
 import io
 import json
 import shlex
@@ -10193,15 +10194,28 @@ class WebChat(Base):
 FAKE_SMI = """import os, sys, time
 with open(os.environ["FAKE_SMI_LOG"], "a") as f:
     f.write(" ".join(sys.argv[1:]) + "\\n")
+mode = os.environ.get("FAKE_SMI_MODE", "")  # slow, exit (the stream), flaky (its first run exits), dead
 if "--query-gpu=index,name" in sys.argv:
-    print("0, NVIDIA Fake 4090\\n1, NVIDIA Fake Old")
+    if mode == "dead":
+        sys.exit(9)
+    print("0, NVIDIA GB10" if mode == "gb10" else "0, NVIDIA Fake 4090\\n1, NVIDIA Fake Old")
     sys.exit()
+if mode in ("exit", "dead"):
+    sys.exit(9)
+if mode == "flaky" and not os.path.exists(os.environ["FAKE_SMI_LOG"] + ".ran"):
+    open(os.environ["FAKE_SMI_LOG"] + ".ran", "w").close()
+    sys.exit(9)
+if mode == "slow":
+    time.sleep(0.6)
 ms = int(sys.argv[sys.argv.index("-lms") + 1])
 with open(os.environ["FAKE_SMI_PID"], "w") as f:
     f.write(str(os.getpid()))
 while True:
-    print("0, 1024, 24564, 37, 215.50")
-    print("1, [N/A], [N/A], [N/A], [N/A]", flush=True)
+    if mode == "gb10":  # a DGX Spark's shape: the GPU's memory is the RAM's, [N/A] to nvidia-smi
+        print("0, [N/A], [N/A], 41, 38.2", flush=True)
+    else:
+        print("0, 1024, 24564, 37, 215.50")
+        print("1, [N/A], [N/A], [N/A], [N/A]", flush=True)
     time.sleep(ms / 1000)
 """
 
@@ -10256,8 +10270,65 @@ class Top(Base):
         t = self.top(drm)
         self.assertEqual(t.gpus(), [
             {"index": 0, "name": "1002:7550", "driver": "amdgpu", "used": 12 * 2 ** 30,
-             "total": 16 * 2 ** 30, "busy": 97, "watts": 212.0},
-            {"index": 1, "name": "card1", "driver": "i915"}])  # absent, not zero
+             "total": 16 * 2 ** 30, "busy": 97, "watts": 212.0}])  # card1 says nothing: no row (#551)
+
+    def test_an_older_amd_card_shows_its_vram_and_only_an_apu_adds_its_gtt(self):
+        # #435's comment: wb top had its own copy of the vendor-only rule, so an 8 GiB GCN card
+        # with 24 GiB GTT showed as 32.0 GB unified
+        drm = Path(self.tmp.name, "drm")
+        for card, slot, label in (("card0", "0000:03:00.0", "vddgfx"), ("card1", "0000:c5:00.0", "vddnb")):
+            dev = drm / card / "device"
+            (dev / "hwmon" / "hwmon2").mkdir(parents=True)
+            (dev / "uevent").write_text(f"DRIVER=amdgpu\nPCI_SLOT_NAME={slot}\n")
+            (dev / "hwmon" / "hwmon2" / "in1_label" if label == "vddnb" else dev / "hwmon" / "hwmon2" / "in0_label").write_text(label)
+            for k, v in (("vram_total", 8 * 2 ** 30), ("vram_used", 2 ** 30), ("gtt_total", 24 * 2 ** 30),
+                         ("gtt_used", 300 * 2 ** 20)):
+                (dev / f"mem_info_{k}").write_text(str(v))
+        card, apu = self.top(drm).gpus()
+        self.assertEqual((card["used"], card["total"], card.get("unified")), (2 ** 30, 8 * 2 ** 30, None))
+        self.assertEqual((apu["used"], apu["total"], apu.get("unified")),
+                         (2 ** 30 + 300 * 2 ** 20, 32 * 2 ** 30, True))
+
+    def test_a_cards_short_name_is_its_product_never_the_vendor_tag(self):
+        # #576: a Ryzen 7840HS's Phoenix1 (no product bracket in pci.ids) and a card newer than
+        # hwdata ("Device 1586") were both shown as "AMD/ATI"
+        from workbench import top
+        amd = "Advanced Micro Devices, Inc. [AMD/ATI]"
+        for line, want in ((f"{amd} Phoenix1 (rev c4)", "Phoenix1"), (f"{amd} Device 1586 (rev c1)", "Device 1586"),
+                           (f"{amd} Navi 48 [Radeon RX 9070 XT] (rev c0)", "Radeon RX 9070 XT"),
+                           ("NVIDIA Corporation AD102 [GeForce RTX 4090] (rev a1)", "GeForce RTX 4090"),
+                           ("NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 4090"), ("1002:7550", "1002:7550")):
+            self.assertEqual(top.short(line), want)
+
+    def test_a_display_adapter_that_reports_nothing_leaves_the_ram_view_and_models_in_ram_arent_split(self):
+        # #551: an Intel iGPU, a server's ASPEED BMC or a VM's virtio-gpu made an empty GPU row
+        # and hid the RAM view, and a model wholly on the CPU (size_vram 0) showed as "split"
+        from workbench import models, top
+        for driver in ("i915", "ast", "virtio-pci"):
+            drm = Path(self.tmp.name, driver)
+            (drm / "card0" / "device").mkdir(parents=True)
+            (drm / "card0" / "device" / "uevent").write_text(f"DRIVER={driver}\nPCI_SLOT_NAME=0000:00:02.0\n")
+            t = self.top(drm)
+            (g,) = t.gpus()
+            self.assertEqual((g["name"], g.get("ram")), ("RAM (no GPU)", True), driver)
+        m = next(x for x in models.discover().values() if x.engine == "ollama")
+        tags = {m.server: {"models": [{"name": m.name, "size": 9 * 10 ** 9}]}}
+        ps = {m.server: [{"name": m.name, "size": 9 * 10 ** 9, "size_vram": 0}]}
+        with mock.patch.object(models, "_fake", lambda: False), \
+                mock.patch.object(models, "status", lambda *a, **k: {"why": "ollama is not answering"}):
+            row = t._state(m, tags, ps)
+            self.assertEqual((row["state"], row.get("cpu_bytes"), "gpu_bytes" in row), ("cpu", 9 * 10 ** 9, False))
+            self.assertIn("9.0 GB in RAM", top.render({"ts": 0, "every": 2, "gpus": [], "running": [], "rack": [
+                {**row, "label": "M"}], "queue": []}, 200, color=False))
+            t.gpu_memory = True                  # beside a GPU with memory: part of it should be there
+            self.assertEqual(t._state(m, tags, ps)["state"], "split")
+        # a card that reports a reading but no memory size keeps its row, and the RAM shows beside it
+        drm = Path(self.tmp.name, "xe")
+        (drm / "card0" / "device").mkdir(parents=True)
+        (drm / "card0" / "device" / "uevent").write_text("DRIVER=xe\nPCI_SLOT_NAME=0000:03:00.0\n")
+        (drm / "card0" / "device" / "gpu_busy_percent").write_text("12\n")
+        gpu, ram = self.top(drm).gpus()
+        self.assertEqual((gpu["busy"], ram["name"], ram["ram"]), (12, "RAM", True))
 
     def test_with_no_gpu_it_shows_the_ram(self):
         drm = Path(self.tmp.name, "empty")
@@ -10289,6 +10360,121 @@ class Top(Base):
         self.assertEqual([c for c in calls if "-lms" in c],
                          ["--query-gpu=index,memory.used,memory.total,utilization.gpu,power.draw "
                           "--format=csv,noheader,nounits -lms 2000"])  # one stream, not one per tick
+
+    def test_an_nvidia_card_is_never_shown_as_ram_while_its_stream_is_slow_dead_or_back(self):
+        # #547: before nvidia-smi's first line (the one pass Claude's Bash gets, the pane's first
+        # tick) and after its stream exited, wb top said "RAM (no GPU)" on an NVIDIA machine
+        from workbench import top
+        bindir = self.fake_smi()
+        smi, nodrm = str(bindir / "nvidia-smi"), Path(self.tmp.name, "nodrm")
+        os.environ["FAKE_SMI_MODE"] = "slow"
+        t = self.top(nodrm, smi=smi)
+        try:
+            first = t.gpus()      # Top waits up to one interval for the stream's first line
+        finally:
+            t.close()
+        self.assertEqual([(g["name"], g.get("used")) for g in first],
+                         [("NVIDIA Fake 4090", 1024 * 2 ** 20), ("NVIDIA Fake Old", None)])
+        out = io.StringIO()
+        with mock.patch.object(hardware, "system", lambda: "linux"), \
+                mock.patch.object(hardware, "smi_path", lambda: smi), \
+                mock.patch.object(top.models, "discover", lambda: {}):
+            top.main(every=2, out=out, drm=nodrm)
+        self.assertIn("GPU 0 ", out.getvalue())
+        self.assertNotIn("RAM (no GPU)", out.getvalue())
+        os.environ["FAKE_SMI_MODE"] = "exit"      # the stream exits: the cards stay, unread
+        t = self.top(nodrm, smi=smi)
+        try:
+            gone = t.gpus()
+        finally:
+            t.close()
+        self.assertEqual(gone, [{"name": "NVIDIA Fake 4090", "driver": "nvidia", "index": 0, "stale": True},
+                                {"name": "NVIDIA Fake Old", "driver": "nvidia", "index": 1, "stale": True}])
+        self.assertIn("no reading", top.render({"ts": 0, "every": 2, "gpus": gone, "running": [], "rack": [],
+                                                "queue": []}, 200, color=False))
+        os.environ["FAKE_SMI_MODE"] = "flaky"     # it exits once, then streams: started again
+        t = self.top(nodrm, smi=smi)
+        t.every = 0.2
+        try:
+            deadline = time.time() + 15
+            while t.gpus()[0].get("stale") and time.time() < deadline:
+                time.sleep(0.1)
+            back = t.gpus()[0]
+        finally:
+            t.close()
+        self.assertEqual((back.get("used"), back.get("stale")), (1024 * 2 ** 20, None))
+
+    def test_a_dgx_sparks_gpu_shows_the_ram_it_shares_and_an_x86_cards_n_a_stays_unknown(self):
+        # #572: a GB10's memory.used/total are [N/A], so wb top showed its load and watts but not
+        # the 128 GB of shared memory filling, though hardware.gpus knew it is the RAM
+        bindir = self.fake_smi()
+        os.environ["FAKE_SMI_MODE"] = "gb10"
+        ram = {"ram": 128 * 10 ** 9, "ram_free": 100 * 10 ** 9, "swap": None, "swap_free": None}
+        rows = {}
+        for machine in ("aarch64", "x86_64"):
+            with mock.patch("platform.machine", lambda: machine), \
+                    mock.patch.object(hardware, "memory", lambda: ram):
+                t = self.top(Path(self.tmp.name, "nodrm"), smi=str(bindir / "nvidia-smi"))
+                try:
+                    rows[machine] = t.gpus()
+                finally:
+                    t.close()
+        self.assertEqual(rows["aarch64"], [{"name": "NVIDIA GB10", "driver": "nvidia", "index": 0, "busy": 41,
+                                            "watts": 38.2, "total": 128 * 10 ** 9, "used": 28 * 10 ** 9,
+                                            "unified": True}])
+        self.assertEqual(rows["x86_64"][0], {"name": "NVIDIA GB10", "driver": "nvidia", "index": 0, "busy": 41,
+                                             "watts": 38.2})
+        self.assertEqual(rows["x86_64"][1]["name"], "RAM")   # no GPU says a size: the RAM beside (#551)
+
+    def test_on_macos_the_gpu_shows_the_budgets_ceiling_and_the_memory_in_use(self):
+        # #574: an Apple Silicon Mac showed "64.0 GB unified, use not said" whatever was loaded,
+        # all of RAM where the budget allows three quarters, and no row at all when
+        # system_profiler failed
+        from workbench import models, top
+        ram, page = 64 * 2 ** 30, 16384
+        vm = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:     100000.\n"
+              "Pages active:   2000000.\nPages inactive:  300000.\nPages speculative:  50000.\n")
+        asked = []
+
+        def run(*argv):
+            asked.append(argv)
+            return {("sysctl", "-n", "hw.pagesize"): str(page), ("sysctl", "-n", "hw.memsize"): str(ram),
+                    ("vm_stat",): vm}.get(argv, "")
+        used = ram - (100000 + 300000 + 50000) * page
+        for gpus, want in (([{"name": "Apple M3 Max (40-core GPU)", "driver": "metal", "unified": True,
+                              "vram": ram, "wired_limit": None}],
+                            [{"name": "Apple M3 Max (40-core GPU)", "unified": True,
+                              "total": models.unified_default(ram), "used": used}]),
+                           ([{"name": "Apple M3 Max (40-core GPU)", "driver": "metal", "unified": True,
+                              "vram": ram, "wired_limit": 56 * 2 ** 30}],
+                            [{"name": "Apple M3 Max (40-core GPU)", "unified": True, "total": 56 * 2 ** 30,
+                              "used": used}]),
+                           ([], [{"name": "RAM (no GPU)", "ram": True, "total": ram, "used": used}])):
+            asked.clear()
+            with mock.patch.object(hardware, "system", lambda: "macos"), \
+                    mock.patch.object(hardware, "_mac_gpus", lambda: gpus), \
+                    mock.patch.object(hardware, "_run", run):
+                t = top.Top(2)
+                self.assertEqual(t.gpus(), want)
+                self.assertEqual(t.gpus(), want)
+            self.assertEqual(asked.count(("vm_stat",)), 1)   # once per probe interval, not per tick
+
+    def test_on_wsl_a_failing_nvidia_smi_falls_back_to_windows_adapters_not_the_ram(self):
+        # #547: on WSL a stream that started and then failed hid Windows' adapters too
+        from workbench import top
+        bindir = self.fake_smi()
+        os.environ["FAKE_SMI_MODE"] = "dead"
+        nodrm = Path(self.tmp.name, "nodrm")
+        with mock.patch.object(hardware, "system", lambda: "wsl"), \
+                mock.patch.object(hardware, "smi_path", lambda: str(bindir / "nvidia-smi")), \
+                mock.patch.object(hardware, "_windows_gpus", lambda: [
+                    {"name": "AMD Radeon RX 7800 XT", "driver": "windows (seen from WSL)",
+                     "vram": 17163091968, "vram_used": None}]):
+            t = top.Top(0.2, drm=nodrm)
+        try:
+            self.assertEqual(t.gpus(), [{"name": "AMD Radeon RX 7800 XT", "total": 17163091968}])
+        finally:
+            t.close()
 
     def test_a_tick_names_the_running_tasks_the_rack_and_the_queue(self):
         from workbench import models, top
@@ -10388,8 +10574,16 @@ class Hardware(unittest.TestCase):
         run = lambda *argv: next((out for k, out in runs.items() if argv[:len(k)] == k), "")  # noqa
         read = lambda path: files.get(str(path), "")  # noqa: E731
         drm = Path("/fake/sys/class/drm")
-        cards = sorted({Path(f).parent for f in files if f.startswith(f"{drm}/")})
-        glob = lambda self, pattern: iter(cards) if self == drm else iter(())  # noqa: E731
+        # every directory and file the fake files make, so a glob below the DRM (a card's hwmon)
+        # finds what a real one would
+        made = {p for f in files for p in (Path(f), *Path(f).parents)}
+
+        def glob(self, pattern):
+            if self != drm and drm not in self.parents:
+                return iter(())
+            return iter(sorted(p for p in made if self in p.parents
+                               and fnmatch.fnmatchcase(str(p.relative_to(self)), pattern)
+                               and str(p.relative_to(self)).count("/") == pattern.count("/")))
         for target, value in (("platform.system", lambda: system), ("platform.machine", lambda: machine),
                               ("workbench.hardware._run", run), ("workbench.hardware._read", read),
                               ("workbench.hardware.DRM", drm), ("pathlib.Path.glob", glob),
@@ -10397,6 +10591,11 @@ class Hardware(unittest.TestCase):
             patcher = mock.patch(target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        home = tempfile.mkdtemp()  # what hardware caches (WSL's Windows adapters), never the real one's
+        self.addCleanup(shutil.rmtree, home, True)
+        patcher = mock.patch.dict(os.environ, {"WB_HOME": home})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         return hardware
 
     def test_apple_silicon_reports_unified_memory_not_no_gpu(self):
@@ -10413,26 +10612,41 @@ class Hardware(unittest.TestCase):
                 {"_name": "Apple M2 Pro", "sppci_model": "Apple M2 Pro", "sppci_cores": "19"}]})})
         out = "\n".join(hw.report())
         self.assertIn("OS    macos (arm64)", out)
-        self.assertIn("Apple M2 Pro (19-core GPU) · unified memory: 32.0 GB shared with the CPU", out)
+        self.assertIn("Apple M2 Pro (19-core GPU) · unified memory: 34.4 GB shared with the CPU", out)
         self.assertNotIn("none found", out)
-        self.assertIn("RAM   32.0 GB (2.0 GB free) · swap 2.0 GB (1.5 GB free)", out)
+        self.assertIn("RAM   34.4 GB (2.1 GB free) · swap 2.1 GB (1.6 GB free)", out)
         self.assertIn("CPU   Apple M2 Pro", out)
 
     def test_an_intel_mac_reports_its_graphics_cards_vram(self):
         hw = self.fake("Darwin", runs={("system_profiler",): json.dumps({"SPDisplaysDataType": [
             {"sppci_model": "AMD Radeon Pro 5500M", "spdisplays_vram": "8 GB"}]})})
-        self.assertIn("AMD Radeon Pro 5500M · 8.0 GB VRAM · metal", "\n".join(hw.report()))
+        self.assertIn("AMD Radeon Pro 5500M · 8.6 GB VRAM · metal", "\n".join(hw.report()))
 
-    def test_wsl_names_windows_gpus_and_says_what_it_cannot_see(self):
+    def test_wsl_reads_each_windows_gpus_memory_and_budgets_it_when_linux_sees_none(self):
+        # #522: a 16 GB RX 7800 XT under Ollama for Windows was "VRAM unknown", scout said only
+        # NVIDIA is usable, and with no budget tasks took turns and unloaded every model
+        from workbench import models
+        asked = []
         hw = self.fake("Linux", files={
             "/proc/version": "Linux version 5.15.153.1-microsoft-standard-WSL2",
             "/proc/meminfo": "MemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n"},
-            runs={("powershell.exe",): "AMD Radeon RX 7900 XTX\r\n"})
-        out = "\n".join(hw.report())
-        self.assertIn("OS    wsl", out)
-        self.assertIn("only NVIDIA GPUs are usable from inside WSL", out)
-        self.assertIn("AMD Radeon RX 7900 XTX · VRAM unknown · windows (seen from WSL)", out)
-        self.assertIn("RAM   15.3 GB", out)
+            runs={("powershell.exe",): "AMD Radeon RX 7800 XT\t17163091968\r\n"
+                                       "Intel(R) UHD Graphics 770\t134217728\r\nParsec Virtual Display Adapter\t\r\n"})
+        run = hw._run
+        with mock.patch.object(hw, "_run", lambda *argv: asked.append(argv) or run(*argv)):
+            out = "\n".join(hw.report())
+            self.assertIn("OS    wsl", out)
+            self.assertNotIn("only NVIDIA", out)
+            self.assertIn("models served from Windows (Ollama for Windows) can use any vendor's GPU", out)
+            self.assertIn("AMD Radeon RX 7800 XT · 17.2 GB VRAM · windows (seen from WSL)", out)
+            self.assertIn("Parsec Virtual Display Adapter · VRAM unknown", out)
+            self.assertIn("RAM   16.4 GB", out)  # decimal GB (#523)
+            with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+                budget, devs, why = models.budget_devices()
+        self.assertEqual((budget, why), (17163091968, "AMD Radeon RX 7800 XT (VRAM)"))
+        ps = [a for a in asked if a[0] == "powershell.exe"]
+        self.assertEqual(len(ps), 1)                    # cached: the budget asked no PowerShell
+        self.assertIn("-EncodedCommand", ps[0])          # no quoting through WSL's interop
 
     def test_ollamas_quoted_service_environment_and_a_context_that_isnt_a_number(self):
         # the 2026-11-16 audit: systemd quotes a value with a space and the split lost it; "32k"
@@ -10563,24 +10777,41 @@ class Hardware(unittest.TestCase):
         hw = self.fake("Linux", files={
             f"{card}/uevent": "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:c5:00.0",
             f"{card}/mem_info_vram_total": str(512 * 2 ** 20),
-            f"{card}/mem_info_gtt_total": str(96 * 2 ** 30), f"{card}/unique_id": "a1b2"},
+            f"{card}/mem_info_gtt_total": str(96 * 2 ** 30), f"{card}/unique_id": "a1b2",
+            f"{card}/hwmon/hwmon5/in1_label": "vddnb"},   # an APU's northbridge voltage (#435)
             runs={("lspci",): "c5:00.0 Display controller: Radeon 8060S"})
         apu = hw.gpus()[0]
         self.assertEqual((apu["vram"], apu["uuid"]), (512 * 2 ** 20 + 96 * 2 ** 30, "GPU-a1b2"))
-        self.assertIn("Radeon 8060S · unified memory: 96.5 GB usable by the GPU "
-                      "(0.5 GB carve-out + 96.0 GB GTT) · amdgpu", "\n".join(hw.report()))
+        self.assertIn("Radeon 8060S · unified memory: 103.6 GB usable by the GPU "
+                      "(0.5 GB carve-out + 103.1 GB GTT) · amdgpu", "\n".join(hw.report()))
         with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
             self.assertEqual(models.budget_devices()[0], 512 * 2 ** 20 + 96 * 2 ** 30)
 
         meminfo = {"/proc/meminfo": "MemTotal:       125000000 kB\nMemAvailable:    100000000 kB\n"}
         spark = ("nvidia-smi",), "GPU-77aa, NVIDIA GB10, [N/A], [N/A], 580.95"
         hw = self.fake("Linux", files=meminfo, runs=dict([spark]))
-        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}), \
+                mock.patch.object(models, "_get", lambda *a, **k: None):   # no Ollama answers
             budget, devs, why = models.budget_devices()
-        self.assertEqual((budget, [g["name"] for g in devs]), (125000000 * 1024, ["NVIDIA GB10"]))
-        self.assertIn("NVIDIA GB10 (the RAM: nvidia-smi gives the GPU no memory of its own)", why)
+        # the RAM less what the system used when read (#524)
+        self.assertEqual((budget, [g["name"] for g in devs]), (100000000 * 1024, ["NVIDIA GB10"]))
+        self.assertIn("NVIDIA GB10 (the RAM: nvidia-smi gives the GPU no memory of its own, less 25.6 GB "
+                      "the system uses)", why)
         hw = self.fake("Linux", files=meminfo, runs=dict([spark]), machine="x86_64")
         self.assertIsNone(hw.gpus()[0]["vram"])  # an x86 card's [N/A] stays unknown
+
+    def test_an_older_amd_card_that_names_no_memory_vendor_is_not_taken_for_an_apu(self):
+        # #435: GCN cards (RX 470-590, Fury, R9 390) have no mem_info_vram_vendor, so an 8 GiB
+        # RX 580 with 24 GiB GTT was made a unified 34.4 GB budget. Only an APU's hwmon has vddnb
+        card = "/fake/sys/class/drm/card0/device"
+        gcn = {f"{card}/uevent": "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:03:00.0",
+               f"{card}/mem_info_vram_total": str(8 * 2 ** 30), f"{card}/mem_info_gtt_total": str(24 * 2 ** 30),
+               f"{card}/hwmon/hwmon2/in0_label": "vddgfx", f"{card}/hwmon/hwmon2/power1_average": "90000000"}
+        (g,) = self.fake("Linux", files=gcn, machine="x86_64").gpus()
+        self.assertEqual((g["vram"], g.get("unified"), g.get("discrete")), (8 * 2 ** 30, None, True))
+        bare = {k: v for k, v in gcn.items() if "/hwmon/" not in k}   # no hwmon at all: unknown
+        (g,) = self.fake("Linux", files=bare, machine="x86_64").gpus()
+        self.assertEqual((g["vram"], g.get("unified"), g.get("discrete")), (8 * 2 ** 30, None, None))
 
     def test_a_discrete_amd_card_doesnt_count_its_gtt(self):
         card = "/fake/sys/class/drm/card0/device"
