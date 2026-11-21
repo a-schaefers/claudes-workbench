@@ -11265,6 +11265,23 @@ class Projects(Base):
                    "--model", "mimo")
         self.assertIn("a monorepo package with its own: --repo <the package's directory>", err.getvalue())
 
+    def test_from_inside_dot_claude_the_repos_own_claude_md_is_not_taken_for_a_package(self):
+        # Review of #606: walking up from .claude/skills/x found .claude/CLAUDE.md and ran the
+        # task in .claude as if it were a package; a package's own .claude/ still leads to it
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        (self.repo / ".claude" / "skills" / "x").mkdir(parents=True)
+        (self.repo / ".claude" / "CLAUDE.md").write_text("# root\n")
+        (self.repo / ".claude" / "skills" / "x" / "SKILL.md").write_text("---\nname: x\n---\n")
+        app = self.repo / "packages" / "app"
+        (app / ".claude" / "skills").mkdir(parents=True)
+        (app / ".claude" / "CLAUDE.md").write_text("# app\n")
+        g("add", "-A")
+        g("commit", "-qm", "instructions in .claude, at the root and in a package")
+        base = gitops.git(self.repo, "rev-parse", "HEAD").strip()
+        self.assertIsNone(cli._package(self.repo, self.repo / ".claude" / "skills" / "x", base))
+        self.assertIsNone(cli._package(self.repo, self.repo / ".claude", base))
+        self.assertEqual(cli._package(self.repo, app / ".claude" / "skills", base), "packages/app")
+
     def test_instructions_in_dot_claude_count_and_hints_quote_their_paths(self):
         # the audit: a repo with only .claude/CLAUDE.md (Claude Code reads it, and so does the
         # agent) was refused as having none; a path with a space broke the printed merge command

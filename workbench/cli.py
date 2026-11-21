@@ -513,7 +513,9 @@ def _package(repo: Path, given: Path, base: str) -> str | None:
     except ValueError:
         return None
     for n in range(len(parts), 0, -1):
-        if _claude_md_at(repo, base, sub := "/".join(parts[:n])):
+        # not a `.claude` directory: its CLAUDE.md is its parent's .claude/CLAUDE.md, and from
+        # .claude/skills/x the walk took the repo's own for a package at .claude (review of #606)
+        if parts[n - 1] != ".claude" and _claude_md_at(repo, base, sub := "/".join(parts[:n])):
             return sub
     return None
 

@@ -1089,7 +1089,7 @@ prompt, in this order:
 - in a monorepo package (task.json `subdir`), the package's own three, the same way: `wb start
   --repo packages/app` (or any directory inside it: the nearest one up to, not including, the
   repo's top with a committed `CLAUDE.md` or `.claude/CLAUDE.md`, as Claude Code finds it,
-  `cli._package`; from `packages/app/src` the repo was refused, or the task ran at the root,
+  `cli._package`; a `.claude` directory is never one, its CLAUDE.md being its parent's; from `packages/app/src` the repo was refused, or the task ran at the root,
   #606), passes the CLAUDE.md check on it, and the agent, the setup, the tests (the
   base check's and `wb verify`'s too) and the session export run there (`Task.workdir`); the diff
   and the commits stay the whole repo's, and a plain subdirectory still means the repo's top.
