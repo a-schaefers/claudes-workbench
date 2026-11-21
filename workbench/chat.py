@@ -508,7 +508,10 @@ def expired(msg_id: str) -> bool:
 def pending() -> list[dict]:
     """Every message of the user's without a receipt, however far back (open_work, #329), and
     still deliverable: an expired one is retired (#741)."""
-    rows = sorted(open_work()["messages"].values(), key=lambda r: (r.get("ts", 0), r.get("id", "")))
+    # by time, ties in the order written (a stable sort over the file's order): two sends in one
+    # millisecond came back by their ids' random suffix, and CI's retry test failed by chance
+    # (seen 2026-11-21, merging the audit's fixes)
+    rows = sorted(open_work()["messages"].values(), key=lambda r: r.get("ts", 0))
     return [{**r, "received": None} for r in rows]
 
 
