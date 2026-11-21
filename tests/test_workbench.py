@@ -15025,7 +15025,7 @@ class Detector(unittest.TestCase):
         before = time.time()
         row = events.normalize({"type": "text", "part": {"text": "x"}}, 1)
         self.assertGreaterEqual(row["ts"], round(before, 3) - 0.001)
-        self.assertLessEqual(row["ts"], time.time())
+        self.assertLessEqual(row["ts"], round(time.time(), 3) + 0.001)  # ts is rounded to the ms
         self.assertEqual(events.normalize({"type": "text", "timestamp": 1_800_000_000_000,
                                            "part": {"text": "x"}}, 1)["ts"], 1_800_000_000.0)
 
