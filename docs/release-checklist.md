@@ -33,6 +33,15 @@ run every platform, server and surface by hand before a release, so other hardwa
 from the source, its docs and CI, and from what users report (`wb doctor`'s output, the OS, the
 GPU, the model server). Run what is at hand and mark the rest **skip** (#275, closed 2026-11-20).
 
+Every result by hand, in this section and the next, is recorded against the exact candidate:
+the SHA it ran (`git rev-parse --short HEAD` in the checkout used), the OS and the repo's
+filesystem, the versions (Python, git, OpenCode, Claude Code, the kernel and its Landlock ABI as
+`wb doctor` says it, and whatever the run is about: Docker, tailscale, Ollama), the hardware,
+and the result: **pass**, **skip** with its reason, or **fail** with its issue. Where a table has
+only a Notes column, the notes hold them. A run on an earlier commit stays recorded as that SHA,
+and counts for the candidate only when `git diff <sha> <candidate>` touches nothing it
+exercises, which its notes say. (#482, the audit of v1.8: what would earn 9/10.)
+
 The whole road, as a `--trial` task on a scratch repo from `wb init`: install, sample (`wb try`),
 delegate (`wb start`), answer a question (`wb answer`), review, interrupt (`wb steer --now` or
 `wb stop`), resume (`wb feedback`), then `wb accept --merge`. Check the merged file and commit
@@ -54,6 +63,34 @@ On at least one of them:
       awake (macOS, Linux: `systemd-inhibit --list` names workbench), or on WSL2 `wb start
       --backlog` says it can't.
 
+### The release evidence
+
+The runs the audit of v1.8 named (#482). Each row is one run, and a row naming several checks
+passes only when all of them do: its notes name any one skipped or failed. Best effort like the
+rest of this section: a skip is recorded with its reason, never a gate.
+
+| Run | Result | SHA | OS, filesystem | Versions | Hardware | Notes (skip reason, fail issue) |
+|---|---|---|---|---|---|---|
+| `wb accept --merge` with a signing key that needs unlocking (a passphrase, a pinentry) | | | | | | |
+| `wb accept --merge --no-sign`, headless (no terminal, no agent to unlock a key) | | | | | | |
+| A sparse, blobless clone (`--filter=blob:none`, `git sparse-checkout`) of a large repo | | | | | | |
+| A repo with Git LFS files | | | | | | |
+| `wb bench run` with `wb events` running, on a kernel with an 8,192-watch limit (`fs.inotify.max_user_watches`) | | | | | | |
+| A `--test` suite using Docker, under Landlock ABI 9 or newer | | | | | | |
+| The web chat behind a real `tailscale serve --bg 1337`, on its https address, with the default chat.json (#448) | | | | | | |
+| The web chat on an IPv6-only host | | | | | | |
+| The web chat on real phones: a request backgrounded, the server interrupted between writes, an old prompt answered, reconnecting | | | | | | |
+| A clean install on Debian or Ubuntu with Python 3.11 | | | | | | |
+| An upgrade from a 1.7 state directory with open tasks and chat history | | | | | | |
+| macOS on Apple silicon, natively: a signed accept, sleep during a task, no child left after a round | | | | | | |
+| macOS on Apple silicon: a task on a Metal model | | | | | | |
+| WSL2, the repo on the distro's filesystem: CRLF, exec bits, symlinks, submodules, `wb shot` | | | | | | |
+| WSL2, the repo on a mounted Windows volume (`/mnt/c`): CRLF, exec bits, symlinks, submodules, `wb shot` | | | | | | |
+| A real AMD GPU workload | | | | | | |
+| A real NVIDIA GPU workload | | | | | | |
+| A low-VRAM or mixed GPU host | | | | | | |
+| A shared Ollama, with a long request from outside workbench during a task | | | | | | |
+
 ## Models and long runs
 
 | Setup | Result | Notes |
@@ -69,4 +106,3 @@ On at least one of them:
 - [ ] More tasks than fit, queued (`--queue`), each run in turn.
 - [ ] A model load interrupted (`wb stop` while it loads), and the next task runs.
 - [ ] The web chat in two tabs, with reconnects and a long history.
-- [ ] The web chat behind a real `tailscale serve --bg 1337`, on its https address, with the default chat.json (#448).
