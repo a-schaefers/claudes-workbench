@@ -60,7 +60,8 @@ class Knob:
     # whose tests never passed, ran alike under every value (results' `self_review_due`, #816)
     long: bool = False  # acts only where the spec names a file over context.PROBE_FILE_LINES,
     # with probe on: elsewhere the levels behave alike (results' `probe_long`, #857)
-    try_min: int = TRY_MIN  # tasks a value other than the default needs before it can be the pick
+    try_min: int = TRY_MIN  # tasks a value other than the default needs before it can be the pick;
+    # above TRY_MIN, the default needs them too (best)
 
 
 KNOBS = {
@@ -80,9 +81,10 @@ KNOBS = {
     # window (context.probe_start, at wb start). Moderate measured no worse than off on a 27B at
     # 40K and aggressive worse (#857), but a stronger model or a wider window may earn aggressive
     # by itself. Only a spec that names a long file is evidence, and only there is it explored;
-    # a fixed level (moderate, aggressive) is evidence of its own value. Five tasks at aggressive
-    # before it can be the pick, not three: a tenth of the long-file tasks run a level that
-    # measured worse, and one replay's time moved 41 to 13 minutes (the owner's design, 2026-11-21)
+    # a fixed level (moderate, aggressive) is evidence of its own value. Five tasks at each
+    # value before aggressive can be the pick, not three: one long-file task in five (EXPLORE)
+    # runs a level that measured worse, and one replay's time moved 41 to 13 minutes (the
+    # owner's design, 2026-11-21)
     "probe_aggressive": Knob((0, 1), 0, "whether adaptable probe runs at aggressive", long=True,
                              try_min=5),
 }
@@ -244,10 +246,16 @@ def scores(name: str, model: str, window, ceiling=None) -> dict:
 def best(name: str, model: str, window, ceiling=None) -> float:
     """The best-scoring value among the default and those tried the knob's try_min times
     (TRY_MIN): an untried value sits at the pooled mean, so any one task above it won the pick
-    (#721)."""
+    (#721). A knob whose try_min is above TRY_MIN keeps its default until that has as many."""
     d, sc = default(name, ceiling), scores(name, model, window, ceiling)
     rec = record(name, model, window, ceiling)
-    ok = [v for v in sc if v == d or len(rec[v]) >= KNOBS[name].try_min]
+    need = KNOBS[name].try_min
+    if need > TRY_MIN and len(rec[d]) < need:
+        # a knob that asks more than TRY_MIN asks it of the default too: else five tasks at a
+        # fixed aggressive and one at moderate flipped adaptable to aggressive on that one
+        # (review, 2026-11-21; the owner's design: five tasks per value, #857)
+        return d
+    ok = [v for v in sc if v == d or len(rec[v]) >= need]
     return max(ok, key=lambda v: (round(sc[v], 9), v == d, -abs(v - d)))
 
 

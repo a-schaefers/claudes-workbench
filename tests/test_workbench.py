@@ -22279,7 +22279,9 @@ class ProbeLevels(Base):
         with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("read whole")):
             self.assertEqual(context.long_files("data.csv", self.repo), {})
 
-    def test_aggressive_becomes_adaptables_pick_after_five_better_long_file_tasks_and_not_four(self):
+    def test_aggressive_becomes_adaptables_pick_only_once_both_levels_have_five_long_file_tasks(self):
+        # the owner's design (2026-11-21, #857): five evidence tasks per value; the default
+        # once stayed in the running with one (review, 2026-11-21)
         from workbench import tuning
         run_wb("experiment", "probe", "adaptable")
         self.long_file()
@@ -22290,6 +22292,12 @@ class ProbeLevels(Base):
         row = lambda v, reviews, **x: {"model": model, "window": window, "outcome": "accepted",  # noqa
                                        "reviews": reviews, "active_minutes": 10, "probe_long": True,
                                        "tuned": {"probe_aggressive": v}, **x}
+        results = store.home() / "results.jsonl"
+        store.append_jsonl(results, row(0, 1))                            # one moderate, five aggressive
+        for _ in range(5):
+            store.append_jsonl(results, row(1, 0))
+        self.assertEqual(tuning.best("probe_aggressive", model, window), 0)  # moderate's 1 < try_min
+        results.unlink()
         for _ in range(5):                                                 # moderate: sent back once each
             store.append_jsonl(store.home() / "results.jsonl", row(0, 1))
         for _ in range(4):

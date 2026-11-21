@@ -2466,9 +2466,12 @@ named a file over `context.PROBE_FILE_LINES` with probe on (the row's `probe_lon
 act alike, so a try teaches nothing (the owner's design, 2026-11-21, #857). A task at a fixed
 level (`moderate`, `aggressive`) is evidence of its value, as a `--self-review` flag is; one with
 probe off has no value at all (`fixed` None: nothing in `tuned`). Its `try_min` is 5, not
-`TRY_MIN`: a tenth of the long-file tasks run a level that measured worse, and one replay's time
-moved 41 to 13 minutes, so five tasks at aggressive come before it can be the pick (moderate, the
-default, runs four in five of the rest, and the fixed-level tasks too).
+`TRY_MIN`: one long-file task in five (`EXPLORE`) runs a level that measured worse, and one
+replay's time moved 41 to 13 minutes, so five evidence tasks at each value, moderate as well as
+aggressive, come before aggressive can be the pick (`best`: a knob whose `try_min` is above
+`TRY_MIN` keeps its default until the default has that many too; asked of aggressive alone, five
+tasks at a fixed aggressive beside one at moderate made it the pick on that one, the review of
+2026-11-21). Moderate, the default, runs the other four in five, and the fixed-level tasks count too.
 Each value's mean is smoothed toward the others' (`PRIOR`, two tasks' worth), and a value other
 than the default can be the pick only once `TRY_MIN` (3) tasks ran at it (the knob's `try_min`) (an untried value sits at
 the pooled mean, so any one task above it won), so one lucky task moves nothing, and the pick
@@ -5565,8 +5568,8 @@ window, and in one task in five (`tuning.EXPLORE`) the other value, but only whe
 file over `PROBE_FILE_LINES` (`context.long_files` at the base: the paths in the spec's text,
 `spec_paths`, brace forms too, `brace_names`, tried in the package first; task.json `probe_files`,
 the row's `probe_long`), the only tasks on which the levels act differently. The knob learns only
-from those tasks, a fixed level's among them, and needs five at aggressive before it can be the
-pick. `wb status <task>` names the level: `probe (adaptable → moderate)`, `probe (adaptable →
+from those tasks, a fixed level's among them, and needs five at each level before aggressive can
+be the pick. `wb status <task>` names the level: `probe (adaptable → moderate)`, `probe (adaptable →
 aggressive, a try)`, `probe (adaptable → moderate, no long file named)`, `probe (aggressive)`. The
 pane marks adaptable "recommended" only when `context.PROBE_RECOMMENDED` is true, which Claude sets
 after the check that moderate, with the read cap and the outline, is at least as good as off
