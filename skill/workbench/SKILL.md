@@ -112,8 +112,9 @@ it that way; the agents never write either.
   built its "Next:" line instead of its spec). `wb start` refuses a repo without one (CLAUDE.md or
   `.claude/CLAUDE.md`; `--no-claude-md` only for throwaway repos). It also refuses an unknown
   `--base` and a repo with no git identity for the commits: fix those, don't work around them.
-- **Submodules** are not checked out in the agent's worktree (`wb start` says so): a step whose
-  build or tests need one is yours, or its acceptance command must not need it.
+- **Submodules** are filled read-only in the agent's worktree, at the commit the base records;
+  `wb start` names any it couldn't fill (your checkout lacks it), which a build or test there
+  can't use. A step must not edit inside one: the edit can't land in the commit.
 
 ## Planning work you will hand off
 In workbench mode every plan you write is for agents weaker than you, who see only the spec you
@@ -315,7 +316,7 @@ window, the permissions' traps, the web chat, a backlog left to run overnight.
 **The user's two commands.** Only these, never words in a message, stop the delegation and end
 workbench mode; the mod runs them, closes the pane and tells you what it did:
 - **`/workbench-quit-and-hand-back-claude`**: take over. This session's agents are already stopped
-  (`wb takeover --all --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Leave workbench mode and finish the work yourself without pausing: review
+  (`wb takeover --all --user --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Leave workbench mode and finish the work yourself without pausing: review
   what each agent left, complete it in its worktree to your standard, run the acceptance command,
   `wb accept`, then carry on with the rest of the request directly, without delegating.
 - **`/workbench-quit`**: stop. This session's delegated agents are already stopped (`wb stop

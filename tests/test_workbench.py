@@ -3,6 +3,7 @@ import ast
 import base64
 import contextlib
 import errno
+import re
 import glob
 import fnmatch
 import io
@@ -9682,6 +9683,33 @@ class Coding(Base):
         self.assertIn("the user handed it to Claude", run_wb("coding"))     # so the mod lets Claude edit
         self.assertIn("Only when I say", run_wb("coding"))           # kept: a restart reads it again
         self.assertEqual(self.refused("coding", "allow", "t", "--edit", "x")[0], 1)  # needs their words
+
+    def test_takeover_all_says_each_refusal_and_still_takes_over_the_rest(self):
+        # #601 (the audit of v1.90): the first refused task exited 3 before any runner was stopped
+        run_wb("coding", "only")
+        for name in ("t", "t2"):
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+        run_wb("coding", "allow", "t2", "--edit", "fix the units", "--said", "yes")
+        out, err = io.StringIO(), io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stdout(out), redirect_stderr(err):
+            cli.main(["takeover", "--all"])
+        self.assertEqual(e.exception.code, 3)
+        self.assertIn("report the blocker to the user", err.getvalue())   # t's refusal, said
+        self.assertIn("took over t2", out.getvalue())                     # and t2 still taken
+        self.assertEqual(store.Task("t2").status["last"], "Claude took over")
+        self.assertNotEqual(store.Task("t").status["last"], "Claude took over")
+
+    def test_the_skills_no_mod_hand_back_command_passes_user_so_the_coding_gate_lets_it(self):
+        # #601: SKILL.md's hand-back command had no --user and exited 3 under "Only when I say"
+        skill = (Path(__file__).parent.parent / "skill/workbench/SKILL.md").read_text()
+        cmd = re.search(r"`wb (takeover --all[^`]*)`", skill)
+        self.assertIn("--user", cmd.group(1).split())
+        run_wb("coding", "only")
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        argv = [w for w in cmd.group(1).split() if w.startswith("--") and w not in ("--repo", "--session")]
+        self.assertIn("took over t", run_wb("takeover", *argv))
 
 
 class Verify(Base):

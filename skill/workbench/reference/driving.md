@@ -140,8 +140,8 @@ Rounds of a task continue one OpenCode session, so the agent keeps what it read.
 When that session passes its handover point (60% of the window until `wb tune` learns better
 for that model; less on windows under ~32K, and a model served under 16K can't take tasks), the runner hands the task to a fresh session
 at once, mid-round if need be: the task, the work so far (the diff), the agent's last words and
-the new instructions. A round that hands over 5 times is stopped as stuck (the step is too big for
-the window: split it), and from the second handover each one is a check-in. OpenCode's own compaction (the model summarising itself, which can lose the
+the new instructions. The fourth handover in a round is a check-in, and past the fifth the round is
+stopped as stuck (the step is too big for the window: split it). OpenCode's own compaction (the model summarising itself, which can lose the
 task) is only a backstop past that. Reports show `agent context: …` so you see it coming. A
 check-in or report that says `NOTE: the spec doesn't name …` lists files outside the spec: drift
 until you've looked, so read them and steer (`--now`) if the agent left its task. `NOTE: <dir>: a

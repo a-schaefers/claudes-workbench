@@ -1781,10 +1781,16 @@ def cmd_takeover(a):
                                 if t.status.get("phase") not in store.CLOSED], a.repo, a.session)
         if not tasks:
             print("no open delegated tasks to take over")
-        for t in tasks:
-            cmd_takeover(argparse.Namespace(name=t.name, all=False, repo=None, session=None,
-                                            user=a.user))
+        refused = 0
+        for t in tasks:  # each refusal said (die's line) and the rest still taken: one refused
+            try:         # first left every other runner going (#601, the audit of v1.90)
+                cmd_takeover(argparse.Namespace(name=t.name, all=False, repo=None, session=None,
+                                                user=a.user))
+            except SystemExit as e:
+                refused = max(refused, e.code if isinstance(e.code, int) else 1)
         _say(_others_line(others, "left alone"))
+        if refused:
+            sys.exit(refused)
         return
     if getattr(a, "repo", None) or getattr(a, "session", None):
         die("--repo and --session go with --all")

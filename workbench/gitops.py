@@ -459,9 +459,10 @@ def share_lfs(repo: Path, clone: Path) -> None:
 
 
 def submodules(repo: Path, commit: str) -> list[str]:
-    """The submodule paths ``commit`` lists. They stay empty in a task's worktree: each one's
-    `.git` would be a file the agent could point at a git dir of its own, whose config git then
-    obeys outside the lane (see _pinned), so wb start says so instead (the 2026-11-16 audit)."""
+    """The submodule paths ``commit`` lists. In a task's worktree each is filled read-only by
+    fill_submodules, never checked out: a `.git` there would be a file the agent could point at a
+    git dir of its own, whose config git then obeys outside the lane (see _pinned; the 2026-11-16
+    audit). wb start names only the ones it couldn't fill."""
     out = git(repo, "config", "--blob", f"{commit}:.gitmodules", "--get-regexp",
               r"^submodule\..*\.path$", check=False)
     return [line.split(" ", 1)[1] for line in out.splitlines() if " " in line]
