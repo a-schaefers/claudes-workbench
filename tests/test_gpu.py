@@ -581,6 +581,9 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
             time.sleep(0.1)
         self.assertEqual(store.Task("t-gpu").status["last"],
                          "waiting for the GPU (held by t-big): the tests use it alone")
+        # and says it is waiting: left `running`, wb steer --now promised an interrupt within
+        # seconds for a note that came only after the wait and the tests (#943's review)
+        self.assertEqual(store.Task("t-gpu").status["phase"], "queued")
         time.sleep(1)
         ran = store.Task("t-gpu").worktree / "ran-tests"
         self.assertFalse(ran.exists())                                # not beside t-big's model

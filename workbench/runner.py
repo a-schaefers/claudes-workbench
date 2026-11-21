@@ -3082,8 +3082,14 @@ def drive(task: store.Task) -> None:
                 task.notify(phase, text, round=n,
                             cause="server" if server else "guard" if rnd["stuck"] else "agent")
                 return
-            # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257
-            lease.step_aside(unload=bool(task.spec.get("unload_for_tests")))
+            # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257.
+            # Theirs is waited for (a peer's round, up to its timeout; this machine's pool for a
+            # remote model): queued meanwhile, as _rejoin is, since left `running`, wb steer --now
+            # promised an interrupt within seconds and the wait counted as active work (#943's
+            # review, 2026-11-21)
+            if unload := bool(task.spec.get("unload_for_tests")):
+                task.set_status(phase="queued", last="waiting for the GPU: the tests use it alone")
+            lease.step_aside(unload=unload)
             with _tests_gpu(task, lease):
                 tests = run_tests(task, n)
             if pending_steer(task):  # a note that came in while the tests ran

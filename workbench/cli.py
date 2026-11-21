@@ -2300,13 +2300,14 @@ def cmd_progress(a):
 
 def _when_delivered(task: store.Task, phase: str, running: str) -> str:
     """When a note reaches the agent: --now promised "within a few seconds" while the tests ran
-    (up to the test timeout) or the task waited for the GPU (the 2026-11-16 audit)."""
+    (up to the test timeout) or the task waited for the GPU (the 2026-11-16 audit), and the
+    GPU's wait before a round's tests (--unload-for-tests) read as `running` (#943's review)."""
     if phase == "testing":
         return (f"its tests are running (up to {int(task.spec.get('test_timeout') or 900)}s); "
                 "the agent gets it when they end")
     if phase == "queued":
-        return ("its round hasn't started (waiting for the GPU or its model); the agent gets it "
-                "when the round starts")
+        return ("it is waiting for the GPU or its model, before a round or a round's tests; the "
+                "agent gets it when the round starts, or once the tests end")
     return running
 
 

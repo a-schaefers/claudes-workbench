@@ -820,12 +820,14 @@ outside `OPENCODE_TESTED`.
    unloaded the model the next task had just been let in with and loaded (#327, the audit of
    1.4). And its tests, which use the GPU, keep the lease: its `gpu.json` entry becomes one with
    no model and `tests: true`, `gpu.lock` still held, so nobody joins it (`admits`: a holder whose
-   model isn't known), `wb start` refuses (exit 4, naming the task, phase `testing`) and a queued
-   task waits until the tests end: let go, a queued task was let in and ran a whole model round
+   model isn't known), `wb start` refuses (exit 4, naming the task, phase `testing`, or `queued`
+   while it waits for the GPU as below) and a queued task waits until the tests end: let go, a queued task was let in and ran a whole model round
    while the tests still ran, both allocating VRAM at once (#428, the audit of 1.8). Without the
    flag (tests on the CPU), and on a remote model's server, it lets go as above. Holders already
-   sharing the GPU are waited out: the tests hold their entry, status `last` "waiting for the GPU
-   (held by …): the tests use it alone", until every other holder has stepped aside or ended
+   sharing the GPU are waited out: the tests hold their entry, status phase `queued` (from before
+   `step_aside` to `run_tests`'s `testing`, the remote case's wait below too: left `running`, `wb
+   steer --now` promised an interrupt within seconds and the wait counted as active work, #943's
+   review) and `last` "waiting for the GPU (held by …): the tests use it alone", until every other holder has stepped aside or ended
    (`GpuLease._alone_for_tests`; another task's GPU tests only when they came first, by `since`,
    so two never run together nor wait on each other), and then `runner._tests_gpu` frees what
    they left loaded (`free_gpu` within `keep_loaded`, `media.settle`): before, a task admitted
@@ -2224,7 +2226,8 @@ the runner is woken by the note itself (`_steer_bell`), stops the agent within s
 starts the next round with the note first, marked as overriding anything earlier. The next round
 continues the session unless the between-rounds check hands it to a fresh one; during the tests
 there is nothing to interrupt, so the note waits for them, and while the task waits for the GPU it
-goes with the round's prompt when the round starts (`runner._early_notes`): `wb steer` and `wb allow` say which (`cli._when_delivered`), not
+goes with the round's prompt when the round starts (`runner._early_notes`), or, waiting for the
+GPU before its tests (`--unload-for-tests`, phase `queued` too), once the tests end: `wb steer` and `wb allow` say which (`cli._when_delivered`), not
 "within a few seconds". A note the runner never delivered (it stopped first) goes to the stuck
 report, and the next `wb resume` carries it, `wb feedback` and `wb next` drop it and say so.
 
