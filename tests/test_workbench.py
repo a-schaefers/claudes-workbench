@@ -3262,6 +3262,7 @@ class WorktreeSetup(Base):
         self.assertEqual(st["base_check"]["exit"], 2)          # deps there: not NO-DEPS's 3
         self.assertEqual(count.read_text().count("run"), 1)     # the base check copied them
         self.assertEqual(st["prepared_paths"], ["deps"])
+        self.assertEqual(st["prepared_bytes"], store.dir_size(t.worktree / "deps")[0])  # #860
         self.assertIn("setup: ", run_wb("report", "t-once"))
         (t.worktree / "test_answer.sh").write_text(self.NEEDS_DEPS + "\n")
         out = run_wb("verify", "t-once", "--test", "sh test_answer.sh", "--files", "test_answer.sh")
@@ -3338,6 +3339,30 @@ class WorktreeSetup(Base):
         self.assertEqual(code, "copy failed")
         self.assertIn("prepared input deps/stamp changed", said)
         self.assertFalse((real / "scratch" / "deps" / "stamp").exists())
+
+    def test_a_setups_build_too_big_for_the_free_space_is_never_copied_into_a_scratch_checkout(self):
+        # #860 (the third 2026-11-21 audit): a 12 GB target/ was copied into the base check's
+        # scratch on ext4 with no free-space check, filling the disk (twice: cp, then copytree)
+        # and failing every other open task's status writes meanwhile
+        (Path(self.tmp.name) / "task" / "target").mkdir(parents=True)
+        (Path(self.tmp.name) / "task" / "target" / "app").write_text("built\n")
+        (Path(self.tmp.name) / "scratch").mkdir()
+        free = store.free_bytes()
+        at = types.SimpleNamespace(spec={"repo": str(self.repo)}, worktree=Path(self.tmp.name) / "scratch",
+                                   status={"prepared_paths": ["target"], "prepared_bytes": free + 10**9})
+        with mock.patch.object(runner, "_reflinks", return_value=False):
+            code, said = runner.prepare(at, Path(self.tmp.name) / "task")
+        self.assertEqual(code, "copy failed")
+        self.assertIn(f"({store.gb(free + 10**9)}: its build output", said)
+        self.assertIn("wb verify --setup", said)
+        self.assertFalse((Path(self.tmp.name) / "scratch" / "target").exists())
+        with mock.patch.object(runner, "_reflinks", return_value=True):  # a clone takes no space
+            self.assertEqual(runner.prepare(at, Path(self.tmp.name) / "task"), (0, ""))
+        self.assertTrue((Path(self.tmp.name) / "scratch" / "target" / "app").exists())
+        shutil.rmtree(Path(self.tmp.name) / "scratch" / "target")
+        at.status["prepared_bytes"] = 4096                       # room: copied as before
+        self.assertEqual(runner.prepare(at, Path(self.tmp.name) / "task"), (0, ""))
+        self.assertTrue((Path(self.tmp.name) / "scratch" / "target" / "app").exists())
 
     def test_commands_json_gives_a_repo_its_setup_for_every_task(self):
         self.ignore("deps/")

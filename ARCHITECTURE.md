@@ -254,7 +254,8 @@ unknown), the rest unknown and said: a 30 GB monorepo's whole tree was counted f
 and a blobless clone fetched every blob, one at a time, to be sized, #436) plus its `--copy` paths
 (a file at its own size: `store.dir_size` counted one as nothing, #436), times
 `DISK_COPIES` (3: the worktree, the base check's and `wb verify`'s scratch checkouts, full copies
-on ext4) plus `DISK_SPARE` (2 GB), free where the state directory is, less what the open tasks'
+on ext4; the setup's build output, not made yet, is checked before each scratch copy instead:
+`runner._no_room_for`, #860) plus `DISK_SPARE` (2 GB), free where the state directory is, less what the open tasks'
 runners haven't checked out yet (`runner.pending_checkouts`: each one's task.json
 `checkout_bytes`, the size this check measured, until its status has `checked_out`; a failed one's
 never counts): since the runner makes the checkout, a batch of starts each saw the disk as the
@@ -1186,7 +1187,12 @@ failure before the agent ran (`runner._load_failed`, `results.ran` false) sets i
 notice adds "the agent never ran: once the model can, wb resume <task> starts it". Either way the
 results row says `ran: false`, which the router and the tuning leave out (#581). Each scratch checkout (the base check, `wb verify`, `wb shot`:
 `verify._run`) gets the same links beside it and a copy of the task's `prepared_paths` from its
-worktree (`prepare(at, prepared)`, as a reflink where the filesystem has them). A file already present in the scratch checkout takes precedence. A missing prepared input or a changed parent link requires fresh setup: each input's parent must resolve to the same path under the two worktrees' resolved roots, so a link inside a worktree refuses the copy while a symlinked state directory (`WB_HOME` a link to another volume) doesn't (#345). The setup
+worktree (`prepare(at, prepared)`, as a reflink where the filesystem has them). Before copying,
+their size (status `prepared_bytes`, `store.dir_size` at setup, 10 s a path at most) must fit in
+the free space with `CHECKOUT_SPARE` (2 GB) left, unless one small file clones there
+(`runner._reflinks`: btrfs, XFS, APFS); else "copy failed", naming both sizes, what to free and
+`--setup` (`_no_room_for`): wb start counts only the checkout, measured before any setup ran,
+and a 12 GB `target/` copied on ext4 filled the disk and failed every open task's writes (#860). A file already present in the scratch checkout takes precedence. A missing prepared input or a changed parent link requires fresh setup: each input's parent must resolve to the same path under the two worktrees' resolved roots, so a link inside a worktree refuses the copy while a symlinked state directory (`WB_HOME` a link to another volume) doesn't (#345). The setup
 isn't run there: each ran it from nothing, up to the setup limit, and a first build compiled three
 to five times a task (#249, the audit of 1.2). `wb verify --setup` and `wb shot --setup` run it in
 each checkout as before; so does a task prepared before the paths were recorded, and one whose
@@ -6653,7 +6659,7 @@ check-ins off), not `wb start`'s.
 | `checked_out`, `checkout_secs` | `runner.checkout`: the worktree is made (task.json `checkout: "runner"`, #529); how long the checkout took |
 | `taken_over` | `wb takeover`: Claude has had the worktree; `runner.checkout` then fails a task not checked out rather than remove it and check it out again (#655) |
 | `branch_made` | `runner.checkout`: the commit it makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists; the only branch a cleanup of the checkout cut short deletes, and only there (#416, #529) |
-| `prepared_paths`, `prepared_marks`, `setup_secs` | set with `prepared`: the worktree's ignored paths the preparation left, which each scratch checkout copies instead of running the setup (#249), unless one is a virtualenv (#325) or was rebuilt since (`prepared_marks`, `{path: fingerprint}`, `runner.prepared_mark`, #732); how long it took, in the first report |
+| `prepared_paths`, `prepared_marks`, `prepared_bytes`, `setup_secs` | set with `prepared`: the worktree's ignored paths the preparation left, which each scratch checkout copies instead of running the setup (#249), unless one is a virtualenv (#325) or was rebuilt since (`prepared_marks`, `{path: fingerprint}`, `runner.prepared_mark`, #732); their size, checked against the free space before each copy (#860); how long it took, in the first report |
 | `failed_before` | `setup` or `load`: the runner failed the task on its setup or its model's load before the agent ran (`_prepare`, `_load_failed`); the results row copies it (#581) |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |

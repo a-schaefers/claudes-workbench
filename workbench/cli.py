@@ -808,8 +808,9 @@ def _missing_dirs(repo: Path) -> list[str]:
 
 
 # A task takes its checkout and --copy paths, then the base check's and wb verify's scratch
-# checkouts copy them again (a full copy on ext4, where reflinks don't exist), plus the build
-# (#342, the audit of 1.4)
+# checkouts copy them again (a full copy on ext4, where reflinks don't exist) (#342, the audit
+# of 1.4). The setup's build output can't be measured before it runs: runner._no_room_for checks
+# it before each scratch copy (#860).
 DISK_COPIES, DISK_SPARE = 3, runner.CHECKOUT_SPARE
 
 

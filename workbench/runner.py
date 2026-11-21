@@ -23,6 +23,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -1535,6 +1536,34 @@ def _copy(src: Path, dest: Path) -> None:
         shutil.copy2(src, dest, follow_symlinks=False)
 
 
+def _reflinks(at: Path) -> bool:
+    """Whether a copy made in ``at`` can be a clone that takes no space (btrfs, XFS, APFS):
+    one small file cloned there, or not."""
+    argv = ["cp", "-c"] if sys.platform == "darwin" else ["cp", "--reflink=always"]
+    try:
+        with tempfile.TemporaryDirectory(dir=at) as d:
+            Path(d, "a").write_bytes(b"x" * 4096)
+            return subprocess.run([*argv, str(Path(d, "a")), str(Path(d, "b"))],
+                                  capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+def _no_room_for(task: store.Task, wt: Path) -> str | None:
+    """Why the setup's work (status `prepared_bytes`) can't be copied into the scratch checkout
+    ``wt`` without filling the disk, or None. wb start counted only the checkout, measured before
+    any setup ran: a 12 GB target/ copied on ext4 filled the disk twice over (cp, then copytree),
+    and every other open task's status write failed meanwhile (#860)."""
+    need = int(task.status.get("prepared_bytes") or 0)
+    free = store.free_bytes(wt)
+    if not need or free is None or free >= need + CHECKOUT_SPARE or _reflinks(wt.parent):
+        return None
+    return (f"the setup's work in the worktree ({store.gb(need)}: its build output, installs and "
+            f"copies) doesn't fit in a scratch copy: {store.gb(free)} free where the state directory "
+            "is, 2 GB kept spare. Free some (another task's build, wb gc), or have the scratch "
+            "checkout run the setup itself (wb verify --setup, wb shot --setup)")
+
+
 def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, str]:
     """Make `task.worktree` the project as the user has it, before anything runs there: the
     links beside it to the repo's `siblings`, the ignored paths to `copy` from the user's
@@ -1580,6 +1609,8 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
             # a worktree refuses the copy. Comparing each parent with its own resolution refused
             # every prepared input under a linked home (#345, the audit of 1.4).
             roots = prepared.resolve(), wt.resolve()
+            if why := _no_room_for(task, wt):
+                return "copy failed", why
             for p in made:
                 src, dest = prepared / p, wt / p
                 # A later step can track an earlier build path or change its parent to a link.
@@ -1899,7 +1930,10 @@ def _prepare_now(task: store.Task) -> bool:
         except gitops.GitError:
             made = None
         marks = {p: prepared_mark(task.worktree / p) for p in made} if made else None  # #732
-        task.set_status(prepared=True, prepared_paths=made, prepared_marks=marks, setup_secs=secs)
+        # what each scratch checkout's copy of them takes, checked against the free space (#860)
+        size = sum(store.dir_size(task.worktree / p, budget=10)[0] for p in made) if made else 0
+        task.set_status(prepared=True, prepared_paths=made, prepared_marks=marks, setup_secs=secs,
+                        prepared_bytes=size)
         return True
     what = f"the setup command failed (exit {code})" if isinstance(code, int) else \
         f"setting up the worktree failed ({setup_timed_out(spec) if code == 'timeout' else code})"
