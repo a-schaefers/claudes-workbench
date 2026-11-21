@@ -768,31 +768,168 @@ export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; 
 }
 
 // The commands that hand work out: run as a command, not merely written down. #409 (2026-11-20):
-// a Python patch whose string held "split it (wb next)" turned a session's workbench mode on, so a
-// heredoc's body, a quoted string and a comment are dropped first, and only a simple command's
-// own word counts (after `;`, `&&`, `||`, `|`, `&`, a newline, `(`, `$(`, `{`, a backtick; past
-// `VAR=x`, `env`, `time`, `nohup`, `exec`, `command`): `wb` or a path ending in `/wb`.
-const HANDS_OUT = new Set(['start', 'next', 'feedback', 'steer', 'answer'])
-const PREFIXES = new Set(['env', 'time', 'nohup', 'exec', 'command'])
-export function delegates(command: string): boolean {
-  let text = command
-  // heredoc bodies: from the line after `<<TAG` (`<<-`, quoted or not) to the line that is TAG
-  for (;;) {
-    const m = /<<-?\s*(['"]?)([A-Za-z_][\w]*)\1/.exec(text)
-    if (!m) break
-    const lineEnd = text.indexOf('\n', m.index)
-    const head = text.slice(0, m.index)
-    if (lineEnd < 0) { text = head; break }
-    const rest = text.slice(lineEnd + 1)
-    const end = new RegExp(`^\\t*${m[2]}[ \\t]*$`, 'm').exec(rest)
-    text = head + ' Q' + text.slice(m.index + m[0].length, lineEnd + 1) + (end ? rest.slice(end.index + end[0].length) : '')
+// a Python patch whose string held "split it (wb next)" turned a session's workbench mode on. So
+// the command is read as bash reads it (#560, the text matcher before it disagreed both ways: it
+// missed `"…/bin/wb" start`, `if wb start`, `! wb start`, `echo "$(wb start)"`, `timeout 60 wb
+// start`, anything after a `<<<` here-string, and `wb resume`, and took `echo foo \; wb start` for
+// two commands): heredoc bodies and comments dropped, quotes and backslashes undone within a word,
+// a `$(…)` or backtick inside double quotes read as the commands it runs, and only a simple
+// command's own word counts, past `VAR=x`, the reserved words and the wrappers (with their
+// options): `wb` or a path ending in `/wb`.
+const HANDS_OUT = new Set(['start', 'next', 'feedback', 'steer', 'answer', 'resume'])
+const RESERVED = new Set(['if', 'then', 'elif', 'else', 'while', 'until', 'do', '!', '{'])
+// A wrapper that runs the rest: the options of it that take a value, and the words it takes
+// before the command (timeout's duration)
+const PREFIXES: Record<string, [string[], number]> = {
+  env: [['-u', '-C', '-S', '--unset', '--chdir', '--split-string'], 0],
+  time: [['-f', '-o', '--format', '--output'], 0],
+  nohup: [[], 0], exec: [['-a'], 0], command: [[], 0],
+  timeout: [['-s', '-k', '--signal', '--kill-after'], 1],
+  nice: [['-n', '--adjustment'], 0], ionice: [['-c', '-n', '--class', '--classdata'], 0],
+  stdbuf: [['-i', '-o', '-e', '--input', '--output', '--error'], 0],
+}
+
+// Where the `(` at `open` closes, quotes skipped (the end when it never does)
+function closing(src: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < src.length; i++) {
+    const c = src[i]
+    if (c === '\\') i++
+    else if (c === "'") { const j = src.indexOf("'", i + 1); i = j < 0 ? src.length : j }
+    else if (c === '(') depth++
+    else if (c === ')' && --depth === 0) return i
   }
-  // quoted strings and comments, each left as one word so the words around them stay apart
-  text = text.replace(/'[^']*'|"(?:[^"\\]|\\.)*"|(^|[\s;&|(])#[^\n]*/g, (q, pre) => (pre !== undefined ? `${pre} ` : ' Q '))
-  for (const part of text.split(/\$\(|&&|\|\||[;&|\n(){}`]/)) {
-    const words = part.trim().split(/\s+/).filter(Boolean)
+  return src.length
+}
+
+// The commands an unquoted heredoc's body runs: its `$(…)` and backticks (`\\` escapes)
+function expansions(body: string): string[][] {
+  const out: string[][] = []
+  for (let j = 0; j < body.length; j++) {
+    if (body[j] === '\\') j++
+    else if (body[j] === '$' && body[j + 1] === '(') {
+      const k = closing(body, j + 1)
+      out.push(...simpleCommands(body.slice(j + 2, k)))
+      j = k
+    } else if (body[j] === '`') {
+      const k = body.indexOf('`', j + 1)
+      const end = k < 0 ? body.length : k
+      out.push(...simpleCommands(body.slice(j + 1, end)))
+      j = end
+    }
+  }
+  return out
+}
+
+// The simple commands a bash command line runs, each as its words (quotes undone)
+function simpleCommands(src: string): string[][] {
+  const out: string[][] = []
+  let words: string[] = []
+  let word: string | null = null // null: between words
+  const heredocs: { tag: string; strip: boolean; quoted: boolean }[] = []
+  const endWord = () => { if (word !== null) words.push(word); word = null }
+  const endCommand = () => { endWord(); if (words.length) out.push(words); words = [] }
+  const n = src.length
+  let i = 0
+  while (i < n) {
+    const c = src[i]!
+    if (c === '\\') {
+      if (src[i + 1] !== '\n') word = (word ?? '') + (src[i + 1] ?? '') // `\;` is a `;` in a word
+      i += 2
+    } else if (c === "'") {
+      const j = src.indexOf("'", i + 1)
+      const end = j < 0 ? n : j
+      word = (word ?? '') + src.slice(i + 1, end)
+      i = end + 1
+    } else if (c === '"') {
+      let j = i + 1
+      let text = ''
+      while (j < n && src[j] !== '"') {
+        if (src[j] === '\\') { text += src[j + 1] ?? ''; j += 2 }
+        else if (src[j] === '$' && src[j + 1] === '(') {
+          const k = closing(src, j + 1)
+          out.push(...simpleCommands(src.slice(j + 2, k)))
+          j = k + 1
+        } else if (src[j] === '`') {
+          const k = src.indexOf('`', j + 1)
+          const end = k < 0 ? n : k
+          out.push(...simpleCommands(src.slice(j + 1, end)))
+          j = end + 1
+        } else text += src[j++]
+      }
+      word = (word ?? '') + text
+      i = j + 1
+    } else if (c === '#' && word === null) { // a comment, to the line's end
+      const j = src.indexOf('\n', i)
+      i = j < 0 ? n : j
+    } else if (c === '\n') {
+      endCommand()
+      i++
+      for (const h of heredocs) { // their bodies start on the next line: up to the line that is the tag
+        let body = ''
+        while (i < n) {
+          const j = src.indexOf('\n', i)
+          const line = src.slice(i, j < 0 ? n : j)
+          i = j < 0 ? n : j + 1
+          if ((h.strip ? line.replace(/^\t+/, '') : line) === h.tag) break
+          body += `${line}\n`
+        }
+        if (!h.quoted) out.push(...expansions(body)) // text, but `$(…)` in it runs
+      }
+      heredocs.length = 0
+    } else if (c === '<' && src.startsWith('<<<', i)) { // a here-string: its word follows
+      endWord()
+      i += 3
+    } else if (c === '<' && src[i + 1] === '<') { // a heredoc: its tag, quotes undone
+      endWord()
+      let j = i + 2
+      const strip = src[j] === '-'
+      if (strip) j++
+      while (src[j] === ' ' || src[j] === '\t') j++
+      const m = /^(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()'"]+))/.exec(src.slice(j))
+      if (m) heredocs.push({ tag: m[1] ?? m[2] ?? m[3]!, strip, quoted: m[3] === undefined || m[0].startsWith('\\') })
+      i = j + (m ? m[0].length : 0)
+    } else if (c === '$' && src[i + 1] === '{') { // ${…}: part of the word
+      const j = src.indexOf('}', i)
+      const end = j < 0 ? n : j
+      word = (word ?? '') + src.slice(i, end + 1)
+      i = end + 1
+    } else if (c === '$' && src[i + 1] === '(') { // $(…): the commands inside are commands too
+      endCommand()
+      i += 2
+    } else if (';&|()`'.includes(c)) {
+      endCommand()
+      i++
+    } else if (c === ' ' || c === '\t' || c === '<' || c === '>') {
+      endWord()
+      i++
+    } else {
+      word = (word ?? '') + c
+      i++
+    }
+  }
+  endCommand()
+  return out
+}
+
+export function delegates(command: string): boolean {
+  for (const words of simpleCommands(command)) {
     let i = 0
-    while (i < words.length && (/^[A-Za-z_]\w*=/.test(words[i] ?? '') || PREFIXES.has(words[i] ?? ''))) i++
+    for (;;) {
+      const w = words[i] ?? ''
+      if (/^[A-Za-z_]\w*=/.test(w) || RESERVED.has(w)) { i++; continue }
+      const prefix = PREFIXES[w]
+      if (!prefix) break
+      i++
+      let positional = prefix[1]
+      while (i < words.length) {
+        const o = words[i]!
+        if (o === '--') { i++; break }
+        if (o.startsWith('-') && o.length > 1) { i += prefix[0].includes(o) ? 2 : 1; continue }
+        if (positional > 0) { positional--; i++; continue }
+        break
+      }
+    }
     const cmd = words[i] ?? ''
     if ((cmd === 'wb' || cmd.endsWith('/wb')) && HANDS_OUT.has(words[i + 1] ?? '')) return true
   }

@@ -4925,13 +4925,21 @@ sessions a task belongs to, the first to deliver a notice wins (the `acked` writ
 (`skill.prompt`, which also records its path and opens the pane through `showPane`; run again
 while the mode is on and with no task, which `firstTask` reads from the expanded skill's
 "**First task:** \`…\`" line, it returns AGAIN_NOTE in place of the skill: the pane is back,
-reply in one line), or a Bash tool call that runs `wb start|next|feedback|steer|answer`
+reply in one line), or a Bash tool call that runs `wb start|next|feedback|steer|answer|resume`
 (`delegates`, checked before it runs; a resumed session or a /workbench the mod missed; not
 `accept` or `takeover`, which a done note after a quit asks for). Only a command counts, not
-text (#409, 2026-11-20: a Python patch's string holding "(wb next)" turned a session's mode on):
-heredoc bodies, quoted strings and comments are dropped, the rest split into simple commands
-(`;`, `&&`, `||`, `|`, `&`, newlines, `(`, `$(`, `{`, backticks), and the command word, past
-`VAR=x`, `env`, `time`, `nohup`, `exec` and `command`, must be `wb` or a path ending in `/wb`.
+text (#409, 2026-11-20: a Python patch's string holding "(wb next)" turned a session's mode on),
+and the line is read as bash reads it (`simpleCommands`, #560: the text matcher before it missed
+a quoted path, `if`/`while`/`!`, a `$(…)` in double quotes, `timeout`/`nice`/`stdbuf`, anything
+after a `<<<`, and `wb resume`, and split `echo foo \; wb start` in two): a backslash or quotes
+are undone within a word (`"…/bin/wb" start` is `wb`; `\;` is a `;` in a word), comments and
+heredoc bodies are dropped (an unquoted heredoc's `$(…)` and backticks still run, as do those in
+double quotes), a `<<<` here-string's word is a word; the simple commands split at `;`, `&`, `|`,
+newlines, `(`, `)`, `$(` and backticks; the command word, past `VAR=x`, the reserved words (`if`,
+`then`, `elif`, `else`, `while`, `until`, `do`, `!`, `{`) and the wrappers with their options
+(`PREFIXES`: `env`, `time`, `nohup`, `exec`, `command`, `timeout` and its duration, `nice`,
+`ionice`, `stdbuf`), must be `wb` or a path ending in `/wb`. It is syntactic: `true || wb
+steer` counts.
 Off:
 either quit command, which also closes the pane. While on: the `workbench-mode` and `user-notes`
 context blocks (and `claude-coding` outside "Let Claude decide", with a task open too), the idle status line, pane auto-open, web chat listening, the apprentice's

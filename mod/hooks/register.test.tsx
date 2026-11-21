@@ -1468,17 +1468,29 @@ test('running wb counts as workbench mode, and a web message reaches a running t
   expect(runs.some(a => a.join(' ') === 'wb chat ack m1 --by ' + a[5] + ' --how now')).toBe(true)
 })
 
-test('only wb run as a command counts as delegating, not wb written in a string, a heredoc or a comment (#409)', () => {
+test('only wb run as a command counts as delegating, read as bash reads it, not wb written in a string, a heredoc or a comment (#409, #560)', () => {
   // 2026-11-20: a Python patch whose string held "split it (wb next)" turned workbench mode on
   for (const run of ['wb start t --spec s.md', 'cd ~ && wb start step-2 --spec s.md --repo .', 'wb next t',
     'git add -A; wb feedback t --text x', 'true || wb steer t "go"', 'WB_HOME=/x wb answer t q1 yes',
     'env WB_HOME=/x wb next t', '~/repos/workbench/bin/wb start t', 'out=$(wb start t --spec s.md)',
-    'cat <<EOF > s.md\nwrite it\nEOF\nwb start t --spec s.md', '(cd repo; wb next t)'])
+    'cat <<EOF > s.md\nwrite it\nEOF\nwb start t --spec s.md', '(cd repo; wb next t)',
+    // #560: each checked against bash running a marker wb
+    '"/home/u/repos/workbench/bin/wb" start t', "'wb' start t", '"/mnt/c/Users/A B/wb" next t',
+    'if wb start t --spec s; then echo ok; fi', 'while ! wb answer t "x"; do sleep 1; done', '! wb start t',
+    'echo "$(wb start t)"', 'echo "`wb next t`"', 'until wb steer t --text go; do :; done',
+    'if true; then wb next t; fi', '{ wb start t; }', 'wb resume t', 'timeout 60 wb start t',
+    'timeout -s KILL 5m wb start t', 'nice -n 5 wb start t', 'stdbuf -oL wb next t', 'ionice -c 3 wb next t',
+    'env -u X WB_HOME=/x wb next t', 'cat <<< hello; wb start t',
+    'wb \\\nstart t', 'cat <<EOF\n$(wb start t)\nEOF', "python3 - <<'EOF'\nx = 1\nEOF\nwb next t", 'cat <<"X" | sort\nwb start t\nX\nwb next t'])
     expect([run, delegates(run)]).toEqual([run, true])
   for (const data of ['python3 - <<\'EOF\'\ns = "split it (wb next) or take it over"\nEOF',
     'python3 -c "print(\'(wb next)\')"', 'git commit -m "wb start now records the session"',
     'grep -n "wb (start|next)" ARCHITECTURE.md', 'echo done # then wb next t', "echo 'wb answer t q1'",
-    'wb status', 'wb accept t', 'cat <<-X\n\twb start t\n\tX', 'awb next t', 'wb nextstep'])
+    'wb status', 'wb accept t', 'cat <<-X\n\twb start t\n\tX', 'awb next t', 'wb nextstep',
+    // #560: bash runs only echo, which prints "foo ; wb start t"
+    'echo foo \\; wb start t', 'echo foo \\& wb start t', 'echo a \\| wb next t', '"wb start" t',
+    "echo 'it ran $(wb start t)'", 'echo x # "$(wb start t)"', "cat <<'EOF'\n$(wb start t)\nEOF",
+    'cat <<< "wb start t"', 'echo wb start t', 'if grep -q x f; then echo wb next; fi'])
     expect([data, delegates(data)]).toEqual([data, false])
 })
 
