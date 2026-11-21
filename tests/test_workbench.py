@@ -9753,7 +9753,35 @@ class Permission(Base):
                 context.commands_conf()
 
 
-IMAGE_PNG = b"\x89PNG\r\n\x1a\n"  # what a fake engine's image starts with: anything else is refused (#744)
+def image_png(w: int = 1, h: int = 1) -> bytes:
+    """A whole w x h grey PNG: a fake engine's image. Anything else is refused (#744), and so is
+    a PNG without its IHDR size or its IEND end (#946)."""
+    import zlib
+
+    def chunk(t, d):
+        return len(d).to_bytes(4, "big") + t + d + zlib.crc32(t + d).to_bytes(4, "big")
+    ihdr = w.to_bytes(4, "big") + h.to_bytes(4, "big") + bytes([8, 0, 0, 0, 0])
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(b"\x00" * (w + 1) * h))
+            + chunk(b"IEND", b""))
+
+
+def image_jpeg(w: int, h: int) -> bytes:
+    """A JPEG's structure, w x h: SOI, a baseline frame, a scan, EOI."""
+    seg = lambda m, d: b"\xff" + bytes([m]) + (len(d) + 2).to_bytes(2, "big") + d  # noqa: E731
+    sof = bytes([8]) + h.to_bytes(2, "big") + w.to_bytes(2, "big") + bytes([1, 1, 0x11, 0])
+    return b"\xff\xd8" + seg(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00") + seg(0xC0, sof) \
+        + seg(0xDA, bytes([1, 1, 0, 0, 63, 0])) + b"\x12\x34\xff\x00\x56" + b"\xff\xd9"
+
+
+def image_webp(w: int, h: int) -> bytes:
+    """A lossless WebP's structure, w x h: its RIFF size the file's, a VP8L chunk."""
+    bits = (w - 1) | (h - 1) << 14
+    vp8l = b"\x2f" + bits.to_bytes(4, "little") + b"\x00"
+    body = b"WEBP" + b"VP8L" + len(vp8l).to_bytes(4, "little") + vp8l
+    return b"RIFF" + len(body).to_bytes(4, "little") + body
+
+
+IMAGE_PNG = image_png()
 
 
 class Images(Base):
@@ -9767,7 +9795,7 @@ class Images(Base):
         fake = tmp / "fake_image.py"
         fake.write_text("import json, sys\n"
                         "a = sys.argv[1:]\n"
-                        "open(a[a.index('-o') + 1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n')\n"
+                        "open(a[a.index('-o') + 1], 'wb').write(" + repr(image_png(640, 360)) + ")\n"
                         "open(sys.argv[0] + '.calls', 'a').write(json.dumps(a) + '\\n')\n")
         self.engines({"fake": {"command": f"{sys.executable} {fake} -p {{prompt}} -o {{out}} "
                                           "-W {width} -H {height} --seed {seed}",
@@ -9827,13 +9855,14 @@ class Images(Base):
         fake.write_text("import os, sys\n"
                         "a = sys.argv[1:]\n"
                         "if not os.environ.get('NOTHING'):\n"
-                        "    open(a[a.index('-o') + 1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n' + a[a.index('-p') + 1].encode())\n")
+                        "    open(a[a.index('-o') + 1], 'wb').write(" + repr(IMAGE_PNG) + " + a[a.index('-p') + 1].encode())\n")
         self.engines({"fake": {"command": f"{sys.executable} {fake} -p {{prompt}} -o {{out}}"}})
         first, second = "a red fox in the snow at dawn", "a red fox in the snow at dusk"
         run_wb("image", first, "--n", "1", "--seed", "5", "--out", str(tmp / "img"))
         run_wb("image", second, "--n", "1", "--seed", "5", "--out", str(tmp / "img"))
         a, b = tmp / "img" / "a-red-fox-in-the-snow-5.png", tmp / "img" / "a-red-fox-in-the-snow-5-2.png"
-        self.assertEqual((a.read_bytes()[8:].decode(), b.read_bytes()[8:].decode()), (first, second))
+        n = len(IMAGE_PNG)
+        self.assertEqual((a.read_bytes()[n:].decode(), b.read_bytes()[n:].decode()), (first, second))
         self.assertEqual(json.loads(a.with_suffix(".json").read_text())["prompt"], first)
         self.assertEqual(json.loads(b.with_suffix(".json").read_text())["prompt"], second)
         os.environ["NOTHING"] = "1"
@@ -9853,8 +9882,7 @@ class Images(Base):
         fake = tmp / "fake_image.py"
         fake.write_text("import os, sys\nopen(sys.argv[1], 'wb').write(bytes.fromhex(os.environ['BODY']))\n")
         self.engines({"fake": {"command": f"{sys.executable} {fake} {{out}}"}})
-        for body, made in ((b"\xff\xd8\xff\xe0 a jpeg", "a-fox-1.jpg"),
-                           (b"RIFF\x10\x00\x00\x00WEBPVP8 a webp", "a-fox-1.webp")):
+        for body, made in ((image_jpeg(4, 3), "a-fox-1.jpg"), (image_webp(4, 3), "a-fox-1.webp")):
             with mock.patch.dict(os.environ, {"BODY": body.hex()}):
                 out = run_wb("image", "a fox", "--n", "1", "--seed", "1", "--out", str(tmp / made))
             self.assertIn(f"{tmp / made / made}  (", out)
@@ -9868,6 +9896,41 @@ class Images(Base):
             run_wb("image", "a fox", "--n", "1", "--out", str(tmp / "html"))
         self.assertIn("image engine fake wrote no image (it starts '<html><body>502", err.getvalue())
         self.assertEqual([p.name for p in (tmp / "html").iterdir() if p.name != "engine.log"], [])
+
+    def test_an_image_that_starts_right_but_isnt_whole_is_refused_and_a_whole_one_records_its_own_size(self):
+        # #946 (the v1.90.24 review, finding 28): only the first 12 bytes were checked, so a bare
+        # PNG signature, a JPEG cut before its end marker or a WebP shorter than its RIFF size was
+        # published as a finished image, its sidecar giving the size asked for, not the one made
+        tmp = Path(self.tmp.name)
+        fake = tmp / "fake_image.py"
+        fake.write_text("import os, sys\nopen(sys.argv[1], 'wb').write(bytes.fromhex(os.environ['BODY']))\n")
+        self.engines({"fake": {"command": f"{sys.executable} {fake} {{out}}"}})
+        whole = {"png": image_png(37, 23), "jpeg": image_jpeg(37, 23), "webp": image_webp(37, 23)}
+        webp = whole["webp"]
+        for body, why in ((b"\x89PNG\r\n\x1a\n", "no IHDR chunk after the PNG signature"),
+                          (whole["png"][:-12], "a PNG cut off before its IEND chunk"),
+                          (whole["png"][:40], "a PNG cut off before its IEND chunk"),
+                          (image_png(0, 23), "a 0x23 PNG"),
+                          (whole["jpeg"][:-2], "a JPEG cut off before its end marker (FFD9)"),
+                          (b"\xff\xd8\xff", "a JPEG cut off before its image data"),
+                          (whole["jpeg"][:24], "a JPEG cut off before its image data"),
+                          (webp[:4] + (len(webp) + 92).to_bytes(4, "little") + webp[8:],
+                           f"a WebP of {len(webp)} bytes whose RIFF size says {len(webp) + 100}"),
+                          (b"RIFF\x04\x00\x00\x00WEBP", "a WebP whose first chunk doesn't fit it")):
+            out = tmp / "cut" / body[:12].hex()
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, {"BODY": body.hex()}), self.assertRaises(SystemExit), \
+                    redirect_stderr(err):
+                run_wb("image", "a fox", "--n", "1", "--seed", "1", "--out", str(out))
+            self.assertIn(f"image engine fake wrote an incomplete image ({why})", err.getvalue())
+            self.assertEqual([p.name for p in out.iterdir() if p.name != "engine.log"], [])  # no sidecar
+        for fmt, body in whole.items():
+            with mock.patch.dict(os.environ, {"BODY": (body + b"trailing").hex()}):
+                out = run_wb("image", "a fox", "--n", "1", "--seed", "1", "--size", "1024x768",
+                             "--out", str(tmp / fmt))
+            made = Path(out.splitlines()[0].split("  (")[0])
+            side = json.loads(made.with_suffix(".json").read_text())
+            self.assertEqual((side["format"], side["width"], side["height"]), (fmt, 37, 23))
 
     def test_an_image_or_audio_server_that_cuts_its_reply_off_ends_in_one_line_naming_it(self):
         # #925: IncompleteRead is an HTTPException, not an OSError: a server killed mid-body gave
@@ -9971,7 +10034,7 @@ class Images(Base):
         fake = tmp / "cd_engine.py"
         fake.write_text("import os, sys\nopen(sys.argv[0] + '.got', 'w').write(sys.argv[1])\n"
                         f"os.chdir({str(tmp / 'elsewhere')!r})\n"
-                        "open(sys.argv[1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n')\n")
+                        "open(sys.argv[1], 'wb').write(" + repr(IMAGE_PNG) + ")\n")
         self.engines({"cd": {"command": f"{sys.executable} {fake} {{out}}", "gpu": False}})
         here = os.getcwd()
         os.chdir(tmp)
@@ -10330,7 +10393,7 @@ class Images(Base):
         store.write_json(store.home() / "gpu.json", {str(sleeper.pid): {"model": "strata/strata",
                                                                        "task": "t-big"}})
         fake = tmp / "fake_image.py"
-        fake.write_text("import sys\nopen(sys.argv[1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n')\n")
+        fake.write_text("import sys\nopen(sys.argv[1], 'wb').write(" + repr(IMAGE_PNG) + ")\n")
         self.engines({"cpu": {"command": f"{sys.executable} {fake} {{out}}", "gpu": False},
                       "here": {"command": f"{sys.executable} {fake} {{out}}"}})
         freed = []

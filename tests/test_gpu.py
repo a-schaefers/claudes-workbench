@@ -18,7 +18,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script too
 
 from workbench import cli, hardware, images, models, store, transcript
-from tests.test_workbench import Base, TEST_CMD, run_wb, wait_phase
+from tests.test_workbench import Base, IMAGE_PNG, TEST_CMD, run_wb, wait_phase
 
 BIG, SMALL = "ollama/qwen3.8-27b", "ollama/mimo-v2.6:9b-q8_0"
 
@@ -206,7 +206,7 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         os.environ["WB_IMAGES"] = str(tmp / "images.json")
         self.start("t-r1", "hang", "--model", "ollama-pc/coder")
         wait_running("t-r1")
-        png = lambda e, v: Path(v["out"]).write_bytes(b"\x89PNG\r\n\x1a\n")
+        png = lambda e, v: Path(v["out"]).write_bytes(IMAGE_PNG)
         with mock.patch.object(images, "_server", png), mock.patch.object(images, "ready", lambda e: ""):
             with self.assertRaisesRegex(RuntimeError, "t-r1"):           # its turn: refused, not beside it
                 images.generate("a fox", tmp / "o", n=1, name="box", say=lambda m: None)
@@ -238,7 +238,7 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.start("t-w1", "hang", "--model", win.id)
         wait_running("t-w1")
         self.assertEqual([h["task"] for h in models.holders().values()], ["t-w1"])   # this machine's
-        png = lambda e, v, *rest: Path(v["out"]).write_bytes(b"\x89PNG\r\n\x1a\n")  # noqa: E731
+        png = lambda e, v, *rest: Path(v["out"]).write_bytes(IMAGE_PNG)  # noqa: E731
         with mock.patch.object(images, "_server", png), mock.patch.object(images, "_command", png), \
                 mock.patch.object(images, "ready", lambda e: ""):
             for name in ("wsl", "win"):
@@ -412,7 +412,7 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         os.environ["WB_FAKE_GPU_GB"] = "48"
         tmp = Path(self.tmp.name)
         engine = tmp / "engine.py"
-        engine.write_text("import sys\nopen(sys.argv[1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n')\n")
+        engine.write_text("import sys\nopen(sys.argv[1], 'wb').write(" + repr(IMAGE_PNG) + ")\n")
         (tmp / "images.json").write_text(json.dumps(
             {"e": {"command": f"{sys.executable} {engine} {{out}}"}}))
         os.environ["WB_IMAGES"] = str(tmp / "images.json")

@@ -4730,11 +4730,17 @@ custom-node packs do run their own Python).
   `<slug>-<seed>.png` (the slug is the prompt's first six words) in the output directory, made
   absolute first (on 3.11 `mkdtemp` kept a relative `--out` relative, so an engine that changed
   directory wrote its `{out}` elsewhere; `wb audio` too, #751), each with a `.json` sidecar
-  `{prompt, seed, width, height, engine, refs, secs, ts, format}`. Each is made in a fresh temporary
+  `{prompt, seed, width, height, engine, refs, secs, ts, format}` (`width`/`height` measured from
+  the file, not the size asked for). Each is made in a fresh temporary
   directory inside the output directory (`.wb-image-*`), refused when the engine wrote nothing
   there or what it wrote doesn't start like an image (`images.kind`: PNG, JPEG or WebP magic
   bytes; else "wrote no image (it starts '…')", `media.starts`: an HTML error page from an engine
-  or an image url was published as a .png and reported as an image, #744); a JPEG or WebP keeps
+  or an image url was published as a .png and reported as an image, #744), or starts like one but
+  isn't whole ("wrote an incomplete image (…)": a PNG's IHDR size and its chunks walked to IEND,
+  each within the file; a JPEG's SOFn size and an FFD9 after its first scan; a WebP no shorter than
+  its RIFF size, with a VP8X/VP8/VP8L chunk giving its size; a zero width or height refused; bytes
+  after a whole image pass, as decoders take them: a bare PNG signature, a JPEG cut before its end
+  or a short WebP was published, its sidecar giving the size asked for, #946); a JPEG or WebP keeps
   its own suffix (`.jpg`, `.webp`; `format` in the sidecar says which), then published with its sidecar under the first of `<slug>-<seed>.png`,
   `<slug>-<seed>-2.png`, … that has neither (`media.free`): two prompts with the same first six
   words and seed wrote one PNG, the second over the first, and an engine that exited 0 without
