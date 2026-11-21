@@ -202,11 +202,14 @@ else:
 
 def awake_how() -> str:
     """What keeps this machine awake while a run lives: "caffeinate" (macOS), "systemd-inhibit"
-    (Linux booted with systemd), or "" where nothing can: WSL2 (Windows sleeps whatever Linux
-    holds), or neither tool."""
+    (Linux booted with systemd), "windows" (WSL2 with interop and Windows' powershell.exe: Windows
+    sleeps whatever Linux holds, so the request is made on its side, #777), or "" where nothing
+    can."""
     kind = hardware.system()
     if kind == "macos":
         return "caffeinate" if shutil.which("caffeinate") else ""
+    if kind == "wsl":
+        return "windows" if context.interop_on() and hardware.powershell() else ""
     if kind == "linux" and shutil.which("systemd-inhibit") and Path("/run/systemd/system").is_dir():
         return "systemd-inhibit"
     return ""
@@ -219,10 +222,20 @@ def keep_awake(pid: int, why: str) -> bool:
     <pid>`. Linux: `systemd-inhibit --what=idle:sleep --mode=block` around a wait for the pid;
     logind lets a local active session block sleep, and where it refuses (polkit: an SSH session,
     a scope outside any session) an idle lock alone. Started in this session, not a scope, for
-    that reason. Where nothing can (WSL2, no tool) or the start fails: nothing, and False."""
+    that reason. WSL2: Windows' powershell.exe asks SetThreadExecutionState(ES_CONTINUOUS |
+    ES_SYSTEM_REQUIRED) and blocks reading its stdin, a pipe from the wait for the pid: once the
+    pid is gone the pipe closes, the read returns and the request ends with the process (#777;
+    idle sleep only, a closed lid or a chosen sleep still sleeps). Where nothing can (WSL2 without
+    interop, no tool) or the start fails: nothing, and False."""
     how = awake_how()
     if how == "caffeinate":
         argv = ["caffeinate", "-i", "-w", str(pid)]
+    elif how == "windows":
+        ps = hardware.powershell()
+        if not ps:
+            return False
+        argv = ["sh", "-c", shlex.join([sys.executable, "-c", AWAIT_PID, str(pid)]) + " | "
+                + shlex.join([ps, "-NoProfile", "-NonInteractive", "-Command", WINDOWS_AWAKE])]
     elif how == "systemd-inhibit":
         def lock(what: str) -> str:
             return shlex.join(["systemd-inhibit", f"--what={what}", "--who=workbench", f"--why={why}",
@@ -253,12 +266,23 @@ def awake_line() -> tuple[bool, str]:
         return ok, ("runs keep the machine from idle-sleeping (systemd-inhibit)" if ok else
                       "runs hold an idle lock only (systemd-inhibit): logind refuses a sleep lock "
                       "from this session (polkit grants one to a local active session)")
+    if how == "windows":
+        return True, WINDOWS_AWAKE_SAID
     if hardware.system() == "wsl":
         return False, WSL_SLEEPS
     return False, ("nothing here keeps the machine from idle-sleeping during a run (no "
                    "systemd-inhibit): a machine that sleeps pauses its tasks until it wakes")
 
 
+# Windows' side of keep_awake on WSL2 (#777): ES_CONTINUOUS | ES_SYSTEM_REQUIRED, written in
+# decimal since Windows PowerShell reads 0x80000001 as a negative Int32, which no uint takes;
+# held by this thread until stdin closes
+WINDOWS_AWAKE = ("$k = Add-Type -Name Awake -Namespace Workbench -PassThru -MemberDefinition "
+                 "'[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState"
+                 "(uint flags);'; [void]$k::SetThreadExecutionState([uint32]2147483649); "
+                 "[void][Console]::In.ReadLine()")
+WINDOWS_AWAKE_SAID = ("runs keep Windows from idle-sleeping (powershell.exe, SetThreadExecutionState); "
+                      "closing the lid or choosing sleep still sleeps it")
 WSL_SLEEPS = ("WSL2 can't keep Windows awake: when the laptop sleeps, its tasks pause until it "
               "wakes; for a night's run set Windows' sleep to Never while plugged in (Settings, "
               "System, Power)")
@@ -990,7 +1014,7 @@ def cmd_start(a):
         print(f"note: mise doesn't trust {repo}'s config (mise trust --show), so it trusts no "
               "copy of it either: every mise shim fails in the agent's worktree, its setup and its "
               f"tests; `mise trust` in {repo} first, if the task needs its tools")
-    if a.backlog and hardware.system() == "wsl" and not any(  # once per backlog (#516)
+    if a.backlog and hardware.system() == "wsl" and awake_how() != "windows" and not any(  # #516, #777
             t.spec.get("backlog") == a.backlog for t in store.all_tasks() if t.name != a.name):
         print(f"note: {WSL_SLEEPS}")
     if context.on_windows(str(repo), context.windows_drives()):  # finding 30 (the 2026-11-19 audit)

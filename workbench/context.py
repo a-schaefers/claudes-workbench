@@ -1264,17 +1264,22 @@ def venv_line(task: store.Task, setup: bool) -> str:
     return line
 
 
-def interop_gap() -> str | None:
-    """What WSL's interop leaves open, for `wb doctor`, or None (not WSL, or interop off)."""
+def interop_on() -> bool:
+    """Whether WSL runs Windows programs (binfmt_misc's WSLInterop enabled): False off WSL."""
     if hardware.system() != "wsl":
-        return None
+        return False
     for name in ("WSLInterop", "WSLInterop-late"):
         try:
             if Path(BINFMT, name).read_text().split("\n")[0].strip() == "enabled":
-                break
+                return True
         except OSError:
             continue
-    else:
+    return False
+
+
+def interop_gap() -> str | None:
+    """What WSL's interop leaves open, for `wb doctor`, or None (not WSL, or interop off)."""
+    if not interop_on():
         return None
     return ("WSL interop is on: a Windows program runs as you outside the agent's lane. The "
             "Windows drives are out of its PATH and reads, but a Windows program in its lane or "

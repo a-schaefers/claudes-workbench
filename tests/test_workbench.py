@@ -14939,9 +14939,10 @@ class KeepAwake(Base):
             time.sleep(0.05)
         self.assertEqual(log.read_text().split(), ["-i", "-w", "4242"])
 
-    def test_wsl_holds_nothing_and_says_so_once_per_backlog_and_in_doctor(self):
-        # Windows sleeps whatever Linux inside it holds
-        with mock.patch.object(hardware, "system", return_value="wsl"):
+    def test_wsl_without_interop_holds_nothing_and_says_so_once_per_backlog_and_in_doctor(self):
+        # Windows sleeps whatever Linux inside it holds, and without interop wb can't ask it
+        with mock.patch.object(hardware, "system", return_value="wsl"), \
+                mock.patch.object(context, "interop_on", return_value=False):
             self.assertEqual(cli.awake_how(), "")
             self.assertFalse(cli.keep_awake(os.getpid(), "task x"))
             first = self.start("t-night1", "ok", "--backlog", "night", "--queue")
@@ -14953,6 +14954,43 @@ class KeepAwake(Base):
             self.assertEqual(cli.awake_line(), (False, cli.WSL_SLEEPS))
         for t in ("t-night1", "t-night2", "t-day"):
             wait_phase(t, {"review"})
+
+    def test_on_wsl_windows_powershell_keeps_windows_awake_until_the_run_ends(self):
+        # #777: WSL2 held nothing, so an overnight backlog froze when Windows idle-slept, though
+        # powershell.exe through interop can ask Windows itself (SetThreadExecutionState)
+        log = Path(self.tmp.name) / "ps.log"
+        ps = Path(self.tmp.name) / "powershell.exe"
+        ps.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > {log}\ncat > /dev/null\necho released >> {log}\n')
+        ps.chmod(0o755)
+        sleeper = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(sleeper.wait)
+        self.addCleanup(sleeper.kill)
+        with mock.patch.object(hardware, "system", return_value="wsl"), \
+                mock.patch.object(context, "interop_on", return_value=True), \
+                mock.patch.object(hardware, "powershell", return_value=str(ps)):
+            self.assertEqual(cli.awake_how(), "windows")
+            self.assertEqual(cli.awake_line(), (True, cli.WINDOWS_AWAKE_SAID))
+            self.assertTrue(cli.keep_awake(sleeper.pid, "task x"))
+        end = time.monotonic() + 10
+        while not log.exists() and time.monotonic() < end:
+            time.sleep(0.05)
+        args = log.read_text().splitlines()
+        self.assertEqual(args[:3], ["-NoProfile", "-NonInteractive", "-Command"])
+        self.assertIn("SetThreadExecutionState([uint32]2147483649)", args[3])
+        self.assertIn("[Console]::In.ReadLine()", args[3])
+        time.sleep(0.3)
+        self.assertNotIn("released", log.read_text())         # held while the run lives
+        sleeper.kill()
+        end = time.monotonic() + 30                           # the waiter polls a pidfd, else 15 s
+        while "released" not in log.read_text() and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertIn("released", log.read_text())           # and let go when it ends
+        with mock.patch.object(hardware, "system", return_value="wsl"), \
+                mock.patch.object(context, "interop_on", return_value=True), \
+                mock.patch.object(hardware, "powershell", return_value=str(ps)):
+            out = self.start("t-night", "ok", "--backlog", "night", "--queue")
+        self.assertNotIn(cli.WSL_SLEEPS, out)                 # Windows is kept awake: no warning
+        wait_phase("t-night", {"review"})
 
     def test_with_no_tool_nothing_is_held_and_nothing_fails(self):
         with mock.patch("shutil.which", return_value=None), \
