@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 from collections import Counter
 from pathlib import Path
+from typing import Callable
 
 from . import store
 
@@ -257,21 +258,89 @@ def lfs_filter(repo: Path) -> list[tuple[str, str]]:
     return [(k, v) for k, _, v in (line.partition(" ") for line in out.splitlines()) if k]
 
 
-def checkout_size(repo: Path, commit: str) -> int:
-    """The bytes a checkout of ``commit`` writes: each blob's size, and where the repo runs Git
-    LFS, for a pointer the size of the file it stands for. Counted as pointers, a repo of
-    LFS-tracked data read as a few kilobytes, and wb start's disk check passed it (#382, the
-    audit of 1.6)."""
-    size, pointers = 0, []
-    for row in git(repo, "ls-tree", "-r", "-l", "-z", commit, check=False).split("\0"):
-        f = row.partition("\t")[0].split()
-        if len(f) == 4 and f[1] == "blob" and f[3].isdigit():
+@functools.lru_cache(maxsize=1)
+def version() -> tuple[int, ...] | None:
+    """The git on PATH as numbers ((2, 44, 0)), None when it can't say."""
+    try:
+        out = subprocess.run(["git", "--version"], capture_output=True, text=True).stdout
+    except OSError:
+        return None
+    word = next((w for w in out.split() if w[:1].isdigit()), "")
+    nums = [int(n) for n in word.split(".")[:3] if n.isdigit()]
+    return tuple(nums) or None
+
+
+def partial_clone(repo: Path) -> bool:
+    """A clone made with --filter: the blobs it lacks are fetched one by one when asked for. Its
+    remote is a promisor (an older git also set extensions.partialClone, a newer one may not)."""
+    if git(repo, "config", "extensions.partialClone", check=False).strip():
+        return True
+    out = git(repo, "config", "--get-regexp", r"^remote\..*\.promisor$", check=False)
+    return any(line.rpartition(" ")[2].lower() in ("true", "yes", "on", "1")
+               for line in out.splitlines())
+
+
+def _sparse_keeps(repo: Path) -> Callable[[str], bool] | None:
+    """Whether a path is in the checkout's sparse cone (or its patterns), None when it isn't
+    sparse. Cone mode: every file at the top and in a cone directory's parents, everything under
+    a cone directory. Otherwise (patterns, which only git matches): what the checkout's own index
+    keeps, its entries without the skip-worktree bit."""
+    sparse = sparse_of(repo)
+    if not sparse:
+        return None
+    if sparse[1]:
+        cones = [d.strip("/") for d in git(repo, "sparse-checkout", "list", check=False).splitlines()
+                 if d.strip("/")]
+        def keeps(path: str) -> bool:
+            d = os.path.dirname(path)
+            return not d or any(d == c or d.startswith(c + "/") or c.startswith(d + "/")
+                                for c in cones)
+        return keeps
+    kept = {row[2:] for row in git(repo, "ls-files", "-t", "-z", check=False).split("\0")
+            if row[:2] != "S "}
+    return kept.__contains__
+
+
+def checkout_size(repo: Path, commit: str) -> tuple[int, int]:
+    """The bytes a checkout of ``commit`` writes, and how many of its files' sizes aren't known
+    here: each blob's size, and where the repo runs Git LFS, for a pointer the size of the file it
+    stands for. Counted as pointers, a repo of LFS-tracked data read as a few kilobytes, and wb
+    start's disk check passed it (#382, the audit of 1.6). Only what the sparse cone checks out
+    counts, and in a partial clone only the blobs it holds, asked with lazy fetching off (git
+    2.44+; an older one's are all unknown): the whole tree of a 30 GB monorepo was counted for a
+    1 GB cone, and a blobless clone fetched every blob, one at a time, to size it (#436)."""
+    keeps = _sparse_keeps(repo)
+    lazy = partial_clone(repo)
+    no_fetch = {"GIT_NO_LAZY_FETCH": "1"}
+    size, unknown, pointers, blobs = 0, 0, [], []
+    for row in git(repo, "ls-tree", "-r", *([] if lazy else ["-l"]), "-z", commit,
+                   check=False).split("\0"):
+        head, _, path = row.partition("\t")
+        f = head.split()
+        if len(f) < 3 or f[1] != "blob" or (keeps and not keeps(path)):
+            continue
+        if lazy:
+            blobs.append(f[2])
+        elif len(f) == 4 and f[3].isdigit():
             size += int(f[3])
             if LFS_POINTER_MIN <= int(f[3]) <= LFS_POINTER_MAX:
                 pointers.append(f[2])
+    if blobs and (version() or (0,)) < (2, 44):
+        return size, len(blobs)
+    if blobs:
+        out = _run(repo, ("cat-file", "--batch-check"), env=no_fetch, check=False,
+                   input="".join(f"{sha}\n" for sha in blobs).encode()).stdout
+        for line in out.decode("ascii", "replace").splitlines():
+            f = line.split()
+            if len(f) == 3 and f[2].isdigit():
+                size += int(f[2])
+                if LFS_POINTER_MIN <= int(f[2]) <= LFS_POINTER_MAX:
+                    pointers.append(f[0])
+            else:  # "<sha> missing": not fetched yet
+                unknown += 1
     if not pointers or not lfs_filter(repo):
-        return size
-    out = _run(repo, ("cat-file", "--batch"), check=False,
+        return size, unknown
+    out = _run(repo, ("cat-file", "--batch"), env=no_fetch, check=False,
                input="".join(f"{sha}\n" for sha in pointers).encode()).stdout
     at = 0
     while (nl := out.find(b"\n", at)) >= 0:
@@ -285,7 +354,7 @@ def checkout_size(repo: Path, commit: str) -> int:
             for line in body.splitlines():
                 if line.startswith(b"size ") and line[5:].isdigit():
                     size += int(line[5:]) - n
-    return size
+    return size, unknown
 
 
 def share_lfs(repo: Path, clone: Path) -> None:

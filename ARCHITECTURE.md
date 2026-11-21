@@ -215,7 +215,14 @@ mod wakes Claude. On Linux the agent dies with its runner anyway: `lane.py` sets
 failed on its own, the task stayed live, and `reap`'s write raised, so `wb status`, `wb wait` and
 the mod's poll ended in a traceback until space was freed. Now `wb start` refuses a task the disk
 has no room for (`cli._disk_room`: under the base's tracked size (`gitops.checkout_size`: a Git
-LFS pointer at the size of the file it stands for, #382) plus its `--copy` paths, times
+LFS pointer at the size of the file it stands for, #382; in a sparse checkout only what it checks
+out: in cone mode the top's files, each cone directory's parents' and everything under a cone
+directory, with patterns the checkout's own index entries without skip-worktree; in a partial
+clone, `gitops.partial_clone` (a promisor remote), only the blobs it holds, asked through
+`cat-file --batch-check` with `GIT_NO_LAZY_FETCH=1` (git 2.44+; an older git's all count as
+unknown), the rest unknown and said: a 30 GB monorepo's whole tree was counted for a 1 GB cone,
+and a blobless clone fetched every blob, one at a time, to be sized, #436) plus its `--copy` paths
+(a file at its own size: `store.dir_size` counted one as nothing, #436), times
 `DISK_COPIES` (3: the worktree, the base check's and `wb verify`'s scratch checkouts, full copies
 on ext4) plus `DISK_SPARE` (2 GB), free where the state directory is; it names the open tasks and
 their sizes; unknown free space refuses nothing). The runner's crash handler on ENOSPC or EDQUOT

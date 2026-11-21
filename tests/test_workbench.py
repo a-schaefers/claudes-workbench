@@ -9679,6 +9679,54 @@ class DiskRoom(Base):
             self.start("t-unknown", "ok", "--queue")
         wait_phase("t-unknown", {"review"})
 
+    def test_the_disk_check_sizes_only_the_sparse_cone_and_fetches_nothing_in_a_blobless_clone(self):
+        # #436 (the audit of v1.8): a cone of two files counted the whole tree's 6 MB, and in a
+        # blobless clone each blob the count needed was fetched, one at a time
+        g = lambda d, *a: subprocess.run(["git", "-C", str(d), *a], check=True,  # noqa
+                                         capture_output=True, text=True).stdout
+        for d in ("app", "huge"):
+            (self.repo / d).mkdir()
+        (self.repo / "app" / "f.txt").write_bytes(b"a" * 1000)
+        for i in range(3):
+            (self.repo / "huge" / f"{i}.bin").write_bytes(os.urandom(200_000))
+        g(self.repo, "add", ".")
+        g(self.repo, "commit", "-qm", "two packages")
+        whole, unknown = gitops.checkout_size(self.repo, "HEAD")
+        self.assertGreater(whole, 600_000)
+        self.assertEqual(unknown, 0)
+        g(self.repo, "sparse-checkout", "set", "app")
+        cone, _ = gitops.checkout_size(self.repo, "HEAD")
+        self.assertLess(cone, 100_000)                       # the top's files and app/ alone
+        self.assertGreater(cone, 1000)
+        g(self.repo, "sparse-checkout", "set", "--no-cone", "/huge/0.bin")
+        self.assertLess(abs(gitops.checkout_size(self.repo, "HEAD")[0] - 200_000), 1000)
+        g(self.repo, "sparse-checkout", "disable")
+        g(self.repo, "config", "uploadpack.allowFilter", "true")
+        clone = Path(self.tmp.name) / "blobless"
+        g(self.tmp.name, "clone", "-q", "--filter=blob:none", "--no-checkout",
+          self.repo.as_uri(), str(clone))
+        objects = store.dir_size(clone / ".git" / "objects")[0]
+        size, unknown = gitops.checkout_size(clone, "HEAD")
+        self.assertEqual(store.dir_size(clone / ".git" / "objects")[0], objects)  # nothing fetched
+        if gitops.version() >= (2, 44):
+            self.assertGreater(unknown, 3)
+        self.assertLess(size, 600_000)
+        err = io.StringIO()
+        with mock.patch.object(gitops, "checkout_size", return_value=(10**6, 7)), \
+                mock.patch.object(store, "free_bytes", return_value=10**6), \
+                redirect_stderr(err), self.assertRaises(SystemExit):
+            self.start("t-partial", "ok")
+        self.assertIn("7 of its files aren't fetched yet (a partial clone)", err.getvalue())
+
+    def test_a_single_file_given_to_copy_counts_at_its_size(self):
+        # #436 (Codex's 21): dir_size scanned a file as a directory, counted nothing and called
+        # the count whole, so one large --copy input passed the disk check
+        f = Path(self.tmp.name) / "input.dat"
+        f.write_bytes(os.urandom(65_536))
+        size, whole = store.dir_size(f)
+        self.assertGreaterEqual(size, 65_536)
+        self.assertTrue(whole)
+
     def test_doctor_says_what_the_state_dir_holds_and_what_is_free(self):
         def doctor(free):
             buf = io.StringIO()

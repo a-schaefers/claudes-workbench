@@ -97,7 +97,14 @@ def free_bytes(path: Path | None = None) -> int | None:
 
 def dir_size(path: Path, budget: float | None = None) -> tuple[int, bool]:
     """Bytes under ``path`` (links not followed, a hard-linked file once) and whether the count
-    is whole: with a ``budget`` in seconds it stops there, a lower bound."""
+    is whole: with a ``budget`` in seconds it stops there, a lower bound. A file is its own size:
+    a 64 KB file given to --copy counted as nothing, the count called whole (#436)."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return 0, True
+    if not stat.S_ISDIR(st.st_mode):
+        return st.st_blocks * 512, True
     total, seen, end = 0, set(), (time.monotonic() + budget) if budget else None
     stack = [str(path)]
     while stack:

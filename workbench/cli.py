@@ -568,17 +568,22 @@ def _disk_room(repo: Path, base: str, setup: dict) -> None:
     free = store.free_bytes()
     if free is None:
         return
-    size = gitops.checkout_size(repo, base)  # Git LFS files at their own size (#382)
+    # Git LFS files at their own size (#382), the sparse cone only, a partial clone's local blobs
+    size, unknown = gitops.checkout_size(repo, base)  # (#436)
     for p in setup.get("copy", ()):
         size += store.dir_size(repo / p, budget=5)[0]
     need = size * DISK_COPIES + DISK_SPARE
+    gap = (f"; {unknown} of its files aren't fetched yet (a partial clone), so their size isn't "
+           "counted" if unknown else "")
     if free >= need:
+        if unknown:
+            print(f"note: the disk check counted {store.gb(size)} of the checkout{gap}")
         return
     held = sorted(((store.dir_size(t.dir, budget=2)[0], t.name) for t in store.all_tasks()
                    if t.status.get("phase") not in store.CLOSED), reverse=True)
     die(f"{store.gb(free)} free where the state directory is ({store.home()}), and a task of this "
         f"repo wants {store.gb(need)} (its checkout and --copy paths, {store.gb(size)}, three "
-        "times over, and 2 GB): free some, or wb discard an open task"
+        f"times over, and 2 GB{gap}): free some, or wb discard an open task"
         + ("; the open tasks: " + ", ".join(f"{n} {store.gb(b)}" for b, n in held[:8]) if held else ""))
 
 
