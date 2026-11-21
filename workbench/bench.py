@@ -36,7 +36,10 @@ REFUSED = ("No reviewer is available in this run, so nothing outside the everyda
 # The protocol's fold (cli.PROTOCOL, `transcript`'s marker) and its acceptance line; a step's
 # opening (cli.cmd_next). Prompt openings are an API: these read the prompts wb wrote.
 FOLD = "\n---\nHow to work"
-TEST_LINE = re.compile(r"^- The acceptance command is `(.+)`\. Run it", re.M)
+# across lines and to the sentence's end: `.+` stopped at a newline, and a command of several
+# lines (`set -e` and a script) read as none (#941, the v1.90.24 review). Only for a task from
+# before status `step_tests`, which records each step's command as data
+TEST_LINE = re.compile(r"^- The acceptance command is `(.+?)`\. Run it before you finish", re.M | re.S)
 STEP_HEAD = re.compile(r"\AStep (\d+) of this task is done and committed \([^)]*\)\. The next step:\n\n")
 BASE_CHECK_SECS = 120  # the hidden checks on the base, at add time; past this, not checked
 
@@ -342,8 +345,11 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
     prompt = _step_prompt(task, step)
     if prompt is None:
         raise RuntimeError(f"step {step}'s prompt is gone from {task.dir / 'rounds'}")
-    test = TEST_LINE.search(prompt)
-    if not test:
+    if str(step) in (recorded := st.get("step_tests") or {}):  # as data since #941
+        test_cmd = recorded[str(step)]
+    else:
+        test_cmd = (m := TEST_LINE.search(prompt)) and m.group(1)
+    if not test_cmd:
         raise RuntimeError(f"step {step} had no acceptance command: nothing to grade a replay by")
     changed = gitops.git(repo, "diff", "--name-only", "--no-renames", "--diff-filter=AM", base, ref
                          ).splitlines()
@@ -382,7 +388,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 **({"git_common": str(c)} if (c := gitops.common_dir(repo)) else {}),  # _repo
                 "base": base,
                 "reference": ref, "size": spec.get("size"), "stack": spec.get("stack"),
-                "test_cmd": test.group(1), "test_timeout": spec.get("test_timeout") or 900,
+                "test_cmd": test_cmd, "test_timeout": spec.get("test_timeout") or 900,
                 "check_cmd": check, "hidden": picked, "allow": grants.get("allow") or [],
                 "paths": grants.get("paths") or [], "skills": st.get("skills_ever") or [],
                 # the worktree's setup (#201), so the reference, the base and each replay are the

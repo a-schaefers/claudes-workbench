@@ -4033,8 +4033,11 @@ before #649 has neither. It holds:
   `Step N-1 of this task is done`; `instructions.md` when the step began in a fresh session,
   `store.round_prompt`: read from prompt.md alone, every step sent with `wb next --fresh` was
   refused as gone, #503), cut at the protocol's fold (`FOLD`), and its acceptance
-  command, from the protocol's `- The acceptance command is` line (`TEST_LINE`; `wb next --test`
-  can change it per step);
+  command, the step's own (`wb next --test` can change it per step, and task.json's `test_cmd`
+  keeps only the latest): status `step_tests`, which `wb start` and `wb next` record, or, for a
+  task from before it, the protocol's `- The acceptance command is` line (`TEST_LINE`, across
+  lines to the sentence's end: a one-line pattern read a command of several lines as none and
+  refused the case, #941);
 - the hidden checks: `--hidden` paths, by default the files the step added or changed that look
   like tests or the data a test reads (`verify.looks_like_test`, the one pattern `wb verify` uses
   too, *Verifying a fix against the base*: `tests/`, `fixtures/`, `test_*`, `*.test.*` and the
@@ -6961,6 +6964,7 @@ check-ins off), not `wb start`'s.
 | `round`, `round_started_at` | the runner round (every kind counts); when it started |
 | `limits` | `{think?, silence?, round?}` seconds: the limits no flag gave, raised before the round for a model measured slower since wb start (`runner.stretch_limits`, #814); null when none was |
 | `steps`, `step_round`, `step_sizes` | `wb next`: the step number, the round it began, the closed steps' `results.step` |
+| `step_tests` | `wb start` and `wb next`: each step's acceptance command, `{"<step>": cmd or null}`, which `wb bench add` reads (task.json's `test_cmd` is only the latest; before it, bench read the prompt's line, #941) |
 | `step_base` | `wb next`: the worktree's HEAD as the step advanced, its commit or, for a step with no changes, the last one before it: what `wb verify` and `wb shot` compare the next step with (`verify._review_base`; without it, the newest earlier step's commit by its trailer, else the base: the step after a clean one refused both, #652) |
 | `reviews` | review rounds in this step (`wb feedback` +1, `wb next` resets) |
 | `auto_fixes`, `auto_fixes_total` | auto-fix rounds since the last review or step; earlier ones |
@@ -7477,7 +7481,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   and the mod's task listing (register.tsx) all leave a replay out of real work; the Bench tests
   and the mod's replay test.
 - **`cli.PROTOCOL`'s acceptance line or fold, or `wb next`'s step opening** → `bench.py` reads
-  them back out of old prompts (`TEST_LINE`, `FOLD`, `STEP_HEAD`); the trailers `wb next` and
+  them back out of old prompts (`TEST_LINE` for a task without status `step_tests`, `FOLD`, `STEP_HEAD`); the trailers `wb next` and
   `wb accept` write → `gitops.step_commit`, which finds them from status `tip` once the merged
   branch is gone, in commits `bench add` restores from the task's `steps.bundle` (#799): what
   `bundle_steps` packs (base..tip) must hold every step `step_commit` looks for.

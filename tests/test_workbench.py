@@ -12135,6 +12135,39 @@ class Bench(Base):
         self.assertEqual(bench.TEST_LINE.search(line).group(1), "python3 -m unittest tests.test_x")
         self.assertEqual(cli.test_line(None), "")
 
+    def test_a_case_keeps_an_acceptance_command_of_several_lines_whole(self):
+        # #941 (the v1.90.24 review): bench add read each step's command back from its prompt with
+        # a one-line pattern, so `set -e` and a script on the next line read as no command, and
+        # the case was refused: "had no acceptance command"
+        from workbench import bench
+        test = "set -e\nsh tests/check.sh"
+        task = self.accepted("t-ml", test=test)
+        self.assertEqual(task.status["step_tests"], {"1": test})
+        run_wb("bench", "add", "t-ml")
+        self.assertEqual(bench.cases()["t-ml"]["test_cmd"], test)
+        # a task from before status `step_tests`: read from the prompt, lines and all
+        run_wb("bench", "rm", "t-ml")
+        task.set_status(step_tests=None)
+        run_wb("bench", "add", "t-ml")
+        self.assertEqual(bench.cases()["t-ml"]["test_cmd"], test)
+        self.assertEqual(bench.TEST_LINE.search(cli.test_line(test)).group(1), test)
+
+    def test_each_steps_case_gets_the_acceptance_command_that_step_had(self):
+        # #941: wb next --test replaces task.json's test_cmd, so each step's command is recorded
+        # in status `step_tests`; a task from before it still reads them from its prompts
+        from workbench import bench
+        task = self.squashed("t-st")
+        self.assertEqual(task.status["step_tests"],
+                         {"1": "sh tests/check.sh", "2": "sh tests/check2.sh"})
+        for legacy in (False, True):
+            if legacy:
+                run_wb("bench", "rm", "t-st-s1", "t-st-s2")
+                task.set_status(step_tests=None)
+            run_wb("bench", "add", "t-st", "--step", "1")
+            run_wb("bench", "add", "t-st", "--step", "2")
+            self.assertEqual(bench.cases()["t-st-s1"]["test_cmd"], "sh tests/check.sh", legacy)
+            self.assertEqual(bench.cases()["t-st-s2"]["test_cmd"], "sh tests/check2.sh", legacy)
+
     def accepted(self, name: str, test: str = "sh tests/check.sh", notes: bool = False) -> store.Task:
         """An accepted task whose step added tests/check.sh (written here, as the agent's), and
         notes.txt with `notes`: one more thing the fake's replay never writes."""

@@ -52,7 +52,8 @@ question(s) for this task). Otherwise make reasonable choices and say what you a
 
 
 def test_line(test: str | None) -> str:
-    """The protocol's acceptance line (bench.TEST_LINE reads it back). It names the command and
+    """The protocol's acceptance line (bench.TEST_LINE reads it back for a task from before status
+    `step_tests`, #941). It names the command and
     keeps the agent to it: two agents in a row ran the whole suite for half an hour after theirs
     passed (2026-11-18, #127), and the runner runs the command after each round anyway."""
     return (f"- The acceptance command is `{test}`. Run it before you finish and make it pass. "
@@ -1138,7 +1139,11 @@ def cmd_start(a):
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
                     opencode=f"{have[0]}.{have[1]}" if have else None,  # runner.opencode_moved
-                    skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
+                    skills=handed, skills_ever=handed, skills_rev=skills.revs(handed),
+                    # each step's acceptance command, as data: bench add read it back from the
+                    # prompt alone, whose one-line pattern missed a command of several lines
+                    # (#941, the v1.90.24 review); task.json's test_cmd is only the latest
+                    step_tests={"1": a.test})
     exact, tools = context.test_allowances(a.test)
     context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
     context.grant(task, "test_tools", tools)
@@ -1407,6 +1412,7 @@ def cmd_next(a):
     advance = dict(round=n, steps=step + 1, step_round=n, reviews=0, step_base=approved,
                    step_active_s=st.get("active_s") or 0, progress_checks=0,
                    step_sizes=(st.get("step_sizes") or []) + [measured],
+                   step_tests={**(st.get("step_tests") or {}), str(step + 1): test},  # #941
                    context="fresh" if a.fresh else None,
                    auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                    auto_fixes=0, phase="queued", last=f"step {step} " + (
