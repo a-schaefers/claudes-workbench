@@ -217,7 +217,12 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     if not re.fullmatch(r"\d{2,5}x\d{2,5}", viewport):
         raise RuntimeError(f"--viewport {viewport}: give it as WIDTHxHEIGHT, e.g. 390x844")
     tree = gitops.snapshot(task.worktree)
-    base, candidate = _checkouts(task, tree, files or [], task.spec["base"])
+    # after wb next, the last approved step, as wb verify compares: the original base showed the
+    # earlier steps' change as this one's (#501, the audit of 1.90)
+    base_rev = _review_base(task)
+    if not base_rev:
+        raise RuntimeError("cannot find the last approved step's commit for the comparison")
+    base, candidate = _checkouts(task, tree, files or [], base_rev)
     d = task.dir / "shots"
     n = 1 + max((int(p.name) for p in d.glob("*") if p.name.isdigit()), default=0)
     out = d / str(n)
@@ -225,7 +230,7 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     st = task.status
     meta = {"task": task.name, "step": st.get("steps", 1), "round": st.get("round", 1),
             "cmd": cmd, "viewport": viewport, "files": files or [], "ts": store.now(),
-            "base": {"rev": task.spec["base"]}, "candidate": {"rev": tree}}
+            "base": {"rev": base_rev}, "candidate": {"rev": tree}}
     for side, checkout in (("base", base), ("candidate", candidate)):
         dest = out / f"{side}.png"
         name = SHOT.format(secrets.token_hex(6))

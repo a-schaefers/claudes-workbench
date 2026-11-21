@@ -3338,7 +3338,9 @@ one.
 `wb shot <task> --capture CMD [--viewport WxH] [--files PATH…] [--timeout N]` (`verify.shot`,
 #98) runs the project's own capture command (a headless browser script, a test that saves a
 screenshot) once on the base and once on the candidate. Each run uses the same scratch checkouts,
-lane and environment as `wb verify`. The command writes a PNG to `$WB_SHOT_OUT` (the absolute path of
+lane and environment as `wb verify`, and the same base: the task's original base for step one, the
+last approved step's commit after `wb next` (`_review_base`; the original base showed step one's
+change as step two's, and a capture needing what step one added failed on the base, #501). The command writes a PNG to `$WB_SHOT_OUT` (the absolute path of
 `.wb-shot-<random>.png` at its checkout's top, a fresh name each run: a PNG already at a fixed
 `.wb-shot.png` passed a capture that wrote nothing, #344; absolute because the command runs in the
 task's package, `subdir`, where a relative `./.wb-shot-….png` landed while the image was looked

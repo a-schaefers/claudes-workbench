@@ -6942,6 +6942,18 @@ class Shot(Base):
         out = run_wb("shot", "t", "--capture", "sh shoot.sh", "--files", "shoot.sh")
         self.assertNotIn("no image", out)
 
+    def test_after_wb_next_the_base_image_is_the_last_approved_step(self):
+        # #501 (the audit of 1.90): #252's fix reached wb verify only, so at step 2's review the
+        # base image was the app before step 1, showing step 1's change as step 2's
+        with mock.patch("sys.stdin", io.StringIO("Add a footer.")):
+            run_wb("next", "t", "--spec", "-", "-m", "Fix conversion")
+        wait_phase("t", {"review"})
+        approved = gitops.git(self.wt, "rev-parse", "HEAD").strip()
+        run_wb("shot", "t", "--capture", self.CAPTURE)
+        m = json.loads((store.Task("t").dir / "shots" / "1" / "shots.json").read_text())
+        self.assertEqual((m["step"], m["base"]["rev"]), (2, approved))
+        self.assertIn(b"watts / 1000", Path(m["base"]["image"]).read_bytes())  # step 1's code
+
     def test_a_package_scoped_task_keeps_both_screenshots(self):
         # #433 (the audit of 1.8, reproduced): run from packages/web, both captures wrote their
         # PNG to the relative $WB_SHOT_OUT, inside the package, and wb shot looked at the top
