@@ -306,9 +306,14 @@ def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = No
     catalog = {} if catalog is None else catalog
     scores = [score(m, size, state=models.status(m, down, catalog), stack=stack)
               for m in models.discover().values() if allowed(m, size)]
-    budget = models.gpu_budget() if scores else None
+    # each model against its own server's cards: with one Ollama per GPU, one budget for all (the
+    # first process's) held an 18 GB model on the 24 GB card's server back as not fitting the 8 GB
+    # one, and passed a model too big for the 8 GB card (#801); read once per server this pass
+    by_root: dict = {}
     for s in scores:
-        s.fits = fits(s.model, budget) if s.state["available"] else None
+        if s.state["available"] and s.model.root not in by_root:
+            by_root[s.model.root] = None if s.model.remote else models.gpu_budget(s.model.root)
+        s.fits = fits(s.model, by_root[s.model.root]) if s.state["available"] else None
     usable = [s for s in scores if s.state["available"]]
     best = max((s.quality for s in usable), default=0)
     # a source whose optimize variant can run goes after it: the variant is the window measured

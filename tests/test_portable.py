@@ -1288,6 +1288,24 @@ class Real(unittest.TestCase):
         with mock.patch.object(models, "gpu_budget", return_value=8_000_000_000):
             self.assertIs(router.rank("significant")[-1].fits, False)  # 20 GB of weights on an 8 GB card
 
+    def test_each_model_is_fitted_against_its_own_servers_cards_not_the_first_ollamas(self):
+        # #801: one Ollama per card (8 GB and 24 GB); one budget for all, the first process's,
+        # held the 24 GB card's 20 GB model back and passed a model too big for the 8 GB one
+        big = self.server({"/v1/models": {"data": [{"id": "big", "owned_by": "llamacpp",
+                                                      "meta": {"size": 20_000_000_000}}]}})
+        small = self.server({"/v1/models": {"data": [{"id": "small", "owned_by": "llamacpp",
+                                                        "meta": {"size": 12_000_000_000}}]}})
+        self.config({"big": {"options": {"baseURL": big + "/v1"}, "models": {"big": {}}},
+                     "small": {"options": {"baseURL": small + "/v1"}, "models": {"small": {}}}},
+                    {"big": {"engine": "server"}, "small": {"engine": "server"}})
+        cards = {big: 24_000_000_000, small: 8_000_000_000}
+        asked = []
+        with mock.patch.object(models, "gpu_budget",
+                               side_effect=lambda root=None: asked.append(root) or cards.get(root, 8_000_000_000)):
+            fit = {s.model.id: s.fits for s in router.rank("significant")}
+        self.assertEqual(fit, {"big/big": True, "small/small": False})
+        self.assertEqual(sorted(asked), sorted(cards))  # once per server in the pass
+
     def test_vllm_says_its_window_and_doctor_flags_an_entry_past_it(self):
         from workbench import cli
         vllm = self.server({"/v1/models": {"data": [{"id": "coder", "owned_by": "vllm", "max_model_len": 32768}]}})

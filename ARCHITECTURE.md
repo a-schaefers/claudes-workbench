@@ -3522,8 +3522,9 @@ audit of 1.6). A system unit's process runs as another user and can't be read: i
 With several `ollama serve` readable here (one per GPU, each on its own port), `ollama_env_at(root)`
 is the one whose `OLLAMA_HOST` listens on root's port (`_ollama_processes`; unset is `OLLAMA_PORT`
 11434; a container's gives no `OLLAMA_HOST` and isn't matched), else `ollama_env()`; the GPU
-budget (`budget_devices(root)`, `gpu_budget(root)`), `can_share` and `_room_beside` read the
-task's own server's devices, `OLLAMA_NUM_PARALLEL` and `OLLAMA_MAX_LOADED_MODELS`, the last
+budget (`budget_devices(root)`, `gpu_budget(root)`), the router's fit (`router.rank`, one
+budget per server a pass: one for all held the 24 GB card's model back, #801), `can_share` and
+`_room_beside` read the task's own server's devices, `OLLAMA_NUM_PARALLEL` and `OLLAMA_MAX_LOADED_MODELS`, the last
 counting only the models on that server. The lowest pid's stood for both: two 24 GB cards were
 budgeted as GPU 0 alone for the second server (#460, the audit of 1.8). Which cards each server
 uses is `models.server_devices(root)`: its budget's devices (by UUID, else driver, name and size),
