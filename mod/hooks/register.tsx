@@ -311,6 +311,45 @@ export const wrapWords = (text: string, n: number): string[] => {
   return lines.length ? lines : ['']
 }
 
+// A line of coloured parts broken into lines of at most n characters at spaces, each further
+// line indented: the Stats tab's live rows were cut at the pane's edge (truncate-end), so a GPU
+// with a long name lost its busy bar, watts and sparkline, and a model its load time, to "…"
+// (2026-11-21). A word longer than a line stays whole; the Text still cuts it at the edge.
+type Part = { color?: string; dim?: boolean; bold?: boolean; text: string }
+export const wrapParts = (parts: Part[], n: number, indent = 2): Part[][] => {
+  const lines: Part[][] = []
+  let line: Part[] = []
+  let width = 0
+  const add = (p: Part, text: string) => {
+    const last = line[line.length - 1]
+    if (last && last.color === p.color && last.dim === p.dim && last.bold === p.bold) last.text += text
+    else line.push({ ...p, text })
+    width += text.length
+  }
+  for (const p of parts) {
+    for (const tok of p.text.split(/(\s+)/).filter(Boolean)) {
+      if (/^\s/.test(tok)) {
+        if (width > (lines.length ? indent : 0)) add(p, tok)
+        continue
+      }
+      if (width > (lines.length ? indent : 0) && width + tok.length > n) {
+        const end = line[line.length - 1]
+        if (end) end.text = end.text.trimEnd()
+        lines.push(line)
+        line = [{ text: ' '.repeat(indent) }]
+        width = indent
+      }
+      add(p, tok)
+    }
+  }
+  if (line.length) {
+    const end = line[line.length - 1]
+    end.text = end.text.trimEnd()
+    lines.push(line)
+  }
+  return lines.length ? lines : [[{ text: '' }]]
+}
+
 const eventLine = (r: Row): string | null => {
   switch (r.kind) {
     case 'tool': return `${r.tool} ${r.brief ?? ''}${r.ok ? '' : '  ✗'}`.trim()
@@ -1252,6 +1291,7 @@ const mem = {
   chatSent: new Set<string>(), // web messages submitted by this load, awaiting their receipt
   chatRetry: new Map<string, number>(), // a web message whose prompt was dropped: tried again from then
   chatExpired: new Set<string>(), // web messages wb said are too old to pass on (#536): not asked again
+  chatQueued: new Map<string, string>(), // web messages whose receipt says queued (id → by): read once a turn ends
   chatUrlAt: 0, // when the web chat's link was last looked up
   savingsAt: 0, // when the week's saving was last read
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
@@ -2020,6 +2060,17 @@ async function sendWeb($: any, id: string, text: string, how: string, by: string
   }
   const { ok, out } = await runWb($, ['chat', 'ack', id, '--by', by, '--how', how])
   if (!ok) warnOnce($, 'chat-ack', `wb chat ack failed: ${brief(out)}`)
+  else if (how === 'queued') mem.chatQueued.set(id, by)
+}
+
+// A queued web message enters at the running turn's next step or as the next turn, so once that
+// turn ends Claude has it: its receipt becomes read. The phone said "Queued for Claude" for good
+// on messages Claude had read and acted on (2026-11-21).
+async function readQueued($: any) {
+  for (const [id, by] of [...mem.chatQueued]) {
+    mem.chatQueued.delete(id)
+    await runWb($, ['chat', 'ack', id, '--by', by, '--how', 'now'])
+  }
 }
 
 // Notifications nobody has acknowledged yet: one toast each, and, for this session's tasks, a
@@ -2509,6 +2560,7 @@ export const register: Register = (on, options) => {
       mem.asksOpen.clear()
       mem.busy = false
       mem.skillTurn = false
+      if (mem.chatQueued.size) void readQueued($)
       mem.sawTurn = true
       mem.turnEndedAt = await $.clock.now()
       void poll($) // held wakes and chat messages go now, not at the next tick
@@ -2636,7 +2688,7 @@ export const register: Register = (on, options) => {
           {now.length ? (
             <Box flexDirection="column" marginBottom={1}>
               <Text bold color="claude">Now</Text>
-              {now.map(parts => (
+              {now.flatMap(parts => wrapParts(parts, cols)).map(parts => (
                 <Text wrap="truncate-end">{parts.map(p => <Text color={p.color} dimColor={p.dim} bold={p.bold}>{p.text}</Text>)}</Text>
               ))}
             </Box>

@@ -2160,7 +2160,9 @@ nothing until a surface attaches.
   tab opened, the last `BUSY_KEEP` 60 samples, in memory only), a line per running task (phase,
   round, its time, tok/s, said `(last call)` when not live, context %), the rack (one line per
   model: resident, split, cpu, idle or can't run, where its memory is, its speeds and load time, the
-  tasks on it) and the queue. One child (`runTop`, read by `pumpTop`), started by `syncTop` only
+  tasks on it) and the queue. A line longer than the pane wraps at spaces, the rest indented
+  (`wrapParts`, colours kept): cut at the edge, a long GPU name took its busy bar, watts and
+  sparkline. One child (`runTop`, read by `pumpTop`), started by `syncTop` only
   while the tab is shown, the pane not minimized and Live view on, checked at each poll, a tab's
   press, a minimize, a bring-back and a Stats pick; it ends (`stopTop`, `return()` on the stream) the
   moment any of those stops holding, and its own loop checks again at each line, so a pane put
@@ -4567,7 +4569,8 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
 - `audio/<batch>/`: `wb chat listen`'s copies, `<n>.<ext>`, and `audio.json` `{batch, ts, clips:
   [{n, name, path (the original), file, type (its media type), line (the check line), engine?,
   seed?, voice?}]}`; the newest `LISTEN_KEPT` (20) batches are kept. `wb events` skips it.
-- `receipts.jsonl`: `{id, ts, by, how: "now"|"queued"}`, written by `wb chat ack` (the mod).
+- `receipts.jsonl`: `{id, ts, by, how: "now"|"queued"}`, written by `wb chat ack` (the mod); the
+  newest row per id stands (a queued one is acked `now` once its turn ends).
   `queued`: a mid-turn delivery didn't go through, so it was submitted as a prompt.
 - `open.json`: `{messages: {<id>: row}, asks: {<id>: row}, answered: {<id>: ask}}`, the user's
   messages without a receipt and the asks without an answer (`chat.open_work`), under `open.lock`:
@@ -5178,7 +5181,9 @@ together both took the chat and both submitted it, #84): idle → `prompt.submit
 (each attached file a line after the words, `attachedLines`: `[attached: <path> (<size>, <type>)]`),
 receipt `how=now`; busy → `session.send` into the running turn with WEB_NOTE, else a queued
 prompt (`how=queued`); `wb chat ack <id> --by <key> --how …` once it entered (a dropped prompt
-gets no receipt and is tried again a minute later), `webAt = now`, a toast. Dialogs
+gets no receipt and is tried again a minute later); a queued one is acked again `how=now` when
+that turn ends (`mem.chatQueued`, `readQueued`: by then Claude has it, at the turn's next step or
+as the next turn; the page said "Queued for Claude" for good, 2026-11-21), `webAt = now`, a toast. Dialogs
 (`classic.PermissionRequest`; the terminal shows its dialog meanwhile, and the hook's answer
 settles it): unless a settings hook already decided, or the session isn't delegating with
 `webAt` within AWAY_MS (6 h; a prompt typed in the terminal sets it to 0) or this session with a

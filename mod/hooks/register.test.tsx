@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, parsePrice, priceOf, quietForJobs, savedLine, spark, statsLines, wrapWords } from './register.js'
+import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, parsePrice, priceOf, quietForJobs, savedLine, spark, statsLines, wrapParts, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -1570,6 +1570,41 @@ test('running wb counts as workbench mode, and a web message reaches a running t
   expect(runs.some(a => a.join(' ') === 'wb chat ack m1 --by ' + a[5] + ' --how now')).toBe(true)
 })
 
+test('a web message queued behind a running turn reads as read once that turn ends', async ($, on) => {
+  // 2026-11-21: three messages Claude had read and acted on said "Queued for Claude" on the phone for good
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.send', () => ({ isDelivered: false, reason: 'busy' }))  // refused: a queued prompt instead
+  const runs: string[] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv.join(' ')); return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'a long review', turnId: 't1' })
+  await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })  // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'status?' }) + '\n'
+  await clock.advance(3000)
+  expect(asked.some(a => a.startsWith('[web chat] status?'))).toBe(true)
+  const acks = () => runs.filter(r => r.includes('chat ack m1'))
+  expect(acks().length).toBe(1)
+  expect(acks()[0]).toMatch(/--how queued$/)
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(3000)
+  expect(acks().length).toBe(2)
+  expect(acks()[1]).toMatch(/--how now$/)                          // the page's "Read by Claude"
+  expect(acks()[1].split(' --by ')[1]).toBe(acks()[0].split(' --by ')[1].replace(/ --how queued$/, ' --how now'))
+  await $.turn.start({ text: 'next', turnId: 't2' })
+  await $.turn.complete(endTurn('t2'))
+  await clock.advance(3000)
+  expect(acks().length).toBe(2)                                    // once
+})
+
 test('only wb run as a command counts as delegating, read as bash reads it, not wb written in a string, a heredoc or a comment (#409, #560)', () => {
   // 2026-11-20: a Python patch whose string held "split it (wb next)" turned workbench mode on
   for (const run of ['wb start t --spec s.md', 'cd ~ && wb start step-2 --spec s.md --repo .', 'wb next t',
@@ -1874,6 +1909,25 @@ test('/workbench as the first message says its rules once, in the context blocks
   expect(blocks.map((b: any) => b.name)).toContain('workbench-mode')
   await clock.advance(2000)
   expect(rows).toEqual([])
+})
+
+test("the Stats tab's live rows wrap at spaces instead of losing their end to the pane's edge", () => {
+  // 2026-11-21: "GPU 0 Radeon RX 9070/9070 XT/9070 GRE █░░… 1.3/15.9 GiB · busy …": the busy bar,
+  // the watts and the sparkline were cut off in a 70-column pane
+  const gpu = [{ bold: true, text: 'GPU 0 ' }, { dim: true, text: 'Radeon RX 9070/9070 XT/9070 GRE ' },
+    { color: 'success', text: '█░░░░░░░░░░░' }, { text: ' 1.3/15.9 GiB ' }, { dim: true, text: '· busy ' },
+    { color: 'success', text: '░░░░░░░░' }, { text: ' 3% ' }, { text: '· 21 W ' }, { dim: true, text: '▁▁▂▁▁▁' }]
+  const lines = wrapParts(gpu, 70)
+  expect(lines.length).toBe(2)
+  for (const l of lines) expect(l.map(p => p.text).join('').length).toBeLessThanOrEqual(70)
+  const flat = (ls: typeof lines) => ls.map(l => l.map(p => p.text).join('')).join(' ').replace(/\s+/g, ' ')
+  expect(flat(lines)).toBe(gpu.map(p => p.text).join('').replace(/\s+/g, ' ').trim())  // nothing lost
+  expect(lines[1][0].text).toBe('  ')                                   // the rest indented under it
+  expect(lines[1].find(p => p.text.includes('░░░░░░░░'))?.color).toBe('success')  // colours kept
+  expect(wrapParts([{ text: 'Nothing running.' }], 70)).toEqual([[{ text: 'Nothing running.' }]])
+  const model = [{ text: '○ ' }, { text: 'Qwen3.8 27B UD-Q3_K_XL (Ollama) (40K) ' }, { dim: true, text: 'idle' },
+    { dim: true, text: ' · writes ~35 · reads ~602 · loads ~12s' }]
+  expect(flat(wrapParts(model, 70))).toContain('loads ~12s')
 })
 
 test('the bubble wraps its words into lines that fit, never cutting a line short', () => {
