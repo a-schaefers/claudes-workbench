@@ -3166,7 +3166,8 @@ it runs on its own only where the user is told and expects a short wait, and onl
 (`due`: never measured, the GPU changed (`fingerprint`: each GPU's name and memory), a remote
 server's models changed, a model came since (not one in `skipped` before its `retry_after`), or
 the last run was stopped): at the end of `wb setup`, and once per Claude Code session
-opened, after its first turn while no task is open (the mod's `measureIfDue`, which toasts
+opened, after its first turn while quiet (the mod's `measureIfDue`, gated like the weekly check:
+`quietForJobs`, #541; `optimize.start` itself defers to a task holding the GPU; it toasts
 "workbench: measuring the GPU for N local model(s) (<why>): about M min; a task you start goes
 first" and wakes no one). `wb optimize start --if-due` is that check: quiet when nothing is due or
 a task holds the GPU (the next session tries again). Due for a new model only, it measures only
@@ -5096,7 +5097,9 @@ listening at once.
 
 **The weekly model check** (`scoutIfDue`): once `wb events` has said hello (wb runs), Claude idle
 a minute after a main-loop turn (`SCOUT_QUIET_MS`: raised the moment a turn ended, it buried
-Claude's question to the user), no task open, once per
+Claude's question to the user), quiet (`quietForJobs`: no task anywhere active, and none of this
+session's waiting on Claude within `REWAKE_MAX_MS`; any open task at any age once gated it, so
+one stuck task left by a quit stopped the check for good, #541), once per
 load: when scout.json's `done_at` is 7+ days old and `offered_at` 1+ day old, it writes
 `offered_at` and submits SCOUT_NOTE (`wb scout`, research, recommend keep/add/retire, change
 nothing without a yes; the audio and image engines too, each model's licence checked against

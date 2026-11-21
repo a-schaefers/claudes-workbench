@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, parsePrice, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
+import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, parsePrice, priceOf, quietForJobs, savedLine, spark, statsLines, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -1869,6 +1869,21 @@ test('a night\'s backlog keeps the user away past six hours; without one, away l
   expect(awayNow(t0, t0 + 7 * hour, [night('running', '')], ours)).toBe(false)     // not a backlog task
   expect(awayNow(t0, t0 + 7 * hour, [night('running')], () => false)).toBe(false)  // another session's
   expect(awayNow(0, t0, [night('running')], ours)).toBe(false)                     // never wrote from the web
+})
+
+test('a leftover task waiting on Claude stops neither the weekly check nor the optimize for good', () => {
+  // #541: any open task at any age gated both, so one stuck task left by /workbench-quit, or
+  // another session's in review, stopped them for weeks
+  const now = 1_800_000_000_000, hour = 3600_000
+  const t = (phase: string, idle: number) => ({ name: 'x', phase, updatedAt: now - idle } as any)
+  const ours = () => true, theirs = () => false
+  expect(quietForJobs([], now, ours)).toBe(true)
+  expect(quietForJobs([t('running', 0)], now, theirs)).toBe(false)     // the GPU's, anyone's
+  expect(quietForJobs([t('queued', 30 * 24 * hour)], now, theirs)).toBe(false)
+  expect(quietForJobs([t('review', hour)], now, ours)).toBe(false)     // this session's, lately
+  expect(quietForJobs([t('review', hour)], now, theirs)).toBe(true)    // another session's
+  expect(quietForJobs([t('stuck', 13 * hour)], now, ours)).toBe(true)  // left for a session long gone
+  expect(quietForJobs([t('accepted', 0)], now, ours)).toBe(true)
 })
 
 test('Claude coding: its own edit in a task\'s worktree waits for the user\'s yes, unless Claude decides', async ($, on) => {

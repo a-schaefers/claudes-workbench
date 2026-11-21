@@ -161,6 +161,15 @@ export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: 
   if (now - webAt < AWAY_MS) return true
   return list.some(t => t.backlog && isMine(t) && (ACTIVE.has(t.phase) || NEEDS.has(t.phase)))
 }
+// Whether the weekly model check and the automatic optimize may run: no task anywhere active (the
+// GPU's, and a check's question beside a running task's), and none of this session's waiting on
+// Claude lately. Any task open at any age once gated both, so one stuck, failed or unreviewed
+// task left after a quit stopped them for good (#541); one idle past REWAKE_MAX_MS waits for a
+// session long gone, as rewake judges it.
+export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) => boolean): boolean {
+  return !list.some(t => ACTIVE.has(t.phase) ||
+    (NEEDS.has(t.phase) && isMine(t) && now - t.updatedAt <= REWAKE_MAX_MS))
+}
 async function away($: any, st: WbChat): Promise<boolean> {
   return awayNow(st.webAt, await $.clock.now(), await read($, tasks), mine)
 }
@@ -1700,13 +1709,14 @@ async function poll($: any) {
       await compactAtBoundary($)
     }
     // the weekly check needs wb to run (`wb events` said hello) and a quiet minute after a turn
-    if (mem.sawTurn && mem.earsOk && !mem.busy && !mem.scoutAsked && !list.some(isOpen) &&
+    const quiet = quietForJobs(list, now, mine)
+    if (mem.sawTurn && mem.earsOk && !mem.busy && !mem.scoutAsked && quiet &&
       now - mem.turnEndedAt >= SCOUT_QUIET_MS) await scoutIfDue($, now)
     if (mem.sawTurn && mem.earsOk && !mem.updateAsked) {
       mem.updateAsked = true
       void checkUpdate($) // off the poll's path: a stalled fetch held every wake (the 2026-11-16 audit)
     }
-    if (mem.sawTurn && mem.earsOk && !mem.optimizeAsked && !list.some(isOpen)) {
+    if (mem.sawTurn && mem.earsOk && !mem.optimizeAsked && quiet) {
       mem.optimizeAsked = true
       void measureIfDue($)
     }
