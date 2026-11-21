@@ -6817,7 +6817,10 @@ load (`this Claude Code (<v>) is older than <min>…: claude update if they misb
 `$.session.version` itself is missing) and carries on (the 2026-11-19 audit: an older one met a
 call it lacks as a bare error); OpenCode 2.2.7, the oldest release that
 passes the real-OpenCode tests (2.2.0 never lists `workbench_ask_reviewer`, found 2026-11-17);
-Python 3.11; git 2.34 (`gitops.GIT_FLOOR`, Ubuntu 22.04's, where the fallbacks for `merge-tree
+Python 3.11 (before 3.14 `Path.exists`, `is_dir` and `is_file` raise `PermissionError` under a parent
+this account can't read, where 3.14 says False: a probe of a path another account or an admin owns,
+the shared lease, OpenCode's system and global config, PATH's `bin` directories, uses `os.path`, #850;
+`tests.test_portable.UnreadableParents` holds 3.14 to the older behaviour); git 2.34 (`gitops.GIT_FLOOR`, Ubuntu 22.04's, where the fallbacks for `merge-tree
 --write-tree`, 2.38, and `GIT_NO_LAZY_FETCH`, 2.44, are checked; `wb doctor` is BAD below it, and
 the skill library no longer needs 2.28's `init -b`: #527, the audit of v1.90). Each Linux job's `Landlock`
 step prints the runner's Landlock ABI, or that it has none and the Lane tests skip. `check.yml`'s

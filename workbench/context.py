@@ -1149,8 +1149,10 @@ def python_envs(environ=None) -> list[str]:
     roots = [env.get("VIRTUAL_ENV"), env.get("CONDA_PREFIX")]
     for d in (env.get("PATH") or "").split(os.pathsep):
         p = Path(d)
-        if p.is_absolute() and p.name == "bin" and ((p.parent / "pyvenv.cfg").is_file()
-                                                   or (p.parent / "conda-meta").is_dir()):
+        # os.path, not Path.is_file: before 3.14 that raises under a parent this account can't
+        # read (another account's ~/bin, a dead NFS mount's ESTALE), and every lane failed (#850)
+        if p.is_absolute() and p.name == "bin" and (os.path.isfile(p.parent / "pyvenv.cfg")
+                                                   or os.path.isdir(p.parent / "conda-meta")):
             roots.append(str(p.parent))
     return list(dict.fromkeys(os.path.realpath(r) for r in roots if r and os.path.isdir(r)))
 

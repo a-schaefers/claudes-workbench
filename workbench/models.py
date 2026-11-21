@@ -161,7 +161,7 @@ def opencode_config_path() -> Path:
     if os.environ.get("WB_OPENCODE_CONFIG"):
         return Path(os.environ["WB_OPENCODE_CONFIG"])
     d = _config_dir()
-    return next((p for p in (d / "opencode.json", d / "opencode.jsonc") if p.exists()),
+    return next((p for p in (d / "opencode.json", d / "opencode.jsonc") if os.path.exists(p)),
                 d / "opencode.json")
 
 
@@ -187,7 +187,9 @@ def opencode_config_files() -> list[Path]:
     file (#370)."""
     paths = [Path(os.environ["WB_OPENCODE_CONFIG"])] if os.environ.get("WB_OPENCODE_CONFIG") else \
         [*_system_files(), *_global_files(), *filter(None, [_users_config()])]
-    return [p for p in paths if p.exists()]
+    # os.path.exists, not Path.exists: before 3.14 that raises under a directory it can't read (an
+    # admin's 0750 /etc/opencode), and every wb command that reads OpenCode's config failed (#850)
+    return [p for p in paths if os.path.exists(p)]
 
 
 def _strip_jsonc(text: str) -> str:
@@ -276,7 +278,7 @@ def agent_providers() -> dict:
     global files itself. Left out, a model wb found ready was "Model unavailable" to the agent
     before any request reached its server (the 2026-11-19 audit). Templates stay templates, a
     relative {file:} made absolute: the layer lives elsewhere."""
-    own = {p.resolve() for p in (*_system_files(), *_global_files()) if p.exists()}
+    own = {p.resolve() for p in (*_system_files(), *_global_files()) if os.path.exists(p)}  # #850
     out: dict = {}
     for path, layer in _layers():
         if path.resolve() in own:
@@ -292,7 +294,7 @@ def config_target(change: str) -> Path:
     """The file own_config would write, or RuntimeError saying why it won't (and ``change``, to
     make by hand). Asked first by a change that does something else before writing: wb optimize
     made its Ollama variant, then the config refused it (#266, the audit of 1.2)."""
-    system = {p.resolve() for p in _system_files() if p.exists()}  # an admin's: never written (#370)
+    system = {p.resolve() for p in _system_files() if os.path.exists(p)}  # an admin's: never written (#370, #850)
     files = [f for f in opencode_config_files() if f.resolve() not in system]
     if len(files) > 1:
         raise RuntimeError(f"OpenCode layers {' and '.join(map(str, files))}; wb won't rewrite "
@@ -1804,7 +1806,9 @@ def lease_dir() -> Path:
     v = os.environ.get("WB_GPU_DIR")
     if v:
         return Path(os.path.abspath(os.path.expanduser(v)))
-    if SHARED_GPU.is_dir() and os.access(SHARED_GPU, os.W_OK | os.X_OK):
+    # os.path.isdir: before 3.14 Path.is_dir raises under a parent this account can't read (an
+    # admin's 0750 /var/lib/workbench), and every start and lease failed instead of falling back (#850)
+    if os.path.isdir(SHARED_GPU) and os.access(SHARED_GPU, os.W_OK | os.X_OK):
         return SHARED_GPU
     return _own_lease()
 

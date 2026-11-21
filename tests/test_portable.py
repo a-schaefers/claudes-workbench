@@ -2453,6 +2453,47 @@ class Optimize(unittest.TestCase):
                              "note: stopped wb optimize (what it measured is kept) to make room")
 
 
+def _strict(name):
+    """Path.<name> as Python 3.11-3.13 have it: a PermissionError from stat (an unreadable
+    parent) is raised, not read as False as 3.14 does, so the test fails on any Python."""
+    real = getattr(Path, name)
+
+    def probe(self, *a, **kw):
+        try:
+            os.stat(self)
+        except PermissionError:
+            raise
+        except OSError:
+            pass
+        return real(self, *a, **kw)
+    return probe
+
+
+@unittest.skipIf(os.geteuid() == 0, "root reads a 000 directory")
+class UnreadableParents(Base):
+    def test_a_probe_under_a_directory_this_account_cant_read_reads_as_absent_on_every_python(self):
+        # #850: before 3.14, Path.is_dir/exists/is_file raise PermissionError under an unreadable
+        # parent: an admin's 0750 /var/lib/workbench or /etc/opencode failed every wb command,
+        # and another account's ~/bin on PATH failed every lane
+        tmp = Path(self.tmp.name)
+        locked = tmp / "locked"
+        (locked / "x" / "bin").mkdir(parents=True)
+        locked.chmod(0)
+        self.addCleanup(lambda: locked.exists() and locked.chmod(0o755))  # Base's tearDown may go first
+        os.environ.pop("WB_GPU_DIR", None)
+        os.environ.pop("WB_OPENCODE_CONFIG", None)
+        os.environ["XDG_CONFIG_HOME"] = str(tmp / "xdg")
+        with mock.patch.object(Path, "exists", _strict("exists")), \
+                mock.patch.object(Path, "is_dir", _strict("is_dir")), \
+                mock.patch.object(Path, "is_file", _strict("is_file")), \
+                mock.patch.object(models, "SHARED_GPU", locked / "gpu"), \
+                mock.patch.object(models, "_system_dir", return_value=locked / "opencode"):
+            self.assertEqual(models.lease_dir(), store.home())
+            self.assertEqual(models.opencode_config_files(), [])
+            self.assertEqual(models.agent_providers(), {})
+            self.assertEqual(context.python_envs({"PATH": f"{locked / 'x' / 'bin'}:/usr/bin"}), [])
+
+
 class Fallback(unittest.TestCase):
     """watch.Watcher without inotify (macOS): it still says what changed."""
     def setUp(self):
