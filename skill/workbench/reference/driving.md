@@ -12,7 +12,8 @@ check-in, when an agent asks for a command or a directory, a spec needs web rese
   with the rule; `--always` keeps it for every task (`~/.config/workbench/commands.json`). Say no
   (`wb answer`, with another way) to what reaches outside the task: deploys, other machines,
   system services, the user's data, a dependency the project shouldn't take on. Knowing a task
-  needs something up front, `wb start … --allow "<pattern>"`. sudo, git writes, git by its full
+  needs something up front, `wb start … --allow "<pattern>"`; the `--test` command is granted by
+  itself (each of its commands, and `<its command> *`). sudo, git writes, git by its full
   path and `gh` stay refused whatever you allow. A plain `npx <pkg>` runs only what the project
   installed; to let it fetch one, allow `npx --yes <pkg>`.
 - **Directories it asks for.** The agent writes only in its lane (worktree, temp, build caches)
@@ -29,7 +30,12 @@ check-in, when an agent asks for a command or a directory, a spec needs web rese
   run later outside the lane. A test driving a program through a pseudo-terminal (pexpect, Python's pty,
   `script`, node-pty) fails in the lane ("out of pty devices", "failed to create
   pseudo-terminal"): grant `/dev/pts` (`wb start --allow-path /dev/pts`), which also opens the
-  user's other terminals to the agent.
+  user's other terminals to the agent. Sockets outside the lane are refused too (kernels from
+  6.12): Docker's, Podman's, `/run/postgresql`, the Nix daemon's, failing with "connect:
+  permission denied"; the report names the `wb allow <name> --path <socket or its directory>`.
+  Docker's socket is root on the machine, and rootless Podman's acts as the user outside the
+  lane: grant one only when the user expects the tests to run containers. Docker Desktop's `~/.docker/desktop/docker.sock` can be granted alone;
+  the rest of `~/.docker` (its logins) stays hidden.
 
 ## The web is yours; the agent tests in a browser but does not browse
 Research (for a spec, an

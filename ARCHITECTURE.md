@@ -967,30 +967,38 @@ image generation.
 
 **Commands, an allowlist** (`context.shell_rules`). OpenCode's `shell` permission rules are
 checked against each simple command of a line (pipes, `&&`, loops, `$(…)`), its raw text as the
-resource. OpenCode anchors each pattern, lets `*` match anything (spaces and `/` too), treats a
-trailing ` *` as optional (`npm install *` also matches `npm install`), and the last matching rule
+resource. OpenCode anchors each pattern, lets `*` match anything (spaces and `/` too) and `?` any
+one character (a space too), treats a trailing ` *` as optional (`npm install *` also matches `npm install`), and the last matching rule
 wins; no match means ask, which `--auto` allows. The rules, in order:
 1. deny `*`;
-2. allow `c`, `c *` and `*=* c *` (`ASSIGN`: a variable set before it, `PYTHONPATH=. pytest`)
-   for each of `ALLOWED_COMMANDS` (about 215: the shell's builtins and
+2. allow `c *` (a bare `c` too) and `*=* c *` (`ASSIGN`: a variable set before it,
+   `PYTHONPATH=. pytest`) for each of `ALLOWED_COMMANDS` (about 240: the shell's builtins and
    everyday tools, files and text, archivers, builds and compilers, test runners, interpreters,
-   package managers, `bash`/`sh`, `sqlite3`, `git` (the shim)); not on it: `curl`, `wget`, `ssh`,
+   package managers, `bash`/`sh`, `sqlite3`, `git` (the shim), and since #514 (the audit of 1.90)
+   the toolchains the lane makes room for and the common runners and linters: `python3.*`,
+   `pip3.*`, `pypy3`, `pdm`, `pipenv`, `hatch`, `nox`, `pixi`, `conda`, `mamba`, `micromamba`,
+   `pre-commit`, `pyright`, `flutter`, `dart`, `bazel`, `bazelisk`, `just`, `task`, `pio`,
+   `platformio`, `conan`, `xcodebuild`, `xcrun`, `rubocop`, `golangci-lint`, `shellcheck`);
+   not on it: `curl`, `wget`, `ssh`,
    `rsync`, `docker`, `systemctl`, `opencode`. OpenCode matches each simple command's raw text,
    so `FOO=1 ls` was refused while `ls` and `env FOO=1 ls` ran, and a small model copying the
    project's own `CI=1 npm test` spent a Claude wake asking or stopped running the tests (#258, the
    audit of 1.2). `*` matches spaces, so the prefix form also passes a line with an `=` anywhere
-   before an allowed command's name: no more than `env *` already runs. Steps 4 to 6 and 8 get the
-   prefix form too;
+   before an allowed command's name: no more than `env *` already runs. Steps 4 to 6 get the
+   prefix form too (step 8 no longer does: #442);
 3. allow `./*`, `../*`, and `<dir>/*` for every directory of the lane but those under `/dev` and `/proc` (a program the agent built
    runs by its path anywhere it can write: a debug binary in the temp directory was refused
    though `bash` could run it);
 4. allow `PROJECT_BINS` (and `./*`, `../*`, each also behind `*=*`), what a project builds or
    installs for itself, by its path:
    `.venv/bin/*`, `venv/bin/*`, `node_modules/.bin/*`, `build/*`, `target/debug/*`,
-   `target/release/*`, `bin/*`, `out/*`, `dist/*`, `zig-out/bin/*`;
+   `target/release/*`, `bin/*`, `out/*`, `dist/*`, `zig-out/bin/*`, `vendor/bin/*` (Composer's),
+   `scripts/*`, `tools/*`;
 5. deny `ASK_FIRST`: adding a dependency (`pip install *`, `npm install *`, `npm add *`,
    `pnpm i *`, `yarn global add *`, `bun i *`, `deno add *`, `deno install *`, `cargo add *`,
-   `go get *`, `dotnet add * package *`, …) and fetching a package to run it (`npx -y *`,
+   `go get *`, `dotnet add * package *`, `python3.* -m pip install *`, `pdm add *`,
+   `pipenv install *`, `pixi add *`, `conda install *`, `flutter pub add *`, `dart pub add *`,
+   `pio pkg install *`, `conan install *--requires*`, …) and fetching a package to run it (`npx -y *`,
    `npx --yes *`, `npm exec *`, `npm x *`, `npx -p *`, `npx --package *`, `pnpm dlx *`,
    `yarn dlx *`, `bunx *`, `bun x *`, `uvx *`, `uv tool run *`, `uv tool install *`,
    `uv run --with *`, `deno run *npm:*`, `deno run *jsr:*`). A plain `npx <pkg>` stays allowed
@@ -1000,7 +1008,9 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
 6. allow `INSTALL_LISTED`, installing what the project already lists, because with the optional
    trailing ` *` the rules above also refuse the bare forms: `npm install`, `npm i`, `npm ci`,
    `pnpm install`, `pnpm i`, `bun install`, `bun i`, `yarn`, `yarn install`, `pip install -r *`,
-   `pip install -e .` (and `pip3`, `python -m pip`, `python3 -m pip`, `uv pip` forms). The pip
+   `pip install -e .` (and `pip3`, `pip3.*`, `python -m pip`, `python3 -m pip`,
+   `python3.* -m pip`, `uv pip` forms), `pipenv install`, `pipenv install --dev`, `pipenv sync`,
+   `pio pkg install`, `platformio pkg install`. The pip
    forms only where pip installs into the worktree's own venv, or with no Python environment
    active (the user's checkout's are left out: *Its environment*, below) while Landlock bounds
    what pip writes (`context.python_installs`); otherwise they ask first, since pip would write
@@ -1010,17 +1020,32 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    *`, the `pip uninstall` forms), which change the active venv, ask first too (#490, the audit
    of 1.90: the agent's `pip install -e .` repointed the user's venv at the worktree, which
    accept or discard then deleted);
+
 7. allow the user's standing patterns (`commands.json` `allow`) and the task's grants
-   (`rules/<task>/grants.json` `allow`: `wb allow`, `wb start|next --allow`); a `*` there lifts
-   everything above;
+   (`rules/<task>/grants.json` `allow`: `wb allow`, `wb start|next --allow`, and the acceptance
+   command `wb start|next --test` names: `context.test_allowances`, each of its simple commands
+   as written, `<its command> *` and `*=* <its command> *`, so the agent can run what the
+   protocol tells it to (#514)); a `*` there lifts everything above;
 8. deny the hard limits (`context.denied_shell()`): `DENIED_SHELL`, built from `_HARD` (`sudo`,
    `doas`, `pkexec`, `su`, `gh`), and the real git by its path (each `git` on the runner's PATH
    but the shim, its real path, and `GIT_PATHS`: `/usr/bin/git`, `/bin/git`,
-   `/usr/local/bin/git`, `/opt/homebrew/bin/git`), each bare and with ` *`, and each again behind
-   the `_WRAPPERS` (`env`, `env *`, `xargs`, `xargs *`, `nohup`, `nohup --`, `nice`, `nice *`,
-   `time`, `time -p`, `time --`, `command`, `command -p`, `command --`, `exec`, `timeout *`,
-   `stdbuf *`, `setsid`, `*=*`), so `env gh …`, `time -p sudo …`, `timeout 5 sudo …` and
-   `FOO=1 sudo …` are refused.
+   `/usr/local/bin/git`, `/opt/homebrew/bin/git`), each as `c *` (which matches a bare `c` too:
+   one rule each, as the rules travel in one environment string, `runner.CONFIG_CONTENT_MAX`), and
+   each again behind the `_WRAPPERS`, a wrapper's own option shapes: `env`, `env -i`, `env --`;
+   `xargs` bare, `-0`, `-r`, `-0r`, `-r0`, `--null`, `--no-run-if-empty`, `-??`, `-???`, `-? ?`,
+   `-I {}`, `-I{}`; `nohup`, `nohup --`; `nice` bare, `-?`, `-??`, `-???`, `-n ?`, `-n ??`,
+   `-n ???`; `time`, `time -p`, `time --`; `command`, `command -p`, `command --`; `exec`;
+   `timeout ?`, `timeout ??`, `timeout ???`; `stdbuf -??` once to three times; `setsid`. So
+   `env gh …`, `time -p sudo …`, `timeout 5 sudo …`, `nice -n 10 sudo …`, `xargs -n 1 gh …` are
+   refused. Never a `*` before the hard word: `*` matches spaces, so the earlier `env *`,
+   `xargs *`, `nice *`, `timeout *`, `stdbuf *` and `*=*` forms refused `env CI=1 rg gh src`,
+   `xargs grep -l gh`, `timeout 300 pytest -k gh` and `pytest --tb=short -k gh`, and being last,
+   no `wb allow` nor `"allow": ["*"]` could lift them (#442, the audit of 1.8). Each shape starts
+   with the wrapper's word or a `-` and spans at most three characters with `?` (a count, a
+   duration, a niceness, a buffering mode), so it can't reach over a command's name; a longer
+   value (`timeout 3600 sudo`, `timeout -s KILL 5 sudo`) and a variable set before the command
+   (`FOO=1 sudo`, `env CI=1 gh`), whose value no pattern can bound, pass the patterns like
+   `bash -c` does, and the kernel stands behind them (below).
    Not `*/git`, which also refused `go test ./internal/git` whatever Claude allowed, and not
    `time *`, which would refuse `time pytest -k gh` (the 2026-11-16 audit).
 
@@ -1054,16 +1079,26 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   said nothing of permission, #331, the audit of 1.4; any other node a failed test run names
   with "Permission denied" or "Operation not permitted" outside the lane, `/dev/kvm` say, goes in
   status `tests.lane` and the report names `wb allow <task> --path <node>` for it:
-  `runner.lane_refused`), `/proc`, the build caches and
+  `runner.lane_refused`; since #437, the audit of 1.8, any absolute path on a refusal's line,
+  matched in any case, that lies outside the lane and that a grant can reach (`lane_grant`: the
+  path when it exists or is under `/dev`, else its nearest existing directory; never `/`, the
+  home directory, a secret, or the task's repo), so a refused keystore, lockfile or cache is
+  named too, not a URL's path), `/proc`, the build caches and
   toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.rustup`, `go/pkg`, `.npm`,
   `.bun/install/cache`, `.yarn`, `.pnpm-store`, `.local/share/pnpm/store`,
   `.gradle`, `.m2`, `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`,
   `.platformio`, `.conan2`, `.hex`, `.mix`, `.sbt`, `.ivy2`, `.pub-cache`, `.konan`,
-  `.local/share/hatch`, `.local/share/virtualenvs`) and wherever the environment moved them
+  `.local/share/hatch`, `.local/share/virtualenvs`, and since #437 `.local/share/NuGet`, NuGet's
+  http and plugins caches, `.local/state/cabal`, Cabal 3.10's store without `~/.cabal`, and
+  `.android`, the debug keystore, split around `adbkey`), Flutter's `bin/cache` for
+  `$FLUTTER_ROOT` and each `flutter` on PATH (`flutter_caches`: every flutter command opens
+  `bin/cache/lockfile` for writing; kept whole, like `.dotnet`, though the Dart SDK the user's
+  flutter runs lives there) and wherever the environment moved them
   (`TOOL_HOME_VARS`, each that is set: `CARGO_HOME`, `RUSTUP_HOME`, `GOPATH`'s first entry,
   `GOMODCACHE`, `GOCACHE`, `npm_config_cache`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`,
   `GRADLE_USER_HOME`, `BUN_INSTALL`, `DENO_DIR`, `MIX_HOME`, `HEX_HOME`, `PUB_CACHE`,
-  `KONAN_DATA_DIR`, `HATCH_DATA_DIR`, `WORKON_HOME`; of `GOPATH` and `BUN_INSTALL` only their
+  `KONAN_DATA_DIR`, `HATCH_DATA_DIR`, `WORKON_HOME`, `CARGO_TARGET_DIR`, `NPM_CONFIG_CACHE`,
+  `NUGET_PACKAGES`, each only when absolute; of `GOPATH` and `BUN_INSTALL` only their
   caches, `VAR_CACHES`: `pkg`, `install/cache`), OpenCode's own data (`.local/share/opencode`,
   `.local/state/opencode`, and `opencode` under `$XDG_DATA_HOME` and `$XDG_STATE_HOME` when set),
   `$XDG_CACHE_HOME`, and the extra paths (`commands.json` `paths`, the task's grants `paths`), each with its real path
@@ -1114,7 +1149,8 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
 - *Reads.* Everything is readable except where credentials and the user's own records live:
   `context.SECRETS` under `$HOME` (`.ssh`, `.gnupg`, `.password-store`, `.netrc`,
   `.git-credentials`, `.config/git/credentials`, `.gcm`, `.config/gh`, keyrings, `.aws`, `.azure`,
-  `.config/gcloud`, `.kube`, `.docker`, `.pypirc`, `.pgpass`, `.my.cnf`, `.vault-token`, cargo and
+  `.config/gcloud`, `.kube`, `.docker`, `.android/adbkey` (adb's key to the user's devices),
+  `.pypirc`, `.pgpass`, `.my.cnf`, `.vault-token`, cargo and
   gem credentials, OpenCode's service password (`.config/opencode/service.json`,
   `.local/state/opencode/service.json`: its background service runs outside the lane), password
   managers, cloud CLIs, browser and mail profiles (Flatpak's `.var/app` too), shell history,
@@ -1147,7 +1183,11 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   into (only those are listed, each directory once: an lstat per entry, and the 0.90 review found
   every PATH directory under an `ONLY_KEPT` root listed on each lane drawn, WSL2's System32
   among them), and the Python running workbench; never `/`, the home directory or a parent of a
-  secret), not the user's documents or other projects. On WSL (`hardware.system()`), never the
+  secret), the SDKs a build finds by variable rather than PATH (`sdk_roots`: `SDK_VARS`,
+  `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `JAVA_HOME`, `FLUTTER_ROOT`, `DOTNET_ROOT`, and
+  `SDK_DEFAULTS`, Android Studio's `~/Android/Sdk` and macOS's `~/Library/Android/sdk`: with only
+  `platform-tools` on PATH, Gradle couldn't open `platforms/*/android.jar` and every Android build
+  failed, #437, the audit of 1.8), not the user's documents or other projects. On WSL (`hardware.system()`), never the
   Windows drives either (`windows_drives`: the DrvFs mounts in `/proc/self/mounts`, and any
   `/mnt/<letter>`): a Windows program runs through interop as a Windows process, as the user,
   outside Landlock and no-new-privileges, and the 0.90 review found the Windows PATH (System32,
@@ -1176,7 +1216,14 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `io.systemd.Resolve`, userdb's `io.systemd.Multiplexer`, `/run/nscd/socket`, sssd's
   `pipes/nss`), so `logger` and `resolvectl` work, not the system bus; and the
   `commands.json` and grant `paths`, split around secrets and workbench's own files as the reads
-  and writes are, so `wb allow --path /run/postgresql` reaches a test database; a `--unix` rule
+  and writes are, so `wb allow --path /run/postgresql` reaches a test database; and a granted
+  `SECRET_SOCKETS` file, Docker Desktop's `~/.docker/desktop/docker.sock` (macOS's
+  `~/.docker/run/docker.sock`), which `lane_refusal` lets a grant name although `.docker` is a
+  secret: it is connected to only, `config.json` and the rest of `~/.docker` stay hidden (before
+  #441, the audit of 1.8, only turning the lane off let Testcontainers reach it). A refused
+  connection is named in the report like any refused path (`runner.lane_refused`: Docker's
+  `dial unix /var/run/docker.sock: connect: permission denied`, psql's socket under
+  `/run/postgresql`, the Nix daemon's); a `--unix` rule
   carries the socket right alone, since the 0.90 review found its read right made a granted
   `~/.config`'s gh token readable again), so the session bus (and through it `systemd-run`), the keyring and the SSH and GPG
   agents are out of reach; sockets the lane's own processes make stay theirs. From ABI 6 it also
@@ -1208,10 +1255,17 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   tools' paths and the shell's working directory and `cd` targets (not other arguments), is deny
   `*`, then allow `<dir>/*` for the lane, `READABLE` (`/usr`, `/etc`, `/opt`, `/lib*`, `/bin`,
   `/sbin`, `/proc`, `/sys`, `/nix`, `/run/current-system`, and macOS's `/Library`,
-  `/System`, `/Applications`), the task's `rounds/` (a prompt too long for one argument is read
-  from there) and the handed skills' directories; with the lane off, allow `*` (said outright:
-  the layer's rule for other MCP servers' tools, `*_*`, would match it). This is all that applies
-  without Landlock.
+  `/System`, `/Applications`), the installs the lane already lets the agent read (`read_only`:
+  `tool_roots`, the programs it runs, such as a conda, pyenv or mise env's site-packages, and the
+  toolchains split out of the write lane, `NOT_WRITABLE` and `$RUSTUP_HOME/toolchains`, rustup's
+  std sources; and `sdk_roots`; never one inside a lane entry), the task's `rounds/` (a prompt
+  too long for one argument is read from there) and the handed skills' directories; with the
+  lane off, allow `*` (said outright: the layer's rule for other MCP servers' tools, `*_*`, would
+  match it). The `read_only` places also get an `edit` deny (`read_only_rules`): read, never
+  edited, but a lane entry inside one (a Flutter SDK's `bin/cache`) gets its `edit` allow back. Before #521 (the audit of 1.90) `read` on an env's `pandas/core/frame.py` was refused,
+  each refusal counting toward the six-errors guard, and the only remedy, `wb allow --path`, made
+  the install writable, though the user's own shell runs it outside the lane later. This is all
+  that applies without Landlock.
 - *Asking for more.* A refused write is "Permission denied" (the protocol says so, and not to
   probe it); the agent calls `ask_reviewer` with `path`, which raises a PERMISSION question naming
   `wb allow <task> --path <dir>`. That grants read and write (`--always` keeps it in
@@ -3340,23 +3394,30 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
   `rules/<task>/bin/git` every round (a `/bin/sh` wrapper, `exec '<python>' -I -c '<code>' "$@"`,
   quoted, since a shebang line splits at a space and a Python under `/home/John Smith/` broke
   every git call; the code inserts the package path, then `gitguard.main(<real git>, <the task
-  repo's common dir>, argv)`) and puts its directory first on the agent's `PATH`,
+  repo's common dir>, argv, <the temp roots>, [<the worktree>])`) and puts its directory first on the agent's `PATH`,
   so it's the git called from the shell, a script or `make`. `split` skips git's global options
   (and the values of `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--super-prefix`,
-  `--attr-source`) to find the subcommand; `reads` decides: no subcommand or one of `READ` (35:
-  `status`, `diff`, `log`, `show`, `blame`, `grep`, `rev-parse`, `ls-files`, …) reads; `branch` and
-  `tag` read only when listing; `config` only with a read option or one name; `stash` only `list`
+  `--attr-source`) to find the subcommand; `reads` decides: no subcommand or one of `READ` (41:
+  `status`, `diff`, `log`, `show`, `blame`, `grep`, `rev-parse`, `ls-files`, `archive`,
+  `check-mailmap`, `interpret-trailers`, …) reads; `branch` and `tag` read only when listing (for
+  `tag`, `TAG_LISTS`: `-l`, `--points-at`, `--contains`, `--merged` and their `--no-` forms, which
+  version scripts in Makefiles, `setup.py` and `build.rs` run: #443); `apply` only with
+  `--check`, `--stat`, `--numstat` or `--summary` and no `--apply`; `hash-object` without `-w`;
+  `fsck` without `--lost-found`; `config` only with a read option or one name; `stash` only `list`
   and `show`; `worktree` only `list`; `remote` without arguments, `get-url`, `show` (with or without `-v`); `reflog`,
   `notes`, `submodule` and `symbolic-ref` in their read forms; anything else (aliases and `lfs`
   included) is a write. A read is exec'd with `GIT_OPTIONAL_LOCKS=0`, so the agent's `git status`
   never refreshes the index while Claude diffs. A write is refused, with `REFUSAL` (leave the
   change uncommitted for Claude; to undo an edit, edit it back or `git show HEAD:<path>`; ask if
   the task needs a git write), when it lands in the task's repository (`protected`: the same
-  common dir) or in any repository outside the temp directories; outside any repository it passes,
-  and throwaway repositories under the temp directories, which test suites create, stay writable
+  common dir) or in any repository outside the temp directories and the worktree; outside any
+  repository it passes, and throwaway repositories under the temp directories or nested in the
+  worktree (a common dir below it that isn't the task's), which test suites create, stay writable
   (the temp roots are fixed when the shim is written, so an agent's `TMPDIR` can't make a project
-  count as scratch). For `init` and `clone` it judges by where the new repository lands
-  (`destination`, skipping options and their values). The real git
+  count as scratch; Rust's `CARGO_TARGET_TMPDIR` and fixtures in `tests/tmp` are in the worktree:
+  #444). For `init` and `clone` it judges by where the new repository lands (`new_repo`, skipping
+  options and their values): strictly below the worktree, and without `--separate-git-dir`, it
+  passes (`nested`); else by the repository its nearest existing directory is in (`destination`). The real git
   called by its full path is refused by OpenCode's rules (`context.denied_shell()`), and the task repo's refs are
   outside the lane. That also means an agent can't wipe its own unfinished work by mistake. The
   shim is standard library only: it's imported on every git call.
@@ -4407,9 +4468,9 @@ delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--self-review`/`--no-self-review` (default: the learned `self_review` knob), `--checkin MIN` (0: off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--unload-for-tests` (an Ollama model unloaded before each test run, for tests that need the GPU, the base check, `wb verify` and `wb shot` with the GPU alone, `verify.gpu`, and the GPU's device nodes in the lane, `context.gpu_nodes`: task.json `unload_for_tests`), `--no-sign` (the task's commits unsigned, whatever `commit.gpgsign` says: task.json `sign: false`; without it, a key that can't sign unattended is said at start, `gitops.sign_problem`), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--copy PATH…`, `--sibling PATH…` (`lib` or `../lib` beside the repo, `../../shared/lib` further up: *Setting the worktree up*; with commands.json `repos`), `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--backlog NAME` (one of a batch left to run: task.json `backlog`, same name rules), `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, neither commands.json `"paths": ["*"]` nor `--allow-path '*'` turning it off, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy; or in the `--repo` directory below the top: a monorepo package, task.json `subdir`, `package: …` printed, #375); checks the worktree setup (`_worktree_setup`: a `--copy` path inside the repo, there, ignored in the checkout, with nothing under it tracked at the task's base or in the checkout's index (#244: a tag as `--base` tracked `generated/config`, and the local copy went over it into the commit), ignored at the task's base as well, checked in the new worktree, which is removed again on a refusal (#322), and no `SECRET_FILES` name; a `--sibling` a directory beside the repo or further up, by a path without `.` or `..` inside it, not one of `context.TASK_FILES` beside a flat worktree, not refused by `lane_refusal`, not holding the repo, its link inside no other's or the worktree's; #261); makes the worktree there, nested under `tree/` for a sibling more than one level up; refuses a task the disk has no room for (`cli._disk_room`, *A full disk*: #342); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); writes `starting.json` (repo, worktree, its pid; removed once task.json is written), so a start killed before task.json is undone by the next start of that name, when its pid is gone, or by `wb gc` (#376); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); fills each submodule from the user's own checkout of it at the commit the base records (`gitops.fill_submodules`: a scratch index and `checkout-index`, no `.git` for the agent to repoint, the files read-only since the gitlink keeps an edit there out of the diff and the commit; the scratch checkouts get the same, `verify._run`; empty, a C/C++ or vendored build failed on the base and in every round: #350), a submodule's own submodules too, from the user's checkout of each inside it (#383), and notes the ones the checkout lacks, by their whole path; says what the setup will do (`setup: …`), or, with none and no commands.json `repos` entry, notes the checkout's ignored top-level directories (`_missing_dirs`, not `CACHE_DIRS`) the worktree lacks; notes a home directory inside a temp root, with the lane on (`context.home_gap`); notes each proxy variable the agent's environment leaves out (`runner.dropped_proxies`: a `*_proxy` holding a password, with the commands.json `env` that passes it through, `proxy_line`; #380); notes a repo on a Windows drive (`context.on_windows`: git is many times slower there; finding 30); notes a fixed prompt of `FIXED_SHARE` (40%) of the model's window or more (`context.fixed_prompt`: `OPENCODE_BASE_TOKENS` 3500 for OpenCode's own prompt and the tools left, plus the instruction files, AGENTS.md and round 1's prompt at `CHARS_PER_TOKEN` 4; the line names the three largest parts; finding 27: a 25 KB CLAUDE.md on a 32K window started the agent near its handover point) and an OpenCode outside `runner.OPENCODE_TESTED` (2.3 up to 3.0: `runner.untested`; finding 26); writes task.json (with `session` when `CLAUDE_CODE_SESSION_ID` is set and `claude_pid` when `CLAUDE_PID` is: Claude Code's Bash exports both), round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when `--test-timeout` cut it short. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>` (granted to the agent's shell too: `context.test_allowances`, #514), `--auto-fix N` (2), `--self-review`/`--no-self-review` (default: the learned `self_review` knob), `--checkin MIN` (0: off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--unload-for-tests` (an Ollama model unloaded before each test run, for tests that need the GPU, the base check, `wb verify` and `wb shot` with the GPU alone, `verify.gpu`, and the GPU's device nodes in the lane, `context.gpu_nodes`: task.json `unload_for_tests`), `--no-sign` (the task's commits unsigned, whatever `commit.gpgsign` says: task.json `sign: false`; without it, a key that can't sign unattended is said at start, `gitops.sign_problem`), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--copy PATH…`, `--sibling PATH…` (`lib` or `../lib` beside the repo, `../../shared/lib` further up: *Setting the worktree up*; with commands.json `repos`), `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--backlog NAME` (one of a batch left to run: task.json `backlog`, same name rules), `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, neither commands.json `"paths": ["*"]` nor `--allow-path '*'` turning it off, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy; or in the `--repo` directory below the top: a monorepo package, task.json `subdir`, `package: …` printed, #375); checks the worktree setup (`_worktree_setup`: a `--copy` path inside the repo, there, ignored in the checkout, with nothing under it tracked at the task's base or in the checkout's index (#244: a tag as `--base` tracked `generated/config`, and the local copy went over it into the commit), ignored at the task's base as well, checked in the new worktree, which is removed again on a refusal (#322), and no `SECRET_FILES` name; a `--sibling` a directory beside the repo or further up, by a path without `.` or `..` inside it, not one of `context.TASK_FILES` beside a flat worktree, not refused by `lane_refusal`, not holding the repo, its link inside no other's or the worktree's; #261); makes the worktree there, nested under `tree/` for a sibling more than one level up; refuses a task the disk has no room for (`cli._disk_room`, *A full disk*: #342); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); writes `starting.json` (repo, worktree, its pid; removed once task.json is written), so a start killed before task.json is undone by the next start of that name, when its pid is gone, or by `wb gc` (#376); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); fills each submodule from the user's own checkout of it at the commit the base records (`gitops.fill_submodules`: a scratch index and `checkout-index`, no `.git` for the agent to repoint, the files read-only since the gitlink keeps an edit there out of the diff and the commit; the scratch checkouts get the same, `verify._run`; empty, a C/C++ or vendored build failed on the base and in every round: #350), a submodule's own submodules too, from the user's checkout of each inside it (#383), and notes the ones the checkout lacks, by their whole path; says what the setup will do (`setup: …`), or, with none and no commands.json `repos` entry, notes the checkout's ignored top-level directories (`_missing_dirs`, not `CACHE_DIRS`) the worktree lacks; notes a home directory inside a temp root, with the lane on (`context.home_gap`); notes each proxy variable the agent's environment leaves out (`runner.dropped_proxies`: a `*_proxy` holding a password, with the commands.json `env` that passes it through, `proxy_line`; #380); notes a repo on a Windows drive (`context.on_windows`: git is many times slower there; finding 30); notes a fixed prompt of `FIXED_SHARE` (40%) of the model's window or more (`context.fixed_prompt`: `OPENCODE_BASE_TOKENS` 3500 for OpenCode's own prompt and the tools left, plus the instruction files, AGENTS.md and round 1's prompt at `CHARS_PER_TOKEN` 4; the line names the three largest parts; finding 27: a 25 KB CLAUDE.md on a 32K window started the agent near its handover point) and an OpenCode outside `runner.OPENCODE_TESTED` (2.3 up to 3.0: `runner.untested`; finding 26); writes task.json (with `session` when `CLAUDE_CODE_SESSION_ID` is set and `claude_pid` when `CLAUDE_PID` is: Claude Code's Bash exports both), round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when `--test-timeout` cut it short. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps a dead runner first (`reap`). Phase review/stuck/failed and no live runner; empty text is refused before anything is written. Writes the next round's prompt (FEEDBACK_HEAD + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (the re-run only when there is one) + the text), reviews+1, spawns the runner. Warns past three review rounds; prints each undelivered note it dropped ("not delivered, dropped …"). A note names the GPU's holders when it will wait for them. Gathers lessons. |
-| `wb next <task> --spec <file> -m "…"` | `--include` (approve bulk additions and large binaries), `--no-sign` (this commit unsigned), `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`; the agent's proposals settled around the commit and put back if it fails, *Claude's files*); a step with no changes (once the proposals are settled) makes no commit and advances all the same, "step N of <task> had no changes" (it died on "nothing to commit" and the task stayed on the step, #507, Claude's audit of 1.90), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:", or "(no changes to commit)" for an empty step, + spec + PROTOCOL), records the spec gaps, says what `runner.fresh_reason` makes of the status to come, then advances the step (round, steps, step_round, reviews reset, phase queued) in one status write right before it spawns: written before that slow export, an interrupt left step 2 under review with no runner, a retry dying on "nothing to commit" and accept closing the task on step 1 (#191). A retry after one interrupted past its commit (the worktree's tip carries this step's trailer and nothing changed since: `cli._step_landed`) takes that commit and measures the step from `HEAD~1`, so the task advances once; it died on "nothing to commit" (#85). The spec is read again, so give it again (`-` reads stdin). Says whether the next step gets a fresh session and why (`runner.fresh_reason`), each undelivered note it dropped, and names the GPU's holders when it will wait for them. Gathers lessons. |
+| `wb next <task> --spec <file> -m "…"` | `--include` (approve bulk additions and large binaries), `--no-sign` (this commit unsigned), `--test` (replaces the acceptance command, and grants it to the agent's shell like `wb start --test`: `context.test_allowances`, #514), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`; the agent's proposals settled around the commit and put back if it fails, *Claude's files*); a step with no changes (once the proposals are settled) makes no commit and advances all the same, "step N of <task> had no changes" (it died on "nothing to commit" and the task stayed on the step, #507, Claude's audit of 1.90), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:", or "(no changes to commit)" for an empty step, + spec + PROTOCOL), records the spec gaps, says what `runner.fresh_reason` makes of the status to come, then advances the step (round, steps, step_round, reviews reset, phase queued) in one status write right before it spawns: written before that slow export, an interrupt left step 2 under review with no runner, a retry dying on "nothing to commit" and accept closing the task on step 1 (#191). A retry after one interrupted past its commit (the worktree's tip carries this step's trailer and nothing changed since: `cli._step_landed`) takes that commit and measures the step from `HEAD~1`, so the task advances once; it died on "nothing to commit" (#85). The spec is read again, so give it again (`-` reads stdin). Says whether the next step gets a fresh session and why (`runner.fresh_reason`), each undelivered note it dropped, and names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically, never through a link: `ask_mcp.write_answer`); the blocked `ask_reviewer` returns it. An empty answer is refused: the question stays open. A closed question (answered, or dropped by the runner) is refused. |
 | `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse or has the wrong shape: `context.commands_conf`); answers the oldest open permission request (else the pending question) with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule (while the tests run or the task waits for the GPU it says the agent gets it when they end, or when its round starts). `--path` goes through `_lane_dir` (refuses a path through a link, naming its target, and what `context.lane_refusal` refuses: `/`, home, a place inside credentials, workbench's state or config, or the skill library, and a place in the task's repo or its git directory; creates the directory; `*` turns the lane off for the task). |
 | `wb progress [on\|off]` | `--after MIN` (with `on`; default: the task's typical length on its model) | The user's opt-in to progress checks; with no argument, what it is (*Progress checks*). |

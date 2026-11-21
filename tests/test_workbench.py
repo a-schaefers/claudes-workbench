@@ -4268,6 +4268,30 @@ class RealOpenCode(Base):
         self.assertNotIn("rejected", answers[0])
         self.assertIn("wide-ok", answers[1])
 
+    @home_outside_the_lane
+    def test_the_file_tools_read_the_installs_the_agent_runs_but_never_edit_them(self):
+        # #521, the audit of 1.90: with a conda env's bin on PATH, `read` on its site-packages got
+        # "Permission denied: external_directory", and the only remedy granted writes
+        env = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-conda-env-"))
+        self.addCleanup(shutil.rmtree, env, True)
+        (env / "bin").mkdir()
+        lib = env / "lib" / "site-packages" / "pandas"
+        lib.mkdir(parents=True)
+        (lib / "frame.py").write_text("CANARY_FRAME = 1\n")
+        calls = [{"name": "read", "arguments": {"path": str(lib / "frame.py")}},
+                 {"name": "grep", "arguments": {"pattern": "CANARY_FRAME", "path": str(lib)}},
+                 {"name": "write", "arguments": {"path": str(lib / "frame.py"), "content": "x"}},
+                 {"name": "write", "arguments": {"path": str(env / "planted.pth"), "content": "x"}}]
+        with mock.patch.dict(os.environ, {"PATH": f"{env / 'bin'}{os.pathsep}{os.environ['PATH']}"}):
+            task, answers = self.run_calls("t-ro", calls)
+            self.assertIn(str(env), context.read_only(task, context.writable(task)))
+        self.assertIn("CANARY_FRAME", answers[0])
+        self.assertIn("CANARY_FRAME", answers[1])
+        self.assertIn("rejected", answers[2])                  # read, never edited
+        self.assertIn("rejected", answers[3])
+        self.assertEqual((lib / "frame.py").read_text(), "CANARY_FRAME = 1\n")
+        self.assertFalse((env / "planted.pth").exists())
+
     def test_a_project_config_and_the_users_mcp_servers_lift_nothing(self):
         # the 2026-11-16 audit: an opencode.json in the worktree loaded after the task's layer and
         # its allow-all came last; the user's own MCP servers (a GitHub one with their token)
@@ -4339,7 +4363,8 @@ class RealOpenCode(Base):
         self.assertIn("assigned-ok", answers[0])
         self.assertIn("two-ok", answers[1])
         self.assertNotIn("rejected", answers[2])               # a project's tool, by its path
-        self.assertIn("permission.rejected", answers[3])       # no root
+        if sys.platform.startswith("linux"):  # no root: the kernel's, as a variable's value can't
+            self.assertIn("no new privileges", answers[3])  # be bounded in a pattern (#442)
         self.assertIn("permission.rejected", answers[4])       # a new package asks first
         self.assertIn("permission.rejected", answers[5])       # not an allowed command
 
@@ -4535,6 +4560,25 @@ class GitGuard(unittest.TestCase):
             _, sub, rest = gitguard.split(line.split())
             self.assertFalse(gitguard.reads(sub, rest), line)
 
+    def test_version_scripts_and_pure_readers_get_through_the_shim(self):
+        # #443, the audit of 1.8: `git tag --points-at HEAD` (Makefiles, setup.py, build.rs) was
+        # refused as a write, so the tests failed every round and the agent couldn't fix it
+        from workbench import gitguard
+        reads = ["tag --points-at HEAD", "tag --contains v1.2", "tag --no-contains x",
+                 "tag --merged main", "tag --no-merged main", "tag -l v*", "archive HEAD",
+                 "archive -o x.tar HEAD", "apply --check p.diff", "apply --stat p.diff",
+                 "apply --numstat p.diff", "hash-object src/a.c", "check-mailmap A <a@b>",
+                 "interpret-trailers msg.txt", "fsck", "fsck --full"]
+        writes = ["tag v1", "tag -a v1 --contains HEAD", "apply p.diff", "apply --index p.diff",
+                  "apply --check --apply p.diff", "hash-object -w src/a.c",
+                  "fsck --lost-found"]
+        for line in reads:
+            _, sub, rest = gitguard.split(line.split())
+            self.assertTrue(gitguard.reads(sub, rest), line)
+        for line in writes:
+            _, sub, rest = gitguard.split(line.split())
+            self.assertFalse(gitguard.reads(sub, rest), line)
+
     def test_protected_repositories(self):
         from workbench import gitguard
         with tempfile.TemporaryDirectory() as d:
@@ -4561,6 +4605,40 @@ class GitGuard(unittest.TestCase):
             out = subprocess.run([str(Path(d) / "bin" / "git"), "commit", "-m", "x"], cwd=repo,
                                  capture_output=True, text=True, env={**os.environ, **env})
             self.assertIn("read-only", out.stderr)
+
+    def test_a_test_suites_own_repositories_inside_the_worktree_stay_writable(self):
+        # #444, the audit of 1.8: `git init target/tmp/x` (Rust's CARGO_TARGET_TMPDIR, fixtures
+        # in tests/tmp) resolved to the task's repo, and a commit in a nested one was refused
+        from workbench import gitguard
+        d = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-nested-"))  # no temp
+        self.addCleanup(shutil.rmtree, d, True)                                         # root
+        repo, wt = d / "repo", d / "wt"
+        git = lambda *a, cwd=wt: subprocess.run(["git", *a], cwd=cwd, capture_output=True,
+                                                text=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m",
+            "base", cwd=repo)
+        git("worktree", "add", "-q", str(wt), cwd=repo)
+        env = {**os.environ, **gitguard.install(d / "bin", repo, ROOT, os.environ["PATH"], wt),
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@t"}
+        shim = lambda *a, cwd=wt: subprocess.run([str(d / "bin" / "git"), *a], cwd=cwd, env=env,
+                                                 capture_output=True, text=True)
+        out = shim("init", "-q", "target/tmp/x")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        out = shim("commit", "-q", "--allow-empty", "-m", "fixture", cwd=wt / "target/tmp/x")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        (wt / "tests/tmp").mkdir(parents=True)
+        out = shim("-C", "tests/tmp", "init", "-q")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        # the task's own repository stays read-only, from the worktree or below it
+        self.assertIn("read-only", shim("commit", "--allow-empty", "-m", "x").stderr)
+        self.assertIn("read-only", shim("init", "-q").stderr)
+        (wt / "src").mkdir()
+        self.assertIn("read-only", shim("-C", "src", "commit", "--allow-empty", "-m", "x").stderr)
+        self.assertIn("read-only", shim("init", "-q", "--separate-git-dir", str(repo / ".git"),
+                                        "sub").stderr)
+        self.assertIn("read-only", shim("commit", "--allow-empty", "-m", "x", cwd=repo).stderr)
 
     def test_the_report_flags_claudes_files(self):
         status = " M src/a.c\n M CLAUDE.md\n?? docs/AGENTS.md\nR  x -> .claude/skills/s/SKILL.md\n"
@@ -5221,6 +5299,105 @@ class Lane(Base):
             got.append(out.stdout.strip() or out.stderr)
         self.assertEqual(got, ["refused", "pty"])
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_android_flutter_dotnet_and_cabal_find_their_sdks_and_caches_in_the_lane(self):
+        # #437, the audit of 1.8: Gradle couldn't read ~/Android/Sdk/platforms, every flutter
+        # command opened bin/cache/lockfile for writing and exited, NuGet's and Cabal 3.10's
+        # caches and ~/.android weren't writable, and NPM_CONFIG_CACHE wasn't followed
+        task = self.bare_task("t-sdk", self.repo)
+        task.worktree.mkdir()
+        home = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-sdk-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        files = ["Android/Sdk/platforms/android-34/android.jar", "Android/Sdk/platform-tools/adb",
+                 "jdk/lib/modules", "sdk/flutter/bin/flutter", "sdk/flutter/bin/cache/lockfile",
+                 ".android/debug.keystore", ".android/adbkey", ".local/share/NuGet/v3-cache/x",
+                 ".local/state/cabal/store/x", "npmc/x"]
+        for f in files:
+            (home / f).parent.mkdir(parents=True, exist_ok=True)
+            (home / f).write_text("x")
+        (home / "sdk/flutter/bin/flutter").chmod(0o755)
+        env = {"PATH": os.pathsep.join([str(home / "sdk/flutter/bin"),
+                                        str(home / "Android/Sdk/platform-tools"), os.environ["PATH"]]),
+               "JAVA_HOME": str(home / "jdk"), "NPM_CONFIG_CACHE": str(home / "npmc"),
+               **{v: "" for v in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+                                  "XDG_CONFIG_HOME", "FLUTTER_ROOT", "ANDROID_HOME")}}
+        with mock.patch.object(context.Path, "home", lambda: home), mock.patch.dict(os.environ, env):
+            w, r = context.writable(task), context.readable(task)
+        script = ("import json, sys\nout = {}\nfor mode, p in json.loads(sys.argv[1]):\n"
+                  "    try:\n        open(p, mode).close(); out[p] = 'ok'\n"
+                  "    except OSError as e:\n        out[p] = e.strerror\nprint(json.dumps(out))\n")
+        ops = [("r", "Android/Sdk/platforms/android-34/android.jar"), ("r", "jdk/lib/modules"),
+               ("w", "sdk/flutter/bin/cache/lockfile"), ("w", ".android/debug.keystore"),
+               ("w", ".local/share/NuGet/v3-cache/x"), ("w", ".local/state/cabal/store/x"),
+               ("w", "npmc/x"), ("r", ".android/adbkey"), ("w", "sdk/flutter/bin/flutter")]
+        out = subprocess.run(lane.wrap(w, [sys.executable, "-c", script,
+                                           json.dumps([(m, str(home / p)) for m, p in ops])], r),
+                             capture_output=True, text=True, timeout=20)
+        got = {k[len(str(home)) + 1:]: v for k, v in json.loads(out.stdout or "{}").items()}
+        self.assertEqual(got, {**{p: "ok" for _, p in ops[:7]},
+                               ".android/adbkey": "Permission denied",       # a credential
+                               "sdk/flutter/bin/flutter": "Permission denied"}, out.stderr)
+
+    def test_any_path_the_lane_refused_is_named_with_the_grant_that_reaches_it(self):
+        # #437, the audit of 1.8: only /dev paths were named, so a refused keystore or cache read
+        # as the agent's bug
+        outside = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-refused-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        self.start("t-refused", "ok", "--auto-fix", "0", "--no-base-check", "--test",
+                   f"echo 'java.io.FileNotFoundException: {outside}/keys/debug.keystore "
+                   "(Permission denied)'; echo 'fetch https://example.org/x: permission denied'; "
+                   f"echo 'PermissionError: [Errno 13] Permission denied: \"{outside}\"'; exit 1")
+        st = wait_phase("t-refused", {"review"})
+        self.assertEqual(st["tests"]["lane"], [f"{outside}/keys/debug.keystore", str(outside)])
+        report = run_wb("report", "t-refused")
+        self.assertIn(f"the lane refused {outside}/keys/debug.keystore: wb allow t-refused --path "
+                      f"{outside} if the tests need it", report)
+        self.assertNotIn("example.org", "".join(st["tests"]["lane"]))   # a URL's path isn't one
+
+    @unittest.skipUnless((lane.abi() or 0) >= 9, "needs Landlock ABI 9")
+    @home_outside_the_lane
+    def test_a_socket_outside_the_lane_is_named_with_its_grant_and_docker_desktops_can_be_granted(self):
+        # #441, the audit of 1.8: "dial unix …docker.sock: connect: permission denied" named no
+        # grant, and Docker Desktop's socket under ~/.docker (a secret) couldn't be granted at all
+        task = self.bare_task("t-sock", self.repo)
+        task.worktree.mkdir()
+        home = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-sock-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / ".docker/desktop").mkdir(parents=True)
+        (home / ".docker/config.json").write_text('{"auths": {"x": {"auth": "secret"}}}')
+        (home / "pg").mkdir()
+        socks = [str(home / ".docker/desktop/docker.sock"), str(home / "pg/.s.PGSQL.5432")]
+        for p in socks:
+            srv = socket.socket(socket.AF_UNIX)
+            srv.bind(p)
+            srv.listen()
+            self.addCleanup(srv.close)
+        script = ("import socket, sys\nfor p in sys.argv[1:]:\n    s = socket.socket(socket.AF_UNIX)\n"
+                  "    try:\n        s.connect(p); print('connected', p)\n"
+                  "    except OSError as e:\n        print(f'dial unix {p}: connect: {e.strerror.lower()}')\n"
+                  "try:\n    open(sys.argv[1].rsplit('/', 2)[0] + '/config.json').read(); print('read')\n"
+                  "except OSError as e:\n    print('config:', e.strerror)\n")
+        conf = Path(os.environ["WB_COMMANDS"])
+        env = {v: "" for v in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME",
+                               "DOCKER_CONFIG")}
+        with mock.patch.object(context.Path, "home", lambda: home), mock.patch.dict(os.environ, env):
+            def run():
+                return subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script,
+                                                                         *socks],
+                                                context.readable(task), context.unix_paths(task)),
+                                      capture_output=True, text=True, timeout=20).stdout
+            out = run()
+            self.assertIn(f"dial unix {socks[0]}: connect: permission denied", out)
+            self.assertEqual(runner.lane_refused(task, out), socks)
+            self.assertIsNone(context.lane_refusal(socks[0]))         # grantable, though in .docker
+            self.assertIsNotNone(context.lane_refusal(str(home / ".docker/config.json")))
+            conf.write_text(json.dumps({"paths": socks}))
+            out = run()
+        self.assertIn(f"connected {socks[0]}", out)
+        self.assertIn(f"connected {socks[1]}", out)
+        self.assertIn("config: Permission denied", out)                 # the logins stay hidden
+
     def test_a_device_node_the_lane_refused_is_named_with_its_wb_allow(self):
         # #331 (the audit of 1.4): /dev/kvm or /dev/fuse refused read as the project's bug, and the
         # agent spent its auto-fix rounds on it
@@ -5553,13 +5730,14 @@ class Permission(Base):
 
     @staticmethod
     def verdict(rules, command):
-        """OpenCode's matcher as CLAUDE.md describes it: anchored, `*` matches anything, a
-        trailing ` *` optional, the last matching rule wins."""
+        """OpenCode's matcher as CLAUDE.md describes it: anchored, `*` matches anything, `?` one
+        character, a trailing ` *` optional, the last matching rule wins."""
         import re as _re
         found = None
         for r in rules:
             pat = r["resource"]
-            rx = _re.escape(pat[:-2] if pat.endswith(" *") else pat).replace(r"\*", ".*")
+            rx = _re.escape(pat[:-2] if pat.endswith(" *") else pat).replace(r"\*", ".*") \
+                .replace(r"\?", ".")
             rx += "( .*)?" if pat.endswith(" *") else ""
             if _re.fullmatch(rx, command, _re.S):
                 found = r["effect"]
@@ -5582,6 +5760,58 @@ class Permission(Base):
                     "uv run --with requests python x.py", "uv tool run ruff"):
             self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
         self.assertEqual(runner.OPENCODE_ENV["npm_config_yes"], "false")  # a plain `npx <pkg>`
+
+    def test_a_hard_word_after_a_wrappers_arguments_is_refused_but_inside_a_command_is_not(self):
+        # #442, the audit of 1.8: `xargs *`, `env *`, `timeout *` and `*=*` before ` gh` matched
+        # `xargs grep -l gh` and `pytest --tb=short -k gh`, last, so nothing could lift them
+        task = store.Task("t-wrap")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-wrap", "repo": str(self.repo)}))
+        rules = context.shell_rules(task)
+        for cmd in ("xargs grep -l gh", "pytest --tb=short -k gh", "timeout 300 pytest -k gh",
+                    "env CI=1 rg gh src", "nice -n 5 make su", "xargs -0 rg gh",
+                    "timeout 60 grep -rw sudo docs", "CI=1 npm test -- -t gh"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        for cmd in ("sudo x", "gh pr create", "env gh pr list", "env -i sudo x", "xargs gh",
+                    "xargs -0 sudo rm", "xargs -n 1 gh", "xargs -I {} sudo cp {} /", "xargs -r0 su",
+                    "timeout 5 sudo -n true", "timeout 30 gh run list", "timeout 5m su",
+                    "nice -n 10 sudo x", "nice -5 doas x", "stdbuf -oL -eL gh api x",
+                    "time -p sudo x", "command -p gh pr create", "nohup -- pkexec x", "setsid su"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"allow": ["*"]}))
+        rules = context.shell_rules(task)
+        self.assertEqual(self.verdict(rules, "curl -s x | xargs grep -l gh"), "allow")
+        self.assertEqual(self.verdict(rules, "timeout 5 sudo x"), "deny")  # still the hard limit
+
+    def test_the_acceptance_command_claude_chose_is_the_agents_to_run(self):
+        # #514, the audit of 1.90: the protocol said "The acceptance command is `flutter test`.
+        # Run it", and the agent's shell refused it, so it asked Claude or finished untested
+        self.start("t-acc", "ok", "--test", f"earthly +test || CI=1 {TEST_CMD}")
+        wait_phase("t-acc", {"review"})
+        task = store.Task("t-acc")
+        rules = context.shell_rules(task)
+        for cmd in ("earthly +test", "earthly +lint", "CI=1 earthly +test"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        self.assertEqual(self.verdict(rules, "ponyc --check"), "deny")
+        with mock.patch("sys.stdin", io.StringIO("And again.\n")):
+            run_wb("next", "t-acc", "--spec", "-", "-m", "feat: step one",
+                   "--test", f"ponyc --check || {TEST_CMD}")
+        wait_phase("t-acc", {"review"})
+        rules = context.shell_rules(task)
+        self.assertEqual(self.verdict(rules, "ponyc --check"), "allow")
+        self.assertEqual(self.verdict(rules, "earthly +test"), "allow")   # grants add up
+        # the toolchains the lane prepares for, a project's scripts, a pinned interpreter
+        for cmd in ("flutter test", "dart analyze", "bazel test //...", "just test",
+                    "vendor/bin/phpunit", "scripts/test.sh", "python3.12 -m pytest -q",
+                    "pipenv install", "pio test", "xcodebuild test -scheme App"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        for cmd in ("python3.12 -m pip install requests", "flutter pub add http", "pdm add x",
+                    "conda install numpy", "pipenv install requests"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)          # still asks first
+        self.start("t-acc-gh", "ok", "--test", f"gh run list || {TEST_CMD}")
+        wait_phase("t-acc-gh", {"review"})
+        self.assertEqual(self.verdict(context.shell_rules(store.Task("t-acc-gh")), "gh run list"),
+                         "deny")                                        # never the hard limits
 
     def test_a_commands_json_that_is_malformed_is_refused_not_ignored(self):
         # a string `allow` was spread letter by letter, its `*` allowing every command; a file

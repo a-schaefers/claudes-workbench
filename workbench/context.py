@@ -40,27 +40,39 @@ DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent"
 # tests (`PYTHONPATH=. pytest`, `CI=1 npm test`), and a small model copying the project's command
 # spent a Claude wake asking, or stopped running the tests (#258, the audit of 1.2). `*` matches
 # spaces too, so the prefix form lets through a line with an `=` before an allowed command's name:
-# no more than `env *` already runs. The hard limits and the ask-first steps get the form as well.
+# no more than `env *` already runs. The ask-first steps get the form as well; the hard limits
+# don't (#442).
 ASSIGN = "*=*"
 # The shell's hard limits: no root, and no road round the read-only git (gitguard.py, a `git` of
 # its own first on the agent's PATH): not the real git named by its path, not `gh`, which pushes,
 # opens pull requests and runs workflows. OpenCode checks each part of a compound command, so
 # `cd x && sudo ...` is refused too. Everything else is the agent's, guided by the handbook.
 # The plain wrappers are covered too (`env gh`, `timeout 5 sudo …`). A command built some other
-# way (`bash -c`, an interpreter) still gets past these patterns; behind them, the kernel refuses
-# sudo (no_new_privs, lane.py, on any Linux) and, with Landlock, gh finds no login (its config and
-# tokens are out of reach). On macOS only these patterns stand.
+# way (`bash -c`, an interpreter, `FOO=1 sudo`, `env CI=1 gh`) still gets past these patterns;
+# behind them, the kernel refuses sudo (no_new_privs, lane.py, on any Linux) and, with Landlock,
+# gh finds no login (its config and tokens are out of reach). On macOS only these patterns stand.
 _HARD = ("sudo", "doas", "pkexec", "su", "gh")
-# a wrapper's option forms too: `time -p sudo x` matched only the allow rule `time *` (the
-# 2026-11-16 audit); not `time *` itself, which would refuse `time pytest -k gh`
-_WRAPPERS = ("env", "env *", "xargs", "xargs *", "nohup", "nohup --", "nice", "nice *", "time",
-             "time -p", "time --", "command", "command -p", "command --", "exec", "timeout *",
-             "stdbuf *", "setsid", ASSIGN)
+# A wrapper's own option shapes, before the hard word: `time -p sudo x` matched only the allow
+# rule `time *` (the 2026-11-16 audit). Never a `*` before the hard word: `*` matches spaces too,
+# so `xargs *`, `env *`, `timeout *` and `*=*` refused `xargs grep -l gh`, `env CI=1 rg gh src`,
+# `timeout 300 pytest -k gh` and `pytest --tb=short -k gh`, and as the hard limits come last,
+# nothing Claude or the user allowed could lift them (#442, the audit of 1.8). `?` matches one
+# character (a space too), so each shape starts with the wrapper's literal word or `-` and spans
+# at most three: a count, a duration, a niceness, a buffering mode. A value it can't bound (a
+# variable's) is left to the kernel, as above.
+_WRAPPERS = ("env", "env -i", "env --", "xargs", "xargs -0", "xargs -r", "xargs -0r", "xargs -r0",
+             "xargs --null", "xargs --no-run-if-empty", "xargs -??", "xargs -???", "xargs -? ?",
+             "xargs -I {}", "xargs -I{}", "nohup", "nohup --", "nice", "nice -?", "nice -??",
+             "nice -???", "nice -n ?", "nice -n ??", "nice -n ???", "time", "time -p", "time --",
+             "command", "command -p", "command --", "exec", "timeout ?", "timeout ??",
+             "timeout ???", "stdbuf -??", "stdbuf -?? -??", "stdbuf -?? -?? -??", "setsid")
 
 
 def _denied(commands) -> tuple[str, ...]:
-    return tuple(p for c in commands for p in (c, f"{c} *")) + \
-        tuple(f"{w} {p}" for w in _WRAPPERS for c in commands for p in (c, f"{c} *"))
+    # `sudo *` matches a bare `sudo` too (OpenCode makes a trailing " *" optional): one rule each,
+    # as the rules travel in one environment string (runner.CONFIG_CONTENT_MAX)
+    return tuple(f"{c} *" for c in commands) + \
+        tuple(f"{w} {c} *" for w in _WRAPPERS for c in commands)
 
 
 DENIED_SHELL = _denied(_HARD)
@@ -113,10 +125,18 @@ ALLOWED_COMMANDS = (
     "swift", "swiftc", "kotlin", "kotlinc", "scala", "sbt", "ghc", "cabal", "stack", "elixir",
     "mix", "erl", "perl", "R", "Rscript", "julia",
     "bash", "sh", "zsh", "dash", "xvfb-run", "Xvfb", "sqlite3", "git",
+    # the toolchains the lane makes room for (.pub-cache, hatch, virtualenvs, .platformio,
+    # .conan2) and wb doctor checks, and the common runners and linters: `flutter test` was
+    # refused though Claude chose it as the acceptance command (#514, the audit of 1.90).
+    # `python3.*`, `pip3.*`: a pinned interpreter (`python3.12 -m pytest`)
+    "python3.*", "pip3.*", "pypy3", "pdm", "pipenv", "hatch", "nox", "pixi", "conda", "mamba",
+    "micromamba", "pre-commit", "pyright", "flutter", "dart", "bazel", "bazelisk", "just", "task",
+    "pio", "platformio", "conan", "xcodebuild", "xcrun", "rubocop", "golangci-lint", "shellcheck",
 )
 # A project's own tools and builds, by their usual relative paths (`./x` is allowed already).
 PROJECT_BINS = (".venv/bin/*", "venv/bin/*", "node_modules/.bin/*", "build/*", "target/debug/*",
-                "target/release/*", "bin/*", "out/*", "dist/*", "zig-out/bin/*")
+                "target/release/*", "bin/*", "out/*", "dist/*", "zig-out/bin/*", "vendor/bin/*",
+                "scripts/*", "tools/*")
 # Inside the allowed tools, the steps that change what the project depends on: a new package is
 # Claude's decision (the handbook: no new dependencies), so these ask first even though the tool
 # is allowed. Installing what the project already lists (`npm install`, `npm ci`) needs no ask.
@@ -127,6 +147,11 @@ ASK_FIRST = (
     "bun install *", "bun i *", "cargo add *", "cargo install *", "go install *", "go get *",
     "gem install *", "bundle add *", "composer require *", "deno add *", "deno install *",
     "dotnet add * package *",
+    "pip3.* install *", "python3.* -m pip install *", "pypy3 -m pip install *", "pdm add *",
+    "pipenv install *", "pixi add *", "pixi global install *", "conda install *",
+    "mamba install *", "micromamba install *", "flutter pub add *", "dart pub add *",
+    "dart pub global activate *", "flutter pub global activate *", "pio pkg install *",
+    "platformio pkg install *", "conan install *--requires*",
     # fetch a package and run it
     "npx -y *", "npx --yes *", "npm exec *", "pnpm dlx *", "yarn dlx *", "bunx *", "uvx *",
     # their other spellings (the 2026-11-16 audit); a plain `npx <pkg>` runs only what the
@@ -142,6 +167,9 @@ INSTALL_LISTED = (
     "pip3 install -e .", "python -m pip install -r *", "python3 -m pip install -r *",
     "python -m pip install -e .", "python3 -m pip install -e .", "uv pip install -r *",
     "uv pip install -e .",
+    "pip3.* install -r *", "pip3.* install -e .", "python3.* -m pip install -r *",
+    "python3.* -m pip install -e .", "pipenv install", "pipenv install --dev", "pipenv sync",
+    "pio pkg install", "platformio pkg install",
 )
 # The pip forms above are allowed only when they install into the worktree's own venv, or no
 # environment is active and Landlock bounds pip (python_installs); else they ask first. These,
@@ -155,6 +183,49 @@ def allowed_patterns(task: store.Task) -> list[str]:
     """What this task's agent may run beyond ALLOWED_COMMANDS: the user's standing allowances
     (commands.json `allow`; "*" turns the list off) and what Claude granted this task."""
     return [*commands_conf().get("allow", []), *(grants(task).get("allow") or [])]
+
+
+def _simple_commands(line: str) -> list[str]:
+    """The simple commands of a shell line as OpenCode checks them, each its raw text: split at
+    `&&`, `||`, `;`, `|`, `&` and newlines outside quotes, a subshell's parentheses dropped."""
+    parts, cur, quote, i = [], "", None, 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            quote = None if ch == quote else quote
+            cur += ch
+        elif ch in "'\"":
+            quote, cur = ch, cur + ch
+        elif ch == "\\" and i + 1 < len(line):
+            cur, i = cur + line[i:i + 2], i + 1
+        elif ch in ";|&\n":
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+        i += 1
+    parts.append(cur)
+    return [p.strip().strip("()").strip() for p in parts if p.strip().strip("()").strip()]
+
+
+def test_allowances(test: str | None) -> list[str]:
+    """What `wb start --test` and `wb next --test` grant the task: the acceptance command's own
+    simple commands, as written and as `<their command> *`. The protocol tells the agent to run
+    it; refused (`flutter test`, `just test`, `scripts/test.sh`), it spent an ask and a Claude
+    wake on a command Claude chose, or finished untested (#514, the audit of 1.90). The hard
+    limits come later in the rules, so a grant here never lifts them."""
+    import shlex
+    out = []
+    for cmd in _simple_commands(test or ""):
+        out.append(cmd)
+        try:
+            words = shlex.split(cmd)
+        except ValueError:
+            continue
+        words = [w for w in words if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w)]
+        if words and "*" not in words[0]:
+            out += [f"{words[0]} *", f"{ASSIGN} {words[0]} *"]
+    return list(dict.fromkeys(out))
 
 
 def commands_path() -> Path:
@@ -295,7 +366,7 @@ def shell_rules(task: store.Task) -> list[dict]:
     and the user allowed; the hard limits last, so no allowance lifts them (later rules win)."""
     rules = [{"action": "shell", "resource": "*", "effect": "deny"}]
     rules += [{"action": "shell", "resource": r, "effect": "allow"}
-              for c in ALLOWED_COMMANDS for r in (c, f"{c} *", f"{ASSIGN} {c} *")]
+              for c in ALLOWED_COMMANDS for r in (f"{c} *", f"{ASSIGN} {c} *")]  # `c *` is `c` too
     if experiment(task, "probe"):  # read-only: an outline, one function, a search
         rules += [{"action": "shell", "resource": r, "effect": "allow"}
                   for r in ("probe", "probe *", f"{ASSIGN} probe *")]
@@ -319,9 +390,9 @@ def shell_rules(task: store.Task) -> list[dict]:
 # The agent's lane: its worktree, the temp directory, and the caches and toolchain homes that
 # builds and package managers fill, so a build or test runs without asking (2026-11-16, the user:
 # keep agents in their lane with the least friction). Writes anywhere else are refused by the
-# kernel (lane.py), file tools and the shell's working directory are kept to the lane and the
-# READABLE places by OpenCode's `external_directory` rule, and the agent asks Claude for the rest
-# (`wb allow --path`). Reading through the shell stays free: `cat`, a compiler, an interpreter.
+# kernel (lane.py), file tools and the shell's working directory are kept to the lane, the
+# READABLE places and the installs it runs (read_only, never edited) by OpenCode's
+# `external_directory` rule, and the agent asks Claude for the rest (`wb allow --path`). Reading through the shell stays free: `cat`, a compiler, an interpreter.
 # A toolchain's caches, not the directories on the user's PATH or in their shell's startup: a file
 # the agent plants there runs later outside the lane (the 2026-11-16 audit: ~/.local/lib's user
 # site-packages, whose .pth files every python runs; ~/.cargo/bin; GOPATH holding the repo itself).
@@ -334,13 +405,21 @@ TOOL_HOMES = (".cache", ".cargo", ".rustup", "go/pkg", ".npm", ".bun/install/cac
               ".pnpm-store", ".local/share/pnpm/store", ".gradle", ".m2",
               ".nuget", ".dotnet", ".gem", ".julia", ".cabal", ".stack", ".ghcup", ".platformio",
               ".conan2", ".hex", ".mix", ".sbt", ".ivy2", ".pub-cache", ".konan",
-              ".local/share/hatch", ".local/share/virtualenvs")
+              ".local/share/hatch", ".local/share/virtualenvs",
+              # NuGet's http and plugins caches, Cabal 3.10's store without ~/.cabal, and
+              # Android's debug keystore, its adbkey hidden (SECRETS): each build failed (#437)
+              ".local/share/NuGet", ".local/state/cabal", ".android")
 # where the user moved them: a toolchain follows its variable, not the default path; GOPATH and
 # BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches
 TOOL_HOME_VARS = ("CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE", "GOCACHE", "npm_config_cache",
                   "PIP_CACHE_DIR", "UV_CACHE_DIR", "GRADLE_USER_HOME", "BUN_INSTALL", "DENO_DIR",
                   "MIX_HOME", "HEX_HOME", "PUB_CACHE", "KONAN_DATA_DIR", "HATCH_DATA_DIR",
-                  "WORKON_HOME")
+                  "WORKON_HOME", "CARGO_TARGET_DIR", "NPM_CONFIG_CACHE", "NUGET_PACKAGES")
+# The SDKs a build reads by variable, not from PATH: with only Android's platform-tools on PATH,
+# Gradle couldn't open ~/Android/Sdk/platforms' android.jar, and every build and test failed
+# (#437, the audit of 1.8). Their targets are readable, and so are the SDKs' default places.
+SDK_VARS = ("ANDROID_HOME", "ANDROID_SDK_ROOT", "JAVA_HOME", "FLUTTER_ROOT", "DOTNET_ROOT")
+SDK_DEFAULTS = ("Android/Sdk", "Library/Android/sdk")
 VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
 # inside a toolchain home in the lane, what stays out of it: the programs on the user's PATH and
 # what their shell sources, and the toolchains rustup's proxies run (relative to the home, or to
@@ -403,6 +482,8 @@ def lane_refusal(raw: str) -> str | None:
     real = os.path.realpath(Path(raw).expanduser())
     if real in ("/", os.path.realpath(Path.home())):
         return f"{raw}: not the whole of / or your home; name the directory the task needs"
+    if real in secret_sockets():
+        return None
     for h in secret_paths() | private_paths() | {os.path.realpath(skills.library())}:
         if real == h or _under(real, h):
             return (f"{raw}: in {h}, which holds credentials or workbench's own state and stays "
@@ -537,7 +618,8 @@ def writable(task: store.Task) -> list[str] | None:
     for v in TOOL_HOME_VARS:
         if os.environ.get(v):
             first = os.environ[v].split(os.pathsep)[0]
-            xdg.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
+            if os.path.isabs(first):  # a relative CARGO_TARGET_DIR is the build's own, in the repo
+                xdg.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
     # OpenCode's own directories, made first: the lane writes only what exists, so a first task
     # in a fresh profile failed opening OpenCode's log before any model request (#340, the audit
     # of 1.4). One that can't be made is named in runner.log, the place a failed round points to.
@@ -552,6 +634,7 @@ def writable(task: store.Task) -> list[str] | None:
                   f"its first run fails without it", file=sys.stderr)
     places = [tempfile.gettempdir(), *TEMP_ROOTS, *DEV_NODES, *gpu_nodes(task), "/proc",
               *(home / h for h in TOOL_HOMES + OPENCODE_HOMES), *(x for x in xdg if x),
+              *flutter_caches(),
               *(Path(p).expanduser() for p in extra)]
     whole = {"/", os.path.realpath(home)}  # a GOPATH=~ must not hand over the home directory
     temps = {os.path.realpath(t) for t in (tempfile.gettempdir(), *TEMP_ROOTS)}
@@ -598,6 +681,29 @@ def writable(task: store.Task) -> list[str] | None:
     return [p for p in _both(kept) if os.path.exists(p) and os.path.realpath(p) not in whole]
 
 
+def flutter_caches() -> list[str]:
+    """Flutter's `bin/cache`, for $FLUTTER_ROOT and each `flutter` on PATH: every flutter command
+    opens bin/cache/lockfile for writing, so in the lane each one exited (#437, the audit of 1.8).
+    Kept whole, like .dotnet: the Dart SDK the user's flutter runs later lives there."""
+    roots = [os.environ.get("FLUTTER_ROOT")]
+    for d in (os.environ.get("PATH") or "").split(os.pathsep):
+        f = os.path.join(d, "flutter")
+        if os.path.isabs(d) and os.path.isfile(f):
+            roots.append(os.path.dirname(os.path.dirname(os.path.realpath(f))))
+    caches = (os.path.join(r, "bin", "cache") for r in roots if r and os.path.isabs(r))
+    return list(dict.fromkeys(c for c in caches if os.path.isdir(c)))
+
+
+def sdk_roots(hidden: set[str]) -> set[str]:
+    """The SDKs' homes (SDK_VARS, SDK_DEFAULTS) that exist, real paths: never `/`, the home
+    directory or a place holding or inside a secret."""
+    home = os.path.realpath(Path.home())
+    paths = [os.environ.get(v) for v in SDK_VARS] + [str(Path(home) / d) for d in SDK_DEFAULTS]
+    real = {os.path.realpath(p) for p in paths if p and os.path.isabs(p) and os.path.isdir(p)}
+    return {r for r in real if r not in ("/", home)
+            and not any(h == r or _under(h, r) or _under(r, h) for h in hidden)}
+
+
 # the toolchains `wb doctor` checks for snaps
 TOOLCHAINS = ("go", "node", "npm", "npx", "yarn", "pnpm", "dotnet", "java", "cmake", "flutter",
               "dart", "kotlin", "cargo", "rustc", "python3", "opencode")
@@ -641,6 +747,19 @@ SYSTEM_SOCKETS = ("/dev/log", "/run/systemd/journal/socket", "/run/systemd/journ
                   "/var/lib/sss/pipes/nss")
 
 
+def secret_sockets() -> set[str]:
+    """SECRET_SOCKETS under the home that exist as sockets, real paths."""
+    found = set()
+    for n in SECRET_SOCKETS:
+        p = os.path.realpath(Path.home() / n)
+        try:
+            if stat.S_ISSOCK(os.stat(p).st_mode):
+                found.add(p)
+        except OSError:
+            pass
+    return found
+
+
 def unix_paths(task: store.Task) -> list[str]:
     """Where the agent may connect to a UNIX socket made outside its lane (Landlock ABI 9): the
     SYSTEM_SOCKETS there are, and what the user and Claude added (`paths`; `wb allow --path
@@ -648,9 +767,11 @@ def unix_paths(task: store.Task) -> list[str]:
     around secrets like the reads (the 0.90 review: a GPG agent socket under a granted ~/.config
     was in reach)."""
     hidden = _hidden()
+    granted = [Path(r).expanduser() for r in lane_paths(task) if r != "*"]
+    inside = secret_sockets()  # a socket in a secret: connected to, nothing else (no read, write)
     return _both([*(s for s in SYSTEM_SOCKETS if os.path.exists(s)),
-                  *(q for p in (Path(r).expanduser() for r in lane_paths(task) if r != "*")
-                    if os.path.exists(p) for q in _split(str(p), hidden))])
+                  *(str(p) for p in granted if os.path.realpath(p) in inside),
+                  *(q for p in granted if os.path.exists(p) for q in _split(str(p), hidden))])
 
 
 def ask_dir(task: store.Task) -> Path:
@@ -768,7 +889,11 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            ".config/Bitwarden CLI", ".config/doctl", ".config/sops", ".config/age", ".fly",
            ".kaggle", ".oci", ".gemini", ".config/containers/auth.json",
            ".local/share/fish/fish_history", ".var/app", ".config/vivaldi",
-           ".config/microsoft-edge", ".config/opera")
+           ".config/microsoft-edge", ".config/opera", ".android/adbkey")
+# The sockets inside a secret that a grant may still reach, to connect only (unix_paths): Docker
+# Desktop's, under ~/.docker beside the registry logins in config.json, so `wb allow --path` was
+# refused and only turning the lane off let a Testcontainers suite run (#441, the audit of 1.8)
+SECRET_SOCKETS = (".docker/desktop/docker.sock", ".docker/run/docker.sock")
 # where the user moved them (a file, a directory, or a path list)
 SECRET_VARS = ("GNUPGHOME", "PASSWORD_STORE_DIR", "GH_CONFIG_DIR", "DOCKER_CONFIG", "KUBECONFIG",
                "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "CLOUDSDK_CONFIG",
@@ -1089,7 +1214,7 @@ def readable(task: store.Task) -> list[str] | None:
     keep = {os.path.realpath(p) for p in (task.spec.get("repo"), PKG_ROOT, *lane,  # PKG_ROOT:
                                           *lane_paths(task), *siblings(task))  # the git shim,
             if p}                                                              # the ask server
-    keep |= tool_roots(hidden)
+    keep |= tool_roots(hidden) | sdk_roots(hidden)
     # OpenCode's global config where OPENCODE_CONFIG_DIR keeps it, outside the dotfiles: the
     # agent's OpenCode loads it itself (#370, the audit of 1.6)
     if os.environ.get("OPENCODE_CONFIG_DIR"):
@@ -1146,15 +1271,51 @@ def readable(task: store.Task) -> list[str] | None:
     return out
 
 
+def read_only(task: store.Task, lane: list[str]) -> list[str]:
+    """The installs the lane lets the agent read but not write, for its file tools too: the
+    programs it runs (tool_roots: a conda, pyenv or mise env's site-packages) and the toolchains
+    split out of the write lane (NOT_WRITABLE, $RUSTUP_HOME/toolchains: rustup's std sources).
+    `read` on pandas' frame.py got "Permission denied: external_directory", counting toward the
+    six-errors guard, and the only remedy, `wb allow --path`, made the install writable (#521,
+    the audit of 1.90). Also the SDKs (sdk_roots). Never one inside a lane entry, whose own
+    rules say what is done there."""
+    hidden = secret_paths() | private_paths()
+    home = Path.home()
+    split = [home / h for h in NOT_WRITABLE]
+    split += [Path(v) / d for v, d in ((os.environ.get("RUSTUP_HOME"), "toolchains"),
+                                       (os.environ.get("CARGO_HOME"), "bin")) if v]
+    places = tool_roots(hidden) | sdk_roots(hidden) | {
+        os.path.realpath(p) for p in split
+        if os.path.isdir(p) and not any(_under(os.path.realpath(p), h) for h in hidden)}
+    real_lane = {os.path.realpath(p) for p in lane}
+    # one holding a lane entry stays (a Flutter SDK, its bin/cache in the lane: read_only_rules
+    # lets the entry be edited again); one in a lane entry is the lane's
+    return sorted(p for p in places if p not in real_lane and not any(
+        p == q or _under(p, q) for q in real_lane))
+
+
+def read_only_rules(task: store.Task) -> list[dict]:
+    """The file tools may read `read_only` places but never edit there: the kernel refuses the
+    write too, with Landlock; without it (macOS) these rules are what keep the file tools out."""
+    lane = writable(task)
+    if lane is None:
+        return []
+    places = read_only(task, lane)
+    inner = [q for q in lane if any(_under(os.path.realpath(q), p) for p in places)]
+    return [{"action": "edit", "resource": f"{p.rstrip('/')}/*", "effect": "deny"}
+            for p in _both(places)] + \
+        [{"action": "edit", "resource": f"{q.rstrip('/')}/*", "effect": "allow"} for q in _both(inner)]
+
+
 def external_rules(task: store.Task) -> list[dict]:
     """OpenCode's `external_directory` rule: its file tools and the shell's working directory
-    stay in the lane and READABLE, and the skills handed to the task."""
+    stay in the lane, READABLE and the read-only installs, and the skills handed to the task."""
     lane = writable(task)
     if lane is None:  # (explicit: layer's rule for other MCP servers' tools would match it)
         return [{"action": "external_directory", "resource": "*", "effect": "allow"}]
     have = skills.available()
     # and the rounds' prompts, read-only, where a prompt too long for one argument waits
-    places = [*lane, *READABLE, task.dir / "rounds", *siblings(task),
+    places = [*lane, *READABLE, *read_only(task, lane), task.dir / "rounds", *siblings(task),
               *(sibling_link(task.worktree, n) for n in task.spec.get("siblings") or ()),
               *(have[n]["path"] for n in task.status.get("skills") or [] if n in have)]
     rules = [{"action": "external_directory", "resource": "*", "effect": "deny"}]
@@ -1334,6 +1495,7 @@ def layer(task: store.Task) -> dict:
     rules += [{"action": t, "resource": "*", "effect": "deny"} for t in DENIED_TOOLS]
     rules += shell_rules(task)
     rules += external_rules(task)
+    rules += read_only_rules(task)
     rules += [{"action": "edit", "resource": f, "effect": "deny"}
               for f in CLAUDE_FILES + OPENCODE_FILES]
     rules += [{"action": "skill", "resource": n, "effect": "deny"}
