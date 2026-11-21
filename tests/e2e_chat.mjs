@@ -678,6 +678,68 @@ async function run(engine, device) {
       if (messages().filter(m => m.text === 'throttled once').length !== 1) throw new Error('throttled once landed twice')
     } finally { await tc.close() }
   })
+  await check('storage full: a send whose reply trickles in over more than 15 s still clears the box, sent once', async () => {
+    // the review of #935: post() gave the whole reply body 15 s, so a link too slow to carry its
+    // snapshot in that time aborted every reply, and a held message, cleared only by its reply,
+    // stayed in the box for good. A proxy that relays each send's reply a twelfth every 1.5 s
+    let sends = 0
+    const socks = new Set()
+    const proxy = createServer(c => {
+      const up = dial(PORT, '127.0.0.1'), s = { c, up, slow: false, buf: Buffer.alloc(0), pacer: 0 }
+      socks.add(s)
+      c.on('data', d => {
+        if (d.toString('latin1').startsWith('POST /api/send')) { sends++; s.slow = true }
+        up.write(d)
+      })
+      up.on('data', d => {
+        if (!s.slow) return c.write(d)
+        s.buf = Buffer.concat([s.buf, d])
+        if (s.pacer) return
+        const cut = s.buf.indexOf('\r\n\r\n')
+        if (cut < 0) return
+        const length = Number(/content-length:\s*(\d+)/i.exec(s.buf.subarray(0, cut).toString('latin1'))[1])
+        c.write(s.buf.subarray(0, cut + 4)); s.buf = s.buf.subarray(cut + 4)
+        const piece = Math.ceil(length / 12)
+        let left = length
+        s.pacer = setInterval(() => {
+          const n = Math.min(piece, left, s.buf.length)
+          c.write(s.buf.subarray(0, n)); s.buf = s.buf.subarray(n); left -= n
+          if (left <= 0) {
+            clearInterval(s.pacer); s.pacer = 0; s.slow = false
+            if (s.buf.length) c.write(s.buf)
+            s.buf = Buffer.alloc(0)
+            if (s.upClosed) c.end()
+          }
+        }, 1500)
+      })
+      // the server closes after each reply (HTTP/1.0): the client's side stays open until the
+      // trickle has carried it all
+      up.on('error', () => {}).on('close', () => { s.upClosed = true; if (!s.pacer) c.destroy() })
+      c.on('error', () => {}).on('close', () => { clearInterval(s.pacer); up.destroy(); socks.delete(s) })
+    })
+    await new Promise(r => proxy.listen(PORT + 9, '127.0.0.1', r))
+    const p = await ctx.newPage()
+    p.on('pageerror', e => errors.push(String(e)))
+    try {
+      await p.goto(`http://localhost:${PORT + 9}/#token=${token}`)
+      await until(async () => await p.locator('#input').isEditable())
+      await p.evaluate(() => { Storage.prototype.setItem = () => { throw new DOMException('full', 'QuotaExceededError') } })
+      const text = 'held over a slow link'
+      await p.fill('#input', text)
+      await p.click('#send')
+      await until(() => messages().filter(m => m.text === text).length === 1, 10000)
+      await sleep(2000)
+      if ((await p.inputValue('#input')) !== text) throw new Error('the box was cleared before the reply came')
+      await until(async () => (await p.inputValue('#input')) === '', 30000)   // 18 s of reply
+      if (sends !== 1) throw new Error(`sent ${sends} times: the trickling reply was given up`)
+      const n = messages().filter(m => m.text === text).length
+      if (n !== 1) throw new Error(`landed ${n} times`)
+    } finally {
+      await p.close()
+      for (const s of socks) { clearInterval(s.pacer); s.c.destroy(); s.up.destroy() }
+      proxy.close()
+    }
+  })
   await check('a message over 6 h unread says it was not passed to Claude, never Delivered, and sends again', async () => {
     // #536 (the 2026-11-20 audit): the mod skipped it, and the page said "Delivered" for good
     listen(false)

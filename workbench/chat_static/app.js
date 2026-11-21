@@ -20,7 +20,7 @@
   const HIDDEN_GRACE_MS = 60000  // a hidden page keeps its stream this long, then lets go
   const STALE_MS = 20000         // back on screen with nothing heard this long: the line is likely dead
   const AWAY_MS = 3000           // off screen this long: a phone may have let the line die, so dial again
-  const POST_MS = 15000          // a send that hasn't answered by now is tried again
+  const POST_MS = 15000          // a send silent this long (no headers yet, or no more of its reply) is tried again
   const FLOW_MS = 40
 
   const $ = id => document.getElementById(id)
@@ -597,15 +597,33 @@
     location.reload()
     return true
   }
-  async function post(path, body) {  // a POST that gives up after POST_MS, so a dead line can't hold it
-    const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), POST_MS)
+  async function post(path, body) {  // a POST that gives up after POST_MS silent, so a dead line can't hold it
+    const ctrl = new AbortController()
+    let timer = 0
+    const pet = () => { clearTimeout(timer); timer = setTimeout(() => ctrl.abort(), POST_MS) }
+    pet()
     try {
       const r = await fetch(path, { method: 'POST', cache: 'no-store', signal: ctrl.signal,
         headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      // the body is read under the same timer: cleared at the headers, a reply whose body stalled
+      // the body is read under the timer too: cleared at the headers, a reply whose body stalled
       // (a phone changing networks between the two) held flush, and every later send, for as long
-      // as TCP took to give up (#935)
-      const text = await r.text()
+      // as TCP took to give up (#935). But re-armed at each chunk, as an upload's STALL_MS is: one
+      // deadline for the whole body cut off a reply's snapshot on a slow link every time, so a
+      // held message, which only its reply clears, stayed in the box for good (the review of #935)
+      let text = ''
+      if (r.body) {
+        const reader = r.body.getReader(), dec = new TextDecoder()
+        ctrl.signal.addEventListener('abort', () => { reader.cancel().catch(() => {}) }, { once: true })
+        for (;;) {
+          pet()
+          const { value, done } = await reader.read()
+          if (done) break
+          text += dec.decode(value, { stream: true })
+        }
+        // a cancelled read can end as done rather than throw: half a reply is no reply
+        if (ctrl.signal.aborted) throw new DOMException('the reply stalled', 'AbortError')
+        text += dec.decode()
+      } else text = await r.text()
       return { ok: r.ok, status: r.status, headers: r.headers, json: async () => JSON.parse(text) }
     } finally { clearTimeout(timer) }
   }

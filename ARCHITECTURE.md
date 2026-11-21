@@ -6086,8 +6086,11 @@ edit and delete, except 408, 425 and 429 (`transient`, which the uploads share):
 front of the chat saying "later", tried again by itself after its `Retry-After` (`retryAfter`, held
 under 30 s) or the backoff, whichever is longer; it waited for a tap on retry (#936). Each send
 (`post`, the reply's body included: cleared at the headers, a body that stalled held `flush`, and
-every later send, until a reload, #935) gives up after `POST_MS` 15 s and is tried again, so a
-dead line can't hold the outbox; `flush` clears its `flushing` flag and reschedules in a
+every later send, until a reload, #935) gives up after `POST_MS` 15 s of silence, before the
+headers or between two chunks of the body (the timer re-armed at each, as an upload's
+`STALL_MS`: one deadline for the whole body cut off every reply's snapshot on a link too slow to
+carry it in 15 s, so a held message, cleared only by its reply, stayed in the box for good), and
+is tried again, so a dead line can't hold the outbox; `flush` clears its `flushing` flag and reschedules in a
 `finally`. Staying connected: a 40 s watchdog (`DEAD_MS`; pings count) aborts a silent
 stream, and that counts as a failure, backing off like any other (reconnecting at once kept the
 count at one, so a server that took the call and never answered showed "Reconnecting…" for ever;
