@@ -2043,6 +2043,61 @@ test('the live view runs wb top only while the Stats tab is on screen with Live 
   await ui.unmount()
 })
 
+test('a failing wb stats or wb top is tried again after a while, not at every poll, and says why', async ($, on) => {
+  // #553: a failed full-history read ran again at every 1.5 s poll while a task ran, and the tab
+  // said "Reading…" forever; a wb top that ended at once was restarted every 30 s, its stderr dropped
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  task(files, 'fix-it', 'running')                                        // polls every 1.5 s
+  const pane = fakeTasks(on, files, ['fix-it'], true, [], false)
+  let stats = 0, tops = 0
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'stats' && e.argv[2] === '--json') {
+      stats += 1
+      return { value: { exitCode: 1, stdout: '', stderr: 'Traceback (most recent call last):\nValueError: a bad row\n' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('process.spawn', async function* (_: any, e: any) {
+    if (e.argv[1] !== 'top') {                                           // wb events, as fakeTasks's
+      yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+      await new Promise(() => {})
+    }
+    tops += 1
+    yield { stream: 'stderr', text: "wb: invalid choice: 'top'\n" }        // an older wb on PATH
+    return { value: { code: 2, signal: null } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(29_000)
+  expect(stats).toBe(1)                                                   // not twenty
+  let texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts).toContain('History unavailable: ValueError: a bad row (wb stats --json)')
+  expect(tops).toBe(1)
+  expect(texts.some(t => t.includes("can't be read"))).toBe(false)        // once may be a blip
+  await clock.advance(2_000)
+  expect(tops).toBe(2)
+  texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts).toContain("This machine can't be read: wb: invalid choice: 'top' (wb top --json)")
+  await clock.advance(30_000)                                             // 61 s in
+  expect(tops).toBe(2)                                                    // its wait doubled
+  expect(stats).toBe(2)                                                   // 60 s after the first
+  await clock.advance(117_000)
+  expect(stats).toBe(2)                                                   // and then 120 s
+  await clock.advance(3_000)
+  expect(stats).toBe(3)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
+test('the history keeps its last feed when a read fails, and says it is not updated', () => {
+  expect(statsLines(null, 'timed out')).toEqual([{ label: '', text: 'History unavailable: timed out (wb stats --json)' }])
+  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1 } } }, 'timed out'))
+    .toEqual([{ label: '', text: 'Not updated: timed out (wb stats --json)' }, { label: 'This week', text: '1 task · 1 landed' }])
+})
+
 test('a card wb top knows but has no reading for says so, not nothing (#547)', () => {
   const text = (gpus: any[]) => liveLines({ snap: { ts: 0, every: 2, gpus, running: [], rack: [], queue: [] }, busy: {} } as any)
     .map(r => r.map(p => p.text).join(''))

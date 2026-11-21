@@ -146,7 +146,11 @@ const statsFeed = atom({ plugin: 'workbench', key: 'stats' } as const, { key: ''
 const topNow = atom({ plugin: 'workbench', key: 'top' } as const, { snap: null, busy: {} } as WbTop,
   { shape: 'top-1' })
 const BUSY_KEEP = 60 // busy % samples kept per GPU for the sparkline: two minutes at 2 s
-const TOP_RETRY_MS = 30_000 // a `wb top` that ended by itself (wb missing, failing) is tried again this long after
+const TOP_RETRY_MS = 30_000 // a `wb top` that ended by itself (wb missing, failing) is tried again this long after, doubling
+// A `wb stats --json` that failed or timed out is tried again after STATS_RETRY_MS, doubling to
+// RETRY_MAX_MS; each poll ran it again, a full-history read a core kept busy on a slow host (#553)
+const STATS_RETRY_MS = 60_000
+const RETRY_MAX_MS = 10 * 60_000
 const SETTINGS_HINT = 'Click a row to see its options, then click one; or Tab to it and press Enter. A change applies at once.'
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
 const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web message
@@ -548,19 +552,29 @@ async function refreshStats($: any, force = false) {
   const key = (await Promise.all(['results.jsonl', 'stats.json', 'optimize.json', 'bench/runs.jsonl',
     'speed.json', mem.savingsFile || '-'].map(stamp))).join(' ')
   const had = await read($, statsFeed)
-  const dayOver = typeof had.feed?.until === 'number' && (await $.clock.now()) / 1000 >= had.feed.until
+  const now = await $.clock.now()
+  const dayOver = typeof had.feed?.until === 'number' && now / 1000 >= had.feed.until
   if (!force && had.feed && key === had.key && mem.statsLoaded && !dayOver) return
+  if (!force && now < mem.statsRetryAt) return // it failed: not at every poll (#553)
   mem.statsReading = true
+  // wb missing, failing or slow: the last feed stays, the reason is said, and the next try waits
+  const failed = (why: string) => {
+    mem.statsBackoff = Math.min(mem.statsBackoff ? mem.statsBackoff * 2 : STATS_RETRY_MS, RETRY_MAX_MS)
+    mem.statsRetryAt = now + mem.statsBackoff
+    mem.statsWhy = why
+    $.ui.invalidate('ui.render')
+  }
   try {
     const r = await $.process.run([mem.wb, 'stats', '--json'], { timeoutMs: 30_000 })
-    if (r.exitCode !== 0) return
+    if (r.exitCode !== 0) return failed(brief(r.stderr || r.stdout) || `exit ${r.exitCode}`)
     const feed = JSON.parse(r.stdout)
-    if (feed && typeof feed === 'object') {
-      await update($, statsFeed, () => ({ key, feed }))
-      mem.statsLoaded = true
-    }
-  } catch {
-    // wb missing or slow: the last feed stays; tried again at the next poll
+    if (!feed || typeof feed !== 'object') return failed('not a feed')
+    mem.statsWhy = ''
+    mem.statsBackoff = mem.statsRetryAt = 0
+    await update($, statsFeed, () => ({ key, feed }))
+    mem.statsLoaded = true
+  } catch (err) {
+    failed(brief(String(err)))
   } finally {
     mem.statsReading = false
   }
@@ -594,9 +608,10 @@ async function runTop($: any) {
   const child = $.process.spawn({ argv: [mem.wb, 'top', '--json'] })
   mem.top = child
   await update($, topNow, () => ({ snap: null, busy: {} })) // the sparkline starts as the tab opens
-  let buf = ''
+  let buf = '', err = '', ticked = false
   try {
     for await (const { stream, text } of child) {
+      if (stream === 'stderr') err = (err + text).slice(-2000) // why it ended, should it (#553)
       if (stream !== 'stdout') continue
       buf += text
       let cut
@@ -606,6 +621,9 @@ async function runTop($: any) {
         let snap: Row
         try { snap = JSON.parse(line) } catch { continue }
         if (!snap || typeof snap !== 'object') continue
+        ticked = true
+        mem.topFails = mem.topBackoff = 0
+        mem.topWhy = ''
         await update($, topNow, prev => {
           const busy: Record<string, number[]> = {}
           for (const g of (snap.gpus ?? []) as Row[])
@@ -615,12 +633,16 @@ async function runTop($: any) {
       }
       if (!(await topWanted($))) break // off screen now: leaving the loop ends the child
     }
-  } catch {
-    // it could not start, or its stream closed: tried again after a while
+  } catch (e) {
+    err ||= String(e) // it could not start, or its stream closed: tried again after a while
   }
-  if (mem.top === child) { // it ended by itself, not by stopTop: not again at once
+  if (mem.top === child) { // it ended by itself, not by stopTop: not again at once, and why
     mem.top = null
-    mem.topRetryAt = (await $.clock.now()) + TOP_RETRY_MS
+    if (!ticked) mem.topFails += 1
+    mem.topWhy = brief(err) || 'it ended'
+    mem.topBackoff = Math.min(mem.topBackoff ? mem.topBackoff * 2 : TOP_RETRY_MS, RETRY_MAX_MS)
+    mem.topRetryAt = (await $.clock.now()) + mem.topBackoff
+    $.ui.invalidate('ui.render')
   }
 }
 
@@ -651,9 +673,10 @@ const RACK_COLOR: Record<string, string> = { resident: 'success', cpu: 'success'
 // The live view as lines of coloured parts: each GPU (memory and busy as bars, watts, busy's
 // sparkline), what runs now, the rack (every model: where it is, its speeds, its load time, the
 // task on it) and the queue. Nothing is said for what a platform can't tell.
-export function liveLines(t: WbTop): { color?: string; dim?: boolean; bold?: boolean; text: string }[][] {
+export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; bold?: boolean; text: string }[][] {
   const s = t.snap
-  if (!s) return [[{ dim: true, text: 'Reading this machine…' }]]
+  // `why`: what `wb top` said as it ended, once it has failed twice: "Reading…" was all ever said (#553)
+  if (!s) return [[{ dim: true, text: why ? `This machine can't be read: ${why} (wb top --json)` : 'Reading this machine…' }]]
   const out: { color?: string; dim?: boolean; bold?: boolean; text: string }[][] = []
   for (const g of (s.gpus ?? []) as Row[]) {
     const row: { color?: string; dim?: boolean; bold?: boolean; text: string }[] = [
@@ -745,8 +768,10 @@ const GUARD_WORDS: Record<string, string> = {
 // The Stats tab's history as lines (a label in bold, then the text): what the feed holds, each
 // section left out when it has nothing, estimates said as such. A run of days that ended isn't
 // mentioned, only the best (the plan's rule: show what went right, never nag).
-export function statsLines(f: Record<string, any> | null): { label: string; text: string }[] {
-  if (!f) return [{ label: '', text: 'Reading the history…' }]
+export function statsLines(f: Record<string, any> | null, why = ''): { label: string; text: string }[] {
+  // `why`: the last `wb stats --json` failed, said (#553): with no feed yet "Reading…" never ended
+  if (!f) return [{ label: '', text: why ? `History unavailable: ${why} (wb stats --json)` : 'Reading the history…' }]
+  if (why) return [{ label: '', text: `Not updated: ${why} (wb stats --json)` }, ...statsLines(f)]
   // only when the feed has no section at all: with no judged task, a period of spec-gap
   // discards (#569), the optimized windows and the bench results still have something to say (#549)
   if (!f.tasks && !Object.keys(f).some(k => !['ts', 'until', 'settings', 'tasks'].includes(k)))
@@ -909,6 +934,12 @@ const mem = {
   liveAt: 0, // when its transcript was last read
   statsReading: false, // a `wb stats --json` under way (refreshStats)
   statsLoaded: false, // the history was read in this load: the atom's feed may be an older load's
+  statsWhy: '', // why the last `wb stats --json` failed ('' when it didn't): said on the tab (#553)
+  statsRetryAt: 0, // not again before then, unless the tab is pressed
+  statsBackoff: 0, // the wait after the last failure, doubling
+  topWhy: '', // why the last `wb top` ended by itself: its stderr's last line
+  topFails: 0, // `wb top` runs in a row that ended with no tick: said under Now from the second
+  topBackoff: 0, // the wait before the next try, doubling
   top: null as any, // the `wb top --json` child while the live view runs (syncTop)
   topRetryAt: 0, // not before then, after one ended by itself
   price: null as number | null, // the electricity price wb says is set (`wb savings --json`)
@@ -2226,7 +2257,7 @@ export const register: Register = (on, options) => {
     if (view.tab === 'stats') {
       const { feed } = await read($, statsFeed)
       const cols = Math.max(30, Number(((e.props ?? {}) as Row).bodyColumns ?? e.viewport?.columns ?? 60))
-      const now = (await statsSettings($)).live ? liveLines(await read($, topNow)) : []
+      const now = (await statsSettings($)).live ? liveLines(await read($, topNow), mem.topFails >= 2 ? mem.topWhy : '') : []
       return (
         <Box flexDirection="column">
           {now.length ? (
@@ -2237,7 +2268,7 @@ export const register: Register = (on, options) => {
               ))}
             </Box>
           ) : null}
-          {statsLines(feed).map(({ label, text }) => (
+          {statsLines(feed, mem.statsWhy).map(({ label, text }) => (
             <Box flexDirection="column" marginBottom={label ? 0 : 1}>
               {label
                 ? wrapWords(`${label}: ${text}`, cols).map((l, i) => i === 0 && l.startsWith(label)

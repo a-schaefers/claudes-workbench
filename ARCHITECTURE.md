@@ -2039,7 +2039,9 @@ nothing until a surface attaches.
   minimize, a bring-back and a Stats pick; it ends (`stopTop`, `return()` on the stream) the
   moment any of those stops holding, and its own loop checks again at each line, so a pane put
   away by the engine ends it within a tick. One that ended by itself is tried again after
-  `TOP_RETRY_MS` 30 s. Live view off: no child, no **Now**. The newest tick is the `top` atom
+  `TOP_RETRY_MS` 30 s, doubling to `RETRY_MAX_MS` 10 min until a tick comes; from its second run in
+  a row with no tick, **Now** says why (the last line of its stderr: "This machine can't be read:
+  …"), where "Reading this machine…" was all it ever said (#553). Live view off: no child, no **Now**. The newest tick is the `top` atom
   (`top-1`). Below it is the history (#406): `wb stats --json` (*The Stats feed*) drawn as one line a
   section by `statsLines`, `Label: text` with the label bold: this week and all time (the score,
   the saving or the cost (estimate), tasks, landed, the spec-gap discards in the saving, the
@@ -2059,7 +2061,11 @@ nothing until a surface attaches.
   with the first two alone, `wb optimize`, a bench run or a price left the tab stale for good,
   #549), when the feed's `until` (its next local
   midnight) has passed, and after a Stats setting is picked; and once in each load
-  (`mem.statsLoaded`), since the atom outlives a reload. Without the clock, an ended streak, last
+  (`mem.statsLoaded`), since the atom outlives a reload. A read that fails or times out keeps the
+  last feed and is tried again after `STATS_RETRY_MS` 60 s, doubling to `RETRY_MAX_MS` 10 min
+  (a press of the tab tries at once), and the tab says why (`statsLines`' `why`: "History
+  unavailable: …" with no feed, "Not updated: …" above one): each 1.5 s poll ran it again, a full
+  history read that kept a core busy on the hosts too slow for it (#553). Without the clock, an ended streak, last
   week's numbers and a 30-day chart ending days ago stayed until a task closed (#575).
   No timer: hidden, it costs nothing; shown, a stat per poll. The feed is the `stats` atom
   (`stats-1`).
