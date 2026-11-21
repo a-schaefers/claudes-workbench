@@ -728,16 +728,6 @@ def wait_up(port: int, pid: int, limit: float = START_WAIT) -> bool:
     return False
 
 
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
 def start(port: int) -> int:
     """`wb chat serve` detached, its output in chat/serve.log, its pid in chat/serve.pid: for a
     machine without the systemd unit, so turning the chat on is enough to reach it."""
@@ -746,16 +736,16 @@ def start(port: int) -> int:
         proc = subprocess.Popen([sys.executable, "-X", "utf8", str(root / "bin" / "wb"), "chat", "serve",
                                  "--port", str(port)], cwd=root, stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=log, start_new_session=True)  # outlives wb
-    store.write_json(chat_dir() / "serve.pid", {"pid": proc.pid, "port": port})
+    store.write_json(chat_dir() / "serve.pid", {"pid": proc.pid, "port": port, "start": _started(proc.pid)})
     return proc.pid
 
 
 def stop_started() -> bool:
     """Stop the server `start` made, if it still runs; never one wb didn't start (systemd's)."""
     from . import models  # only here: chat is imported by the server, which needs none of it
-    pid = (store.read_json(chat_dir() / "serve.pid", None) or {}).get("pid")
+    pid = (st := store.read_json(chat_dir() / "serve.pid", None) or {}).get("pid")
     (chat_dir() / "serve.pid").unlink(missing_ok=True)
-    if not pid or not _alive(pid) or not models.runs(int(pid), "chat", "serve"):
+    if not pid or not _alive(pid, st.get("start")) or not models.runs(int(pid), "chat", "serve"):
         return False
     try:
         os.kill(int(pid), 15)
@@ -784,14 +774,20 @@ def wait_answer(ask_id: str, timeout: float) -> str | None:
         w.close()
 
 
-def _alive(pid) -> bool:
+def _started(pid: int) -> str | None:
+    from . import models
+    return models._started(pid)
+
+
+def _alive(pid, start=None) -> bool:
+    """models._alive: a pid of another user's (EPERM) is gone, and one that started at another
+    time than recorded was recycled. This said both were alive: a root daemon under listener.json's
+    old pid read as a session listening (#532)."""
+    from . import models  # only here: chat is imported by the server, which needs little of it
     try:
-        os.kill(int(pid), 0)
-        return True
-    except (ProcessLookupError, ValueError, TypeError):
+        return models._alive(int(pid), start if isinstance(start, str) else None)
+    except (ValueError, TypeError):
         return False
-    except PermissionError:
-        return True
 
 
 def listener() -> dict | None:
@@ -801,7 +797,7 @@ def listener() -> dict | None:
     if not st:
         return None
     if st.get("pid"):
-        return st if _alive(st["pid"]) else None
+        return st if _alive(st["pid"], st.get("start")) else None
     return st if store.now() - st.get("ts", 0) <= LISTENING_FOR else None
 
 
@@ -1197,7 +1193,8 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
     # the port it runs on, for `wb chat url` and the pane's link: they asked without one and got
     # the default, wrong for a server on the free port the CLI advises (#349, the audit of 1.4)
     store.write_json(chat_dir() / "port.json", {"port": servers[0].server_address[1] if servers
-                                                else port, "pid": os.getpid()})
+                                                else port, "pid": os.getpid(),
+                                                "start": _started(os.getpid())})
     for srv in servers[1:]:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
     say(f"web chat on {', '.join(f'{s.server_address[0]}:{port}' for s in servers)}"
@@ -1252,7 +1249,7 @@ def port() -> int:
     """The port the running server recorded (chat/port.json), else PORT: so a command or the
     pane that names no port finds a server started on another (#349, the audit of 1.4)."""
     st = store.read_json(chat_dir() / "port.json", None) or {}
-    if isinstance(st.get("port"), int) and st.get("pid") and _alive(st["pid"]):
+    if isinstance(st.get("port"), int) and st.get("pid") and _alive(st["pid"], st.get("start")):
         return st["port"]
     return PORT
 

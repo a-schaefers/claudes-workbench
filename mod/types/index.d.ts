@@ -20,6 +20,8 @@ export type WbTask = {
   session: string
   /** the Claude Code process it ran in (0 when unknown): once gone, the directory rule adopts it */
   claude_pid: number
+  /** when that process started (task.json `claude_start`, '' when unknown): a recycled pid isn't it */
+  claude_start: string
   /** task.json's backlog ('' for none): while one of this session's is open, the user stays away */
   backlog: string
   /** the user's unspent allowance for Claude to edit it (`wb coding allow`), as the pane says it;

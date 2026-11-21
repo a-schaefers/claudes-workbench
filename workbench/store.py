@@ -30,6 +30,7 @@ Every file and format: ARCHITECTURE.md, *Files and formats*.
 """
 import errno
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -422,8 +423,16 @@ SCRATCH_AGE = 3600
 
 
 def scratch(prefix: str) -> str:
-    """``prefix`` (one of SCRATCH_PREFIXES) with this process's pid, for tempfile."""
-    return f"{prefix}{os.getpid()}-"
+    """``prefix`` (one of SCRATCH_PREFIXES) with this process's pid and its start (`.<tag>`,
+    models.start_tag: a pid recycled since isn't the maker, #532), for tempfile."""
+    pid = os.getpid()
+    return f"{prefix}{pid}{'.' + tag if (tag := _start_tag(pid)) else ''}-"
+
+
+@functools.cache  # by pid: a forked child is another process
+def _start_tag(pid: int) -> str:
+    from . import models  # only here: models imports store
+    return models.start_tag(pid)
 
 
 def all_tasks(archived: bool = False):

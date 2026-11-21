@@ -367,6 +367,41 @@ test('a new Claude Code process in the project adopts the tasks of one that is g
   expect(kills.length - asked).toBeLessThanOrEqual(1)          // a live one, not at every poll
 })
 
+test('a task whose Claude Code process\'s pid now belongs to another process is adopted all the same', async ($, on) => {
+  // #532: the crashed session's pid was live again under another program, and `kill -0` alone
+  // said the old session still ran: the new `claude` in the project never adopted its tasks
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'recycled', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old',
+    claude_pid: 4242, claude_start: '1000' })
+  task(files, 'same', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-other',
+    claude_pid: 4343, claude_start: '2000' })
+  task(files, 'macos', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-mac',
+    claude_pid: 4444, claude_start: 'Thu Nov 20 09:00:00 2026' })
+  const names = ['recycled', 'same', 'macos']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names)
+  // a stat line whose 22nd field is the start: the comm may hold spaces and parentheses
+  const stat = (start: string) => `9 (we (ird) x) S 1 ${'0 '.repeat(17)}${start} 0 0`
+  files['/proc/4242/stat'] = stat('5000')                     // started after the task's process
+  files['/proc/4343/stat'] = stat('2000')                     // the very process
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', (_: any, e: any) => {
+    if (e.argv.includes('lstart=')) {                          // no /proc for 4444: ps says
+      return { value: { exitCode: 0, stdout: ' Fri Nov 21  10:00:00 2026\n', stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }  // kill -0: every pid is live
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-recycled'))).toHaveLength(1)  // the pid lives, not its process
+  expect(woken.filter(t => t.includes('REPORT-macos'))).toHaveLength(1)     // ps's start differs too
+  expect(woken.join('\n')).not.toContain('REPORT-same')                    // the same process: still its own
+})
+
 test('on a file system that ignores case, a task under ~/Repos is a session in ~/repos\'s', async ($, on) => {
   // the 2026-11-19 audit (finding 28): by the raw strings it was no one's
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
@@ -1122,10 +1157,16 @@ test('the web chat reaches Claude only in /workbench mode, with a receipt, and o
   await clock.advance(2000)
   expect(asked.length).toBe(1)
 
+  // #532: its pid is live, but under a process that started after the claim: nobody listens there
+  files['/proc/777/stat'] = `777 (sleep) S 1 ${'0 '.repeat(17)}5000 0 0`
+  files['/wb/chat/listener.json'] = JSON.stringify({ session: 'other', cwd: '/x', pid: 777, start: '1000' })
+  await clock.advance(31_000)
+  expect(asked.at(-1)).toBe('[web chat] hi')                     // this session took the chat
+
   // /workbench-quit ends workbench mode, and with it the listening
   await $.command.run({ command: 'workbench-quit', args: '' })
   await clock.advance(20_000)
-  expect(asked.length).toBe(1)
+  expect(asked.length).toBe(2)
 })
 
 test('a web message wb holds open is delivered past the files tails, and an old one is named', async ($, on) => {

@@ -87,7 +87,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-5',
+  shape: 'tasks-6',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -891,8 +891,8 @@ const mem = {
   cwd: '', // the session's directory, resolved: which old tasks are this session's (mine)
   home: '', // the home directory, resolved: a session there claims no task by directory
   ids: new Set<string>(), // the `sessions` atom: which tasks are this session's (mine)
-  deadPids: new Set<number>(), // Claude Code processes tasks recorded that are gone: final (mine)
-  pidAt: new Map<number, number>(), // when a live one was last checked (noteClaude)
+  deadPids: new Set<string>(), // Claude Code processes tasks recorded that are gone (pid@start): final (mine)
+  pidAt: new Map<string, number>(), // when a live one was last checked (noteClaude)
   person: false, // someone can be at this session (not a bare `claude -p` or SDK run)
   started: false, // the ears and timers run
   busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
@@ -917,6 +917,7 @@ const mem = {
   chatUrlAt: 0, // when the web chat's link was last looked up
   savingsAt: 0, // when the week's saving was last read
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
+  eventsStart: '', // its start, as its hello says: with the pid, listener.json's proof of life (#532)
   earsOk: false, // `wb events` has said hello in this load: wb runs
   gone: new Set<string>(), // task directories closed past KEEP_CLOSED_MS: final, never read again
   again: false, // something changed while a poll ran: run another after it
@@ -955,27 +956,30 @@ const near = (t: { repo?: string; cwd?: string }) => {
   return (!!t.cwd && within(mem.cwd, t.cwd)) ||
     (!!t.repo && (within(mem.cwd, t.repo) || within(t.repo, mem.cwd)))
 }
-const mine = (t: { session?: string; repo?: string; cwd?: string; claude_pid?: number }) => {
+const mine = (t: { session?: string; repo?: string; cwd?: string; claude_pid?: number; claude_start?: string }) => {
   if (t.session && mem.ids.size) {
-    return mem.ids.has(t.session) || (mem.deadPids.has(Number(t.claude_pid ?? 0)) && near(t))
+    return mem.ids.has(t.session) || (mem.deadPids.has(pidKey(t)) && near(t))
   }
   if (!mem.cwd || (!t.cwd && !t.repo)) return true
   return near(t)
 }
 
 // Whether another session's task's Claude Code process is gone (mem.deadPids, for `mine`): `kill
-// -0`, a live one at most every PID_CHECK_MS. A gone one stays gone; one wb can't ask about
-// (kill failed to run) stays unknown, so its task stays the other session's.
+// -0` and its start (task.json `claude_start`: a recycled pid is another process, #532), a live
+// one at most every PID_CHECK_MS. A gone one stays gone; one wb can't ask about (kill failed to
+// run) stays unknown, so its task stays the other session's. Keyed by pid and start.
 const PID_CHECK_MS = 30_000
-async function noteClaude($: any, t: { session?: string; claude_pid?: number }, now: number): Promise<void> {
+const pidKey = (t: { claude_pid?: number; claude_start?: string }) =>
+  `${Number(t.claude_pid ?? 0)}@${t.claude_start ?? ''}`
+async function noteClaude($: any, t: { session?: string; claude_pid?: number; claude_start?: string },
+  now: number): Promise<void> {
   const pid = Number(t.claude_pid ?? 0)
-  if (!pid || !t.session || mem.ids.has(t.session) || mem.deadPids.has(pid)) return
-  if (now - (mem.pidAt.get(pid) ?? -Infinity) < PID_CHECK_MS) return
-  mem.pidAt.set(pid, now)
-  try {
-    const r = await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5000 })
-    if (r.exitCode !== 0) mem.deadPids.add(pid)
-  } catch {}
+  const key = pidKey(t)
+  if (!pid || !t.session || mem.ids.has(t.session) || mem.deadPids.has(key)) return
+  if (now - (mem.pidAt.get(key) ?? -Infinity) < PID_CHECK_MS) return
+  mem.pidAt.set(key, now)
+  const live = await alive($, pid, t.claude_start)
+  if (live === false) mem.deadPids.add(key)
 }
 
 // This session's id joins the ids this process has had: at the start and at each poll, so a
@@ -1083,7 +1087,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
       tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
       repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), session: String(sp.session ?? ''),
-      claude_pid: Number(sp.claude_pid ?? 0),
+      claude_pid: Number(sp.claude_pid ?? 0), claude_start: String(sp.claude_start ?? ''),
       backlog: String(sp.backlog ?? ''),
       allowed: allowedLine((await readJson($, `${base}/coding.json`)).allowed),
     })
@@ -1251,6 +1255,7 @@ async function ears($: any) {
           try { ev = JSON.parse(line) } catch { continue }
           if (ev.hello) {
             mem.eventsPid = Number(ev.hello)
+            mem.eventsStart = typeof ev.start === 'string' ? ev.start : '' // listener.json's start (#532)
             mem.earsOk = hello = true
             wait = 2000
           }
@@ -1261,6 +1266,7 @@ async function ears($: any) {
       why = brief(String(err)) // the child could not start or its stream closed: start another below
     }
     mem.eventsPid = 0
+    mem.eventsStart = ''
     if (!mem.earsOk) {
       warnOnce($, 'ears', `can't run \`${mem.wb} events\` (${why}): the pane runs on the task ` +
         `files alone. Put wb on Claude Code's PATH or set WB_BIN; wb doctor`)
@@ -1494,13 +1500,34 @@ async function sendQueued($: any, text: string) {
   warnOnce($, `queued:${text.slice(0, 40)}`, `a turn for Claude was dropped (${r.drop}); trying again in a minute`)
 }
 
-// Whether a process lives: `kill -0`, since macOS has no /proc.
-async function alive($: any, pid: number): Promise<boolean> {
+// When a process started, as wb's models._started says it: /proc/<pid>/stat's 22nd field, else
+// `ps -o lstart=` (macOS has no /proc); '' when neither says.
+async function startOf($: any, pid: number): Promise<string> {
   try {
-    return (await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5000 })).exitCode === 0
+    const stat = String(await $.fs.read(`/proc/${pid}/stat`))
+    const field = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/)[19]
+    if (field) return field
+  } catch {}
+  try {
+    const r = await $.process.run(['env', 'LC_ALL=C', 'ps', '-o', 'lstart=', '-p', String(pid)], { timeoutMs: 5000 })
+    if (r.exitCode === 0) return r.stdout.trim().split(/\s+/).join(' ')
+  } catch {}
+  return ''
+}
+
+// Whether a process lives (`kill -0`) and, given the start recorded beside its pid, is still the
+// one that wrote it: a recycled pid is another process (#532), as wb's models._alive judges. Only
+// two starts of one kind compare (both /proc's tick count, or both ps's date). null: unknown
+// (kill failed to run).
+async function alive($: any, pid: number, start?: string): Promise<boolean | null> {
+  try {
+    if ((await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5000 })).exitCode !== 0) return false
   } catch {
-    return false
+    return null
   }
+  if (!start) return true
+  const now = await startOf($, pid)
+  return !now || /^\d+$/.test(now) !== /^\d+$/.test(start) || now === start
 }
 
 // The web chat's switch, as the user left it (chat/switch.json, written by `wb chat on|off`): turned
@@ -1530,10 +1557,11 @@ async function listen($: any, now: number) {
   if (!mem.eventsPid) return // the chat knows a listener by its live `wb events` process
   const claim = await readJson($, `${dir}/listener.json`)
   const theirs = claim.session && claim.session !== st.key
-  if (theirs && (claim.pid ? await alive($, Number(claim.pid))
+  if (theirs && (claim.pid ? !!(await alive($, Number(claim.pid), claim.start ? String(claim.start) : ''))
     : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens
   if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
-  const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid, busy: mem.busy })
+  const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid,
+    ...(mem.eventsStart ? { start: mem.eventsStart } : {}), busy: mem.busy })
   if (body !== mem.listenerBody || theirs || claim.session !== st.key) { // only on change: a write is an event
     mem.listenerBody = body
     await $.fs.write(`${dir}/listener.json`, body)
