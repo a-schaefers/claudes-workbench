@@ -1598,14 +1598,19 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   repo at `~/.config`), its `siblings` (read-only: *Setting the worktree up*) and its git common directory (`repo_dirs`: outside the repo when it is a
   linked worktree, where git failed in the lane before the 0.90 review; read-only), workbench itself (even inside Claude's directory, the marketplace
   install), the lane, and the programs the agent runs (`tool_roots`: each PATH directory, the
-  prefix of one under the home (its parent when it is a `bin`, so `~/miniconda3` or `~/flutter`)
+  prefix of one under the home (its parent when it is a `bin` or conda's `condabin`, so
+  `~/miniconda3` or `~/flutter`)
   or under an `ONLY_KEPT` root short of a user's home or a whole drive (Linuxbrew's
   `/home/linuxbrew/.linuxbrew`; not `/home/<x>`, `/mnt/<drive>`, `/mnt/c/Users/<x>` or
   `/media/<user>/<drive>`, which give the PATH directory alone: the 0.90 review found Linuxbrew's
   `../Cellar` hidden), the install a link in the home's PATH directories or in a `bin` one points
   into (only those are listed, each directory once: an lstat per entry, and the 0.90 review found
   every PATH directory under an `ONLY_KEPT` root listed on each lane drawn, WSL2's System32
-  among them), and the Python running workbench; never `/`, the home directory or a parent of a
+  among them), the Python running workbench, and conda's and mamba's installs by their
+  variables (`CONDA_VARS`: the prefix of `CONDA_EXE`, `CONDA_PYTHON_EXE` and `MAMBA_EXE`, and
+  `MAMBA_ROOT_PREFIX` itself: with the base env not activated only `condabin` was on PATH, and
+  `conda run -n proj pytest` couldn't read the interpreter or `envs/`, #827, the second
+  2026-11-21 audit); never `/`, the home directory or a parent of a
   secret), the SDKs a build finds by variable rather than PATH (`sdk_roots`: `SDK_VARS`,
   `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `JAVA_HOME`, `FLUTTER_ROOT`, `DOTNET_ROOT`, and
   `SDK_DEFAULTS`, Android Studio's `~/Android/Sdk` and macOS's `~/Library/Android/sdk`: with only

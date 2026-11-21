@@ -1358,6 +1358,10 @@ def secret_paths() -> set[str]:
     return {r for r in map(os.path.realpath, paths) if r not in whole}
 
 
+# where conda, mamba and micromamba say their install is, with or without an env activated
+CONDA_VARS = ("CONDA_EXE", "CONDA_PYTHON_EXE", "MAMBA_EXE", "MAMBA_ROOT_PREFIX")
+
+
 def tool_roots(hidden: set[str]) -> set[str]:
     """The installs the agent's programs run from: each PATH directory's prefix (its parent when
     it is a `bin`), the targets of the links in the home's PATH directories, and the Python
@@ -1365,9 +1369,12 @@ def tool_roots(hidden: set[str]) -> set[str]:
     non-dot home directory (~/miniconda3, ~/flutter, ~/apps) failed in the lane (the 2026-11-16
     audit). The same under an ONLY_KEPT root, short of a user's home or a whole drive: Linuxbrew's
     bin links into ../Cellar, which the lane hid (the 0.90 review). Never `/`, the home directory
-    or anything holding a secret: a prefix is kept whole; never a Windows drive on WSL."""
+    or anything holding a secret: a prefix is kept whole; never a Windows drive on WSL. And
+    conda's and mamba's installs by their variables (CONDA_VARS), a `condabin` taken like a
+    `bin`: with the base env not activated only condabin is on PATH, and `conda run` couldn't
+    read the interpreter or the envs beside it (#827)."""
     home = os.path.realpath(Path.home())
-    prefix = lambda d: os.path.dirname(d) if os.path.basename(d) == "bin" else d  # noqa: E731
+    prefix = lambda d: os.path.dirname(d) if os.path.basename(d) in ("bin", "condabin") else d  # noqa: E731
     roots = {os.path.realpath(r) for r in ONLY_KEPT}
     drives = windows_drives()
 
@@ -1415,6 +1422,12 @@ def tool_roots(hidden: set[str]) -> set[str]:
     found |= {prefix(os.path.dirname(os.path.realpath(sys.executable)))}
     found |= {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix,
                                             os.environ.get("CONDA_PREFIX")) if p}
+    for v in CONDA_VARS:
+        if os.path.isabs(p := os.environ.get(v) or ""):  # a program's install, or a root itself
+            real = os.path.realpath(p)
+            root = prefix(os.path.dirname(real)) if v.endswith("_EXE") else real
+            if os.path.isdir(root) and not on_windows(root, drives):
+                found.add(root)
     return {r for r in found if r not in ("/", home)
             and not any(h == r or _under(h, r) for h in hidden)}
 

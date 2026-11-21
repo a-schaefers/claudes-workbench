@@ -7659,6 +7659,33 @@ class Lane(Base):
         self.assertNotIn(str(big), listed)
         self.assertEqual(sorted(listed), sorted([str(brew), str(home / ".local" / "bin")]))
 
+    def test_a_conda_without_its_base_env_activated_is_readable_in_the_lane(self):
+        # #827 (the second 2026-11-21 audit): with auto_activate_base off only condabin is on
+        # PATH, and the lane read nothing else of ~/miniconda3: `conda run -n proj pytest` failed
+        # on its interpreter and envs; micromamba's root under ~/micromamba likewise
+        home = self.fake_home()
+        conda, mamba = home / "miniconda3", home / "micromamba"
+        for d in (conda / "condabin", conda / "bin", conda / "envs" / "proj" / "bin",
+                  mamba / "envs" / "app"):
+            d.mkdir(parents=True)
+        for f in (conda / "condabin" / "conda", conda / "bin" / "conda", conda / "bin" / "python"):
+            f.write_text("#!/bin/sh\n")
+        env = {"PATH": f"{conda / 'condabin'}{os.pathsep}/usr/bin{os.pathsep}/bin",
+               "CONDA_EXE": str(conda / "bin" / "conda"),
+               "CONDA_PYTHON_EXE": str(conda / "bin" / "python"), "MAMBA_ROOT_PREFIX": str(mamba)}
+        with mock.patch.dict(os.environ, env):
+            roots = context.tool_roots(set())
+            self.assertLessEqual({str(conda), str(mamba)}, roots)
+            del os.environ["CONDA_EXE"], os.environ["CONDA_PYTHON_EXE"]
+            self.assertIn(str(conda), context.tool_roots(set()))     # condabin, like a bin
+            self.assertNotIn(str(home), context.tool_roots(set()))
+            if lane.abi():
+                os.environ["CONDA_EXE"] = str(conda / "bin" / "conda")
+                task = self.bare_task("t-827", self.repo)
+                (conda / "envs" / "proj" / "bin" / "x").write_text("")
+                self.assertEqual(self.reads_in_lane(task, [conda / "envs" / "proj" / "bin" / "x"]),
+                                 ["read"])
+
     def test_a_grant_that_holds_the_repo_grants_the_places_beside_it(self):
         # the 0.90 review: `wb allow --path ~/work` with the repo at ~/work/api said "allowed"
         # and granted nothing, so the agent asked again
