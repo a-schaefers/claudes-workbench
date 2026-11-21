@@ -8749,6 +8749,35 @@ class Cleanup(Base):
         self.assertNotIn("t-slow", g("worktree", "list"))
         self.assertFalse(task.worktree.exists())
 
+    def test_accept_and_discard_keep_another_worktree_on_a_drive_unmounted_for_now(self):
+        # #641 (Codex's audit of 1.90.6): removing a task's worktree ran a repository-wide `git
+        # worktree prune`, which dropped an unrelated worktree whose drive was unmounted; back,
+        # its `git status` exited 128 and its staged index was gone
+        g = lambda *a, cwd=self.repo: subprocess.run(["git", "-C", str(cwd), *a],  # noqa
+                                                     capture_output=True, text=True)
+        other, away = Path(self.tmp.name) / "drive" / "other", Path(self.tmp.name) / "unmounted"
+        other.parent.mkdir()
+        self.assertEqual(g("worktree", "add", "-q", "-b", "mine", str(other)).returncode, 0)
+        (other / "staged.txt").write_text("staged only\n")
+        g("add", "staged.txt", cwd=other)
+        other.parent.rename(away)                          # the drive goes
+        self.start("t-acc", "ok")
+        wait_phase("t-acc", {"review"})
+        run_wb("accept", "t-acc", "-m", "feat: answer", "--merge")
+        self.start("t-dis", "ok")
+        wait_phase("t-dis", {"review"})
+        run_wb("discard", "t-dis")
+        with mock.patch.object(gitops, "_merge_tree", return_value=None):  # the trial merge's own
+            gitops._overwritten(self.repo, "mine")                         # worktree too
+        listed = g("worktree", "list", "--porcelain").stdout
+        self.assertNotIn("t-acc", listed)                  # the tasks' own registrations go
+        self.assertNotIn("t-dis", listed)
+        self.assertNotIn("wb-merge-", listed)
+        away.rename(other.parent)                          # and comes back
+        st = g("status", "--porcelain", cwd=other)
+        self.assertEqual(st.returncode, 0, st.stderr)
+        self.assertIn("A  staged.txt", st.stdout)
+
     def test_wb_gc_deletes_branches_merged_before_and_keeps_the_rest(self):
         self.start("t-old", "ok")
         wait_phase("t-old", {"review"})

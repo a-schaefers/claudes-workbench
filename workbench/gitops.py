@@ -289,7 +289,7 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
             git(dest, *NO_HOOKS, "read-tree", "-mu", "HEAD")
     except GitError:
         git(repo, *NO_HOOKS, "worktree", "remove", "--force", str(dest), check=False)
-        git(repo, "worktree", "prune", check=False)
+        drop_registration(repo, dest)
         delete_branch(repo, task, at=commit)  # this call made it: the --list above found none
         raise
     if rec := _record(dest):  # before any agent has run there: see _pinned
@@ -1090,8 +1090,32 @@ def remove_worktree(repo: Path, worktree: Path) -> str:
             _rmtree(worktree)
             warn = f"git couldn't remove the worktree ({e}); it was deleted"
     if Path(repo).is_dir():
-        git(repo, "worktree", "prune", check=False)
+        drop_registration(repo, worktree)
     return warn
+
+
+def drop_registration(repo: Path, worktree: Path) -> None:
+    """Forget ``worktree``'s registration in ``repo`` once the directory is gone (its admin dir,
+    `<common git dir>/worktrees/<id>`, whose `gitdir` names it), unless it is locked. Only that
+    one: a repository-wide `git worktree prune` after each task's removal dropped an unrelated
+    worktree on a drive unmounted for the moment, whose `git status` then exited 128 and whose
+    staged index was gone (#641, Codex's audit of 1.90.6)."""
+    worktree = Path(worktree)
+    if worktree.exists() or worktree.is_symlink():
+        return  # still there: git's to remove
+    common = common_dir(repo)
+    admin = common / "worktrees" if common else None
+    if not admin or not admin.is_dir():
+        return
+    at = {os.path.abspath(worktree), os.path.realpath(worktree)}
+    for d in admin.iterdir():
+        try:
+            named = (d / "gitdir").read_text().strip()
+        except OSError:
+            continue
+        top = os.path.dirname(named)
+        if {os.path.abspath(top), os.path.realpath(top)} & at and not (d / "locked").exists():
+            shutil.rmtree(d, ignore_errors=True)
 
 
 def _unlock_cut_short(repo: Path, worktree: Path) -> None:
@@ -1550,7 +1574,7 @@ def _trial_merge(repo: Path, branch: str) -> bytes:
     finally:
         _run(repo, ("worktree", "remove", "--force", wt), check=False)
         shutil.rmtree(scratch, ignore_errors=True)
-        _run(repo, ("worktree", "prune"), check=False)
+        drop_registration(repo, Path(wt))  # its own only (#641)
 
 
 def contains(repo: Path, ref: str, commit: str) -> bool:

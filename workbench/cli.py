@@ -2210,8 +2210,7 @@ def _drop_start(task: store.Task, info: dict) -> None:
     repo = Path(info.get("repo") or "/nonexistent")
     if repo.is_dir():
         if info.get("worktree"):  # unlocked first when git left it "initializing" (#376, #529)
-            gitops.remove_worktree(repo, Path(info["worktree"]))
-        gitops.git(repo, "worktree", "prune", check=False)
+            gitops.remove_worktree(repo, Path(info["worktree"]))  # its registration only (#641)
         if info.get("branch") == gitops.branch_name(task.name) and info.get("branch_at"):
             gitops.delete_branch(repo, task.name, at=info["branch_at"])
     gitops._rmtree(task.dir)
