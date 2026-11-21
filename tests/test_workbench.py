@@ -4506,6 +4506,27 @@ class Steering(Base):
         self.assertEqual(mine(mono / "pkg-a" / "src"), ["t-here", "t-pkg", "t-whole"])
         self.assertEqual(mine(mono), ["t-here", "t-pkg", "t-whole"])
 
+    def test_a_bare_wb_wait_takes_only_the_calling_sessions_notices(self):
+        # #696: a bare `wb wait` in one session acknowledged another session's review, so the
+        # owner's mod never woke for it
+        def task(name, **spec):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now(), **spec})
+            t.set_status(phase="review", round=1)
+            return t
+        other = Path(self.tmp.name) / "b"
+        theirs = task("t-theirs", repo=str(other), cwd=str(other), session="sess-b")
+        ours = task("t-ours", repo=str(self.repo), cwd=str(self.repo), session="sess-a")
+        theirs.notify("review", "REPORT-theirs")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-a"
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("wait", "--timeout", "1")                     # theirs only: nothing to take
+        self.assertEqual(cli._acked(theirs), 0.0)                # left for its own session
+        ours.notify("review", "REPORT-ours")
+        self.assertIn("REPORT-ours", run_wb("wait", "--timeout", "1"))
+        self.assertIn("REPORT-theirs", run_wb("wait", "--all-sessions", "--timeout", "1"))
+
     def test_takeover_stops_the_agent_and_hands_over_the_worktree(self):
         self.start("t-take", "slow", "--test", TEST_CMD)
         self.wait_session("t-take")

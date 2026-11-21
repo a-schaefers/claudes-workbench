@@ -1385,20 +1385,27 @@ def cmd_wait(a):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
     watcher = Watcher(store.home(), *([need(a.name).dir] if a.name else []))
+    if a.name and (a.repo or a.session or a.all_sessions):
+        die("--repo, --session and --all-sessions go with a bare wb wait")
+    where, sessions = (None, None) if a.name else _caller(a)
     while True:
         for t in [need(a.name)] if a.name else store.all_tasks():
             if t.status.get("phase") in LIVE:
                 reap(t)  # a dead runner's task becomes failed, with the notice this wait delivers
         rows = store.notices()
+        # a bare wait takes only the caller's tasks (_caller): one in another session's terminal
+        # acknowledged a notice its owner's mod then never woke for (#696)
+        theirs = set() if a.name or not (where or sessions) else {
+            t.name for t in _scope(store.all_tasks(), where, sessions)[1]}
         for row in reversed(rows):
-            if a.name and row["task"] != a.name:
+            if a.name and row["task"] != a.name or row["task"] in theirs:
                 continue
             task = store.Task(row["task"])
             if not task.exists or _stale(row, task.status, _oldest_open(task, rows)
                                          if row["kind"] == "question" else None):
                 continue  # its directory removed by hand, or no longer true
-            if row["ts"] > _acked(task):
-                _write_ack(task, row["ts"])
+            # taken under the ack lock: two waits (or a wait and the mod) both printed it (#696)
+            if row["ts"] > _acked(task) and claim_ack(task, row["ts"]):
                 print(f"[{row['kind']}] {row['task']}\n{row.get('text', '')}")
                 return
         if a.name:
@@ -1429,8 +1436,10 @@ def cmd_wait(a):
                 if phase != "asking":  # a question always has its notice, which carries its id
                     print(f"[{phase}] {a.name} (no notice: {st.get('last') or phase})")
                     return
-        elif not any(t.status.get("phase") not in store.CLOSED for t in store.all_tasks()):
-            die("no open tasks to wait for (wb status --all)", 2)
+        elif not any(t.status.get("phase") not in store.CLOSED and t.name not in theirs
+                     for t in store.all_tasks()):
+            die("no open tasks to wait for (wb status --all)"
+                + (" in this session (--all-sessions waits on every session's)" if theirs else ""), 2)
         if deadline and time.time() > deadline:
             die("timed out waiting", 2)
         # woken by the change itself; the minute bound re-checks the runner is alive
@@ -4846,6 +4855,10 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_answer)
     s = sub.add_parser("wait", help="block until a task needs Claude; prints its report")
     s.add_argument("name", nargs="?"); s.add_argument("--timeout", type=int, default=0)
+    s.add_argument("--repo", metavar="DIR", help="unnamed: only the tasks of a session started in DIR")
+    s.add_argument("--session", action="append", metavar="ID",
+                   help="unnamed: only the tasks of Claude Code session ID (repeatable)")
+    s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
     s.set_defaults(f=cmd_wait)
     s = sub.add_parser("watch", help="follow a task live: the conversation between Claude and "
                        "the agent, every tool call and test")
