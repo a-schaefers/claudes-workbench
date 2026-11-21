@@ -5,14 +5,17 @@ from statistics import median
 from . import gitops, skills, spend, stats, store
 
 
-def step(task: store.Task, landed: bool, since: str = "HEAD") -> dict:
+def step(task: store.Task, landed: bool, since: str = "HEAD", gaps=None) -> dict:
     """The step closing now (committed by wb next or accept, or dropped): its size and how it
     went. A session compacted (now, or before a fresh one took over) or filled by reading alone,
     an agent stuck, or review rounds the agent caused (`reviews` less the `spec_rounds` Claude
     marked as the spec's) say it was too much; Claude taking over says nothing of its size; a
     handover to a fresh session is the runner's normal way through a big step, counted, not held
     against it. The router learns each model's slice from these (router.slice). ``since``: where
-    the step began (HEAD~1 once its commit has landed: a retried wb next)."""
+    the step began (HEAD~1 once its commit has landed: a retried wb next). ``gaps``: the
+    --spec-gap the closing command is about to record (cli._spec_gaps), counted for this round:
+    wb next and wb accept measure the step first, and a gap given there was held against the
+    agent's slice as its own review round (#904)."""
     st = task.status
     first = st.get("step_round") or 1
     try:
@@ -30,7 +33,8 @@ def step(task: store.Task, landed: bool, since: str = "HEAD") -> dict:
         compacted = False
     compacted |= any(e.get("kind") == "fresh" and e.get("compacted") for e in evs)  # an earlier session
     reviews = st.get("reviews", 0)  # wb next starts each step's count afresh
-    gaps = {g.get("round") for g in st.get("spec_gaps") or [] if (g.get("round") or 0) >= first}
+    gaps = {g.get("round") for g in st.get("spec_gaps") or [] if (g.get("round") or 0) >= first} \
+        | ({st.get("round", 1)} if gaps else set())  # a retry's, recorded already: one round
     return {**size, "window": st.get("window"), "landed": landed, "compacted": compacted,
             "handovers": sum(e.get("kind") == "fresh" and bool(e.get("overflow")) for e in evs),
             "read_full": any(e.get("kind") == "reading_full" for e in evs),  # before any change

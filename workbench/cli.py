@@ -1355,7 +1355,7 @@ def cmd_next(a):
     if not nxt.strip():
         die("the next step's spec is empty")
     commit = _step_landed(task, step)
-    measured = results.step(task, landed=True, since="HEAD~1" if commit else "HEAD")
+    measured = results.step(task, landed=True, since="HEAD~1" if commit else "HEAD", gaps=a.spec_gap)
     if not commit:
         try:
             with _settle_proposals(task, a.take_claude_md):
@@ -2527,7 +2527,7 @@ def cmd_accept(a):
         # a retry after an accept killed between its commit and `closing` (ENOSPC, a kill):
         # measured since HEAD, its own commit, the step read as 0 files and 0 lines and the
         # savings card priced the task at nothing (#879, Claude's audit of 1.90.24)
-        measured = results.step(task, landed=True,
+        measured = results.step(task, landed=True, gaps=a.spec_gap,  # recorded below (#904)
                                 since="HEAD~1" if _accept_landed(task) else "HEAD")
         try:
             commit = _landed(task)

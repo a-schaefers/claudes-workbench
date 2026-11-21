@@ -4506,6 +4506,26 @@ class Context(Base):
         self.assertEqual(log.count("feat: the answer"), 1)
         self.assertIn("question.txt", self.runs()[1]["prompt"])
 
+    def test_a_spec_gap_given_on_wb_next_or_accept_counts_in_the_step_it_closes(self):
+        # #904 (the third audit of 2026-11-21): next and accept measured the step before they
+        # recorded --spec-gap, so the step the slice learns from held the spec's round against
+        # the agent: reviews 1, spec_rounds 0, and BAD_REVIEWS reached sooner
+        self.start("t-sg", "ok", "--test", TEST_CMD)
+        wait_phase("t-sg", {"review"})
+        run_wb("feedback", "t-sg", "--text", "1. Reject a blank row.")
+        wait_phase("t-sg", {"review"})
+        with mock.patch("sys.stdin", io.StringIO("Now also write question.txt.\n")):
+            run_wb("next", "t-sg", "--spec", "-", "-m", "feat: step one",
+                   "--spec-gap", "didn't say empty input")
+        st = wait_phase("t-sg", {"review"})
+        self.assertEqual((st["step_sizes"][0]["reviews"], st["step_sizes"][0]["spec_rounds"]), (1, 1))
+        run_wb("feedback", "t-sg", "--text", "1. Name it question.txt.")
+        wait_phase("t-sg", {"review"})
+        run_wb("accept", "t-sg", "-m", "feat: both", "--spec-gap", "didn't name the file")
+        row = store.results()[-1]
+        self.assertEqual([(s["reviews"], s["spec_rounds"]) for s in row["steps"]], [(1, 1), (1, 1)])
+        self.assertEqual(row["spec_rounds"], 2)
+
     def test_a_wb_next_interrupted_while_it_reads_the_session_sends_the_step_once(self):
         # #191 (the 2026-11-19 audit): the step's counters were written before the session export,
         # so an interrupt there left step 2 "under review" with no runner, a retry died on
