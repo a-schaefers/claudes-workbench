@@ -12358,6 +12358,25 @@ class Projects(Base):
                 run_wb("init", str(d))
         self.assertFalse((home / ".git").exists())
 
+    def test_init_makes_a_repo_of_its_own_inside_a_home_kept_as_a_git_repo(self):
+        # #684 (Claude's audit of main, reproduced): with dotfiles kept as `git init` in ~, every
+        # new project read as "inside the git repo /home/u", wb try with it, and the advice to
+        # init it "in its own directory" was what the user had done
+        self.identity()
+        home = Path(self.tmp.name) / "dothome"
+        home.mkdir()
+        self.git(home, "init", "-q")
+        os.environ["HOME"] = str(home)
+        d = home / "projects" / "new"
+        self.assertIn("git repo on", run_wb("init", str(d)))
+        self.assertEqual(Path(self.git(d, "rev-parse", "--show-toplevel")).resolve(), d.resolve())
+        self.assertEqual(self.git(d, "log", "--format=%s"), "Initial commit")
+        err = io.StringIO()                                   # inside a real project: still refused
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("init", str(self.repo / "sub"))
+        self.assertIn(f"is inside the git repo {self.repo.resolve()}", err.getvalue())
+        self.assertIn("outside that repo", err.getvalue())
+
     def test_a_gitignored_claude_md_is_not_linked_and_does_not_stop_a_start(self):
         # the audit: init committed an AGENTS.md link to an ignored file, dangling in every clone,
         # and wb start sent Claude off to commit a file the user keeps out of git

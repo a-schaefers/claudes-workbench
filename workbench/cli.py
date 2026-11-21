@@ -3514,8 +3514,13 @@ def cmd_init(a):
         inside = ""
     except gitops.GitError as e:  # a repo git refuses (dubious ownership) is no place to git init
         die(f"{d}: {str(e).split(': ', 1)[-1]}")
+    if inside and Path(inside) != d and Path.home().resolve().is_relative_to(inside):
+        # a home kept as a git repo (dotfiles, `git init` in ~) is no project: a repo of its own
+        # nested in it is. Refused, wb try could never run there and the advice didn't apply (#684)
+        inside = ""
     if inside and Path(inside) != d:
-        die(f"{d} is inside the git repo {inside}; init the project in its own directory")
+        die(f"{d} is inside the git repo {inside}; init the project in a directory of its own, "
+            "outside that repo")
     if not _identity(d):
         die("git has no user.name/user.email: the user's identity signs the commits "
             "(git config --global user.name/user.email)")
