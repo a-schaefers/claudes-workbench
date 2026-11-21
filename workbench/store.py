@@ -188,10 +188,41 @@ def write_json(path: Path, data) -> None:
         # file written under UTF-8 failed to read back (the 2026-11-16 audit)
         with open(tmp, "x", encoding="utf-8") as fh:
             fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            _synced(fh)
         os.replace(tmp, path)  # readers (woken by inotify on the rename) never see half a file
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _synced(fh) -> None:
+    """The file's data on the disk before a rename puts it in place: renamed unsynced, a power
+    loss on XFS (RHEL's default) or ext4 without auto_da_alloc can leave task.json or
+    status.json empty, read as {} (#475, the audit of 1.8)."""
+    fh.flush()
+    os.fsync(fh.fileno())
+
+
+class Damaged(KeyError, RuntimeError):
+    """A key missing from a task's task.json: a KeyError to the code that reads it, a message to
+    wb's caller (main prints a RuntimeError's)."""
+
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
+class Record(dict):
+    """task.json's contents: a key it lacks says the file is damaged, not a bare KeyError
+    (#475)."""
+
+    def __init__(self, data=None, task: str = ""):
+        super().__init__(data if isinstance(data, dict) else {})
+        self.task = task
+
+    def __missing__(self, key):
+        raise Damaged(f"task {self.task}'s task.json is damaged (it has no {key!r}: a write a "
+                      f"crash or power loss cut short?); its work is in "
+                      f"{task_dir(self.task) / 'worktree'}")
 
 
 def writable_target(path: Path, change: str = "") -> Path:
@@ -222,6 +253,7 @@ def write_through(path: Path, data, change: str = "") -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            _synced(fh)
         os.chmod(tmp, mode)
         os.replace(tmp, target)
     except BaseException:
@@ -407,7 +439,7 @@ class Task:
 
     @property
     def spec(self) -> dict:
-        return read_json(self.dir / "task.json", {})
+        return Record(read_json(self.dir / "task.json", {}), self.name)
 
     @property
     def status(self) -> dict:

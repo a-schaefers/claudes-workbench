@@ -5215,7 +5215,12 @@ same place (a relative `WB_HOME` once had wb write the task under its cwd and th
 runs from the package's directory, look for it there: the 2026-11-16 audit; a relative
 `OPENCODE_CONFIG` had `wb start` pick a model the runner then called unknown: #328, the audit of
 1.4). `write_json` writes `.<name>.<pid>.<random>.tmp` beside the file (created exclusively, so two threads never share one: the 2026-11-19 audit) and renames it
-(no fsync), replacing a symlink with a plain file, which is right for the state directory. The
+after an fsync (`store._synced`, `write_through` too: renamed unsynced, a power loss on XFS or
+ext4 without `auto_da_alloc` could leave `task.json` or `status.json` empty, #475, the audit of
+1.8), replacing a symlink with a plain file, which is right for the state directory. `Task.spec`
+is a `store.Record`: a key `task.json` lacks raises `store.Damaged` (a `KeyError` to the code
+reading it, a `RuntimeError` to `cli.main`), "task <t>'s task.json is damaged (it has no
+'model'…)", and the runner fails the task with that line (`_load_failed`), not a crash. The
 user's own config files take `write_through` instead: `writable_target` follows a symlink to its
 target (refused, saying to edit it in its source, when that isn't writable: a Nix store), the
 temporary file goes beside the target, created 0600, and gets the target's mode (0600 for a new

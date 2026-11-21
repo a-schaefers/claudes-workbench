@@ -7908,6 +7908,32 @@ class Routing(Base):
 
 
 class Cleanup(Base):
+    def test_state_files_reach_the_disk_before_they_replace_the_old_ones(self):
+        # #475 (the audit of 1.8): a rename without an fsync can leave status.json or task.json
+        # empty after a power loss on XFS or ext4 without auto_da_alloc
+        calls = []
+        real_sync, real_replace = os.fsync, os.replace
+        with (mock.patch("os.fsync", lambda fd: (calls.append("fsync"), real_sync(fd))),
+              mock.patch("os.replace", lambda a, b: (calls.append("replace"), real_replace(a, b)))):
+            store.write_json(Path(self.tmp.name) / "s.json", {"a": 1})
+            store.write_through(Path(self.tmp.name) / "c.json", {"a": 1})
+        self.assertEqual(calls, ["fsync", "replace"] * 2)
+
+    def test_a_task_json_emptied_by_a_power_loss_fails_the_task_saying_so(self):
+        # #475: read as {}, task.spec["model"] raised a bare KeyError, and the runner died
+        # without a word inside its own failure report
+        self.start("t-dmg", "ok")
+        wait_phase("t-dmg", {"review"})
+        task = store.Task("t-dmg")
+        (task.dir / "task.json").write_text("")
+        with self.assertRaises(KeyError) as e:  # what the code reading it catches still
+            task.spec["model"]
+        self.assertIn("task t-dmg's task.json is damaged (it has no 'model'", str(e.exception))
+        run_wb("feedback", "t-dmg", "--message", str(self.spec))
+        st = wait_phase("t-dmg", {"failed"})
+        self.assertTrue(st["last"].startswith("task t-dmg's task.json is damaged"), st["last"])
+        self.assertNotIn("the runner crashed", store.notices()[-1]["text"])  # a line, no traceback
+
     """What history leaves behind (the 2026-11-19 audit, finding 18): merged branches, rules,
     runtime directories, old closed tasks and old notices, and the chat read from its end."""
 

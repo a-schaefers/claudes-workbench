@@ -2077,6 +2077,9 @@ def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
 
 
 def _load_failed(task: store.Task, e: Exception) -> None:
+    if isinstance(e, store.Damaged):  # no model to name: task.json lost its contents (#475)
+        task.set_status(phase="failed", last=str(e))
+        return task.notify("failed", str(e))
     from .results import ran  # results imports this module
     never = not ran(task)
     task.set_status(phase="failed", last=f"model: {e}", infra="model",
