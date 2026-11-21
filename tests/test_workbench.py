@@ -6074,6 +6074,32 @@ class SlowFirstToken(Base):
         self.assertGreater(b["round"], router.ROUND_DEFAULT_S)
 
 
+    def test_a_round_left_silent_by_a_dead_server_records_no_read_speed(self):
+        # #862 (the third 2026-11-21 audit): the server died before the first token, the round
+        # went silent for 900 s, and drive recorded ~12 tokens/s before the revive saw the server
+        # down: the model's next rounds and tasks waited an hour of silence for a crash
+        from workbench import models, router
+        self.start("t-dead", "ok")
+        wait_phase("t-dead", {"review"})
+        task = store.Task("t-dead")
+        m = models.resolve(task.spec["model"])
+        (task.round_dir(1) / "prompt.md").write_text("x" * 48_000)
+        silent = {"answered": False, "waited": 900, "guard": "silence"}
+        with mock.patch.object(runner, "_down", return_value=True):
+            self.assertIsNone(runner.read_bound(task, 1, silent, m))
+        with mock.patch.object(runner, "_down", return_value=False), \
+                mock.patch.object(runner, "_stopped", return_value=True):   # wb's own, not running
+            self.assertIsNone(runner.read_bound(task, 1, silent, m))
+        refused = {**silent, "retries": ["Unable to connect. Is the computer able to access the url?"]}
+        self.assertIsNone(runner.read_bound(task, 1, refused, m))   # it came back before the check
+        self.assertEqual(router.speed(m.id), {})
+        with mock.patch.object(runner, "_down", return_value=False), \
+                mock.patch.object(runner, "_stopped", return_value=False):  # up, and slow: learned
+            slow = {**silent, "retries": ["Timed out waiting for response headers"]}
+            self.assertTrue(runner.read_bound(task, 1, slow, m))
+        self.assertIn("read", router.speed(m.id))
+
+
 class AgentContext(Base):
     def test_claude_instructions_reach_the_agent(self):
         from workbench import context, runner

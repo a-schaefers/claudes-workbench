@@ -1272,7 +1272,11 @@ the prompt it was sent (the round's `prompt.md` and `instructions.md` and the la
 instruction files at 4 characters a token, plus `OPENCODE_PROMPT_TOKENS`, 3000, for OpenCode's own
 system prompt and tools) over the seconds it waited, the most it can have read per second, guessed
 low so the budgets come out long. Without it a first request that never finished left no
-`firstToken`, speed.json stayed empty, and the next task got the same 900 s (#491).
+`firstToken`, speed.json stayed empty, and the next task got the same 900 s (#491). No bound when
+the model's server is down or stopped as the round ends (`_down`, `_stopped`), or when a retry
+OpenCode logged was anything but a timeout (a refused connection, a 503 while loading): a server
+that died before the first token read as ~12 tokens/s, and the model's later rounds and tasks
+waited an hour of silence for the next crash (#862).
 
 **Prompt text other code depends on.** Each prompt opens with a head that something else matches
 by prefix; rewording one silently changes those:

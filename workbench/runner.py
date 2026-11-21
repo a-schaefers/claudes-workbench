@@ -2620,15 +2620,22 @@ BOUND_MIN_S = 120
 OPENCODE_PROMPT_TOKENS = 3000
 
 
-def read_bound(task: store.Task, n: int, rnd: dict) -> int | None:
+def read_bound(task: store.Task, n: int, rnd: dict, m: models.Model | None = None) -> int | None:
     """Record round ``n``'s read speed bound (tokens/s) when it ended before the model's first
     output, after BOUND_MIN_S or more, by the silence or round limit or OpenCode giving up; and
     return it; else None. Not after a nudge or Claude's interruption: a model thinking silently
-    behind a server that sent its headers at once would read as a slow reader."""
+    behind a server that sent its headers at once would read as a slow reader. Nor when the
+    server (model ``m``'s) is down or stopped now, or OpenCode's retries say it refused or failed
+    a request (anything but a timeout): a server that died before the first token read as ~12
+    tokens/s, and the model's next rounds and tasks waited an hour of silence (#862)."""
     from . import router
     waited = float(rnd.get("waited") or 0)
     if rnd.get("answered") or rnd.get("interrupted") or waited < BOUND_MIN_S \
             or rnd.get("guard") not in (None, "silence", "round"):
+        return None
+    if any("timed out" not in str(t).lower() for t in rnd.get("retries") or ()):
+        return None
+    if m is not None and (_down(m) or _stopped(m)):
         return None
     try:
         layer = json.loads((context.rules_dir(task) / "opencode.json").read_text())
@@ -2861,7 +2868,7 @@ def drive(task: store.Task) -> None:
             finally:  # before the lease is released: the GPU's next task must not meet our agent
                 _end_agent(task)
             measure_speed(task, began)
-            if (bound := read_bound(task, n, rnd)) and rnd["guard"] == "silence":
+            if (bound := read_bound(task, n, rnd, m)) and rnd["guard"] == "silence":
                 from . import router
                 rnd["stuck"] += (f" (it read at most ~{bound} tokens/s here: this task's next "
                                  f"round and a new task on this model now wait "
