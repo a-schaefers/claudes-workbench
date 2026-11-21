@@ -1776,7 +1776,11 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `SYSTEM_SOCKETS` that exist, the socket files alone, which hold nothing of the user's: the log
   (`/dev/log`, `/run/systemd/journal/socket` and `stdout`) and name and user lookups (resolved's
   `io.systemd.Resolve`, userdb's `io.systemd.Multiplexer`, `/run/nscd/socket`, sssd's
-  `pipes/nss`), so `logger` and `resolvectl` work, not the system bus; and the
+  `pipes/nss`, and since #913, the third 2026-11-21 audit, avahi's `/run/avahi-daemon/socket`,
+  `/run/nslcd/socket` and winbind's `pipe` under `/run/samba/winbindd` or
+  `/var/run/samba/winbindd`: without them a `.local` model server, which nsswitch resolves only
+  through avahi, passed the runner's probes and failed every request in the lane, and LDAP or AD
+  users had no `getpwuid()`), so `logger` and `resolvectl` work, not the system bus; and the
   `commands.json` and grant `paths`, split around secrets and workbench's own files as the reads
   and writes are, so `wb allow --path /run/postgresql` reaches a test database; and a granted
   `SECRET_SOCKETS` file, Docker Desktop's `~/.docker/desktop/docker.sock` (macOS's

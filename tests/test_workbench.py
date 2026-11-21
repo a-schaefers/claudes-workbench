@@ -7994,6 +7994,19 @@ class Lane(Base):
         got = dict(zip(files, self.reads_in_lane(task, files.values(), (unix,))))
         self.assertEqual(got, {"gh": "refused", "token": "refused", "app": "read"})
 
+    def test_the_avahi_nslcd_and_winbind_lookup_sockets_are_in_reach_of_the_lane(self):
+        # #913 (the third 2026-11-21 audit): on Landlock ABI 9 a `.local` model server, which
+        # nsswitch resolves only through avahi, passed the runner's probes and failed every
+        # request in the lane, and LDAP or AD users (nslcd, winbind) had no getpwuid()
+        nss = ("/run/avahi-daemon/socket", "/run/nslcd/socket", "/run/samba/winbindd/pipe")
+        real = os.path.exists
+        task = self.bare_task("t-913", self.repo)
+        with mock.patch.object(context.os.path, "exists", lambda p: p in nss or real(p)):
+            unix = context.unix_paths(task)
+        for s in nss:
+            self.assertIn(s, unix)
+        self.assertFalse([p for p in unix if p in ("/run/samba", "/run/samba/winbindd")])
+
     def test_wb_allow_path_refuses_a_link_and_the_places_the_lane_hides(self):
         # the agent planted /tmp/out -> another directory and asked for /tmp/out: the grant went
         # to the target; ~/.config/workbench would have handed it the chat token (the audit)

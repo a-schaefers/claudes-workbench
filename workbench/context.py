@@ -957,10 +957,14 @@ def snaps(names) -> list[str]:
 # (logger, syslog) and name and user lookups (resolved, userdb for systemd-homed users, nscd,
 # sssd). The files alone, never their directories (sssd's pipes/private stays out), and not the
 # system bus, which reaches polkit's actions (the 0.90 review: `logger` and `resolvectl` failed).
+# And the other NSS lookups: avahi's (nsswitch's mdns4_minimal: a `.local` model server resolved
+# for the runner's probes and failed every request in the lane), nslcd's and winbind's (LDAP and
+# AD users: getpwuid() failed, so `whoami` and ssh did) (#913, the third 2026-11-21 audit)
 SYSTEM_SOCKETS = ("/dev/log", "/run/systemd/journal/socket", "/run/systemd/journal/stdout",
                   "/run/systemd/resolve/io.systemd.Resolve",
                   "/run/systemd/userdb/io.systemd.Multiplexer", "/run/nscd/socket",
-                  "/var/lib/sss/pipes/nss")
+                  "/var/lib/sss/pipes/nss", "/run/avahi-daemon/socket", "/run/nslcd/socket",
+                  "/run/samba/winbindd/pipe", "/var/run/samba/winbindd/pipe")
 
 
 def secret_sockets() -> set[str]:
