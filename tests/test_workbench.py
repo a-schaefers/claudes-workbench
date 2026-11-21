@@ -4317,6 +4317,26 @@ class AskServer(Base):
         ask_mcp.relay(task, opened)
         self.assertIn("Q: second?", run_wb("wait", "t-twoq", "--timeout", "5"))  # once more: named
 
+    def test_allow_refuses_an_answer_too_big_with_its_patterns_before_granting_any(self):
+        # Review of #605: --text was checked with a 400-character guess at the words around it,
+        # so a text under the limit with many patterns passed, the grants were saved, and
+        # write_answer's refusal came out as a traceback with the question still open
+        self.start("t-pats", "ok")
+        wait_phase("t-pats", {"review"})
+        task, opened = store.Task("t-pats"), {}
+        task.set_status(phase="running")
+        self.agent_asks(task, "cccccccc", question="may I?")
+        ask_mcp.relay(task, opened)
+        pats = [f"tool{i:03d} --flag-{'x' * 40} *" for i in range(40)]   # ~2.5 KB of names
+        text = "y" * (ask_mcp.FILE_MAX - 2000)                           # fits with 400 more
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as e:
+            cli.main(["allow", "t-pats", *pats, "--text", text])
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("over the 256 KiB the agent can be sent", err.getvalue())
+        self.assertEqual(context.grants(task).get("allow") or [], [])     # nothing granted
+        self.assertTrue(ask_mcp.is_open(task, "cccccccc"))
+
     def test_an_answer_too_big_for_the_server_is_refused_and_the_question_stays_open(self):
         # #605 (the audit of v1.90): wb answer said "answered" to a 300 KiB answer the server
         # never reads (FILE_MAX), and the agent waited out its ask timeout for NO_ANSWER

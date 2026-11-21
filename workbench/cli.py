@@ -1603,7 +1603,12 @@ def cmd_allow(a):
     if not pats and not dirs:
         die("nothing to allow")
     context.commands_conf()  # refused unless it parses, before any grant: rewriting it would lose it
-    if a.text and (why := ask_mcp.too_long(a.text + " " * 400)):  # with the words around it (#605)
+    said = ", ".join([f"`{p}`" for p in pats] + [f"the directory {d}" for d in dirs])
+    text = (f"Claude allowed {said}" + (" from now on" if a.always else " for this task")
+            + ". Run it again now and carry on." + (f" {a.text.strip()}" if a.text else ""))
+    # the answer as written, before any grant (#605): a guess at the words around --text let
+    # many patterns past it, the grants were saved and write_answer's refusal was a traceback
+    if why := ask_mcp.too_long(text):
         die(f"--text: {why} ({task.worktree})")
     for key, new in (("allow", pats), ("paths", dirs)):
         if not new:
@@ -1611,9 +1616,6 @@ def cmd_allow(a):
         context.grant(task, key, new)
         if a.always:
             context.allow_always(key, new)
-    said = ", ".join([f"`{p}`" for p in pats] + [f"the directory {d}" for d in dirs])
-    text = (f"Claude allowed {said}" + (" from now on" if a.always else " for this task")
-            + ". Run it again now and carry on." + (f" {a.text.strip()}" if a.text else ""))
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "allow",
                 "text": f"allowed {said}" + (" always" if a.always else "")})
     qid = _permission_asked(task) or task.status.get("asking")
