@@ -329,6 +329,18 @@ const NEXT: Record<string, (n: string, id?: string) => string> = {
 }
 const RUNNING = new Set(['queued', 'running', 'testing'])
 
+// A question delivered into a running turn (#542): the engine frames it as another session's
+// message, so one line says whose it is and that it can't wait for the turn to end.
+const MIDTURN_NOTE = '(The workbench mod delivered this into your running turn: the agent is ' +
+  'blocked until it is answered, and gives up after a while. Answer it now, then carry on.)'
+// ask_mcp.NO_ANSWER's opening: what the runner answers a question nobody answered in time
+const NO_ANSWER = 'No answer arrived in time.'
+// A question held for a turn that could not take it, which then timed out: said after the turn
+// rather than acknowledged in silence (#542)
+const MISSED_NOTE = (n: string) => `No answer reached it in time (you were busy in a turn), so the ` +
+  `agent went on with its own assumption and states it in its summary. Check that assumption ` +
+  `when you review, or \`wb steer ${n} --text "…"\` now if it is wrong.`
+
 // /workbench run again with the mode already on and no task: the pane is back, and Claude needn't
 // reread the skill to say so.
 const AGAIN_NOTE = (skill: string) =>
@@ -1037,6 +1049,7 @@ const mem = {
   probe: null as null | { at: number; said: ProbeState }, // wb's last word on the probe experiment (probeStatus)
   queuedRetryAt: 0, // a queued turn the engine dropped is tried again from then
   open: new Set<string>(), // this session's delegated tasks open at the last poll
+  heldAsks: new Set<string>(), // questions (task:ts) held for a turn that could not take them (#542)
   said: null as Said | null, // what the conversation was told of the state's rules (#540); null: no context yet
   skillTurn: false, // /workbench's text said them in this turn: the context block computed after it doesn't
   delegated: false, // workbench mode was on in this load (a hand-back's compaction still keeps the state)
@@ -1874,19 +1887,49 @@ async function deliver($: any, now: number) {
         $.ui.toast(`workbench: ${name} ${headline}`)
       }
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
-      if (mem.busy && current) { // deliver once the turn ends
+      const next = (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
+      const text = `[workbench] Task \`${name}\` ${headline}.\n\n${row.text}\n\n${next}`
+      if (mem.busy && current) {
+        // A question can't wait for the turn to end: its agent is blocked, and after the ask
+        // timeout it guesses (a 20-minute review turn, #542). It goes into the running turn, as
+        // a web message does; refused, it is held like the rest, which deliver once the turn ends.
+        if (row.kind === 'question') {
+          await $.fs.write(ackPath, String(row.ts)) // acknowledge before sending: never twice
+          if (await intoTurn($, text)) {
+            acked = row.ts
+            continue
+          }
+          await $.fs.write(ackPath, String(acked))
+          mem.heldAsks.add(key)
+        }
         held = true
         continue
       }
       const prev = acked
       await $.fs.write(ackPath, String(row.ts)) // acknowledge before waking: never wake twice
       acked = row.ts
-      if (!current) continue
-      const next = (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
-      void wake($, name, `[workbench] Task \`${name}\` ${headline}.\n\n${row.text}\n\n${next}`, prev, row.ts)
+      if (!current) {
+        // held through the turn and timed out unseen: said, not acknowledged in silence (#542)
+        if (mem.heldAsks.delete(key) && row.id && (ACTIVE.has(status.phase) || NEEDS.has(status.phase))
+          && (await $.fs.read(`${root}/tasks/${name}/ask/${row.id}.answer`).catch(() => '')).startsWith(NO_ANSWER)) {
+          void wake($, name, `[workbench] Task \`${name}\` asked a question while you were busy.\n\n${row.text}\n\n` +
+            MISSED_NOTE(name), prev, row.ts)
+        }
+        continue
+      }
+      mem.heldAsks.delete(key)
+      void wake($, name, text, prev, row.ts)
     }
   }
   if (!held) mem.lastNotify = file.key
+}
+
+// Into the running turn, as a message typed mid-turn would be (`listen` does the same for the web
+// chat): whether the engine took it.
+async function intoTurn($: any, text: string): Promise<boolean> {
+  const r = await $.session.send({ to: { sessionId: await $.session.id() }, text: `${text}\n\n${MIDTURN_NOTE}` })
+    .catch(() => ({ isDelivered: false }))
+  return !!r?.isDelivered
 }
 
 // Whether a question is still open: asked (ask/<id>.json) and not answered.

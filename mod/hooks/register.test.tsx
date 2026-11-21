@@ -581,6 +581,71 @@ test('a question whose task no longer asks is acknowledged without a wake', asyn
   expect(Number(files['/wb/tasks/fix-it/acked'])).toBe(ts0)
 })
 
+test('an agent\'s question reaches Claude in its running turn, and a review notice still waits for the turn to end (#542)', async ($, on) => {
+  // a 20-minute review turn held task B's question until the agent timed out and guessed
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'asking')
+  task(files, 'other', 'review')
+  files['/wb/tasks/fix-it/ask/q1.json'] = JSON.stringify({ id: 'q1' })
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'question', id: 'q1', text: 'PERMISSION to run: `make docs`' })
+  notice(files, { ts: ts0, task: 'other', kind: 'review', text: 'REPORT-other' })
+  fakeTasks(on, files, ['fix-it', 'other'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const sent: any[] = []
+  on('session.send', (_: any, e: any) => { sent.push(e); return { isDelivered: true } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'reviewing task A', turnId: 't1' })
+  await clock.advance(3000)
+  expect(sent.length).toBe(1)                                    // into the running turn
+  expect(sent[0].to).toBe('sess-1')
+  expect(sent[0].text).toContain('PERMISSION to run: `make docs`')
+  expect(sent[0].text).toContain('wb allow fix-it')
+  expect(sent[0].text).toContain('delivered this into your running turn')
+  expect(Number(files['/wb/tasks/fix-it/acked'])).toBe(ts0)
+  expect(woken).toEqual([])                                      // the review waits
+  await clock.advance(3000)
+  expect(sent.length).toBe(1)                                    // once
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-other'))).toHaveLength(1)
+  expect(woken.filter(t => t.includes('make docs'))).toHaveLength(0)  // not again after the turn
+})
+
+test('a question held for a turn that could not take it, which then timed out, is said after the turn, not acknowledged in silence (#542)', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'asking')
+  files['/wb/tasks/fix-it/ask/q1.json'] = JSON.stringify({ id: 'q1' })
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'question', id: 'q1', text: 'Q: which config?' })
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.send', () => ({ isDelivered: false, reason: 'busy' }))  // refused: held for the turn
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'a long review', turnId: 't1' })
+  await clock.advance(3000)
+  expect(files['/wb/tasks/fix-it/acked']).toBe(String(0))       // not acknowledged: held
+  // the ask timeout passes mid-turn: the runner answers it itself and the task runs on
+  files['/wb/tasks/fix-it/ask/q1.answer'] = 'No answer arrived in time. Make the most reasonable assumption, carry on.'
+  task(files, 'fix-it', 'running', {}, ts0 + 1200)
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('Q: which config?')
+  expect(woken[0]).toContain('went on with its own assumption')
+  expect(Number(files['/wb/tasks/fix-it/acked'])).toBe(ts0)
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+})
+
 test('another plugin\'s tool call between turns does not hold the wakes', {
   plugins: [{
     name: 'peek',

@@ -287,7 +287,8 @@ Once the tests pass, the agent checks its own change against your review checks 
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
 the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck,
-failed) — end your turn and wait for it. Without the mod, run `wb wait <name>` with Bash
+failed) — end your turn and wait for it; an agent's question can't wait, so it reaches you
+mid-turn too: answer it then. Without the mod, run `wb wait <name>` with Bash
 `run_in_background: true` and act on its notification. If the context says wakes are off (the
 plugin's wake setting), none will come: tell the user it runs, and wait only if they ask.
 A session is woken only for its own tasks (those `wb start` ran in it, wherever; one started by

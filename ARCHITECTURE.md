@@ -1966,7 +1966,12 @@ of 1.8).
   review for a task since discarded or sent back) is acknowledged and dropped.
 - **Held mid-turn.** While Claude's main loop is mid-turn (`mem.busy`, set by `turn.start` or the
   model's own `tool.call`) the wake is held (a prompt submitted then would queue and arrive stale)
-  and checked again on every poll, and after the turn even if notify.jsonl hasn't changed. Otherwise
+  and checked again on every poll, and after the turn even if notify.jsonl hasn't changed. A
+  question (a PERMISSION request too) doesn't wait: its agent is blocked, and after the ask timeout
+  (`--ask-timeout`, 1200 s) it guesses, so it goes into the running turn (`session.send`, as a web
+  message does, with MIDTURN_NOTE saying whose it is); only if that is refused is it held, and one
+  held that the runner then answered with `NO_ANSWER` (timed out unseen) wakes Claude after the
+  turn with the question and that the agent assumed (MISSED_NOTE), not a silent ack (#542). Otherwise
   the mod writes `acked` first, shows a toast, and submits
   a prompt: `[workbench] Task <n> <headline>.`, the notice's text, and the next commands to run
   (`NEXT[kind]` in `register.tsx`; a question names its `wb answer <n> --id <id>`, a PERMISSION
@@ -4894,7 +4899,9 @@ row, past the task's `acked`; a row is still true when it's a check-in and the t
 queued/running/testing, a question while the phase is `asking` and (with an id) its
 `ask/<id>.json` has no `<id>.answer`, or the phase equals the kind. A stale one is acked and dropped. A true one is
 toasted once (`workbench: <name> <headline>`); a task that isn't this session's (`mine`: its
-`session` is one of the process's ids, else by directory as above) gets nothing more; if Claude is busy it waits and leaves the file unseen; else the mod writes `acked
+`session` is one of the process's ids, else by directory as above) gets nothing more; if Claude is busy a question is sent into the turn (`intoTurn`: `acked` first, put back if the engine
+refuses, and the row's key kept in `mem.heldAsks`), and anything else waits and leaves the file unseen; a held question gone stale whose
+`<id>.answer` opens with ask_mcp's NO_ANSWER, its task still open, gets the MISSED_NOTE wake; else the mod writes `acked
 = row.ts` and submits (`wake`) `[workbench] Task \`<n>\` <headline>.\n\n<row.text>\n\n<NEXT[kind]>`
 (HEADLINE and NEXT are the per-kind texts at the top of register.tsx; NEXT names the commands to
 run: a question's `wb answer <n> --id <id>`, and a PERMISSION request is answered by the `wb
@@ -5864,6 +5871,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `free`, `publish`): a change there changes both (`tests.Images`, `tests.Audio`). A new kind of
   generated media → its config path in `store.PATH_VARS` and `context.private_paths`, its output
   directory in `cli.EVENT_SKIP` (and the mod's ears), its engines in `wb scout`.
+- **`ask_mcp.NO_ANSWER`'s opening** ("No answer arrived in time.") → the mod's `NO_ANSWER`, which
+  tells a question that timed out unseen from one answered (#542).
 - **How wb reads a path variable** (`store.absolute_env`, `home()`) → the mod's `absolutePath`,
   which reads `WB_HOME` and `CLAUDE_CONFIG_DIR` the same way (#454).
 - **A process wb leaves running** (a runner, the bench driver, `wb optimize`, the chat `wb chat
