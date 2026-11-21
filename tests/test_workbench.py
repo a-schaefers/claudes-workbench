@@ -6806,6 +6806,40 @@ class Verify(Base):
                      "--expect", "a failure it never prints")
         self.assertIn("inconclusive", out)
 
+    def test_a_golden_file_the_candidate_adds_goes_to_the_base_and_one_left_out_proves_nothing(self):
+        # #500 (the audit of 1.90): Go's testdata/ wasn't copied to the base, which failed on
+        # `open testdata/case1.golden: no such file or directory`, and that was called proven
+        from workbench import verify
+        golden = "parse/testdata/case1.golden"
+        (self.wt / "parse" / "testdata").mkdir(parents=True)
+        (self.wt / golden).write_text("250\n")
+        (self.wt / "tests" / "test_golden.py").write_text(
+            "import unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_kw(self):\n"
+            f"        assert kw(250000) == int(open('{golden}').read()), 'not the golden value'\n")
+        out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_golden")
+        r = verify.last(store.Task("t"))
+        self.assertIn(golden, r["files"])                         # the data, with the test
+        self.assertEqual(r["verdict"], "proven", out)
+        base = Path(r["dir"], "base.txt").read_text()
+        self.assertIn("not the golden value", base)               # failed on the bug, not the file
+        self.assertNotIn("FileNotFoundError", base)
+        # named with --files, the data left behind: the base fails for lack of it, not the bug
+        out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_golden",
+                     "--files", "tests/test_golden.py")
+        self.assertIn("inconclusive", out)
+        self.assertIn(f"the base lacked what the candidate adds: {golden}", out)
+        # Go's own words, from the issue's reproduction
+        go = ("--- FAIL: TestParse (0.00s)\n    parse_test.go:12: open testdata/case1.golden: "
+              "no such file or directory\nFAIL\nexample.com/m/parse\t0.002s")
+        self.assertEqual(verify.verdict(1, go, 0, added=[golden]), "inconclusive")
+        self.assertEqual(verify.verdict(1, go, 0), "proven")        # nothing added: as before
+        for p in ("parse/testdata/x.golden", "fixtures/a.json", "src/fixture/b.txt",
+                  "src/__fixtures__/c", "src/__snapshots__/app.test.js.snap", "golden/out.txt",
+                  "app.test.js.snap", "tests/x.py", "x_test.go"):
+            self.assertTrue(verify.looks_like_test(p), p)
+        self.assertFalse(verify.looks_like_test("src/parse.go"))
+
     def test_a_renamed_test_is_checked_under_its_new_name(self):
         # #194 (the 2026-11-19 audit): the old name was listed too, the overlay asked the
         # candidate for it, and git stopped on the pathspec before either run

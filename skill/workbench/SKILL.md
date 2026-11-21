@@ -335,7 +335,8 @@ coding choice is the user's (`wb coding`), never changed by a check.
     bug's failure prints); after `wb next` it and `wb shot` compare against the previous approved step.
     It runs the test twice (and the setup, with `--setup`), up to `--timeout` each: when that can
     pass a minute, run it, and `wb shot`, with `run_in_background: true` and read its notification. Only `proven` is proof (`wb report` repeats it, and `wb accept`
-    says when it proves nothing about what you accept). For a visual change, `wb shot <name>
+    says when it proves nothing about what you accept); when it says the base lacked a file the candidate adds
+    (a fixture, a golden file), add it with `--files`. For a visual change, `wb shot <name>
     --capture '<the project's screenshot command>'` captures the base and the candidate the same
     way: look at both images, and if a capture failed, review the code as usual. `--chat` shows the
     pair to a user away from the terminal; their reply arrives as `[web chat] (about <task>, step

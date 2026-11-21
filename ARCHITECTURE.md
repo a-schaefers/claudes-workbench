@@ -3298,7 +3298,11 @@ one regression test twice, at review, each run in its own scratch checkout under
 directory and in the task's own lane and environment (`runner.run_in_lane` on a `verify._At`):
 - **The base**: a `--shared` clone (its Git LFS files smudged from the repo's own objects:
   `gitops.share_lfs`, #382) at the task's original base for step one or the previous approved step commit for later steps (#252), with the candidate's test files
-  copied in (`--files`, else the files changed since that commit whose path looks like a test, `TEST_PATH`, as
+  copied in (`--files`, else the files changed since that commit whose path looks like a test or
+  a test's data, `TEST_PATH` through `looks_like_test`: under `tests/`, `test/`, `spec/`,
+  `__tests__/`, `testdata/`, `fixture/`, `fixtures/`, `__fixtures__/`, `__snapshots__/` or
+  `golden/`, or named `test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*.snap`; Go's `testdata/`
+  golden file left behind made the base fail for lack of it, which was called proven, #500; as
   they are in the candidate: a deleted one, such as a renamed test's old name, is left out, and
   each path goes to git `:(literal)`; the old name once stopped git on its pathspec before either
   run, #194). That copy is what makes a test separable from the change; with no test file it
@@ -3316,7 +3320,9 @@ output or couldn't be set up, or the base failed without an assertion. A missing
 nothing about the bug, so it can never count as proof. Proof is positive evidence only: with
 `--expect TEXT`, that text in the base's output; else, unless a setup error (`SETUP`: a syntax,
 import or module error, pytest's collection errors, a fixture not found, a failed build or
-compile) says the tests never ran, an assertion line (`ASSERTION`: `AssertionError`, pytest's
+compile) says the tests never ran, or a line saying a file is missing (`MISSING`: "no such file
+or directory", `FileNotFoundError`, `ENOENT`) names one the candidate adds and the base didn't get
+(`missing`; the report says which, for `--files`: #500), an assertion line (`ASSERTION`: `AssertionError`, pytest's
 `E assert`, a line opening `Expected`, an "expected … but/got/received/to be" phrase, jest's
 `expect(`, a Go `panic:`) or a failed test's header. A bare "expected" once matched Python's
 `SyntaxError: expected ':'`, and a base that never ran an assertion was called proven (#193,
@@ -3324,7 +3330,8 @@ the 2026-11-19 audit); and the setup error is checked first, since a SyntaxError
 quoting `assert 2 = 2` was proof too (#326, the audit of 1.4). `assertion` picks the line the report shows: the first assertion
 line, else a failed test's header. Each run is kept in `tasks/<task>/verify/<n>/`: `base.txt`,
 `candidate.txt` and `result.json` `{cmd, files, tree, ts, base: {rev, exit, assertion}, candidate:
-{rev, exit, assertion}, verdict, dir, expect (when given)}`. `verify.last` reads the newest, with `stale` once the worktree
+{rev, exit, assertion}, verdict, dir, expect (when given), uncopied (the candidate's added files
+not copied to the base, when any), missing (those the base's output said it couldn't find)}`. `verify.last` reads the newest, with `stale` once the worktree
 or the comparison base has changed since. The verdict names the base commit and candidate tree.
 
 The comparison reaches the review (#97): `wb report <task>` (the latest round's) ends with the
