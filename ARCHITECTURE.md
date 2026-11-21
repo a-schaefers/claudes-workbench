@@ -4262,7 +4262,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   script is such characters (`by_characters`) the sidecar has `cer: true` and the line says CER.
   Counted as words, one wrong particle in a Japanese clause scored 100% (#598). The line shows both, because a WER alone misled on the first
   real run (#396): a perfect "Twenty twenty-six" read 30%, the listener having written "2026". A listener that fails is reported on the
-  line, not raised.
+  line, not raised. Its output, ffmpeg's, and the engine log's tail on a failure (`wb image` too)
+  are decoded as UTF-8 with bad bytes replaced: a listener that split a CJK character, or a
+  Windows program's code page through WSL, ended the run in a UnicodeDecodeError traceback (#743).
 - The line reads `3.4 s (asked 3) · peak -1.2 dBFS · -16 LUFS · lead 0.1 s, tail 0.3 s · gaps … ·
   heard "…" WER 30% (twenty twenty six → 2026)`, then the spectrogram's path. Under 80% of the asked length it adds "cut
   short".

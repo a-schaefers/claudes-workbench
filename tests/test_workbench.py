@@ -8203,6 +8203,35 @@ class Audio(Base):
             run_wb("audio", "hi", "--voice", "zoe", "--out", str(tmp / "o"))
         self.assertIn("has no voice 'zoe' (voices: anna, bo)", err.getvalue())
 
+    def test_a_listener_or_engine_that_prints_bytes_that_arent_utf8_is_reported_not_raised(self):
+        # #743 (the 2026-11-21 audit, finding 93): a listener that split a CJK character, or a
+        # Windows program's code page through WSL, ended wb audio in a UnicodeDecodeError traceback,
+        # losing the take; one bad byte in engine.log did the same to every later failure
+        tmp, tone = Path(self.tmp.name), self.tone()
+        ear = tmp / "bad_ear.py"
+        ear.write_text("import sys\nsys.stdout.buffer.write(b'\\xe3\\x81')\n"
+                       "sys.stderr.buffer.write(b'\\x93 cp1252\\n')\nsys.exit(int(sys.argv[2]))\n")
+        for code in (0, 3):
+            self.engines({"tts": {"command": f"{sys.executable} {tone} --text {{text}} --seed {{seed}} "
+                                             "--out {out}", "gpu": False},
+                          "ear": {"kind": "listen", "gpu": False,
+                                  "command": f"{sys.executable} {ear} {{in}} {code}"}})
+            out = run_wb("audio", "こんにちは", "--n", "2", "--out", str(tmp / f"o{code}"))
+            self.assertIn("2 clip(s)", out)                       # every take made
+            side = json.loads(sorted((tmp / f"o{code}").glob("*.json"))[0].read_text())
+            if code:
+                self.assertIn("listener ear exited 3: \ufffd cp1252", side["listen_error"])
+            else:
+                self.assertIn("transcript", side)
+        bad = tmp / "bad_eng.sh"
+        bad.write_text("printf '\\377\\376 broke\\n'; exit 2\n")
+        self.engines({"tts": {"command": f"sh {bad} {{out}}", "gpu": False}})
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("audio", "a bell", "--n", "1", "--no-check", "--out", str(tmp / "o9"))
+        self.assertIn("the engine exited 2 without audio", err.getvalue())
+        self.assertIn("broke", err.getvalue())
+
     def test_audio_cpps_key_value_transcript_is_read_for_its_text(self):
         # the first real run (#396): audio.cpp's CLI prints task=, word_timestamps=[…] and
         # text_output= lines; scored whole, a perfect take read as a WER of several hundred percent

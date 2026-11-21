@@ -100,7 +100,7 @@ def _command(e: dict, values: dict, refs: list[Path], log: Path) -> None:
         r = media.run_group(argv, float(e.get("timeout", 1800)), stdin=subprocess.DEVNULL, stdout=f,
                             stderr=subprocess.STDOUT)
     if r.returncode or not Path(values["out"]).is_file():
-        tail = "\n".join(log.read_text().strip().splitlines()[-8:])
+        tail = "\n".join(log.read_text(errors="replace").strip().splitlines()[-8:])  # #743
         raise RuntimeError(f"the engine exited {r.returncode} without audio:\n{tail}")
 
 
@@ -332,7 +332,7 @@ def _ffmpeg(*args: str, timeout: int = 300) -> subprocess.CompletedProcess | Non
         return None
     try:
         return subprocess.run([exe, "-hide_banner", "-nostdin", *args], capture_output=True,
-                              text=True, timeout=timeout)
+                              encoding="utf-8", errors="replace", timeout=timeout)  # #743
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -468,9 +468,12 @@ def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
     name, e = ear
     if e.get("command"):
         argv = media.fill(e["command"], {"in": clip})
+        # decoded leniently: a listener that split a CJK character at a segment's end, or a
+        # Windows program's code page through WSL, raised UnicodeDecodeError and lost the take (#743)
         r = media.run_group(argv, float(e.get("timeout", 600)), stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        with open(log, "a") as f:
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+                            errors="replace")
+        with open(log, "a", encoding="utf-8") as f:
             f.write(r.stderr)
         if r.returncode:
             raise RuntimeError(f"listener {name} exited {r.returncode}: "
@@ -530,8 +533,8 @@ def inspect(path: Path, kind: str, script: str = "", seconds: float | None = Non
                              differences=differences(script, heard), listener=ear[0])
                 if by_characters(script):
                     found["cer"] = True  # `wer` counts characters
-            except (OSError, RuntimeError, subprocess.TimeoutExpired) as err:
-                found["listen_error"] = str(err)
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as err:
+                found["listen_error"] = str(err)  # on the line, not raised (ValueError: #743)
     return found
 
 

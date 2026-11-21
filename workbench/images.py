@@ -78,7 +78,7 @@ def _command(e: dict, values: dict, refs: list[Path], log: Path) -> None:
         r = media.run_group(_argv(e, values, refs), float(e.get("timeout", 1800)),
                             stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT)
     if r.returncode or not Path(values["out"]).is_file():
-        tail = "\n".join(log.read_text().strip().splitlines()[-8:])
+        tail = "\n".join(log.read_text(errors="replace").strip().splitlines()[-8:])  # one bad byte: #743
         raise RuntimeError(f"the engine exited {r.returncode} without an image:\n{tail}")
 
 
