@@ -1755,12 +1755,11 @@ def cmd_accept(a):
                     "wb feedback or wb discard it")
             die(str(e))
         into = _merge_into(spec, repo) if a.merge else None
-        check_base = a.merge and into in (None, "HEAD")
-        if check_base:
+        if a.merge and into in (None, "HEAD"):
             into = gitops.current_branch(repo)
         tip = gitops.git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
         close = {"commit": commit, "step": measured, "merge": bool(a.merge), "merge_into": into,
-                 "check_base": check_base, "merge_as": a.merge_as or "merge"}
+                 "merge_as": a.merge_as or "merge"}
         task.set_status(closing=close, tip=tip)  # before anything is removed
         _spec_gaps(task, a.spec_gap)
     if warn := gitops.remove_worktree(repo, task.worktree):  # committed: the rest is cleanup
@@ -1776,8 +1775,10 @@ def cmd_accept(a):
             try:
                 if not into:
                     raise gitops.GitError(gitops.detached(repo, spec["branch"], had=True))
-                merged = gitops.merge(repo, a.name, into, spec["base"] if close["check_base"] else None,
-                                      tip=tip, how=close.get("merge_as", "merge"))
+                # every target is held to the base, a named branch too: reset or rebased since
+                # the start, the merge brought back what was withdrawn from it (#418)
+                merged = gitops.merge(repo, a.name, into, spec["base"], tip=tip,
+                                      how=close.get("merge_as", "merge"))
             except gitops.GitError as e:
                 refused = str(e)
                 print(f"wb: not merged: {e}", file=sys.stderr)

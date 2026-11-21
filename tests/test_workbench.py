@@ -1394,6 +1394,45 @@ class Lifecycle(Base):
         self.assertIn("detached HEAD", err.getvalue())
         self.assertEqual(self.branch("main"), self.branch("feature"))  # neither merged
 
+    def test_a_merge_into_a_branch_that_lost_the_base_is_refused_with_what_would_come_back(self):
+        # #418 (the audit of 1.8, reproduced): main reset back past the task's base, then accept
+        # --merge into main (its base_branch) brought the withdrawn commit back; only a merge into
+        # the checkout's branch with no base_branch recorded was held to the base
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout.strip()
+        def withdrawn_then(name, rewrite):
+            (self.repo / "withdrawn.txt").write_text("taken back\n")
+            g("add", "withdrawn.txt")
+            g("commit", "-qm", f"withdrawn for {name}")
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+            self.assertEqual(store.Task(name).spec["base_branch"], "main")
+            rewrite()
+            before = g("rev-parse", "main")
+            with redirect_stderr(io.StringIO()) as err:
+                not_merged("accept", name, "-m", "feat: answer", "--merge")
+            self.assertIn("doesn't hold the task's base", err.getvalue(), name)
+            self.assertIn(f"withdrawn for {name}", err.getvalue(), name)  # what would come back
+            self.assertIn("rebase --onto main", err.getvalue(), name)     # and the choices
+            self.assertIn("by hand", err.getvalue(), name)
+            self.assertEqual(g("rev-parse", "main"), before, name)
+            self.assertFalse((self.repo / "withdrawn.txt").exists(), name)
+            self.assertTrue(self.branch(f"delegate/{name}"), name)        # the work is kept
+        withdrawn_then("t-rewound", lambda: g("reset", "-q", "--hard", "HEAD~1"))
+        def rebased():  # the withdrawn commit rewritten: a force-pushed main, pulled down
+            g("reset", "-q", "--hard", "HEAD~1")
+            (self.repo / "other.txt").write_text("rebased in\n")
+            g("add", "other.txt")
+            g("commit", "-qm", "the rebased history")
+        withdrawn_then("t-rebased", rebased)
+        self.start("t-forward", "ok")  # main moving forward still merges
+        wait_phase("t-forward", {"review"})
+        (self.repo / "later.txt").write_text("later\n")
+        g("add", "later.txt")
+        g("commit", "-qm", "later work on main")
+        self.assertIn("merged into main", run_wb("accept", "t-forward", "-m", "feat: answer", "--merge"))
+        self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
+
     def test_a_colocated_jujutsu_repo_is_told_to_merge_with_jj(self):
         # #385 (the audit of 1.6): jj keeps git's HEAD detached once it has moved the working
         # copy, so accept --merge refused "a detached HEAD" and offered a git merge, whose commit

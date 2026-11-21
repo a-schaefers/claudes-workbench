@@ -733,8 +733,16 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         raise GitError(f"{repo} has {have} out, not {into}; merge {branch_name(task)} by hand")
     if (tip or not into or into == "HEAD") and base and _run(
             repo, ("merge-base", "--is-ancestor", base, "HEAD"), check=False).returncode:
-        raise GitError(f"{repo} has {have} out, which doesn't hold the task's base; "
-                       f"merge {branch_name(task)} by hand")
+        # a branch reset or rebased since the task started: the merge would bring back what was
+        # withdrawn from it, so the commits are named and the choice is Claude's (#418)
+        back = git(repo, "log", "--format=%h %s", f"HEAD..{base}").splitlines()
+        b = branch_name(task)
+        raise GitError(
+            f"{repo} has {have} out, which doesn't hold the task's base {base[:12]} (reset or "
+            f"rebased since?): merging would bring back {len(back)} commit(s) it lacks ("
+            f"{'; '.join(back[:5])}{'; …' if len(back) > 5 else ''}). Rebase the task's commits "
+            f"onto it (git -C {shlex.quote(str(repo))} rebase --onto {have} {base[:12]} {b}, "
+            f"then git switch {have} && git merge {b}), or merge {b} by hand to bring them back")
     if _merging(repo):  # an --abort below would throw away the user's own merge
         raise GitError(f"{repo} is in the middle of a merge; finish it, then merge "
                        f"{branch_name(task)} by hand")

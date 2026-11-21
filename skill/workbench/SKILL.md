@@ -425,7 +425,10 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   history, unless its commands.json `repos` entry already says `merge`); otherwise give them
   the merge command it prints. Exit 5 means accepted but
   not merged (its stderr says why): tell the user and give them the merge command; main
-  doesn't have the change. An accept that was interrupted finishes when run again.
+  doesn't have the change. When it says the branch doesn't hold the task's base (reset or
+  rebased since), the commits it lists would come back with a plain merge: ask the user whether
+  to rebase the task onto it or bring them back. An accept that was interrupted finishes when
+  run again.
 - `wb discard <name> --reason "…"` drops it. `wb status` lists open tasks (e.g. after a context
   reset); `wb stats` compares the models on finished work.
 - **Keep the good ones as bench cases.** An accepted step whose spec pinned the names its tests
