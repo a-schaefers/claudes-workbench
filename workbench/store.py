@@ -38,12 +38,14 @@ import math
 import os
 import re
 import stat
+import sys
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+# \Z, not $: `$` matches before a final newline, so `wb start 'foo\n'` passed the check (#782)
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}\Z")
 
 # Phases a task moves through. "review", "stuck", "failed" and "asking" need Claude.
 ACTIVE = {"queued", "running", "testing", "asking"}
@@ -104,7 +106,9 @@ def disk_full(e: BaseException) -> bool:
 
 
 def free_bytes(path: Path | None = None) -> int | None:
-    """Free space where the state directory lives (or ``path``), for the user; None if unknown."""
+    """Free space where the state directory lives (or ``path``), for the user; None if unknown.
+    On macOS the larger of statvfs's and what the volume has for important use (_important_free),
+    which counts the purgeable space macOS frees when asked."""
     p = Path(path or home())
     while not p.exists() and p != p.parent:
         p = p.parent
@@ -112,7 +116,65 @@ def free_bytes(path: Path | None = None) -> int | None:
         st = os.statvfs(p)
     except OSError:
         return None
-    return st.f_bavail * st.f_frsize
+    return max(st.f_bavail * st.f_frsize, _important_free(p) or 0)
+
+
+def _important_free(path: Path) -> int | None:
+    """The volume's available capacity for important usage (CoreFoundation's
+    kCFURLVolumeAvailableCapacityForImportantUsageKey, what Finder shows as Available), macOS only;
+    None elsewhere or when it can't say. On APFS statvfs leaves out purgeable space (local Time
+    Machine snapshots, iCloud Drive's optimized files, caches), which macOS frees under pressure: a
+    Mac with 1.5 GB by statvfs and 30 GB in Finder refused every wb start, and a task admitted
+    failed at its checkout (#852)."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        key = ctypes.c_void_p.in_dll(cf, "kCFURLVolumeAvailableCapacityForImportantUsageKey")
+        make = cf.CFURLCreateFromFileSystemRepresentation
+        make.restype, make.argtypes = ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_bool]
+        copy = cf.CFURLCopyResourcePropertyForKey
+        copy.restype = ctypes.c_bool
+        copy.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+        number = cf.CFNumberGetValue
+        number.restype, number.argtypes = ctypes.c_bool, [ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p]
+        cf.CFRelease.restype, cf.CFRelease.argtypes = None, [ctypes.c_void_p]
+        raw = os.fsencode(path)
+        url = make(None, raw, len(raw), True) if key.value else None
+        if not url:
+            return None
+        try:
+            val = ctypes.c_void_p()
+            if not copy(url, key, ctypes.byref(val), None) or not val.value:
+                return None
+            try:
+                out = ctypes.c_int64()
+                ok = number(val, 4, ctypes.byref(out))  # kCFNumberSInt64Type
+                return out.value if ok and out.value >= 0 else None
+            finally:
+                cf.CFRelease(val)
+        finally:
+            cf.CFRelease(url)
+    except (ImportError, OSError, AttributeError, ValueError, TypeError):
+        return None
+
+
+def noexec(path: Path | None = None) -> bool:
+    """Whether the state directory (or ``path``) is on a noexec mount (Linux's statvfs flag): the
+    agent's git shim, the worktree's own ./gradlew, node_modules/.bin and .venv/bin and the scratch
+    checkouts' built test binaries all live there, and each exec failed with EACCES that read as a
+    lane or project failure, while wb doctor called the directory fine (#851)."""
+    flag = getattr(os, "ST_NOEXEC", None)
+    if flag is None:  # macOS's statvfs carries no such flag
+        return False
+    p = Path(path or home())
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        return bool(os.statvfs(p).f_flag & flag)
+    except OSError:
+        return False
 
 
 def dir_size(path: Path, budget: float | None = None) -> tuple[int, bool]:
@@ -199,19 +261,47 @@ def note_claude_session() -> None:
     """Record the Claude Code session a `wb` call runs in under its process
     (claude-sessions/<CLAUDE_PID>: "<ts> <session id>" lines), once per id. /clear starts a new
     session id and transcript in the same process, and spend.usage read only the one `wb start`
-    recorded: the review turns after a /clear went uncounted (#451)."""
+    recorded: the review turns after a /clear went uncounted (#451). Each process's lines follow
+    a "start <its start>" line (claude_word): a new process with an old one's pid (a container,
+    a WSL restart) was handed the old one's sessions, and with them its tasks (#787)."""
     sid, pid = os.environ.get("CLAUDE_CODE_SESSION_ID", ""), os.environ.get("CLAUDE_PID", "")
     if not sid or not pid.isdigit() or not re.fullmatch(r"[\w-]{1,128}", sid):
         return
+    from . import models  # here: models imports store
+    start = claude_word(models._started(int(pid)))
     path = home() / "claude-sessions" / pid
     try:
-        if sid in path.read_text().split()[1::2]:
-            return
+        sections = _session_sections(path.read_text().split())
     except FileNotFoundError:
-        pass
+        sections = []
+    last = sections[-1] if sections else (None, [])
+    if (start is None or last[0] == start) and sid in (s for _, s in last[1]):
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
-        f.write(f"{now()} {sid}\n")
+        f.write((f"start {start}\n" if start is not None and last[0] != start else "")
+                + f"{now()} {sid}\n")
+
+
+def claude_word(start) -> str | None:
+    """A process start (models._started: /proc's clock ticks, or ps's `lstart` with its spaces)
+    as one word, for claude-sessions' "start" lines."""
+    return "_".join(str(start).split()) or None if start is not None else None
+
+
+def _session_sections(words: list[str]) -> list[tuple[str | None, list[tuple[float, str]]]]:
+    """claude-sessions' pairs, grouped under the "start" line before them (None: written before
+    #787, with none)."""
+    out: list = [(None, [])]
+    for a, b in zip(words[::2], words[1::2]):
+        if a == "start":
+            out.append((b, []))
+            continue
+        try:
+            out[-1][1].append((float(a), b))
+        except ValueError:
+            continue
+    return out if out[0][1] else out[1:]
 
 
 def note_task_session(name) -> None:
@@ -246,20 +336,46 @@ def task_sessions(task) -> list[str]:
     return out
 
 
-def claude_sessions(pid, since: float = 0) -> list[str]:
-    """The session ids Claude Code process `pid` ran `wb` in from `since` on, first seen first."""
+def claude_sessions(pid, since: float = 0, start=None) -> list[str]:
+    """The session ids Claude Code process `pid` ran `wb` in from `since` on, first seen first.
+    With ``start`` (its models._started, or task.json `claude_start`), only that process's: the
+    file is keyed by pid alone, and a later process given the same pid had the earlier one's
+    sessions, so its plain `wb status` listed and acted on that process's tasks as its own
+    (#787). Lines from before the start lines count only in a file that has none."""
     try:
-        words = (home() / "claude-sessions" / str(int(pid))).read_text().split()
+        sections = _session_sections((home() / "claude-sessions" / str(int(pid))).read_text().split())
     except (OSError, TypeError, ValueError):
         return []
+    born = None
+    if start is not None:
+        word, born = claude_word(start), _start_epoch(start)
+        # lines from before the start lines: this process's when written after it started, else
+        # (its start unknown as a time) only in a file that has nothing newer
+        sections = [s for s in sections if s[0] == word
+                    or s[0] is None and (born is not None or len(sections) == 1)]
     out = []
-    for ts, sid in zip(words[::2], words[1::2]):
-        try:
-            if float(ts) >= since and sid not in out:
+    for word_, rows in sections:
+        for ts, sid in rows:
+            if ts >= since and sid not in out and (word_ is not None or born is None or ts >= born - 1):
                 out.append(sid)
-        except ValueError:
-            continue
     return out
+
+
+def _start_epoch(start) -> float | None:
+    """A process start (models._started) as a Unix time: /proc's clock ticks after boot (btime in
+    /proc/stat), or ps's `lstart`; None when it can't be read."""
+    text = str(start).strip()
+    if text.isdigit():
+        try:
+            btime = next(int(l.split()[1]) for l in Path("/proc/stat").read_text().splitlines()
+                         if l.startswith("btime "))
+            return btime + int(text) / os.sysconf("SC_CLK_TCK")
+        except (OSError, StopIteration, ValueError, IndexError):
+            return None
+    try:
+        return time.mktime(time.strptime(" ".join(text.split()), "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, OverflowError):
+        return None
 
 
 _BOOT: list = []
@@ -285,7 +401,83 @@ def boot_id() -> str | None:
     return _BOOT[0]
 
 
-def write_json(path: Path, data) -> None:
+_MACHINE: list = []
+
+
+def machine() -> str:
+    """This machine, steadily: /etc/machine-id (Linux, WSL), the hardware UUID (macOS), else the
+    host name. A state directory on a network home is shared by several machines, and each one's
+    wb read the other's live runners as dead (its pid not in this machine's process table): failed
+    them as restarted, and signalled pids of its own (#849). The runner records it (status
+    `machine`), and a runner of another machine is never reaped or stopped here."""
+    if not _MACHINE:
+        mid = None
+        for f in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+            try:
+                mid = Path(f).read_text().strip() or None
+            except OSError:
+                continue
+            if mid:
+                break
+        if not mid and sys.platform == "darwin":
+            import subprocess
+            try:
+                out = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                                     capture_output=True, text=True, timeout=5).stdout
+                mid = (m := re.search(r'"IOPlatformUUID" = "([^"]+)"', out)) and m.group(1)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        _MACHINE.append(mid or host())
+    return _MACHINE[0]
+
+
+def host() -> str:
+    """This machine's name, for the user (status `host`)."""
+    import socket
+    return socket.gethostname()
+
+
+def elsewhere(st: dict) -> str | None:
+    """The machine a task's runner runs on, when it is another one (status `machine`, named by
+    `host`): its pid means nothing here (#849). None for this machine's, or one recorded before."""
+    m = st.get("machine")
+    return (st.get("host") or m) if m and m != machine() else None
+
+
+# Network file systems by their mount type (/proc/self/mounts, macOS's mount): a state directory
+# on one may be shared by several machines (#849)
+NETWORK_FS = ("nfs", "nfs4", "cifs", "smb3", "smbfs", "afs", "afpfs", "webdav", "ceph", "glusterfs",
+              "lustre", "gpfs", "beegfs", "fuse.sshfs", "fuse.glusterfs", "fuse.cephfs")
+
+
+@functools.cache
+def network_fs(path: str) -> str | None:
+    """The network file system ``path`` (a real path) is on, by its mount type; None for a local
+    one, or where the mounts can't be read."""
+    mounts: list[tuple[str, str]] = []
+    try:
+        for row in Path("/proc/self/mounts").read_text().splitlines():
+            f = row.split()
+            if len(f) > 2:
+                mounts.append((f[1].replace("\\040", " "), f[2]))
+    except OSError:
+        if sys.platform == "darwin":  # "server:/export on /Users (nfs, nodev, …)"
+            import subprocess
+            try:
+                out = subprocess.run(["mount"], capture_output=True, text=True, timeout=5).stdout
+            except (OSError, subprocess.SubprocessError):
+                out = ""
+            for row in out.splitlines():
+                if (m := re.search(r" on (/.*) \(([^,)]+)", row)):
+                    mounts.append((m.group(1), m.group(2)))
+    best = max((m for m in mounts if path == m[0] or path.startswith(m[0].rstrip("/") + "/")),
+               key=lambda m: len(m[0]), default=None)
+    return best[1] if best and best[1] in NETWORK_FS else None
+
+
+def write_json(path: Path, data, mode: int | None = None) -> None:
+    """``data`` as ``path``, atomically; ``mode``: the file's, else the umask's (a shared GPU
+    lease's gpu.json is the group's to read: #802)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     # a name of its own per write, created exclusively: by pid alone, two of the chat server's
     # threads writing one file shared it, and one's rename found it gone (the 2026-11-19 audit).
@@ -294,9 +486,11 @@ def write_json(path: Path, data) -> None:
     try:
         # UTF-8 whatever the locale: under a legacy one an em dash in a spec failed to write and a
         # file written under UTF-8 failed to read back (the 2026-11-16 audit)
-        with open(tmp, "x", encoding="utf-8") as fh:
+        with open(tmp, "x", encoding="utf-8", errors="backslashreplace") as fh:  # as append_jsonl
             fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
             _synced(fh)
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)  # readers (woken by inotify on the rename) never see half a file
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -446,13 +640,15 @@ def _lock_of(path: Path) -> Path:
     return path.with_name(path.name + ".lock")
 
 
-def append_jsonl(path: Path, row: dict, after: float | None = None) -> None:
-    """Append ``row``. ``after`` (a time): its `ts` is made later than it and than every row's
-    already there, under the same lock (the notices: Task.notify)."""
+def append_jsonl(path: Path, row: dict, after: float | None = None) -> dict:
+    """Append ``row``, and return it as written. ``after`` (a time): its `ts` is made later than
+    it and than every row's already there, under the same lock (the notices: Task.notify)."""
     with locked(_lock_of(path)):
         if after is not None:
             row = {**row, "ts": max(row["ts"], round(max(after, newest_ts(path)) + 0.001, 3))}
-        line = json.dumps(row, ensure_ascii=False).encode() + b"\n"
+        # a lone surrogate (a path's byte that isn't UTF-8) as its JSON escape, which reads back
+        # the same: strict, it raised past every caller's guard and failed the task (#784)
+        line = json.dumps(row, ensure_ascii=False).encode("utf-8", "backslashreplace") + b"\n"
         with open(path, "ab+") as fh:
             # A write cut short (a full disk, a crash) leaves a line with no end, and the next row
             # appended to it was lost with it (the 2026-11-16 audit): end the fragment first, so
@@ -463,6 +659,7 @@ def append_jsonl(path: Path, row: dict, after: float | None = None) -> None:
                 if fh.read(1) != b"\n":
                     line = b"\n" + line
             fh.write(line)
+    return row
 
 
 _results_seen: dict = {}  # path -> (inode, size, mtime_ns), rows: results() parses a file once
@@ -636,9 +833,22 @@ class Task:
             acked = float((self.dir / "acked").read_text() or 0)
         except (OSError, ValueError):
             acked = 0.0
-        append_jsonl(home() / "notify.jsonl",
-                     {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra},
-                     after=acked if math.isfinite(acked) else 0.0)
+        row = append_jsonl(home() / "notify.jsonl",
+                           {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra},
+                           after=acked if math.isfinite(acked) else 0.0)
+        # each named task's newest notice, in its own directory: the mod's idle net read it from
+        # notify.jsonl's last 1 MiB only, and after a reload woke Claude again for a review whose
+        # notice it had acknowledged, pushed out of that tail by later ones (#844)
+        for name in dict.fromkeys([self.name, *(extra.get("tasks") or [])]):
+            if not isinstance(name, str) or "/" in name or name.startswith("."):
+                continue  # a batch names tasks wb named: nothing outside tasks/
+            d = self.dir if name == self.name else home() / "tasks" / name
+            try:
+                was = float((d / "noticed").read_text() or 0)
+            except (OSError, ValueError):
+                was = 0.0
+            if d.is_dir() and not was >= row["ts"]:
+                replace_bytes(d / "noticed", str(row["ts"]).encode())
 
 
 # The scratch directories workbench makes in its home, each named <prefix><maker's pid>-…: wb gc
@@ -693,8 +903,12 @@ SLIM_DAYS = 90  # an archived task keeps its bulky outputs this long after it cl
 # (appended every round), each round's and check's test output (up to 320 KB each). Its
 # task.json, status.json, prompts, summaries, events and asks stay: names stay taken, wb bench
 # add reads an accepted task's prompts, and the lessons and transcripts its events (#740).
+# And the earlier sessions' exports (`.export-<sid>.json`, megabytes each: a cache of OpenCode's
+# own store, which transcript.finished_export fills again on demand) and wb shot's PNGs, whose
+# shots.json side says `pruned` so the web chat shows them expired, not broken (#821).
 SLIM_GLOBS = ("runner.log", "base-tests.txt", "setup.txt", "rounds/*/tests.txt",
-              "verify/*/base.txt", "verify/*/candidate.txt", "shots/*/*.txt")
+              "verify/*/base.txt", "verify/*/candidate.txt", "shots/*/*.txt", ".export-*.json")
+SHOT_SIDES = ("base", "candidate")
 
 
 def slim_archive(days: float = SLIM_DAYS) -> int:
@@ -713,6 +927,30 @@ def slim_archive(days: float = SLIM_DAYS) -> int:
                         f.unlink()
                 except OSError:
                     continue
+        for shot in d.glob("shots/*/"):
+            freed += _prune_shots(shot)
+    return freed
+
+
+def _prune_shots(shot: Path) -> int:
+    """Drop one wb shot pair's PNGs, its shots.json side marked `pruned` first (chat.shots: the
+    image expired); the bytes freed."""
+    meta, freed = read_json(shot / "shots.json", None), 0
+    if not isinstance(meta, dict):
+        return 0
+    pngs = [(side, f) for side in SHOT_SIDES
+            if (f := shot / f"{side}.png").is_file() and not f.is_symlink()]
+    if not pngs:
+        return 0
+    for side, _ in pngs:
+        meta[side] = {**(meta.get(side) if isinstance(meta.get(side), dict) else {}), "pruned": True}
+    write_json(shot / "shots.json", meta)  # before the files: never an image said there that isn't
+    for _, f in pngs:
+        try:
+            freed += f.stat().st_size
+            f.unlink()
+        except OSError:
+            continue
     return freed
 
 

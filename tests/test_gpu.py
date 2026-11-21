@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -95,6 +96,26 @@ class Sharing(Base):
         self.assertIn("note: the GPU is busy with t-big", cli._gpu_note(store.Task("t-small")))
         run_wb("stop", "t-big")
         wait_phase("t-small", {"review"})
+
+    def test_a_start_is_let_in_beside_a_task_whose_runner_stepped_aside_for_its_tests(self):
+        # #805: t-big's runner let the GPU go for its tests, yet wb start counted it a holder
+        # (alive, not in gpu.json) and refused t-small with exit 4 the lease would have let in
+        os.environ["WB_FAKE_GPU_GB"] = "24"           # the two can't share
+        mark = Path(self.tmp.name) / "base-checked"  # the base check runs quickly, the round's slowly
+        self.start("t-big", "ok", "--model", BIG, "--test", f"test -e {mark} && sleep 30; touch {mark}")
+        deadline = time.time() + 30
+        while store.Task("t-big").status.get("phase") != "testing" and time.time() < deadline:
+            time.sleep(0.1)
+        big = store.Task("t-big").status
+        self.assertEqual(big["leased"], big["pid"])
+        self.assertEqual(cli._gpu_holders(), {})
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-small", "--spec", str(self.spec), "--repo", str(self.repo),
+                     "--model", SMALL, "--test", TEST_CMD)  # no --queue: refused before
+        self.assertNotIn("the GPU is busy", out)
+        wait_phase("t-small", {"review"})              # while t-big's tests still run
+        self.assertEqual(store.Task("t-big").status["phase"], "testing")
+        run_wb("stop", "t-big")
 
     def runs_in_order(self, *marks):
         """Each mark's first fake run, in the order the runs came (FAKE_RUNS)."""
@@ -293,6 +314,32 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
             self.assertTrue(models._alive(sleeper.pid, start))
             self.assertFalse(models._alive(sleeper.pid, "1"))  # recycled: started at another time
 
+    def test_without_proc_a_start_reads_the_same_in_every_time_zone(self):
+        # #848: ps's lstart is local time, so a Mac that changed zones, or a writer and a reader
+        # under different TZ, read a live holder, listener or session as a recycled pid
+        real = Path.read_text
+        noproc = lambda self, *a, **kw: (_ for _ in ()).throw(OSError("no /proc")) \
+            if str(self).startswith("/proc/") else real(self, *a, **kw)  # noqa: E731
+        sleeper = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(sleeper.kill)
+        tz = os.environ.get("TZ")
+        self.addCleanup(lambda: os.environ.__setitem__("TZ", tz) if tz is not None
+                        else os.environ.pop("TZ", None))
+        with mock.patch.object(Path, "read_text", noproc):
+            os.environ["TZ"] = "EST5"
+            start, tag = models._started(sleeper.pid), models.start_tag(sleeper.pid)
+            old = models._ps_start(sleeper.pid, utc=False)          # what a wb before #848 wrote
+            self.assertNotEqual(old, start)
+            os.environ["TZ"] = "JST-9"                              # the laptop flew to Tokyo
+            self.assertEqual(models._started(sleeper.pid), start)
+            self.assertTrue(models._alive(sleeper.pid, start))
+            self.assertTrue(models.same_tag(sleeper.pid, tag))
+            self.assertFalse(models._alive(sleeper.pid, "Thu Jan  1 00:00:00 2026"))
+            os.environ["TZ"] = "EST5"                               # an old stamp, same zone
+            self.assertTrue(models._alive(sleeper.pid, old))
+            self.assertTrue(models.same_tag(sleeper.pid, models._tag(old)))
+            self.assertFalse(models.same_tag(sleeper.pid, "0badf00d"))
+
     def test_a_long_load_never_holds_the_admission_lock(self):
         # a finishing task waited on gpu.admit for another task's load, so its runner looked
         # alive after its review notice and wb feedback refused it (the 2026-11-16 audit)
@@ -421,7 +468,7 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         calls, said = [], []
         loads = lambda m, say=print, keep=(), warn=None: calls.append(set(keep)) or 1.0  # noqa: E731
         with mock.patch.object(models, "make_resident", loads), \
-                mock.patch.object(models, "_fits_beside", lambda m, keep, before=None: False), \
+                mock.patch.object(models, "_fits_beside", lambda m, keep, before=None, kept=(): False), \
                 mock.patch.object(models, "_unload", lambda m: said.append(f"unload {m.id}")):
             with models.GpuLease(models.resolve(SMALL), "t-small", said.append) as lease:
                 self.assertEqual(lease.load(), 2.0)
@@ -895,6 +942,10 @@ class SharedLease(Base):
             self.assertFalse(models._alive(os.getpid(), start, me))    # ours can't be refused
             self.assertFalse(models._alive(os.getpid(), start))        # an entry from before: as before
             self.assertFalse(models._alive(os.getpid(), None, other))
+            # #806: /proc mounted hidepid hides its start time; EPERM still proves it is there
+            with mock.patch.object(models, "_started", lambda pid: None):
+                self.assertTrue(models._alive(os.getpid(), start, other))
+                self.assertFalse(models._alive(os.getpid(), start, me))
 
     def test_lease_files_another_account_made_can_still_be_locked(self):
         shared = Path(self.tmp.name) / "shared-gpu"
@@ -908,6 +959,31 @@ class SharedLease(Base):
             self.assertEqual([h["task"] for h in held.values()], ["an-image"])
             self.assertEqual(next(iter(held.values()))["uid"], os.getuid())
         self.assertEqual(models.holders(), {})
+
+    def test_lease_files_made_under_a_umask_077_are_still_the_groups_to_read(self):
+        # #802: account A's umask 077 left gpu.lock, gpu.admit, gpu.load and gpu.json 0600, and
+        # account B's holders(), wb start and GpuLease failed with PermissionError
+        shared = Path(self.tmp.name) / "shared-gpu"
+        shared.mkdir()
+        os.environ["WB_GPU_DIR"] = str(shared)
+        (shared / "gpu.load").touch()
+        (shared / "gpu.load").chmod(0o600)           # left by an earlier run under that umask
+        self.assertEqual([p.name for p in models.unshared_lease_files()], ["gpu.load"])
+        old = os.umask(0o077)
+        try:
+            with models.GpuLease(None, "an-image", say=lambda *_: None):
+                with models._lease_lock(shared / "gpu.load"):
+                    pass
+                modes = {p.name: stat.S_IMODE(p.stat().st_mode) for p in shared.glob("gpu*")}
+        finally:
+            os.umask(old)
+        self.assertEqual(set(modes), {"gpu.lock", "gpu.admit", "gpu.load", "gpu.json"})
+        for name, mode in modes.items():
+            self.assertEqual(mode & 0o044, 0o044, f"{name} is {mode:o}")
+        self.assertEqual(models.unshared_lease_files(), [])
+        os.environ["WB_GPU_DIR"] = str(store.home())  # not shared: the umask's
+        self.assertFalse(models.lease_shared())
+        self.assertEqual(models.unshared_lease_files(), [])
 
     def test_a_refusal_names_another_accounts_task_as_theirs(self):
         held = {"1": {"task": "fix-it", "model": BIG, "uid": os.getuid() + 1, "user": "sam"}}
@@ -964,6 +1040,24 @@ class CanShare(Base):
                     mock.patch.object(models.hardware, "ollama_env", lambda: {}):
                 self.assertEqual(models.max_loaded(), 3 * len(cards))
                 self.assertEqual(models.can_share(d, [a, b, c], int(99e9)), ok, len(cards))
+
+    def test_the_model_limit_is_three_per_gpu_when_gpu_gb_sets_the_budget_too(self):
+        # #811: gpu_gb (a hand-set headroom) left budget_devices no devices, so a two-card box
+        # was allowed 3 models in all, and a fourth task was refused sharing that fit
+        a, b, c, d = (self.model(f"ollama/{x}", gb=1) for x in "abcd")
+        card = {"name": "RTX 3090", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30, "discrete": True}
+        hand = Path(self.tmp.name) / "models.json"
+        hand.write_text(json.dumps({"gpu_gb": 40}))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": str(hand)}), \
+                mock.patch.object(models.hardware, "gpus", lambda windows=True: [card, dict(card)]), \
+                mock.patch.object(models.hardware, "ollama_env", lambda: {}):
+            self.assertEqual(models.budget_devices(), (40_000_000_000, [], "models.json gpu_gb"))
+            self.assertEqual(models.max_loaded(), 6)
+            self.assertTrue(models.can_share(d, [a, b, c], models.gpu_budget()))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": str(hand)}), \
+                mock.patch.object(models.hardware, "gpus", lambda windows=True: []), \
+                mock.patch.object(models.hardware, "ollama_env", lambda: {}):
+            self.assertEqual(models.max_loaded(), 3)                  # no card it can read: as before
 
 
 

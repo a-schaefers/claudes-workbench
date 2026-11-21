@@ -99,22 +99,23 @@ class Score:
     def line(self) -> str:
         if not self.tries:
             return "no real tasks yet"
-        t = f", ~{self.minutes:.1f} min of active work" if self.minutes is not None else ""
+        t = f", ~{self.minutes:.1f} min of active work a step" if self.minutes is not None else ""
         like = f", {round(self.like_wins, 1):g}/{self.like_tries} on {'/'.join(self.stack)}" if self.like_tries else ""
         c = f", ~{self.claude / 1000:.0f}K Claude tokens a task" if self.claude_n >= COST_MIN else ""
         return f"{round(self.wins, 1):g}/{self.tries} real tasks accepted{like}{t}{c}"
 
 
 @functools.cache
-def _repo_stack(repo: str) -> tuple:
-    return tuple(gitops.stack(repo)) if Path(repo).is_dir() else ()
+def _repo_stack(repo: str, subdir: str | None = None) -> tuple:
+    return tuple(gitops.stack(repo, subdir)) if Path(repo).is_dir() else ()
 
 
 def row_stack(r: dict) -> tuple:
-    """A result's stack: recorded since it was, else read from its repo while that exists."""
+    """A result's stack: recorded since it was, else read from its repo (its package's, #820)
+    while that exists."""
     if r.get("stack") is not None:
         return tuple(r["stack"])
-    return _repo_stack(r["repo"]) if r.get("repo") else ()
+    return _repo_stack(r["repo"], r.get("subdir")) if r.get("repo") else ()
 
 
 def _up(over: dict, model_id: str, key: str) -> list[str]:
@@ -131,18 +132,39 @@ def _root(over: dict, model_id: str) -> str:
     return (_up(over, model_id, "variant_of") or [model_id])[-1]
 
 
-def lineage(m: models.Model) -> set[str]:
+# A model's record (score, slice, knobs, speed, the Stats line) was keyed by its OpenCode id, so
+# renaming the provider (`ollama` to `local`), moving from `name:latest` to its explicit tag or
+# renaming a llama-swap alias started it fresh: behind the models with a record, on the window's
+# guess, the default knobs and the default budgets, which stall on a slow machine (#818).
+def earlier(m: models.Model, probe: bool = True) -> list[str]:
+    """The ids ``m`` had before, nearest first: models.json `renamed_from` (wb model rename),
+    followed back; and, with ``probe`` (a server read, cached: models.identity), each id no
+    longer discovered whose newest results row ran on the Ollama digest ``m`` has now. Only a
+    digest: a `bytes:` size matches other weights too often to be called the same model."""
+    over = models._overrides()
+    out = _up(over, m.id, "renamed_from")
+    if probe and (w := models.identity(m)) and w.startswith("ollama:"):
+        newest = {r["model"]: r.get("weights_id") for r in store.results() if r.get("model")}
+        if any(v == w for k, v in newest.items() if k != m.id):
+            found = models.discover()
+            out += [k for k, v in newest.items()
+                    if v == w and k != m.id and k not in found and k not in out]
+    return out
+
+
+def lineage(m: models.Model, probe: bool = True) -> set[str]:
     """The ids that share ``m``'s record: a `wb optimize apply` variant (models.json
     `variant_of`), its source, and the source's other variants, followed to the first source: a
     variant of a variant (an apply after the GPU changed) once named only the one it came from,
     and the first source's record split off (#723). One model at two windows is one model's
-    record (#584)."""
+    record (#584). And the ids it had before (earlier, #818)."""
     over = models._overrides()
     if m.extra.get("variant_of") and not (over.get(m.id) or {}).get("variant_of"):
         over = {**over, m.id: {**(over.get(m.id) or {}), "variant_of": m.extra["variant_of"]}}
     root = _root(over, m.id)
-    return {m.id, root} | {k for k, v in over.items() if isinstance(v, dict) and v.get("variant_of")
-                           and _root(over, k) == root}
+    return {m.id, root, *earlier(m, probe)} | {
+        k for k, v in over.items() if isinstance(v, dict) and v.get("variant_of")
+        and _root(over, k) == root}
 
 
 def replaced(ids) -> set[str]:
@@ -181,7 +203,7 @@ def weights_changed(m: models.Model) -> bool:
 
 def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Score:
     state = state or models.status(m)
-    ids = lineage(m)
+    ids = lineage(m, probe=state["available"])  # a server down isn't asked its weights
     real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
             and tuning.judged(r)]
     # the weights each model has now: a server just found down isn't asked again (the audit)
@@ -201,15 +223,21 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     now = time.time()
     s.w = (sum(_weight(r, now) for r in real), sum(_weight(r, now) * tuning.credit(r) for r in real),
            sum(_weight(r, now) for r in like), sum(_weight(r, now) * tuning.credit(r) for r in like))
-    # the agent's active work, median: wall minutes held the queue, Claude's review and a night
-    # before an accept (480 min for a 12-minute task), and a mean let one such row set every
-    # ETA and progress check at many times the real length (#543). Rows without it are skipped.
-    times = [r["active_minutes"] for r in real if isinstance(r.get("active_minutes"), (int, float))
-             and not isinstance(r["active_minutes"], bool)]
-    s.minutes, s.minutes_n = (statistics.median(times) if times else None), len(times)
+    s.minutes, s.minutes_n = _typical(real)
     spent = [spend.weighted(r["claude"]) for r in real if isinstance(r.get("claude"), dict)]
     s.claude, s.claude_n = (statistics.fmean(spent) if spent else None), len(spent)
     return s
+
+
+def _typical(real: list[dict]) -> tuple[float | None, int]:
+    """The median of the rows' active minutes a step, and how many rows it is of."""
+    # the agent's active work, median: wall minutes held the queue, Claude's review and a night
+    # before an accept (480 min for a 12-minute task), and a mean let one such row set every
+    # ETA and progress check at many times the real length (#543). Rows without it are skipped.
+    # A step's: a `wb next` chain's row holds every step's minutes, and set beside single tasks
+    # it put a step past "its typical" minutes into its chain (#815), as tuning's reward does
+    times = [t for r in real if (t := tuning._step_minutes(r)) is not None]
+    return (statistics.median(times) if times else None), len(times)
 
 
 def _weight(r: dict, now: float) -> float:
@@ -257,19 +285,24 @@ def _cheaper(close: list[Score]) -> list[Score]:
     return [best] + [s for s in close if s is not best]
 
 
-def expected_minutes(model_id: str, size: str) -> float | None:
-    """How long a task of this size usually takes on this model, from real tasks: the median of
-    their active minutes (the agent's own working time), so compare it with a task's active time."""
-    return expected(model_id, size)[0]
+def expected_minutes(model_id: str, size: str, weights: str | None = None) -> float | None:
+    """How long a step of this size usually takes on this model, from real tasks: the median of
+    their active minutes a step (the agent's own working time), so compare it with a step's active
+    time. ``weights``: the task's own (task.json `weights_id`): rows on other weights left out."""
+    return expected(model_id, size, weights)[0]
 
 
-def expected(model_id: str, size: str) -> tuple[float | None, int]:
-    """expected_minutes, and how many timed tasks it is the median of."""
+def expected(model_id: str, size: str, weights: str | None = None) -> tuple[float | None, int]:
+    """expected_minutes, and how many timed tasks it is the median of. From the files alone: a
+    whole score() asked the server for the weights and the identity it never used, and every
+    `wb watch --json` the pane ran each 5 s spent ~5 s on a sleeping LAN box's timeouts (#819)."""
     m = models.discover().get(model_id)
     if not m:
         return None, 0
-    s = score(m, size, state={"available": True, "resident": True})
-    return s.minutes, s.minutes_n
+    ids = lineage(m, probe=False)
+    real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
+            and tuning.judged(r)]
+    return _typical(same_weights(real, {m.id: weights} if weights else {}))
 
 
 def allowed(m: models.Model, size: str) -> bool:
@@ -306,9 +339,14 @@ def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = No
     catalog = {} if catalog is None else catalog
     scores = [score(m, size, state=models.status(m, down, catalog), stack=stack)
               for m in models.discover().values() if allowed(m, size)]
-    budget = models.gpu_budget() if scores else None
+    # each model against its own server's cards: with one Ollama per GPU, one budget for all (the
+    # first process's) held an 18 GB model on the 24 GB card's server back as not fitting the 8 GB
+    # one, and passed a model too big for the 8 GB card (#801); read once per server this pass
+    by_root: dict = {}
     for s in scores:
-        s.fits = fits(s.model, budget) if s.state["available"] else None
+        if s.state["available"] and s.model.root not in by_root:
+            by_root[s.model.root] = None if s.model.remote else models.gpu_budget(s.model.root)
+        s.fits = fits(s.model, by_root[s.model.root]) if s.state["available"] else None
     usable = [s for s in scores if s.state["available"]]
     best = max((s.quality for s in usable), default=0)
     # a source whose optimize variant can run goes after it: the variant is the window measured
@@ -386,7 +424,8 @@ def slice(m: models.Model) -> Slice:
     scale = min(window / BASE_WINDOW, GUESS_MAX) if window else 1
     files, lines = max(1, round(BASE_FILES * scale)), max(50, round(BASE_LINES * scale / 10) * 10)
     basis = f"{window // 1024}K window" if window else "window unknown"
-    rows = same_weights([r for r in store.results() if r.get("model") == m.id and tuning.judged(r)],
+    ids = {m.id, *earlier(m)}  # under the ids it had before too (#818)
+    rows = same_weights([r for r in store.results() if r.get("model") in ids and tuning.judged(r)],
                         weights_now({m.id}))  # another model's steps under the same id (#726)
     steps = [s for r in rows for s in r.get("steps") or []
              if s.get("files") and (not window or s.get("window") in (None, window))]
@@ -495,8 +534,13 @@ def speed_samples(messages: list[dict]) -> dict:
 
 
 def speed(model_id: str) -> dict:
-    """{"write", "read"}: the model's median tokens per second on this machine, where measured."""
-    row = (store.read_json(_speed_path(), {}) or {}).get(model_id) or {}
+    """{"write", "read"}: the model's median tokens per second on this machine, where measured;
+    unmeasured under this id, under the nearest id it had before (earlier, #818)."""
+    data = store.read_json(_speed_path(), {}) or {}
+    row = data.get(model_id) or {}
+    if not row and data:
+        m = models.discover().get(model_id)
+        row = next((data[i] for i in (earlier(m) if m else []) if data.get(i)), {})
     return {k: statistics.median(row[k]) for k in ("write", "read") if row.get(k)}
 
 

@@ -6,7 +6,8 @@ updating workbench, or the weekly model check is due.
 **No local model yet?** If `wb models` lists none that can run, do the model check below first:
 recommend models for this hardware and offer to set them up in OpenCode (ask before any download).
 **Work with the model server the user already runs**, whichever it is: `wb scout` lists the server
-commands on PATH and the servers answering here. Never steer them to one they don't use. With
+commands on PATH and the servers answering here (one that "wants an API key" needs it in its
+provider's `options.apiKey`: ask the user for it). Never steer them to one they don't use. With
 none at all, lay out the options that fit the machine in a line each (llama.cpp's `llama-server`,
 alone or behind llama-swap; LM Studio; Ollama; vLLM on NVIDIA; MLX on Apple Silicon) and let the
 user pick; install nothing unasked. Asked which is most hands-off: Ollama (you download and remove
@@ -51,7 +52,7 @@ with; ask the user if you don't know it. `wb doctor` flags an entry whose
 context differs from what the server serves, or that has none. Results first, then speed. Recommend briefly (keep / add / retire, with sizes and why), and
 only with a yes: on Ollama `wb model add <provider/model> --pull` (background); on another server,
 download it the server's own way (`lms get`, a GGUF from Hugging Face) and `wb model add`; `wb model sizes` for what it
-should take, `wb model retire <id> [--delete]`. Installed but unregistered models may belong to other tools: ask before touching
+should take, `wb model retire <id> [--delete]`; a model now under another id (a provider or alias renamed, its old id retired): `wb model rename <old> <new>` keeps its record. Installed but unregistered models may belong to other tools: ask before touching
 them. When you set a model aside, `wb scout --watch "…"` records what would bring it back:
 the change to look for, and the test it must pass. A model you add: offer an overnight
 `wb bench run --model <id>` before its first real task.

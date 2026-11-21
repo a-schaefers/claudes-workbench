@@ -51,6 +51,11 @@ DEST_VALUED = {"-b", "--branch", "-o", "--origin", "--depth", "-c", "--config", 
                "--reference-if-able", "--separate-git-dir", "-u", "--upload-pack", "--template",
                "--shallow-since", "--shallow-exclude", "-j", "--jobs", "--filter", "--bundle-uri",
                "--server-option", "--initial-branch", "--object-format", "--ref-format"}
+# config's options that take the next argument as their value: counted as a key or value, `git
+# config -f .gitmodules submodule.x.url` read as a write and was refused (#794)
+CONFIG_VALUED = {"-f", "--file", "--blob", "--type", "--default", "--comment", "--value"}
+# config's scopes that name a file of their own, not the repository's config
+CONFIG_FILES = {"--global", "--system", "-f", "--file", "--blob"}
 CONFIG_WRITES = {"--add", "--unset", "--unset-all", "--replace-all", "--rename-section",
                  "--remove-section", "-e", "--edit", "set", "unset", "rename-section",
                  "remove-section", "edit"}
@@ -82,6 +87,7 @@ def reads(sub: str | None, rest: list[str]) -> bool:
     if sub == "tag":
         return not flags & TAG_WRITES and (not plain or bool(flags & TAG_LISTS))
     if sub == "config":
+        plain = _config_plain(rest)
         words = flags | set(plain[:1])
         return not words & CONFIG_WRITES and (bool(words & CONFIG_READS) or len(plain) == 1)
     if sub == "stash":
@@ -104,6 +110,45 @@ def reads(sub: str | None, rest: list[str]) -> bool:
     if sub == "symbolic-ref":
         return len(plain) == 1 and not flags & {"-d", "--delete", "-m"}
     return False
+
+
+def _config_plain(rest: list[str]) -> list[str]:
+    """config's arguments that aren't options or their values: its key, value, subcommand."""
+    plain, skip = [], False
+    for a in rest:
+        if skip:
+            skip = False
+        elif a.startswith("-"):
+            skip = a in CONFIG_VALUED
+        else:
+            plain.append(a)
+    return plain
+
+
+def config_files(rest: list[str], opts: list[str]) -> list[str] | None:
+    """The files a `git config` write with --global, --system or -f writes (the ones it may),
+    or None when it writes the repository's own config. Decided by the cwd's repository, a
+    fixture's `git config --global user.name t` with HOME pointed at its temp directory, run
+    from the worktree, was refused, and the base check and every round failed on it (#794, the
+    second 2026-11-21 audit); the lane keeps the real ~/.gitconfig and /etc out of reach."""
+    env, where = os.environ, _where(opts)
+    for i, a in enumerate(rest):
+        name, eq, value = a.partition("=")
+        if name not in CONFIG_FILES:
+            continue
+        if name == "--blob":
+            return []  # git writes no blob
+        if name == "--global":
+            if env.get("GIT_CONFIG_GLOBAL"):
+                return [os.path.join(where, env["GIT_CONFIG_GLOBAL"])]
+            home = env.get("HOME") or os.path.expanduser("~")
+            xdg = env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+            return [os.path.join(home, ".gitconfig"), os.path.join(xdg, "git", "config")]
+        if name == "--system":
+            return [env.get("GIT_CONFIG_SYSTEM") or "/etc/gitconfig"]
+        value = value if eq else (rest[i + 1] if i + 1 < len(rest) else "")
+        return [os.path.join(where, value)]
+    return None
 
 
 def _temp_roots(temps=()) -> list[str]:
@@ -195,13 +240,25 @@ with ask_reviewer or in your summary.
 """
 
 
-def main(real: str, task_git: str, args: list[str], temps=(), lanes=()) -> int:
+def main(real: str, task_git: str, args: list[str], temps=(), lanes=(), pins=()) -> int:
     """``lanes``: the worktree and the lane's tool homes, where a repository other than the
-    task's is writable (a test suite's own, a package manager's)."""
+    task's is writable (a test suite's own, a package manager's). ``pins``: the `-c` options
+    that make git see the worktree's file system as wb's own calls do (gitops.fs_pins), given
+    to a read in the task's repository only: forced on every git, a test suite's scratch repos
+    on other file systems would get them too (#796)."""
     opts, sub, rest = split(args)
     if reads(sub, rest):
+        pre = list(pins) if pins and common_dir(real, opts) == os.path.realpath(task_git) else []
         # no index refresh in the task's repo, which Claude may be diffing at the same moment
-        os.execve(real, [real, *args], {**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+        os.execve(real, [real, *pre, *args], {**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    if sub == "config" and (files := config_files(rest, opts)) is not None:
+        # a file of its own: refused only where it is the task's repository's (#794)
+        # or a `.git` link, whose rewrite would point the worktree at a git dir of its own
+        if not any(_inside(os.path.realpath(f), [os.path.realpath(task_git)])
+                   or os.path.basename(os.path.realpath(f)) == ".git" for f in files):
+            os.execv(real, [real, *args])
+        sys.stderr.write(REFUSAL.format(sub=sub))
+        return 1
     making = sub in ("init", "clone")
     target = destination(sub, rest, opts) if making else opts
     if (making and nested(sub, rest, opts, lanes)) or \
@@ -212,7 +269,7 @@ def main(real: str, task_git: str, args: list[str], temps=(), lanes=()) -> int:
 
 
 def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str,
-            worktree: Path | None = None, scratch=()) -> dict | None:
+            worktree: Path | None = None, scratch=(), pins=()) -> dict | None:
     """Write the shim into bin_dir; returns the env the agent runs with, or None without git.
     ``worktree``: the task's, where repositories other than the task's are scratch; ``scratch``:
     the rest of the lane's writable places (the tool homes), where they are scratch too: a
@@ -240,7 +297,7 @@ def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str,
             "from workbench.gitguard import main\n"
             f"sys.exit(main({real!r}, {repo_dir!r}, sys.argv[1:], "
             f"{sorted({tempfile.gettempdir(), '/tmp', '/var/tmp'})!r}, "
-            f"{lanes!r}))\n")
+            f"{lanes!r}, {list(pins)!r}))\n")
     shim.write_text("#!/bin/sh\n"
                     "# workbench: git is read-only for the agent (see workbench/gitguard.py)\n"
                     f"exec {shlex.quote(sys.executable)} -I -c {shlex.quote(code)} \"$@\"\n")

@@ -193,8 +193,42 @@ def provider_timeouts(task: store.Task) -> dict:
     pid = str(task.spec.get("model") or "").split("/", 1)[0]
     if not pid:
         return {}
-    chunk = max(900, int(float(task.spec.get("silence_timeout") or 900)) + 60) * 1000
+    chunk = max(900, int(float(limit(task, "silence")) + 60)) * 1000
     return {"provider": {pid: {"options": {"headerTimeout": False, "chunkTimeout": chunk}}}}
+
+
+# A task's limits were fixed in task.json at wb start, so a task on a model not yet measured kept
+# the defaults in every later round, after its first round had measured the model slow and said a
+# new task would wait longer: a fresh session read its prompt again at the same speed and hit the
+# same 900 s wall, and only a new task got the time (#814). Before each round the runner takes,
+# for each limit no flag gave (task.json `timeouts_given`), the larger of task.json's value and the
+# model's budget now, into status `limits`; a flag's value is the user's word, and a task from
+# before the key keeps its own.
+LIMITS = {"think": "think_timeout", "silence": "silence_timeout", "round": "round_timeout"}
+LIMIT_DEFAULTS = {"think": 0, "silence": 900, "round": 2400}  # a task.json missing the key
+
+
+def limit(task: store.Task, which: str) -> float:
+    """The round's limit ``which`` (think, silence, round) in seconds: status `limits`, stretched
+    for a model measured slow since wb start (stretch_limits), else task.json's."""
+    if (now := (task.status.get("limits") or {}).get(which)) is not None:
+        return float(now)
+    return float(task.spec.get(LIMITS[which]) or LIMIT_DEFAULTS[which])
+
+
+def stretch_limits(task: store.Task, m) -> dict:
+    """Status `limits`: each limit no flag gave, raised to the model's budget now
+    (router.budgets) where that is longer than task.json's; returns what was raised."""
+    from . import router
+    spec = task.spec
+    given = spec.get("timeouts_given")
+    if given is None:  # a task from before #814: whether a flag gave them is unknown
+        return {}
+    fresh = router.budgets(m)
+    raised = {k: fresh[k] for k, key in LIMITS.items()
+              if k not in given and fresh[k] > float(spec.get(key) or 0)}
+    task.set_status(limits=raised or None)
+    return raised
 
 
 def write_config_layer(task: store.Task) -> Path:
@@ -446,6 +480,11 @@ def agent_env(task: store.Task, run: str = "") -> dict:
         # (nbmake, nbval, papermill) failed with PermissionError before a kernel started (#668)
         env.setdefault("JUPYTER_RUNTIME_DIR", str(context.runtime_dir(task) / "jupyter"))
         env.update(daemon_env(task, env))  # its own build daemons, not the user's (#669)
+        # poetry's and pipenv's venv in the worktree, as `uv sync` makes it (own_venv): their
+        # homes are split around an active venv (`poetry shell`, direnv), where no new one can
+        # be made, so a setup's `poetry install` was refused (#825); the venv ignores itself
+        env.setdefault("POETRY_VIRTUALENVS_IN_PROJECT", "true")
+        env.setdefault("PIPENV_VENV_IN_PROJECT", "1")
         # On WSL, not the Windows PATH, whose programs run outside the lane (context.agent_path),
         # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
         env.pop("WSL_INTEROP", None)
@@ -464,7 +503,12 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     # the lane's other directories are scratch to the shim too (#665): the kernel lets the
     # agent write there already, and writable() leaves the task's repo out of them
     scratch = [d for d in places or [] if os.path.isdir(d) and not d.startswith(("/dev", "/proc"))]
-    if gitguard.install(shim, Path(task.spec["repo"]), PKG_ROOT, outside, task.worktree, scratch):
+    # the repository's main worktree when the linked one the task started from was removed: its
+    # git dir stays, and `git -C <removed>` crashed the runner on every round (#776)
+    # the worktree's file system as wb's own git sees it, for the agent's git too (#796)
+    pins = gitops.fs_pins(task.worktree, differing=True) if task.worktree.is_dir() else []
+    if gitguard.install(shim, gitops.repo_of(task.spec), PKG_ROOT, outside, task.worktree, scratch,
+                        pins):
         env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
     return env
 
@@ -720,11 +764,13 @@ def _clock(secs: float) -> str:
 
 
 def active_so_far(task: store.Task, now: float | None = None) -> float:
-    """The task's active work in seconds, as the ETA compares it with the typical length: status
-    `active_s` (the rounds so far, written as each ends) plus the round under way, whole."""
+    """The step's active work in seconds, as the ETA compares it with the typical length (a
+    step's, router.score): status `active_s` (the rounds so far, written as each ends) less
+    `step_active_s` (the earlier steps': wb next, #815) plus the round under way, whole."""
     st, now = task.status, now or time.time()
     running = st.get("round_started_at") if st.get("phase") in ("running", "testing", "asking") else None
-    return float(st.get("active_s") or 0) + (max(0.0, now - running) if running else 0.0)
+    return float(st.get("active_s") or 0) - float(st.get("step_active_s") or 0) + \
+        (max(0.0, now - running) if running else 0.0)
 
 
 def checkin_text(task: store.Task, n: int, out: dict, since: float, active: float | None = None) -> str:
@@ -733,7 +779,8 @@ def checkin_text(task: store.Task, n: int, out: dict, since: float, active: floa
     from . import router  # router -> models; imported late to keep the runner's startup lean
     spec, st, now = task.spec, task.status, time.time()
     took = now - spec["created_at"]
-    typical = router.expected_minutes(spec["model"], spec.get("size", "significant"))
+    typical = router.expected_minutes(spec["model"], spec.get("size", "significant"),
+                                      spec.get("weights_id"))
     eta = ""
     if typical:  # active work against active work: the wall clock held queues and reviews (#543)
         left = typical * 60 - (active_so_far(task, now) if active is None else active)
@@ -872,8 +919,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         power.start()
 
     detector = StuckDetector(**spec.get("stuck", {}), worktree=task.worktree)
-    wall, silence = float(spec.get("round_timeout", 2400)), float(spec.get("silence_timeout", 900))
-    think = float(spec.get("think_timeout") or 0)
+    wall, silence, think = limit(task, "round"), limit(task, "silence"), limit(task, "think")
     # A shell command OpenCode moved to the background (past 2 minutes it does, and the turn
     # ends waiting on it) prints nothing until it is done: a long test suite counted as thinking,
     # was nudged and killed every 7 minutes, and rerun (the 2026-11-16 audit). While it waits
@@ -887,6 +933,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     started = time.time()  # the wall clock, for check-ins: they compare with timestamps in files
     clock = _Clock(time.monotonic())
     prior = float(task.status.get("active_s") or 0)  # earlier rounds' active work
+    # what the ETA and the progress checks compare: this step's alone (#815)
+    step_prior = prior - float(task.status.get("step_active_s") or 0)
     typical = progress.threshold(spec)  # the user's opt-in (#95); off (None), today's timing
     # The think budget starts at the round's first output: until then the model is reading its
     # prompt, which on the CPU or a model spilled into RAM takes many minutes, and a round nudged
@@ -901,6 +949,11 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
            "answered": False}
     window = st.get("window")
     fresh_at = tuning.value(task, "fresh_at")
+    # The last step's (session, context): a later step in it carrying under half of one that was
+    # near the handover point is OpenCode's compaction, which `run --format json` doesn't print.
+    # One tool result bigger than the margin before it (a long file, a test log) compacted the
+    # session between two steps, and the agent worked on from its summary (#774).
+    last_step: tuple = (None, 0)
     opened: dict = {}  # the questions open this round (ask_mcp.relay)
     while True:
         try:  # woken by the agent's output or a steer note; the timeout runs the clocks below
@@ -977,6 +1030,22 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 # whose reading came to 16K of a 19K handover point handed over three times in
                 # four minutes, each fresh session getting 3K of work. It carries on instead.
                 changed = None
+                sid = raw.get("sessionID") or task.status.get("session")
+                if window and compacted_between(last_step, sid, used, fresh_at * window, window):
+                    changed = marks != {gitops.mark(task.worktree)}
+                    if changed and floor is None:  # it changed nothing by the step before
+                        floor = last_step[1]
+                        task.set_status(session_floor=floor)
+                    if changed and not keep and not out["full"] \
+                            and fresh_at * window - floor >= HANDOVER_ROOM * window:
+                        out["full"], out["compacted"] = last_step[1], True
+                    else:
+                        task.event({"ts": store.now(), "round": n, "kind": "compacted",
+                                    "text": f"OpenCode compacted the agent's session mid-round at "
+                                            f"{100 * last_step[1] // window}% of its window: it "
+                                            f"works on from its own summary"})
+                if used:
+                    last_step = (sid, used)
                 if floor is None and window:
                     changed = marks != {gitops.mark(task.worktree)}
                     if changed:
@@ -1050,7 +1119,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 nudges = task.status.get("nudges", 0) + 1
                 task.set_status(nudges=nudges)
                 task.notify("checkin", checkin_text(task, n, out, max(started, float(
-                    task.status.get("checkin_at") or 0)), prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
+                    task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
                     f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
                     round=n)
         if out["stuck"]:
@@ -1062,7 +1131,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             break
         every = float(spec.get("checkin") or 0) * 60
         since = max(started, float(task.status.get("checkin_at") or 0))
-        active = prior + clock.ran(mono)
+        active = step_prior + clock.ran(mono)
         if every and now - since >= every and not asking:
             task.set_status(checkin_at=now)
             task.notify("checkin", checkin_text(task, n, out, since, active), round=n)
@@ -1286,9 +1355,16 @@ def clip_tail(output: str, lines: int, width: int = 300, total: int = 4000) -> s
     return s if len(s) <= total else "… (earlier output cut)\n" + s[-total:]
 
 
+# A pty the lane refused, which names no path: Python's pty.openpty and pexpect ("out of pty
+# devices"), node-pty and others; the grant is /dev/pts (#829, the second 2026-11-21 audit)
+PTY_REFUSED = re.compile(r"out of pty devices|failed to create pseudo-?terminal|forkpty\(3\) failed",
+                         re.I)
 # A refusal in a test's output: the phrase, and the absolute paths on its line. Not a URL's path
 # (`https://h/x`), nor one inside a word.
-REFUSAL = re.compile(r"permission denied|operation not permitted", re.I)
+REFUSAL = re.compile(r"permission denied|operation not permitted|"
+                     # Bundler's PermissionError and RubyGems' FilePermissionError, which say
+                     # neither (#832): "while trying to write to `…`", "write permissions for"
+                     r"error while trying to (?:write to|create)|write permissions for", re.I)
 ABS_PATH = re.compile(r"(?<![\w:/.~-])/[\w.+@~-]+(?:/[\w.+@~-]+)*")
 # and where a path may hold spaces (/mnt/c/Users/John Smith, ~/Library/Application Support):
 # quoted, or running up to the refusal itself. ABS_PATH stopped at the first space, and the
@@ -1313,31 +1389,85 @@ def lane_refused(task: store.Task, output: str) -> list[str]:
     reach (`lane_grant`): /dev/kvm and /dev/fuse (#331, the audit of 1.4), and since #437 (the
     audit of 1.8) any path, an Android keystore, a Flutter lockfile, a NuGet cache, which read as
     the project's bug, and the agent spent its auto-fix rounds on them. The report names
-    `wb allow --path` for each."""
-    lane = context.writable(task)
-    if lane is None:
+    `wb allow --path` for each. Only a refusal the lane made: without Landlock (macOS, a kernel
+    without it) there is none, and a path the runner, outside the lane, may not use either is the
+    user's own permissions (#773, the second 2026-11-21 audit: a test's Permission denied on
+    /usr/share skipped auto-fix and woke Claude with a grant that couldn't help)."""
+    places = context.writable(task)
+    if places is None or not lane.abi():
         return []
     guard = context.repo_dirs(task)  # the user's checkout: no lane may write it
+    # From ABI 9 a socket made outside the lane is refused even inside a writable place: the
+    # user's Postgres or MySQL socket in /tmp read as a broken database, no grant named (#826)
+    sockets = context.unix_paths(task) if lane.abi() >= 9 else None
     found = []
     for line in output[-200_000:].splitlines():
+        if PTY_REFUSED.search(line) and "/dev/pts" not in found and "/dev/pts" not in places:
+            found.append("/dev/pts")  # no path, no "permission denied" (#829)
         if not REFUSAL.search(line):
             continue
         for path in refused_paths(line):
             grant = lane_grant(path)
-            if path not in found and grant and not any(
-                    path == w or path.startswith(str(w).rstrip("/") + "/") for w in lane) \
-                    and not any(grant == g or context._under(grant, g) for g in guard):
+            if path not in found and grant and (not any(
+                    path == w or path.startswith(str(w).rstrip("/") + "/") for w in places)
+                    or sockets is not None and is_socket(path) and not any(
+                        path == u or context._under(path, u) for u in sockets)) \
+                    and not any(grant == g or context._under(grant, g) for g in guard) \
+                    and runner_may(path):
                 found.append(path)
     return found[:5]
 
 
-def lane_grant(path: str) -> str | None:
-    """The `wb allow --path` that reaches a refused path: itself when it exists (a directory, a
-    device node, a socket) or is a device node, else the nearest directory that does; None when no grant can (`/`,
-    the home directory, a secret: context.lane_refusal)."""
+def runner_may(path: str) -> bool:
+    """Whether this process, outside the lane, may use `path`: read or write it when it exists,
+    else make it in the nearest directory that does (#773)."""
     real = os.path.realpath(path)
+    if os.path.exists(real):
+        return os.access(real, os.R_OK) or os.access(real, os.W_OK)
+    if real.startswith("/dev/"):  # a pty index gone by now (#829): the kernel's, not a mode's
+        return True
+    while not os.path.exists(real):
+        real = os.path.dirname(real)
+    return os.access(real, os.W_OK | os.X_OK)
+
+
+def is_socket(path: str) -> bool:
+    """Whether ``path`` is a UNIX socket (followed: a link to one is one)."""
+    try:
+        return stat.S_ISSOCK(os.stat(path).st_mode)
+    except OSError:
+        return False
+
+
+def lane_grant(path: str) -> str | None:
+    """The `wb allow --path` that reaches a refused path: /dev/pts for a pty, itself when it
+    exists (a directory, a device node, a socket) or is a device node, else the nearest directory that does; the
+    toolchain home it falls in when that isn't made yet, or the one below it (`~/go`: `go/pkg`,
+    context.tool_home_of, #824: the walk reached the home directory), or else the RubyGems
+    home it is in (context.gem_home_of, #832); then, while that place holds what the lane is split around
+    (context.split_points: a grant of it would be split again), the next directory down
+    towards the path. None when no grant can (`/`, the home directory, a secret:
+    context.lane_refusal)."""
+    target = real = os.path.realpath(path)
+    if real == "/dev/pts" or real.startswith("/dev/pts/"):
+        return "/dev/pts"  # every pty, not the one index this run got (#829)
     while not os.path.exists(real) and not real.startswith("/dev/"):  # a node: itself, or /dev
         real = os.path.dirname(real)
+    if (home := context.tool_home_of(target)) and (not os.path.exists(home)
+                                                   or context._under(home, target)):
+        real = home  # made by wb allow --path (cli._lane_dir), then in the lane (#824)
+    elif gems := context.gem_home_of(target):
+        real = gems  # the whole gem home, which `bundle install` writes all over (#832)
+    if context.lane_refusal(real):
+        return None
+    if real in context.secret_sockets():
+        return real  # Docker Desktop's, in .docker: connected to alone (#441)
+    out = context.split_points()
+    while real != target and context._under(target, real) and \
+            any(context._under(h, real) for h in out):
+        real = os.path.join(real, target[len(real):].strip("/").split("/")[0])
+    if real in out or any(context._under(real, h) for h in out):
+        return None  # what the lane keeps out: ~/.cargo/bin, a secret
     return None if context.lane_refusal(real) else real
 
 
@@ -1351,6 +1481,8 @@ def run_tests(task: store.Task, n: int):
     task.round_dir(n).joinpath("tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     result = {"ok": code == 0, "exit": code, "tail": clip_tail(output, 40), "round": n}
+    if code == "timeout" and (stalled := hang(task, limit)):  # #779
+        result["hang"] = stalled
     if code != 0 and (refused := lane_refused(task, output)):
         result["lane"] = refused
     if code != 0 and (gone := proxy_gap(output)):  # #380
@@ -1773,6 +1905,11 @@ def _prepare_now(task: store.Task) -> bool:
         f"setting up the worktree failed ({setup_timed_out(spec) if code == 'timeout' else code})"
     tail = "\n".join("    " + x for x in clip_tail(output, 8, total=1500).splitlines())
     proxy = f"\n{proxy_line(gone)}, if the setup needed it" if (gone := proxy_gap(output)) else ""
+    # what the lane refused, as a test run's report names it: a first `npm ci` failed on a
+    # ~/.npm not made yet, and the notice named no grant (#824)
+    proxy += "".join(f"\nthe lane refused {shlex.quote(n)}: wb allow {task.name} --path "
+                     f"{shlex.quote(lane_grant(n) or n)}, if the setup needs it"
+                     for n in lane_refused(task, output))
     task.set_status(phase="failed", last=what, infra="setup", failed_before="setup")  # #508
     # resume, not discard and start again: the agent never ran, and wb resume sets up again (#581)
     task.notify("failed", f"task {task.name}: {what} before any round "
@@ -1798,11 +1935,43 @@ def base_check(task: store.Task) -> dict | None:
         return None
     limit = min(BASE_CHECK_SECS, int(task.spec.get("test_timeout") or 900))
     from . import verify  # verify imports this module
+    timed: list[float] = []  # its scratch checkout and run, not the waits for the GPU or a turn (#779)
     code, output = verify.on_base(task, cmd, limit, say=lambda msg: task.set_status(last=msg),
-                                  turn=lambda: prep_turn(task))  # one at a time, as setups (#590)
+                                  turn=lambda: _timed(prep_turn(task), timed))  # one at a time, as setups (#590)
     task.dir.joinpath("base-tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
-    return {"ok": code == 0, "exit": code, "tail": clip_tail(output, 8, total=1500), "limit": limit}
+    return {"ok": code == 0, "exit": code, "tail": clip_tail(output, 8, total=1500), "limit": limit,
+            **({"secs": round(timed[0], 1), "cmd": cmd} if timed else {})}
+
+
+@contextlib.contextmanager
+def _timed(inner, into: list):
+    """``inner`` (a context manager), with the seconds spent inside it appended to ``into``."""
+    with inner:
+        began = time.monotonic()
+        try:
+            yield
+        finally:
+            into.append(time.monotonic() - began)
+
+
+# A base check that passed in under this share of --test-timeout says the whole suite is fast: a
+# round's run past the limit is the change's hang (an infinite loop, a blocking read, a server
+# never shut down), and goes back to the agent. Skipped as "the suite may be slow", each one cost
+# a 15-minute run and a wake that auto-fix could have handled (#779).
+HANG_SHARE = 0.25
+
+
+def hang(task: store.Task, limit: int) -> dict | None:
+    """{"base", "limit"} when a round's run past ``limit`` is the change's hang: the base check
+    ran this same command to exit 0 in under HANG_SHARE of it. None when it timed out or failed
+    there, or was never checked: then the suite may well be slow."""
+    base = task.status.get("base_check") or {}
+    secs = base.get("secs")
+    if base.get("ok") and secs is not None and base.get("cmd") == task.spec.get("test_cmd") \
+            and secs <= HANG_SHARE * limit:
+        return {"base": secs, "limit": limit}
+    return None
 
 
 def base_check_line(r: dict, task: store.Task) -> str:
@@ -1893,6 +2062,7 @@ def review_diff(task: store.Task) -> str:
     base = "HEAD" if steps > 1 else task.spec["base"]
     last = task.status.get("reviewed") or {}
     since = last.get("tree") if last.get("step") == steps else None
+    gone = ""
     # Only the proposals accept settles (proposals()) are left out of the code's diff: every
     # `*.proposed` was, so an ordinary schema.proposed read as "no changes" and was committed
     # all the same (#79, the 2026-11-18 audit).
@@ -1902,6 +2072,11 @@ def review_diff(task: store.Task) -> str:
         tree, left = gitops.snapshot_left(task.worktree)  # bulky new files left out (#431)
         task.set_status(reviewed={"step": steps, "tree": tree})
         left = gitops.left_line(left)
+        if since and not gitops.has_tree(task.worktree, since):
+            # nothing reaches the last snapshot, and git gc pruned it: the diff against it failed,
+            # and the notice dropped the whole diff without a word (#795, the second 2026-11-21
+            # audit). The whole diff again, said why.
+            since, gone = None, "\n\nthe last review's snapshot is gone (git gc pruned it): all of it again"
         if since:
             # bounded: a big diff is never read whole only to show its stat (#348, the audit of 1.4)
             full = gitops.diff(task.worktree, since, paths=code, limit=REVIEW_DIFF_MAX)
@@ -1918,11 +2093,11 @@ def review_diff(task: store.Task) -> str:
         full = gitops.diff(task.worktree, base, paths=code, limit=REVIEW_DIFF_MAX)
         prop = proposal_diff(task) + left
         if full == "":
-            return "\n\nthe diff: (no changes)" + prop
+            return gone + "\n\nthe diff: (no changes)" + prop
         if full is not None:
-            return (f"\n\nthe diff (all of it; wb diff {task.name} again only after a change):"
+            return (f"{gone}\n\nthe diff (all of it; wb diff {task.name} again only after a change):"
                     f"\n{full}" + prop)
-        return (f"\n\nthe diff is over {REVIEW_DIFF_MAX} characters, too big to include: "
+        return (f"{gone}\n\nthe diff is over {REVIEW_DIFF_MAX} characters, too big to include: "
                 f"its stat:\n{gitops.diff(task.worktree, base, stat=True, stat_count=gitops.CHANGED_SHOWN)}" + prop)
     except (gitops.GitError, OSError):
         return ""
@@ -1972,10 +2147,15 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
              f" · local tokens {rnd['tok_in']} in / {rnd['tok_out']} out"]
     c = context_state(task)
     if c.get("used") and c.get("window"):
+        after = {**st, "round": n + 1}  # judged as the step's next round is (#781)
         lines.append(f"agent context: {c['used'] / 1000:.1f}K of {c['window'] // 1024}K "
                      f"({100 * c['used'] // c['window']}%)"
                      + (f", compacted {c['compactions']}x" if c.get("compactions") else "")
-                     + ("; the next round starts a fresh session" if fresh_reason(task) else ""))
+                     + ("; the next round starts a fresh session" if fresh_reason(task, after) else
+                        "; the next round carries on in this session: a fresh one would re-read "
+                        "what it read and have little room to work"
+                        if full_session(task, after, c) and no_room(task, after, c["window"])
+                        else ""))
     full = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0]
             if e.get("kind") == "reading_full" and e.get("round") == n]
     if full:
@@ -2117,15 +2297,33 @@ def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
         return None if first else "the last session ended before it began"
     if st.get("context") == "keep":
         return None
-    if st.get("context") == "full":
-        return f"the last session was {st.get('full_pct')}% full"
+    if st.get("context") == "full":  # handed over mid-round; after OpenCode compacted it (#774)
+        return COMPACTED if st.get("full_compacted") else f"the last session was {st.get('full_pct')}% full"
     c = context_state(task)
     if c.get("compactions"):
         return COMPACTED
-    if c.get("used") and c.get("window") and c["used"] >= tuning.value(task, "fresh_at") * c["window"]:
+    if full_session(task, st, c) and not no_room(task, st, c["window"]):
         return (f"the last session was {100 * c['used'] // c['window']}% full "
                 f"({c['used'] / 1000:.1f}K of {c['window'] // 1024}K tokens)")
     return None
+
+
+def full_session(task: store.Task, st: dict, c: dict) -> bool:
+    """Whether the session's context (`context_state`) reached the handover point."""
+    return bool(c.get("used") and c.get("window")
+                and c["used"] >= tuning.value(task, "fresh_at") * c["window"])
+
+
+def no_room(task: store.Task, st: dict, window: int) -> bool:
+    """Whether a fresh session in this step would re-read what this one read before its first
+    change (status `session_floor`; all of it when it changed nothing) and be left less than
+    HANDOVER_ROOM to work: the mid-round rule, between rounds too. Ignored there, every auto-fix
+    and feedback round on a small window paid the re-read and filled up again (#781). Not on a
+    step's first round (wb next): the new step's reading is its own."""
+    if (st.get("step_round") or 1) >= st.get("round", 1):
+        return False
+    floor = st.get("session_floor")
+    return floor is None or tuning.value(task, "fresh_at") * window - floor < HANDOVER_ROOM * window
 
 
 ANSWERS_MAX = 4000  # characters of Claude's answers a fresh session carries; the latest first kept
@@ -2215,8 +2413,19 @@ def current_task_prompt(task: store.Task) -> str:
 
 def _start_fresh(task: store.Task, n: int, why: str) -> None:
     path = task.round_dir(n).joinpath("prompt.md")
-    raw = path.read_text().strip()
-    path.with_name("instructions.md").write_text(raw)  # round_asks reads it back
+    kept = path.with_name("instructions.md")
+    # Round n began fresh already, and runs again (its server died before the first event: the
+    # revive): its own prompt is the one kept, and prompt.md is the handoff. Taken as the round's
+    # prompt, the handoff went over instructions.md and was wrapped in a second one, the spec and
+    # the diff twice, and every later reader got the handoff (#780). Made again from the kept one,
+    # for the work as it stands now, and said once.
+    again = kept.is_file()
+    raw = (kept if again else path).read_text().strip()
+    if not again:
+        kept.write_text(raw)  # round_asks reads it back
+    st = task.status
+    if again and not st.get("session") and (said := _fresh_said(task, n)):
+        why = said  # not "the last session ended before it began": the reason it began fresh
     # Not this round's prompt alone: what the step's rounds asked, back to the review feedback.
     # An auto-fix or a steer round after a feedback round, starting fresh, once carried only the
     # failing tests, and the fresh agent fixed them and reported done with the feedback never
@@ -2229,12 +2438,24 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
         asks = round_asks(task, n)  # ends with this round's own: instructions.md is written
         now = raw if len(asks) < 2 else ASKED.format("\n\n".join(asks[:-1])).strip() + "\n\nNow:\n\n" + raw
     path.write_text(handoff_prompt(task, why, now))
-    st = task.status
     task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]] * bool(st.get("session")),
                     context=None, skills_told=None)  # a new session hears the skills again
+    if again and not st.get("session"):  # no session was replaced: the handover is counted once
+        return
     task.event({"ts": store.now(), "round": n, "kind": "fresh", "overflow": why != ASKED_FRESH,
                 "compacted": why == COMPACTED,
-                "text": f"a fresh session for the agent: {why}"})
+                "text": f"{FRESH_SAID}{why}"})
+
+
+FRESH_SAID = "a fresh session for the agent: "
+
+
+def _fresh_said(task: store.Task, n: int) -> str | None:
+    """Why round n began in a fresh session, as its `fresh` event says, or None."""
+    rows = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0]
+            if e.get("kind") == "fresh" and e.get("round") == n
+            and str(e.get("text") or "").startswith(FRESH_SAID)]
+    return rows[-1]["text"][len(FRESH_SAID):] if rows else None
 
 
 # The checks Claude's reviews kept making on 2026-11-17: a rule with no test, a test's expected
@@ -2288,6 +2509,10 @@ def auto_fix_prompt(tests: dict, cmd: str) -> str:
            "failures." if tests.get("proxy") else "")
     vouch = "" if tests.get("proxy") or tests.get("lane") else \
         " The compiler, libraries and system work; the bug is in this change."
+    if h := tests.get("hang"):  # #779: the whole suite finished in seconds on the base
+        net += (f" They now run past {h['limit']}s, where they finished in {h['base']:g}s on the "
+                "base: look for a loop that never ends, a read that blocks (input(), a socket), "
+                "or a process or server the tests start that never exits.")
     return (f"The acceptance tests fail.{net} Command: `{cmd}` (exit {tests['exit']}). Output:\n\n"
             f"```\n{tests['tail']}\n```\n\nFix the code so the tests pass. When a failing check is "
             "one you wrote for this task, first work its expected value out by hand from the task: "
@@ -2305,7 +2530,7 @@ def not_the_code(task: store.Task, tests) -> str:
     (a dropped proxy may be either: its auto-fix prompt says so, auto_fix_prompt)."""
     if not tests or tests["ok"]:
         return ""
-    if tests["exit"] == "timeout":
+    if tests["exit"] == "timeout" and not tests.get("hang"):  # a hang is the change's (#779)
         return (f"the acceptance command ran past --test-timeout "
                 f"({int(task.spec.get('test_timeout') or 900)}s): its failure says nothing about "
                 "the change; run it in the worktree yourself, or narrow it (wb next --test); "
@@ -2399,6 +2624,16 @@ def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
         task.set_status(guards=guards)
     task.event({"ts": store.now(), "round": n, "kind": "round_end", "secs": round(time.time() - began, 1),
                 "how": how, **({"guard": rnd["guard"]} if how == "stuck" and rnd.get("guard") else {})})
+
+
+def _repo_gone(task: store.Task) -> None:
+    """The task's repository is nowhere: not its checkout, nor a main worktree of its git dir.
+    A runner sent on (wb feedback, next, resume) crashed with a CalledProcessError traceback and
+    never named wb relocate, which accept's own check does (#776)."""
+    text = (f"{task.spec['repo']} moved or was deleted: wb relocate {task.name} --repo <its new "
+            "path>, then wb resume")
+    task.set_status(phase="failed", last=text[:200])
+    task.notify("failed", f"task {task.name}: {text}")
 
 
 def _load_failed(task: store.Task, e: Exception) -> None:
@@ -2507,7 +2742,8 @@ def _rejoin(task: store.Task, lease) -> None:
 def drive(task: store.Task) -> None:
     # infra: why the machine, not the agent, failed the task's last run (wb bench grades none of it)
     task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid(), infra=None,
-                    boot=store.boot_id())  # a later boot reaps it as a restart's (cli.reap)
+                    boot=store.boot_id(),  # a later boot reaps it as a restart's (cli.reap)
+                    machine=store.machine(), host=store.host())  # whose pid it is (#849)
     say = lambda msg: task.set_status(last=msg)  # noqa: E731
     try:
         m = models.resolve(task.spec["model"])
@@ -2516,6 +2752,8 @@ def drive(task: store.Task) -> None:
     CURRENT["remote"] = m.remote  # the GPU is not ours to measure when the model is remote
     if m.remote:
         task.set_status(remote_gpu=True)  # so its savings say the energy wasn't measured (#117)
+    if not gitops.repo_of(task.spec).is_dir():  # moved, renamed, or its git dir removed (#776)
+        return _repo_gone(task)
     if not checkout(task):  # the worktree itself, out of wb start's foreground (#529)
         return
     if not _prepare(task):  # the project as the user has it, before the base check (#201)
@@ -2529,6 +2767,9 @@ def drive(task: store.Task) -> None:
         _base_check(task)  # on the untouched base, before the agent and the GPU
     # beside the running tasks' models when all fit the GPU, else alone once they finish
     with models.GpuLease(m, task.name, say) as lease:
+        # this runner reached the lease: from now on gpu.json says whether it holds the GPU, so
+        # wb start no longer counts it as a holder while it steps aside for its tests (#805)
+        task.set_status(leased=os.getpid())
         try:
             _loaded(task, _load(task, lease, m))
             window = (m.config.get("limit") or {}).get("context")
@@ -2566,6 +2807,10 @@ def drive(task: store.Task) -> None:
                 _start_fresh(task, n, why)
             elif keep:
                 task.set_status(context=None)  # a one-round instruction, held by run_round
+            if raised := stretch_limits(task, m):  # measured slow since wb start (#814)
+                task.event({"ts": store.now(), "round": n, "kind": "limits",
+                            "text": "the model was measured slow here: " + ", ".join(
+                                f"{k} {v // 60} min" for k, v in raised.items())})
             task.set_status(phase="running", round=n, round_started_at=store.now(),
                             last="agent started")  # not "starting…": the pane shows its progress
             task.event({"ts": store.now(), "round": n, "kind": "round", "text": "started"})
@@ -2577,8 +2822,9 @@ def drive(task: store.Task) -> None:
             measure_speed(task, began)
             if (bound := read_bound(task, n, rnd)) and rnd["guard"] == "silence":
                 from . import router
-                rnd["stuck"] += (f" (it read at most ~{bound} tokens/s here: a new task on this "
-                                 f"model now waits {router.budgets(m)['silence'] // 60} minutes)")
+                rnd["stuck"] += (f" (it read at most ~{bound} tokens/s here: this task's next "
+                                 f"round and a new task on this model now wait "
+                                 f"{router.budgets(m)['silence'] // 60} minutes)")
             if rnd["full"]:  # before notes: the handover carries them (_full_round)
                 handed += 1
                 if handed <= HANDOVER_MAX:
@@ -2650,6 +2896,10 @@ def drive(task: store.Task) -> None:
                 task.event({"ts": store.now(), "round": n, "kind": "autofix",
                             "text": "tests failed; sent the output back to the agent"})
                 continue
+            if tests and tests["ok"] and not task.status.get("self_review_due"):
+                # self-review could run, whether or not it does: only such a task is evidence
+                # of the knob, which a test-less one could turn off (tuning.acted, #816)
+                task.set_status(self_review_due=True)
             mark = [task.status.get("steps", 1), task.status.get("reviews", 0)]
             if tuning.value(task, "self_review") and tests and tests["ok"] \
                     and task.status.get("self_reviewed") != mark:
@@ -2729,6 +2979,15 @@ def round_asks(task: store.Task, n: int) -> list[str]:
 HANDOVER_ROOM = 0.25
 
 
+def compacted_between(last: tuple, sid, used: int, point: float, window: int) -> bool:
+    """Whether OpenCode compacted the session between the last step (`last`: its session and
+    context) and this one: in the same session, this step carries under half of what the last
+    did, and the last was within one step's growth (fresh_ceiling's margin) of the handover
+    point, where only OpenCode's compaction shrinks a context (#774)."""
+    margin = max(STEP_GROWTH, tuning.CEILING_MARGIN * window)
+    return bool(sid) and last[0] == sid and 0 < used < last[1] / 2 and last[1] >= point - margin
+
+
 def _reading_full(task: store.Task, n: int, used: int, window: int,
                   floor: int | None = None) -> None:
     pct = 100 * used // window
@@ -2758,7 +3017,9 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
     window = task.status["window"]
     pct = 100 * rnd["full"] // window
     text = (f"the agent's session reached {pct}% of its window "
-            f"({rnd['full'] / 1000:.1f}K of {window // 1024}K): a fresh one takes over")
+            f"({rnd['full'] / 1000:.1f}K of {window // 1024}K)"
+            + (", then OpenCode compacted it" if rnd.get("compacted") else "")  # #774
+            + ": a fresh one takes over")
     task.event({"ts": store.now(), "round": n, "kind": "full", "text": text})
     if handed == HANDOVER_MAX - 1:
         files = gitops.changed(task.worktree)
@@ -2774,6 +3035,7 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
         last="> " + last.replace("\n", "\n> ") if last else "(none)")
         + (f"\n\n{folded_notes(task, n + 1, notes)}" if notes else ""))
     task.set_status(round=n + 1, context="full", full_pct=pct,
+                    full_compacted=True if rnd.get("compacted") else None,  # #774: fresh_reason
                     handovers=task.status.get("handovers", 0) + 1,
                     steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
@@ -2793,7 +3055,10 @@ def _early_notes(task: store.Task, n: int) -> None:
     if not (notes := pending_steer(task)):
         return
     path = task.round_dir(n).joinpath("prompt.md")
-    path.write_text(path.read_text().rstrip() + "\n\n" + folded_notes(task, n, notes))
+    text = folded_notes(task, n, notes)
+    for f in (path, path.with_name("instructions.md")):  # a revived fresh round's own too (#780)
+        if f == path or f.is_file():
+            f.write_text(f.read_text().rstrip() + "\n\n" + text)
     task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
 
@@ -2922,6 +3187,7 @@ def _one_runner(task: store.Task):
 
 def main():
     store.absolute_env()
+    gitops.drop_repo_env()  # the caller's repository variables, for the agent too (#798)
     task = store.Task(sys.argv[1])
     lock = _one_runner(task)  # noqa: F841 (held until the process exits)
     if lock is None:

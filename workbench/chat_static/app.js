@@ -242,6 +242,7 @@
         const ed = document.createElement('button'); ed.textContent = 'edit'
         ed.onclick = () => {
           drop(m.cid)
+          if (m.about) setAbout(m.about)  // what it was about comes back with it (#843)
           for (const f of m.files || []) if (!draft.some(d => d.id === f.id)) draft.push({ ...f, mod: 0, state: 'up' })
           keepDraft(); drawTray(); pump()
           input.value = m.text; save(K.draft, m.text); grow(); armSend()
@@ -431,6 +432,9 @@
   const shotOf = s => `${s.task} · step ${s.step} · round ${s.round}`
   function shotImage(s, side, fig) {
     // a capture that exited nonzero failed, whatever it wrote (#268)
+    // dropped with its archived task, months on (#821)
+    const expired = 'This screenshot has expired: an archived task keeps its screenshots 90 days.'
+    if (s[side].pruned) { fig.prepend(span('missing', expired)); return }
     if (!s[side].image) { fig.prepend(span('missing', `No image: the capture failed${s[side].exit != null ? ` (exit ${s[side].exit})` : ''}. The code review stands on its own.`)); return }
     const img = document.createElement('img')
     img.alt = `${side === 'base' ? 'Base' : 'Candidate'} of ${shotOf(s)}`
@@ -439,7 +443,7 @@
           { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
       .then(r => r.ok ? r.blob() : Promise.reject(r.status))
       .then(b => { img.src = URL.createObjectURL(b) })
-      .catch(() => img.replaceWith(span('missing', 'This image could not be loaded.')))
+      .catch(st => img.replaceWith(span('missing', st === 410 ? expired : 'This image could not be loaded.')))
   }
   function makeShots(s) {
     const box = document.createElement('div')
@@ -491,7 +495,7 @@
   function setAbout(a) {
     about = a; save(K.about, a)
     $('about').hidden = !a
-    $('about-text').textContent = a ? `Replying about ${a.task}, step ${a.step}` : ''
+    $('about-text').textContent = !a ? '' : a.audio ? aboutTag(a) : `Replying about ${a.task}, step ${a.step}`
   }
   $('about-x').onclick = () => setAbout(null)
   setAbout(about)
@@ -1087,11 +1091,12 @@
     render(); toEnd(true); flush(true)
   }
   // an expired message, sent again as a new one through the outbox (its own cid), with its files:
-  // already on the computer, so not a byte again (#623)
+  // already on the computer, so not a byte again (#623); and what it was about, a pair of
+  // screenshots or a kept take: without it Claude got the words with no task or take (#843)
   function resend(m) {
     if (!token) return
     const files = (m.files || []).map(({ id, name, size, type }) => ({ id, name, size, type }))
-    const o = { cid: newId(), text: m.text, ts: now(), ...(files.length ? { files } : {}) }
+    const o = { cid: newId(), text: m.text, ts: now(), ...(m.about ? { about: m.about } : {}), ...(files.length ? { files } : {}) }
     if (!save(OUT + o.cid, o)) { banner('Not sent: this browser keeps no outbox here. Copy it into the box.', true); return }
     outbox = outItems()
     render(); toEnd(true); flush(true)
@@ -1172,7 +1177,7 @@
     const saved = t.saved >= 0
       ? `Saved about ${tokens(t.saved)}${t.self_est > 0 ? ` (${Math.round(100 * t.saved / t.self_est)}%)` : ''}.`
       : `It cost about ${tokens(-t.saved)} more.`
-    const gpu = t.wh ? ` The GPU used ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${t.cost != null ? ` ($${t.cost.toFixed(2)})` : ''}.` : ''
+    const gpu = t.wh ? ` The GPU used ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${t.cost != null ? `, cost ${t.cost.toFixed(2)}` : ''}.` : ''  // no currency sign: the price is the user's, in theirs (#845, as #609)
     $('saved').textContent = `In the last 7 days, ${t.tasks} task${t.tasks === 1 ? '' : 's'}: Claude used ${tokens(t.claude)} tokens where writing them itself would have taken about ${tokens(t.self_est)} (an estimate). ${saved}${gpu}`
   }
   function drawSettings() {

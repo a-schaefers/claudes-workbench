@@ -25,9 +25,11 @@ check-in, when an agent asks for a command or a directory, a spec needs web rese
   needs; the agent can plant links in its lane), a place inside credentials or workbench's own
   state and config, and one in the task's own repo (the user's checkout: take that file yourself).
   A toolchain the build wants installed (a Python uv must download, a
-  `rust-toolchain.toml` toolchain, `uv tool install`, `cargo install`) is refused there: install
-  it yourself rather than grant `~/.local/share/uv` or `~/.rustup/toolchains`, whose programs
-  run later outside the lane. A test driving a program through a pseudo-terminal (pexpect, Python's pty,
+  `rust-toolchain.toml` toolchain, `uv tool install`, `cargo install`, the gems a `bundle
+  install` adds to an rbenv, rvm, asdf or mise Ruby) is refused there: install it yourself (the
+  gems: `bundle install` in the user's checkout) rather than grant `~/.local/share/uv`,
+  `~/.rustup/toolchains` or the gem home the report names, whose programs run later outside
+  the lane. A test driving a program through a pseudo-terminal (pexpect, Python's pty,
   `script`, node-pty) fails in the lane ("out of pty devices", "failed to create
   pseudo-terminal"): grant `/dev/pts` (`wb start --allow-path /dev/pts`), which also opens the
   user's other terminals to the agent. Sockets outside the lane are refused too (kernels from
@@ -136,8 +138,9 @@ run it as a backlog. Each task still gets the same review it would by day.
   than guessing.
 - The user stays away while a backlog task of this session's is open, so permission prompts
   keep going to the web chat (*The web chat*).
-- Each task keeps the machine from idle-sleeping while it runs (macOS, Linux). On WSL2 nothing
-  can: when `wb start` says so, tell the user to set Windows' sleep to Never for the night.
+- Each task keeps the machine from idle-sleeping while it runs (macOS, Linux, WSL2 through
+  Windows' powershell.exe). A closed lid still sleeps it; on WSL2 without interop nothing can:
+  when `wb start` says so, tell the user to set Windows' sleep to Never for the night.
 - When the batch is done, run `wb backlog <name>` and post it with `wb chat reply`: each task's
   outcome and branch, and the batch's saving. That is the morning summary.
 

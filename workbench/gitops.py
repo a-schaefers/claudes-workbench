@@ -47,6 +47,30 @@ PLAIN = ("-c", "color.ui=never", "-c", "color.diff=never", "-c", "color.status=n
 # wb accept ran them as the user outside the lane (the 2026-11-16 audit). The checks belong in
 # --test, which runs in the lane. Signing is kept: only the hooks go.
 NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
+# The variables that tell git which repository, index or work tree to use. Inherited from a git
+# hook (git exports GIT_INDEX_FILE, and GIT_DIR in a linked worktree) or a vcsh or bare-dotfiles
+# shell (GIT_DIR, GIT_WORK_TREE), they sent wb's calls to the caller's repository or index: the
+# runner's `worktree add` failed ("index file open failed: Not a directory"), or the review diff
+# and the accept commit were built from the user's own index (#798, the second 2026-11-21
+# audit). wb, its runner and the agent never inherit them (drop_repo_env); wb's own deliberate
+# GIT_INDEX_FILE (a scratch index) is layered on per call.
+REPO_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX")
+
+
+def drop_repo_env(env=None) -> None:
+    """REPO_ENV out of ``env`` (the process's own by default), in place: at wb's and the runner's
+    start, so no child (the runner, the agent, its tests) inherits the caller's."""
+    env = os.environ if env is None else env
+    for name in REPO_ENV:
+        env.pop(name, None)
+
+
+def _env(extra=None) -> dict:
+    """The environment for one of wb's git calls: the process's, less REPO_ENV, plus ``extra``."""
+    return {**{k: v for k, v in os.environ.items() if k not in REPO_ENV}, **(extra or {})}
+
+
 NO_SMUDGE = {"GIT_LFS_SKIP_SMUDGE": "1"}  # LFS files stay pointers: a trial reads paths only (#469)
 
 
@@ -87,11 +111,31 @@ def _pinned(cwd) -> list[str]:
         raise GitError(f"the worktree's .git was rewritten: git was not run there ({dotgit} "
                        f"must say gitdir: {want['gitdir']})")
     return [f"--git-dir={want['gitdir']}", f"--work-tree={os.path.abspath(cwd)}",
-            *NO_HOOKS, "-c", "core.fsmonitor=false",
-            *(("-c", f"core.filemode={'true' if modes else 'false'}")
-              if (modes := _modes_hold(os.path.dirname(os.path.abspath(cwd)))) is not None else ()),
-            *(("-c", f"core.ignorecase={'true' if folds else 'false'}")
-              if (folds := _case_folds(os.path.dirname(os.path.abspath(cwd)))) is not None else ())]
+            *NO_HOOKS, "-c", "core.fsmonitor=false", *fs_pins(cwd)]
+
+
+def fs_pins(worktree, differing: bool = False) -> list[str]:
+    """`-c core.filemode=… -c core.ignorecase=…` as the file system the task's worktree is on
+    really behaves (_modes_hold, _case_folds; one it can't tell is left out). ``differing``: only
+    those the repository's own config says otherwise (unset: git's defaults), for the agent's git
+    shim, which then checks the call is in the task's repository: only wb's own calls had them,
+    and the agent's `git status` on exFAT listed every file as changed to 100755, and on a
+    case-sensitive disk under a core.ignorecase=true repo a case-only rename as a deletion (#796,
+    the second 2026-11-21 audit)."""
+    d = os.path.dirname(os.path.abspath(worktree))
+    rec = _record(worktree) if differing else None
+    gitdir = (store.read_json(rec) or {}).get("gitdir") if rec else None
+    out = []
+    for key, now, default in (("core.filemode", _modes_hold(d), True),
+                              ("core.ignorecase", _case_folds(d), False)):
+        if now is None:
+            continue
+        if differing and gitdir:
+            said = _run(gitdir, ("config", "--bool", key), check=False).stdout.decode().strip()
+            if (said == "true" if said else default) == now:
+                continue
+        out += ["-c", f"{key}={'true' if now else 'false'}"]
+    return out
 
 
 @functools.lru_cache(maxsize=64)
@@ -151,7 +195,7 @@ def _case_folds(d: str) -> bool | None:
 def _run(cwd, args, env=None, check=True, timeout=None, input=None) -> subprocess.CompletedProcess:
     try:
         r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args], capture_output=True,
-                           env={**os.environ, **env} if env else None, timeout=timeout, input=input,
+                           env=_env(env), timeout=timeout, input=input,
                            stdin=subprocess.DEVNULL if timeout and input is None else None)
     except subprocess.TimeoutExpired:
         raise GitError(f"git {' '.join(args)}: no answer in {timeout}s") from None
@@ -180,7 +224,7 @@ def git_hash(cwd, h, *args) -> None:
     beside the resident model (#678)."""
     with tempfile.TemporaryFile() as err:  # not a pipe: a full one would stall git mid-diff
         p = subprocess.Popen(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args],
-                             stdout=subprocess.PIPE, stderr=err, stdin=subprocess.DEVNULL)
+                             stdout=subprocess.PIPE, stderr=err, stdin=subprocess.DEVNULL, env=_env())
         with p.stdout:
             while chunk := p.stdout.read(1 << 16):
                 h.update(chunk)
@@ -291,6 +335,48 @@ def branch_name(task: str) -> str:
     return f"delegate/{task}"
 
 
+def branch_clash(repo: Path, task: str) -> str:
+    """Why branch delegate/<task> can't be made in ``repo``, or "". Besides that branch itself, a
+    branch named `delegate`, or one under `delegate/<task>/`, holds the ref's place: `branch
+    --list` missed them, and the runner's `worktree add` failed for every task in that repo,
+    after it had spawned (#792, the second 2026-11-21 audit)."""
+    name = branch_name(task)
+    if git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{name}", check=False).strip():
+        return f"branch {name} already exists in {repo}: pick a new name"
+    if git(repo, "rev-parse", "--verify", "-q", "refs/heads/delegate", check=False).strip():
+        return (f"the branch delegate in {repo} blocks workbench's delegate/ branches: rename it "
+                "(git branch -m delegate <new name>), then start again")
+    if under := git(repo, "for-each-ref", "--count=1", "--format=%(refname:short)",
+                    f"refs/heads/{name}/", check=False).strip():
+        return (f"the branch {under} in {repo} blocks branch {name}: pick a new name, or rename "
+                "that branch")
+    return ""
+
+
+def case_clash(repo: Path, commit: str, where: Path, name: str = "") -> str:
+    """Why ``commit`` can't be checked out faithfully under ``where``, or "": its tree holds paths
+    that differ only by case (docs/API.md and docs/api.md, Makefile and makefile) and the file
+    system there folds case (macOS's default APFS, exFAT, a casefold mount). Only one file is
+    written for each pair, so the review showed the other as changed by the agent before it
+    did anything, and an edit to one was committed to the other: the branch accepted wasn't the
+    diff reviewed (#797, the second 2026-11-21 audit). ``name``: the base as the user gave it."""
+    if not _case_folds(os.path.abspath(where)):
+        return ""
+    groups: dict[str, list[str]] = {}
+    for p in _run(repo, ("ls-tree", "-r", "-z", "--name-only", commit)).stdout.split(b"\0"):
+        if p:
+            groups.setdefault(_folded(p), []).append(os.fsdecode(p))
+    twins = [g for g in groups.values() if len(g) > 1]
+    if not twins:
+        return ""
+    shown = "; ".join(" and ".join(g) for g in twins[:3]) + \
+        (f"; {len(twins) - 3} more" if len(twins) > 3 else "")
+    return (f"{name or commit[:12]} tracks paths that differ only by case ({shown}), and the state "
+            f"directory's file system folds case: checked out there, one of each would overwrite "
+            "the other, and accept would commit an edit to the wrong one. Put WB_HOME on a "
+            "case-sensitive volume")
+
+
 def base_commit(repo: Path, base: str) -> str | None:
     """The commit ``base`` names (an annotated tag peeled), or None when it names none: a typo
     once read as a missing CLAUDE.md (the 2026-11-16 audit)."""
@@ -305,8 +391,8 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
     commit = base_commit(repo, base)
     if not commit:
         raise GitError(f"no commit {base} in {repo}")
-    if git(repo, "branch", "--list", branch_name(task)).strip():
-        raise GitError(f"branch {branch_name(task)} already exists in {repo}")
+    if why := branch_clash(repo, task) or case_clash(repo, commit, Path(dest).parent, base):
+        raise GitError(why)
     # a sparse checkout's patterns: newer git copies them into a worktree it adds (2.56 does),
     # an older one checked out the whole tree; set before the checkout either way (#263)
     sparse = sparse_of(repo)
@@ -319,7 +405,7 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
     except GitError:
         git(repo, *NO_HOOKS, "worktree", "remove", "--force", str(dest), check=False)
         drop_registration(repo, dest)
-        delete_branch(repo, task, at=commit)  # this call made it: the --list above found none
+        delete_branch(repo, task, at=commit)  # this call made it: branch_clash found none
         raise
     if rec := _record(dest):  # before any agent has run there: see _pinned
         rec.parent.mkdir(parents=True, exist_ok=True)
@@ -493,10 +579,13 @@ def submodules(repo: Path, commit: str) -> list[str]:
     """The submodule paths ``commit`` lists. In a task's worktree each is filled read-only by
     fill_submodules, never checked out: a `.git` there would be a file the agent could point at a
     git dir of its own, whose config git then obeys outside the lane (see _pinned; the 2026-11-16
-    audit). wb start names only the ones it couldn't fill."""
-    out = git(repo, "config", "--blob", f"{commit}:.gitmodules", "--get-regexp",
+    audit). wb start names only the ones it couldn't fill. Read NUL-terminated, each record
+    `key\nvalue`: split at the first space, a submodule named `my lib` (git's default for that
+    path) read as `lib.path my lib`, never filled, and wb start named a path that isn't there
+    (#791, the second 2026-11-21 audit)."""
+    out = git(repo, "config", "-z", "--blob", f"{commit}:.gitmodules", "--get-regexp",
               r"^submodule\..*\.path$", check=False)
-    return [line.split(" ", 1)[1] for line in out.splitlines() if " " in line]
+    return [rec.split("\n", 1)[1] for rec in out.split("\0") if "\n" in rec]
 
 
 SUBMODULES = "submodules.json"  # rules/<task>/: the submodules filled in its worktree (#419)
@@ -603,7 +692,7 @@ def submodule_edits(worktree: Path) -> list[str]:
                            f"{sub['src']} is gone or unreadable (moved? wb relocate {rec.parent.name} "
                            "--repo <its new path>)")
                 continue
-        files = [os.fsdecode(f) for f in (changed + new).split(b"\0") if f]
+        files = [shown(f) for f in (changed + new).split(b"\0") if f]
         if files:
             out.append(_edit_line(sub, files))
     return out
@@ -643,6 +732,15 @@ CHANGED_SHOWN = 40  # lines listed as they are; the rest are counted by top-leve
 BUILD_FILES = 50    # new files in one new top-level directory: likely build output
 NEW_FILES_MAX = 300  # wb accept and wb next commit no more new files than this without --include
 BINARY_MAX = 1 << 20  # nor a new binary file this big
+
+
+def shown(path) -> str:
+    """A path git gave as bytes, for a line a person reads: a byte that isn't UTF-8 as `\\xe9`.
+    os.fsdecode kept it as a lone surrogate, which no UTF-8 write takes: a Latin-1 fixture's name
+    in the left-out list crashed the runner's review notice, every wb resume again, and wb
+    verify's result (#784)."""
+    raw = path if isinstance(path, bytes) else os.fsencode(path)
+    return raw.decode("utf-8", "backslashreplace")
 
 
 def _top(path: str) -> str:
@@ -880,7 +978,7 @@ def _bounded(cwd, args, env, limit: int) -> str | None:
     of 1.4). A character is at most 4 bytes, so past 4 * limit bytes it can't fit."""
     with tempfile.TemporaryFile() as err:
         p = subprocess.Popen(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args],
-                             stdout=subprocess.PIPE, stderr=err, env={**os.environ, **env})
+                             stdout=subprocess.PIPE, stderr=err, env=_env(env))
         out = p.stdout.read(4 * limit + 1)
         over = len(out) > 4 * limit
         if over:
@@ -903,6 +1001,12 @@ def snapshot(worktree: Path, landing: bool = False) -> str:
     return snapshot_left(worktree, landing)[0]
 
 
+def has_tree(cwd: Path, rev: str) -> bool:
+    """Whether ``rev`` still names a tree here. A review snapshot (snapshot_left) is reachable from
+    nothing, so git gc prunes it once gc.pruneExpire passes (#795)."""
+    return not _run(cwd, ("cat-file", "-e", f"{rev}^{{tree}}"), check=False).returncode
+
+
 def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]]:
     """snapshot's tree, and what it left out ("build/ (400 new files)", "data.bin (3 MB)"; []
     when nothing): a new file of BINARY_MAX or more, the top-level directories with the most new
@@ -922,20 +1026,20 @@ def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]
         big = [(p, n) for p, n in files if n >= BINARY_MAX]
     skip = set(big)
     rest = [r for r in files if r not in skip]
-    dirs, count = [], Counter(_top(os.fsdecode(p)) for p, _ in rest)
+    dirs, count = [], Counter(_top(shown(p)) for p, _ in rest)
     for d, n in count.most_common():
         if len(rest) <= NEW_FILES_MAX:
             break
         dirs.append(f"{d} ({n:,} new file{'s' if n != 1 else ''})")
-        rest = [(p, m) for p, m in rest if _top(os.fsdecode(p)) != d]
+        rest = [(p, m) for p, m in rest if _top(shown(p)) != d]
     rest.sort(key=lambda r: r[1])
     while not landing and rest and sum(n for _, n in rest) > SNAPSHOT_MAX:
         big.append(rest.pop())
     if len(rest) == len(files):
         return with_new_files(worktree, "write-tree", whole=True).strip(), []
     tree = with_new_files(worktree, "write-tree", whole=True, new=[p for p, _ in rest]).strip()
-    return tree, dirs + brief([f"{os.fsdecode(p)} ({n / (1 << 20):.0f} MB)" if n >= 1 << 20
-                               else f"{os.fsdecode(p)} ({n >> 10:,} KB)" for p, n in sorted(big)])
+    return tree, dirs + brief([f"{shown(p)} ({n / (1 << 20):.0f} MB)" if n >= 1 << 20
+                               else f"{shown(p)} ({n >> 10:,} KB)" for p, n in sorted(big)])
 
 
 def left_line(left: list[str]) -> str:
@@ -1029,11 +1133,12 @@ LANGUAGES = {
 STACK_SHARE = 0.2  # a language holding at least this share of the source files is part of it
 
 
-def stack(repo) -> list[str]:
+def stack(repo, subdir: str | None = None) -> list[str]:
     """The repo's main languages, most files first (at most two), from its tracked files; empty
-    when it has no source or isn't a repository."""
+    when it has no source or isn't a repository. ``subdir``: a monorepo package's alone (a Go
+    service in a TypeScript monorepo was routed and recorded as TypeScript work, #820)."""
     try:
-        names = git(repo, "ls-files", "-z").split("\0")
+        names = git(repo, "ls-files", "-z", *(["--", subdir] if subdir else [])).split("\0")
     except (GitError, OSError):
         return []
     langs = Counter(LANGUAGES[x] for n in names if (x := Path(n).suffix[1:].lower()) in LANGUAGES)
@@ -1050,6 +1155,16 @@ def keep_accepted(repo: Path, task: str, tip: str) -> None:
     ancestor of main), its branch deleted and git's reflogs and gc done, wb bench add could no
     longer find the step (#649, Codex's audit of 1.90.6). Never fails the accept."""
     git(repo, "update-ref", "-m", "workbench: accepted", ACCEPTED_REF.format(task), tip, check=False)
+
+
+def drop_accepted(repo: Path, task: str, tip: str) -> bool:
+    """Delete ``task``'s ACCEPTED_REF while it still points at ``tip`` (a compare-and-delete), once
+    nothing needs it: a branch that holds the tip keeps every step alive, or each step has its
+    bench case. Kept on every accept for good, each task's steps showed as a side line in `git log
+    --all`, `clone --mirror` copied them, and gc could never prune them (#799, the second
+    2026-11-21 audit). Whether it went."""
+    return not _run(repo, ("update-ref", "-d", ACCEPTED_REF.format(task), tip),
+                    check=False).returncode
 
 
 def step_commit(task: store.Task, step: int, steps: int) -> str | None:
@@ -1272,7 +1387,10 @@ def drop_registration(repo: Path, worktree: Path) -> None:
             named = (d / "gitdir").read_text().strip()
         except OSError:
             continue
-        top = os.path.dirname(named)
+        # against the admin dir, as git reads it: with worktree.useRelativePaths (git 2.48+) the
+        # link is relative, read against wb's cwd it matched nothing, and the registration and
+        # its delegate branch stayed (#793, the second 2026-11-21 audit); an absolute one stays
+        top = os.path.dirname(d / named)
         if {os.path.abspath(top), os.path.realpath(top)} & at and not (d / "locked").exists():
             shutil.rmtree(d, ignore_errors=True)
 

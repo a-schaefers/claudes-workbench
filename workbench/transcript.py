@@ -361,8 +361,14 @@ def task_entries(task: store.Task) -> list[Entry]:
             out.append(Entry(ts, key, [("claude", f"■ Claude {r.get('text', '')}")]))
         elif kind == "interrupted":
             out.append(Entry(ts, key, [("bad", "■ the agent was interrupted")]))
-        elif kind in ("fresh", "full", "load", "left_bg"):
+        # reading_full: why a session grew into compaction, beside fresh and full; it, resumed,
+        # spec_gap and coding were dropped as kinds with no branch (#846)
+        elif kind in ("fresh", "full", "load", "left_bg", "reading_full"):
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
+        elif kind in ("resumed", "coding"):  # the text says who: Claude, or the user's allowance
+            out.append(Entry(ts, key, [("claude", f"■ {r.get('text', '')}")]))
+        elif kind == "spec_gap":
+            out.append(Entry(ts, key, [("claude", f"■ Claude: the spec missed: {r.get('text', '')}")]))
         elif kind == "next_step":
             out.append(Entry(ts, key, [("ok", f"■ {r.get('text', '')}")]))
         elif kind == "takeover":
@@ -476,7 +482,8 @@ def clock_line(task: store.Task, now: float | None = None, data: dict | None = N
     if st.get("load_secs", 0) >= 1:
         parts.append(f"model load {_secs(st['load_secs'] * 1000)}")
     if st.get("phase") in ("queued", "running", "testing", "asking"):
-        typical = router.expected_minutes(sp.get("model", ""), sp.get("size", "significant"))
+        typical = router.expected_minutes(sp.get("model", ""), sp.get("size", "significant"),
+                                          sp.get("weights_id"))
         if typical:  # against active work, as typical is (#543)
             from .runner import active_so_far
             left = typical * 60 - active_so_far(task, now)

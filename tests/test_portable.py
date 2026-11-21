@@ -564,6 +564,54 @@ class Real(unittest.TestCase):
         with mock.patch.object(models.hardware, "ollama_env", lambda: {"OLLAMA_NUM_PARALLEL": "1"}):
             self.assertFalse(models.can_share(twin, [found["a/x"]], int(99e9)))  # the same model
 
+    def test_a_shared_task_counts_the_kept_models_already_loaded_and_sees_one_evicted(self):
+        # #803: keep_loaded's embedding (1 GB) and autocomplete (5 GB) models loaded, x (10 GB)
+        # running: y (10 GB) was let in to share, and loading it made Ollama evict a kept model
+        gb = 10 ** 9
+        loaded = [{"name": "emb", "size": gb, "size_vram": gb},
+                  {"name": "auto", "size": 5 * gb, "size_vram": 5 * gb}]
+        self.own(loaded, ["x", "y", "emb", "auto"])
+        kept = lambda *ids: Path(os.environ["WB_MODELS"]).write_text(json.dumps(  # noqa: E731
+            {"a/x": {"vram_gb": 10}, "b/y": {"vram_gb": 10}, "keep_loaded": list(ids)}))
+        env = lambda n: mock.patch.object(models.hardware, "ollama_env",  # noqa: E731
+                                          lambda: {"OLLAMA_MAX_LOADED_MODELS": n})
+        kept()
+        x, y = models.discover()["a/x"], models.discover()["b/y"]
+        with env("9"):
+            self.assertTrue(models.can_share(y, [x], int(24e9)))     # 20 of 21.6: nothing kept
+            kept("emb", "auto")
+            self.assertFalse(models.can_share(y, [x], int(24e9)))    # 26 of 21.6
+            self.assertTrue(models.can_share(y, [x], int(30e9)))     # 26 of 27
+            kept("emb", "auto", "a/x")                                # x is the task's: counted once
+            self.assertTrue(models.can_share(y, [x], int(30e9)))
+        with env("3"):
+            kept("emb", "auto")
+            self.assertFalse(models.can_share(y, [x], int(99e9)))    # x, emb, auto and y: 4 of 3
+            kept("emb")
+            self.assertTrue(models.can_share(y, [x], int(99e9)))
+        loaded[:] = [{"name": n, "size": 10, "size_vram": 10} for n in ("x", "y", "auto")]
+        self.assertFalse(models._fits_beside(y, {"a/x"}, {"x", "emb", "auto"}, {"emb", "auto"}))  # emb went
+        self.assertTrue(models._fits_beside(y, {"a/x"}, {"x", "auto"}, {"auto"}))
+        # and the lease sees it: the load evicts emb, so y waits for the GPU alone
+        os.environ["WB_GPU_DIR"] = str(Path(self.tmp.name) / "lease")
+        runner_x = subprocess.Popen(["sleep", "60"])  # x's task's runner, holding a/x
+        self.addCleanup(runner_x.kill)
+        store.write_json(models.lease_dir() / "gpu.json", {str(runner_x.pid): {"model": "a/x", "task": "t-x"}})
+        loaded[:] = [{"name": n, "size": 10, "size_vram": 10} for n in ("x", "emb")]
+        def evicting(m, say=print, keep=(), warn=None):
+            loaded[:] = [r for r in loaded if r["name"] != "emb"] + [{"name": m.name, "size": 10, "size_vram": 10}]
+            return 1.0
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps(
+            {"a/x": {"vram_gb": 10}, "b/y": {"vram_gb": 10}, "keep_loaded": ["emb"], "gpu_gb": 99}))
+        said, alone = [], []
+        with env("9"), mock.patch.object(models, "make_resident", evicting), \
+                mock.patch.object(models.GpuLease, "_take_alone", lambda self, held: alone.append(1)):
+            with models.GpuLease(models.discover()["b/y"], "t-y", said.append) as lease:
+                self.assertEqual(alone, [])                          # let in to share
+                lease.load()
+        self.assertEqual(alone, [1])
+        self.assertIn("ollama could not fit b/y beside a/x, emb", said[-1])
+
     def test_a_model_that_fits_beside_the_loaded_ones_unloads_nothing_and_kept_ones_stay(self):
         # the 2026-11-19 audit: every round unloaded every other Ollama model, the user's Open
         # WebUI or autocomplete model and an embedding model the project's tests use, fits or not
@@ -1191,6 +1239,107 @@ class Real(unittest.TestCase):
         models.make_resident(found["lms/b"], say=lambda *_: None)
         self.assertEqual(loaded, {"a": 32768, "b": 32768})        # keep_loaded is kept
 
+    def test_an_idle_lm_studio_neither_empties_the_gpu_of_ollamas_models_nor_stops_a_respread(self):
+        # #808: just in time, LM Studio's /v1/models lists every downloaded model, so with nothing
+        # loaded it read as a resident server: every round unloaded the user's Ollama models that
+        # fit beside the task's, and a model split onto the CPU was never placed again (#703)
+        gb = 10 ** 9
+        ollama_loaded, lms_loaded, posts = [{"name": "chat", "size": 2 * gb, "size_vram": 2 * gb}], {}, []
+        srv, port = fake_ollama(ollama_loaded, ["x", "chat"], posts)
+        lms, url = fake_lmstudio(lms_loaded, [])
+        self.servers += [srv, lms]
+        win = {"limit": {"context": 32768}}
+        self.config({"o": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"x": {}, "chat": {}}},
+                     "lms": {"options": {"baseURL": url + "/v1"}, "models": {"a": win, "b": win}}},
+                    {"lms": {"engine": "server"}, "o/x": {"vram_gb": 4}, "gpu_gb": 20})
+        found = models.discover()
+        self.assertTrue(models.status(found["lms/a"])["resident"])  # its list, not its memory
+        x = found["o/x"]
+        self.assertTrue(models._room_beside(x))                    # 2 + 4 of 18, LM Studio idle
+        lms_loaded["a"] = 32768
+        self.assertFalse(models._room_beside(x))                   # an instance whose size is unsaid
+        ollama_loaded.append({"name": "x", "size": 10 * gb, "size_vram": 5 * gb})  # half on the CPU
+        self.assertIsNotNone(models._respread(x))                  # free_gpu unloads a
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps(
+            {"lms": {"engine": "server"}, "o/x": {"vram_gb": 4}, "gpu_gb": 20, "keep_loaded": ["lms/a"]}))
+        self.assertIsNone(models._respread(models.discover()["o/x"]))  # kept: its memory stays taken
+        lms_loaded.clear()
+        self.assertIsNotNone(models._respread(models.discover()["o/x"]))
+
+    def test_scout_finds_jan_and_text_generation_webui_and_a_server_that_wants_a_key(self):
+        # #810: Jan (1337) and text-generation-webui (5000) were never probed, and a 401 read as
+        # no answer: "none found", and first run offered servers to install
+        from workbench import cli
+        self.assertIn((1337, "Jan"), models.SERVER_PORTS)
+        self.assertIn((5000, "text-generation-webui"), models.SERVER_PORTS)
+
+        def refusing(code, said):
+            class H(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(code)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": said}).encode())
+
+                def log_message(self, *a):
+                    pass
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            self.servers.append(srv)
+            return srv.server_address[1]
+        jan = self.server({"/v1/models": {"data": [{"id": "qwen-coder"}]}})
+        keyed = refusing(401, "invalid api key")
+        chat = refusing(401, "bad or missing token: open the link from `wb chat url`")  # wb's own
+        airplay = refusing(403, "forbidden")                                              # macOS's 5000
+        ports = ((int(jan.rsplit(":", 1)[1]), "Jan"), (keyed, "LM Studio"), (chat, "Jan"),
+                 (airplay, "text-generation-webui"))
+        with mock.patch.object(models, "SERVER_PORTS", ports), \
+                mock.patch.object(models, "windows_host", return_value=None):
+            _, found = models.servers_here()
+            self.assertEqual(found, [{"root": jan, "usually": "Jan", "models": ["qwen-coder"]},
+                                     {"root": f"http://127.0.0.1:{keyed}", "usually": "LM Studio",
+                                      "models": [], "key": True}])
+            lines = cli.server_lines({})
+        self.assertIn(f"{jan} answers (usually Jan): qwen-coder", lines[-2])
+        self.assertIn(f"127.0.0.1:{keyed} answers (usually LM Studio): it wants an API key", lines[-1])
+
+    def test_a_wb_remote_box_waits_for_another_clients_model_and_names_one_its_load_evicted(self):
+        # #812: two machines' tasks on one wb remote box each took their own lease, so each load
+        # evicted the other client's model, mid-request, and the cause was never named
+        loaded, posts = [{"name": "theirs", "size": 10, "size_vram": 10,
+                          "expires_at": "2020-01-01T00:00:00Z"}], []           # past: answering
+        srv, port = fake_ollama(loaded, ["x", "theirs", "emb"], posts)
+        self.servers.append(srv)
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"x": {}}}},
+                    {"box": {"local": True}})
+        warned = []
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "INFLIGHT_WAIT", 0), mock.patch.object(models, "INFLIGHT_WATCH", 0):
+            x = models.discover()["box/x"]
+            self.assertTrue(x.remote)
+            self.assertEqual(models.box_others(x), ["theirs"])
+            models.make_resident(x, say=lambda *_: None, warn=warned.append)
+            self.assertIn("theirs on 127.0.0.1 is answering another client's requests", warned[0])
+            self.assertIn("don't share a GPU lease", warned[0])
+            self.assertIn("still in use after 0 min: loading x anyway", warned[1])
+            self.assertEqual([p["model"] for p in posts], ["x"])              # theirs left loaded
+            self.assertEqual(len(warned), 2)                                  # and not evicted
+            models._unload(x)
+            loaded[:] = [{"name": "theirs", "size": 10, "size_vram": 10}, {"name": "emb", "size": 1}]
+            Path(os.environ["WB_MODELS"]).write_text(json.dumps({"box": {"local": True}, "keep_loaded": ["emb"]}))
+            self.assertEqual(models.box_others(models.discover()["box/x"]), ["theirs"])  # emb: the user's
+            real_post, warned[:] = models._post, []
+
+            def evicting(url, body, timeout=600):
+                loaded[:] = [r for r in loaded if r["name"] != "theirs"]
+                return real_post(url, body, timeout)
+            with mock.patch.object(models, "_post", evicting):
+                models.make_resident(models.discover()["box/x"], say=lambda *_: None, warn=warned.append)
+            self.assertEqual(len(warned), 1)
+            self.assertIn("loading x on 127.0.0.1 unloaded theirs, which another client of the box had loaded",
+                          warned[0])
+            local = models.Model(id="o/x", provider="o", name="x", base_url=x.base_url, engine="ollama", label="o/x")
+            self.assertEqual(models.box_others(local), [])                    # this machine's: free_gpu's
+
     def test_lm_studio_says_each_models_size_window_and_tool_training(self):
         from workbench import cli
         lms = self.server({"/api/v1/models": {"models": [
@@ -1287,6 +1436,24 @@ class Real(unittest.TestCase):
             self.assertEqual(router.rank("trivial")[0].model.id, "small/small")
         with mock.patch.object(models, "gpu_budget", return_value=8_000_000_000):
             self.assertIs(router.rank("significant")[-1].fits, False)  # 20 GB of weights on an 8 GB card
+
+    def test_each_model_is_fitted_against_its_own_servers_cards_not_the_first_ollamas(self):
+        # #801: one Ollama per card (8 GB and 24 GB); one budget for all, the first process's,
+        # held the 24 GB card's 20 GB model back and passed a model too big for the 8 GB one
+        big = self.server({"/v1/models": {"data": [{"id": "big", "owned_by": "llamacpp",
+                                                      "meta": {"size": 20_000_000_000}}]}})
+        small = self.server({"/v1/models": {"data": [{"id": "small", "owned_by": "llamacpp",
+                                                        "meta": {"size": 12_000_000_000}}]}})
+        self.config({"big": {"options": {"baseURL": big + "/v1"}, "models": {"big": {}}},
+                     "small": {"options": {"baseURL": small + "/v1"}, "models": {"small": {}}}},
+                    {"big": {"engine": "server"}, "small": {"engine": "server"}})
+        cards = {big: 24_000_000_000, small: 8_000_000_000}
+        asked = []
+        with mock.patch.object(models, "gpu_budget",
+                               side_effect=lambda root=None: asked.append(root) or cards.get(root, 8_000_000_000)):
+            fit = {s.model.id: s.fits for s in router.rank("significant")}
+        self.assertEqual(fit, {"big/big": True, "small/small": False})
+        self.assertEqual(sorted(asked), sorted(cards))  # once per server in the pass
 
     def test_vllm_says_its_window_and_doctor_flags_an_entry_past_it(self):
         from workbench import cli
@@ -1620,6 +1787,34 @@ class Remote(unittest.TestCase):
             self.assertTrue(models._this_host("fe80::1c2b:3d4e:5f60:7182"))
             self.assertFalse(models._this_host("192.168.1.24"))
 
+    def test_this_machine_named_by_its_lan_or_tailnet_name_is_this_host(self):
+        # #807: a baseURL at box.lan (dotfiles shared with a laptop) was another host: its own
+        # GPU pool, no sharing or fit check, and the local lease never saw its tasks
+        me = socket.gethostname().split(".")[0].lower()
+        names = {f"{me}.lan": "192.168.1.23", f"{me}.tail1234.ts.net": "100.64.0.7",
+                 "gpubox.lan": "192.168.1.40", "loop.example": "127.0.1.1"}
+
+        def resolve(name, *a, **kw):
+            if name not in names:
+                raise socket.gaierror(name)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (names[name], 0))]
+        for f in (models._own_addresses, models._named_here):
+            f.cache_clear()
+            self.addCleanup(f.cache_clear)
+        with mock.patch.object(models.socket, "getaddrinfo", resolve), \
+                mock.patch.object(models.socket, "getfqdn", lambda *a: "desk.corp.example"), \
+                mock.patch.object(models, "_own_addresses", lambda: frozenset({"192.168.1.23", "100.64.0.7"})):
+            for host in (f"{me}.lan", f"{me}.tail1234.ts.net", "loop.example", "desk.corp.example", "desk"):
+                self.assertTrue(models._this_host(host), host)
+            self.assertFalse(models._this_host("gpubox.lan"))     # a box of its own
+            self.assertFalse(models._this_host("nowhere.lan"))    # unresolved: not this machine
+            url = f"http://{me}.lan:11434/v1"
+            self.assertEqual(models.server_key(url), models.server_key("http://127.0.0.1:11434/v1"))
+            ((pid, _, _, why, remote),) = models._scan({"provider": {"o": {"options": {"baseURL": url}}}}, {})
+            self.assertEqual((why, remote), ("", False))
+            m = models.Model(id="o/m", provider="o", name="m", base_url=url, engine="ollama", label="o/m")
+            self.assertEqual(models.pool(m), "gpu")
+
     def test_wb_remote_registers_the_tool_models_of_another_machines_ollama_and_remove_undoes_it(self):
         ctx = {"llama.context_length": 131072}
         srv, port = fake_remote_ollama(
@@ -1744,7 +1939,15 @@ class Optimize(unittest.TestCase):
     """wb optimize against an Ollama whose placement depends on the window: 10 GB of weights and
     32 KB a token of context, on a card that holds 12 GB (so up to 64K fits whole)."""
     WEIGHTS, PER_TOKEN, CARD = 10_000_000_000, 32_000, 12_100_000_000
-    setUp, tearDown, config = Real.setUp, Real.tearDown, Real.config  # not Real's tests again
+    tearDown, config = Real.tearDown, Real.config  # not Real's tests again
+
+    def setUp(self):
+        Real.setUp(self)
+        from workbench import optimize
+        self.no_gpu_here = optimize.no_gpu_here
+        card = mock.patch.object(optimize, "no_gpu_here", lambda m, seen=None: False)  # the card's
+        card.start()  # there, though hardware.gpus lists none (Real's); #809's test says otherwise
+        self.addCleanup(card.stop)
 
     def ollama(self, window, entry=None, loaded=None, extra=None, served=None):
         loaded, posts = loaded if loaded is not None else [], []
@@ -1837,6 +2040,35 @@ class Optimize(unittest.TestCase):
             self.assertTrue([p for p in posts if p[0] == "/api/generate"])
             self.assertIn(m.id, optimize.state()["models"])
             self.assertEqual(models.holders(pool=models.pool(m)), {})          # and let go
+
+    def test_a_machine_with_no_gpu_measures_nothing_and_a_model_on_the_cpu_gets_no_advice(self):
+        # #809: on a CPU-only box wb optimize ran by itself, loaded each model into RAM twice, and
+        # wb start and wb doctor said each "doesn't fit the GPU whole even at 16K"
+        from workbench import optimize
+        self.ollama(32768)
+        real = mock.patch.object(optimize, "no_gpu_here", self.no_gpu_here)  # as it is
+        real.start()
+        self.addCleanup(real.stop)
+        with mock.patch.object(models.hardware, "gpus", lambda windows=True: []):  # Real's: none
+            self.assertTrue(optimize.no_gpu_here(models.discover()["ollama/m"]))
+            self.assertEqual(optimize.candidates(), [])
+            self.assertEqual(optimize.due(), "")                       # nothing starts by itself
+            Path(os.environ["WB_MODELS"]).write_text(json.dumps({"gpu_gb": 12}))  # said by hand
+            self.assertEqual([m.id for m in optimize.candidates()], ["ollama/m"])
+        with mock.patch.object(models.hardware, "system", lambda: "macos"), \
+                mock.patch.object(models.hardware, "gpus", lambda windows=True: [
+                    {"name": "AMD Radeon Pro 5500M", "driver": "metal", "vram": 4 * 2 ** 30}]):
+            Path(os.environ["WB_MODELS"]).write_text("{}")
+            self.assertTrue(optimize.no_gpu_here(models.discover()["ollama/m"]))  # an Intel Mac's
+        self.CARD = 0                                                  # Ollama puts it all in RAM
+        row = optimize.fit(models.discover()["ollama/m"], 262144)
+        self.assertEqual((row["fits"], row.get("cpu")), (None, True))
+        self.assertEqual(optimize.advice("ollama/m", row), "")
+        self.assertEqual(optimize.advice("ollama/m", {k: v for k, v in row.items() if k != "cpu"}), "")  # an old row
+        self.CARD = 5_000_000_000                                      # partly on a GPU: advised
+        row = optimize.fit(models.discover()["ollama/m"], 262144)
+        self.assertNotIn("cpu", row)
+        self.assertIn("doesn't fit the GPU whole even at 16K", optimize.advice("ollama/m", row))
 
     def test_a_model_the_user_keeps_loaded_is_never_measured_or_unloaded(self):
         # #254 (the audit of 1.2): each probe unloads and reloads its model, so a background
@@ -2219,6 +2451,47 @@ class Optimize(unittest.TestCase):
                 mock.patch.object(optimize, "stop", lambda: 123) as stop:
             self.assertEqual(cli._preempt_bench(m, "t"),
                              "note: stopped wb optimize (what it measured is kept) to make room")
+
+
+def _strict(name):
+    """Path.<name> as Python 3.11-3.13 have it: a PermissionError from stat (an unreadable
+    parent) is raised, not read as False as 3.14 does, so the test fails on any Python."""
+    real = getattr(Path, name)
+
+    def probe(self, *a, **kw):
+        try:
+            os.stat(self)
+        except PermissionError:
+            raise
+        except OSError:
+            pass
+        return real(self, *a, **kw)
+    return probe
+
+
+@unittest.skipIf(os.geteuid() == 0, "root reads a 000 directory")
+class UnreadableParents(Base):
+    def test_a_probe_under_a_directory_this_account_cant_read_reads_as_absent_on_every_python(self):
+        # #850: before 3.14, Path.is_dir/exists/is_file raise PermissionError under an unreadable
+        # parent: an admin's 0750 /var/lib/workbench or /etc/opencode failed every wb command,
+        # and another account's ~/bin on PATH failed every lane
+        tmp = Path(self.tmp.name)
+        locked = tmp / "locked"
+        (locked / "x" / "bin").mkdir(parents=True)
+        locked.chmod(0)
+        self.addCleanup(lambda: locked.exists() and locked.chmod(0o755))  # Base's tearDown may go first
+        os.environ.pop("WB_GPU_DIR", None)
+        os.environ.pop("WB_OPENCODE_CONFIG", None)
+        os.environ["XDG_CONFIG_HOME"] = str(tmp / "xdg")
+        with mock.patch.object(Path, "exists", _strict("exists")), \
+                mock.patch.object(Path, "is_dir", _strict("is_dir")), \
+                mock.patch.object(Path, "is_file", _strict("is_file")), \
+                mock.patch.object(models, "SHARED_GPU", locked / "gpu"), \
+                mock.patch.object(models, "_system_dir", return_value=locked / "opencode"):
+            self.assertEqual(models.lease_dir(), store.home())
+            self.assertEqual(models.opencode_config_files(), [])
+            self.assertEqual(models.agent_providers(), {})
+            self.assertEqual(context.python_envs({"PATH": f"{locked / 'x' / 'bin'}:/usr/bin"}), [])
 
 
 class Fallback(unittest.TestCase):
@@ -2639,6 +2912,26 @@ class Budgets(Base):
         spec = store.Task("t-slow").spec
         self.assertEqual((spec["think_timeout"], spec["silence_timeout"]), (b["think"], b["silence"]))
         wait_phase("t-slow", {"review"})
+
+    def test_a_task_measured_slow_after_it_started_gets_the_longer_limits_in_its_next_round(self):
+        # #814: the limits were fixed at wb start, so a first task whose round measured the model
+        # slow kept 900 s of silence in every later round; a limit a flag gave stays the user's
+        self.start("t-later", "ok", "--round-timeout", "3000")
+        spec = store.Task("t-later").spec
+        self.assertEqual(spec["timeouts_given"], ["round"])
+        self.assertEqual(spec["silence_timeout"], 900)
+        wait_phase("t-later", {"review"})
+        self.assertIsNone(store.Task("t-later").status.get("limits"))   # not measured: as started
+        m = models.resolve("mimo")
+        router.record_speed(m.id, self.session(15, 150, n=40))
+        b = router.budgets(m)
+        run_wb("feedback", "t-later", "--text", "1. Again.")
+        st = wait_phase("t-later", {"review"})
+        self.assertEqual(st["limits"], {"think": b["think"], "silence": b["silence"]})
+        layer = json.loads((context.rules_dir(store.Task("t-later")) / "opencode.json").read_text())
+        self.assertEqual(layer["provider"]["ollama"]["options"]["chunkTimeout"], (b["silence"] + 60) * 1000)
+        evs, _ = store.read_jsonl(store.Task("t-later").dir / "events.jsonl")
+        self.assertTrue(any(e["kind"] == "limits" and e["round"] == 2 for e in evs))
 
     def test_a_thinking_model_that_would_outlast_its_budget_on_this_machine_is_flagged(self):
         # a 64K entry left thinking with a 16K cap, spilled to 21 tok/s, sat silent 14 minutes

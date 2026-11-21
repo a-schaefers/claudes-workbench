@@ -21,6 +21,7 @@ first and never goes in by itself: Claude reads it, adapts it and adds it like i
 from __future__ import annotations
 
 import codecs
+import contextlib
 import os
 import re
 import shutil
@@ -77,7 +78,34 @@ def revs(names: list[str]) -> dict[str, str]:
     return {n: rev(n) for n in names}
 
 
-def _commit(message: str) -> None:
+# Two sessions acting on the lessons nudge at once: B's `git add` landed between A's add and its
+# commit, A's path-less commit took both skills under A's message, and B, finding nothing to
+# commit, left b's message, source and review record out of the history; or one git call met the
+# other's index.lock and failed after its files were in place, a skill live but uncommitted (the
+# half-there state #604 fixed) and its rev() the previous version's (#822). Each change holds
+# one library-wide lock (in the state directory, which no lane reads) from its first read to its
+# commit, and commits only its own skill's paths. Reentrant: patch holds it through add.
+_HELD = [0]
+
+
+@contextlib.contextmanager
+def _library_lock():
+    if _HELD[0]:
+        _HELD[0] += 1
+        try:
+            yield
+        finally:
+            _HELD[0] -= 1
+        return
+    with store.locked(store.home() / "locks" / "skills.lock"):
+        _HELD[0] = 1
+        try:
+            yield
+        finally:
+            _HELD[0] = 0
+
+
+def _commit(message: str, *paths: str) -> None:
     """Commit as the user; a machine without a git identity still gets its history. Unsigned and
     without hooks: the library is workbench's own record, not one of the user's projects, and a
     signing prompt or a global hook made `wb skill add` fail from Claude's Bash (the 2026-11-16
@@ -87,7 +115,8 @@ def _commit(message: str) -> None:
                                capture_output=True).stdout.strip() else \
         ["-c", "user.name=workbench", "-c", "user.email=workbench@localhost"]
     r = subprocess.run(["git", "-C", str(library()), *who, "-c", "commit.gpgsign=false",
-                        "-c", f"core.hooksPath={os.devnull}", "commit", "-q", "--no-verify", "-m", message],
+                        "-c", f"core.hooksPath={os.devnull}", "commit", "-q", "--no-verify", "-m", message,
+                        *(["--", *paths] if paths else [])],  # its own skill's paths alone (#822)
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode:
         raise RuntimeError((r.stderr or r.stdout).strip())
@@ -194,6 +223,12 @@ def resolve(names: list[str]) -> list[Path]:
 
 def add(src: Path, name: str, message: str, source: str = "",
         reviewed: tuple[str, ...] = ()) -> tuple[str, list[str]]:
+    with _library_lock():  # from reading the old copy to the commit (#822)
+        return _add(src, name, message, source, reviewed)
+
+
+def _add(src: Path, name: str, message: str, source: str,
+         reviewed: tuple[str, ...]) -> tuple[str, list[str]]:
     """Copy a skill (a SKILL.md, or a directory holding one and its files) into the library and
     commit it. Returns ("added"|"updated", warnings); raises ValueError with the problems. The
     scan refuses a critical finding; on an update only what the change brought in counts.
@@ -235,13 +270,34 @@ def add(src: Path, name: str, message: str, source: str = "",
     verb = "updated" if dest.exists() else "added"
     _git("status")  # makes the repository on first use
     _put(src, dest)
-    md = dest / "SKILL.md"
-    if (raw := md.read_bytes()).startswith(codecs.BOM_UTF8):  # the library's copy without it (#479)
-        md.write_bytes(raw[len(codecs.BOM_UTF8):])
-    _git("add", "-A", "--", name)
-    if _git("status", "--porcelain", "--", name).strip():
-        _commit(f"{name}: {message}" + (f"\n\nSource: {source}" if source else ""))
+    try:
+        md = dest / "SKILL.md"
+        if (raw := md.read_bytes()).startswith(codecs.BOM_UTF8):  # the library's copy without it (#479)
+            md.write_bytes(raw[len(codecs.BOM_UTF8):])
+        _git("add", "-A", "--", name)
+        if _git("status", "--porcelain", "--", name).strip():
+            _commit(f"{name}: {message}" + (f"\n\nSource: {source}" if source else ""), name)
+    except (OSError, RuntimeError):
+        _undo_put(name, dest, verb == "updated")  # never live but uncommitted (#604, #822)
+        raise
     return verb, warnings
+
+
+def _undo_put(name: str, dest: Path, had: bool) -> None:
+    """Put the library's committed copy of ``name`` back after a failed commit: the old one, or
+    none for a skill that was new."""
+    try:
+        _git("reset", "-q", "--", name)
+    except RuntimeError:
+        pass
+    if not had:
+        shutil.rmtree(dest, ignore_errors=True)
+        return
+    try:
+        _git("checkout", "-q", "HEAD", "--", name)
+        _git("clean", "-fdq", "--", name)  # the new copy's files the old one hadn't
+    except RuntimeError:
+        pass
 
 
 def _put(src: Path, dest: Path) -> None:
@@ -280,6 +336,11 @@ def patch(name: str, old: str, new: str, message: str) -> list[str]:
     """Fix one passage of a skill in place (the sentence that misled, not an appended
     correction): `old` must occur exactly once in its SKILL.md. Checked, scanned and committed
     like add; returns the warnings."""
+    with _library_lock():  # the text read is the one replaced (#822)
+        return _patch(name, old, new, message)
+
+
+def _patch(name: str, old: str, new: str, message: str) -> list[str]:
     have = available()
     if name not in have:
         raise KeyError(name)
@@ -341,22 +402,24 @@ def license_of(skill: Path, root: Path) -> str:
 
 
 def retire(name: str, message: str) -> None:
-    if name not in available():
-        raise KeyError(name)
-    (library() / "retired").mkdir(exist_ok=True)
-    shutil.rmtree(library() / "retired" / name, ignore_errors=True)  # an older retired copy
-    _git("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", f"retired/{name}")  # only that
-    _git("mv", name, f"retired/{name}")
-    _commit(f"{name}: retired: {message}")
+    with _library_lock():  # (#822)
+        if name not in available():
+            raise KeyError(name)
+        (library() / "retired").mkdir(exist_ok=True)
+        shutil.rmtree(library() / "retired" / name, ignore_errors=True)  # an older retired copy
+        _git("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", f"retired/{name}")  # only that
+        _git("mv", name, f"retired/{name}")
+        _commit(f"{name}: retired: {message}", name, f"retired/{name}")
 
 
 def restore(name: str) -> None:
-    if not (library() / "retired" / name / "SKILL.md").is_file():
-        raise KeyError(name)
-    if (library() / name).exists():
-        raise ValueError(f"{name} is in the library already: retire it first")
-    _git("mv", f"retired/{name}", name)
-    _commit(f"{name}: restored")
+    with _library_lock():  # (#822)
+        if not (library() / "retired" / name / "SKILL.md").is_file():
+            raise KeyError(name)
+        if (library() / name).exists():
+            raise ValueError(f"{name} is in the library already: retire it first")
+        _git("mv", f"retired/{name}", name)
+        _commit(f"{name}: restored", name, f"retired/{name}")
 
 
 def history(name: str, n: int = 5) -> list[str]:

@@ -80,6 +80,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
         steps = [{**s, "claude": c} for s, c in zip(steps, per_step)]
     row = {"ts": store.now(), "task": task.name, "outcome": outcome, "model": spec.get("model"),
            "size": spec.get("size"), "repo": spec.get("repo"), "stack": spec.get("stack"),
+           **({"subdir": spec["subdir"]} if spec.get("subdir") else {}),  # the package (#820)
            "rounds": st.get("round", 1),
            "auto_fixes": st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
            "reviews": reviews,
@@ -98,6 +99,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},
            **({"peak_share": st["peak_share"]} if "peak_share" in st else {}),  # tuning (#721)
+           "self_review_due": bool(st.get("self_review_due")),  # tuning.acted (#816)
            "spec_gaps": [g["text"] for g in st.get("spec_gaps") or []],
            **({"backlog": spec["backlog"]} if spec.get("backlog") else {}),  # wb backlog
            **({"claude": u} if u else {}),
@@ -178,11 +180,16 @@ def table(only: set | None = None) -> str:
     """`wb stats`' table; ``only``: these models' rows alone (the ones the Stats tab shows)."""
     from .tuning import judged  # tuning reads results' rows
     every = store.results()
-    rows = [r for r in every if judged(r) and (only is None or r.get("model") in only)]
-    gaps = len(every) - len(rows)
+    shown = [r for r in every if only is None or r.get("model") in only]
+    rows = [r for r in shown if judged(r)]
+    # each kind left out counted apart: every row not shown was called a spec-gap discard, so
+    # 40 tasks on a retired model read "(41 discards put down to the spec left out)" (#817)
+    gaps = sum(1 for r in shown if r.get("outcome") == "discarded" and r.get("spec_gaps"))
+    never = len(shown) - len(rows) - gaps
     trials = len(store.results(trials=True)) - len(every)
     left_out = (f"\n({trials} trial run{'s' if trials > 1 else ''} left out)" if trials else "") + \
-        (f"\n({gaps} discard{'s' if gaps > 1 else ''} put down to the spec left out)" if gaps else "")
+        (f"\n({gaps} discard{'s' if gaps > 1 else ''} put down to the spec left out)" if gaps else "") + \
+        (f"\n({never} task{'s' if never > 1 else ''} whose agent never ran left out)" if never else "")
     if not rows:
         return "no finished tasks yet" + left_out
     by = defaultdict(list)

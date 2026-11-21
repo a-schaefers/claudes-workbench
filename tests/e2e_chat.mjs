@@ -14,7 +14,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const pw = createRequire(import.meta.url)(process.env.PLAYWRIGHT || 'playwright')
 const home = mkdtempSync(join(tmpdir(), 'wbchat-'))
 const env = { ...process.env, WB_HOME: join(home, 'state'), WB_CHAT_TOKEN: join(home, 'token'),
-  WB_CHAT_CONFIG: join(home, 'chat.json') }  // not the user's
+  WB_CHAT_CONFIG: join(home, 'chat.json'), WB_SAVINGS: join(home, 'savings.json') }  // not the user's
 // a system Chromium when there is one (CHROMIUM names another), else Playwright's own
 const CHROMIUM = process.env.CHROMIUM || (existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : '')
 const PORT = Number(process.env.WB_E2E_PORT || 13371)
@@ -268,6 +268,15 @@ async function run(engine, device) {
     await until(async () => (await page.textContent('#saved')).includes('In the last 7 days, 1 task: Claude used 56K tokens'))
     const said = await page.textContent('#saved')
     if (!said.includes('about 59K (an estimate). Saved about 3K (5%). The GPU used 600 Wh.')) throw new Error(said)
+    // #845: a price in the user's own currency showed as dollars on the phone
+    writeFileSync(env.WB_SAVINGS, JSON.stringify({ kwh_price: 0.3 }))
+    await page.click('#gear')
+    await until(async () => await page.locator('#settings').isHidden())
+    await page.reload()
+    await page.click('#gear')
+    await until(async () => (await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18.'))
+    if ((await page.textContent('#saved')).includes('$')) throw new Error('a currency sign: ' + await page.textContent('#saved'))
+    writeFileSync(env.WB_SAVINGS, '{}')  // no price again, for the next engine
     // #101: the badge, its number and its words, legible at phone width
     if (await page.locator('#badge').isHidden()) throw new Error('no badge')
     const n = await page.textContent('#badge-n'), cls = await page.getAttribute('#badge-n', 'class')
@@ -398,6 +407,20 @@ async function run(engine, device) {
     if (JSON.stringify(r.about) !== JSON.stringify({ task: 'fix-nav', n: 1, step: 1, round: 2 })) throw new Error(JSON.stringify(r.about))
     if (!(await page.locator('#about').isHidden())) throw new Error('still replying about them')
     await until(async () => (await page.$$eval('.about-tag', t => t.at(-1)?.textContent)) === 'About fix-nav, step 1')
+  })
+  await check('a pair whose screenshots were dropped with its archived task says they expired, not that they failed (#821)', async () => {
+    const d = join(home, 'state/tasks/fix-old/shots/1')
+    mkdirSync(d, { recursive: true })
+    writeFileSync(join(d, 'shots.json'), JSON.stringify({ step: 1, round: 1, viewport: '390x844',
+      base: { rev: 'aaaaaaaaaaaa', ok: true, pruned: true }, candidate: { rev: 'bbbbbbbbbbbb', ok: true, pruned: true } }))
+    const pair = { task: 'fix-old', n: 1, step: 1, round: 1, viewport: '390x844',  // as recorded then
+      base: { rev: 'aaaaaaaaaaaa', image: true }, candidate: { rev: 'bbbbbbbbbbbb', image: true } }
+    appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: 'shots-old', ts: Date.now() / 1000, from: 'claude',
+      text: 'screenshots of fix-old.', shots: pair }) + '\n')
+    await page.reload()
+    const expired = async () => (await page.$$eval('.shots .missing', m => m.map(x => x.textContent)))
+      .filter(t => t.includes('This screenshot has expired')).length
+    await until(async () => (await expired()) === 2)
   })
   await check("wb audio's shortlist: each take plays from its blob, with its checks, and Keep sends the pick (#397)", async () => {
     const d = join(home, 'takes'); mkdirSync(d, { recursive: true })
@@ -550,8 +573,10 @@ async function run(engine, device) {
   await check('a message over 6 h unread says it was not passed to Claude, never Delivered, and sends again', async () => {
     // #536 (the 2026-11-20 audit): the mod skipped it, and the page said "Delivered" for good
     listen(false)
+    // #843: about a pair of screenshots, sent again without it: Claude got the words, no task
+    const about = { task: 'fix-nav', n: 1, step: 1, round: 2 }
     appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: 'old-1', ts: Date.now() / 1000 - 7 * 3600,
-      from: 'user', text: 'run the backlog overnight' }) + '\n')
+      from: 'user', text: 'run the backlog overnight', about }) + '\n')
     const row = page.locator('.row.user', { hasText: 'run the backlog overnight' })
     await until(async () => (await row.locator('.meta').textContent()).includes('Not passed to Claude (over 6 h old)'))
     if ((await row.locator('.meta').textContent()).includes('Delivered')) throw new Error('says Delivered')
@@ -559,7 +584,33 @@ async function run(engine, device) {
     await until(() => messages().filter(m => m.text === 'run the backlog overnight').length === 2)
     const again = messages().filter(m => m.text === 'run the backlog overnight').at(-1)
     if (Date.now() / 1000 - again.ts > 60) throw new Error('not sent as a new message')
+    if (JSON.stringify(again.about) !== JSON.stringify(about)) throw new Error('about lost: ' + JSON.stringify(again.about))
     await until(async () => (await page.locator('.row.user', { hasText: 'run the backlog overnight' }).last().locator('.meta').textContent()).includes('Delivered'))
+  })
+  await check('a refused message about a pair of screenshots, edited, is still about them (#843)', async () => {
+    // #843: edit put the words and files back in the box but not what they were about. The pair
+    // again, newest: the first one may have left the thread's newest 200 by now
+    const shots = { task: 'fix-nav', n: 1, step: 1, round: 2, viewport: '390x844',
+      base: { rev: '1a2b3c4d5e6f', image: true }, candidate: { rev: '9f8e7d6c5b4a', image: true } }
+    appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: 'shots-again', ts: Date.now() / 1000, from: 'claude',
+      text: 'screenshots of fix-nav again.', shots }) + '\n')
+    // its own row's button: #821's expired fix-old pair can sort after it in the thread
+    const pair = page.locator('.row', { hasText: 'screenshots of fix-nav again.' }).locator('text=Reply about these')
+    await until(async () => (await pair.count()) > 0)
+    await pair.last().click()
+    await until(async () => (await page.textContent('#about-text')) === 'Replying about fix-nav, step 1')
+    await page.fill('#input', 'x'.repeat(8001))                    // past MAX_TEXT: refused
+    await page.click('#send')
+    const row = page.locator('.row.user.pending', { hasText: 'Not sent' })
+    await until(async () => (await row.count()) === 1)
+    if (!(await page.locator('#about').isHidden())) throw new Error('the box still said it before the edit')
+    await row.locator('.meta button', { hasText: 'edit' }).click()
+    await until(async () => (await page.textContent('#about-text')) === 'Replying about fix-nav, step 1')
+    await page.fill('#input', 'the logo is cut off')
+    await page.click('#send')
+    await until(() => { const r = messages().at(-1); return r && r.text === 'the logo is cut off' })
+    const r = messages().at(-1)
+    if (JSON.stringify(r.about) !== JSON.stringify({ task: 'fix-nav', n: 1, step: 1, round: 2 })) throw new Error(JSON.stringify(r.about))
   })
   await check('a photo attached, the page reloaded before sending: the chip is back, nothing uploaded twice; one message with one path reaches Claude', async () => {
     // #623, the owner (2026-11-20): never a file uploaded twice by a refresh

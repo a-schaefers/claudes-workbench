@@ -41,9 +41,11 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -124,8 +126,8 @@ def server_key(url: str, remote: bool = False) -> tuple:
     """One key per server however its host is spelled: localhost, 127.0.0.1 and this machine's
     own name or address are one server. Compared as strings, two spellings of one Ollama made
     free_gpu unload the models it was told to keep (the 2026-11-16 audit), and wb model retire
-    --delete delete the default's weights (#368, the audit of 1.6). No DNS lookup: this runs on
-    every admission."""
+    --delete delete the default's weights (#368, the audit of 1.6). This runs on every
+    admission: a host name is looked up once per process (_named_here)."""
     u = urlparse(url)
     here = not remote and _this_host(u.hostname)
     return ("this host" if here else (u.hostname or "").lower(),
@@ -159,7 +161,7 @@ def opencode_config_path() -> Path:
     if os.environ.get("WB_OPENCODE_CONFIG"):
         return Path(os.environ["WB_OPENCODE_CONFIG"])
     d = _config_dir()
-    return next((p for p in (d / "opencode.json", d / "opencode.jsonc") if p.exists()),
+    return next((p for p in (d / "opencode.json", d / "opencode.jsonc") if os.path.exists(p)),
                 d / "opencode.json")
 
 
@@ -185,7 +187,9 @@ def opencode_config_files() -> list[Path]:
     file (#370)."""
     paths = [Path(os.environ["WB_OPENCODE_CONFIG"])] if os.environ.get("WB_OPENCODE_CONFIG") else \
         [*_system_files(), *_global_files(), *filter(None, [_users_config()])]
-    return [p for p in paths if p.exists()]
+    # os.path.exists, not Path.exists: before 3.14 that raises under a directory it can't read (an
+    # admin's 0750 /etc/opencode), and every wb command that reads OpenCode's config failed (#850)
+    return [p for p in paths if os.path.exists(p)]
 
 
 def _strip_jsonc(text: str) -> str:
@@ -274,7 +278,7 @@ def agent_providers() -> dict:
     global files itself. Left out, a model wb found ready was "Model unavailable" to the agent
     before any request reached its server (the 2026-11-19 audit). Templates stay templates, a
     relative {file:} made absolute: the layer lives elsewhere."""
-    own = {p.resolve() for p in (*_system_files(), *_global_files()) if p.exists()}
+    own = {p.resolve() for p in (*_system_files(), *_global_files()) if os.path.exists(p)}  # #850
     out: dict = {}
     for path, layer in _layers():
         if path.resolve() in own:
@@ -290,7 +294,7 @@ def config_target(change: str) -> Path:
     """The file own_config would write, or RuntimeError saying why it won't (and ``change``, to
     make by hand). Asked first by a change that does something else before writing: wb optimize
     made its Ollama variant, then the config refused it (#266, the audit of 1.2)."""
-    system = {p.resolve() for p in _system_files() if p.exists()}  # an admin's: never written (#370)
+    system = {p.resolve() for p in _system_files() if os.path.exists(p)}  # an admin's: never written (#370, #850)
     files = [f for f in opencode_config_files() if f.resolve() not in system]
     if len(files) > 1:
         raise RuntimeError(f"OpenCode layers {' and '.join(map(str, files))}; wb won't rewrite "
@@ -423,7 +427,36 @@ def _this_host(host: str | None) -> bool:
         return ip.is_loopback or str(ip) in _own_addresses()
     except ValueError:
         me = socket.gethostname().lower()
-        return host.lower() in (me, me.split(".")[0], f"{me.split('.')[0]}.local")
+        name = host.lower().rstrip(".")
+        return name in (me, me.split(".")[0], f"{me.split('.')[0]}.local") or _named_here(name)
+
+
+RESOLVE_WAIT = 1.0  # seconds a baseURL's host name gets to resolve; slower counts as another host
+
+
+@functools.lru_cache(maxsize=64)
+def _named_here(name: str) -> bool:
+    """Whether the host name ``name`` is this machine by another name: its FQDN (or that's short
+    form), or a name (LAN DNS, a tailnet's) that resolves to a loopback or own address. A config
+    naming the box as box.lan or box.tail1234.ts.net was another host: a GPU pool of its own, no
+    sharing, residency or fit check, and the local lease never saw it (#807). Once per process
+    (server_key runs on every admission), within RESOLVE_WAIT; a failure is not this machine."""
+    out: list = []
+
+    def look():
+        try:
+            fq = socket.getfqdn().lower()
+            if name in (fq, fq.split(".")[0]):
+                out.append(True)
+                return
+            ips = {a[4][0].split("%")[0] for a in socket.getaddrinfo(name, None)}
+            out.append(any(ipaddress.ip_address(ip).is_loopback or ip in _own_addresses() for ip in ips))
+        except (OSError, ValueError, UnicodeError):
+            out.append(False)
+    t = threading.Thread(target=look, daemon=True)
+    t.start()
+    t.join(RESOLVE_WAIT)
+    return bool(out and out[0])
 
 
 _ENGINES: dict[str, str] = {}  # root -> engine, once its server has answered
@@ -1234,6 +1267,14 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
     t0 = time.time()
     if not away and not _room_beside(m):
         free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
+    others = box_others(m, keep) if away else []
+    host = urlparse(m.root).hostname
+    if others:  # another client's model on the box: not evicted in the middle of its request
+        _wait_unused({m.root: others}, warn,
+                     said=(f"on {host} is answering another client's requests: waiting up to "
+                           f"{INFLIGHT_WAIT // 60} min for it to go idle before loading {m.name} "
+                           f"({BOX_SHARED})"),
+                     then=f"loading {m.name} anyway")
     if m.engine == "ollama":
         if respread:
             # Ollama never re-places a loaded runner: a generate with the same options reuses
@@ -1245,6 +1286,9 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
               timeout=START_TIMEOUT)
         _placement(m, warn)
+        if others and (gone := [n for n in others if not _matches(n, set(_ollama_loaded(m.root)))]):
+            warn(f"loading {m.name} on {host} unloaded {', '.join(gone)}, which another client "
+                 f"of the box had loaded: {BOX_SHARED}")
     elif not status(m)["resident"]:
         if not m.start:
             raise RuntimeError(f"{m.id} is not running and has no start command")
@@ -1388,9 +1432,11 @@ def _respread(m: Model, keep=()) -> tuple | None:
     if not budget:
         return None
     local = [o for o in discover().values() if not o.remote]
-    if any(o.engine == "server" and not o.stop and status(o)["resident"] for o in local):
+    held = keep_loaded()
+    unstopped = [o for o in local if not o.stop]  # free_gpu stops a server that has a stop
+    if _servers_hold(unstopped, [o for o in unstopped if o.id in keep or o.id in held], held):
         return None  # its memory stays taken whatever is freed
-    held, seen, mine, kept = keep_loaded(), {}, None, 0
+    seen, mine, kept = {}, None, 0
     ours = [o for o in local if o.engine == "ollama" and (o.id in keep or o.id in held)]
     for key, root in _roots(o for o in local if o.engine == "ollama").items():
         if apart(m.root, root, seen):
@@ -1595,16 +1641,18 @@ def _in_use(doomed: dict, watch: float | None = None) -> set:
     return busy
 
 
-def _wait_unused(doomed: dict, warn) -> None:
+def _wait_unused(doomed: dict, warn, said: str = "", then: str = "unloading it") -> None:
     """Wait, up to INFLIGHT_WAIT, while a model free_gpu would unload is answering requests that
     aren't this account's tasks' (they are kept): unloading it between someone's requests made
-    them reload it on the next (#378). It is unloaded after, used or not: the GPU is the task's."""
+    them reload it on the next (#378). It is unloaded after, used or not: the GPU is the task's.
+    ``said``, ``then``: the warning's words, for another client's model on a wb remote box (#812)."""
     due = time.monotonic() + INFLIGHT_POLL
     busy = _in_use(doomed)
     if not busy:
         return
     names = ", ".join(sorted({n for _, n in busy}))
-    warn(f"{names} on ollama is answering requests that aren't this account's tasks (another "
+    warn(f"{names} {said}" if said else
+         f"{names} on ollama is answering requests that aren't this account's tasks (another "
          f"user's wb, Open WebUI, an editor): waiting up to {INFLIGHT_WAIT // 60} min for it to go "
          "idle before unloading it (models.json keep_loaded leaves a model loaded)")
     deadline = time.monotonic() + INFLIGHT_WAIT
@@ -1615,7 +1663,28 @@ def _wait_unused(doomed: dict, warn) -> None:
                        min(INFLIGHT_WATCH, max(deadline - time.monotonic(), 0)))
     if busy:
         names = ", ".join(sorted({n for _, n in busy}))
-        warn(f"{names} on ollama was still in use after {INFLIGHT_WAIT // 60} min: unloading it")
+        warn(f"{names} on ollama was still in use after {INFLIGHT_WAIT // 60} min: {then}")
+
+
+# Clients of one wb remote box don't share a lease: each one's gpu-<host>.json is in its own
+# lease_dir, so a laptop's and a desktop's tasks on one box each loaded their model, Ollama
+# evicted the other's to serve each request, and both paid a reload on most requests, the cause
+# never named (#812). So before a load there, a model another client is using is waited for
+# (not evicted mid-request), and one the load evicted anyway is named.
+BOX_SHARED = ("clients of one wb remote box don't share a GPU lease, so their models may swap on "
+              "every request: run them at different times, or on models that fit the box together")
+
+
+def box_others(m: Model, keep=()) -> list[str]:
+    """The models a wb remote box (``m``'s Ollama on another machine) has loaded that this
+    client's task isn't using: ``m`` and the models ``keep`` names aside, and keep_loaded's.
+    Another client's, or the box's own. [] when it doesn't answer, and for a local model."""
+    if m.engine != "ollama" or not m.remote or same_gpu(m) or _fake():
+        return []
+    held, found = keep_loaded(), discover()
+    ours = [m, *(o for o in (found.get(k) for k in keep) if o)]
+    return [n for n in _ollama_loaded(m.root) if n and not _kept_name(n, held)
+            and not any(o.server == m.server and _matches(o.name, {n}) for o in ours)]
 
 
 def unheld_loaded(skip=()) -> list[str]:
@@ -1651,6 +1720,29 @@ def _others_resident(m: Model, keep=()) -> bool:
                if not apart(m.root, root, seen) for n in _ollama_loaded(root))
 
 
+def _servers_hold(local: list[Model], ours: list[Model] | None = None, held: set | None = None) -> bool:
+    """Whether a resident server (not Ollama) among ``local`` holds GPU memory nothing here
+    measures: any server but LM Studio, which says what it has loaded (/api/v1/models). Its
+    just-in-time list names every downloaded model, so an idle LM Studio read as resident: every
+    round unloaded the user's Ollama models that fit beside the task's, and a model split onto the
+    CPU was never placed again (#808). With ``ours`` (and ``held``, keep_loaded), only the
+    instances free_gpu leaves loaded count, since it unloads the rest; without, any loaded."""
+    seen: set = set()
+    for o in local:
+        if o.engine != "server" or o.server in seen or not status(o)["resident"]:
+            continue
+        seen.add(o.server)
+        rows = _lmstudio_rows(o.root, o.api_key)
+        if rows is None:
+            return True  # a server that can't say what it holds
+        loaded = {i["id"] for x in rows for i in _instances(x)}
+        if ours is not None:
+            loaded -= {i for s, i in _lmstudio_extra(local, ours, held or set())[0] if s.server == o.server}
+        if loaded:
+            return True
+    return False
+
+
 def _room_beside(m: Model) -> bool:
     """Whether ``m`` fits on the GPU beside every model resident there now, so nothing need be
     unloaded: every round once emptied the GPU of the user's other models even when all of them
@@ -1661,7 +1753,7 @@ def _room_beside(m: Model) -> bool:
     if m.engine != "ollama" or not budget:
         return False
     local = [o for o in discover().values() if not o.remote]
-    if any(o.engine == "server" and status(o)["resident"] for o in local):
+    if _servers_hold(local):
         return False
     used, here, mine, seen = 0, [], False, {}
     for key, root in _roots(o for o in local if o.engine == "ollama").items():
@@ -1710,18 +1802,32 @@ SHARED_GPU = Path("/var/lib/workbench/gpu")
 def lease_dir() -> Path:
     """Where the GPU lease's files live (gpu.lock, gpu.json, gpu.admit, gpu.load, and a remote
     server's gpu-<host>.*): WB_GPU_DIR, else SHARED_GPU when this account may write it, else the
-    state directory, as before."""
+    state directory, as before (_own_lease)."""
     v = os.environ.get("WB_GPU_DIR")
     if v:
         return Path(os.path.abspath(os.path.expanduser(v)))
-    if SHARED_GPU.is_dir() and os.access(SHARED_GPU, os.W_OK | os.X_OK):
+    # os.path.isdir: before 3.14 Path.is_dir raises under a parent this account can't read (an
+    # admin's 0750 /var/lib/workbench), and every start and lease failed instead of falling back (#850)
+    if os.path.isdir(SHARED_GPU) and os.access(SHARED_GPU, os.W_OK | os.X_OK):
         return SHARED_GPU
-    return store.home()
+    return _own_lease()
+
+
+def _own_lease() -> Path:
+    """The state directory, or on a network file system its `machines/<store.machine()>/`: there
+    several machines may share it, and each one's wb read the other's holders as dead and erased
+    them from gpu.json, and took turns with them on a GPU they don't share (#849)."""
+    home = store.home()
+    if not store.network_fs(os.path.realpath(home)):
+        return home
+    own = home / "machines" / store.machine()
+    own.mkdir(parents=True, exist_ok=True)
+    return own
 
 
 def lease_shared() -> bool:
-    """Whether the lease is shared with other accounts (not this account's state directory)."""
-    return os.path.realpath(lease_dir()) != os.path.realpath(store.home())
+    """Whether the lease is shared with other accounts (not this account's own)."""
+    return os.path.realpath(lease_dir()) != os.path.realpath(_own_lease())
 
 
 @contextlib.contextmanager
@@ -1736,9 +1842,32 @@ def _lease_lock(path: Path):
         os.close(fd)  # releases the lock
 
 
+# A shared lease's files, readable by every account in the directory's group. Created under an
+# account's umask 077 they were 0600, and every other account's holders(), wb start, wb optimize
+# and GpuLease failed with PermissionError until an admin chmodded them (#802).
+LEASE_MODE = 0o664
+
+
 def _lease_fd(path: Path) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
-    return os.open(path, os.O_RDONLY | os.O_CREAT, 0o664)
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT, LEASE_MODE)
+    if lease_shared():
+        st = os.fstat(fd)
+        if st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) & LEASE_MODE != LEASE_MODE:
+            os.fchmod(fd, stat.S_IMODE(st.st_mode) | LEASE_MODE)  # only its owner may
+    return fd
+
+
+def unshared_lease_files() -> list[Path]:
+    """A shared lease's files the directory's group can't read (wb doctor names them): another
+    account's holders() and GpuLease fail on each (#802). [] when the lease isn't shared."""
+    if not lease_shared():
+        return []
+    try:
+        return sorted(p for p in lease_dir().glob("gpu*") if p.is_file()
+                      and not p.name.startswith(".") and not p.stat().st_mode & stat.S_IRGRP)
+    except OSError:
+        return []
 
 
 def max_loaded(root: str | None = None) -> int:
@@ -1749,7 +1878,10 @@ def max_loaded(root: str | None = None) -> int:
     most = (hardware.ollama_env_at(root).get("OLLAMA_MAX_LOADED_MODELS") or "").strip()
     if most.isdigit() and int(most):
         return int(most)
-    return OLLAMA_MAX_LOADED * max(len(budget_devices(root)[1]), 1)
+    # gpu_gb sets the bytes, not the cards: with it set, budget_devices names no device, and a
+    # two-card box was allowed 3 models in all, not 6 (#811)
+    devs = budget_devices(root)[1] or (_read_devices(root)[1] if _overrides().get("gpu_gb") is not None else [])
+    return OLLAMA_MAX_LOADED * max(len(devs), 1)
 
 
 def unified_default(ram: int) -> int:
@@ -1795,6 +1927,12 @@ def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str
         except (TypeError, ValueError):
             raise RuntimeError(f"{overrides_path()}: gpu_gb is {hand!r}, not a number of GB; "
                                "fix it by hand") from None
+    return _read_devices(root)
+
+
+def _read_devices(root: str | None = None) -> tuple[int | None, list[dict], str]:
+    """budget_devices as the machine says it, models.json's gpu_gb aside: max_loaded counts these
+    GPUs even when gpu_gb sets the bytes (#811)."""
     if _fake():
         gb = os.environ.get("WB_FAKE_GPU_GB")  # tests: a GPU of this size
         return (int(float(gb) * 1e9), [], "WB_FAKE_GPU_GB") if gb else (None, [], "")
@@ -1943,14 +2081,37 @@ def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
         par = env.get("OLLAMA_NUM_PARALLEL") or ""
         return par.isdigit() and same + 1 <= int(par)
     distinct = {_key(o): o for o in running}
+    kept = _kept_beside(m, running)
     # its limit is its own server's: models another Ollama holds aren't counted against it
-    if sum(k[0] == m.server for k in distinct) + 1 > max_loaded(m.root):
+    if sum(k[0] == m.server for k in distinct) + sum(k == m.server for k, _ in kept) + 1 \
+            > max_loaded(m.root):
         return False
     # only what may sit on m's cards takes its budget: summed with another card's models, two
     # tasks on one Ollama per GPU were refused sharing that fit (#460)
     seen: dict = {}
     sizes = [need(o) for o in distinct.values() if not apart(m.root, o.root, seen)] + [need(m)]
-    return all(sizes) and sum(sizes) <= SHARE_AT * budget
+    return all(sizes) and sum(sizes) + sum(n for _, n in kept) <= SHARE_AT * budget
+
+
+def _kept_beside(m: Model, running: list[Model]) -> list[tuple]:
+    """The keep_loaded models resident on ``m``'s cards that no running task runs: (server, bytes)
+    each. free_gpu never unloads them, so they take room a shared load needs: left out,
+    can_share admitted a task whose load made Ollama evict the user's protected model (or the
+    other task's) without a word (#803). Asked only when keep_loaded lists something."""
+    held = keep_loaded()
+    if not held:
+        return []
+    out, seen = [], {}
+    local = [o for o in discover().values() if o.engine == "ollama" and not o.remote]
+    for key, root in _roots([m, *local]).items():
+        if apart(m.root, root, seen):
+            continue  # another card's models take none of m's room (#460)
+        for x in (_get(f"{root}/api/ps", timeout=1.0) or {}).get("models") or []:
+            name = x.get("name") or ""
+            if _kept_name(name, held) and not any(o.server == key and _matches(o.name, {name})
+                                                  for o in (m, *running)):
+                out.append((key, int(x.get("size") or 0)))
+    return out
 
 
 def admits(m: Model | None, held: dict, cards: frozenset | None = None) -> bool:
@@ -1990,14 +2151,16 @@ def holders(home: Path | None = None, pool: str = "gpu") -> dict:
             if p.isdigit() and _alive(int(p), h.get("start"), h.get("uid"))}
 
 
-def _fits_beside(m: Model, keep: set, before=None) -> bool:
+def _fits_beside(m: Model, keep: set, before=None, kept=()) -> bool:
     """After a shared load: Ollama kept every other holder's model and has all of ``m`` in VRAM.
     need() guesses a model's context before it loads; when the guess is short, Ollama evicts a
     model or splits one onto the CPU, and two tasks then reload their models on every request
     (the 2026-11-16 audit). Unknown (Ollama didn't answer) counts as fitting. ``before``: the
     names /api/ps listed before the load. A kept model missing from it was unloaded idle (its task
     in a long test run or waiting on a question past the keep-alive), not evicted: counted as one,
-    the other task unloaded itself and waited for that task to finish (the 0.90 review)."""
+    the other task unloaded itself and waited for that task to finish (the 0.90 review).
+    ``kept``: the keep_loaded names /api/ps listed before the load, each still loaded after it:
+    an eviction of the user's protected model passed unseen (#803)."""
     if _fake() or m.engine != "ollama":
         return True
     body = _get(f"{m.root}/api/ps")
@@ -2010,7 +2173,7 @@ def _fits_beside(m: Model, keep: set, before=None) -> bool:
               and (before is None or _matches(o.name, before))]
     whole = any(_matches(m.name, {x.get("name")}) and x.get("size") and x.get("size_vram") == x["size"]
                 for x in ps)
-    return whole and all(_matches(o.name, names) for o in others)
+    return whole and all(_matches(o.name, names) for o in others) and all(n in names for n in kept)
 
 
 class GpuLease:
@@ -2044,7 +2207,9 @@ class GpuLease:
         return holders(self.home, self.pool)
 
     def _set(self, held: dict) -> None:
-        store.write_json(self.home / f"{self.pool}.json", held)
+        # renamed into place, so its mode is the writer's each time: the group's to read (#802)
+        store.write_json(self.home / f"{self.pool}.json", held,
+                         mode=LEASE_MODE if lease_shared() else None)
 
     def _entry(self, waiting: bool = False) -> dict:
         # the start time tells this runner from a later process given its pid (after a reboot)
@@ -2196,11 +2361,14 @@ class GpuLease:
                         if p != self.me and not h.get("waiting") and h.get("model")}
             before = set(_ollama_loaded(self.m.root)) if keep and self.m.engine == "ollama" \
                 and not _fake() else None
+            held_ids = keep_loaded() if before else set()
+            kept = {n for n in before or () if n and _kept_name(n, held_ids)
+                    and not _matches(self.m.name, {n})}
             secs = make_resident(self.m, say=self.say, keep=keep, warn=self.warn)
             # a load that loaded nothing evicted nothing (the 0.90 review)
-            if not keep or not secs or _fits_beside(self.m, keep, before):
+            if not keep or not secs or _fits_beside(self.m, keep, before, kept):
                 return secs
-            self.warn(f"ollama could not fit {self.m.id} beside {', '.join(sorted(keep))}; "
+            self.warn(f"ollama could not fit {self.m.id} beside {', '.join(sorted(keep | kept))}; "
                       "waiting for the GPU to itself")
             found = discover()
             if _key(self.m) not in {_key(o) for o in (found.get(k) for k in keep) if o}:
@@ -2290,13 +2458,30 @@ def _started(pid: int) -> str | None:
         return Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[19]
     except (OSError, IndexError):
         pass
+    return _ps_start(pid)
+
+
+def _ps_start(pid: int, utc: bool = True) -> str | None:
+    """ps's `lstart`, in UTC: it prints local time, so a laptop that changed zones, or a writer and
+    a reader under different TZ (the launchd chat server beside a shell's `export TZ`), read the
+    same live process as a recycled pid: live runners dropped from gpu.json, live sessions' tasks
+    adopted, no listener on the chat (#848). ``utc=False``: the zone ps inherits, as stamps written
+    before #848 were."""
+    env = {**os.environ, "LC_ALL": "C", **({"TZ": "UTC0"} if utc else {})}
     try:
         r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=5,
-                           env={**os.environ, "LC_ALL": "C"})
+                           encoding="utf-8", errors="replace", timeout=5, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return (" ".join(r.stdout.split()) or None) if r.returncode == 0 else None
+
+
+def _same_start(pid: int, now: str, start: str) -> bool:
+    """Whether ``pid``, whose stamp is ``now``, started when ``start`` says: the same stamp, else
+    (both ps dates) the one a wb before #848 wrote, in ps's inherited zone, so a holder, listener or
+    claimed session recorded then isn't read as recycled after the upgrade."""
+    return now == start or (not now.isdigit() and not start.isdigit()
+                            and _ps_start(pid, utc=False) == start)
 
 
 PROC = Path("/proc")
@@ -2327,8 +2512,18 @@ def runs(pid: int, *words: str) -> bool:
 def start_tag(pid: int) -> str:
     """`_started` short enough for a file name (its crc32, in hex), '' when unknown: a scratch
     directory's name carries its maker's, so wb gc knows a recycled pid isn't the maker (#532)."""
-    s = _started(pid)
+    return _tag(_started(pid))
+
+
+def _tag(s: str | None) -> str:
     return format(zlib.crc32(s.encode()), "08x") if s else ""
+
+
+def same_tag(pid: int, tag: str) -> bool:
+    """Whether ``pid``'s start_tag is ``tag``, or can't be read: as _same_start, a scratch
+    directory named before #848 (ps's local time) still matches its live maker."""
+    now = _started(pid)
+    return not now or _tag(now) == tag or (not now.isdigit() and _tag(_ps_start(pid, utc=False)) == tag)
 
 
 def _alive(pid: int, start: str | None = None, uid: int | None = None) -> bool:
@@ -2342,13 +2537,16 @@ def _alive(pid: int, start: str | None = None, uid: int | None = None) -> bool:
     except PermissionError:
         if uid is None or uid == os.getuid() or not start:
             return False
-        return _started(pid) == start
+        # EPERM proves the pid exists. Under /proc mounted hidepid its start time can't be read
+        # (None): taken as gone, B shared the GPU with A's live runner and unloaded its model (#806)
+        now = _started(pid)
+        return now is None or _same_start(pid, now, start)
     except ProcessLookupError:
         return False
     except (OverflowError, ValueError):
         return False
     now = _started(pid) if start else None
-    return now is None or now == start
+    return now is None or _same_start(pid, now, start)
 
 
 # ---- managing the set: what Claude's weekly model check uses to add and retire models ----
@@ -2576,8 +2774,11 @@ def remove_remote(host: str) -> tuple[str, list[str]]:
 # Where the common local model servers listen by default and what their command is called, for
 # wb scout: Claude works with whatever the user runs, so it needs to see what that is (only
 # Ollama was looked for, and the skill steered every first run to it).
+# Jan's local API server (1337) and text-generation-webui's OpenAI API (5000, --api) were never
+# probed: a running one was "none found", and first run offered servers to install (#810)
 SERVER_PORTS = ((11434, "Ollama"), (1234, "LM Studio"), (8080, "llama.cpp, llama-swap, LocalAI or MLX"),
-                (8000, "vLLM"), (5001, "KoboldCpp"), (30000, "SGLang"))
+                (8000, "vLLM"), (5001, "KoboldCpp"), (30000, "SGLang"), (1337, "Jan"),
+                (5000, "text-generation-webui"))
 SERVER_COMMANDS = ("ollama", "lms", "llama-server", "llama-swap", "vllm", "sglang", "koboldcpp",
                    "local-ai", "mlx_lm.server", "jan")
 
@@ -2613,17 +2814,43 @@ def windows_host() -> str | None:
     return None
 
 
-def _models_at(root: str, timeout: float) -> list[str] | None:
-    body = _get(f"{root}/v1/models", timeout=timeout)
+NEEDS_KEY = "needs an API key"  # what _models_at says of a server that answered 401
+
+
+def _models_at(root: str, timeout: float) -> list[str] | str | None:
+    """The ids ``root``'s /v1/models lists; NEEDS_KEY when it answered 401 (Jan or LM Studio
+    with an API key set: taken as no answer, it was invisible on its own port, #810); else None."""
+    try:
+        with _open(f"{root}/v1/models", timeout=timeout) as r:
+            body = json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            said = e.read(4096) if e.code == 401 else b""
+        except Exception:
+            said = b""
+        finally:
+            e.close()
+        # not 403: macOS's AirPlay receiver answers 5000 so; and not wb's own web chat, on 1337
+        # by default, whose 401 is for its token
+        return NEEDS_KEY if e.code == 401 and b"wb chat" not in said else None
+    except Exception:
+        return None
     if isinstance(body, dict) and isinstance(body.get("data"), list):
         return [str(x.get("id")) for x in body["data"] if isinstance(x, dict)]
     return None
 
 
+def _answer(root: str, usually: str, names: list[str] | str) -> dict:
+    """servers_here's entry for a server that answered: its models, or `key` when it wants one."""
+    return {"root": root, "usually": usually, "models": [], "key": True} if names == NEEDS_KEY \
+        else {"root": root, "usually": usually, "models": names}
+
+
 def servers_here() -> tuple[list[str], list[dict]]:
     """The model servers' commands on PATH, and the servers answering on their default ports here:
-    {"root", "usually", "models"} (the ids an OpenAI-compatible /v1/models lists), and on WSL2
-    those at the Windows host too, with "windows": its address (#663)."""
+    {"root", "usually", "models"} (the ids an OpenAI-compatible /v1/models lists; "key": true
+    and no models when it wants an API key, #810), and on WSL2 those at the Windows host too, with
+    "windows": its address (#663)."""
     on_path = [c for c in SERVER_COMMANDS if shutil.which(c)]
     if _fake():
         return on_path, []
@@ -2631,13 +2858,13 @@ def servers_here() -> tuple[list[str], list[dict]]:
     for port, usually in SERVER_PORTS:
         root = f"http://127.0.0.1:{port}"
         if (names := _models_at(root, 1)) is not None:
-            answering.append({"root": root, "usually": usually, "models": names})
+            answering.append(_answer(root, usually, names))
     if (win := windows_host()) and not answering:  # mirrored networking found them above
         from concurrent.futures import ThreadPoolExecutor
         roots = [(f"http://{win}:{port}", usually) for port, usually in SERVER_PORTS]
-        with ThreadPoolExecutor(len(roots)) as pool:  # a firewall that drops: one wait, not six
+        with ThreadPoolExecutor(len(roots)) as pool:  # a firewall that drops: one wait, not eight
             found = list(pool.map(lambda r: _models_at(r[0], 1), roots))
-        answering += [{"root": root, "usually": usually, "models": names, "windows": win}
+        answering += [{**_answer(root, usually, names), "windows": win}
                       for (root, usually), names in zip(roots, found) if names is not None]
     return on_path, answering
 

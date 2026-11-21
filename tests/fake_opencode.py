@@ -14,6 +14,10 @@
   fill   writes "41", then a step that fills 76% of a 32K window (6K of it reasoning), then
          works on for an hour; a fresh session handed the task behaves like ok
   read   reads, a step that fills 76% before any change, then writes "42" like ok
+  compact  writes "41", a step at 52% of a 32K window, then one at 15%: OpenCode compacted it
+         between them, which `run --format json` doesn't print (#774); then works on for an
+         hour; a fresh session handed the task behaves like ok. FAKE_COMPACT_READ: it reads
+         before writing, its first step at 50%
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
   refill every session changes a file, then fills 76% and works on for an hour
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
@@ -112,7 +116,7 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                              "cwd": os.getcwd(), "pwd": os.environ.get("PWD")}) + "\n")
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
-if scenario == "fill" and "picking this task up in a fresh session" in args[-1]:
+if scenario in ("fill", "compact") and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
 if scenario in ("crash", "crashtalk") and os.path.exists(os.environ.get("FAKE_DOWN", "") + ".crashed"):
     scenario = "ok"  # the server came back: this run works
@@ -259,6 +263,32 @@ elif scenario == "floor":  # read half its window before its first change, then 
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "compact":  # #774: a tool result past the margin compacted it between steps
+    if os.environ.get("FAKE_COMPACT_READ"):  # read half its window before its first change
+        tool("read", {"filePath": os.path.abspath("answer.txt")})
+        emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                          "cache": {"read": 14300}})  # 16400: 50%
+        time.sleep(1)  # the runner sees that step before the change
+    with open("answer.txt", "w") as fh:
+        fh.write("41\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 900 if not os.environ.get(
+                                                          "FAKE_COMPACT_READ") else 14400}})
+    emit("text", text="Wrote 41 so far; reading the test log next.")
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 14900}})  # 17000: 52%
+    tool("read", {"filePath": os.path.abspath("answer.txt")})
+    emit("step_finish", reason="tool-calls", tokens={"input": 4000, "output": 900,
+                                                      "cache": {"read": 0}})  # 4900: 15%
+    if os.environ.get("FAKE_COMPACT_READ"):  # a session that carries on: it finishes the work
+        with open("answer.txt", "w") as fh:
+            fh.write("42\n")
+        tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+        emit("text", text="Wrote answer.txt = 42.")
+        finish()
+    else:
+        time.sleep(3600)
 elif scenario == "fill":
     with open("answer.txt", "w") as fh:
         fh.write("41\n")

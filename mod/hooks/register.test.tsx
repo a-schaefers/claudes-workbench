@@ -288,6 +288,21 @@ function task(files: Record<string, string>, name: string, phase: string, extra:
 const notice = (files: Record<string, string>, row: Record<string, any>) => {
   files['/wb/notify.jsonl'] = (files['/wb/notify.jsonl'] ?? '') + JSON.stringify(row) + '\n'
 }
+// `wb ack` as wb runs it, on the test's files: a claim (exit 3 when the mark is there already) or,
+// with --if, a rollback only while the mark is still that value (#786); `then` runs after a claim,
+// standing in for another session claiming next. Every other command: exit 0.
+function wbAck(files: Record<string, string>, then?: (name: string, ts: number) => void) {
+  return (_: any, e: any) => {
+    if (e.argv[1] !== 'ack') return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    const [name, ts] = [e.argv[2], Number(e.argv[3])], path = `/wb/tasks/${e.argv[2]}/acked`
+    const now = Number(files[path] ?? 0)
+    const i = e.argv.indexOf('--if')
+    const ok = i > 0 ? now === Number(e.argv[i + 1]) : now < ts
+    if (ok) files[path] = String(ts)
+    if (ok && i < 0) then?.(name, ts)
+    return { value: { exitCode: ok ? 0 : 3, stdout: '', stderr: '' } }
+  }
+}
 const endTurn = (turnId: string) => ({ answer: '', durationMs: 1, isAborted: false, turnId, reason: 'answer' } as const)
 
 test('a session wakes for its own project\'s tasks only: another project\'s are left for their session', async ($, on) => {
@@ -472,6 +487,32 @@ test('a session resumed in a new process comes back in workbench mode, and a qui
   await clock.advance(3000)                                     // the quit's poll ends inside the test
 })
 
+test('after a reload in workbench mode, a /clear\'s new session id is kept in the mode too (#840)', async ($, on) => {
+  // #840: a reload started mem.delegated false while the chat atom kept the mode, so a /clear's
+  // id was never saved, and `claude --continue` into it came back with the mode off
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const kept: Record<string, unknown> = { modes: { 'sess-1': 1_800_000_000_000 - 3600_000 } }
+  on('store.get', (_: any, e: any) => ({ value: kept[e.key] }))
+  on('store.set', (_: any, e: any) => { kept[e.key] = e.value; return { value: undefined } })
+  // the chat atom as the earlier load left it, in the mode: it outlives the reload, mem doesn't
+  let held: any = { shape: 'chat-4', value: { key: 'k1', delegating: true, url: '', web: false } }
+  let version = 1
+  const isChat = (e: any) => e.key === 'chat' && e.plugin === 'workbench'
+  on('state.get', (_: any, e: any, next: any) => isChat(e) ? { value: { value: held, version } } : next(e))
+  on('state.set', (_: any, e: any, next: any) => isChat(e) ? (held = e.value, { value: { isSet: true, version: ++version } }) : next(e))
+  let id = 'sess-1'
+  on('session.id', () => ({ value: id }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  id = 'sess-2'                                                   // /clear, before any delegating command
+  await clock.advance(31_000)
+  expect(Object.keys(kept.modes as object).sort()).toEqual(['sess-1', 'sess-2'])
+})
+
 test('a session that adopts a task whose process is gone turns workbench mode on with it (#689)', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
@@ -503,6 +544,48 @@ test('a session that adopts a task whose process is gone turns workbench mode on
   await $.command.run({ command: 'workbench-quit', args: '' })   // the mode was on: the quit says so
   expect(ui).toContain('close workbench')
   await clock.advance(3000)
+})
+
+// #834: /workbench-quit parked the review (or the hand-back took it over), the session ended, and
+// the next one in the project adopted it and turned the mode back on against the quit
+async function adoptsLeftOver($: any, on: any, extra: Record<string, unknown>) {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const ui: string[] = []
+  task(files, 'orphan', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4242 })
+  files['/wb/tasks/orphan/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts0, ...extra })
+  fakeTasks(on, files, ['orphan'], true, ui, false)
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout', text: '{"hello": 4343, "parent": 9000, "parent_start": "77"}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', (_: any, e: any) => {
+    const [cmd, ...args] = e.argv
+    if (cmd === 'kill') return { value: { exitCode: args[1] === '4242' ? 1 : 0, stdout: '', stderr: '' } }
+    if (args[0] === 'adopt') {
+      const path = '/wb/tasks/orphan/task.json'
+      files[path] = JSON.stringify({ ...JSON.parse(files[path]), session: 'sess-new', claude_pid: 9000, claude_start: '77' })
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(JSON.parse(files['/wb/tasks/orphan/task.json']).session).toBe('sess-new') // still adopted
+  await clock.advance(3000)
+  expect(ui).not.toContain('open workbench')
+  expect(ui.some(l => l.includes('workbench mode'))).toBe(false)
+}
+
+test('adopting a task the user\'s quit parked leaves workbench mode off (#834)', async ($, on) => {
+  await adoptsLeftOver($, on, { parked: true })
+})
+
+test('adopting a task handed back to Claude leaves workbench mode off (#834)', async ($, on) => {
+  await adoptsLeftOver($, on, { taken_over: true })
 })
 
 test('in workbench mode the status line counts only this session\'s tasks as awaiting review (#693)', async ($, on) => {
@@ -622,6 +705,40 @@ test('a task whose Claude Code process\'s pid now belongs to another process is 
   expect(woken.join('\n')).not.toContain('REPORT-same')                    // the same process: still its own
 })
 
+test('without /proc, a live Claude Code process reads as alive whatever the time zone (#848)', async ($, on) => {
+  // #848: ps's lstart is local time, so after a zone change every live session's process read as
+  // recycled and the first session to poll adopted their tasks
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'utc', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-utc',
+    claude_pid: 4444, claude_start: 'Fri Nov 21 15:00:00 2026' })
+  task(files, 'old', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old',
+    claude_pid: 4545, claude_start: 'Fri Nov 21 10:00:00 2026' })       // local time, before #848
+  task(files, 'gone', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-gone',
+    claude_pid: 4646, claude_start: 'Thu Nov 20 09:00:00 2026' })
+  const names = ['utc', 'old', 'gone']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names)
+  on('session.id', () => ({ value: 'sess-new' }))
+  const local: Record<string, string> = { '4444': 'Fri Nov 21 10:00:00 2026', '4545': 'Fri Nov 21 10:00:00 2026', '4646': 'Fri Nov 21 11:00:00 2026' }
+  const utc: Record<string, string> = { '4444': 'Fri Nov 21 15:00:00 2026', '4545': 'Fri Nov 21 15:00:00 2026', '4646': 'Fri Nov 21 16:00:00 2026' }
+  on('process.run', (_: any, e: any) => {
+    if (e.argv.includes('lstart=')) {
+      const pid = e.argv[e.argv.length - 1]
+      return { value: { exitCode: 0, stdout: ` ${(e.argv.includes('TZ=UTC0') ? utc : local)[pid]}\n`, stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }  // kill -0: every pid is live
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-gone'))).toHaveLength(1)  // recycled: adopted
+  expect(woken.join('\n')).not.toContain('REPORT-utc')                 // the same process, in UTC
+  expect(woken.join('\n')).not.toContain('REPORT-old')                 // and in an old stamp
+})
+
 test('without a kill executable, /proc says which Claude Code processes are gone (#700)', async ($, on) => {
   // #700: `kill -0` threw ENOENT in a container without procps, so no gone process was ever seen
   // and nobody was woken for a crashed session's tasks
@@ -670,6 +787,35 @@ test('a listener whose life can\'t be told keeps the chat while its claim is fre
   delete mtimes['/wb/chat/listener.json']                       // stale: gone, by every sign there is
   await clock.advance(31_000)
   expect(JSON.parse(files['/wb/chat/listener.json']).session).not.toBe('other-key')
+})
+
+test('without /proc the chat listener spawns no kill or ps for its own claim, and asks of another\'s at most twice a minute (#839)', async ($, on) => {
+  // #839: on macOS listen ran `kill -0` and `ps` on every 1.5 s poll, for its own claim too
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'run', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })   // polls every 1.5 s
+  fakeTasks(on, files, ['run'])
+  chatOn(files)
+  const asks: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[0] === 'kill' || e.argv.includes('ps')) asks.push(e.argv)
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'watch' ? '{}' : '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  const own = files['/wb/chat/listener.json']
+  expect(JSON.parse(own).pid).toBe(4242)                           // this session listens
+  await clock.advance(30_000)
+  expect(files['/wb/chat/listener.json']).toBe(own)
+  expect(asks).toEqual([])                                         // its own claim: never asked
+  files['/wb/chat/listener.json'] = JSON.stringify({ session: 'other-key', pid: 777, start: '1' })
+  await clock.advance(60_000)
+  expect(files['/wb/chat/listener.json']).toContain('other-key')  // theirs stands
+  expect(asks.filter(a => a[0] === 'kill').length).toBeGreaterThanOrEqual(1)
+  expect(asks.filter(a => a[0] === 'kill').length).toBeLessThanOrEqual(3)  // not 40
 })
 
 test('on a file system that ignores case, a task under ~/Repos is a session in ~/repos\'s', async ($, on) => {
@@ -743,7 +889,7 @@ test('a wake the engine drops is not acknowledged, and comes again a minute late
   task(files, 'fix-it', 'review')
   notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT' })
   fakeTasks(on, files)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('process.run', wbAck(files))
   const toasts: string[] = []
   on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
   const tried: string[] = []
@@ -761,6 +907,48 @@ test('a wake the engine drops is not acknowledged, and comes again a minute late
   expect(tried[1]).toContain('Task `fix-it` is ready for review')
   await clock.advance(120_000)
   expect(tried).toHaveLength(2)                                 // once it went through
+})
+
+test('a mark another session claimed after this one\'s take is never written back lower (#786)', async ($, on) => {
+  // #786: after `wb ack` took R1, a later claim of R2 landed, and the mod's plain write of R1
+  // lowered the mark under it: its own next poll took R2 again, delivered by both
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review')
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT' })
+  fakeTasks(on, files)
+  on('process.run', wbAck(files, name => { files[`/wb/tasks/${name}/acked`] = String(ts0 + 5) }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(files['/wb/tasks/fix-it/acked']).toBe(String(ts0 + 5))
+})
+
+test('a question the running turn refused goes back only while the mark is still this session\'s (#786)', async ($, on) => {
+  // #786: the refused send wrote the old mark back unconditionally, over a notice another
+  // session or wb wait had claimed meanwhile, which was then delivered a second time
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'asking')
+  files['/wb/tasks/fix-it/ask/q1.json'] = JSON.stringify({ id: 'q1' })
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'question', id: 'q1', text: 'Q: which config?' })
+  fakeTasks(on, files)
+  const runs: string[][] = []
+  const ack = wbAck(files)
+  on('process.run', (h: any, e: any) => { runs.push(e.argv.slice(1)); return ack(h, e) })
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.send', () => {                                      // refused, and meanwhile a later
+    files['/wb/tasks/fix-it/acked'] = String(ts0 + 7)            // notice was claimed elsewhere
+    return { isDelivered: false, reason: 'busy' }
+  })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'a long review', turnId: 't1' })
+  await clock.advance(3000)
+  expect(runs).toContainEqual(['ack', 'fix-it', '0', '--if', String(ts0)])
+  expect(files['/wb/tasks/fix-it/acked']).toBe(String(ts0 + 7))  // not lowered under the claim
 })
 
 test('a notice already delivered (before a reload, or by wb wait) is not rewoken as lost', async ($, on) => {
@@ -781,6 +969,28 @@ test('a notice already delivered (before a reload, or by wb wait) is not rewoken
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(120_000)
   expect(woken).toEqual([])
+})
+
+test('a review whose notice left notify.jsonl\'s tail is not rewoken after a reload: its own noticed mark says it was had (#844)', async ($, on) => {
+  // #844: mem.noticed came only from the last 1 MiB of notify.jsonl, so a review acknowledged at
+  // its notice's ts, its runner's last status write after that, woke Claude a second time
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review', {}, ts0 + 0.05)               // the runner's last write lands after its notice
+  files['/wb/notify.jsonl'] = JSON.stringify({ ts: ts0 + 1, task: 'other', kind: 'checkin', text: 'later news' }) + '\n'
+  files['/wb/tasks/fix-it/acked'] = String(ts0)                 // its notice woke Claude
+  files['/wb/tasks/fix-it/noticed'] = String(ts0)               // Task.notify's mark of it
+  fakeTasks(on, files, ['fix-it'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(120_000)
+  expect(woken).toEqual([])
+  files['/wb/tasks/fix-it/noticed'] = String(ts0 + 30)          // a newer notice it never acknowledged
+  await clock.advance(120_000)
+  expect(woken.filter(w => w.includes('no notice reached Claude'))).toHaveLength(1)
 })
 
 test('one notice for the tasks a restart interrupted wakes once, ending with the resume, not the failure\'s next step', async ($, on) => {
@@ -936,7 +1146,7 @@ test('a question held for a turn that could not take it, which then timed out, i
   files['/wb/tasks/fix-it/ask/q1.json'] = JSON.stringify({ id: 'q1' })
   notice(files, { ts: ts0, task: 'fix-it', kind: 'question', id: 'q1', text: 'Q: which config?' })
   fakeTasks(on, files)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('process.run', wbAck(files))
   on('ui.toast', () => ({ value: undefined }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.send', () => ({ isDelivered: false, reason: 'busy' }))  // refused: held for the turn
@@ -1176,6 +1386,44 @@ test('a running task writing its status on every tool call is re-read at most ev
   const n = watches()
   await clock.advance(1600)
   expect(watches()).toBe(n + 1)                                 // done: read at once
+})
+
+test('a running task\'s transcript is not read while the pane shows the Stats or Settings tab (#838)', async ($, on) => {
+  // #838: refreshLive checked only that the pane was shown, so a round was exported every five
+  // seconds on tabs that never draw it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })
+  const pane = fakeTasks(on, files, ['fix-it'], true, [], false)
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'watch' ? JSON.stringify({ s: 'claude', t: 'x' }) : '', stderr: '' } }
+  })
+  on('process.spawn', async function* () {                       // wb events, and wb top for the Stats tab
+    yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  await clock.advance(1000)
+  const watches = () => runs.filter(r => r[1] === 'watch').length
+  expect(watches()).toBe(1)                                      // the Tasks tab: read
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  for (const tab of ['tab-stats', 'tab-settings']) {
+    await ui.press({ key: tab })
+    const n = watches()
+    for (let i = 1; i <= 10; i++) {
+      files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'running', round: 1, updated_at: ts0 + i + (tab === 'tab-stats' ? 0 : 20) })
+      await clock.advance(2000)
+    }
+    expect(watches()).toBe(n)                                    // 20 s running: never read there
+  }
+  await ui.press({ key: 'tab-tasks' })
+  await clock.advance(1600)
+  expect(watches()).toBeGreaterThan(1)                           // back on Tasks: read again
+  await ui.unmount()
 })
 
 test('/workbench-quit stops everything; /workbench-quit-and-hand-back-claude hands the tasks to Claude', async ($, on) => {
@@ -2017,6 +2265,113 @@ test('a web message the turn didn\'t answer in the chat gets one follow-up, then
   await turn('t4', 'wb chat reply --text "Two tasks run; done by six."')
   await turn('t5')
   expect([followUps().length, posted().length]).toEqual([1, 1])  // answered there: no follow-up, no note
+})
+
+test('a web message queued behind a task\'s wake is owed from its own turn, not the wake\'s (#837)', async ($, on) => {
+  // #837: the wake and the web message went in one poll; the wake's turn ended without a reply
+  // (Claude hadn't seen the message yet), so a follow-up went for a message Claude then answered
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project', session: 'sess-1' })
+  fakeTasks(on, files)
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  notice(files, { ts: ts0 + 40, task: 'fix-it', kind: 'review', text: 'REPORT-fix-it' })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: ts0 + 40, from: 'user', text: 'Status' }) + '\n'
+  await clock.advance(31_000)                                    // one poll: the wake, then the message
+  const at = (needle: string) => asked.findIndex(a => a.includes(needle))
+  expect(at('REPORT-fix-it')).toBeGreaterThanOrEqual(0)
+  expect(at('[web chat] Status')).toBeGreaterThan(at('REPORT-fix-it'))
+  await turn('t1')                                               // the wake's turn: no reply yet
+  await turn('t2', 'wb chat reply --text "One task in review."') // the message's turn answers it
+  await turn('t3')
+  expect(followUps()).toHaveLength(0)
+})
+
+test('a follow-up the engine dropped is not sent again once Claude answered in the chat (#837)', async ($, on) => {
+  // #837: only chatOwed was cleared on a reply; OWED_NOTE stayed in the queue and went anyway
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const asked: string[] = []
+  let drop = true
+  on('prompt.submit', (_: any, e: any) => {
+    asked.push(e.text)
+    if (drop && e.text.includes("hasn't heard back")) { drop = false; return { drop: 'a settings hook' } }
+    return { text: e.text }
+  })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'Status' }) + '\n'
+  await clock.advance(31_000)
+  await turn('t1')                                               // answered in the terminal only
+  expect(followUps()).toHaveLength(1)                            // tried, and dropped
+  await turn('t2', 'wb chat reply --text "All quiet."')          // then answered there after all
+  await clock.advance(61_000)                                    // past the retry
+  expect(followUps()).toHaveLength(1)
+})
+
+test('a /loop firing, another plugin\'s prompt or a channel message leaves the user away and the follow-up owed; the user\'s Enter ends it (#835)', async ($, on) => {
+  // #835: any prompt that wasn't isMeta counted as the user back at the terminal, so a /loop
+  // firing ended away for every session and cancelled the #767 follow-up
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  const awayAt = () => JSON.parse(files['/wb/chat/away.json'] ?? '{"at": 0}').at
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'Status' }) + '\n'
+  await clock.advance(31_000)
+  expect(asked.filter(a => a.startsWith('[web chat] Status'))).toHaveLength(1)
+  expect(awayAt()).toBeGreaterThan(0)
+  for (const origin of [{ kind: 'scheduled-trigger' }, { kind: 'plugin', name: 'other' }, { kind: 'channel', server: 'slack' },
+    { kind: 'peer' }, { kind: 'task-notification' }])
+    await $.prompt.submit({ text: 'check on the tasks', origin } as any)
+  expect(awayAt()).toBeGreaterThan(0)                            // still away
+  await turn('t1')                                               // answered in the terminal only
+  expect(followUps()).toHaveLength(1)                            // the follow-up still comes
+  await $.prompt.submit({ text: 'back now', origin: { kind: 'composer' } } as any)
+  expect(awayAt()).toBe(0)                                       // the user's own Enter: back
 })
 
 test('only wb run as a command counts as delegating, read as bash reads it, not wb written in a string, a heredoc or a comment (#409, #560)', () => {

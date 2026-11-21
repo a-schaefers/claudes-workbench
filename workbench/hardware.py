@@ -548,7 +548,9 @@ def _ollama_processes() -> list[tuple[dict, str, bool]]:
     (/proc/<pid>/environ: one started by hand in another terminal, a user unit's, anyone's as
     root), lowest pid first, what it is, and whether it runs in a container (another mount
     namespace: its knobs only). A system unit's process (user ollama) can't be read: systemd
-    says its environment."""
+    says its environment. macOS has no /proc: ps says (_ps_ollama)."""
+    if system() == "macos":
+        return _ps_ollama()
     try:
         pids = sorted(int(d.name) for d in PROC.iterdir() if d.name.isdigit())
     except OSError:
@@ -574,6 +576,89 @@ def _ollama_processes() -> list[tuple[dict, str, bool]]:
             found.append((_environ(raw, OLLAMA_KEYS + SET_ONLY),
                           f"the running ollama's environment (pid {pid})", False))
     return found
+
+
+def _ps_ollama() -> list[tuple[dict, str, bool]]:
+    """_ollama_processes on macOS, from ps: each `ollama serve` (by hand, brew services, the app's)
+    and the environment `ps -E` shows of this user's processes. With no /proc it found none, so
+    OLLAMA_NUM_PARALLEL, OLLAMA_MAX_LOADED_MODELS and OLLAMA_CONTEXT_LENGTH were wb's own guesses:
+    two tasks on one model were refused sharing (#804). A value with a space is cut at it (ps
+    joins the environment with spaces); another user's process shows none and is left out."""
+    found = []
+    for line in _run("ps", "-axo", "pid=,args=").splitlines():
+        pid, _, args = line.strip().partition(" ")
+        if not pid.isdigit() or not re.match(r"(\S*/)?ollama serve(\s|$)", args.strip()):
+            continue
+        shown = _run("ps", "-wwE", "-o", "command=", "-p", pid)
+        pairs = dict(re.findall(r"(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=(\S*)", shown))
+        if not {"PATH", "HOME"} & set(pairs):
+            continue  # no environment shown: not this user's to read
+        found.append((int(pid), ({k: v for k, v in pairs.items() if k in OLLAMA_KEYS + SET_ONLY},
+                                 f"the running ollama's environment (pid {pid})", False)))
+    return [f for _, f in sorted(found, key=lambda f: f[0])]  # lowest pid first, as /proc's
+
+
+def _launchd_ollama() -> dict | None:
+    """A brew-services Ollama's environment as launchd holds it (its plist's
+    EnvironmentVariables): `launchctl print gui/<uid>/homebrew.mxcl.ollama`. None when there is
+    no such service."""
+    out = _run("launchctl", "print", f"gui/{os.getuid()}/homebrew.mxcl.ollama")
+    if not out:
+        return None
+    env, inside = {}, False
+    for line in out.splitlines():
+        t = line.strip()
+        if t == "environment = {":
+            inside = True
+        elif inside and t == "}":
+            break
+        elif inside and " => " in t:
+            k, _, v = t.partition(" => ")
+            if k in OLLAMA_KEYS + SET_ONLY:
+                env[k] = v
+    return env
+
+
+# What a systemd unit's EnvironmentFile= read could not, said in the settings' source: the
+# settings may be missing, not Ollama's defaults (#804)
+UNREAD = "unreadable"
+
+
+def _environment_files(entries: list[str], keys) -> tuple[dict, list[str], list[str]]:
+    """``keys`` from a unit's EnvironmentFile= files (systemctl show's `EnvironmentFiles=<path>
+    (ignore_errors=yes|no)` lines), in order, a later one over an earlier; the files read and the
+    ones that couldn't be (a missing file whose errors are ignored is neither: systemd skips it
+    too). systemd's own format: KEY=VALUE lines, `#` and `;` comments, a value quoted whole. Left
+    unread, /etc/default/ollama's CUDA_VISIBLE_DEVICES and OLLAMA_NUM_PARALLEL were taken as
+    unset, and wb doctor said Ollama's defaults (#804)."""
+    env, read, unread = {}, [], []
+    for entry in entries:
+        path, _, flags = entry.strip().partition(" (")
+        optional = "ignore_errors=yes" in flags or path.startswith("-")
+        path = path.lstrip("-")
+        if not path:
+            continue
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            if not optional:
+                unread.append(path)
+            continue
+        except OSError:
+            unread.append(path)
+            continue
+        read.append(path)
+        for line in text.splitlines():
+            t = line.strip()
+            if not t or t[0] in "#;" or "=" not in t:
+                continue
+            k, _, v = t.partition("=")
+            k, v = k.strip(), v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                v = v[1:-1].replace('\\"', '"') if v[0] == '"' else v[1:-1]
+            if k in keys:
+                env[k] = v
+    return env, read, unread
 
 
 def _port(host: str) -> int:
@@ -705,7 +790,9 @@ def ollama_settings() -> tuple[dict, str]:
     nothing could say, and wb's own environment is the guess. In order: a running `ollama serve`
     this user may read; a running systemd unit (the system's, else the user's), its Environment
     split as a shell would (systemd quotes an entry holding a space: split on spaces it was lost,
-    the 2026-11-16 audit); an ollama container; on macOS what the app reads (launchctl setenv);
+    the 2026-11-16 audit), its EnvironmentFile= files over it (one it can't read said in the
+    source: UNREAD, #804); an ollama container; on macOS (whose running `ollama serve` ps shows,
+    #804) a brew service's plist (launchd), else what the app reads (launchctl setenv);
     a unit that isn't running, which Ollama reads when it starts. Read from systemd, launchctl or
     wb's own environment alone, a server in Docker, one started by hand, or Ollama for Windows
     from WSL had OLLAMA_NUM_PARALLEL and OLLAMA_MAX_LOADED_MODELS read as unset, so sharing was
@@ -721,24 +808,33 @@ def ollama_settings() -> tuple[dict, str]:
     if not found and system() != "macos":
         for scope in ((), ("--user",)):
             raw = _run("systemctl", *scope, "show", "ollama", "-p", "LoadState", "-p", "ActiveState",
-                       "-p", "Environment")
-            props = dict(line.partition("=")[::2] for line in raw.splitlines())
+                       "-p", "Environment", "-p", "EnvironmentFiles")
+            lines = raw.splitlines()
+            props = dict(line.partition("=")[::2] for line in lines)
             if props.get("LoadState") != "loaded":
                 continue
             try:
                 items = shlex.split(props.get("Environment", ""))
             except ValueError:  # an unbalanced quote
                 items = props.get("Environment", "").split()
-            unit = (_environ("\0".join(items).encode(), OLLAMA_KEYS + SET_ONLY),
-                    "systemd's ollama unit" + (" (--user)" if scope else ""))
+            # EnvironmentFile= settings override Environment= ones (systemd.exec(5))
+            files, read, unread = _environment_files(
+                [line.partition("=")[2] for line in lines if line.startswith("EnvironmentFiles=")],
+                OLLAMA_KEYS + SET_ONLY)
+            name = "systemd's ollama unit" + (" (--user)" if scope else "") \
+                + (f" and {', '.join(read)}" if read else "") \
+                + (f"; {', '.join(unread)} {UNREAD}, so its settings may be missing" if unread else "")
+            unit = ({**_environ("\0".join(items).encode(), OLLAMA_KEYS + SET_ONLY), **files}, name)
             if props.get("ActiveState") in ("active", "activating", "reloading"):
                 found = unit
                 break
             idle = idle or (unit[0], unit[1] + ", not running")
     found = found or _ollama_container()
     if not found and system() == "macos":
-        env = {k: v for k in OLLAMA_KEYS if (v := _run("launchctl", "getenv", k))}
-        found = (env, "launchctl (what the Ollama app reads)") if env else None
+        if (env := _launchd_ollama()) is not None:  # brew services, not running now (#804)
+            found = (env, "launchd's homebrew.mxcl.ollama, not running")
+        elif env := {k: v for k in OLLAMA_KEYS if (v := _run("launchctl", "getenv", k))}:
+            found = (env, "launchctl (what the Ollama app reads)")
     env, source = found or idle or ({k: os.environ[k] for k in OLLAMA_KEYS + SET_ONLY
                                      if k in os.environ}, "")
     for k in OLLAMA_KEYS:

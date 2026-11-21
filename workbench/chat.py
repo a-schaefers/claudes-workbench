@@ -166,8 +166,11 @@ def shots(task: str, n) -> dict | None:
         return None
     return {"task": task, "n": n, "step": m.get("step"), "round": m.get("round"),
             "viewport": m.get("viewport"),
-            # a capture that failed shows no image, even when it wrote one (#268; verify.shot_ok)
-            **{s: {"rev": (x := m.get(s) or {}).get("rev"), "image": bool(x.get("ok", x.get("image"))),
+            # a capture that failed shows no image, even when it wrote one (#268; verify.shot_ok);
+            # one dropped with its archived task (store.slim_archive) is `pruned` (#821)
+            **{s: {"rev": (x := m.get(s) or {}).get("rev"),
+                   "image": bool(x.get("ok", x.get("image"))) and not x.get("pruned"),
+                   **({"pruned": True} if x.get("pruned") else {}),
                    **({"exit": x["exit"]} if x.get("exit") not in (None, 0) else {})}
                for s in ("base", "candidate")}}
 
@@ -1185,6 +1188,20 @@ def listener() -> dict | None:
     return st if store.now() - st.get("ts", 0) <= LISTENING_FOR else None
 
 
+IDLE_BUMP_S = 60  # without inotify, nothing changed: the streams wake this often all the same (#841)
+
+
+def _answers(pid) -> bool:
+    """Whether a process answers `kill 0` (one of another user's does too); unsure: yes."""
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, ValueError, TypeError, OverflowError):
+        pass
+    return True
+
+
 class Hub:
     """One watcher for every open stream: it wakes them the moment a chat file changes or the
     listening session's process ends (a pidfd), so nothing polls."""
@@ -1225,6 +1242,7 @@ class Hub:
     def _watch(self) -> None:
         w = Watcher(self.dir)
         pid, pidfd = None, None
+        last, said_gone = time.monotonic(), None
         try:
             while not self.closed.is_set():
                 st = store.read_json(self.dir / "listener.json", None) or {}
@@ -1237,7 +1255,15 @@ class Hub:
                     except (OSError, ValueError, AttributeError):
                         pidfd = None
                 if not w.native or w.polled:  # no inotify, or chat/ fell back to looking
-                    w.wait(1)
+                    # a wake only for a change, the listener's process ending (`kill 0`, no `ps`)
+                    # or IDLE_BUMP_S, as the native select's timeout: every open stream rebuilt
+                    # its whole snapshot each second, a `ps` fork each on macOS, with nothing new
+                    # (#841)
+                    changed, gone = w.wait(1), False
+                    if pid and pid != said_gone and not _answers(pid):
+                        gone, said_gone = True, pid
+                    if not changed and not gone and time.monotonic() - last < IDLE_BUMP_S:
+                        continue
                 else:
                     ready, _, _ = select.select([w.fd] + ([pidfd] if pidfd is not None else []), [], [], 60)
                     w.read()
@@ -1246,6 +1272,7 @@ class Hub:
                         pidfd = None
                     time.sleep(0.02)  # gather a burst of writes into one wake
                     w.read()
+                last = time.monotonic()
                 self.bump()
         finally:
             w.close()
@@ -1614,8 +1641,11 @@ class Handler(BaseHTTPRequestHandler):
                 n = (q.get("n") or [""])[0]
                 body = shot_png((q.get("task") or [""])[0], int(n) if n.isdigit() else 0,
                                 (q.get("side") or [""])[0])
-                if body is None:
-                    self._json(404, {"error": "no such screenshot"})
+                if body is None:  # 410: dropped with its archived task, the message still names it (#821)
+                    pair = shots((q.get("task") or [""])[0], int(n) if n.isdigit() else 0)
+                    side = (pair or {}).get((q.get("side") or [""])[0])
+                    gone = isinstance(side, dict) and side.get("pruned")
+                    self._json(410 if gone else 404, {"error": "expired" if gone else "no such screenshot"})
                 else:
                     self._send(200, body, "image/png")
             return

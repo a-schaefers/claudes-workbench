@@ -138,6 +138,15 @@ ALLOWED_COMMANDS = (
     "dune", "opam exec", "lein", "clojure", "clj", "rebar3", "nimble", "shards", "gleam", "elm",
     "mill", "scala-cli", "pod", "ant", "crystal", "nim", "erlc", "escript",
     "pushd", "popd", "printenv", ":", "ulimit", "local", "declare", "shift", "trap", "pgrep",
+    # and the ordinary tools #514 and #672 still missed (#830, the second 2026-11-21 audit):
+    # macOS's own (no sha256sum or nproc there), the wrappers _WRAPPERS already bounds, process
+    # and coreutils tools, native builds' (versioned compilers like python3.*), more ecosystems'
+    "shasum", "md5", "sysctl", "sw_vers", "stdbuf", "setsid", "pkill", "killall", "expr", "bc",
+    "truncate", "dd", "shuf", "cksum", "sha512sum", "flock",
+    "ldd", "readelf", "addr2line", "size", "gcov", "ccache", "sccache", "gfortran", "nvcc",
+    "mpirun", "gcc-*", "g++-*", "clang-*", "clang++-*",
+    "scons", "protoc", "ocaml", "iex", "ghci", "runghc", "irb", "gem", "luarocks", "busted",
+    "lua5.*", "cython", "maturin", "virtualenv", "sphinx-build", "mkdocs", "terraform", "corepack",
 )
 # A project's own tools and builds, by their usual relative paths (`./x` is allowed already).
 PROJECT_BINS = (".venv/bin/*", "venv/bin/*", "node_modules/.bin/*", "build/*", "target/debug/*",
@@ -160,6 +169,7 @@ ASK_FIRST = (
     "platformio pkg install *", "conan install *--requires*",
     "opam install *", "nimble install *", "gleam add *", "elm install *", "clojure -Ttools *",
     "clj -Ttools *",  # (#672)
+    "luarocks install *",  # (#830; `gem install *` above, now that `gem` itself is allowed)
     # fetch a package and run it
     "npx -y *", "npx --yes *", "npm exec *", "pnpm dlx *", "yarn dlx *", "bunx *", "uvx *",
     # their other spellings (the 2026-11-16 audit); a plain `npx <pkg>` runs only what the
@@ -383,20 +393,42 @@ def experiment(task: store.Task, name: str) -> bool:
 MERGE_AS = ("merge", "ff", "squash")
 
 
-def repo_conf(repo: str | Path) -> dict:
-    """commands.json's `repos` entry for this repo (matched by real path, else by git dir), or
-    {}: its `setup` command and its limit (`setup_timeout`, #520), the ignored paths to `copy`
-    into a task's worktree, its `siblings` (#201), how `--merge` lands there (`merge`, #352)."""
-    real, repos = os.path.realpath(repo), commands_conf().get("repos") or {}
-    for k, v in repos.items():
-        if os.path.realpath(Path(k).expanduser()) == real:
-            return v
-    # else by git dir: a linked worktree of a configured repo is that repo (#498)
-    common = gitops.common_dir(repo) if repos else None
+def repo_conf(repo: str | Path, sub: str | None = None) -> dict:
+    """commands.json's `repos` entry for the task's spot, the repo or its package ``sub``
+    (task.json `subdir`), or {}: its `setup` command and its limit (`setup_timeout`, #520), the
+    ignored paths to `copy` into a task's worktree, its `siblings` (#201), how `--merge` lands
+    there (`merge`, #352). The key nearest the spot wins: the spot itself, else the nearest
+    directory above it inside the repo, matched by real path, else the same by git dir, as the
+    path inside its worktree: a linked worktree of a configured repo is that repo (#498). Any
+    key once matched by git dir, so in a monorepo the first package's entry (its setup, its
+    copies, its merge) applied to every task of the repo, the root's and the other packages' (#778)."""
+    repos = commands_conf().get("repos") or {}
+    if not repos:
+        return {}
+    top = os.path.realpath(repo)
+    spot = os.path.realpath(Path(repo) / sub) if sub else top
+
+    def within(p: str, d: str) -> bool:
+        return d == "." or p == d or p.startswith(d.rstrip(os.sep) + os.sep)
+
+    best = max(((len(kr), v) for k, v in repos.items()
+                if within(kr := os.path.realpath(Path(k).expanduser()), top) and within(spot, kr)),
+               default=None, key=lambda x: x[0])
+    if best:
+        return best[1]
+    common, rel_spot, found = gitops.common_dir(repo), os.path.relpath(spot, top), None
     for k, v in repos.items() if common else ():
-        if gitops.common_dir(Path(k).expanduser()) == common:
-            return v
-    return {}
+        kp = Path(k).expanduser()
+        if gitops.common_dir(kp) != common:
+            continue
+        try:
+            rel = os.path.relpath(os.path.realpath(kp), os.path.realpath(gitops.toplevel(kp)))
+        except gitops.GitError:
+            continue
+        rank = 0 if rel == "." else len(rel) + 1
+        if within(rel_spot, rel) and (found is None or rank > found[0]):
+            found = (rank, v)
+    return found[1] if found else {}
 
 
 def shell_rules(task: store.Task) -> list[dict]:
@@ -474,6 +506,10 @@ NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghc
 # home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
 # every build with a dependency, and a git dependency failed wherever git/ didn't exist yet)
 CARGO_MADE = ("registry/", "git/", ".package-cache", ".package-cache-mutate", ".global-cache")
+# and what the common tools make in a cache home split around an active venv (poetry's, from
+# `poetry shell` or direnv), made first so the split grants them: Landlock can only allow, so a
+# split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825)
+CACHE_MADE = ("uv", "pip", "go-build", "pre-commit")
 # what OpenCode and the ask server write themselves, beside the task's directory
 OPENCODE_HOMES = (".local/share/opencode", ".local/state/opencode")
 # The device nodes builds use, not /dev: the user's terminals, input devices (/dev/uinput) and
@@ -566,23 +602,27 @@ _COMMON: dict[str, str] = {}
 def repo_dirs(task: store.Task) -> set[str]:
     """The task's repo and its git directory, real paths: no lane entry may hold either, or the
     agent could write a hook or core.fsmonitor that wb's own git runs outside the lane (the
-    2026-11-16 audit: GOPATH=~/src, or ~/go with the repo in ~/go/src)."""
+    2026-11-16 audit: GOPATH=~/src, or ~/go with the repo in ~/go/src). A removed linked
+    worktree's: the repository's main worktree and its git dir (gitops.repo_of), not the removed
+    path and a `.git` under it (#776)."""
     repo = task.spec.get("repo")
     if not repo:
         return set()
-    real = os.path.realpath(repo)
+    real = gone = os.path.realpath(repo)
+    if not os.path.isdir(real):
+        real = os.path.realpath(gitops.repo_of(task.spec))
     if real not in _COMMON:
         try:
             _COMMON[real] = os.path.realpath(os.path.join(real, gitops.git(
                 Path(real), "rev-parse", "--git-common-dir").strip()))
         except (gitops.GitError, OSError):
-            return {real, os.path.join(real, ".git")}
-    return {real, _COMMON[real]}
+            return {gone, real, os.path.join(real, ".git")}
+    return {gone, real, _COMMON[real]}
 
 
 # What a task's directory holds beside its worktree: a sibling's link (`../<name>` from the
 # worktree) may not take one of these names. A new file in the task directory goes here too.
-TASK_FILES = ("acked", "ask", "base-tests.txt", "claude-sessions", "context.md", "events.jsonl", "rounds",
+TASK_FILES = ("acked", "ask", "base-tests.txt", "claude-sessions", "context.md", "events.jsonl", "noticed", "rounds",
               "runner.log", "setup.txt", "shots", "status.json", "steer.jsonl", "task.json",
               "tree", "verify", "worktree")
 
@@ -646,6 +686,69 @@ def _split(place: str, out_of: set[str]) -> list[str]:
     return [q for n in names for q in _split(os.path.join(real, n), out_of)]
 
 
+def tool_var_homes() -> list[str]:
+    """The toolchain homes TOOL_HOME_VARS name, each that is set (its first entry, its cache for
+    VAR_CACHES' whole homes)."""
+    out = []
+    for v in TOOL_HOME_VARS:
+        if os.environ.get(v):
+            first = os.environ[v].split(os.pathsep)[0]
+            if os.path.isabs(first):  # a relative CARGO_TARGET_DIR is the build's own, in the repo
+                out.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
+    return out
+
+
+def tool_home_of(real: str) -> str | None:
+    """The toolchain home (TOOL_HOMES under the home, a TOOL_HOME_VARS target) that the real path
+    ``real`` lies in, or the one beneath it when it holds exactly one (`~/go` for `go/pkg`), as a
+    real path; None when it is in none. A home not made yet isn't in the lane (writable keeps
+    what exists), and the walk up from a refused `~/.npm/_cacache` reached the home directory,
+    which no grant may name, so a first `npm ci` or `go test` named no grant at all (#824)."""
+    homes = dict.fromkeys(os.path.realpath(h) for h in (
+        *(Path.home() / t for t in TOOL_HOMES), *tool_var_homes()))
+    homes.pop(os.path.realpath(Path.home()), None)
+    within = [h for h in homes if real == h or _under(real, h)]
+    if within:
+        return max(within, key=len)  # the nearest: GOMODCACHE inside ~/.cache, say
+    below = [h for h in homes if _under(h, real)]
+    return below[0] if len(below) == 1 else None
+
+
+def not_writable(made_only: bool = True) -> set[str]:
+    """NOT_WRITABLE's places, CARGO_HOME's and RUSTUP_HOME's own among them, as real paths: those
+    that exist, or with ``made_only`` false every one (lane_grant: a grant made before cargo or
+    rustup runs must not hold their bin/ either)."""
+    cargo, rustup = os.environ.get("CARGO_HOME"), os.environ.get("RUSTUP_HOME")
+    return {os.path.realpath(p) for p in (*(Path.home() / h for h in NOT_WRITABLE),
+                                          *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()),
+                                          *((Path(rustup) / "toolchains",) if rustup else ()))
+            if not made_only or os.path.lexists(p)}
+
+
+def split_points() -> set[str]:
+    """What a grant is split around, real paths (lane_grant): the secrets and workbench's own
+    files, the user's active Python environments (#825: the test report named `~/.cache`, which
+    a grant split around the same venv again) and NOT_WRITABLE's places, made or not."""
+    return _hidden() | set(python_envs()) | not_writable(made_only=False)
+
+
+def gem_home_of(real: str) -> str | None:
+    """The RubyGems home the real path ``real`` lies in (GEM_HOME, or the nearest directory up
+    with both `gems/` and `specifications/`: an rbenv, rvm, asdf or mise Ruby's), else None.
+    `bundle install` writes its cache/, gems/, specifications/ and extensions/, so a grant of
+    the one directory Bundler named was refused again at the next (#832)."""
+    if (g := os.environ.get("GEM_HOME")) and os.path.isabs(g) and \
+            (real == (g := os.path.realpath(g)) or _under(real, g)):
+        return g
+    home = os.path.realpath(Path.home())
+    d = real
+    while d not in ("/", home) and d != os.path.dirname(d):
+        if os.path.isdir(os.path.join(d, "gems")) and os.path.isdir(os.path.join(d, "specifications")):
+            return d
+        d = os.path.dirname(d)
+    return None
+
+
 def writable(task: store.Task) -> list[str] | None:
     """The directories (and files) the agent may write to, None when the user turned the lane off
     (`"paths": ["*"]`). Only those that exist: the kernel's rules are on real files."""
@@ -658,11 +761,7 @@ def writable(task: store.Task) -> list[str] | None:
     xdg = [os.environ.get("XDG_CACHE_HOME")]
     xdg += [os.path.join(os.environ[v], "opencode") for v in ("XDG_DATA_HOME", "XDG_STATE_HOME")
             if os.environ.get(v)]  # OpenCode's own data, when the user moved those
-    for v in TOOL_HOME_VARS:
-        if os.environ.get(v):
-            first = os.environ[v].split(os.pathsep)[0]
-            if os.path.isabs(first):  # a relative CARGO_TARGET_DIR is the build's own, in the repo
-                xdg.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
+    xdg += tool_var_homes()
     # OpenCode's own directories, made first: the lane writes only what exists, so a first task
     # in a fresh profile failed opening OpenCode's log before any model request (#340, the audit
     # of 1.4). One that can't be made is named in runner.log, the place a failed round points to.
@@ -702,11 +801,15 @@ def writable(task: store.Task) -> list[str] | None:
                 pass
     # the user's active Python environments too: a venv in a tool home (poetry's, pipenv's,
     # WORKON_HOME) was the agent's to install into (#490)
-    out_of = _hidden() | set(python_envs()) | \
-        {os.path.realpath(p) for p in (*(home / h for h in NOT_WRITABLE),
-                                       *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()),
-                                       *((Path(rustup) / "toolchains",) if rustup else ()))
-         if os.path.lexists(p)}
+    envs = set(python_envs())
+    out_of = _hidden() | envs | not_writable()
+    cache = os.path.realpath(os.environ.get("XDG_CACHE_HOME") or home / ".cache")
+    if any(_under(e, cache) for e in envs):  # (#825)
+        for n in CACHE_MADE:
+            try:
+                os.makedirs(os.path.join(cache, n), exist_ok=True)
+            except OSError:  # a read-only home: the task starts all the same
+                pass
     # Of the task's directory only its worktree and ask/, where the ask server writes its
     # questions: the rest (task.json, status.json, steer.jsonl, the rounds, runner.log) steers
     # the runner and wb, outside the lane, and notify.jsonl wakes Claude for every task (the
@@ -1046,8 +1149,10 @@ def python_envs(environ=None) -> list[str]:
     roots = [env.get("VIRTUAL_ENV"), env.get("CONDA_PREFIX")]
     for d in (env.get("PATH") or "").split(os.pathsep):
         p = Path(d)
-        if p.is_absolute() and p.name == "bin" and ((p.parent / "pyvenv.cfg").is_file()
-                                                   or (p.parent / "conda-meta").is_dir()):
+        # os.path, not Path.is_file: before 3.14 that raises under a parent this account can't
+        # read (another account's ~/bin, a dead NFS mount's ESTALE), and every lane failed (#850)
+        if p.is_absolute() and p.name == "bin" and (os.path.isfile(p.parent / "pyvenv.cfg")
+                                                   or os.path.isdir(p.parent / "conda-meta")):
             roots.append(str(p.parent))
     return list(dict.fromkeys(os.path.realpath(r) for r in roots if r and os.path.isdir(r)))
 
@@ -1238,17 +1343,22 @@ def venv_line(task: store.Task, setup: bool) -> str:
     return line
 
 
-def interop_gap() -> str | None:
-    """What WSL's interop leaves open, for `wb doctor`, or None (not WSL, or interop off)."""
+def interop_on() -> bool:
+    """Whether WSL runs Windows programs (binfmt_misc's WSLInterop enabled): False off WSL."""
     if hardware.system() != "wsl":
-        return None
+        return False
     for name in ("WSLInterop", "WSLInterop-late"):
         try:
             if Path(BINFMT, name).read_text().split("\n")[0].strip() == "enabled":
-                break
+                return True
         except OSError:
             continue
-    else:
+    return False
+
+
+def interop_gap() -> str | None:
+    """What WSL's interop leaves open, for `wb doctor`, or None (not WSL, or interop off)."""
+    if not interop_on():
         return None
     return ("WSL interop is on: a Windows program runs as you outside the agent's lane. The "
             "Windows drives are out of its PATH and reads, but a Windows program in its lane or "
@@ -1277,6 +1387,10 @@ def secret_paths() -> set[str]:
     return {r for r in map(os.path.realpath, paths) if r not in whole}
 
 
+# where conda, mamba and micromamba say their install is, with or without an env activated
+CONDA_VARS = ("CONDA_EXE", "CONDA_PYTHON_EXE", "MAMBA_EXE", "MAMBA_ROOT_PREFIX")
+
+
 def tool_roots(hidden: set[str]) -> set[str]:
     """The installs the agent's programs run from: each PATH directory's prefix (its parent when
     it is a `bin`), the targets of the links in the home's PATH directories, and the Python
@@ -1284,9 +1398,12 @@ def tool_roots(hidden: set[str]) -> set[str]:
     non-dot home directory (~/miniconda3, ~/flutter, ~/apps) failed in the lane (the 2026-11-16
     audit). The same under an ONLY_KEPT root, short of a user's home or a whole drive: Linuxbrew's
     bin links into ../Cellar, which the lane hid (the 0.90 review). Never `/`, the home directory
-    or anything holding a secret: a prefix is kept whole; never a Windows drive on WSL."""
+    or anything holding a secret: a prefix is kept whole; never a Windows drive on WSL. And
+    conda's and mamba's installs by their variables (CONDA_VARS), a `condabin` taken like a
+    `bin`: with the base env not activated only condabin is on PATH, and `conda run` couldn't
+    read the interpreter or the envs beside it (#827)."""
     home = os.path.realpath(Path.home())
-    prefix = lambda d: os.path.dirname(d) if os.path.basename(d) == "bin" else d  # noqa: E731
+    prefix = lambda d: os.path.dirname(d) if os.path.basename(d) in ("bin", "condabin") else d  # noqa: E731
     roots = {os.path.realpath(r) for r in ONLY_KEPT}
     drives = windows_drives()
 
@@ -1334,6 +1451,12 @@ def tool_roots(hidden: set[str]) -> set[str]:
     found |= {prefix(os.path.dirname(os.path.realpath(sys.executable)))}
     found |= {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix,
                                             os.environ.get("CONDA_PREFIX")) if p}
+    for v in CONDA_VARS:
+        if os.path.isabs(p := os.environ.get(v) or ""):  # a program's install, or a root itself
+            real = os.path.realpath(p)
+            root = prefix(os.path.dirname(real)) if v.endswith("_EXE") else real
+            if os.path.isdir(root) and not on_windows(root, drives):
+                found.add(root)
     return {r for r in found if r not in ("/", home)
             and not any(h == r or _under(h, r) for h in hidden)}
 
@@ -1635,6 +1758,67 @@ def import_files(task: store.Task, roots: list[tuple[Path, Path, bool]]) -> list
     return out
 
 
+def _md_under(src: Path) -> list[Path]:
+    """The `.md` files under ``src``, through its directory links, each real directory once (a
+    link loop ends), no dotted name (a shared rules checkout's .git): Path.rglob follows no
+    directory link, so a rules directory shared by `ln -s ~/team-rules ~/.claude/rules/team`,
+    as Claude Code documents, never reached the agent (#828)."""
+    out, seen = [], set()
+    for d, dirs, files in os.walk(src, followlinks=True):
+        real = os.path.realpath(d)
+        if real in seen:
+            dirs[:] = []
+            continue
+        seen.add(real)
+        dirs[:] = [n for n in dirs if not n.startswith(".")]
+        out += [Path(d) / f for f in files if f.endswith(".md") and not f.startswith(".")]
+    return sorted(out)
+
+
+def _copy_rule(real: str, copy: Path) -> None:
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    tmp = copy.with_name(f".{copy.name}.{os.getpid()}.tmp")  # whole: OpenCode may be reading
+    shutil.copyfile(real, tmp)
+    os.replace(tmp, copy)
+
+
+def project_rules(task: store.Task, wt: Path) -> list[tuple[Path, Path, bool]]:
+    """The project's tracked `.claude/rules/**/*.md`, as import_files' roots: (what OpenCode
+    loads, read from, the user's own). One a committed link takes outside the worktree and the
+    repo (`.claude/rules/shared -> ~/company-standards`) is copied into
+    rules/<task>/project-rules/, which the lane reads: loaded by its worktree path, the lane
+    refused it, and a linked directory's files weren't listed at all, so Claude reviewed against
+    rules the agent never received (#828). Not a secret or workbench's own; its imports reach
+    what a project's do; copies of rules gone since go too."""
+    base, repo = os.path.realpath(wt), os.path.realpath(task.spec["repo"])
+    within = lambda p, d: p == d or _under(p, d)  # noqa: E731
+    hidden = secret_paths() | private_paths()
+    top, out_dir = wt / ".claude" / "rules", rules_dir(task) / "project-rules"
+    files: list[Path] = []
+    for p in _tracked(wt, ".claude/rules"):  # a link is one entry, its files none
+        f = wt / p
+        if f.is_symlink() and f.is_dir():
+            files += _md_under(f)
+        elif p.endswith(".md"):
+            files.append(f)
+    out, made = [], set()
+    for f in files:
+        real = os.path.realpath(f)
+        if not os.path.isfile(real):
+            continue
+        if within(real, base) or within(real, repo):
+            out.append((f, f, False))
+        elif not any(within(real, h) for h in hidden):
+            copy = out_dir / f.relative_to(top)
+            _copy_rule(real, copy)
+            made.add(copy)
+            out.append((copy, Path(real), False))
+    for old in out_dir.rglob("*.md") if out_dir.is_dir() else ():
+        if old not in made:
+            old.unlink(missing_ok=True)
+    return out
+
+
 def user_rules(task: store.Task) -> list[tuple[Path, Path]]:
     """The user's personal rules (Claude's directory's `rules/**/*.md`, which Claude Code loads
     for every project), copied into rules/<task>/user-rules/: (the copy, the file). Only
@@ -1645,17 +1829,14 @@ def user_rules(task: store.Task) -> list[tuple[Path, Path]]:
     claude = os.path.realpath(claude_home())
     hidden = (secret_paths() | private_paths()) - {claude}
     made: list[tuple[Path, Path]] = []
-    for f in sorted(src.rglob("*.md")) if src.is_dir() else ():
+    for f in _md_under(src) if src.is_dir() else ():  # through its directory links (#828)
         rel = f.relative_to(src)
         real = os.path.realpath(f)
         if any(part.startswith(".") for part in rel.parts) or not os.path.isfile(real) or \
                 any(real == h or _under(real, h) for h in hidden):
             continue
         copy = out / rel
-        copy.parent.mkdir(parents=True, exist_ok=True)
-        tmp = copy.with_name(f".{copy.name}.{os.getpid()}.tmp")  # whole: OpenCode may be reading
-        shutil.copyfile(real, tmp)
-        os.replace(tmp, copy)
+        _copy_rule(real, copy)
         made.append((copy, f))
     kept = {c for c, _ in made}
     for old in out.rglob("*.md") if out.is_dir() else ():
@@ -1679,7 +1860,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     user = claude_home() / "CLAUDE.md"
     if user.is_file():  # a copy too: the agent can't read Claude's directory (SECRETS)
         mine = rules_dir(task) / "CLAUDE.md"
-        mine.write_text(user.read_text())
+        mine.write_bytes(user.read_bytes())  # as it is: a CP1252 byte failed every start (#784)
         roots.append((mine, user, True))
     roots += [(copy, src, True) for copy, src in user_rules(task)]
     load: list[Path] = []
@@ -1695,8 +1876,8 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
                 if (base / rel).is_file():
                     load.append(base / rel)
                     break
-    load += [wt / p for p in _tracked(wt, ".claude/rules/*.md")]
-    load = [handbook, *import_files(task, roots + [(p, p, False) for p in load])]  # #513
+    proj = [(p, p, False) for p in load] + project_rules(task, wt)  # through their links (#828)
+    load = [handbook, *import_files(task, roots + proj)]  # #513
     # OpenCode already loads the worktree's AGENTS.md: skip a CLAUDE.md with the same text (one
     # only in the user's checkout isn't loaded, so it can't stand in for CLAUDE.md)
     # (and, started in a package, the package's too: checked on OpenCode 2.3, #375)
@@ -1742,6 +1923,8 @@ def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
         mine = rules / "user-rules"
         if p.is_relative_to(mine):
             named[p] = f"~/.claude/rules/{p.relative_to(mine)}"
+        if p.is_relative_to(rules / "project-rules"):
+            named[p] = f".claude/rules/{p.relative_to(rules / 'project-rules')}"
         label = named.get(p) or ("the spec" if p.name == "prompt.md" else
                                  str(p.relative_to(wt)) if p.is_relative_to(wt) else p.name)
         parts.append((label, n))

@@ -200,7 +200,19 @@ def _model_lines(rows: list[dict], now: float) -> dict | None:
     except Exception:  # the feed never fails over a config it can't read
         found = {}
     over = models._overrides()  # a retired variant still folds under its source
-    base = lambda mid: ((over.get(mid) or {}) if isinstance(over.get(mid), dict) else {}).get("variant_of") or mid  # noqa: E731
+    # an id a model had before (models.json `renamed_from`; an Ollama digest it now runs under
+    # another id, router.earlier without a server read: from the rows' own weights_id) folds
+    # under the id it has now, not into "older" (#818)
+    newer = {old: k for k, v in over.items() if isinstance(v, dict)
+             for old in _renames(over, k)}
+    weights = {r["model"]: r.get("weights_id") for r in rows if r.get("model")}
+    digest = {w: k for k, w in weights.items() if k in found and w and w.startswith("ollama:")}
+    newer.update({k: digest[w] for k, w in weights.items()
+                  if k not in found and k not in newer and w in digest})
+
+    def base(mid: str) -> str:
+        mid = newer.get(mid, mid)
+        return ((over.get(mid) or {}) if isinstance(over.get(mid), dict) else {}).get("variant_of") or mid
     sources = {base(m) for m in found} | set(found)
     groups = defaultdict(list)
     for r in rows:
@@ -221,6 +233,11 @@ def _model_lines(rows: list[dict], now: float) -> dict | None:
     if not lines and not older["models"]:
         return None
     return {"lines": lines, **({"older": older} if older["models"] else {})}
+
+
+def _renames(over: dict, model_id: str) -> list[str]:
+    from . import router
+    return router._up(over, model_id, "renamed_from")
 
 
 def _model_stats(model: str, rs: list[dict]) -> dict:

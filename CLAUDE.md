@@ -166,7 +166,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
    without a worktree edit, silence past `--silence-timeout`, a round past `--round-timeout`, more than
    `HANDOVER_MAX` handovers in a round. Past the think budget (`--think-timeout`, from the round's
    first output, paused while OpenCode waits on a background job) it gets a nudge; the round after
-   it that stalls again is stopped. Limits stretch for a model measured slow (`router.budgets`, written into task.json at start). `wb steer` queues a note;
+   it that stalls again is stopped. Limits stretch for a model measured slow (`router.budgets`, again before each round). `wb steer` queues a note;
    `--now` interrupts.
 4. After a clean round the runner runs `--test`, in the agent's lane, environment and shell; failures go back to the agent up to `--auto-fix`
    times without waking Claude (`--test-timeout`, 900 s). A session that reaches the handover point (`fresh_at`, tuned per
