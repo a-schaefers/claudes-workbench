@@ -2137,7 +2137,7 @@ def cmd_savings(a):
         s = savings.score(t)
         print(f"wrote {a.card}: " + (f"{s['score']}/100. {s['sentence']}" if s else savings.NO_SCORE))
     elif a.json:
-        print(json.dumps({"period": period, **t, "score": savings.score(t)}))
+        print(json.dumps({"period": period, **t, "score": savings.score(t), "price": savings.price()}))
     else:
         print(savings.summary(t, period))
 

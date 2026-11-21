@@ -1627,11 +1627,11 @@ nothing until a surface attaches.
 ## Seeing what the agent does
 
 - **The pane** (opened by `/workbench`, or once per load when a task runs, and closed by a quit command;
-  `/workbench` run again brings it back) has two tabs, **Tasks** and **Settings** (Buttons on its
-  last line, keys `1` and `2`: last, since the pane follows its end and a row at the top scrolled
+  `/workbench` run again brings it back) has three tabs, **Tasks**, **Stats** and **Settings** (Buttons on its
+  last line, keys `1`, `2` and `3`: Stats in the middle, looked at more often than Settings; last, since the pane follows its end and a row at the top scrolled
   away under a long transcript). Closed by the user (its mark, Esc), it is minimized, as
   backseat-driver's is (2026-11-19): a strip above the prompt stands in for it while workbench mode
-  is on or the session has tasks, `▸ Workbench`, `Tasks`, `Settings` (each a way back, to that tab)
+  is on or the session has tasks, `▸ Workbench`, `Tasks`, `Stats`, `Settings` (each a way back, to that tab)
   and the status line's summary; a press there or `/workbench` brings it back; a quit command
   clears it, and a module reload doesn't reopen a minimized pane. The Tasks tab lists every task: phase, round, model, test result, age and
   its last few events. Under the list it follows one task as a live transcript: the one it
@@ -1665,6 +1665,30 @@ nothing until a surface attaches.
   **Agent code navigation (experimental, may go away)** (`PROBE_STOPS`, key `probe`, options `probe:off|on`,
   *Experiments*): `Off (default)` and `On`; a pick runs `wb experiment probe off|on`, and each
   draw reads `experiments.json` again (`probeMode`; no file or no `probe` key: off).
+  Then the Stats tab's (#406), each a `wb` command, the mod writing no setting itself:
+  **Stats recording** (`RECORD_STOPS`, `On (default)` / `Off`: `wb stats set recording`,
+  *Stats recording*), **Live view** (`LIVE_STOPS`: `wb stats set live`), **Live refresh**
+  (`EVERY_STOPS`, `1 s`, `2 s (default)`, `5 s`: `wb stats set every`), each read back from
+  stats.json (`statsSettings`, a mistyped value its default); **Progress checks**
+  (`PROGRESS_STOPS`, `Off (default)` / `On`: `wb progress on|off`, read from progress.json; off by
+  default because each check wakes Claude); and **Electricity price per kWh**, an Input (key
+  `price`) that runs `wb savings --price X --json` (`setPrice`: anything not a positive number,
+  a leading `$` allowed, is refused with a toast before wb is asked), shown from `wb savings
+  --json`'s `price` (`priceOf`, `mem.price`). The ring's sentence follows any of these rows
+  (`SETTING_ROWS`).
+- **The Stats tab** (#406) is the history: `wb stats --json` (*The Stats feed*) drawn as one line a
+  section by `statsLines`, `Label: text` with the label bold: this week and all time (the score,
+  the saving or the cost (estimate), tasks, landed, energy and, with a price, its cost), the
+  streak (only the best once a run ended), what the agents absorbed without waking Claude, one
+  line per model (tasks, landed, rounds, minutes, write speed with its trend as a sparkline,
+  `spark`, and the change, Claude's cost a task), by size, the last 30 days as a sparkline, bests,
+  the newest milestone, what stopped agents (`GUARD_WORDS`), what helps, bench, the optimized
+  windows. A section with no data is left out; a new install's says to delegate one with
+  /workbench. It is read (`refreshStats`) only while the tab is shown (`pane.tab` and `$.ui.panes()`
+  `isShown`): on the tab's press, then at each poll when results.jsonl's or stats.json's size or
+  mtime changed (`$.fs.stat`, the key kept with the feed), and after a Stats setting is picked.
+  No timer: hidden, it costs nothing; shown, a stat per poll. The feed is the `stats` atom
+  (`stats-1`).
 - **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting
   review`, or `⚒ wb · workbench mode` with nothing open. Outside workbench mode it counts only
   the session's own tasks (`mine`), and shows nothing without one: another session's running task
@@ -3644,7 +3668,7 @@ const bound to one; imports from the module's own files also pass). The helpers 
 "gating hook without .catch" notes) is the check. Env reads must be string literals: `HOME`,
 `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_COMPACT_AT`.
 
-**State.** Six `$.state` atoms survive a module reload within a session; each has a shape tag,
+**State.** Seven `$.state` atoms survive a module reload within a session; each has a shape tag,
 and an atom read under an old tag is absent, so change the tag when its type changes:
 `tasks` (`tasks-5`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
 updatedAt, tokens, recent, repo, cwd, session, claude_pid, backlog, allowed), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
@@ -3652,7 +3676,8 @@ updatedAt, tokens, recent, repo, cwd, session, claude_pid, backlog, allowed), `l
 listener key and the web chat's switch as last read), `pane` (`pane-1`, {tab, open, focus,
 minimized}: the pane's tab, the open settings row, the option under the ring, the strip), `sessions` (`sessions-1`, string[]: every Claude Code session id this process
 has had, `mem.ids` while loaded), `savings` (`savings-1`, string: the pane's saving line, '' for
-none). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
+none), `stats` (`stats-1`, {key, feed}: the Stats tab's `wb stats --json` and the stamp of the files
+it was read from). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
 this session's open set, the session's resolved `cwd` and `home`, `person`, follow, sawTurn, scoutAsked,
 toasts sent, dropped wakes, the closed tasks no longer read, the events pid, …). The task facts
 themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.json's
@@ -3798,7 +3823,7 @@ text past 100,000 characters, which once left the bubble empty), scrolling with 
 unless the user scrolled up (`ui.scroll`); then the stage (the apprentice with a speech bubble,
 pixels on a terminal at least 20 rows by 40 columns, else its one-line face; text wrapped by
 `wrapWords` because Text's own wrapping beside the raster drew empty rows); the saving and the
-tabs last. The Settings tab and the minimized strip (`AbovePrompt`)
+tabs last. The Stats tab, the Settings tab and the minimized strip (`AbovePrompt`)
 are under *Seeing what the agent does*.
 
 **The apprentice** (`apprentice.ts`): 16×12 pixel art as letters, drawn with half blocks
@@ -3870,7 +3895,9 @@ rewake, Raster vs face, `/workbench` alone, the update check and `/workbench-upd
 and the 2026-11-16 audit's: another project's task neither woken nor acked, a headless session
 quiet until a surface attaches, a dropped wake retried, no false rewake for a notice delivered
 before, two wakes due in one turn, two open questions, another plugin's tool call, the update
-check beside the wakes, a notify.jsonl read by its tail, the pane read only while shown, a sticky
+check beside the wakes, a notify.jsonl read by its tail, the pane read only while shown,
+the Stats tab read only while shown and again when a task closes, its settings rows and the typed
+price, a history that says nothing it has no data for, a sticky
 focus, a cut transcript, a long line clipped, `/workbench-models` once, wb missing (one toast, a
 backoff, no model check), wb failing (no open-tasks block, quit says so), no compaction without
 delegating, wake off told, closed tasks not re-read. Not covered: check-in wakes, the one-hour
@@ -4007,7 +4034,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb bench self <case>` | `--yes` (required: it spends Claude tokens), `--turns N` (40) | Claude Code writes the case (`claude -p`, edits and the acceptance command only), graded by its hidden checks in the original task's lane; one runs.jsonl row (`arm: claude`) and its line: PASS or fail, the weighted tokens, the handoff's cost and the ratio (*Bench*). |
 | `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. Skips what an earlier run with the same label already replayed. |
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run), archived tasks included (#270): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`. |
-| `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive, else exit 1) writes savings.json first. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score}`. `--card FILE.svg`: the badge as an image (*The badge*). |
+| `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive, else exit 1) writes savings.json first. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price}` (`price`: the kWh price set, or null; the pane's Settings row shows it). `--card FILE.svg`: the badge as an image (*The badge*). |
 | `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (the feed, *The Stats feed*) | `wb stats set` changes the Stats tab's settings (stats.json, *Stats recording*) and prints them. `wb stats` starts with the feed's headline (`stats.summary`: the week and all time, the streak, what the agents absorbed, the guards that fired), then the results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
 | `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`), the scratch directories in the state directory (`store.SCRATCH_PREFIXES`: `.verify-`, `.base-`, `.check-`, `.submodule-`, `wb-index-`, `wb-merge-`, each named with its maker's pid by `store.scratch`) `SCRATCH_AGE` (an hour) old whose maker is gone (`_drop_scratches`), half-made starts (`_dead_start`, `_drop_start`: a task directory with no task.json whose `starting.json` pid is gone, or with none past `RULES_GRACE`; its worktree, registration, branch and rules go too; killed commands left full clones that `_disk_room` counted, and a killed start's name was refused for good: #376, the audit of 1.6) and the delegate branches of tasks accepted with `--merge` before accept deleted them itself (`_merged_branches`: tip recorded first, `branch -d`). Prints the counts; writes `gc.json`. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
 
@@ -4618,7 +4645,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
-- **A `$.state` atom's type** in the mod → its tag (`tasks-5`, `live-1`, `chat-3`, `sessions-1`, `savings-1`, `pane-1`).
+- **A `$.state` atom's type** in the mod → its tag (`tasks-5`, `live-1`, `chat-3`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`).
 - **The Claude coding choices** (`cli.CODING`: modes, labels, sentences) → the mod's
   `CODING_STOPS` (the Settings row) and `CODING_RULES` (the context block), and the skill's *Claude
   coding* bullet.
