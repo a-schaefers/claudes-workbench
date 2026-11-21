@@ -110,13 +110,22 @@ def untested(version: tuple[int, int] | None) -> str:
 STEP_GROWTH = 4096
 
 
+def usable_input(lim: dict) -> int:
+    """What OpenCode 2.3 compacts against: the smaller of `limit.input` and `limit.context`,
+    else whichever is set. Its compaction sits at this less `compaction.buffer`. Taking it as
+    context less output (OpenCode 1.x) wrote a 4K buffer for a hand-written {context 32K, output
+    16K}, so OpenCode compacted at 87.5% while wb planned the handover against 37.5% (#675)."""
+    inp, window = lim.get("input") or 0, lim.get("context") or 0
+    return min(inp, window) if inp and window else inp or window
+
+
 def compaction_buffer(cfg: dict) -> int | None:
     """The buffer that puts OpenCode's compaction where a request still fits the window."""
     lim, opts = cfg.get("limit") or {}, cfg.get("options") or {}
     window = lim.get("context")
     if not window:
         return None
-    usable = lim.get("input") or window - (lim.get("output") or 0)
+    usable = usable_input(lim)
     reply = opts.get("max_tokens") or lim.get("output") or 0
     return max(usable + reply - window, 0) + STEP_GROWTH
 
@@ -127,8 +136,7 @@ def fresh_ceiling(cfg: dict) -> float | None:
     window = lim.get("context")
     if not window or buf is None:
         return None
-    usable = lim.get("input") or window - (lim.get("output") or 0)
-    return (usable - buf) / window
+    return (usable_input(lim) - buf) / window
 
 
 def handover_warning(cfg: dict) -> str:

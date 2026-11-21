@@ -16205,8 +16205,20 @@ class Drift(unittest.TestCase):
                "options": {"max_tokens": 8192}}
         self.assertEqual(runner.compaction_buffer(cfg), 8192)
         self.assertEqual(runner.compaction_buffer({"limit": {"context": 65536, "output": 8192}}),
-                         4096)                     # input defaults to context - output
+                         8192 + 4096)              # no input limit: OpenCode 2.3 uses the window
         self.assertIsNone(runner.compaction_buffer({}))
+
+    def test_the_buffer_puts_opencodes_compaction_at_the_ceiling_whatever_the_entry_says_of_input(self):
+        # #675: OpenCode 2.3 compacts at min(input, context) - buffer (input unset: context - buffer).
+        # wb took an unset input as context - output, wrote a 4K buffer for {32K, output 16K}, and
+        # OpenCode compacted at 87.5% while the handovers were planned against 37.5%
+        for lim in ({"context": 32768, "output": 16384}, {"context": 32768, "input": 16384, "output": 16384},
+                    {"context": 32768, "input": 65536, "output": 4096}, {"context": 65536, "output": 8192}):
+            cfg = {"limit": lim}
+            inp = min(lim["input"], lim["context"]) if lim.get("input") else lim["context"]
+            self.assertEqual((inp - runner.compaction_buffer(cfg)) / lim["context"],
+                             runner.fresh_ceiling(cfg), lim)
+        self.assertEqual(runner.compaction_buffer({"limit": {"context": 32768, "output": 16384}}), 20480)
 
     def test_outside_spec_names_files_the_spec_never_mentions(self):
         with tempfile.TemporaryDirectory() as d:

@@ -903,9 +903,14 @@ counts mid-round handovers.
 **OpenCode's own compaction** is a small model's summary of its session, which drops details and
 can lose the task itself (seen: an agent that built CLAUDE.md's "next step" after one). The config
 layer sets `compaction: {auto: true, buffer}` with `buffer = max(usable + reply − window, 0) +
-STEP_GROWTH` (usable: `limit.input`, else context − output; reply: `options.max_tokens`, else
-`limit.output`; `STEP_GROWTH` 4096), so OpenCode compacts only past the handover point, leaving
-room for one reply at the output cap and one step's growth (`compaction_buffer`). `fresh_ceiling`
+STEP_GROWTH` (usable: OpenCode 2.3's own figure, `runner.usable_input`: the smaller of
+`limit.input` and the window, else the window, since OpenCode compacts at usable − buffer; reply:
+`options.max_tokens`, else `limit.output`; `STEP_GROWTH` 4096), so OpenCode compacts only past the
+handover point, leaving room for one reply at the output cap and one step's growth
+(`compaction_buffer`). Taking an unset `limit.input` as context − output (OpenCode 1.x) wrote a 4K
+buffer for a hand-written `{context 32K, output 16K}`: OpenCode compacted at 87.5% while the
+handovers were planned against 37.5% (#675). OpenCode shrinks each request's `maxTokens` to fit, so
+a request never overflows; the buffer is what keeps a full reply possible. `fresh_ceiling`
 is the same point as a share of the window: 62.5% on a 32K window with a 4K output limit and an
 8K cap; the tuner never tries a handover point past it. A model without `limit.context` gets no
 mid-round handover, no compaction setting and no ceiling. Below `models.MIN_WINDOW` (16K) a
