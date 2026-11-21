@@ -308,6 +308,30 @@ class Lifecycle(Base):
         self.assertIsNone(wait_phase("t-skip", {"review"}).get("base_check"))
         self.assertNotIn("on the base", run_wb("report", "t-skip"))
 
+    def test_a_task_resumed_before_its_first_round_still_checks_the_base(self):
+        # #510 (the audit of 1.90): the gate was round 1, so a task that failed waiting for its
+        # server and was resumed (round 2) ran with no base check, and its report said nothing
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-late", "ok", "--test", TEST_CMD, "--auto-fix", "0", "--no-self-review")
+        with mock.patch.object(runner, "_down", return_value=True), \
+                mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+            runner.drive(store.Task("t-late"))
+        st = store.Task("t-late").status
+        self.assertEqual((st["phase"], st.get("base_check")), ("failed", None))
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("resume", "t-late")
+        runner.drive(store.Task("t-late"))
+        st = store.Task("t-late").status
+        self.assertEqual((st["phase"], st["round"]), ("review", 2))
+        self.assertIs(st["base_check"]["ok"], False)
+        self.assertTrue((store.Task("t-late").dir / "base-tests.txt").exists())
+        summary = (store.Task("t-late").round_dir(2) / "summary.md").read_text()
+        self.assertIn("base check: on the base the acceptance command fails", summary)
+        # once a round has reported, never again
+        task = store.Task("t-late")
+        task.set_status(base_check=None)
+        self.assertFalse(runner.needs_base_check(task))
+
     def test_a_base_check_cut_short_by_the_test_timeout_says_which_limit(self):
         # It once said "ran past 120s" whatever limit had cut it (the 2026-11-16 audit).
         self.start("t-slowbase", "ok", "--test", "sleep 5", "--test-timeout", "1", "--auto-fix", "0")
@@ -387,6 +411,33 @@ class Lifecycle(Base):
             self.assertEqual(agent.wait(timeout=5), -signal.SIGKILL)
         finally:
             agent.kill()
+
+    def test_a_verify_started_at_review_outlives_the_next_rounds_runner(self):
+        # #504 (the audit of 1.90): the runner's backstop on exit swept every process of the task,
+        # and SIGKILLed the candidate's check of a wb verify run in the background beside a
+        # feedback round, which then read as candidate-fails
+        self.start("t-bgverify", "ok", "--no-base-check")
+        wait_phase("t-bgverify", {"review"})
+        task = store.Task("t-bgverify")
+        sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+        check = subprocess.Popen(sleeper, env=runner.agent_env(task, "a-verify-run"),
+                                 start_new_session=True)  # as run_in_lane starts one
+        try:
+            run_wb("feedback", "t-bgverify", "--text", "1. Again.")
+            st = wait_phase("t-bgverify", {"review"})              # its runner has exited
+            self.assertEqual(st["round"], 2)
+            self.assertIsNone(check.poll())                       # the verify's run: untouched
+            # a crashed runner's backstop ends only the runs it issued
+            runner.ISSUED.clear()
+            runner._end_agent(task)
+            self.assertIsNone(check.poll())
+            runner.ISSUED.add("a-verify-run")
+            runner._end_agent(task)
+            self.assertEqual(check.wait(timeout=5), -signal.SIGKILL)
+        finally:
+            check.kill()
+            check.wait()
+            runner.ISSUED.clear()
 
     def test_what_the_agent_leaves_running_ends_with_its_round(self):
         # A writer left running could change the worktree after Claude read the diff (the
@@ -6968,6 +7019,136 @@ class Verify(Base):
                      "--expect", "a failure it never prints")
         self.assertIn("inconclusive", out)
 
+    def test_a_golden_file_the_candidate_adds_goes_to_the_base_and_one_left_out_proves_nothing(self):
+        # #500 (the audit of 1.90): Go's testdata/ wasn't copied to the base, which failed on
+        # `open testdata/case1.golden: no such file or directory`, and that was called proven
+        from workbench import verify
+        golden = "parse/testdata/case1.golden"
+        (self.wt / "parse" / "testdata").mkdir(parents=True)
+        (self.wt / golden).write_text("250\n")
+        (self.wt / "tests" / "test_golden.py").write_text(
+            "import unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_kw(self):\n"
+            f"        assert kw(250000) == int(open('{golden}').read()), 'not the golden value'\n")
+        out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_golden")
+        r = verify.last(store.Task("t"))
+        self.assertIn(golden, r["files"])                         # the data, with the test
+        self.assertEqual(r["verdict"], "proven", out)
+        base = Path(r["dir"], "base.txt").read_text()
+        self.assertIn("not the golden value", base)               # failed on the bug, not the file
+        self.assertNotIn("FileNotFoundError", base)
+        # named with --files, the data left behind: the base fails for lack of it, not the bug
+        out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_golden",
+                     "--files", "tests/test_golden.py")
+        self.assertIn("inconclusive", out)
+        self.assertIn(f"the base lacked what the candidate adds: {golden}", out)
+        # Go's own words, from the issue's reproduction
+        go = ("--- FAIL: TestParse (0.00s)\n    parse_test.go:12: open testdata/case1.golden: "
+              "no such file or directory\nFAIL\nexample.com/m/parse\t0.002s")
+        self.assertEqual(verify.verdict(1, go, 0, added=[golden]), "inconclusive")
+        self.assertEqual(verify.verdict(1, go, 0), "proven")        # nothing added: as before
+        for p in ("parse/testdata/x.golden", "fixtures/a.json", "src/fixture/b.txt",
+                  "src/__fixtures__/c", "src/__snapshots__/app.test.js.snap", "golden/out.txt",
+                  "app.test.js.snap", "tests/x.py", "x_test.go"):
+            self.assertTrue(verify.looks_like_test(p), p)
+        self.assertFalse(verify.looks_like_test("src/parse.go"))
+
+    def test_a_build_tree_naming_its_checkout_is_made_afresh_in_each_scratch_checkout(self):
+        # #424 (the audit of 1.8, reproduced with CMake): the worktree's build/ (configured by the
+        # setup, CMAKE_HOME_DIRECTORY the worktree) was copied to the base's checkout, its target
+        # ran the candidate's code there, and verify said the test already passed on the base
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        (self.repo / ".gitignore").write_text("build/\n")
+        g("add", "-A")
+        g("commit", "-qm", "ignore the build tree")
+        configure = ('mkdir -p build && printf "CMAKE_HOME_DIRECTORY:INTERNAL=%s\\n" "$PWD" '
+                     '> build/CMakeCache.txt && printf "%s" "$PWD" > build/src')
+        self.start("t-cmake", "ok", "--queue", "--setup", configure)
+        wait_phase("t-cmake", {"review"})
+        wt = store.Task("t-cmake").worktree
+        for p in ("calc.py", "tests/__init__.py", "tests/test_calc.py"):
+            (wt / p).parent.mkdir(exist_ok=True)
+            (wt / p).write_bytes((self.wt / p).read_bytes())
+        build = 'cd "$(cat build/src)" && python3 -m unittest tests.test_calc'  # as its target runs
+        out = run_wb("verify", "t-cmake", "--test", build)
+        self.assertIn("test_calc.py): proven", out)              # the base ran the base's code
+        # a build tree copied from the user's checkout, with no setup to make it afresh: said
+        (self.repo / "build").mkdir()
+        (self.repo / "build" / "CMakeCache.txt").write_text(
+            f"CMAKE_HOME_DIRECTORY:INTERNAL={self.repo}\n")
+        self.start("t-copied", "ok", "--queue", "--copy", "build")
+        wait_phase("t-copied", {"review"})
+        wt = store.Task("t-copied").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "test_x.py").write_text("")
+        out = run_wb("verify", "t-copied", "--test", "true")
+        self.assertIn("inconclusive", out)
+        self.assertIn("base: exit setup failed", out)
+        said = Path(verify_dir := store.Task("t-copied").dir / "verify" / "1", "base.txt").read_text()
+        self.assertIn(f"build is a build tree configured for {self.repo}", said, verify_dir)
+
+    def test_with_unload_for_tests_the_checks_have_the_gpu_alone(self):
+        # #502 (the audit of 1.90): the base check, wb verify and wb shot ran the project's GPU
+        # tests beside other tasks' resident models, taking no lease and freeing nothing, and an
+        # out-of-memory failure read as the base's or the change's
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-gpu", "ok", "--queue", "--unload-for-tests", "--test", TEST_CMD)
+        seen, freed, real = [], [], runner.run_in_lane
+
+        def look(task, cmd, limit):
+            seen.append((cmd, runner.models.holders()))
+            return real(task, cmd, limit)
+        with mock.patch.object(runner, "run_in_lane", side_effect=look), \
+                mock.patch.object(runner.models, "free_gpu",
+                                  side_effect=lambda *a, **k: freed.append(1)):
+            runner.drive(store.Task("t-gpu"))
+            wt = store.Task("t-gpu").worktree
+            (wt / "tests").mkdir()
+            (wt / "tests" / "test_x.py").write_text("")
+            run_wb("verify", "t-gpu", "--test", TEST_CMD)
+            run_wb("shot", "t-gpu", "--capture", "true")
+        me = str(os.getpid())
+        checks = [h for cmd, h in seen if TEST_CMD in cmd and "-c" not in cmd]
+        base_check, round_tests, base, cand = checks[:4]
+        for held in (base_check, base, cand):                       # alone, as no model's task
+            self.assertEqual([(p, h["model"], h["task"]) for p, h in held.items()],
+                             [(me, None, "t-gpu")])
+        self.assertEqual(round_tests, {})                            # the round's: stepped aside
+        shots = [h for cmd, h in seen if "WB_SHOT_OUT" in cmd]
+        self.assertEqual([list(h) for h in shots], [[me], [me]])
+        self.assertEqual(len(freed), 3)                              # once each: check, verify, shot
+        self.assertEqual(runner.models.holders(), {})
+        # without the flag, as before: no lease
+        seen.clear()
+        with mock.patch.object(runner, "run_in_lane", side_effect=look):
+            run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
+        self.assertEqual([h for _, h in seen], [{}, {}])
+
+    def test_the_scratch_checkouts_read_the_bytes_the_task_reads(self):
+        # #426 (the audit of 1.8, reproduced): with the repo's own core.autocrlf the task read
+        # CRLF, and the base check's and verify's clones read LF, failing on an untouched file
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        (self.repo / "data.txt").write_bytes(b"a\nb\n")
+        (self.repo / "more.dat").write_bytes(b"x\ny\n")
+        g("add", "-A")
+        g("commit", "-qm", "data")
+        g("config", "core.autocrlf", "true")
+        (self.repo / ".git" / "info" / "attributes").write_text("*.dat -text\n")  # kept as is
+        check = ("python3 -c \"import sys; ok = open('data.txt', 'rb').read() == b'a\\r\\nb\\r\\n' "
+                 "and open('more.dat', 'rb').read() == b'x\\ny\\n'; sys.exit(0 if ok else 3)\"")
+        self.start("t-crlf", "ok", "--queue", "--test", check)
+        st = wait_phase("t-crlf", {"review"})
+        wt = store.Task("t-crlf").worktree
+        self.assertEqual((wt / "data.txt").read_bytes(), b"a\r\nb\r\n")    # the task's bytes
+        self.assertEqual((wt / "more.dat").read_bytes(), b"x\ny\n")
+        self.assertTrue(st["base_check"]["ok"], st["base_check"])          # the base check's
+        (wt / "tests").mkdir()
+        (wt / "tests" / "test_x.py").write_text("")
+        run_wb("verify", "t-crlf", "--test", check)
+        from workbench import verify
+        r = verify.last(store.Task("t-crlf"))
+        self.assertEqual((r["base"]["exit"], r["candidate"]["exit"]), (0, 0))  # and verify's
+
     def test_a_renamed_test_is_checked_under_its_new_name(self):
         # #194 (the 2026-11-19 audit): the old name was listed too, the overlay asked the
         # candidate for it, and git stopped on the pathspec before either run
@@ -7103,6 +7284,44 @@ class Shot(Base):
         (self.wt / "shoot.sh").write_text(self.CAPTURE + "\n")
         out = run_wb("shot", "t", "--capture", "sh shoot.sh", "--files", "shoot.sh")
         self.assertNotIn("no image", out)
+
+    def test_after_wb_next_the_base_image_is_the_last_approved_step(self):
+        # #501 (the audit of 1.90): #252's fix reached wb verify only, so at step 2's review the
+        # base image was the app before step 1, showing step 1's change as step 2's
+        with mock.patch("sys.stdin", io.StringIO("Add a footer.")):
+            run_wb("next", "t", "--spec", "-", "-m", "Fix conversion")
+        wait_phase("t", {"review"})
+        approved = gitops.git(self.wt, "rev-parse", "HEAD").strip()
+        run_wb("shot", "t", "--capture", self.CAPTURE)
+        m = json.loads((store.Task("t").dir / "shots" / "1" / "shots.json").read_text())
+        self.assertEqual((m["step"], m["base"]["rev"]), (2, approved))
+        self.assertIn(b"watts / 1000", Path(m["base"]["image"]).read_bytes())  # step 1's code
+
+    def test_a_package_scoped_task_keeps_both_screenshots(self):
+        # #433 (the audit of 1.8, reproduced): run from packages/web, both captures wrote their
+        # PNG to the relative $WB_SHOT_OUT, inside the package, and wb shot looked at the top
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        web = self.repo / "packages" / "web"
+        web.mkdir(parents=True)
+        (web / "CLAUDE.md").write_text("# web\nThe web package.\n")
+        (web / "page.txt").write_text("old page\n")
+        g("add", "-A")
+        g("commit", "-qm", "a web package")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-web", "--spec", str(self.spec), "--repo", str(web), "--model", "mimo",
+               "--queue")
+        wait_phase("t-web", {"review"})
+        task = store.Task("t-web")
+        self.assertEqual(task.spec["subdir"], "packages/web")
+        (task.workdir / "page.txt").write_text("new page\n")
+        capture = ("python3 -c \"import os; open(os.environ['WB_SHOT_OUT'], 'wb').write("
+                   "b'\\x89PNG\\r\\n\\x1a\\n' + open('page.txt', 'rb').read())\"")
+        out = run_wb("shot", "t-web", "--capture", capture)
+        self.assertNotIn("a capture failed", out)
+        m = json.loads((task.dir / "shots" / "1" / "shots.json").read_text())
+        self.assertEqual((m["base"]["ok"], m["candidate"]["ok"]), (True, True))
+        self.assertIn(b"old page", Path(m["base"]["image"]).read_bytes())
+        self.assertIn(b"new page", Path(m["candidate"]["image"]).read_bytes())
 
 
 class Stats(Base):

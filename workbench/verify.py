@@ -10,22 +10,32 @@ command not found or a timeout says nothing about the bug, so the comparison is 
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import secrets
 import shlex
 import shutil
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from . import context, gitops, runner, store
+from . import context, gitops, models, runner, store
 
 LIMIT = 300  # seconds for each run; past it, that run is inconclusive
 
 # what a test file's path looks like, in the languages workbench sees: tests/, test_x.py,
-# x_test.go, x.test.ts, x.spec.js
-TEST_PATH = re.compile(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_[^/]*$|_test\.[A-Za-z]+$"
-                       r"|\.(test|spec)\.[A-Za-z]+$")
+# x_test.go, x.test.ts, x.spec.js; and the data a test reads beside it: Go's testdata/, fixtures/,
+# Jest's __snapshots__ (*.snap), golden/. Without the data, the base failed for lack of the golden
+# file and was called proven (#500, the audit of 1.90). One pattern for verify and bench
+# (`looks_like_test`).
+TEST_PATH = re.compile(r"(^|/)(tests?|spec|__tests__|testdata|fixtures?|__fixtures__|__snapshots__"
+                       r"|golden)/|(^|/)test_[^/]*$|_test\.[A-Za-z]+$|\.(test|spec)\.[A-Za-z]+$"
+                       r"|\.snap$")
+# a file not found, as the common runtimes say it: what a base missing the candidate's new file
+# prints (Go's `open testdata/x.golden: no such file or directory`, Python's FileNotFoundError,
+# Node's ENOENT)
+MISSING = re.compile(r"no such file or directory|FileNotFoundError|\bENOENT\b"
+                     r"|cannot find the (file|path) specified", re.I)
 # an assertion failing, as the common runners print one: what went wrong first (pytest's `E
 # assert`, unittest's AssertionError, jest's Expected:/expect(, Go's "expected … got"), then a
 # failed test's header. Not a bare "expected": Python's `SyntaxError: expected ':'` matched it,
@@ -59,15 +69,35 @@ def _review_base(task: store.Task) -> str | None:
     return task.spec["base"] if step == 1 else gitops.step_commit(task, step - 1, step)
 
 
+def looks_like_test(path: str) -> bool:
+    """Whether a repo path looks like a test or the data a test reads (TEST_PATH)."""
+    return bool(TEST_PATH.search(path))
+
+
+def _changes(task: store.Task, tree: str, base_rev: str) -> list[tuple[str, str]]:
+    """(status letter, path) for each file the candidate changed since ``base_rev``.
+    NUL-separated, so a name with a tab or newline survives."""
+    raw = gitops.git(task.worktree, "diff", "--name-status", "--no-renames", "-z",
+                     base_rev, tree).split("\0")
+    return [(st, p) for st, p in zip(raw[0::2], raw[1::2]) if p]
+
+
 def test_files(task: store.Task, tree: str, base_rev: str) -> list[str]:
     """The candidate's changed files that look like tests, as they are in the candidate: what the
     base run borrows. Not the deleted ones: a renamed test listed its old name too, the overlay
     asked the candidate for it, and git stopped on the pathspec before any test ran (#194, the
-    2026-11-19 audit). NUL-separated, so a name with a tab or newline survives."""
-    raw = gitops.git(task.worktree, "diff", "--name-status", "--no-renames", "-z",
-                     base_rev, tree).split("\0")
-    pairs = zip(raw[0::2], raw[1::2])
-    return [p for st, p in pairs if p and not st.startswith("D") and TEST_PATH.search(p)]
+    2026-11-19 audit)."""
+    return [p for st, p in _changes(task, tree, base_rev)
+            if not st.startswith("D") and looks_like_test(p)]
+
+
+def missing(text: str, added: list[str]) -> list[str]:
+    """The files of ``added`` (the candidate's new ones, not copied to the base) that ``text``
+    (the base's output) says it couldn't find: a line saying a file is missing that names one, by
+    its path or its name. The base then failed for lack of the candidate's file, not on the bug
+    (#500, the audit of 1.90)."""
+    lines = [x for x in text[-200_000:].splitlines() if MISSING.search(x)]
+    return [p for p in added if any(PurePosixPath(p).name in x for x in lines)][:10]
 
 
 def assertion(text: str) -> str:
@@ -80,17 +110,71 @@ def assertion(text: str) -> str:
     return ""
 
 
-def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None,
+# The repo's own settings for how its files are checked out: a clone has none of its local config,
+# so a repo with core.autocrlf (a Windows-born project, a WSL workspace) gave the task CRLF files
+# and the base check and wb verify LF ones, and a test reading bytes failed there alone (#426, the
+# audit of 1.8). .git/info/attributes too.
+CHECKOUT_KEYS = r"^core\.(eol|autocrlf|safecrlf|symlinks|filemode|ignorecase|checkroundtripencoding)$"
+
+
+def checkout_settings(repo: Path, clone: Path) -> None:
+    """``repo``'s local checkout settings (CHECKOUT_KEYS, its info/attributes) in ``clone``,
+    before anything is checked out there."""
+    out = gitops.git(repo, "config", "--local", "--includes", "--get-regexp", CHECKOUT_KEYS,
+                     check=False)
+    for key, _, value in (line.partition(" ") for line in out.splitlines()):
+        if key:
+            gitops.git(clone, "config", key, value)
+    try:
+        attrs = Path(repo) / gitops.git(repo, "rev-parse", "--git-path", "info/attributes").strip()
+        if attrs.is_file():
+            dest = Path(clone) / gitops.git(clone, "rev-parse", "--git-path", "info/attributes").strip()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(attrs, dest)
+    except (gitops.GitError, OSError):
+        pass
+
+
+def _say(msg: str) -> None:
+    print(msg, flush=True)
+
+
+@contextlib.contextmanager
+def gpu(task: store.Task, say=_say):
+    """The GPU to the checks alone, for a task started with --unload-for-tests whose model is
+    local: queued with the tasks in first-come order, then the other models unloaded (models.json's
+    keep_loaded kept) and their memory let go (media.gpu), as the round's own tests have it. The
+    base check, wb verify and wb shot ran the project's GPU tests beside other tasks' resident
+    models, and an out-of-memory failure read as the base's or the change's (#502, the audit of
+    1.90). Otherwise nothing: tests that need no GPU don't wait for it."""
+    if not task.spec.get("unload_for_tests"):
+        yield
+        return
+    try:
+        local = not models.resolve(task.spec["model"]).remote
+    except KeyError:
+        local = True  # retired since: the GPU may still be busy, so take it
+    if not local:
+        yield
+        return
+    from . import media  # media imports models and hardware; only these checks need it
+    with media.gpu(task.name, say, wait=True):
+        yield
+
+
+def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
          setup: bool = False) -> tuple[int | str, str]:
     """``cmd`` in a scratch clone that ``checkout`` sets up, under the task's lane; ``keep(work)``
-    takes what the run left before the clone goes. Prepared from the task's worktree, unless
-    ``setup`` (--setup) asks for the setup to run there again."""
+    takes what the run left before the clone goes. ``cmd`` may be a function of the clone's path,
+    for a command that names it. Prepared from the task's worktree, unless ``setup`` (--setup)
+    asks for the setup to run there again."""
     store.home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
     with tempfile.TemporaryDirectory(prefix=store.scratch(".verify-"), dir=store.home()) as scratch:
         # nested as the worktree is, so that a sibling two levels up stays in the scratch (#261)
         work = context.tree(Path(scratch), task.spec["repo"], task.spec.get("siblings"), "repo")
         work.parent.mkdir(parents=True, exist_ok=True)
         gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", task.spec["repo"], str(work))
+        checkout_settings(Path(task.spec["repo"]), work)  # its line endings, as the task's (#426)
         gitops.share_lfs(Path(task.spec["repo"]), work)  # its LFS files as data (#382)
         if sparse := gitops.sparse_of(Path(task.spec["repo"])):  # as the task's worktree is (#263)
             gitops.apply_sparse(work, sparse)
@@ -102,17 +186,19 @@ def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None,
         code, said = runner.prepare(at, None if setup else task.worktree)
         if code != 0:
             return "setup failed", f"[setting up the scratch checkout failed: {code}]\n{said}"
-        out = runner.run_in_lane(at, cmd, limit)
+        out = runner.run_in_lane(at, cmd(work) if callable(cmd) else cmd, limit)
         if keep:
             keep(work)
         return out
 
 
-def on_base(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]:
+def on_base(task: store.Task, cmd: str, limit: int, say=_say) -> tuple[int | str, str]:
     """``cmd`` on the task's base commit alone, in a scratch checkout under its lane (the runner's
-    base check): nothing it writes reaches the task's worktree."""
-    return _run(task, lambda work: gitops.git(work, "checkout", "-q", "--detach", task.spec["base"]),
-                cmd, limit)
+    base check): nothing it writes reaches the task's worktree. With the GPU alone when the
+    task's tests need it (``gpu``)."""
+    with gpu(task, say):
+        return _run(task, lambda work: gitops.git(work, "checkout", "-q", "--detach", task.spec["base"]),
+                    cmd, limit)
 
 
 def _checkouts(task: store.Task, tree: str, files: list[str], base_rev: str):
@@ -130,10 +216,12 @@ def _checkouts(task: store.Task, tree: str, files: list[str], base_rev: str):
     return base, candidate
 
 
-def verdict(base: int | str, base_out: str, cand: int | str, expect: str = "") -> str:
+def verdict(base: int | str, base_out: str, cand: int | str, expect: str = "",
+            added: list[str] = ()) -> str:
     """proven, base-passes, candidate-fails or inconclusive. Proven only on positive evidence:
     ``expect`` (the failure Claude names, `wb verify --expect`) in the base's output, else an
-    assertion line, else a failed test's header with no setup error beside it."""
+    assertion line, else a failed test's header with no setup error beside it, nor a file of
+    ``added`` (the candidate's new files the base didn't get) said missing."""
     if isinstance(base, str) or isinstance(cand, str):  # a timeout, an output limit, the setup
         return "inconclusive"
     if cand != 0:
@@ -145,7 +233,7 @@ def verdict(base: int | str, base_out: str, cand: int | str, expect: str = "") -
     # The setup's failure first: a SyntaxError's traceback prints the bad source line, and an
     # `assert 2 = 2` there matched ASSERTION, so a base that never ran a test was called proven
     # (#326, the audit of 1.4)
-    if SETUP.search(base_out):
+    if SETUP.search(base_out) or missing(base_out, list(added)):  # #500
         return "inconclusive"
     return "proven" if assertion(base_out) else "inconclusive"
 
@@ -162,9 +250,12 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     if not files:
         raise RuntimeError("no test file among the candidate's changes: name the regression "
                            "test's files with --files (or review it as usual)")
+    # the candidate's new files the base doesn't get: a test that reads one fails there for that
+    uncopied = [p for st, p in _changes(task, tree, base_rev) if st.startswith("A") and p not in files]
     base, candidate = _checkouts(task, tree, files, base_rev)
-    b_code, b_out = _run(task, base, cmd, limit, setup=setup)
-    c_code, c_out = _run(task, candidate, cmd, limit, setup=setup)
+    with gpu(task):  # both runs under one hold: nothing loads in between
+        b_code, b_out = _run(task, base, cmd, limit, setup=setup)
+        c_code, c_out = _run(task, candidate, cmd, limit, setup=setup)
     d = task.dir / "verify"
     n = 1 + max((int(p.name) for p in d.glob("*") if p.name.isdigit()), default=0)
     out = d / str(n)
@@ -174,8 +265,11 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     result = {"cmd": cmd, "files": files, "tree": tree, "ts": store.now(),
               "base": {"rev": base_rev, "exit": b_code, "assertion": assertion(b_out)},
               "candidate": {"rev": tree, "exit": c_code, "assertion": assertion(c_out)},
-              "verdict": verdict(b_code, b_out, c_code, expect), "dir": str(out),
-              **({"expect": expect} if expect else {})}
+              "verdict": verdict(b_code, b_out, c_code, expect, uncopied), "dir": str(out),
+              **({"expect": expect} if expect else {}),
+              **({"uncopied": uncopied[:50]} if uncopied else {})}
+    if b_code != 0 and (gone := missing(b_out, uncopied)):
+        result["missing"] = gone
     store.write_json(out / "result.json", result)
     return result
 
@@ -184,8 +278,8 @@ SAY = {"proven": "proven: it fails on the base and passes on the candidate",
        "base-passes": "not proven: it already passes on the base, so it doesn't show the bug",
        "candidate-fails": "the candidate fails it",
        "inconclusive": "inconclusive: the base run didn't fail on an assertion (a setup error: "
-                       "syntax, import, build or collection; or not the --expect text), a run "
-                       "timed out, or the setup command failed"}
+                       "syntax, import, build or collection; a file the candidate adds missing; "
+                       "or not the --expect text), a run timed out, or the setup command failed"}
 
 
 def lines(r: dict) -> list[str]:
@@ -196,6 +290,9 @@ def lines(r: dict) -> list[str]:
     for side in ("base", "candidate"):
         x = r[side]
         out.append(f"  {side}: exit {x['exit']}" + (f": {x['assertion']}" if x["assertion"] else ""))
+    if r.get("missing"):
+        out.append(f"  the base lacked what the candidate adds: {', '.join(r['missing'])} "
+                   "(--files copies what the test reads onto the base)")
     out.append(f"  outputs: {r['dir']}/{{base,candidate}}.txt")
     return out
 
@@ -216,7 +313,12 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     if not re.fullmatch(r"\d{2,5}x\d{2,5}", viewport):
         raise RuntimeError(f"--viewport {viewport}: give it as WIDTHxHEIGHT, e.g. 390x844")
     tree = gitops.snapshot(task.worktree)
-    base, candidate = _checkouts(task, tree, files or [], task.spec["base"])
+    # after wb next, the last approved step, as wb verify compares: the original base showed the
+    # earlier steps' change as this one's (#501, the audit of 1.90)
+    base_rev = _review_base(task)
+    if not base_rev:
+        raise RuntimeError("cannot find the last approved step's commit for the comparison")
+    base, candidate = _checkouts(task, tree, files or [], base_rev)
     d = task.dir / "shots"
     n = 1 + max((int(p.name) for p in d.glob("*") if p.name.isdigit()), default=0)
     out = d / str(n)
@@ -224,8 +326,17 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     st = task.status
     meta = {"task": task.name, "step": st.get("steps", 1), "round": st.get("round", 1),
             "cmd": cmd, "viewport": viewport, "files": files or [], "ts": store.now(),
-            "base": {"rev": task.spec["base"]}, "candidate": {"rev": tree}}
-    for side, checkout in (("base", base), ("candidate", candidate)):
+            "base": {"rev": base_rev}, "candidate": {"rev": tree}}
+    with gpu(task):
+        _capture(task, cmd, viewport, limit, setup, out, meta, (("base", base), ("candidate", candidate)))
+    store.write_json(out / "shots.json", meta)
+    return {**meta, "dir": str(out)}
+
+
+def _capture(task: store.Task, cmd: str, viewport: str, limit: int, setup: bool, out: Path,
+             meta: dict, sides) -> None:
+    """Each side's capture, its image and output in ``out``, what it gave in ``meta``."""
+    for side, checkout in sides:
         dest = out / f"{side}.png"
         name = SHOT.format(secrets.token_hex(6))
 
@@ -233,8 +344,12 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
             p = work / name
             if p.is_file() and not p.is_symlink() and p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n":
                 shutil.copyfile(p, dest)
-        env = f"WB_SHOT_OUT=./{name} WB_SHOT_VIEWPORT={viewport} "
-        code, text = _run(task, checkout, env + f"sh -c {shlex.quote(cmd)}", limit, keep, setup)
+        # absolute: the command runs in the task's package (task.json `subdir`), where a relative
+        # path landed while the image was looked for at the checkout's top (#433, the audit of 1.8)
+        def line(work: Path, name=name) -> str:
+            return (f"WB_SHOT_OUT={shlex.quote(str(work / name))} WB_SHOT_VIEWPORT={viewport} "
+                    f"sh -c {shlex.quote(cmd)}")
+        code, text = _run(task, checkout, line, limit, keep, setup)
         (out / f"{side}.txt").write_text(text, encoding="utf-8")
         # a capture that exits nonzero failed, PNG or not: one that wrote its image and exited 7
         # on both sides printed two normal-looking paths (#268, the audit of 1.2)
@@ -243,8 +358,6 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
         if not ok:  # said, never hidden: the ordinary code review still stands
             meta[side]["error"] = (f"exit {code}" if code != 0 else "no PNG at $WB_SHOT_OUT") + \
                 f": {out / (side + '.txt')}"
-    store.write_json(out / "shots.json", meta)
-    return {**meta, "dir": str(out)}
 
 
 def shot_ok(side: dict) -> bool:
