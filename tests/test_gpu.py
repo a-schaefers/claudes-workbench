@@ -1015,6 +1015,24 @@ class CanShare(Base):
                 self.assertEqual(models.max_loaded(), 3 * len(cards))
                 self.assertEqual(models.can_share(d, [a, b, c], int(99e9)), ok, len(cards))
 
+    def test_the_model_limit_is_three_per_gpu_when_gpu_gb_sets_the_budget_too(self):
+        # #811: gpu_gb (a hand-set headroom) left budget_devices no devices, so a two-card box
+        # was allowed 3 models in all, and a fourth task was refused sharing that fit
+        a, b, c, d = (self.model(f"ollama/{x}", gb=1) for x in "abcd")
+        card = {"name": "RTX 3090", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30, "discrete": True}
+        hand = Path(self.tmp.name) / "models.json"
+        hand.write_text(json.dumps({"gpu_gb": 40}))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": str(hand)}), \
+                mock.patch.object(models.hardware, "gpus", lambda windows=True: [card, dict(card)]), \
+                mock.patch.object(models.hardware, "ollama_env", lambda: {}):
+            self.assertEqual(models.budget_devices(), (40_000_000_000, [], "models.json gpu_gb"))
+            self.assertEqual(models.max_loaded(), 6)
+            self.assertTrue(models.can_share(d, [a, b, c], models.gpu_budget()))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": str(hand)}), \
+                mock.patch.object(models.hardware, "gpus", lambda windows=True: []), \
+                mock.patch.object(models.hardware, "ollama_env", lambda: {}):
+            self.assertEqual(models.max_loaded(), 3)                  # no card it can read: as before
+
 
 
 class ServedWindow(unittest.TestCase):

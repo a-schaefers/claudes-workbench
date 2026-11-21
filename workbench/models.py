@@ -1828,7 +1828,10 @@ def max_loaded(root: str | None = None) -> int:
     most = (hardware.ollama_env_at(root).get("OLLAMA_MAX_LOADED_MODELS") or "").strip()
     if most.isdigit() and int(most):
         return int(most)
-    return OLLAMA_MAX_LOADED * max(len(budget_devices(root)[1]), 1)
+    # gpu_gb sets the bytes, not the cards: with it set, budget_devices names no device, and a
+    # two-card box was allowed 3 models in all, not 6 (#811)
+    devs = budget_devices(root)[1] or (_read_devices(root)[1] if _overrides().get("gpu_gb") is not None else [])
+    return OLLAMA_MAX_LOADED * max(len(devs), 1)
 
 
 def unified_default(ram: int) -> int:
@@ -1874,6 +1877,12 @@ def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str
         except (TypeError, ValueError):
             raise RuntimeError(f"{overrides_path()}: gpu_gb is {hand!r}, not a number of GB; "
                                "fix it by hand") from None
+    return _read_devices(root)
+
+
+def _read_devices(root: str | None = None) -> tuple[int | None, list[dict], str]:
+    """budget_devices as the machine says it, models.json's gpu_gb aside: max_loaded counts these
+    GPUs even when gpu_gb sets the bytes (#811)."""
     if _fake():
         gb = os.environ.get("WB_FAKE_GPU_GB")  # tests: a GPU of this size
         return (int(float(gb) * 1e9), [], "WB_FAKE_GPU_GB") if gb else (None, [], "")

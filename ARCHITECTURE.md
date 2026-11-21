@@ -3211,7 +3211,8 @@ admitted any number, and a third task's requests queued inside Ollama while its 
 ran, the 2026-11-19 audit), and different models may not outnumber `OLLAMA_MAX_LOADED_MODELS`
 on their server (`max_loaded`; unset or 0: `OLLAMA_MAX_LOADED` 3 per GPU the budget counts,
 Ollama's `defaultModelsPerGPU * len(gpus)`; counted as 3 in all, a fourth task on a two-card box
-was refused, #466, the audit of 1.8), or Ollama swaps them on every
+was refused, #466, the audit of 1.8; with models.json's `gpu_gb` setting the bytes, the cards are
+still counted, `models._read_devices`, the machine's devices without `gpu_gb`: #811), or Ollama swaps them on every
 request. The keep_loaded models resident on `m`'s cards that no running task runs
 (`_kept_beside`, from each such server's `/api/ps`, asked only when models.json lists any) count
 in both the sum and, on `m`'s server, the loaded-model limit: free_gpu never unloads them, and
