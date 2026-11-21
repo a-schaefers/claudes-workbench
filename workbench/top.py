@@ -364,12 +364,13 @@ class Top:
         return round(last["out"] / gap, 1)
 
     def _loads(self) -> dict[str, float]:
-        """Each model's typical load here: the median of its tasks' load_secs (none measured: absent)."""
+        """Each model's typical load here: the median of its tasks' loads, one by one (a task's
+        load_secs is their total, reloads and all, #577; none measured: absent)."""
         if time.monotonic() - self.loads_at >= LOAD_EVERY or not self.loads_at:
             secs: dict[str, list] = {}
             for _, spec, st in self._tasks():
-                if st.get("load_secs") and spec.get("model"):
-                    secs.setdefault(spec["model"], []).append(st["load_secs"])
+                if spec.get("model") and (one := models.single_loads(st)):
+                    secs.setdefault(spec["model"], []).extend(one)
             self.load = {k: round(_median(v), 1) for k, v in secs.items()}
             self.loads_at = time.monotonic()
         return self.load

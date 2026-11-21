@@ -12681,6 +12681,30 @@ class Top(Base):
         for word in ("RUNNING", "busy", "40 tok/s (last call)", "RACK", "MiMo", "QUEUE", "later"):
             self.assertIn(word, text)
 
+    def test_the_typical_load_is_one_loads_time_while_the_task_keeps_the_total(self):
+        # #577: the rack's typical load was the median of tasks' totals, so a task that reloaded
+        # its 40 s model for each round read "loads ~2m40s"; the row's total must still add up
+        from workbench import optimize
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-re", "fix", "--test", TEST_CMD, "--no-base-check")
+        with mock.patch.object(runner.models, "make_resident", return_value=40.0):
+            runner.drive(store.Task("t-re"))                       # round 1, then its auto-fix round
+        st = store.Task("t-re").status
+        self.assertEqual((st["round"], st["load_secs"], st["loads"]), (2, 80.0, [40.0, 40.0]))
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", "t-re", "--text", "again")
+        with mock.patch.object(runner.models, "make_resident", return_value=0.0):  # still resident
+            runner.drive(store.Task("t-re"))
+        self.assertEqual(store.Task("t-re").status["loads"], [40.0, 40.0])
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        rack = {r["model"]: r for r in self.top(drm).tick()["rack"]}
+        model = store.Task("t-re").spec["model"]
+        self.assertEqual(rack[model]["load_s"], 40.0)
+        self.assertEqual(optimize.load_secs(runner.models.resolve(model)), 40.0)
+        run_wb("accept", "t-re", "-m", "feat: answer")
+        self.assertEqual(store.results()[-1]["load_secs"], 80.0)  # the total: both loads, never 0
+
     def test_the_default_tick_is_stats_json_every_else_two_seconds(self):
         from workbench import top
         self.assertEqual(top.default_every(), 2)

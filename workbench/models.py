@@ -961,6 +961,15 @@ def _ollama_loaded(root: str) -> list[str]:
     return [x.get("name") for x in (_get(f"{root}/api/ps") or {}).get("models", [])]
 
 
+def single_loads(st: dict) -> list[float]:
+    """A task's loads one by one (status `loads`: each load that happened, #577), the samples of a
+    model's typical load (wb top, wb optimize); a task from before `loads` gives its `load_secs`."""
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0  # noqa: E731
+    if isinstance(st.get("loads"), list):
+        return [v for v in st["loads"] if num(v)]
+    return [st["load_secs"]] if num(st.get("load_secs")) else []
+
+
 def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
     """Free the GPU for ``m`` and load it, leaving the models in ``keep`` (ids) loaded. Returns
     the seconds it took (0 if already there). ``warn`` gets what Claude should hear about later

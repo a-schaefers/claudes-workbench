@@ -2052,6 +2052,16 @@ def _load(task: store.Task, lease, m: models.Model) -> float:
     return secs
 
 
+def _loaded(task: store.Task, secs: float) -> None:
+    """A load's seconds: added to the task's total (status `load_secs`, after what earlier runners
+    loaded: set, a `wb feedback` runner finding the model resident wrote 0 over a 40 s cold load,
+    #567), and a load that happened kept alone in status `loads`, the typical load's sample: the
+    median of totals made four reloads of a 40 s load read "loads ~2m40s" (#577)."""
+    st, secs = task.status, round(secs, 1)
+    task.set_status(load_secs=round((st.get("load_secs") or 0) + secs, 1),
+                    **({"loads": [*(st.get("loads") or []), secs]} if secs > 0 else {}))
+
+
 def _rejoin(task: store.Task, lease) -> None:
     """Back on the GPU before a round, after the tests or a server's wait let it go (#257):
     queued, in its first-come place, when the GPU is someone else's meanwhile."""
@@ -2085,11 +2095,9 @@ def drive(task: store.Task) -> None:
     # beside the running tasks' models when all fit the GPU, else alone once they finish
     with models.GpuLease(m, task.name, say) as lease:
         try:
-            secs = _load(task, lease, m)
+            _loaded(task, _load(task, lease, m))
             window = (m.config.get("limit") or {}).get("context")
-            # added to what earlier runners loaded (wb feedback, next, resume): set, a second
-            # runner finding the model resident wrote 0 over the task's 40 s (#567)
-            task.set_status(load_secs=round((task.status.get("load_secs") or 0) + secs, 1), window=window)
+            task.set_status(window=window)
             own = task.spec.get("self_review")  # --self-review / --no-self-review, else learned
             tuning.tune(task, task.spec["model"], window, {"fresh_at": fresh_ceiling(m.config)},
                         {} if own is None else {"self_review": int(own)})
@@ -2107,7 +2115,7 @@ def drive(task: store.Task) -> None:
                 try:
                     _rejoin(task, lease)
                     if (again := _load(task, lease, m)) > 0:
-                        task.set_status(load_secs=round(task.status.get("load_secs", 0) + again, 1))
+                        _loaded(task, again)
                         task.event({"ts": store.now(), "round": task.status["round"], "kind": "load",
                                     "text": f"model reloaded ({again:.0f}s)"})
                 except (KeyError, RuntimeError, OSError) as e:

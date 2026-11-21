@@ -72,9 +72,10 @@ def served(m: models.Model) -> int:
 
 
 def load_secs(m: models.Model) -> float:
-    """How long a load of this model takes here: the median its tasks measured, else a guess."""
-    secs = [t.status["load_secs"] for t in store.all_tasks()
-            if t.spec.get("model") == m.id and t.status.get("load_secs")]
+    """How long a load of this model takes here: the median of the loads its tasks measured, one
+    by one (a task's total held its reloads, #577), else a guess."""
+    secs = [v for t in store.all_tasks() if t.spec.get("model") == m.id
+            for v in models.single_loads(t.status)]
     return statistics.median(secs) if secs else LOAD_GUESS
 
 

@@ -628,7 +628,7 @@ once more and `pid` and `stopping` are cleared.
    the task's knob values once (`status.tuned`). A load error: `failed`, with a notice.
 3. Each round n: after the first, the lease rejoined and `lease.load()` again, since each request resets Ollama's
    keep-alive to its own 5 minutes and a longer test run once left the auto-fix round paying for
-   the reload inside its think budget (a reload adds to `load_secs` and logs a `load` event;
+   the reload inside its think budget (a reload adds to `load_secs` and `loads` and logs a `load` event;
    resident already, it is one look at the server). For n > 1, `fresh_reason` decides whether a fresh session takes over
    (`_start_fresh`); a one-round `keep` is cleared and passed to `run_round`, so that round never
    hands over. Phase `running`, `round_started_at`, a `round` event, then `run_round`, then
@@ -2187,8 +2187,10 @@ Each tick reads, cheapest first:
   `/metrics` `live` object of each running task's server other than Ollama (which has none). A
   model on another machine is not asked: no telemetry. Probes to this machine skip HTTP proxies
   (`models._open`).
-- **Typical load**: the median of the tasks' status `load_secs` per model, recomputed every
-  `LOAD_EVERY` (300 s).
+- **Typical load**: the median of the tasks' single loads per model (`models.single_loads`:
+  status `loads`, else, for a task from before it, its `load_secs`), recomputed every
+  `LOAD_EVERY` (300 s). Not the tasks' totals: a task that reloaded its 40 s model for each of
+  four rounds read "loads ~2m40s" (#577).
 
 `--json` prints one object per tick (sizes in bytes; a field the platform can't give is left out,
 never 0):
@@ -3027,7 +3029,8 @@ measured, and Claude and the user choose with both facts (`advice`): a spilling 
 largest whole one, or a whole window with room for more.
 
 `wb optimize estimate` says how long (`estimate`: loads × the last run's measured seconds a load
-(`secs_per_load`), else the model's median measured `status.load_secs`, else `LOAD_GUESS` 20 s; with `--bench`, the bench's cases × models × each
+(`secs_per_load`), else the median of the model's measured single loads (`models.single_loads`,
+#577), else `LOAD_GUESS` 20 s; with `--bench`, the bench's cases × models × each
 case's original minutes). `wb optimize start [--bench]` detaches the run (`python -m
 workbench.optimize`, its output in `optimize.log`, its pid in `optimize.json`; it makes the state
 directory first, which a fresh profile's `wb setup` hadn't, #198) so it outlives
@@ -5097,7 +5100,7 @@ check-ins off), not `wb start`'s.
 | `session`, `sessions`, `session_mark`, `session_floor` | the OpenCode session; earlier ones; `gitops.mark` when it began; the context it had read at its first change |
 | `context` | a one-round instruction: `fresh`, `keep`, `full` (a handover happened) |
 | `full_pct`, `handovers` | the fill at the last mid-round handover; how many |
-| `window`, `load_secs` | the model's context window; the load time, summed over every runner of the task (`wb feedback`, `next`, `resume`) and the reloads before later rounds |
+| `window`, `load_secs`, `loads` | the model's context window; the load time, summed over every runner of the task (`wb feedback`, `next`, `resume`) and the reloads before later rounds (`runner._loaded`); each load that happened, alone (`[secs…]`: the typical load's samples, #577) |
 | `tuned`, `explored`, `tuned_max` | the knob values this task runs at (`tuning.tune`) |
 | `steer_taken`, `nudges`, `nudged_round`, `checkin_at` | notes delivered; nudges sent; the round that ended in one; the last check-in |
 | `active_s` | the agent's active work so far, in seconds: rounds less answers and a frozen machine (*Progress checks*) |
