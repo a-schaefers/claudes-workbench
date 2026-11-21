@@ -2387,7 +2387,14 @@ def cmd_takeover(a):
             print("no open delegated tasks to take over")
         refused = 0
         for t in tasks:  # each refusal said (die's line) and the rest still taken: one refused
-            try:         # first left every other runner going (#601, the audit of v1.90)
+            # first left every other runner going (#601, the audit of v1.90). Not ready is skipped,
+            # not refused: a task still checking out, or failed at checkout, made every hand-back
+            # exit 1, and the mod queued no turn for the tasks it had taken over (#918)
+            if not runner.checked_out(t):
+                print(f"not ready: {t.name} (its checkout hasn't finished): wait for it, "
+                      f"or wb discard {t.name}")
+                continue
+            try:
                 cmd_takeover(argparse.Namespace(name=t.name, all=False, repo=None, session=None,
                                                 user=a.user))
             except SystemExit as e:

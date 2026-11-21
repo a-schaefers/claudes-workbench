@@ -13823,6 +13823,24 @@ class Coding(Base):
         self.assertEqual(store.Task("t2").status["last"], "Claude took over")
         self.assertNotEqual(store.Task("t").status["last"], "Claude took over")
 
+    def test_takeover_all_skips_a_task_not_checked_out_and_exits_zero_for_the_rest(self):
+        # #918: a task still checking out (or failed at checkout) was a refusal: the hand-back
+        # exited 1, and the mod queued no turn for the task whose agent it had just stopped
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        nc = store.Task("t-nc")
+        nc.dir.mkdir(parents=True)
+        store.write_json(nc.dir / "task.json", {"name": "t-nc", "checkout": "runner",
+                                                "repo": str(self.repo), "cwd": os.getcwd(),
+                                                "created_at": store.now()})
+        nc.set_status(phase="failed", round=1)
+        out = run_wb("takeover", "--all", "--user")       # no SystemExit: exit 0
+        self.assertIn("took over t", out)
+        self.assertIn("not ready: t-nc (its checkout hasn't finished): wait for it, "
+                      "or wb discard t-nc", out)
+        self.assertEqual(store.Task("t").status["last"], "Claude took over")
+        self.assertFalse(store.Task("t-nc").status.get("taken_over"))
+
     def test_the_skills_no_mod_hand_back_command_passes_user_so_the_coding_gate_lets_it(self):
         # #601: SKILL.md's hand-back command had no --user and exited 3 under "Only when I say"
         skill = (Path(__file__).parent.parent / "skill/workbench/SKILL.md").read_text()

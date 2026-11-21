@@ -1485,6 +1485,25 @@ test('wb failing is said as a failure: not open tasks, not agents stopped', asyn
   expect(submitted.join('\n')).not.toContain('Leave workbench mode')   // no turn to finish what wasn't handed over
 })
 
+test('#918: a hand-back that took over one task and was refused another still gives Claude its turn', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {})
+  on('process.run', (_: any, e: any) => ({ value: e.argv[1] === 'takeover'
+    ? { exitCode: 3, stdout: 'took over fix-it: the agent is stopped.', stderr: 'wb: other: report the blocker to the user' }
+    : { exitCode: 0, stdout: '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const submitted: string[] = []
+  on('prompt.submit', (_: any, e: any) => { submitted.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const back = await $.command.run({ command: 'workbench-quit-and-hand-back-claude', args: '' })
+  expect(back.text).not.toContain('failed')
+  expect(toasts.join('\n')).toContain("some tasks weren't taken over")
+  await clock.advance(2000)
+  expect(submitted.at(-1)).toContain('took over fix-it')        // the turn for the one taken
+  expect(submitted.at(-1)).toContain('report the blocker')      // and the refusal, said with it
+})
+
 test('a closed task compacts Claude early, keeping the delegation state; open tasks come back after', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const ts = 1_800_000_000

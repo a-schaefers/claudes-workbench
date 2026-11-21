@@ -2800,10 +2800,14 @@ export const register: Register = (on, options) => {
   on('command.run', { command: HAND_BACK }, async $ => {
     await workbenchMode($, false)
     const { ok, out } = await runWb($, ['takeover', '--all', '--user', ...(await scope($))])
-    if (!ok) { // nothing was handed over: no turn telling Claude to finish it
+    // A refusal (the coding gate) still takes over the rest: a turn for those whenever one was
+    // taken, the refusals said with them. Keyed on the exit code alone, one refused task left
+    // Claude no turn for the ones whose agents it had just stopped (#918).
+    if (!ok && !/^took over /m.test(out)) { // nothing was handed over: no turn telling Claude to finish it
       $.ui.toast(`workbench: wb takeover --all failed: ${brief(out)}`)
       return { text: `wb takeover --all failed; the agents may still be running (wb status):\n${out}` }
     }
+    if (!ok) $.ui.toast(`workbench: some tasks weren't taken over: ${brief(out)}`)
     mem.queued.push(DONE_NOTE(out)) // a command may not start a turn itself: the next poll does
     return { text: `Agents stopped; Claude is taking over. ${out}` }
   })
