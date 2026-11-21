@@ -1609,7 +1609,9 @@ def _caller(a) -> tuple:
     if not sid:
         return None, None
     pid = os.environ.get("CLAUDE_PID", "")
-    ids = list(dict.fromkeys([*(store.claude_sessions(pid) if pid.isdigit() else []), sid]))
+    # this process's ids only: a dead one's under the same pid were taken for its own (#787)
+    ids = list(dict.fromkeys([*(store.claude_sessions(pid, start=models._started(int(pid)))
+                                if pid.isdigit() else []), sid]))
     return os.getcwd(), ids
 
 

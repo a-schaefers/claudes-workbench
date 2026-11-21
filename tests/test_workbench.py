@@ -4721,6 +4721,38 @@ class Steering(Base):
         self.assertIn("released t-race", run_wb("ack", "t-race", "1.0", "--if", repr(q)))
         self.assertEqual(cli._acked(t), 1.0)
 
+    def test_a_dead_claude_codes_sessions_under_a_reused_pid_are_not_the_new_ones(self):
+        # #787: claude-sessions/<pid> was keyed by pid alone, so a new Claude Code process given a
+        # dead one's pid (a container, a WSL restart) took that process's sessions, and plain
+        # `wb status` listed its tasks as this session's, and --all acted on them
+        from workbench import models, spend
+        def task(name, **spec):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "created_at": 1.0, **spec})
+            t.set_status(phase="review", round=1)
+        other = Path(self.tmp.name) / "x"
+        me = subprocess.Popen(["sleep", "60"]); self.addCleanup(me.kill)
+        task("t-old", repo=str(other), cwd=str(other), session="sess-old", claude_pid=me.pid,
+             claude_start="12345")
+        task("t-older", repo=str(other), cwd=str(other), session="sess-older")
+        (store.home() / "claude-sessions").mkdir()
+        (store.home() / "claude-sessions" / str(me.pid)).write_text(   # written before #787 too
+            "2 sess-older\nstart 12345\n3 sess-old\n")
+        os.environ.update(CLAUDE_CODE_SESSION_ID="sess-new", CLAUDE_PID=str(me.pid))
+        out = run_wb("status")
+        self.assertIn("open elsewhere (other sessions'): ", out)
+        mine = out.split("open elsewhere")[0]
+        self.assertNotIn("t-old", mine)
+        self.assertNotIn("t-older", mine)
+        start = models._started(me.pid)
+        self.assertEqual(store.claude_sessions(me.pid, start=start), ["sess-new"])
+        self.assertEqual(store.claude_sessions(me.pid, start="12345"), ["sess-old"])  # the old one's
+        self.assertEqual(store.claude_sessions(me.pid), ["sess-older", "sess-old", "sess-new"])
+        self.assertEqual(spend.sessions(store.Task("t-old")), ["sess-old"])   # its process's only
+        run_wb("status")
+        self.assertEqual((store.home() / "claude-sessions" / str(me.pid)).read_text().count("sess-new"), 1)
+
     def test_plain_wb_status_from_claude_code_lists_the_calling_sessions_tasks(self):
         # #693: the skill and the compaction note send Claude to `wb status`, which listed every
         # session's open tasks as one, so one session could accept or discard another's

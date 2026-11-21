@@ -492,8 +492,13 @@ scarce resource, so each row also records what the task cost the Claude Code ses
 `<session>/subagents/`, and those of each later session its process had (`spend.sessions`): a
 /clear continues the process under a new id and transcript, whose review turns once went
 uncounted (#451). Every `wb` call records its session under its process
-(`store.note_claude_session`: `claude-sessions/<CLAUDE_PID>`, a `<ts> <id>` line once per id);
-the ones task.json's `claude_pid` recorded from its `created_at` on are read too, each turn
+(`store.note_claude_session`: `claude-sessions/<CLAUDE_PID>`, a `<ts> <id>` line once per id,
+under a `start <its start>` line, `models._started` as one word, `store.claude_word`, for each
+process the pid has had); the ones task.json's `claude_pid` recorded from its `created_at` on
+are read too, only those under its `claude_start` (`store.claude_sessions(pid, since, start)`;
+lines written before the start lines count when written after that process started,
+`store._start_epoch`: keyed by pid alone, a new Claude Code process given a dead one's pid, in a
+container or after a WSL restart, took its sessions and with them its tasks, #787), each turn
 counted per session. So are the sessions recorded in the task's own `claude-sessions` (a `<ts>
 <id>` line once per id, `store.note_task_session`), written by every `wb` call that names the task
 (its `name` or `task` argument): a task another process adopted after a crash, an update or a
@@ -2351,7 +2356,8 @@ woke Claude for it.) Another session's notice is toasted at most
 and left unacknowledged for its own session or `wb wait`. `wb status`, a bare `wait`, `stop --all`,
 `takeover --all` and `resume --all` run from Claude Code's Bash without `--repo`/`--session` take
 the calling session's scope the same way (`cli._caller`: `CLAUDE_CODE_SESSION_ID`, the ids in
-`claude-sessions/<CLAUDE_PID>`, the directory it runs in; `--all-sessions` for everyone's, as a
+`claude-sessions/<CLAUDE_PID>` under this process's own start, not a dead one's with the same
+pid, #787, the directory it runs in; `--all-sessions` for everyone's, as a
 terminal gets): plain `wb status`, which the skill and the compaction note send Claude to, listed
 every session's tasks as one (#693). Among sessions a task belongs to, the
 first to deliver a notice wins. A session with no person at it (`claude -p`, the SDK) does
@@ -6153,7 +6159,7 @@ Prints the counts and the bytes freed; writes `gc.json`. Then (not in `cli.gc`, 
 $WB_HOME (~/.local/state/workbench)
   notify.jsonl                   notices that need Claude, all tasks (the runner writes them)
   notify.old.jsonl               notices handled and older than ARCHIVE_DAYS, moved by gc (_rotate_notices), its newest half kept past NOTIFY_OLD_MAX
-  claude-sessions/<pid>          "<ts> <session id>" lines: each session a Claude Code process ran wb in (spend.sessions)
+  claude-sessions/<pid>          "<ts> <session id>" lines, each process's after a "start <its start>" line (#787): each session a Claude Code process ran wb in (spend.sessions, cli._caller)
   gc.json                        the last gc: {at, archived, notices, rules, runtime, scratch, starts, uploads, branches}
   archive/<task>/                a task closed and untouched for ARCHIVE_DAYS (30), moved from tasks/ by gc
   coding.json                    Claude coding, the user's choice: {mode: only|ask|decide, ts}; none: decide

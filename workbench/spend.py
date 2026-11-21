@@ -237,7 +237,8 @@ def sessions(task: store.Task) -> list[str]:
     sid = task.spec.get("session")
     if not sid:
         return []
-    later = store.claude_sessions(task.spec.get("claude_pid"), task.spec.get("created_at") or 0)
+    later = store.claude_sessions(task.spec.get("claude_pid"), task.spec.get("created_at") or 0,
+                                  task.spec.get("claude_start"))  # its process's, not the pid's (#787)
     return list(dict.fromkeys([sid, *later, *store.task_sessions(task)]))
 
 

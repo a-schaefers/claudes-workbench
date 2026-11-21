@@ -200,19 +200,47 @@ def note_claude_session() -> None:
     """Record the Claude Code session a `wb` call runs in under its process
     (claude-sessions/<CLAUDE_PID>: "<ts> <session id>" lines), once per id. /clear starts a new
     session id and transcript in the same process, and spend.usage read only the one `wb start`
-    recorded: the review turns after a /clear went uncounted (#451)."""
+    recorded: the review turns after a /clear went uncounted (#451). Each process's lines follow
+    a "start <its start>" line (claude_word): a new process with an old one's pid (a container,
+    a WSL restart) was handed the old one's sessions, and with them its tasks (#787)."""
     sid, pid = os.environ.get("CLAUDE_CODE_SESSION_ID", ""), os.environ.get("CLAUDE_PID", "")
     if not sid or not pid.isdigit() or not re.fullmatch(r"[\w-]{1,128}", sid):
         return
+    from . import models  # here: models imports store
+    start = claude_word(models._started(int(pid)))
     path = home() / "claude-sessions" / pid
     try:
-        if sid in path.read_text().split()[1::2]:
-            return
+        sections = _session_sections(path.read_text().split())
     except FileNotFoundError:
-        pass
+        sections = []
+    last = sections[-1] if sections else (None, [])
+    if (start is None or last[0] == start) and sid in (s for _, s in last[1]):
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
-        f.write(f"{now()} {sid}\n")
+        f.write((f"start {start}\n" if start is not None and last[0] != start else "")
+                + f"{now()} {sid}\n")
+
+
+def claude_word(start) -> str | None:
+    """A process start (models._started: /proc's clock ticks, or ps's `lstart` with its spaces)
+    as one word, for claude-sessions' "start" lines."""
+    return "_".join(str(start).split()) or None if start is not None else None
+
+
+def _session_sections(words: list[str]) -> list[tuple[str | None, list[tuple[float, str]]]]:
+    """claude-sessions' pairs, grouped under the "start" line before them (None: written before
+    #787, with none)."""
+    out: list = [(None, [])]
+    for a, b in zip(words[::2], words[1::2]):
+        if a == "start":
+            out.append((b, []))
+            continue
+        try:
+            out[-1][1].append((float(a), b))
+        except ValueError:
+            continue
+    return out if out[0][1] else out[1:]
 
 
 def note_task_session(name) -> None:
@@ -247,20 +275,46 @@ def task_sessions(task) -> list[str]:
     return out
 
 
-def claude_sessions(pid, since: float = 0) -> list[str]:
-    """The session ids Claude Code process `pid` ran `wb` in from `since` on, first seen first."""
+def claude_sessions(pid, since: float = 0, start=None) -> list[str]:
+    """The session ids Claude Code process `pid` ran `wb` in from `since` on, first seen first.
+    With ``start`` (its models._started, or task.json `claude_start`), only that process's: the
+    file is keyed by pid alone, and a later process given the same pid had the earlier one's
+    sessions, so its plain `wb status` listed and acted on that process's tasks as its own
+    (#787). Lines from before the start lines count only in a file that has none."""
     try:
-        words = (home() / "claude-sessions" / str(int(pid))).read_text().split()
+        sections = _session_sections((home() / "claude-sessions" / str(int(pid))).read_text().split())
     except (OSError, TypeError, ValueError):
         return []
+    born = None
+    if start is not None:
+        word, born = claude_word(start), _start_epoch(start)
+        # lines from before the start lines: this process's when written after it started, else
+        # (its start unknown as a time) only in a file that has nothing newer
+        sections = [s for s in sections if s[0] == word
+                    or s[0] is None and (born is not None or len(sections) == 1)]
     out = []
-    for ts, sid in zip(words[::2], words[1::2]):
-        try:
-            if float(ts) >= since and sid not in out:
+    for word_, rows in sections:
+        for ts, sid in rows:
+            if ts >= since and sid not in out and (word_ is not None or born is None or ts >= born - 1):
                 out.append(sid)
-        except ValueError:
-            continue
     return out
+
+
+def _start_epoch(start) -> float | None:
+    """A process start (models._started) as a Unix time: /proc's clock ticks after boot (btime in
+    /proc/stat), or ps's `lstart`; None when it can't be read."""
+    text = str(start).strip()
+    if text.isdigit():
+        try:
+            btime = next(int(l.split()[1]) for l in Path("/proc/stat").read_text().splitlines()
+                         if l.startswith("btime "))
+            return btime + int(text) / os.sysconf("SC_CLK_TCK")
+        except (OSError, StopIteration, ValueError, IndexError):
+            return None
+    try:
+        return time.mktime(time.strptime(" ".join(text.split()), "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, OverflowError):
+        return None
 
 
 _BOOT: list = []
