@@ -4027,7 +4027,8 @@ before #649 has neither. It holds:
   checkout (alternates) and no ref but a detached HEAD (`_submodule_repos`), so `wb start` and the
   scratch checkouts fill the replay's worktree from it as from a user's checkout. When the repo is
   gone, or its checkout lacks a submodule, its commit or the LFS objects, add refuses and a replay
-  is an `error` row, each naming the submodules or LFS;
+  is an `error` row, each naming the submodules or LFS (or a filter of the repo's own that can't
+  make the task's bytes there: *Checkout settings*, #932);
 
 - the spec (`spec.md`): the step's prompt (`rounds/<n>/prompt.md`, round 1's or the one opening
   `Step N-1 of this task is done`; `instructions.md` when the step began in a fresh session,
@@ -5036,10 +5037,18 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   task's worktree and unedited there are compared byte for byte (`verify.filter_gap`), and a
   difference, or a checkout a `required` filter failed, makes the run `"filtered"`: the base
   check's note says the base wasn't checked, `wb verify` is `inconclusive` with the reason
-  (result.json `filtered`), `wb shot`'s side `exit filtered`. bench's clones too: `bench add`'s base and
-  reference checks and each replay's checkout (`bench._clone_base`, from the case's repo while it
-  lasts); without them the reference check read LF where the task read CRLF and refused the case,
-  and replays were graded on other bytes (#736, the 2026-11-21 audit).
+  (result.json `filtered`), `wb shot`'s side `exit filtered`. bench's clones get the settings
+  too: `bench add`'s base and reference checks and each replay's checkout (`bench._clone_base`,
+  from the case's repo while it lasts); without them the reference check read LF where the task
+  read CRLF and refused the case, and replays were graded on other bytes (#736, the 2026-11-21
+  audit). By then the task's worktree is gone, so bench compares each sampled filtered file with
+  what the repo itself makes of its blob (`verify.smudge_gap`: `git --attr-source=<the clone's
+  tree> cat-file --filters` run in the repo, with its git dir and keys; read-only there, a blob
+  it lacks or a git before 2.40 skipped), and a difference or a `required` filter's failure
+  (`_filter_failed`) is a `RuntimeError` naming the file and `filter.<driver>` (`bench._filtered`):
+  `bench add` refuses, a replay is an `error` row saying why, never one graded on other bytes.
+  They had the filters without this, and a git-crypt repo's add died on git's raw "smudge filter
+  git-crypt failed" and each of its cases' replays was an error naming no setting (#932's review).
 - **The split of roles.** The agent writes code and reads git freely (`status`, `diff`, `log`,
   `show`, `blame`). Everything that leaves its working tree is Claude's: commits, branches,
   merges, pushes, pull requests, CI/CD, deploys and infrastructure (`gh`, `wrangler` and the like),

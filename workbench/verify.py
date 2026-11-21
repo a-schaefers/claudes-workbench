@@ -206,25 +206,13 @@ def filter_gap(worktree: Path, clone: Path) -> str | None:
     worktree's unedited. A filter that keeps state in the git dir (git-crypt's keys in
     .git/git-crypt) can't work from the copied config, and a scratch run on the stored bytes is
     no evidence either way (#932). No local filter: one git call."""
-    drivers = {k.split(".")[1] for k, _ in local_filters(clone)
-               if k.lower().endswith((".smudge", ".process"))}
-    if not drivers or not Path(worktree).is_dir():
+    if not Path(worktree).is_dir():
         return None
-    files = gitops.git_bytes(clone, "ls-files", "-z")
-    said = gitops._run(clone, ("check-attr", "-z", "--stdin", "filter"), input=files,
-                       check=False).stdout.split(b"\0")
-    filtered = {os.fsdecode(said[i]): os.fsdecode(said[i + 2]) for i in range(0, len(said) - 2, 3)
-                if os.fsdecode(said[i + 2]) in drivers}
+    filtered = _filtered_files(clone)
     paths = sorted(filtered)[:FILTER_SAMPLE]
     if not paths:
         return None
-
-    def blobs(at):
-        out = gitops.git_bytes(at, "ls-files", "-s", "-z", "--", *(f":(literal){p}" for p in paths))
-        return {os.fsdecode(rec.split(b"\t", 1)[1]): rec.split()[1]
-                for rec in out.split(b"\0") if b"\t" in rec}
-
-    mine, theirs = blobs(clone), blobs(worktree)
+    mine, theirs = _blobs(clone, paths), _blobs(worktree, paths)
     differ = []
     for p in paths:
         if mine.get(p) and mine.get(p) == theirs.get(p):
@@ -243,6 +231,52 @@ def filter_gap(worktree: Path, clone: Path) -> str | None:
     return (f"{p} checks out differently in the scratch checkout than in the task's worktree "
             f"(filter.{filtered[p]}, the repo's own: state it keeps in the git dir, such as "
             "git-crypt's keys, isn't there), so this run wasn't on the task's bytes")
+
+
+def _filtered_files(clone: Path) -> dict[str, str]:
+    """Each of ``clone``'s files under one of its local smudging filters: its driver."""
+    drivers = {k.split(".")[1] for k, _ in local_filters(clone)
+               if k.lower().endswith((".smudge", ".process"))}
+    if not drivers:
+        return {}
+    files = gitops.git_bytes(clone, "ls-files", "-z")
+    said = gitops._run(clone, ("check-attr", "-z", "--stdin", "filter"), input=files,
+                       check=False).stdout.split(b"\0")
+    return {os.fsdecode(said[i]): os.fsdecode(said[i + 2]) for i in range(0, len(said) - 2, 3)
+            if os.fsdecode(said[i + 2]) in drivers}
+
+
+def _blobs(at: Path, paths: list[str]) -> dict[str, bytes]:
+    out = gitops.git_bytes(at, "ls-files", "-s", "-z", "--", *(f":(literal){p}" for p in paths))
+    return {os.fsdecode(rec.split(b"\t", 1)[1]): rec.split()[1]
+            for rec in out.split(b"\0") if b"\t" in rec}
+
+
+def smudge_gap(repo: Path, clone: Path) -> str | None:
+    """filter_gap for a checkout with no task's worktree beside it (bench's: the task was
+    accepted and its worktree removed, and a step's new files aren't in the user's checkout):
+    the first filtered file (FILTER_SAMPLE at most) whose bytes in ``clone`` aren't what ``repo``
+    itself makes of its blob (`git cat-file --filters`, run there, with the repo's git dir and so
+    git-crypt's keys; the attributes of ``clone``'s tree, `--attr-source`). Read-only in
+    ``repo``; a blob it lacks, a filter that fails there too, or a git before 2.40 (no
+    --attr-source) is skipped (#932's review)."""
+    filtered = _filtered_files(clone)
+    paths = sorted(filtered)[:FILTER_SAMPLE]
+    if not paths:
+        return None
+    tree = gitops.git(clone, "rev-parse", "HEAD^{tree}").strip()
+    for p, blob in _blobs(clone, paths).items():
+        made = gitops._run(repo, (f"--attr-source={tree}", "cat-file", "--filters",
+                                  f"--path={p}", os.fsdecode(blob)), check=False)
+        try:
+            if made.returncode == 0 and (Path(clone) / p).read_bytes() != made.stdout:
+                return (f"{p} checks out differently in the scratch checkout than in {repo} "
+                        f"(filter.{filtered[p]}, the repo's own: state it keeps in the git dir, "
+                        "such as git-crypt's keys, isn't there), so the checks wouldn't run on "
+                        "the task's bytes")
+        except OSError:
+            pass
+    return None
 
 
 def _filter_failed(repo: Path, e: gitops.GitError) -> str | None:

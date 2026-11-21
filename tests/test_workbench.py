@@ -12665,6 +12665,44 @@ class Bench(Base):
         bench.checkout(bench.cases()["t-crlf"], clone)
         self.assertEqual((clone / "data.txt").read_bytes(), b"a\r\nb\r\n")    # a replay's too
 
+    def test_a_filter_whose_key_stays_in_the_git_dir_is_named_by_bench_add_and_a_replay(self):
+        # #932's review (reproduced): bench's clones took the repo's filters but not verify's
+        # handling: a required git-crypt-like one died on a raw git error naming no setting, and
+        # one falling back to the stored bytes refused the case as failing on its own commit
+        from workbench import bench
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        key = 'test -f "$(git rev-parse --git-common-dir)/gc-key"'
+        g("config", "filter.gc.clean", "sed s/42/SECRET/")
+        g("config", "filter.gc.smudge", f"sh -c 'if {key}; then sed s/SECRET/42/; else cat; fi'")
+        (self.repo / ".git" / "gc-key").write_text("k\n")
+        (self.repo / ".gitattributes").write_text("answer.txt filter=gc\nsecret.txt filter=gc\n")
+        g("add", "-A")
+        g("commit", "-qm", "a filter keyed in the git dir")
+        task = self.accepted("t-gc")
+        self.assertEqual(gitops.git(self.repo, "cat-file", "-p",
+                                    f"{task.spec['branch']}:answer.txt"), "SECRET\n")
+        with self.assertRaisesRegex(RuntimeError, r"answer\.txt checks out differently.*filter\.gc"):
+            bench.add("t-gc")                                    # not "fails on its own commit"
+        g("config", "filter.gc.required", "true")
+        g("config", "filter.gc.smudge", f"sh -c 'if {key}; then sed s/SECRET/42/; else exit 1; fi'")
+        with self.assertRaisesRegex(RuntimeError, r"failed in filter\.gc, the repo's own"):
+            bench.add("t-gc")                                    # not git's words alone
+        # a replay's checkout of a base with such a file: the same, so its error row names it
+        (self.repo / "secret.txt").write_text("42\n")
+        g("add", "-A")
+        g("commit", "-qm", "a filtered file in the base")
+        tmp = Path(self.tmp.name)
+        bench.bundle(self.repo, "HEAD", tmp / "b.bundle")
+        with self.assertRaisesRegex(RuntimeError, r"failed in filter\.gc"):
+            bench._clone_base(tmp / "b.bundle", tmp / "c1", self.repo)
+        g("config", "--unset", "filter.gc.required")
+        g("config", "filter.gc.smudge", f"sh -c 'if {key}; then sed s/SECRET/42/; else cat; fi'")
+        with self.assertRaisesRegex(RuntimeError, r"secret\.txt checks out differently"):
+            bench._clone_base(tmp / "b.bundle", tmp / "c2", self.repo)
+        g("config", "filter.gc.smudge", "sed s/SECRET/42/")          # one that works there: fine
+        bench._clone_base(tmp / "b.bundle", tmp / "c3", self.repo)
+        self.assertEqual((tmp / "c3" / "secret.txt").read_text(), "42\n")
+
     def test_a_bench_run_on_an_unknown_model_says_so_in_a_line(self):
         # #737 (the 2026-11-21 audit, reproduced): models.resolve's KeyError reached main, which
         # catches only RuntimeError and OSError, and Claude got a traceback

@@ -175,10 +175,31 @@ def _clone_base(bundle_path: Path, dest: Path, repo: Path) -> None:
     try:
         gitops.git(dest, "reset", "-q", "--hard")
     except gitops.GitError as e:
+        _filtered(repo, dest, e)
         if not lfs:
             raise
         raise RuntimeError(f"the case's Git LFS files can't be checked out from {repo}'s LFS "
                            f"objects (git lfs fetch there?): {str(e)[-300:]}") from None
+    _filtered(repo, dest)
+
+
+def _filtered(repo: Path, work: Path, e: gitops.GitError | None = None) -> None:
+    """RuntimeError naming the repo's own filter when `work`'s checkout isn't the bytes the task
+    had: the checkout's failure in a `required` one (verify._filter_failed), else a filtered file
+    whose bytes aren't what the repo itself makes of them (verify.smudge_gap). Bench's clones took
+    the repo's filters (#932) but not verify's handling of them: git-crypt's keys are in the git
+    dir, so bench add died on a raw "smudge filter git-crypt failed" naming no setting, each
+    replay of such a case was an error row saying the same, and a filter that only falls back
+    to the stored bytes graded replays on other bytes without a word (#932's review). Nothing
+    when the repo is gone: its filters weren't copied then."""
+    if not repo.is_dir():
+        return
+    if e is not None:
+        if why := verify._filter_failed(repo, e):
+            raise RuntimeError(why) from None
+        return
+    if why := verify.smudge_gap(repo, work):
+        raise RuntimeError(why)
 
 
 def _filled(repo: Path, commit: str, work: Path, where: str) -> None:
@@ -439,7 +460,12 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
             gitops.share_lfs(repo, work)  # its LFS files as data, as verify's (#382, #509)
             if sparse := gitops.sparse_of(Path(repo)):  # as the task's worktree was (#263)
                 gitops.apply_sparse(work, sparse)
-            gitops.git(work, "checkout", "-q", "--detach", ref)
+            try:
+                gitops.git(work, "checkout", "-q", "--detach", ref)
+            except gitops.GitError as e:
+                _filtered(repo, work, e)  # a required filter that can't work here, named (#932)
+                raise
+            _filtered(repo, work)  # or one that fell back to the stored bytes
             _filled(repo, ref, work, f"step {step}'s own commit")
             # the hidden checks overlaid as on a replay: graded straight from the commit, a check
             # the overlay broke (its execute bit lost) still let the case in (#346, the audit of 1.4)
@@ -715,7 +741,7 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
     try:
         try:
             checkout(case, work)
-        except RuntimeError as e:  # its LFS files or submodules (#509): the next run tries again
+        except RuntimeError as e:  # its LFS, submodules (#509), filters (#932): the next run retries
             return {**row, "outcome": "error", "why": str(e)[:300]}
         _inputs(case, work)
         with redirect_stdout(log):
