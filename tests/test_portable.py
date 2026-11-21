@@ -1252,6 +1252,21 @@ class Optimize(unittest.TestCase):
                     optimize.main()
             self.assertEqual([b for path, b in posts if path == "/api/generate"], [], keep)  # no unload
 
+    def test_every_hint_to_measure_names_wb_optimize_start_which_is_what_measures(self):
+        # #600 (the audit of v1.90): bare `wb optimize` only reports, and its never-run line named
+        # the bare command again, so the first run's step 3 measured nothing
+        from workbench import optimize
+        self.ollama(32768)
+        self.assertEqual(optimize.report(), ["not run yet: wb optimize estimate, then wb optimize "
+                                             "start (Ollama models only)"])
+        with self.assertRaisesRegex(RuntimeError, "wb optimize start first"):
+            optimize.apply(models.discover()["ollama/m"])
+        with mock.patch.object(models, "holders", return_value={"1": {"task": "t"}}), \
+                self.assertRaisesRegex(RuntimeError, "run wb optimize start once"):
+            optimize.start()
+        skill = (Path(__file__).parent.parent / "skill/workbench/SKILL.md").read_text()
+        self.assertIn("`wb optimize start`", skill.split("**First run**")[1].split("4. `wb try`")[0])
+
     def test_the_first_run_on_a_fresh_profile_starts(self):
         # #198 (the 2026-11-19 audit): optimize.log was opened before the state directory existed,
         # and wb setup swallowed the error, so the first measurement never ran

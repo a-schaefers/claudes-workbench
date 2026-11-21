@@ -334,7 +334,7 @@ def apply(m: models.Model) -> str:
     row = (state().get("models") or {}).get(m.id) or {}
     fits = row.get("fits")
     if not fits or fits == row.get("window"):
-        raise RuntimeError(f"no measured window to apply for {m.id}: wb optimize first")
+        raise RuntimeError(f"no measured window to apply for {m.id}: wb optimize start first")
     name = entry_name(m.name, fits)
     provider = m.id.split("/", 1)[0]
     entry = dict(m.config)
@@ -387,7 +387,7 @@ def start(bench: bool = False, if_due: bool = False) -> list[str]:
     if not ms:
         raise RuntimeError("no Ollama model here to measure (wb models)")
     if models.holders():
-        raise RuntimeError("a task holds the GPU: run wb optimize once it is done (real work first)")
+        raise RuntimeError("a task holds the GPU: run wb optimize start once it is done (real work first)")
     from . import context  # its bench replays' agents get the user's PYTHONPATH (#512)
     env = context.detached_env()
     for k in ("WB_TASK", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"):
@@ -437,7 +437,7 @@ def report() -> list[str]:
         out.append(f"stopped: {st['stopped']}")
     rows = st.get("models") or {}
     if not rows and not out and not st.get("skipped"):
-        return ["not run yet: wb optimize estimate, then wb optimize"]
+        return ["not run yet: wb optimize estimate, then wb optimize start (Ollama models only)"]
     for mid, row in rows.items():
         if made := applied(mid, row):  # not "fits all on the GPU": it spills, its variant doesn't
             out.append(f"{mid}: {row['fits'] // 1024}K fits all on the GPU here; {made}, applied, "

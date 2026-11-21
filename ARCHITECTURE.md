@@ -3155,7 +3155,8 @@ its retry time. Real work stops it:
 (`OPTIMIZE_EXIT`, 30 s at most) before the GPU's holders are read: `wb try` right after `wb
 setup`'s run was refused by the entry it hadn't yet let go (#161). The fits measured so far stay
 in `optimize.json`. With `--bench` it then starts `wb bench run` on every model, labelled
-`optimize`. `wb optimize report` (the default) gives a line per model; `wb doctor` adds the same
+`optimize`. `wb optimize report` (the default) gives a line per model (never run: it names `estimate`, then
+`start`, which is what measures; the refusals and `apply`'s name `start` too, #600); `wb doctor` adds the same
 line (`--`) for each measured model with something to change. `wb optimize stop` ends it, only if
 state.json's pid is still alive, started when it did, and runs `-m workbench.optimize`
 (`optimize.running`). `models.runs(pid, *words)` is the one identity check behind every stop
@@ -5413,7 +5414,7 @@ claude plugin install workbench@workbench
 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/marketplaces/workbench/bin/wb setup
 ```
 then `/workbench` in Claude Code, inside a project: the first time, the skill walks the first run
-in order (`wb setup`'s checklist, `wb scout` and `wb model add`, `wb optimize`, `wb try`, its
+in order (`wb setup`'s checklist, `wb scout` and `wb model add`, `wb optimize estimate` then `start`, `wb try`, its
 review and accept, the savings line; #113). `wb setup` ends with the `first run:` checklist, so
 the quickstart no longer runs `wb doctor` itself. The plugin install copies only `mod/` (the marketplace entry's `source`) into Claude Code's plugin
 cache, but `marketplace add` keeps a full clone of the repo under

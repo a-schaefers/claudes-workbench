@@ -68,7 +68,8 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   1. `wb setup`: its `first run:` lines say what is missing.
   2. No model yet: `wb scout`, then recommend what fits the machine (reference/models.md, which
      names no server for them); `wb model add <provider/model> [--pull]`.
-  3. `wb optimize` (a minute or two): each model's window, measured on this GPU.
+  3. Ollama models only: `wb optimize estimate`, then `wb optimize start` (a minute or two,
+     detached): each model's window, measured on this GPU; `wb optimize report` once done.
   4. `wb try` proves it on a tiny sample: review it as any task and run the hidden check it
      printed. Then `wb accept` it (the sample is a scratch repo of its own) and show the user the
      result and the savings line accept prints. Then ask what they'd like built.

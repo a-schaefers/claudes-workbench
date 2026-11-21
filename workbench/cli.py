@@ -3695,7 +3695,7 @@ def cmd_remote(a):
             print(out.getvalue().splitlines()[0])
         except SystemExit:  # die: why this one wasn't registered, and the rest go on
             print(f"--  {pid}/{name}: {err.getvalue().strip().removeprefix('wb: ')}")
-    print("next: wb models (where each one ranks); wb optimize measures them")
+    print("next: wb models (where each one ranks); wb optimize start measures them")
 
 
 UPDATE_EVERY = 7 * 24 * 3600  # the mod's weekly check (wb update --check --if-due)
