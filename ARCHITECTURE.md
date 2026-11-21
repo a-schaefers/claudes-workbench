@@ -2539,11 +2539,17 @@ tasks every model passed in one round in a minute, so it told them apart by noth
 `wb models`, `wb scout` and `wb bench report` print it, and the router doesn't read it.
 
 **A case** (`wb bench add <task> [--step N]`, by default a `wb next` task's last step) comes from
-a closed, accepted task, not a trial. It keeps the task's setup, copies, siblings and grants, and
+a closed, accepted task, not a trial. It keeps the task's setup, copies, siblings, grants and
+package (task.json `subdir`, kept as case.json `subdir`), and
 its base check, its reference check, each replay (`wb start --setup/--copy/--sibling/--allow`,
 the copies and siblings put beside the replay's checkout first, `bench._inputs`) and `wb bench
 self` run with them; a setup that fails there refuses the case, saying it can't reproduce the
-task's dependencies. A task's `--setup` once made an ignored stamp its tests needed, and its
+task's dependencies. A replay starts from the package (`--repo <checkout>/<subdir>`), so it
+works, sets up and is graded there: without it a package's case ran from the root, and an
+`answer.txt` written there passed a check of `app/answer.txt` (#425, the audit of 1.8). A case
+made before `subdir` was kept reads it from its task (`bench.subdir`); with the task gone too, its
+replays are `error` rows, never graded; a replay `wb start` didn't put in that package is an
+`error` too. A task's `--setup` once made an ignored stamp its tests needed, and its
 own commit was rejected, and its grants, deleted with its rules at the close, were empty
 (#250, the audit of 1.2; `cli._keep_grants` keeps them in status `grants_kept`, which
 `context.grants` reads once the rules are gone). It holds:
@@ -2589,7 +2595,8 @@ environment; `bench/driver.json` holds its pid, which counts only while that pro
 workbench.bench`: `models.runs`, below). For each pair and `--repeat`, one at a time:
 1. It waits while any real task is active (queued for the GPU too): real work comes first.
 2. It clones the bundle into `bench/runs/<run>/<task>/repo` (an identity of its own: nothing
-   commits) and starts a task there through `cli.parser()` and `cmd_start`: `--trial`, task.json
+   commits) and starts a task there (in the case's package, `subdir`) through `cli.parser()` and
+   `cmd_start`: `--trial`, task.json
    `bench` (`{case, run, label}`), the case's size, test, test timeout and grants, `--ask-budget
    0`, `--checkin 0`, `--queue`, `--no-claude-md`, and `--skill` for the run's. Everything else is
    as a real task runs: the same guards, nudges, auto-fix rounds and handovers.
@@ -2615,7 +2622,8 @@ Each row has `wb_commit` (the workbench clone's HEAD) and `label`: run a branch 
 
 **Claude writing it** (`wb bench self <case> --yes [--turns N]`, `bench.self_run`, #118) is the
 other side of the handoff's cost. It runs Claude Code on the case: `claude -p --output-format
-json --max-turns N` (40, `SELF_TURNS`) in a scratch checkout of the case's base. The spec is
+json --max-turns N` (40, `SELF_TURNS`) in a scratch checkout of the case's base, from its package
+(`subdir`). The spec is
 followed by `SELF_PROMPT` (the acceptance command, run before finishing).
 - **What Claude may do.** Edits are allowed (`--permission-mode acceptEdits`), and of the shell
   only the acceptance command (`--allowedTools Bash(<cmd>:*)`, one rule per simple command of
@@ -4549,7 +4557,8 @@ with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
 **bench/cases/<case>/case.json** (`bench.add`): `name`, `task`, `step`, `repo`, `base`,
 `reference`, `size`, `stack`, `test_cmd`, `test_timeout`, `check_cmd`, `hidden` (paths, their
 files in `hidden/`), `allow`, `paths` (the task's grants, from status `grants_kept` once its
-rules are gone), `setup`, `copy`, `siblings` (its worktree's setup: #250), `skills` (the original's), `original` (`model`, `rounds`,
+rules are gone), `setup`, `copy`, `siblings` (its worktree's setup: #250), `subdir` (the package it ran in, '' for the repo's
+top: #425), `skills` (the original's), `original` (`model`, `rounds`,
 `reviews`, `minutes`, `steps`), `base_check` (`fails` or `not checked (timed out)`),
 `created_at`. **bench/runs.jsonl** (`bench.replay`): `ts`, `run`, `label`, `rep`, `case`,
 `model`, `task`, `wb_commit`, `skills`, `outcome` (`passed`, `failed`, `preempted`, `error`),

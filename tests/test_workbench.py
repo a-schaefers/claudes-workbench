@@ -6345,6 +6345,44 @@ class Bench(Base):
         self.assertTrue((bench.home() / "runs" / "r1" / good["task"] / "diff.patch").exists())
         self.assertNotIn("bench-", run_wb("status"))
 
+    def test_a_package_case_is_replayed_set_up_and_graded_in_its_package(self):
+        # #425 (the audit of 1.8): the case kept no package path, so a replay ran from the repo's
+        # root, and an answer.txt written there passed a check of app/answer.txt
+        from workbench import bench
+        app = self.repo / "app"
+        app.mkdir()
+        (app / "CLAUDE.md").write_text("# app\n")
+        (app / ".gitignore").write_text("made-here\n")                    # the setup's
+        subprocess.run(["git", "-C", str(self.repo), "add", "app"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "the app"], check=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-pkg", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo",
+               "--test", "sh tests/check.sh", "--setup", "touch made-here")
+        wait_phase("t-pkg", {"review"})
+        wt = store.Task("t-pkg").worktree
+        self.assertTrue((wt / "app" / "answer.txt").exists())
+        (wt / "app" / "tests").mkdir()
+        (wt / "app" / "tests" / "check.sh").write_text("test -f made-here && grep -qx 42 answer.txt\n")
+        run_wb("accept", "t-pkg", "-m", "feat: the answer")
+        bench.add("t-pkg")
+        case = bench.cases()["t-pkg"]
+        self.assertEqual((case["subdir"], case["hidden"]), ("app", ["app/tests/check.sh"]))
+        good = bench.replay(case, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(good["outcome"], "passed", good)
+        self.assertEqual(store.Task(good["task"]).spec.get("subdir"), "app")
+        diff = (bench.home() / "runs" / "r1" / good["task"] / "diff.patch").read_text()
+        self.assertIn("app/answer.txt", diff)
+        self.assertNotIn("b/answer.txt", diff)
+        # a case made before the package path was kept reads it from its task, while it lasts
+        old = {k: v for k, v in case.items() if k != "subdir"}
+        self.assertEqual(bench.replay(old, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])["outcome"],
+                         "passed")
+        # and without the task, it can't say where it ran: not replayed, never passed
+        shutil.move(store.Task("t-pkg").dir, Path(self.tmp.name) / "gone")
+        row = bench.replay(old, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(row["outcome"], "error")
+        self.assertIn("package", row["why"])
+
     def test_a_run_replays_in_the_background_and_a_second_run_skips_what_is_done(self):
         from workbench import bench
         self.accepted("t-src")

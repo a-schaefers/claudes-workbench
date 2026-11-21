@@ -246,6 +246,9 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 # own commit rejected, the scratch clone without it (#250, the audit of 1.2)
                 "setup": spec.get("setup") or "", "copy": spec.get("copy") or [],
                 "siblings": spec.get("siblings") or [],
+                # the package the task ran in (#375), where each replay runs, sets up and is
+                # graded: from the root, an answer written there passed a package's check (#425)
+                "subdir": spec.get("subdir") or "",
                 "original": {"model": spec.get("model"), "rounds": row.get("rounds"),
                              "reviews": step_row.get("reviews", row.get("reviews")),
                              "minutes": row.get("minutes"), "steps": steps},
@@ -414,9 +417,21 @@ def drive(run: str) -> None:
                     break
 
 
+def subdir(case: dict) -> str | None:
+    """The package a case's task ran in ('' for the repo's top), None when that can't be known:
+    a case made before it was kept (#425, the audit of 1.8) reads it from its task, while the
+    task lasts."""
+    if "subdir" in case:
+        return case["subdir"] or ""
+    task = store.Task(case.get("task") or "")
+    return (task.spec.get("subdir") or "") if case.get("task") and task.exists else None
+
+
 def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str], meta: dict) -> None:
     from . import cli  # cli imports this module
-    argv = ["start", name, "--spec", str(case_dir(case["name"]) / "spec.md"), "--repo", str(repo),
+    # from the package, so wb start finds it as the task's start did (cli._package, #425)
+    argv = ["start", name, "--spec", str(case_dir(case["name"]) / "spec.md"),
+            "--repo", str(repo / (subdir(case) or "")),
             "--size", case.get("size") or "significant", "--model", model, "--test", case["test_cmd"],
             "--test-timeout", str(case.get("test_timeout") or 900), "--ask-budget", "0",
             "--checkin", "0", "--queue", "--trial", "--no-claude-md"]
@@ -442,10 +457,14 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
     from . import cli
     stamp = f"{int(time.time() * 1000) % 10 ** 9:09d}"
     name = f"bench-{case['name'][:30].rstrip('-')}-{stamp}"
-    d = home() / "runs" / run / name
-    d.mkdir(parents=True)
     row = {"ts": store.now(), "run": run, "label": label, "rep": rep, "case": case["name"],
            "model": model, "task": name, "wb_commit": wb_commit(), "skills": skills}
+    if (sub := subdir(case)) is None:  # graded from the root, a package's case can pass wrongly
+        return {**row, "outcome": "error", "why": f"case {case['name']} predates the package path "
+                f"cases keep, and its task {case.get('task')} is gone: where it ran is unknown "
+                "(#425); make it again from a task"}
+    d = home() / "runs" / run / name
+    d.mkdir(parents=True)
     began = time.time()
     log = open(d / "wb.log", "a")
     work = _checkout_at(d, case)
@@ -462,6 +481,9 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
         if not task.exists:
             return {**row, "outcome": "error", "why": "wb start refused"}
         CURRENT["task"] = task
+        if (task.spec.get("subdir") or "") != sub:  # its package's CLAUDE.md gone from the base
+            return {**row, "outcome": "error", "why": f"wb start didn't take {sub or 'the top'} as "
+                    "the package the case's task ran in"}
         st, asks_refused = _wait(task)
         phase = st.get("phase")
         row.update(phase=phase, rounds=st.get("round", 1),
@@ -590,7 +612,7 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
         argv = [claude, "-p", "--output-format", "json", "--max-turns", str(turns),
                 "--permission-mode", "acceptEdits", "--allowedTools", *allow, "--", prompt]
         try:
-            p = subprocess.run(argv, cwd=work, capture_output=True, text=True,
+            p = subprocess.run(argv, cwd=work / (subdir(case) or ""), capture_output=True, text=True,
                                timeout=int(case.get("test_timeout") or 900) * 4)
         except subprocess.TimeoutExpired:
             return {**row, "outcome": "error", "why": "claude -p timed out"}
