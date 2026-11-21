@@ -5154,7 +5154,10 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   with that line and `wb resume`, not a traceback (`runner._repo_gone`, before the checkout); the
   runner's git shim (`gitguard.install`) and the lane's guard (`context.repo_dirs`) take the
   main worktree once the linked one is removed: `git -C <removed>` crashed every round's runner
-  with a CalledProcessError, and the guard held only the removed path (#776). `wb relocate`
+  with a CalledProcessError, and the guard held only the removed path (#776). So does `wb bench
+  add` (its repo `gitops.repo_of`, refused naming `wb relocate` when that is nowhere, and each
+  case's replays through `bench._repo`): it refused the task as "gone: the case is cut from its
+  repo" (#909). `wb relocate`
   (`gitops.relocate`, under the task's command lock) checks the new repo holds the task's base
   commit, finds the git dir it keeps for the worktree (`worktrees/<id>`, whose `gitdir` links back
   to it, a relative link read against that directory; else the one named as gitdir.json's, whose
@@ -6541,7 +6544,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb skill hand\|take <task> <n…>` | | Change a task's skills from its next run. |
 | `wb lessons` / `wb lessons close <id…> -m "…"` | `--task`, `--all` | Open lessons, recurring first (12 unless `--all`); close with why. |
 | `wb notes` / `add "…"` / `drop N…` | | The user's standing delegation preferences (`notes.md`, `- ` lines, at most 20 of 300 characters). |
-| `wb bench add <task>` | `--step N` (the last), `--hidden PATH…` (the test files the step changed), `--check CMD`, `--name CASE` (the task's; `<task>-sN` for a step of several) | Makes a case of one step of an accepted task (*Bench*): the base as a bundle, the spec, the acceptance command, the hidden checks, the grants. Refused: not accepted or a trial, the repo or commit gone, no acceptance command, no hidden checks, ones that pass on the base already, submodules or Git LFS files the repo can't supply (named), or ones its own commit fails in the agent's lane (no replay could pass them). |
+| `wb bench add <task>` | `--step N` (the last), `--hidden PATH…` (the test files the step changed), `--check CMD`, `--name CASE` (the task's; `<task>-sN` for a step of several) | Makes a case of one step of an accepted task (*Bench*): the base as a bundle, the spec, the acceptance command, the hidden checks, the grants. Refused: not accepted or a trial, the repo moved (`wb relocate` named; a removed linked worktree's main one is used, #909) or the commit gone, no acceptance command, no hidden checks, ones that pass on the base already, submodules or Git LFS files the repo can't supply (named), or ones its own commit fails in the agent's lane (no replay could pass them). |
 | `wb bench rm <case…>` | | Removes the cases with their bundles and hidden checks (`bench.remove`); their runs.jsonl rows stay in the report. Refused for an unknown case or while a run goes. Nothing removed one before (#740). |
 | `wb bench list` / `wb bench report` / `wb bench stop` | `report`: `--run ID`, `--label TEXT` | The cases; pass rates, rounds, auto-fixes, minutes and local tokens per label and model, then each case against the original's model and review rounds (with the running run's progress), the preempted count, and each replay that didn't start with why and its `wb.log`, or that the machine broke off (`broke off: <infra>: …`, its task's `runner.log`, #508) (the last 10; a run of only those said "no replays yet", #89); stop the driver, which closes its replay. |
 | `wb bench self <case>` | `--yes` (required: it spends Claude tokens), `--turns N` (40) | Claude Code writes the case (`claude -p`, edits and the acceptance command only), graded by its hidden checks in the original task's lane; one runs.jsonl row (`arm: claude`) and its line: PASS or fail, the weighted tokens, the handoff's cost of the case's step and the ratio, or for a row with only a whole multi-step task's cost, that cost marked not comparable and no ratio (*Bench*). |
@@ -6889,7 +6892,10 @@ it counted as the agent's review round in the slice, #904), `stuck`, `took_over`
 step's share of the row's `claude`, `spend.usage_by_step`, same shape: only in a row of several
 steps whose cost was split, #558).
 
-**bench/cases/<case>/case.json** (`bench.add`): `name`, `task`, `step`, `repo`, `base`,
+**bench/cases/<case>/case.json** (`bench.add`): `name`, `task`, `step`, `repo` (where add ran
+its git: `gitops.repo_of`, the task's checkout or, that linked worktree removed, its repository's
+main one), `git_common` (its git dir: a replay's checkout, LFS objects, submodules and `--copy`
+inputs come from `bench._repo`, the main worktree once `repo` is removed, #909), `base`,
 `reference`, `size`, `stack`, `test_cmd`, `test_timeout`, `check_cmd`, `hidden` (paths, their
 files in `hidden/`), `allow`, `paths` (the task's grants, from status `grants_kept` once its
 rules are gone), `setup`, `copy`, `siblings` (its worktree's setup: #250), `setup_timeout`

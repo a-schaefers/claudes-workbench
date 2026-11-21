@@ -214,11 +214,19 @@ def _submodule_repos(src: Path, commit: str, dest: Path) -> list[str]:
     return left
 
 
+def _repo(case: dict) -> Path:
+    """The case's repo: case.json `repo`, or once that linked worktree is removed, its
+    repository's main one (gitops.repo_of, from `git_common`): read from the removed path, a
+    replay lost its line endings, and one with Git LFS files or submodules failed as "gone"
+    (#909, the third audit of 2026-11-21)."""
+    return gitops.repo_of({"repo": case.get("repo"), "git_common": case.get("git_common")})
+
+
 def checkout(case: dict, dest: Path) -> None:
     """The case's base, checked out at `dest`, with an identity of its own (nothing commits), and
     its Git LFS files and submodules as the task had them, from the case's repo (#509).
     RuntimeError naming what it couldn't reproduce."""
-    repo = Path(case["repo"])
+    repo = _repo(case)
     _clone_base(case_dir(case["name"]) / "base.bundle", dest, repo)
     gitops.git(dest, "config", "user.name", "workbench bench")
     gitops.git(dest, "config", "user.email", "bench@workbench.invalid")
@@ -277,7 +285,7 @@ def _prepared(at: store.Task, where: str) -> None:
 def _inputs(case: dict, repo: Path) -> None:
     """The original checkout's copied paths and siblings, beside a replay's checkout, where its
     wb start --copy and --sibling find them (#250)."""
-    src = Path(case["repo"])
+    src = _repo(case)
     for p in case.get("copy") or ():
         if os.path.lexists(src / p):
             runner._copy(src / p, repo / p)
@@ -298,9 +306,13 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         raise RuntimeError(f"{name} is {st.get('phase')}: a case is made from an accepted task")
     if spec.get("trial") or spec.get("bench"):
         raise RuntimeError(f"{name} is a trial run: a check of workbench, not work to replay")
-    repo = Path(spec.get("repo") or "")
+    # the checkout it started from, else its repository's main worktree once that linked one is
+    # removed, as accept and discard find it: refused as gone, though restore_steps and
+    # step_commit below would have found the commits (#909, the third audit of 2026-11-21)
+    repo = gitops.repo_of(spec)
     if not repo.is_dir():
-        raise RuntimeError(f"{repo} is gone: the case is cut from its repo")
+        raise RuntimeError(f"{spec.get('repo')} moved or was deleted: wb relocate {name} --repo "
+                           "<its new path>, then try again")
     steps = st.get("steps", 1)
     step = step or steps
     if not 1 <= step <= steps:
@@ -354,7 +366,9 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         measured = row.get("steps") or []
         step_row = measured[step - 1] if len(measured) >= step else {}
         grants = context.grants(task)
-        case = {"name": case_name, "task": name, "step": step, "repo": str(repo), "base": base,
+        case = {"name": case_name, "task": name, "step": step, "repo": str(repo),
+                **({"git_common": str(c)} if (c := gitops.common_dir(repo)) else {}),  # _repo
+                "base": base,
                 "reference": ref, "size": spec.get("size"), "stack": spec.get("stack"),
                 "test_cmd": test.group(1), "test_timeout": spec.get("test_timeout") or 900,
                 "check_cmd": check, "hidden": picked, "allow": grants.get("allow") or [],

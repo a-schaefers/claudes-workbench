@@ -11741,6 +11741,41 @@ class Bench(Base):
             run_wb("bench", "add", "t-src")                               # once
         self.assertIn("t-src", run_wb("bench", "list"))
 
+    def test_a_task_from_a_removed_linked_worktree_still_makes_cases_that_replay(self):
+        # #909 (the third audit of 2026-11-21): bench add read task.json `repo` alone and refused
+        # a task started from a linked worktree since removed ("is gone: the case is cut from its
+        # repo"), and a case made before the removal checked its replays out from the gone path
+        from workbench import bench
+        w1 = Path(self.tmp.name) / "w1"
+        gitops.git(self.repo, "worktree", "add", "-q", "-b", "feat", str(w1))
+        os.environ["FAKE_SCENARIO"] = "ok"
+        for name in ("t-wa", "t-wb"):
+            run_wb("start", name, "--spec", str(self.spec), "--repo", str(w1), "--model", "mimo",
+                   "--test", "sh tests/check.sh")
+            wait_phase(name, {"review"})
+            wt = store.Task(name).worktree
+            (wt / "tests").mkdir()
+            (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+            run_wb("accept", name, "-m", "feat: the answer")
+        self.assertIn("hidden checks: tests/check.sh", run_wb("bench", "add", "t-wa"))
+        before = bench.cases()["t-wa"]
+        self.assertEqual(before["git_common"], os.path.realpath(self.repo / ".git"))
+        gitops.git(self.repo, "worktree", "remove", str(w1))
+        self.assertIn("hidden checks: tests/check.sh", run_wb("bench", "add", "t-wb"))
+        self.assertEqual(Path(bench.cases()["t-wb"]["repo"]).resolve(), self.repo.resolve())
+        self.assertEqual(bench._repo(before).resolve(), self.repo.resolve())  # replays: the main one
+        bench.checkout(before, Path(self.tmp.name) / "replay")
+        self.assertFalse((Path(self.tmp.name) / "replay" / "answer.txt").exists())
+        # the repository itself moved: refused naming wb relocate, not "the case is cut"
+        run_wb("bench", "rm", "t-wb")
+        moved = Path(self.tmp.name) / "moved"
+        self.repo.rename(moved)
+        self.addCleanup(lambda: moved.exists() and moved.rename(self.repo))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("bench", "add", "t-wb")
+        self.assertIn(f"{w1} moved or was deleted: wb relocate t-wb --repo <its new path>", err.getvalue())
+
     def squashed(self, name: str) -> store.Task:
         """A two-step task accepted with --merge-as squash after main moved: no branch holds its
         steps."""
