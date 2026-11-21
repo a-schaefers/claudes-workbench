@@ -98,6 +98,30 @@ def opencode_version() -> tuple[int, int] | None:
     return (int(v[1]), int(v[2])) if v else None
 
 
+def opencode_moved(task: store.Task) -> bool:
+    """Whether OpenCode changed under the task since the last wb command started its runner
+    (status `opencode`, set by wb start, feedback, next and resume), or is now before 2.0; if so,
+    the task is left stuck for wb resume, cause `opencode`: not the step's. Only wb start
+    looked: OpenCode reinstalled from npm (1.x) mid-task failed the next round as "opencode
+    exited 1", charged to the model's slice, and every resume repeated it (#866). Not installed
+    or saying no version: the lane's own error says so."""
+    if not (have := opencode_version()):
+        return False
+    now, was = f"{have[0]}.{have[1]}", task.status.get("opencode")
+    if have >= (2, 0) and (not was or was == now):
+        return False
+    msg = (f"OpenCode {now} can't run tasks: workbench needs OpenCode 2.x: {OPENCODE_GET}; then wb "
+           f"resume {task.name}" if have < (2, 0) else
+           f"{OPENCODE_MOVED} ({was}, now {now}): wb resume {task.name} continues it on {now}"
+           + (f". {drift}" if (drift := untested(have)) else ""))
+    task.set_status(phase="stuck", last=msg[:200])
+    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="opencode")
+    return True
+
+
+OPENCODE_MOVED = "OpenCode was changed under this task"
+
+
 def untested(version: tuple[int, int] | None) -> str:
     """A line when ``version`` is outside OPENCODE_TESTED, else ""."""
     lo, hi = OPENCODE_TESTED
@@ -2834,6 +2858,8 @@ def drive(task: store.Task) -> None:
             return _load_failed(task, e)
     if needs_base_check(task):
         _base_check(task)  # on the untouched base, before the agent and the GPU
+    if opencode_moved(task):  # before the GPU is taken for a round that can't run (#866)
+        return
     # beside the running tasks' models when all fit the GPU, else alone once they finish
     with models.GpuLease(m, task.name, say) as lease:
         # this runner reached the lease: from now on gpu.json says whether it holds the GPU, so
@@ -2853,6 +2879,8 @@ def drive(task: store.Task) -> None:
         revived = None  # the round run again after its server went away under it
         while True:
             if _updated(task):  # before the round: its lane, shim and ask server would be new
+                return
+            if not first and opencode_moved(task):  # reinstalled between rounds (#866)
                 return
             if not first:
                 # Again before every round: each request resets Ollama's keep-alive to its own

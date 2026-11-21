@@ -128,6 +128,20 @@ def _coding_used(task: store.Task) -> None:
             {**x, "used": x.get("used") or (store.now() if _spent(x) else None)} for x in rows]})
 
 
+def _opencode_again(task: store.Task) -> None:
+    """wb start's check of OpenCode, again before feedback, next or resume writes anything:
+    reinstalled from npm or GitHub's Latest (1.x) mid-task, the round failed as "opencode exited
+    1" and was charged to the model (#866). The version it finds is the runner's to compare with
+    (status `opencode`, runner.opencode_moved)."""
+    if (have := runner.opencode_version()) and have < (2, 0):
+        die(f"OpenCode {have[0]}.{have[1]} can't run tasks: workbench needs OpenCode 2.x: "
+            f"{runner.OPENCODE_GET}", 3)
+    if have:
+        if drift := runner.untested(have):
+            print(f"note: {drift}")
+        task.set_status(opencode=f"{have[0]}.{have[1]}")
+
+
 def spawn_runner(task: store.Task) -> int:
     _coding_used(task)  # work handed (back) to the agent: Claude's allowance, if any, is spent
     env = context.detached_env()  # the user's PYTHONPATH kept for the agent (#512)
@@ -1016,6 +1030,7 @@ def cmd_start(a):
     task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
+                    opencode=f"{have[0]}.{have[1]}" if have else None,  # runner.opencode_moved
                     skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
     exact, tools = context.test_allowances(a.test)
     context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
@@ -1064,7 +1079,7 @@ def cmd_start(a):
               "the worktree at every step: a clone in WSL's own filesystem (~/...) runs faster")
     if fixed:
         print(f"note: {fixed}")
-    if drift := runner.untested(runner.opencode_version()):
+    if drift := runner.untested(have):
         print(f"note: {drift}")
     print(f"model: {why}" if why != "asked for" else f"model: {m.id} (asked for)")
     print(f"slice: {router.slice(m).line()}")
@@ -1130,6 +1145,7 @@ def cmd_feedback(a):
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
     _need_worktree(task)
+    _opencode_again(task)
     text = a.text if a.text is not None else \
         sys.stdin.read() if a.message == "-" else Path(a.message).read_text(encoding="utf-8")
     if not text.strip():  # before anything is written: an empty one cost a round (the audit)
@@ -1226,6 +1242,7 @@ def cmd_next(a):
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
     _need_worktree(task)
+    _opencode_again(task)
     step = st.get("steps", 1)
     try:  # read before anything is committed: a bad path must leave the step as it was
         nxt = sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text(encoding="utf-8")
@@ -1885,8 +1902,10 @@ INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP, UPDATE_STOP)
 def _interrupted(last) -> bool:
     """Whether status `last` says the task was interrupted from outside: one of INTERRUPTED, or
     runner._updated's (runner.UPDATED, then the task's own `wb resume <name>`), which no exact
-    match could ever hit: after a pull under running tasks, wb resume --all resumed none (#788)."""
-    return last in INTERRUPTED or isinstance(last, str) and last.startswith(runner.UPDATED + ":")
+    match could ever hit: after a pull under running tasks, wb resume --all resumed none (#788).
+    And runner.opencode_moved's, OpenCode changed under it (#866)."""
+    return last in INTERRUPTED or isinstance(last, str) and last.startswith(
+        (runner.UPDATED + ":", runner.OPENCODE_MOVED + " ("))
 
 
 @one_at_a_time
@@ -1956,6 +1975,7 @@ def _resume(task: store.Task) -> None:
         die(f"{name}'s runner is still running")
     if not _rechecks_out(task):
         _need_worktree(task)
+    _opencode_again(task)
     n = st.get("round", 1)
     if _first_round(st):
         # it never ran a round (queued behind the GPU, its model or the base check): round 1

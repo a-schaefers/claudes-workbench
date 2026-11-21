@@ -4434,6 +4434,42 @@ class StartChecks(Base):
         self.assertIn("opencode upgrade --major", runner.OPENCODE_GET)
         self.assertIn(runner.OPENCODE_GET, "\n".join(cli.first_run()))
 
+    def test_opencode_changed_under_a_task_stops_it_for_resume_and_1x_is_refused_before_any_round(self):
+        # #866 (the third 2026-11-21 audit): only wb start checked the version, so OpenCode
+        # reinstalled from npm (1.x) mid-task failed the next round as "opencode exited 1",
+        # charged to the model's slice, and every feedback or resume repeated it
+        from workbench import results
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-oc", "ok", "--no-base-check")
+        task = store.Task("t-oc")
+        self.assertEqual(task.status["opencode"], "2.3")
+        os.environ["FAKE_VERSION"] = "opencode v2.5.0"              # upgraded before the runner
+        runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st.get("session")), ("stuck", None))   # no round ran
+        self.assertIn("OpenCode was changed under this task (2.3, now 2.5): wb resume t-oc", st["last"])
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-oc"]
+        self.assertEqual(rows[-1]["cause"], "opencode")
+        self.assertNotIn(rows[-1]["cause"], results.THE_STEP)
+        self.assertTrue(cli._interrupted(st["last"]))               # wb resume --all takes it
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("resume", "t-oc")
+        self.assertEqual(task.status["opencode"], "2.5")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        os.environ["FAKE_VERSION"] = "opencode v1.9.0"              # npm's, before feedback
+        rounds = sorted(p.name for p in (task.dir / "rounds").iterdir())
+        with self.assertRaises(SystemExit) as e:
+            run_wb("feedback", "t-oc", "--text", "1. Again.")
+        self.assertEqual(e.exception.code, 3)
+        self.assertEqual(sorted(p.name for p in (task.dir / "rounds").iterdir()), rounds)
+        self.assertEqual(task.status["phase"], "review")
+        task.set_status(phase="stuck")
+        with self.assertRaises(SystemExit):
+            run_wb("resume", "t-oc")
+        runner.drive(task)                                         # a runner already spawned
+        self.assertIn("OpenCode 1.9 can't run tasks", task.status["last"])
+
     @unittest.skipUnless(hasattr(os, "ST_NOEXEC"), "statvfs has no noexec flag here (macOS)")
     def test_a_state_dir_on_a_noexec_mount_is_refused_by_start_and_named_by_doctor(self):
         # #851: the git shim and the worktree's own programs live under WB_HOME, so on a noexec
