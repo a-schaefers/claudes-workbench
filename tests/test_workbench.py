@@ -7057,6 +7057,46 @@ class Audio(Base):
                          ["gate and → (nothing)"])
         self.assertEqual(audio.wer("open the gate and walk", "open the walk"), 0.4)
 
+    def test_peak_clipping_and_silence_are_measured_on_the_clips_own_channels_and_rate(self):
+        # #586: measured on ffmpeg's 16 kHz mono copy, a 48 kHz stereo take clipped on its left
+        # channel read peak -6 dBFS and 0% clipped, one with its right channel inverted read
+        # SILENT (the channels cancelled in the downmix), and clipping above 8 kHz was filtered out
+        import array as _array, math, wave as _wave
+        tmp = Path(self.tmp.name)
+
+        def wav(name, rate, chans, secs=1.0):
+            a = _array.array("h")
+            for i in range(int(rate * secs)):
+                a.extend(max(-32767, min(32767, int(32767 * f(i / rate)))) for f in chans)
+            with _wave.open(str(tmp / name), "wb") as w:
+                w.setnchannels(len(chans)); w.setsampwidth(2); w.setframerate(rate)
+                w.writeframes(a.tobytes())
+            return tmp / name
+
+        sine = lambda hz, amp: lambda t: amp * math.sin(2 * math.pi * hz * t)  # noqa: E731
+        clipped_left = wav("clip.wav", 48000, [sine(440, 1.6), sine(440, 0.5)])
+        high = wav("high.wav", 44100, [sine(10000, 1.6)])
+        inverted = wav("inv.wav", 44100, [sine(440, 0.85), sine(440, -0.85)])
+        quiet = wav("quiet.wav", 44100, [lambda t: 0.0, lambda t: 0.0])
+        real_which = shutil.which
+        without = mock.patch.object(audio.shutil, "which",
+                                    lambda x, *a, **k: None if x == "ffmpeg" else real_which(x, *a, **k))
+        for how, ctx in (("ffmpeg", nullcontext()), ("wave alone", without)):
+            if how == "ffmpeg" and not shutil.which("ffmpeg"):
+                continue
+            with self.subTest(how), ctx:
+                for clip in (clipped_left, high):
+                    found = audio.inspect(clip, "sfx", draw=False)
+                    self.assertEqual(found["peak_db"], 0.0, clip.name)
+                    self.assertGreater(found["clipped"], 0.2, clip.name)
+                    self.assertIn("clipped", audio.summary(found, None))
+                found = audio.inspect(inverted, "sfx", draw=False)
+                self.assertNotIn("silent", found)
+                self.assertAlmostEqual(found["peak_db"], -1.4, delta=0.2)
+                self.assertNotIn("SILENT", audio.summary(found, None))
+                found = audio.inspect(quiet, "sfx", draw=False)
+                self.assertTrue(found["silent"])
+
     def test_an_engine_refuses_what_it_has_no_slot_for_and_the_wrong_kind(self):
         tmp, tone = Path(self.tmp.name), self.tone()
         self.engines({"tts": {"command": f"{sys.executable} {tone} --out {{out}}", "gpu": False,

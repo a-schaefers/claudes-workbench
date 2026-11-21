@@ -3554,7 +3554,8 @@ requirement:
 What the runs taught: Kokoro needs eSpeak-ng installed, and a voice needs its language
 (`bm_george` with `en-us` exits "voice/language mismatch"); its takes of one script differ only
 slightly. A sound effect's hit came 0.8 to 1.45 s in (the line's lead), so the skill says to trim
-it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
+it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: read then on the
+16 kHz mono copy (#586), so the stereo original's peak is at least that, and may clip.
 
 - A **command** engine fills `{text}`, `{out}`, `{seed}`, `{seconds}`, `{voice}` and `{lyrics}`
   the way `wb image` fills its placeholders: one argument each, never through a shell. An option
@@ -3590,10 +3591,13 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
   published with its sidecar and spectrogram under the first free `<slug>-<seed>.wav`
   (`media.free`, #267). A url engine POSTs `{model, input, voice, seed, response_format: "wav"}`
   and saves the body. The `unload` URL is POSTed when the batch ends, whether it failed or not.
-- `inspect`: with ffmpeg, it makes a 16 kHz mono PCM copy first (the `wave` module reads only
-  integer PCM, and listeners want 16 kHz), measures loudness with `ebur128` and draws the picture
-  with `showspectrumpic`. Without ffmpeg it uses the `wave` module alone and says "loudness: no
-  ffmpeg". `levels` reads 50 ms blocks: silence is below `SILENT_DB` (-50 dBFS), a gap is
+- `inspect`: with ffmpeg, it makes a 16-bit PCM copy first at the clip's own rate and channels
+  (the `wave` module reads only integer PCM), measures loudness with `ebur128` and draws the
+  picture with `showspectrumpic`; the listener alone gets a 16 kHz mono copy. Without ffmpeg it
+  uses the `wave` module alone and says "loudness: no ffmpeg". Either way the levels come from
+  each frame's loudest channel at the clip's own rate: measured on the 16 kHz mono copy, a stereo
+  take clipped on one channel read clean, one with a channel inverted read SILENT (the downmix
+  cancelled it), and clipping above 8 kHz was filtered out (#586). `levels` reads 50 ms blocks: silence is below `SILENT_DB` (-50 dBFS), a gap is
   `GAP_SECS` (1 s) or more between sounds, and a sample at 0.999 of full scale or more counts as
   clipped. `_spans` aligns the script's words with the heard ones (`difflib`, lower case) and keeps
   the spans heard differently, except those that differ only in spacing or apostrophes

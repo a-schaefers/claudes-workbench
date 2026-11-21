@@ -361,16 +361,16 @@ def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
 def inspect(path: Path, kind: str, script: str = "", seconds: float | None = None,
             ear: tuple[str, dict] | None = None, draw: bool = True,
             log: Path | None = None) -> dict:
-    """What Claude can read of a clip it can't hear. ffmpeg, when here, makes a 16 kHz mono copy
-    first (the wave module reads only integer PCM, and listeners want 16 kHz), measures loudness
-    and draws the spectrogram beside the clip (.png)."""
+    """What Claude can read of a clip it can't hear. ffmpeg, when here, makes an integer PCM copy
+    first (the wave module reads nothing else), measures loudness and draws the spectrogram beside
+    the clip (.png). The levels are measured at the clip's own rate and channels: on a 16 kHz mono
+    copy a stereo take clipped on one channel read clean, and one with a channel inverted read
+    SILENT, its channels cancelled in the downmix (#586). The listener alone gets a 16 kHz mono copy."""
     found: dict = {}
     with tempfile.TemporaryDirectory(prefix=".wb-listen-") as tmp:
-        plain = Path(tmp) / "plain.wav"
-        r = _ffmpeg("-v", "error", "-i", str(path), "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
-                    "-y", str(plain))
-        clip = plain if r and r.returncode == 0 and plain.is_file() else path
-        pcm = _pcm(clip)
+        whole = Path(tmp) / "pcm.wav"
+        r = _ffmpeg("-v", "error", "-i", str(path), "-c:a", "pcm_s16le", "-y", str(whole))
+        pcm = _pcm(whole if r and r.returncode == 0 and whole.is_file() else path)
         if pcm is None:
             found["unreadable"] = "not a PCM WAV the wave module reads" + ("" if r else "; no ffmpeg to convert it")
         else:
@@ -380,6 +380,10 @@ def inspect(path: Path, kind: str, script: str = "", seconds: float | None = Non
             if draw:
                 spectrogram(path, path.with_suffix(".png"))
         if ear and script:
+            plain = Path(tmp) / "plain.wav"  # what listeners want
+            r16 = _ffmpeg("-v", "error", "-i", str(path), "-ac", "1", "-ar", "16000", "-c:a",
+                          "pcm_s16le", "-y", str(plain)) if r is not None else None
+            clip = plain if r16 and r16.returncode == 0 and plain.is_file() else path
             try:
                 heard = transcribe(ear, clip, log or Path(tmp) / "listen.log")
                 found.update(transcript=heard, wer=wer(script, heard),
