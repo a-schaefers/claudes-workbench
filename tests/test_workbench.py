@@ -3696,6 +3696,39 @@ class Context(Base):
         self.assertEqual(len(evs), 1)
         self.assertIn("OpenCode compacted the agent's session mid-round at 51%", evs[0]["text"])
 
+    def test_a_fresh_round_run_again_after_its_server_died_is_handed_over_once(self):
+        # #780 (the second 2026-11-21 audit): a round that began fresh, revived before its first
+        # event, ran _start_fresh again: the handoff went over instructions.md and was wrapped in
+        # a second one, the spec and the diff twice, and a second `fresh` event was logged
+        from workbench import lessons
+        self.start("t-780", "ok", "--test", TEST_CMD)
+        wait_phase("t-780", {"review"})
+        task = store.Task("t-780")
+        feedback = lessons.FEEDBACK_HEAD + " 1. Add a trailing comment line."
+        task.round_dir(2).mkdir(parents=True)
+        task.round_dir(2).joinpath("prompt.md").write_text(feedback)
+        task.set_status(round=2, context="full", full_pct=76)
+        runner._start_fresh(task, 2, runner.fresh_reason(task))
+        first = task.round_dir(2).joinpath("prompt.md").read_text()
+        # the revive: no session began, and notes came in meanwhile
+        self.assertEqual(runner.fresh_reason(task), "the last session ended before it began")
+        store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": "Use tabs."})
+        runner._early_notes(task, 2)
+        runner._start_fresh(task, 2, runner.fresh_reason(task))
+        again = task.round_dir(2).joinpath("prompt.md").read_text()
+        kept = task.round_dir(2).joinpath("instructions.md").read_text()
+        self.assertTrue(kept.startswith(feedback), kept[:200])
+        self.assertNotIn("picking this task up", kept)
+        self.assertIn("Use tabs.", kept)
+        self.assertEqual(again.count("You are picking this task up"), 1)
+        self.assertEqual(again.count("## The task"), first.count("## The task"))
+        self.assertTrue(again.startswith("You are picking this task up in a fresh session (the "
+                                         "last session was 76% full)"), again[:200])
+        self.assertIn("Use tabs.", again)
+        self.assertTrue(store.round_prompt(task, 2).read_text().startswith(feedback))
+        fresh = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0] if e.get("kind") == "fresh"]
+        self.assertEqual(len(fresh), 1)
+
     def test_a_feedback_round_handed_over_mid_round_keeps_the_feedback(self):
         self.start("t-c6", "fill", "--test", TEST_CMD)
         wait_phase("t-c6", {"review"}, timeout=60)

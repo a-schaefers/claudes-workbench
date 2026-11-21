@@ -946,7 +946,11 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
   a full or compacted one carried on (#262, the audit of 1.2).
 
 **A fresh session's prompt** (`_start_fresh`, `handoff_prompt`). The raw prompt is kept as
-`rounds/<n>/instructions.md`, and `prompt.md` becomes: "You are picking this task up in a fresh
+`rounds/<n>/instructions.md` (once a round: a round that began fresh and runs again, revived
+before its first event, makes the handoff again from the kept one, for the work as it stands,
+with the first reason (`_fresh_said`, from its `fresh` event) and no second event, and
+`_early_notes` folds notes into both files; taken as the round's own prompt, the handoff went
+over instructions.md and was wrapped in a second one, #780), and `prompt.md` becomes: "You are picking this task up in a fresh
 session (why)…", `## The task` (the current step's prompt, `current_task_prompt`: `rounds/<step_round>/`
 `instructions.md` when the step began in a fresh session, else its `prompt.md`, `store.round_prompt`,
 which `round_asks`, the lessons and `wb bench add` read too; the spec plus the protocol), `## The work so far` (the committed steps, `git log --oneline

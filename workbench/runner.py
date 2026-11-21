@@ -2287,8 +2287,19 @@ def current_task_prompt(task: store.Task) -> str:
 
 def _start_fresh(task: store.Task, n: int, why: str) -> None:
     path = task.round_dir(n).joinpath("prompt.md")
-    raw = path.read_text().strip()
-    path.with_name("instructions.md").write_text(raw)  # round_asks reads it back
+    kept = path.with_name("instructions.md")
+    # Round n began fresh already, and runs again (its server died before the first event: the
+    # revive): its own prompt is the one kept, and prompt.md is the handoff. Taken as the round's
+    # prompt, the handoff went over instructions.md and was wrapped in a second one, the spec and
+    # the diff twice, and every later reader got the handoff (#780). Made again from the kept one,
+    # for the work as it stands now, and said once.
+    again = kept.is_file()
+    raw = (kept if again else path).read_text().strip()
+    if not again:
+        kept.write_text(raw)  # round_asks reads it back
+    st = task.status
+    if again and not st.get("session") and (said := _fresh_said(task, n)):
+        why = said  # not "the last session ended before it began": the reason it began fresh
     # Not this round's prompt alone: what the step's rounds asked, back to the review feedback.
     # An auto-fix or a steer round after a feedback round, starting fresh, once carried only the
     # failing tests, and the fresh agent fixed them and reported done with the feedback never
@@ -2301,12 +2312,24 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
         asks = round_asks(task, n)  # ends with this round's own: instructions.md is written
         now = raw if len(asks) < 2 else ASKED.format("\n\n".join(asks[:-1])).strip() + "\n\nNow:\n\n" + raw
     path.write_text(handoff_prompt(task, why, now))
-    st = task.status
     task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]] * bool(st.get("session")),
                     context=None, skills_told=None)  # a new session hears the skills again
+    if again and not st.get("session"):  # no session was replaced: the handover is counted once
+        return
     task.event({"ts": store.now(), "round": n, "kind": "fresh", "overflow": why != ASKED_FRESH,
                 "compacted": why == COMPACTED,
-                "text": f"a fresh session for the agent: {why}"})
+                "text": f"{FRESH_SAID}{why}"})
+
+
+FRESH_SAID = "a fresh session for the agent: "
+
+
+def _fresh_said(task: store.Task, n: int) -> str | None:
+    """Why round n began in a fresh session, as its `fresh` event says, or None."""
+    rows = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0]
+            if e.get("kind") == "fresh" and e.get("round") == n
+            and str(e.get("text") or "").startswith(FRESH_SAID)]
+    return rows[-1]["text"][len(FRESH_SAID):] if rows else None
 
 
 # The checks Claude's reviews kept making on 2026-11-17: a rule with no test, a test's expected
@@ -2893,7 +2916,10 @@ def _early_notes(task: store.Task, n: int) -> None:
     if not (notes := pending_steer(task)):
         return
     path = task.round_dir(n).joinpath("prompt.md")
-    path.write_text(path.read_text().rstrip() + "\n\n" + folded_notes(task, n, notes))
+    text = folded_notes(task, n, notes)
+    for f in (path, path.with_name("instructions.md")):  # a revived fresh round's own too (#780)
+        if f == path or f.is_file():
+            f.write_text(f.read_text().rstrip() + "\n\n" + text)
     task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
 
