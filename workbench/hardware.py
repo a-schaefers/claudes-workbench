@@ -773,8 +773,8 @@ def disk_free(path: Path | None) -> int | None:
 def size(n: int | None) -> str:
     """Bytes in decimal GB, the unit models.json's gpu_gb and vram_gb take (and Ollama prints):
     binary GiB labelled GB sat beside a decimal budget, and a hand-set gpu_gb came out 7% small
-    (#523)."""
-    return f"{n / 1e9:.1f} GB" if n else "?"
+    (#523). 0 is 0.0 GB, only None unknown: a full disk and exhausted swap read "?" (#717)."""
+    return f"{n / 1e9:.1f} GB" if n is not None else "?"
 
 
 SYSTEM_NOTE = {

@@ -15998,6 +15998,18 @@ class Hardware(unittest.TestCase):
             self.assertIn("stops wb reading Windows' GPUs: set their memory in models.json gpu_gb",
                           context.interop_gap())
 
+    def test_a_full_models_disk_and_exhausted_swap_read_zero_not_unknown(self):
+        # #717: size(0) printed "?", so a disk with 0 bytes free (ext4's reserved blocks) read as
+        # unknown in wb scout, the moment it mattered most, and so did swap all in use
+        hw = self.fake("Linux", files={"/proc/meminfo": "MemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n"
+                                                        "SwapTotal:       8388608 kB\nSwapFree:              0 kB\n"})
+        with mock.patch.object(hw, "ollama_models_dir", lambda: Path("/data/ollama")), \
+                mock.patch.object(hw, "disk_free", lambda path: 0):
+            out = "\n".join(hw.report())
+        self.assertIn("disk  0.0 GB free where Ollama keeps models (/data/ollama)", out)
+        self.assertIn("swap 8.6 GB (0.0 GB free)", out)
+        self.assertEqual((hw.size(0), hw.size(None)), ("0.0 GB", "?"))
+
     def test_ollamas_quoted_service_environment_and_a_context_that_isnt_a_number(self):
         # the 2026-11-16 audit: systemd quotes a value with a space and the split lost it; "32k"
         # crashed wb scout, which Ollama only warns about

@@ -3233,7 +3233,9 @@ Every size `wb` prints is in decimal GB (`size`, `wb top`'s `_gb`, the progress 
 unit `gpu_gb` and `vram_gb` take and Ollama prints: scout showed a 16 GiB card as "16.0 GB VRAM"
 beside "GPU budget 17 GB", and a 12 GiB card's owner who wrote `{"gpu_gb": 12}` got 7% less than
 the card has (#523), so `gpu_line`'s hint says "the card's memory in decimal GB: 12.9 for a 12
-GiB card". The pane's live view labels its sizes GiB, which they are.
+GiB card". The pane's live view labels its sizes GiB, which they are. `size` prints `?` only
+for None (unknown): 0 is "0.0 GB", since a models disk with nothing free and swap all in use read
+as unknown in `wb scout` (#717).
 `gpu_power_w()`: the cards' draw right now, in watts (None on macOS, or when nothing reads):
 nvidia-smi's `power.draw` summed over the cards that report it, else each sysfs card's
 `device/hwmon/hwmon*/power1_average`, else its `power1_input` (amdgpu generations with no
