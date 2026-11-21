@@ -39,21 +39,23 @@ def recording() -> bool:
 
 
 def set_setting(key: str, value: str) -> dict:
-    """`wb stats set KEY VALUE`. Raises ValueError with the allowed values."""
-    data = store.read_json(path(), {})
-    data = data if isinstance(data, dict) else {}
+    """`wb stats set KEY VALUE`. Raises ValueError with the allowed values. Under stats.lock: two
+    settings picked at once (two sessions' rows, the pane and a shell) each wrote back the snapshot
+    it read, and one was lost while both said it took (#564)."""
     if key in SWITCHES:
         if value not in ("on", "off"):
             raise ValueError(f"{key} is on or off")
-        data[key] = value == "on"
+        change = {key: value == "on"}
     elif key == "every":
         if value not in {str(s) for s in EVERY}:
             raise ValueError(f"every is one of {', '.join(map(str, EVERY))} (seconds)")
-        data["every"] = int(value)
+        change = {"every": int(value)}
     else:
         raise ValueError(f"no setting {key!r}: recording, live or every")
-    data["ts"] = store.now()
-    store.write_json(path(), data)
+    with store.locked(path().with_suffix(".lock")):
+        data = store.read_json(path(), {})
+        data = data if isinstance(data, dict) else {}
+        store.write_json(path(), {**data, **change, "ts": store.now()})
     return settings()
 
 

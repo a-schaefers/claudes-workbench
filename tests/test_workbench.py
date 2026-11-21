@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import types
 import threading
 import time
@@ -9234,6 +9235,35 @@ class Stats(Base):
         for text in ('{"recording": "no", "every": 7}', '[1]', 'not json'):  # hand-edited: ignored
             stats.path().write_text(text)
             self.assertEqual(stats.settings(), stats.DEFAULTS)
+
+    def test_two_settings_changed_at_once_both_stay(self):
+        # #564: each wrote back the snapshot it read, so one change was lost while both said it took.
+        # Each process waits after its read until the other has read too (or a second passes: under
+        # the lock the other can't read until this one has written).
+        from workbench import stats
+        code = textwrap.dedent("""
+            import sys, time
+            from pathlib import Path
+            sys.path.insert(0, sys.argv[1])
+            from workbench import stats, store
+            real, me, other = store.read_json, Path(sys.argv[4]), Path(sys.argv[5])
+            def slow(path, default=None):
+                got = real(path, default)
+                if Path(path).name == "stats.json":
+                    me.touch()
+                    end = time.time() + 1
+                    while not other.exists() and time.time() < end:
+                        time.sleep(0.01)
+                return got
+            store.read_json = slow
+            stats.set_setting(sys.argv[2], sys.argv[3])
+        """)
+        tmp = Path(self.tmp.name)
+        procs = [subprocess.Popen([sys.executable, "-c", code, str(ROOT), key, "off",
+                                   str(tmp / f"read-{key}"), str(tmp / f"read-{other}")])
+                 for key, other in (("live", "recording"), ("recording", "live"))]
+        self.assertEqual([p.wait(timeout=30) for p in procs], [0, 0])
+        self.assertEqual((stats.settings()["live"], stats.settings()["recording"]), (False, False))
 
     def test_a_round_stopped_by_a_guard_says_which_and_the_row_keeps_it(self):
         self.start("t-loop", "loop")

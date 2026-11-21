@@ -4880,7 +4880,7 @@ $WB_HOME (~/.local/state/workbench)
   experiments.json  .lock        wb experiment: {<name>: "on"|"off"}; a missing name is off (*Experiments*)
   progress.json                  progress checks, the user's opt-in: {on, after?, ts}; none: off
   results.jsonl                  one row per closed task: what the router, slices, tuning and skill records learn from
-  stats.json                     the Stats tab's settings ({recording, live, every, ts}; none: all defaults: *Stats recording*)
+  stats.json  stats.lock         the Stats tab's settings ({recording, live, every, ts}; none: all defaults: *Stats recording*)
   lessons.jsonl                  what each task taught, open until written into a skill or closed
   notes.md  notes.lock           wb notes: how the user wants delegation run
   tuning.json                    optional: pin a tuned setting ({"fresh_at": 0.6})
@@ -5131,7 +5131,8 @@ hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_
 - `speed.json`: `{"<model id>": {"write": [tok/s…], "read": [tok/s…]}}`, the last 60 of each.
 - `stats.json`: `{recording, live, every, ts}` (`stats.py`, `wb stats set`): `recording` and `live`
   booleans, `every` 1, 2 or 5 seconds; a missing or mistyped key is its default (`stats.DEFAULTS`:
-  on, on, 2).
+  on, on, 2). `set_setting` changes one key under `stats.lock`, the others kept: two picks at once
+  each wrote back what it had read, and one was lost (#564).
 - `gpu.json`: `{"<pid>": {model, task, since, start, waiting?, tests?}}` (`tests`: true while a
   task's `--unload-for-tests` tests hold the GPU, `model` null then; `since`: its place in the queue,
   the task's `created_at`; `start`: the holder's start time, `/proc/<pid>/stat` field 22, else
