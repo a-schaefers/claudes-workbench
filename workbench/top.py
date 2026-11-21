@@ -205,6 +205,7 @@ class Top:
             self.static = [{"name": g["name"], **({"total": g["vram"]} if g.get("vram") else {})}
                            for g in hardware._windows_gpus()]
         self.probed = 0.0
+        self.reaped = 0.0
         self.loads_at = 0.0
         self.load: dict[str, float] = {}
         self.rack: list[dict] = []
@@ -309,6 +310,22 @@ class Top:
             spec = self.files.json(d / "task.json")
             if isinstance(spec, dict):
                 yield d, spec, self.files.json(d / "status.json", {}) or {}
+
+    def reap(self) -> None:
+        """Fail every live task whose runner died without a word (cli.reap, as `wb events` does),
+        every PROBE_EVERY seconds: a runner OOM-killed mid-round stayed `running`, its round clock
+        counting, for as long as wb top was the only thing looking (#571). reap waits out
+        REAP_GRACE and checks the pid's process itself."""
+        if self.reaped and time.monotonic() - self.reaped < PROBE_EVERY:
+            return
+        self.reaped = time.monotonic()
+        from . import cli  # wb top runs from cli: loaded already
+        for d, _spec, st in list(self._tasks()):
+            if st.get("phase") in LIVE:
+                try:
+                    cli.reap(store.Task(d.name))
+                except OSError:
+                    pass  # a task removed mid-tick; a full disk reaps on a later pass
 
     def running(self, found: dict, now: float) -> list[dict]:
         out = []
@@ -483,6 +500,7 @@ class Top:
 
     def tick(self) -> dict:
         now = time.time()
+        self.reap()
         gpus = self.gpus()  # first: the rack's states read gpu_memory
         if self._probe_due() or self.found is None:
             self.found = models.discover()  # the config, re-read with the servers' answers

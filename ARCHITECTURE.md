@@ -211,8 +211,8 @@ becomes `failed`, `last` "the runner died (see runner.log)", with an `error` eve
 cleared) is killed when `models.runs` shows it still runs `run --standalone` (off Linux the kernel leaves it running when its parent dies, as the
 2026-11-19 audit observed), and `runner.sweep` kills what its agent left. The
 check-and-set is `Task.set_status_if`, under the task's status lock (`locks/<task>.status.lock`), so of two reapers one notifies. `wb status`, `wait`,
-`feedback`, `resume`, `next`, `steer` and `accept` call it, and `wb events` once a minute, so the
-mod wakes Claude. On Linux the agent dies with its runner anyway: `lane.py` sets
+`feedback`, `resume`, `next`, `steer` and `accept` call it, `wb events` once a minute, so the
+mod wakes Claude, and `wb top` every `PROBE_EVERY` (#571). On Linux the agent dies with its runner anyway: `lane.py` sets
 `PR_SET_PDEATHSIG` (SIGKILL) before it execs OpenCode or the tests.
 
 **A full disk** (#342, the audit of 1.4) failed every status write: the runner's crash handler
@@ -2201,6 +2201,10 @@ Each tick reads, cheapest first:
   status `loads`, else, for a task from before it, its `load_secs`), recomputed every
   `LOAD_EVERY` (300 s). Not the tasks' totals: a task that reloaded its 40 s model for each of
   four rounds read "loads ~2m40s" (#577).
+- **Every `PROBE_EVERY` too, the dead runners**: each live task goes through `cli.reap` (as `wb
+  events` does each minute), so a task whose runner died without a word (an OOM kill, a reboot)
+  turns `failed` past `REAP_GRACE` instead of staying `running`, its round clock counting, while
+  the lease view had already dropped its pid (#571).
 
 `--json` prints one object per tick (sizes in bytes; a field the platform can't give is left out,
 never 0):

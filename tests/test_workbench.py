@@ -12640,7 +12640,8 @@ class Top(Base):
         mimo = "ollama/mimo-v2.6:9b-q8_0"
         for name, phase, extra in (("busy", "running", {
                 "round": 2, "round_started_at": now - 30, "session": "s1", "window": 32768,
-                "live_used": {"session": "s1", "used": 8192}, "last": "edit answer.txt"}),
+                "live_used": {"session": "s1", "used": 8192}, "last": "edit answer.txt",
+                "updated_at": now}),  # within REAP_GRACE: not reaped though it names no runner
                 ("old1", "accepted", {"load_secs": 8}), ("old2", "discarded", {"load_secs": 12})):
             d = store.tasks_dir() / name
             d.mkdir(parents=True)
@@ -12704,6 +12705,25 @@ class Top(Base):
         self.assertEqual(optimize.load_secs(runner.models.resolve(model)), 40.0)
         run_wb("accept", "t-re", "-m", "feat: answer")
         self.assertEqual(store.results()[-1]["load_secs"], 80.0)  # the total: both loads, never 0
+
+    def test_a_task_whose_runner_died_is_failed_on_the_next_tick_not_shown_running(self):
+        # #571: an OOM-killed runner's task stayed "running r2 1h30m" in wb top, its clock still
+        # counting, until something else called wb status or wb wait
+        now = time.time()
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        d = store.tasks_dir() / "killed"
+        d.mkdir(parents=True)
+        store.write_json(d / "task.json", {"model": "ollama/mimo-v2.6:9b-q8_0", "created_at": now - 6000})
+        store.write_json(d / "status.json", {"phase": "running", "round": 2, "pid": gone.pid,
+                                             "round_started_at": now - 5400,
+                                             "updated_at": now - cli.REAP_GRACE - 5})
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        snap = self.top(drm).tick()
+        self.assertEqual(snap["running"], [])
+        self.assertEqual((store.Task("killed").status["phase"], store.Task("killed").status["last"]),
+                         ("failed", cli.RUNNER_DIED))
 
     def test_the_default_tick_is_stats_json_every_else_two_seconds(self):
         from workbench import top
