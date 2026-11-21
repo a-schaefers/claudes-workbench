@@ -10912,6 +10912,30 @@ class Routing(Base):
         self.assertEqual(store.Task("t-kind").spec["stack"], ["c"])
         wait_phase("t-kind", {"review"})  # before tearDown deletes what its runner writes (CI, 2026-11-17)
 
+    def test_a_header_counts_as_the_c_family_language_the_repo_is_written_in(self):
+        # #908 (the third audit of 2026-11-21): .h was C, so a C++ repo with a header per source
+        # was "c/c++" and the router took plain-C records as C++ experience; F#, VB and
+        # Gradle-Kotlin-script trees had no stack at all
+        def stack_of(name, *files):
+            d = Path(self.tmp.name) / "stacks" / name
+            d.mkdir(parents=True)
+            for f in files:
+                (d / f).write_text("x\n")
+            subprocess.run(["git", "init", "-q", str(d)], check=True)
+            subprocess.run(["git", "-C", str(d), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(d), "-c", "user.name=t", "-c", "user.email=t@t",
+                            "commit", "-qm", "s"], check=True)
+            return gitops.stack(d)
+        self.assertEqual(stack_of("cpp", "a.cpp", "b.cpp", "a.h", "b.h", "c.h"), ["c++"])
+        self.assertEqual(stack_of("objc", "a.m", "b.mm", "a.h", "b.h"), ["objective-c"])
+        self.assertEqual(stack_of("plain-c", "a.c", "a.h"), ["c"])
+        self.assertEqual(stack_of("headers", "a.h", "b.h"), ["c"])          # nothing else: C
+        self.assertEqual(stack_of("fsharp", "a.fs", "b.fsx", "c.fs"), ["f#"])
+        self.assertEqual(stack_of("vb", "a.vb", "b.vb"), ["visual basic"])
+        self.assertEqual(stack_of("gradle", "build.gradle.kts", "settings.gradle.kts"), ["kotlin"])
+        self.assertEqual(stack_of("cuda", "k.cu", "k.cuh", "m.cpp"), ["cuda", "c++"])
+        self.assertEqual(stack_of("ts", "a.mts", "b.cts", "c.ts"), ["typescript"])
+
     def test_a_trial_run_is_kept_but_not_evidence(self):
         from workbench import router
         self.result("strata/strata", "significant", "discarded", n=4, task="e2e-a")

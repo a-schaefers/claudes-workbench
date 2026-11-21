@@ -5185,8 +5185,10 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   and skips one closed since it listed them (it set a discarded task back to stuck). The runner
   never takes it.
 - **The repo's stack** (`gitops.stack`): from `git ls-files -z`, the top two languages by file
-  extension that each hold at least 20% of the source files. The router and the skill records use
-  it.
+  extension (`LANGUAGES`) that each hold at least 20% of the source files. A `.h` counts as the
+  most common of `HEADERS` (C, C++, Objective-C) among the repo's sources, C when it has none:
+  counted as C, a C++ repo with as many headers as sources was "c/c++", and the router took a
+  model's plain-C record as C++ experience (#908). The router and the skill records use it.
 - **`wb init <dir>`** sets a project up the way Claude keeps every project: a git repo on git's
   default branch (`init.defaultBranch`) with an initial commit, and `AGENTS.md` as a symlink to
   `CLAUDE.md` (an existing `AGENTS.md` becomes `CLAUDE.md`), so OpenCode's agents and Claude read

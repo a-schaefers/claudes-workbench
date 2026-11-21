@@ -1163,15 +1163,22 @@ def footprint(worktree: Path, base: str) -> dict:
 
 
 # Source files by extension, for the kind of work a repo holds (stack). Markup, data and docs
-# say nothing about it and are left out.
+# say nothing about it and are left out. A `.h` is C, C++ or Objective-C, so it isn't here: it
+# goes to whichever of those the repo's sources are mostly (HEADERS). Counted as C, a C++ repo's
+# headers made it "c/c++" and C and C++ records mixed in the router (#908, the third audit of
+# 2026-11-21), which also missed the extensions from mts to cu below.
 LANGUAGES = {
     "py": "python", "js": "javascript", "mjs": "javascript", "cjs": "javascript", "jsx": "javascript",
-    "ts": "typescript", "tsx": "typescript", "c": "c", "h": "c", "cc": "c++", "cpp": "c++",
-    "cxx": "c++", "hpp": "c++", "hh": "c++", "rs": "rust", "go": "go", "java": "java", "kt": "kotlin",
-    "swift": "swift", "m": "objective-c", "cs": "c#", "rb": "ruby", "php": "php", "lua": "lua",
+    "ts": "typescript", "tsx": "typescript", "mts": "typescript", "cts": "typescript",
+    "vue": "javascript", "svelte": "javascript", "astro": "javascript",
+    "c": "c", "cc": "c++", "cpp": "c++", "cxx": "c++", "hpp": "c++", "hh": "c++", "hxx": "c++",
+    "ipp": "c++", "inl": "c++", "cu": "cuda", "cuh": "cuda", "rs": "rust", "go": "go", "java": "java",
+    "kt": "kotlin", "kts": "kotlin", "swift": "swift", "m": "objective-c", "mm": "objective-c",
+    "cs": "c#", "fs": "f#", "fsx": "f#", "vb": "visual basic", "rb": "ruby", "php": "php", "lua": "lua",
     "zig": "zig", "dart": "dart", "scala": "scala", "ex": "elixir", "exs": "elixir", "hs": "haskell",
     "ml": "ocaml", "sh": "shell", "bash": "shell", "gd": "gdscript", "glsl": "glsl", "sql": "sql",
 }
+HEADERS = ("c", "c++", "objective-c")  # what a .h may be, the first when the repo has none of them
 STACK_SHARE = 0.2  # a language holding at least this share of the source files is part of it
 
 
@@ -1183,7 +1190,13 @@ def stack(repo, subdir: str | None = None) -> list[str]:
         names = git(repo, "ls-files", "-z", *(["--", subdir] if subdir else [])).split("\0")
     except (GitError, OSError):
         return []
-    langs = Counter(LANGUAGES[x] for n in names if (x := Path(n).suffix[1:].lower()) in LANGUAGES)
+    exts = Counter(Path(n).suffix[1:].lower() for n in names)
+    langs = Counter()
+    for x, n in exts.items():
+        if x in LANGUAGES:
+            langs[LANGUAGES[x]] += n
+    if exts["h"]:  # max takes the first of HEADERS on a tie: c when the repo has none
+        langs[max(HEADERS, key=lambda lang: langs[lang])] += exts["h"]
     total = sum(langs.values())
     return [lang for lang, n in langs.most_common(2) if n >= STACK_SHARE * total]
 
