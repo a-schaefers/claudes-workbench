@@ -1690,8 +1690,11 @@ async function refreshLive($: any, list: WbTask[], now: number) {
   // the change kept for the clock's next poll. Another task, or one that stopped, is read at once.
   if (focus && ACTIVE.has(focus.phase) && mem.liveKey.startsWith(`${focus.name}@`) &&
     now - mem.liveAt < LIVE_EVERY_MS) return
-  const pane = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
-  if (!pane?.isShown) return // read when it shows again: the key still differs
+  // only the Tasks tab draws the transcript: on Stats or Settings each running round was exported
+  // every LIVE_EVERY_MS for nothing (#838); the key still differs, so it is read on the way back
+  if ((await read($, pane)).tab !== 'tasks') return
+  const shown = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
+  if (!shown?.isShown) return // read when it shows again: the key still differs
   mem.watching = true
   try {
     if (!focus) {

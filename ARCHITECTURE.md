@@ -5920,7 +5920,8 @@ sorted by creation; sets the status line; opens
 the pane once per load when one of the session's own tasks (any task, in workbench mode) is
 queued/running/testing or workbench mode is on (an open the
 user didn't ask for is placed only on a wide terminal; a pane the user closed stays closed for that
-load); refreshes the live transcript while the pane is shown (`wb watch <task> --json --last
+load); refreshes the live transcript while the pane is shown on its Tasks tab (the only one that
+draws it: on Stats or Settings a running round was exported every 5 s for nothing, #838; `wb watch <task> --json --last
 2000`, every 5 s (`LIVE_EVERY_MS`) while the followed task is active, its status writes in
 between waiting for that (#691), at once when the followed task changes or stops; the focus, `focusOf`, sticks to the followed task while it is active,
 else the newest started running one, then queued, else the newest waiting for Claude); submits

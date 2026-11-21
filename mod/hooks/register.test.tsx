@@ -1277,6 +1277,44 @@ test('a running task writing its status on every tool call is re-read at most ev
   expect(watches()).toBe(n + 1)                                 // done: read at once
 })
 
+test('a running task\'s transcript is not read while the pane shows the Stats or Settings tab (#838)', async ($, on) => {
+  // #838: refreshLive checked only that the pane was shown, so a round was exported every five
+  // seconds on tabs that never draw it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })
+  const pane = fakeTasks(on, files, ['fix-it'], true, [], false)
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'watch' ? JSON.stringify({ s: 'claude', t: 'x' }) : '', stderr: '' } }
+  })
+  on('process.spawn', async function* () {                       // wb events, and wb top for the Stats tab
+    yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  await clock.advance(1000)
+  const watches = () => runs.filter(r => r[1] === 'watch').length
+  expect(watches()).toBe(1)                                      // the Tasks tab: read
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  for (const tab of ['tab-stats', 'tab-settings']) {
+    await ui.press({ key: tab })
+    const n = watches()
+    for (let i = 1; i <= 10; i++) {
+      files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'running', round: 1, updated_at: ts0 + i + (tab === 'tab-stats' ? 0 : 20) })
+      await clock.advance(2000)
+    }
+    expect(watches()).toBe(n)                                    // 20 s running: never read there
+  }
+  await ui.press({ key: 'tab-tasks' })
+  await clock.advance(1600)
+  expect(watches()).toBeGreaterThan(1)                           // back on Tasks: read again
+  await ui.unmount()
+})
+
 test('/workbench-quit stops everything; /workbench-quit-and-hand-back-claude hands the tasks to Claude', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, {})
