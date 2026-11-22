@@ -6777,10 +6777,17 @@ class ConfigLayer(Base):
             got = json.loads(env["OPENCODE_CONFIG_CONTENT"])
             self.assertEqual(got["provider"], prov)
             self.assertEqual(got["instructions"], ["/x/rules.md"])
-            self.assertEqual(got["permissions"][0], mine)              # theirs first,
-            self.assertEqual(got["permissions"][-1]["effect"], "deny")  # the rules last
             self.assertEqual(got["share"], "disabled")
             self.assertNotIn("mcp", got)
+            # #994: the rules live in the layer alone, and the content loads after it, so the
+            # user's permissions go into the layer, before the rules, and leave the content
+            self.assertNotIn("permissions", got)
+            self.start("t-347", "ok")
+            wait_phase("t-347", {"review"})
+            layer = json.loads(runner.write_config_layer(store.Task("t-347")).read_text())
+            self.assertEqual(layer["permissions"][0], mine)                # theirs first,
+            self.assertEqual(layer["permissions"].count(mine), 1)
+            self.assertEqual(layer["permissions"][-1]["effect"], "deny")  # the rules after
             os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps({"compaction": {"auto": False},
                                                                 "theme": "dark"})
             got = json.loads(runner.rules_env({"permissions": [], "compaction": {"auto": True}})
@@ -6952,10 +6959,11 @@ class AgentContext(Base):
         task = store.Task("t-ctx")
         layer = json.loads(runner.write_config_layer(task).read_text())
         loaded = layer["instructions"]
-        self.assertEqual(loaded[0], str(context.rules_dir(task) / "HANDBOOK.md"))  # a copy
-        self.assertEqual(Path(loaded[0]).read_text(), context.HANDBOOK.read_text())
+        self.assertEqual(loaded[0], str(task.worktree / "AGENTS.md"))  # first, as OpenCode put it (#994)
+        self.assertEqual(loaded[1], str(context.rules_dir(task) / "HANDBOOK.md"))  # a copy
+        self.assertEqual(Path(loaded[1]).read_text(), context.HANDBOOK.read_text())
         mine = context.rules_dir(task) / "CLAUDE.md"   # a copy: Claude's directory is unreadable
-        self.assertEqual(loaded[1], str(mine))
+        self.assertEqual(loaded[2], str(mine))
         self.assertEqual(mine.read_text(), (tmp / "home" / ".claude" / "CLAUDE.md").read_text())
         self.assertIn(str(task.worktree / "CLAUDE.md"), loaded)        # committed: worktree copy
         self.assertIn(str(task.worktree / ".claude" / "rules" / "style.md"), loaded)
@@ -7042,6 +7050,56 @@ class AgentContext(Base):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "drop"], check=True)
         context.instruction_files(task)
         self.assertFalse((proj / "standards" / "logging.md").exists())
+
+    def test_the_projects_agents_md_skills_and_config_instructions_are_handed_to_the_layer(self):
+        # #994 (2026-11-22): the agent's OpenCode runs with the project's config shut out, which
+        # drops what it found there itself: the AGENTS.md files from the package up, the
+        # project's skills and its opencode.json `instructions`. wb hands them back, in the order
+        # OpenCode loaded them, from the worktree only
+        home = Path(self.tmp.name) / "home"
+        os.environ["HOME"] = str(home)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        write_skill(home / ".claude" / "skills" / "inner", "inner", "Use when mine.")  # personal
+        write_skill(home / ".claude" / "skills" / "mine", "mine", "Use when mine.")
+        packages = self.repo / "packages"
+        app = packages / "app"
+        (self.repo / "docs").mkdir()
+        app.mkdir(parents=True)
+        for f, text in ((self.repo / "AGENTS.md", "top agents\n"), (packages / "AGENTS.md", "between\n"),
+                        (app / "AGENTS.md", "package agents\n"), (app / "CLAUDE.md", "package agents\n"),
+                        (self.repo / "docs" / "a.md", "a\n"), (self.repo / "docs" / "b.md", "b\n"),
+                        (app / "notes.md", "notes\n"), (Path(self.tmp.name) / "outside.md", "outside\n")):
+            f.write_text(text)
+        (self.repo / "opencode.json").write_text(json.dumps({"instructions": [
+            "docs/*.md", "https://example.invalid/rules.md", str(Path(self.tmp.name) / "outside.md"),
+            "~/outside.md", "../outside.md"]}))
+        (app / "opencode.jsonc").write_text('{// the package\'s own\n"instructions": ["notes.md"]}\n')
+        write_skill(self.repo / ".claude" / "skills" / "top", "top", "Use when top.")
+        write_skill(self.repo / ".opencode" / "skills" / "oc", "oc", "Use when oc.")
+        write_skill(app / ".agents" / "skills" / "group" / "inner", "inner", "Use when nested.")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a package"], check=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-994", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        wait_phase("t-994", {"review"})
+        task = store.Task("t-994")
+        wt = task.worktree
+        self.assertEqual(task.spec["subdir"], "packages/app")
+        files, nested = context.instruction_files(task)
+        self.assertEqual(files[:4], [wt / "packages/app/AGENTS.md", wt / "packages/AGENTS.md",
+                                     wt / "AGENTS.md", context.rules_dir(task) / "HANDBOOK.md"])
+        self.assertNotIn(wt / "packages/app/CLAUDE.md", files)       # its AGENTS.md's text: once
+        self.assertEqual(files[-3:], [wt / "packages/app/notes.md", wt / "docs/a.md", wt / "docs/b.md"])
+        self.assertFalse([f for f in files if f.name == "outside.md"])
+        self.assertNotIn("packages/AGENTS.md", nested)
+        self.assertEqual(dict(context.fixed_prompt(task)[1]).get("AGENTS.md"), 2)  # counted once
+        own = [wt / "packages/app/.agents/skills", wt / ".claude/skills", wt / ".opencode/skills"]
+        self.assertEqual(context.project_skill_dirs(task), own)
+        layer = context.layer(task)
+        self.assertEqual(layer["skills"][-3:], [str(d) for d in own])
+        denied = {r["resource"] for r in layer["permissions"]
+                  if r["action"] == "skill" and r["effect"] == "deny"}
+        self.assertEqual(denied & {"inner", "mine", "top", "oc"}, {"mine"})  # a project's keeps its name
 
     def test_uncommitted_local_instructions_come_from_the_repo(self):
         from workbench import context
@@ -7762,6 +7820,71 @@ class RealOpenCode(Base):
         self.assertEqual(runner.claude_files_changed("?? opencode.json\n?? .opencode/x.json\n"),
                          ["opencode.json", ".opencode/x.json"])
 
+    def test_a_projects_agents_md_and_skills_reach_the_agent_and_its_config_lifts_nothing(self):
+        # #994 (2026-11-22): the rules went again in OPENCODE_CONFIG_CONTENT, whose 120,000 bytes
+        # a bare task's nearly filled; past them the fallback shut the project's config out, and
+        # AGENTS.md and the project's skills with it. Now it is always shut out, and wb hands those
+        # back; the user's global AGENTS.md still loads (a temp XDG_CONFIG_HOME, not the real one)
+        xdg = Path(self.tmp.name) / "xdg-994"
+        (xdg / "opencode").mkdir(parents=True)
+        (xdg / "opencode" / "AGENTS.md").write_text("CANARY-GLOBAL-AGENTS\n")
+        os.environ["XDG_CONFIG_HOME"] = str(xdg)
+        (self.repo / "AGENTS.md").write_text("CANARY-AGENTS-MD\n")
+        write_skill(self.repo / ".claude" / "skills" / "proj", "proj", "Use when CANARY-PROJ-SKILL.",
+                    "CANARY-PROJ-BODY\n")
+        write_skill(self.repo / ".agents" / "skills" / "group" / "deep", "deep",
+                    "Use when CANARY-NESTED-SKILL.")
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs" / "extra.md").write_text("CANARY-PROJ-INSTR\n")
+        marker = Path(self.tmp.name) / "plugin-ran"
+        (self.repo / ".opencode" / "plugins").mkdir(parents=True)
+        (self.repo / ".opencode" / "plugins" / "p.js").write_text(
+            f"import fs from 'fs'; fs.writeFileSync({json.dumps(str(marker))}, 'x');\n"
+            "export const P = async () => ({});\n")
+        (self.repo / "opencode.json").write_text(json.dumps({
+            "instructions": ["docs/extra.md"], "agent": {"build": {"prompt": "CANARY-PROJ-PROMPT"}},
+            "permissions": [{"action": "shell", "resource": "*", "effect": "allow"}]}))
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "the project's own"], check=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps(       # rules past the old cap
+            {"allow": [f"wb-filler-{i} *" for i in range(400)]}))
+        wt = str(store.Task("t-994").worktree)
+        task, answers = self.run_calls("t-994", [
+            {"name": "shell", "arguments": {"command": "curl --version", "workdir": wt}},
+            {"name": "skill", "arguments": {"id": "proj"}}])
+        env = runner.agent_env(task)
+        layer = json.loads(Path(env["OPENCODE_CONFIG"]).read_text())
+        self.assertGreater(len(json.dumps(layer["permissions"]).encode()), runner.CONFIG_CONTENT_MAX)
+        self.assertNotIn("permissions", json.loads(env["OPENCODE_CONFIG_CONTENT"]))
+        self.assertIn("permission.rejected", answers[0])     # the project's allow-all lifts nothing
+        self.assertIn("CANARY-PROJ-BODY", answers[1])        # its skill loads
+        reqs = [json.loads(line) for line in
+                (Path(self.tmp.name) / "t-994-requests.jsonl").read_text().splitlines()]
+        text = json.dumps(max(reqs, key=lambda r: len(r.get("tools", []))))
+        for seen in ("CANARY-GLOBAL-AGENTS", "CANARY-AGENTS-MD", "CANARY-PROJ-SKILL",
+                     "CANARY-NESTED-SKILL", "CANARY-PROJ-INSTR"):
+            self.assertTrue(seen in text, seen)              # (not assertIn: a prompt per failure)
+        self.assertEqual(text.count("CANARY-AGENTS-MD"), 1)
+        self.assertFalse("CANARY-PROJ-PROMPT" in text)       # its agent's prompt isn't OpenCode's
+        self.assertFalse(marker.exists())                    # nor does its plugin run
+
+    def test_the_users_own_config_contents_old_style_permission_lifts_no_rule(self):
+        # #994's review (2026-11-22): OpenCode 2.3.2 still reads the 1.x `permission` object,
+        # turned into rules ahead of the same document's `permissions`; the rules then left
+        # OPENCODE_CONFIG_CONTENT for the layer, which loads before it, and a user's own
+        # `{"permission": {"*": "allow"}}` there came after the rules and lifted every one
+        xdg = Path(self.tmp.name) / "xdg-legacy"   # wb reads the content beside no WB_OPENCODE_CONFIG
+        (xdg / "opencode").mkdir(parents=True)
+        shutil.copy(os.environ.pop("WB_OPENCODE_CONFIG"), xdg / "opencode" / "opencode.json")
+        os.environ.update(XDG_CONFIG_HOME=str(xdg),
+                          OPENCODE_CONFIG_CONTENT=json.dumps({"permission": {"*": "allow"}}))
+        wt = str(store.Task("t-legacy").worktree)
+        task, answers = self.run_calls("t-legacy", [
+            {"name": "shell", "arguments": {"command": "curl --version", "workdir": wt}}])
+        self.assertIn("permission.rejected", answers[0])
+        env = runner.agent_env(task)
+        self.assertNotIn("permission", json.loads(env["OPENCODE_CONFIG_CONTENT"]))
+
     def test_sudo_is_refused_even_inside_a_compound_command(self):
         wt = str(store.Task("t-sudo").worktree)  # known before the task starts
         _, answers = self.run_calls("t-sudo", [
@@ -7982,7 +8105,8 @@ class RealOpenCodeRun(Base):
     def test_a_projects_opencode_json_keeps_neither_compaction_nor_the_window_nor_titles(self):
         # #519 (checked on OpenCode 2.3.2): a repo's committed opencode.json loads after the layer
         # and won: compaction off, a wider window than wb planned the handover against, titles
-        # to the project's small_model. Said again in OPENCODE_CONFIG_CONTENT, none of it holds.
+        # to the project's small_model. Said again in OPENCODE_CONFIG_CONTENT, none of it holds
+        # (and since #994 the project's config is shut out besides).
         task, st = self.answered([WRITE_42])
         (task.worktree / "opencode.json").write_text(json.dumps({
             "compaction": {"auto": False}, "small_model": "cap/other", "autoupdate": True,
@@ -9914,8 +10038,6 @@ class Permission(Base):
         for cmd in ("gem install rails", "luarocks install busted"):    # a new dependency asks
             self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
         self.assertEqual(self.verdict(rules, "stdbuf -oL sudo x"), "deny")   # still the hard limit
-        layer = json.loads(runner.write_config_layer(task).read_text())   # still one string
-        self.assertNotIn("OPENCODE_DISABLE_PROJECT_CONFIG", runner.rules_env(layer))
 
     def test_the_lisps_schemes_forth_and_the_checks_guides_checkers_run_without_asking(self):
         # the owner, 2026-11-22 ("does our whitelisting too strict"): Guile, SBCL, Racket and the
@@ -10077,29 +10199,45 @@ class Permission(Base):
         context.grant(task, "test_tools", context.test_allowances("cargo test")[1])
         self.assertEqual(self.verdict(context.shell_rules(task), "cargo publish"), "deny")
 
-    def test_a_bare_tasks_rules_leave_room_in_their_one_environment_string(self):
-        # the owner's 2026-11-22 request for the infra tools took a bare task's rules to about
-        # 112 KB of CONFIG_CONTENT_MAX's 120,000, every allowed entry ~135 bytes with its `*=*`
-        # copy. Past it the rules move to the layer file and OPENCODE_DISABLE_PROJECT_CONFIG,
-        # which drops AGENTS.md and the project's skills (rules_env). Measured in the suite's
-        # home it said less than a real install (the review, 2026-11-22): each tool home that
-        # exists adds its lane rules, about 5.8 KB for all of them. So a fixed home twice: an
-        # empty one keeps 8 KiB spare, so the next addition can't cross it unseen, and one with
-        # every TOOL_HOMES directory, the fullest machine the lane plans for, 4 KiB
+    def test_the_rules_stay_out_of_the_environment_however_long_they_grow(self):
+        # #994 (2026-11-22): the rules went again in OPENCODE_CONFIG_CONTENT, one environment
+        # string, and a bare task's took about 112 KB of CONFIG_CONTENT_MAX's 120,000; past it the
+        # fallback dropped AGENTS.md and the project's skills, so the allowlist couldn't grow. Now
+        # they live in the layer file alone, the project's config always shut out: on the fullest
+        # machine the lane plans for (every TOOL_HOMES directory) and past the old cap besides,
+        # the environment carries only the switch and wb's few pinned keys
         self.start("t-room", "ok")
         wait_phase("t-room", {"review"})
         home = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, home, True)
         self.addCleanup(os.environ.__setitem__, "HOME", os.environ["HOME"])
         os.environ["HOME"] = str(home)
-        for spare, homes in ((8 * 1024, ()), (4 * 1024, context.TOOL_HOMES)):
-            for d in homes:
-                (home / d).mkdir(parents=True, exist_ok=True)
-            layer = json.loads(runner.write_config_layer(store.Task("t-room")).read_text())
+        for d in context.TOOL_HOMES:
+            (home / d).mkdir(parents=True, exist_ok=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps(
+            {"allow": [f"wb-filler-{i} *" for i in range(400)]}))
+        layer = json.loads(runner.write_config_layer(store.Task("t-room")).read_text())
+        self.assertGreater(len(json.dumps(layer["permissions"]).encode()), runner.CONFIG_CONTENT_MAX)
+        env = runner.rules_env(layer)
+        self.assertEqual({k: env[k] for k in runner.PROJECT_CONFIG_OFF},
+                         dict.fromkeys(runner.PROJECT_CONFIG_OFF, "1"))
+        got = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        self.assertNotIn("permissions", got)
+        self.assertLess(len(env["OPENCODE_CONFIG_CONTENT"]), 4096)
+        self.assertTrue(set(runner.RESTATED) - {"tool_output"} <= set(got))
+        # a user's own content too long to add to leaves wb's keys alone, not the switch
+        with mock.patch.object(runner.models, "users_config_content",
+                               return_value={"theme": "x" * runner.CONFIG_CONTENT_MAX}):
             env = runner.rules_env(layer)
-            self.assertNotIn("OPENCODE_DISABLE_PROJECT_CONFIG", env)
-            size = len(env["OPENCODE_CONFIG_CONTENT"].encode())
-            self.assertLessEqual(size, runner.CONFIG_CONTENT_MAX - spare, (size, len(homes)))
+        self.assertNotIn("theme", json.loads(env["OPENCODE_CONFIG_CONTENT"]))
+        self.assertEqual(env["OPENCODE_DISABLE_PROJECT_CONFIG"], "1")
+        # a user's own `=0` under either name doesn't reach the agent's OpenCode: 2.3.2 reads
+        # OPENCODE_CONFIG_PROJECT_DISABLE first, so that one would turn the switch back off
+        with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_PROJECT_DISABLE": "0",
+                                          "OPENCODE_DISABLE_PROJECT_CONFIG": "0"}):
+            env = runner.agent_env(store.Task("t-room"))
+        self.assertEqual((env["OPENCODE_CONFIG_PROJECT_DISABLE"],
+                          env["OPENCODE_DISABLE_PROJECT_CONFIG"]), ("1", "1"))
 
     def test_git_by_path_is_refused_but_a_directory_named_git_is_not(self):
         # `*/git` refused `go test ./internal/git` whatever Claude allowed, and `time -p sudo`

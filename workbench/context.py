@@ -1,11 +1,12 @@
 """What the agent knows before it starts, so it works the way Claude would in the same repo.
 
-OpenCode reads AGENTS.md by itself but not CLAUDE.md, and it lists every skill under
-~/.claude/skills and the project's .claude/skills. This module adds the rest to the task's
-config layer: the workbench handbook, the user's and the repo's Claude instructions, a map of
-the nested CLAUDE.md files to read on the way, and a skill policy (the user's personal skills
-and /workbench itself are hidden, leaving the project's own; so is `question`, which nobody
-answers headless).
+The agent's OpenCode runs with the project's own config shut out (OPENCODE_DISABLE_PROJECT_CONFIG,
+runner.rules_env), which also stops it reading the project's AGENTS.md and skills; it still lists
+the user's global ones (~/.claude/skills and the like). This module gives the task's config layer
+everything else: the project's AGENTS.md, skills and opencode.json `instructions` handed back,
+the workbench handbook, the user's and the repo's Claude instructions, a map of the nested
+CLAUDE.md files to read on the way, and a skill policy (the user's personal skills and /workbench
+itself are hidden, leaving the project's own; so is `question`, which nobody answers headless).
 """
 from __future__ import annotations
 
@@ -70,7 +71,7 @@ _WRAPPERS = ("env", "env -i", "env --", "xargs", "xargs -0", "xargs -r", "xargs 
 
 def _denied(commands) -> tuple[str, ...]:
     # `sudo *` matches a bare `sudo` too (OpenCode makes a trailing " *" optional): one rule each,
-    # as the rules travel in one environment string (runner.CONFIG_CONTENT_MAX)
+    # not a second for the bare word
     return tuple(f"{c} *" for c in commands) + \
         tuple(f"{w} {c} *" for w in _WRAPPERS for c in commands)
 
@@ -315,8 +316,8 @@ INSTALL_FLAGS = ("--frozen-lockfile", "--immutable", "--prefer-offline", "--offl
 # and the common CI lines with two, as written, by the managers that spell them:
 # `pnpm install --frozen-lockfile --prefer-offline` and `npm i --no-audit --no-fund` asked first
 # (#916, the third 2026-11-21 audit). A short list, not every pair: with each rule's `*=*` copy
-# those were ~80 KB, past CONFIG_CONTENT_MAX, whose fallback drops AGENTS.md and the project's
-# skills. No flag with `=*`: the `*` would let a package name through.
+# those were ~80 KB of rules (then past runner.CONFIG_CONTENT_MAX, which bounded the rules until
+# #994). No flag with `=*`: the `*` would let a package name through.
 INSTALL_FLAG_PAIRS = {
     ("npm install", "npm i"): ("--no-audit --no-fund", "--no-fund --no-audit",
                                "--prefer-offline --no-audit", "--no-audit --prefer-offline"),
@@ -2184,9 +2185,10 @@ def external_rules(task: store.Task) -> list[dict]:
 # Claude's files: the instructions every agent reads, and the project's skills and settings.
 # The agent proposes a change to them in its summary; Claude makes it.
 CLAUDE_FILES = ("*CLAUDE.md", "*CLAUDE.local.md", "*AGENTS.md", ".claude/*", "*/.claude/*")
-# and OpenCode's project config, which loads after the task's layer: an `opencode.json` the agent
-# wrote lifted its own denies from the next round on (the 2026-11-16 audit). The runner also puts
-# the rules last (OPENCODE_CONFIG_CONTENT), so these only keep the file tools off them.
+# and OpenCode's project config, which loaded after the task's layer: an `opencode.json` the agent
+# wrote lifted its own denies from the next round on (the 2026-11-16 audit). OpenCode no longer
+# loads it at all (OPENCODE_DISABLE_PROJECT_CONFIG, runner.rules_env, #994), but wb still reads its
+# `instructions` (project_config_instructions), so these keep the file tools off them.
 OPENCODE_FILES = ("*opencode.json", "*opencode.jsonc", ".opencode/*", "*/.opencode/*")
 # Every MCP server's tools but workbench's: the user's own servers in their global OpenCode config
 # (a GitHub or database server, with their token) reached every agent (the 2026-11-16 audit), and
@@ -2474,12 +2476,14 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
                     load.append(base / rel)
                     break
     proj = [(p, p, False) for p in load] + project_rules(task, wt)  # through their links (#828)
-    load = [handbook, *import_files(task, roots + proj)]  # #513
-    # OpenCode already loads the worktree's AGENTS.md: skip a CLAUDE.md with the same text (one
-    # only in the user's checkout isn't loaded, so it can't stand in for CLAUDE.md)
-    # (and, started in a package, the package's too: checked on OpenCode 2.3, #375)
-    agents = {_digest(a) for a in {wt / "AGENTS.md", wt / (sub or "") / "AGENTS.md"} if a.is_file()}
-    seen, files = set(agents), []
+    # The project's AGENTS.md first, the package's before the top's, where OpenCode put them when
+    # it read them itself; the project's opencode.json `instructions` last, after the layer's, as
+    # OpenCode loaded that file after it (#994). A CLAUDE.md with an AGENTS.md's text is skipped:
+    # one copy is enough (one only in the user's checkout isn't loaded, so it can't stand in).
+    agents = agents_files(task, wt)
+    load = [*agents, handbook, *import_files(task, roots + proj),  # #513
+            *project_config_instructions(task, wt)]
+    seen, files = set(), []
     for p in load:
         d = _digest(p)
         if d not in seen:
@@ -2487,8 +2491,76 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
             files.append(p)
     nested = [p for p in _tracked(wt, "*CLAUDE.md", "*AGENTS.md")
               if "/" in p and Path(p).name in ("CLAUDE.md", "AGENTS.md")
-              and not p.startswith(".claude/") and Path(p).parent.as_posix() != sub]
+              and not p.startswith(".claude/") and Path(p).parent.as_posix() != sub
+              and wt / p not in agents]
     return files, nested
+
+
+# Where OpenCode found a project's AGENTS.md, skills and config itself: the directory it runs in
+# and each one above it (on up to the home directory; above the worktree is workbench's state,
+# not the project, so wb stops at the worktree's top). The runner now shuts that reading out
+# (OPENCODE_DISABLE_PROJECT_CONFIG, #994, 2026-11-22: what a project's opencode.json or .opencode/
+# sets would load after the task's layer and could lift its rules), and wb hands these back
+# through the layer's `instructions` and `skills`. Measured on OpenCode 2.3.2 with
+# tests/capture_llm.py: the switch drops the project's AGENTS.md (and those above it), its
+# skills in .claude/skills, .agents/skills, .opencode/skills and .opencode/skill (nested ones
+# too), its opencode.json and .opencode/ (instructions, agents and their prompts, commands,
+# plugins); the global ~/.config/opencode/AGENTS.md and the user's own skills still load.
+PROJECT_SKILL_DIRS = (".claude/skills", ".agents/skills", ".opencode/skills", ".opencode/skill")
+PROJECT_CONFIGS = ("opencode.json", "opencode.jsonc", ".opencode/opencode.json",
+                   ".opencode/opencode.jsonc")
+
+
+def _project_dirs(task: store.Task, wt: Path) -> list[Path]:
+    """The task's working directory (its package, task.json `subdir`) and each one above it,
+    up to the worktree's top ``wt``, nearest first."""
+    parts = Path(task.spec.get("subdir") or "").parts
+    return [wt.joinpath(*parts[:i]) for i in range(len(parts), -1, -1)]
+
+
+def agents_files(task: store.Task, wt: Path) -> list[Path]:
+    """The project's AGENTS.md files OpenCode would have loaded, nearest first."""
+    return [d / "AGENTS.md" for d in _project_dirs(task, wt) if (d / "AGENTS.md").is_file()]
+
+
+def project_skill_dirs(task: store.Task) -> list[Path]:
+    """The project's skill directories OpenCode would have listed (PROJECT_SKILL_DIRS), each a
+    parent the layer's `skills` lists every skill under."""
+    wt = task.worktree if task.worktree.is_dir() else Path(task.spec["repo"])
+    return [d / s for d in _project_dirs(task, wt) for s in PROJECT_SKILL_DIRS if (d / s).is_dir()]
+
+
+def project_config_instructions(task: store.Task, wt: Path) -> list[Path]:
+    """The files a project's opencode.json (PROJECT_CONFIGS, in the task's directory or above
+    it) names in `instructions`, found as OpenCode finds them: each pattern globbed in the task's
+    directory and each one up to the worktree's top. Only what is in the worktree: a URL (OpenCode
+    fetched it on every run, a network call nobody allowed), an absolute or `~/` path (outside the
+    project, where its other keys stay unread too) are left out. Its other keys stay unread on
+    purpose: `plugin` and .opencode/plugins run code in OpenCode's process, outside the rules;
+    `formatter` and `lsp` run commands (and may fetch servers) the shell rules never see; `agent`,
+    `mode` and `command` replace the prompt and the tools wb measured; `permission(s)`, `mcp`,
+    `provider`, `model`, `compaction` and the like are the layer's (#994, 2026-11-22)."""
+    dirs = _project_dirs(task, wt)
+    top = os.path.realpath(wt)
+    patterns: list[str] = []
+    for d in dirs:
+        for name in PROJECT_CONFIGS:
+            try:
+                cfg = json.loads(models._strip_jsonc((d / name).read_text()))
+            except (OSError, ValueError, UnicodeDecodeError):
+                continue
+            got = cfg.get("instructions") if isinstance(cfg, dict) else None
+            patterns += [p for p in got if isinstance(p, str)] if isinstance(got, list) else []
+    out: list[Path] = []
+    for pat in dict.fromkeys(patterns):
+        if not pat or "://" in pat or pat.startswith(("~", "/")) or os.path.isabs(pat):
+            continue
+        for d in dirs:
+            for rel in sorted(glob.glob(pat, root_dir=d, recursive=True, include_hidden=True)):
+                f = d / rel
+                if f.is_file() and _under(os.path.realpath(f), top) and f not in out:
+                    out.append(f)
+    return out
 
 
 # What OpenCode 2.3 itself puts before the instructions: its system prompt and the tools left
@@ -2509,8 +2581,7 @@ def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
     # at wb start the runner has yet to check the worktree out (#529): the checkout stands in
     wt = task.worktree if task.worktree.is_dir() else Path(task.spec["repo"])
     named = {rules / "HANDBOOK.md": "the handbook", rules / "CLAUDE.md": "~/.claude/CLAUDE.md"}
-    paths = [*files, *([wt / "AGENTS.md"] if (wt / "AGENTS.md").is_file() else []),
-             task.round_dir(1) / "prompt.md"]
+    paths = [*files, task.round_dir(1) / "prompt.md"]  # AGENTS.md among the files (#994)
     parts = [("OpenCode's own prompt and tools", OPENCODE_BASE_TOKENS)]
     for p in paths:
         try:
@@ -2529,7 +2600,7 @@ def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
     return sum(n for _, n in parts), parts
 
 
-def denied_skills(extra: list[str] | None = None, project: Path | None = None) -> list[str]:
+def denied_skills(extra: list[str] | None = None, project: list[Path] | None = None) -> list[str]:
     """The user's personal skills (~/.claude/skills, the synced Claude-app ones included) are
     theirs, about their other work: an agent sees only the project's own .claude/skills. On
     2026-11-16 an agent, its context full, summarised a personal publishing skill
@@ -2541,9 +2612,10 @@ def denied_skills(extra: list[str] | None = None, project: Path | None = None) -
                  Path.home() / ".agents" / "skills"}:
         names |= {s.parent.name for s in home.glob("*/SKILL.md")}
         names |= {s.parent.name for s in (home / "synced").glob("*/*/SKILL.md")}
-    if project:  # a project's own skill keeps its name (the personal ones are unreadable anyway)
-        for own in (".claude", ".agents"):
-            names -= {s.parent.name for s in (project / own / "skills").glob("*/SKILL.md")}
+    # a project's own skill keeps its name (the personal ones are unreadable anyway): ``project``,
+    # its skill directories (project_skill_dirs), nested skills too, as OpenCode lists them
+    for own in project or ():
+        names -= {s.parent.name for s in own.rglob("SKILL.md")}
     return sorted(names | {"workbench", *(extra or [])})
 
 
@@ -2575,15 +2647,16 @@ def layer(task: store.Task) -> dict:
     have = skills.available()
     mine = [n for n in task.status.get("skills") or [] if n in have]
     handed = [str(have[n]["path"]) for n in mine]
+    own = project_skill_dirs(task)  # the project's, which OpenCode no longer finds itself (#994)
     # A handed skill keeps its name though a personal skill has it too (a library `pdf`, then the
     # app synced the user's own): denied by name, its every load failed while the agent was told
     # to load it, and wb skill list advised rewriting a good skill (#515). OpenCode takes the
     # handed one by its library path, listed after the personal ones (checked on OpenCode 2.3)
     rules += [{"action": "skill", "resource": n, "effect": "deny"}
-              for n in denied_skills(task.spec.get("deny_skills"), task.worktree)
+              for n in denied_skills(task.spec.get("deny_skills"), own)
               if n not in mine or n == "workbench" or n in (task.spec.get("deny_skills") or ())]
     # the skill library is Claude's to write, with or without the kernel's lane
     rules += [{"action": "edit", "resource": f"{p.rstrip('/')}/*", "effect": "deny"}
               for p in _both([skills.library()])]
     return {"instructions": [str(p) for p in files + ([note] if note else [])],
-            "permissions": rules, "skills": handed}
+            "permissions": rules, "skills": [*handed, *map(str, own)]}

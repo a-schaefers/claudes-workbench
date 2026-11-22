@@ -71,8 +71,8 @@ dependencies. No packaging: it runs from the clone.
   `_ack_all`.
 - `runner.py`: the detached per-task driver: the GPU lease, rounds, guards, the think nudge,
   steering, tests and auto-fix, the report, handovers to a fresh session (`fresh_reason`,
-  `handoff_prompt`, `HANDOVER_ROOM`), the config layer (the user's MCP servers off, the rules
-  again as `OPENCODE_CONFIG_CONTENT`: `rules_env`) and the agent's environment (credentials
+  `handoff_prompt`, `HANDOVER_ROOM`), the config layer (the user's MCP servers off, the
+  project's config shut out: `rules_env`) and the agent's environment (credentials
   dropped: `SECRET_ENV`, `USERINFO`, but `ENV_KEEP`; `commands.json` `env` passes named ones
   through).
 - `events.py`: OpenCode event normalization and the stuck detector.
@@ -265,13 +265,13 @@ real-OpenCode tests check them (which covers what: ARCHITECTURE.md, *The tests*)
 - `--standalone` servers inherit the env and share session storage with the background service,
   as do `session export`/`list`: no workbench call needs the service's port.
 - Project config (`opencode.json` in the worktree, `.opencode/`, or any directory above it) loads
-  after `OPENCODE_CONFIG` and its permissions come later, so it could lift every deny;
-  `OPENCODE_CONFIG_CONTENT` loads last of all (`OPENCODE_DISABLE_PROJECT_CONFIG` also drops
-  AGENTS.md and the project's skills). The user's global MCP servers merge in too, and one whose
-  entry says `"enabled": false` still starts: the layer swaps its command for `false`.
-- It loads AGENTS.md itself but never CLAUDE.md, which reaches it through `instructions`
-  (absolute paths).
-- Skills come from `skills/` in `~/.claude`, `~/.agents`, `.claude`, `.agents`. A
+  after `OPENCODE_CONFIG` and could lift every deny, so `OPENCODE_DISABLE_PROJECT_CONFIG` is
+  always on; it drops the project's plugins, AGENTS.md, skills (not the global AGENTS.md):
+  wb hands back the last two. `OPENCODE_CONFIG_CONTENT` loads last. The user's global MCP servers
+  merge in too, and one whose entry says `"enabled": false` still starts: the layer swaps its
+  command for `false`.
+- It reads a CLAUDE.md only with no AGENTS.md beside it; wb's go in `instructions` (absolute).
+- Skills come from `skills/` in `~/.claude`, `~/.agents`, `.claude`, `.agents`, `.opencode`. A
   `disable-model-invocation` skill isn't listed. The config's `skills` list adds more: a skill's
   directory lists it, a parent lists every skill in it, its SKILL.md lists nothing, so handed
   skills go in one directory each. Loading one (the `skill` tool, argument `id`) returns
