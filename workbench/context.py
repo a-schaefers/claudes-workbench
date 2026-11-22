@@ -433,6 +433,20 @@ OUTWARD = (
     "*psalm* --shepherd*", "*kcov* --coveralls-id*",
     "v up *", "* v up *", "*dprint upgrade *", "*php-cs-fixer* self-update*",
     "*php-cs-fixer* selfupdate*",
+    # a shared build cache written, or the build run on remote workers, from the agent's
+    # unreviewed worktree (#999, 2026-11-22). The agent's environment turns Pants's and Nx's off
+    # whatever the repo's config says (runner.REMOTE_CACHES_OFF); these are the spellings that
+    # turn them back on: Pants's flags, which beat its environment (its options docs), and either
+    # variable named at all (`unset`, `=false`). Bazel and Buck2 have no such switch, so only
+    # their flags that name a cache, an executor or a build-event server, or upload every
+    # action, are here; what a repo's .bazelrc or .buckconfig turns on is the reviewer's to see
+    "*pants* --remote-cache-write *", "*pants* --remote-cache-write=*",
+    "*pants* --remote-execution *", "*pants* --remote-execution=*",
+    "*PANTS_REMOTE_CACHE_WRITE*", "*PANTS_REMOTE_EXECUTION*", "*NX_SKIP_REMOTE_CACHE*",
+    "*bazel* --remote_cache=*", "*bazel* --remote_cache *", "*bazel* --remote_executor=*",
+    "*bazel* --remote_executor *", "*bazel* --bes_backend=*", "*bazel* --bes_backend *",
+    "*buck2* --upload-all-actions*", "*buck2* --write-to-cache-anyway*",
+    "*buck2* --remote-only*", "*buck2* --prefer-remote*", "*buck2* *buck2_re_client.*",
 )
 # OpenCode's matcher makes a trailing " *" optional, so `npm install *` also matches a bare
 # `npm install`. Installing what the project already lists is the agent's: allowed again after.
@@ -483,6 +497,87 @@ INSTALL_LISTED += tuple(f"{c} -e {e}" for c in (
 ENV_INSTALLS = ("poetry install *", "poetry sync *", "poetry remove *", "uv sync --active *",
                 "uv pip sync *", "uv pip uninstall *", "pip uninstall *", "pip3 uninstall *",
                 "python -m pip uninstall *", "python3 -m pip uninstall *")
+# A tool the project installed runs through its package manager or by its path, not by its name:
+# `npx turbo run build`, `pnpm exec cdk synth`, `yarn nx test`, `uv run semgrep`,
+# `node_modules/.bin/redocly lint`. `npx *`, `pnpm *`, `yarn *`, `bun *`, `uv *` and
+# `node_modules/.bin/*` are allowed whole, so each of those ran without the opt-out its plain
+# spelling needs, and turbo and lerna, which aren't allowed at all, ran (#999, 2026-11-22). The
+# runner forms of the tools the rules name, as each ecosystem installs them, now get the verdict
+# of the plain form: denied after the acceptance command's tools (shell_rules), then allowed again
+# as each ALLOWED_COMMANDS entry of the tool is spelled under each runner, its opt-out first
+# (`CDK_DISABLE_CLI_TELEMETRY=true npx cdk synth`); their package steps ask first and their
+# installs of what the project lists are allowed again. npm's names (registry.npmjs.org's `bin`
+# of each package, 2026-11-22): Redocly's CLI is also `openapi`, Rush ships `rush-pnpm`, moon
+# `moonx`, Azurite a server per service, Vercel `vc`, Netlify `ntl`, Wrangler `wrangler2` and
+# `cf-wrangler`; spago is allowed whole, here for its package steps. Python's: the tools pip
+# installs into a project's venv (semgrep has no CLI on npm, nor sam).
+RUNNER_TOOLS = {
+    "node": ("turbo", "lerna", "moon", "moonx", "cdk", "cdktf", "nx", "rush", "rush-pnpm",
+             "redocly", "openapi", "firebase", "azurite", "azurite-blob", "azurite-queue",
+             "azurite-table", "serverless", "sls", "vercel", "vc", "netlify", "ntl", "wrangler",
+             "wrangler2", "cf-wrangler", "spago"),
+    "python": ("sam", "semgrep", "ansible", "ansible-playbook", "ansible-galaxy", "molecule",
+               "aws", "az", "gsutil", "docker-compose")}
+# and the packages npx also takes by name, each of one tool above (`npx aws-cdk deploy` missed
+# `*cdk deploy *`'s word, `npx firebase-tools deploy` `*firebase deploy *`)
+NODE_PACKAGES = ("aws-cdk", "cdktf-cli", "@microsoft/rush", "@redocly/cli", "firebase-tools",
+                 "@moonrepo/cli", "netlify-cli")
+# How the runners spell a tool, as deny patterns, `{t}` the tool: npx and its flags (`npx --no
+# turbo`) and a version npx takes when it matches the installed one (`npx nx@19 release`);
+# pnpm's and yarn's shorthands and filters (`pnpm --filter web exec cdk`, `yarn workspace a nx`);
+# bun's; any runner's `run` and `exec` (`npm run cdk` runs a package.json script named for the
+# tool, `pnpm exec` and `yarn exec` run any command, `bun run`, `uv run`, `poetry run`, `pixi
+# run`, `conda run`); and a bin directory's (`node_modules/.bin/`, `.venv/bin/`, absolute too).
+# Each starts with `*`, as OUTWARD's do, so `CI=1` or `env` before it is caught too. A word
+# after a flag is taken for the tool, so `pnpm --filter cdk build`, a package named cdk, asks
+# once. A flag's quoted command (`npx -c 'turbo run'`) passes, as `bash -c` does.
+RUNNER_FORMS = {
+    "node": ("*npx {t} *", "*npx -* {t} *", "*pnpm {t} *", "*pnpm -* {t} *", "*yarn {t} *",
+             "*yarn -* {t} *", "*yarn workspace * {t} *", "*bun {t} *", "*bun -* {t} *",
+             "*run {t} *", "*run -* {t} *", "*exec {t} *", "*exec -* {t} *", "*bin/{t} *"),
+    "python": ("*run {t} *", "*run -* {t} *", "*exec {t} *", "*exec -* {t} *", "*bin/{t} *")}
+NPX_VERSIONED = ("*npx {t}@*", "*npx -* {t}@*")
+# and the anchored spellings an entry is allowed again under: a runner's word, or the path to
+# the project's bin directory (an absolute one asks)
+RUNNER_PREFIXES = {
+    "node": ("npx", "pnpm", "pnpm exec", "yarn", "yarn run", "yarn exec", "bun", "bun run",
+             "node_modules/.bin/", "./node_modules/.bin/"),
+    "python": ("uv run", "poetry run", "pipenv run", "pdm run", "hatch run", "pixi run",
+               ".venv/bin/", "./.venv/bin/", "venv/bin/", "./venv/bin/")}
+
+
+def _under_runner(entry: str, prefix: str) -> str:
+    """ALLOWED entry ``entry`` spelled under ``prefix``: its variables first, then the runner."""
+    words = entry.split(" ")
+    n = next((i for i, w in enumerate(words)
+              if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", w)), len(words))
+    rest = " ".join(words[n:])
+    return " ".join([*words[:n], prefix + rest if prefix.endswith("/") else f"{prefix} {rest}"])
+
+
+def _runner_rules() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """(deny, allow, ask, listed): the runner forms of the RUNNER_TOOLS not allowed whole, the
+    runner spellings of their ALLOWED_COMMANDS entries, of their ASK_FIRST entries and of their
+    INSTALL_LISTED ones. Each pattern once: the allows also behind `*=*` (shell_rules)."""
+    whole = set(ALLOWED_COMMANDS)
+    deny, allow, ask, listed = [], [], [], []
+    for eco, tools in RUNNER_TOOLS.items():
+        held = [t for t in tools if t not in whole]
+        names = held + (list(NODE_PACKAGES) if eco == "node" else [])
+        deny += [f.format(t=t) for t in names for f in RUNNER_FORMS[eco]]
+        deny += [f.format(t=t) for t in names for f in NPX_VERSIONED if eco == "node"]
+        allow += [_under_runner(e, p) for e in ALLOWED_COMMANDS if " " in e
+                  and _entry_tool(e) in held for p in RUNNER_PREFIXES[eco]]
+        ask += [f.format(t=e[:-2] if e.endswith(" *") else e) for e in ASK_FIRST
+                if _entry_tool(e) in tools for f in RUNNER_FORMS[eco]]
+        listed += [_under_runner(e, p) for e in INSTALL_LISTED if _entry_tool(e) in tools
+                   for p in RUNNER_PREFIXES[eco]]
+    return tuple(dict.fromkeys(deny)), tuple(dict.fromkeys(allow)), \
+        tuple(dict.fromkeys(ask)), tuple(dict.fromkeys(listed))
+
+
+RUNNER_DENY, RUNNER_ALLOW, RUNNER_ASK, RUNNER_LISTED = _runner_rules()
+RUNNER_HELD = frozenset(t for ts in RUNNER_TOOLS.values() for t in ts if t not in ALLOWED_COMMANDS)
 
 
 def allowed_patterns(task: store.Task) -> list[str]:
@@ -529,7 +624,8 @@ def test_allowances(test: str | None) -> tuple[list[str], list[str]]:
     'terraform validate'` granted `terraform *`, and with it `terraform apply` and `plan`
     (2026-11-22). Nor one that reaches out (OUTWARD_TOOLS): `--test 'terragrunt hcl fmt
     --check'` granted `terragrunt *` and `terragrunt apply`, `pulumi preview` `pulumi up` (the
-    review, 2026-11-22). The hard limits come later in the rules, so no grant here lifts them."""
+    review, 2026-11-22). Nor one of RUNNER_HELD, the tools a runner's spelling of is held
+    (`moon`, `vercel`, #999). The hard limits come later in the rules, so no grant here lifts them."""
     import shlex
     exact, tools = [], []
     for cmd in _simple_commands(test or ""):
@@ -540,7 +636,10 @@ def test_allowances(test: str | None) -> tuple[list[str], list[str]]:
         except ValueError:
             continue
         words = [w for w in words if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w)]
-        if words and "*" not in words[0] and words[0] not in LIMITED | OUTWARD_TOOLS:
+        # a tool by its path is that tool: `--test 'node_modules/.bin/turbo run test'` granted
+        # `node_modules/.bin/turbo *`, `/usr/bin/terraform validate` `/usr/bin/terraform *` (#999)
+        if words and "*" not in words[0] and os.path.basename(words[0]) not in \
+                LIMITED | OUTWARD_TOOLS | RUNNER_HELD:
             tools += [f"{words[0]} *", f"{ASSIGN} {words[0]} *"]
     return list(dict.fromkeys(exact)), list(dict.fromkeys(tools))
 
@@ -1106,20 +1205,31 @@ def shell_rules(task: store.Task) -> list[dict]:
               for d in (writable(task) or []) if os.path.isdir(d)
               and not d.startswith(("/dev", "/proc"))]
     # the acceptance command's tools (test_allowances): before the asks, which still win (#646)
+    test_tools = grants(task).get("test_tools") or []
+    rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in test_tools]
+    # the runner forms of the tools the rules name (`npx turbo`, `uv run semgrep`) get their
+    # plain form's verdict (#999, 2026-11-22): after those tools, so `--test 'npx vitest run'`
+    # granting `npx *` doesn't lift them, then each tool's entries under each runner, and the
+    # acceptance command's own lines with more arguments (`npx turbo run test *` under `--test
+    # 'npx turbo run test'`, as plain `turbo run test *`), never a tool granted whole
+    rules += [{"action": "shell", "resource": p, "effect": "deny"} for p in RUNNER_DENY]
     rules += [{"action": "shell", "resource": r, "effect": "allow"}
-              for r in grants(task).get("test_tools") or []]
+              for p in RUNNER_ALLOW for r in (f"{p} *", f"{ASSIGN} {p} *")]
+    rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in test_tools
+              if len(r.removeprefix(f"{ASSIGN} ").split(" ")) > 2]
     # the outward steps: after those tools, which can't lift them, before what Claude allowed
     rules += [{"action": "shell", "resource": p, "effect": "deny"} for p in OUTWARD]
     pip, theirs = python_installs(task)  # into the worktree's venv, not the user's (#490)
     rules += [{"action": "shell", "resource": r, "effect": "deny"}
               for p in (*ASK_FIRST, *(ENV_INSTALLS if theirs else ())) for r in (p, f"{ASSIGN} {p}")]
+    rules += [{"action": "shell", "resource": p, "effect": "deny"} for p in RUNNER_ASK]
     # pipenv isn't pip: it installs into the active venv, else makes its own in the worktree
     # (PIPENV_VENV_IN_PROJECT), lane or no lane. Taken for a pip form by the "pip" in its name,
     # `pipenv install` asked first wherever Landlock isn't, every macOS task (#950)
     listed = [p for p in INSTALL_LISTED
               if (not theirs if p.startswith("pipenv") else pip or "pip" not in p)]
     rules += [{"action": "shell", "resource": r, "effect": "allow"}
-              for p in listed for r in (p, f"{ASSIGN} {p}")]
+              for p in (*listed, *RUNNER_LISTED) for r in (p, f"{ASSIGN} {p}")]
     rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in allowed_patterns(task)]
     rules += [{"action": "shell", "resource": c, "effect": "deny"} for c in denied_shell()]
     return rules
@@ -1819,6 +1929,19 @@ def drop_stale_runtime_dirs(tasks) -> int:
 # stops when it can't (its readDiskConfig): the agent's K6_CONFIG names its own. Vercel's CLI
 # stops on every command, `vercel build` too, when its config or login can't be read: in the
 # lane it doesn't run for a user logged in, a deploy CLI, which is Claude's to run.
+# #999 (2026-11-22), each read with its file there but unreadable: the Firebase CLI stops, at
+# exit if not before (configstore 5, which it uses, rethrows EACCES, and its cli.js deletes
+# `lastError` from the store on every exit: run against an unreadable file, configstore's own
+# module exited 1). Its store's path follows XDG_CONFIG_HOME alone, which would move OpenCode's
+# and every tool's config too, so firebase doesn't run in the lane as it is, logged in or not:
+# that exit handler writes the file on every run, so anyone who ran the CLI has one, and where
+# it isn't the write fails (~/.config/configstore isn't the lane's; configstore rethrows that
+# EACCES too: the review, the directory read-only). `XDG_CONFIG_HOME=$(mktemp -d) firebase
+# emulators:exec --project demo-x ...` runs, a store of its own. semgrep stops too, so the agent's SEMGREP_SETTINGS_FILE names its own
+# (runner.agent_env). Rush reads its credentials only for a cloud build cache with no
+# RUSH_BUILD_CACHE_CREDENTIAL: the S3 and HTTP plugins catch the read's error, warn and miss
+# (the build runs locally); the Azure one's first read isn't caught (AzureStorageBuildCacheProvider,
+# not run here), so such a repo builds with `RUSH_BUILD_CACHE_ENABLED=0` before it in the lane.
 # A hidden file inside a writable tool home splits it (writable): SPLIT_MADE lists what the tool
 # makes at that home's top, made first.
 SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".authinfo",
@@ -1844,7 +1967,13 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            ".config/dart/pub-credentials.json", ".ansible/galaxy_token", ".m2/settings-security.xml",
            ".foundry/keystores", ".mc", ".erlang.cookie", ".config/erlang/.erlang.cookie",
            ".mylogin.cnf", ".dbt/profiles.yml", ".config/openstack", ".config/hcloud", ".chef",
-           ".config/infracost", ".minikube")
+           ".config/infracost", ".minikube",
+           # #999 (2026-11-22): the Firebase CLI's login (its refresh token, in configstore's
+           # file of its own; the rest of ~/.config/configstore is other tools'), semgrep's
+           # (`semgrep login`'s token; under XDG_CONFIG_HOME's .semgrep when that is set) and
+           # Rush's cloud build cache credentials (`rush update-cloud-credentials`)
+           ".config/configstore/firebase-tools.json", ".semgrep/settings.yml",
+           ".config/.semgrep/settings.yml", ".rush-user/credentials.json")
 # The sockets inside a secret that a grant may still reach, to connect only (unix_paths): Docker
 # Desktop's, under ~/.docker beside the registry logins in config.json, so `wb allow --path` was
 # refused and only turning the lane off let a Testcontainers suite run (#441, the audit of 1.8)
@@ -1856,7 +1985,9 @@ SECRET_VARS = ("GNUPGHOME", "PASSWORD_STORE_DIR", "GH_CONFIG_DIR", "DOCKER_CONFI
                # the files Terraform's CLI config, podman's and buildah's logins, helm's registry
                # logins, Ansible Galaxy's token and the MinIO client's keys were moved to (#992)
                "TF_CLI_CONFIG_FILE", "REGISTRY_AUTH_FILE", "HELM_REGISTRY_CONFIG",
-               "ANSIBLE_GALAXY_TOKEN_PATH", "MC_CONFIG_DIR")
+               "ANSIBLE_GALAXY_TOKEN_PATH", "MC_CONFIG_DIR",
+               # and semgrep's settings, its login inside (#999)
+               "SEMGREP_SETTINGS_FILE")
 # Of the home directory's own entries, the dotfiles (tools' configs, caches, toolchains) stay
 # readable, and these (R's and Perl's user libraries); the user's documents and other projects
 # don't, beyond the task's repo, workbench itself, the programs on PATH and what Claude allowed.

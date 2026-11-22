@@ -50,7 +50,15 @@ its dependency yourself: that is the user's (ask, and say what it would catch).
   redocly lint`, `CDK_DISABLE_CLI_TELEMETRY=true cdk synth`, `SAM_CLI_TELEMETRY=0 sam validate
   --lint`; an Nx workspace with `--no-cloud` (or `NX_NO_CLOUD=true`), Rush with
   `RUSH_BUILD_CACHE_WRITE_ALLOWED=0`, Firebase's emulators on a `--project demo-<x>`. The plain
-  spelling is refused and would cost a question each round. A test's MySQL, MongoDB, NATS or
+  spelling is refused and would cost a question each round, and so is the same tool through a
+  runner without it: `CDK_DISABLE_CLI_TELEMETRY=true npx cdk synth`, `npx nx test --no-cloud`,
+  `uv run semgrep --metrics=off` (the opt-out first, then the runner). turbo, lerna and moon don't
+  run in the agent's shell under any runner: their test is yours to run. Firebase's emulators need a store of their own in the lane, logged in
+  or not (its usual one is hidden or not writable there): `XDG_CONFIG_HOME=$(mktemp -d) firebase
+  emulators:exec --project demo-<x> '<tests>'`. A Rush
+  repo on Azure's build cache: `RUSH_BUILD_CACHE_ENABLED=0 RUSH_BUILD_CACHE_WRITE_ALLOWED=0 rush
+  test`. The agent's Nx runs skip the remote cache and its Pants runs never write one or run
+  remotely (wb turns them off), so they can be slower than yours. A test's MySQL, MongoDB, NATS or
   MinIO goes on a socket or `127.0.0.1` too (`mysqld --socket=$d/m.sock --skip-networking`):
   some listen on every interface by default.
 - **Per-file syntax checks** take every file: `find src -name '*.php' -print0 | xargs -0 -n1 php
