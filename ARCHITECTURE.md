@@ -43,7 +43,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
   spec, dispatch, drive, review, accept. SKILL.md holds what every session needs; what only some
   do (model servers and the weekly check, the agents' skill library, images, audio, steering and
   check-ins, handovers, permissions, the web and the web chat, the checks for a spec Claude
-  wrote) is in `reference/*.md` beside it, read when it comes up: every line of SKILL.md rides
+  wrote, the compiler, typecheck or lint per language that goes ahead of a task's tests in
+  `--test`, `checks.md`: OpenCode 2 runs no language servers, 2026-11-22) is in `reference/*.md` beside it, read when it comes up: every line of SKILL.md rides
   along on each of Claude's calls (it was 46KB; the 2026-11-17 measurement; 34KB to 30KB on
   2026-11-18). The review is in
   proportion to the task's size. The user types it once, then asks for things as usual;
