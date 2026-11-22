@@ -1493,11 +1493,34 @@ def sign_problem(repo: Path, rev: str) -> str | None:
     return None if r is not None and r.returncode == 0 else UNLOCK
 
 
-def commit_all(worktree: Path, message: str, include: bool = False, sign: bool = True) -> str:
+def ignored_files(worktree: Path, paths) -> list[str]:
+    """Of ``paths`` (relative to the worktree), the files there that git ignores and doesn't track."""
+    if not (paths := sorted(set(paths))):
+        return []
+    out = git(worktree, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--",
+              *(":(literal)" + p for p in paths))
+    return sorted({p for p in out.split("\0") if p})
+
+
+def ignored_line(paths: list[str]) -> str:
+    """What the review and a refused commit say of the files the agent wrote that git ignores."""
+    return (f"git ignores files the agent wrote ({', '.join(brief(paths))}), so the diff leaves them "
+            "out and a commit would too, and they'd go with the worktree: read them, then --include "
+            "commits them, or have them moved or deleted")
+
+
+def commit_all(worktree: Path, message: str, include: bool = False, sign: bool = True,
+               written=()) -> str:
     """Commit everything in the worktree, without git hooks (NO_HOOKS; also for a task started
     before its git dir was recorded) but signed if the user signs. Refuses a nested repository: committed, it was a gitlink to
     a commit that exists nowhere else. Refuses, unless ``include``, more than NEW_FILES_MAX new
-    files or a large new binary: `add -A` committed a build/ the project didn't ignore (#251)."""
+    files or a large new binary: `add -A` committed a build/ the project didn't ignore (#251).
+    Refuses, unless ``include``, which adds them, any of ``written`` (the files the agent wrote)
+    that git ignores: `add -A` left a module under Python.gitignore's lib/ out of the commit, and
+    it was deleted with the worktree while main imported it (audit round 2 of 1.91)."""
+    ignored = ignored_files(worktree, written)
+    if ignored and not include:
+        raise GitError("not committed: " + ignored_line(ignored))
     if nested := nested_repos(worktree):
         raise GitError(f"{', '.join(nested)}: a git repository of its own, so not committed: "
                        "remove its .git or gitignore it, then try again")
@@ -1508,6 +1531,8 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
                        f"{worktree}, or --include to commit it anyway")
     record_case_renames(worktree)
     add_all(worktree, pre=NO_HOOKS)
+    if ignored:
+        git(worktree, *NO_HOOKS, "add", "-f", "--", *(":(literal)" + p for p in ignored))
     if not git(worktree, "diff", "--cached", "--name-only").strip():
         raise GitError("nothing to commit: the agent's worktree has no changes")
     if not sign:  # --no-sign, at start or now: the task's commits go unsigned (#374)

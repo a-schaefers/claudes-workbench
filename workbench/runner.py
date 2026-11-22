@@ -34,7 +34,7 @@ from pathlib import Path
 
 from . import (ask_mcp, context, gitguard, gitops, hardware, lane, lessons, models, progress, skills,
                stats, store, tuning)
-from .events import StuckDetector, compaction_failed, normalize
+from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize
 from .watch import Watcher
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
@@ -1974,6 +1974,28 @@ def venv_in(path: Path) -> Path | None:
         return None
 
 
+def agent_wrote(task: store.Task) -> list[str]:
+    """The files the agent wrote with its edit tools, relative to the worktree, from events.jsonl:
+    what an ignored path would hide from the diff and the commit (gitops.ignored_files)."""
+    root = os.path.realpath(task.worktree)
+    out = set()
+    for r in store.read_jsonl(task.dir / "events.jsonl")[0]:
+        if r.get("kind") == "tool" and r.get("ok") and r.get("tool") in EDIT_TOOLS and r.get("path"):
+            full = os.path.realpath(os.path.join(root, str(r["path"])))
+            if full.startswith(root + os.sep):
+                out.add(os.path.relpath(full, root))
+    return sorted(out)
+
+
+def ignored_writes(task: store.Task) -> list[str]:
+    """The files the agent wrote that git ignores, so no diff or commit holds them; [] when git
+    can't say."""
+    try:
+        return gitops.ignored_files(task.worktree, agent_wrote(task))
+    except (gitops.GitError, OSError):
+        return []
+
+
 def _ignored_paths(wt: Path) -> list[str]:
     """The worktree's ignored files and directories (a directory once, not its files)."""
     out = gitops.git(wt, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
@@ -2520,6 +2542,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
                      ".claude/ are yours to write; keep, rewrite or revert them")
     if nested := gitops.nested_repos(task.worktree):
         lines.append(gitops.nested_line(nested))
+    if ignored := ignored_writes(task):
+        lines.append("NOTE: " + gitops.ignored_line(ignored))
     edits, new = gitops.submodule_check(task.worktree)
     lines += [f"NOTE: {e}" for e in edits + new]  # #419, #889
     try:  # a git that refuses the diff costs the report a line, not the task (#493)
