@@ -7,6 +7,7 @@ import re
 import glob
 import fnmatch
 import http.client
+import http.server
 import io
 import json
 import queue
@@ -16,6 +17,7 @@ import os
 import shutil
 import signal
 import socket
+import socketserver
 import stat
 import subprocess
 import sys
@@ -36,6 +38,27 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from workbench import runner, ask_mcp, audio, cli, context, events, gitops, hardware, lane, progress, store, transcript  # noqa: E402
+
+class _Listens:
+    """A test server that listens as soon as it is made. HTTPServer's own server_bind looks the
+    address's name up (socket.getfqdn) between bind and listen, which took 35 s on GitHub's macOS
+    runners, per server: the nightly's macOS shards spent minutes before their fake model servers
+    and services answered (#950, 2026-11-21). Nothing in the tests reads server_name. Not patched
+    into http.server for the whole suite: chat.py's own server must still be caught doing the
+    lookup (WebChat, #236)."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+class HTTPServer(_Listens, http.server.HTTPServer):
+    pass
+
+
+class ThreadingHTTPServer(_Listens, http.server.ThreadingHTTPServer):
+    pass
+
 
 FAKE = shlex.join([sys.executable, str(ROOT / "tests" / "fake_opencode.py")])  # a path may hold spaces
 TEST_CMD = "grep -qx 42 answer.txt"
@@ -10170,7 +10193,7 @@ class Images(Base):
         # #925: IncompleteRead is an HTTPException, not an OSError: a server killed mid-body gave
         # Claude a traceback from wb image / wb audio instead of one line
         import threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import images, media
 
         class H(BaseHTTPRequestHandler):
@@ -10219,7 +10242,7 @@ class Images(Base):
         # #749 (the 2026-11-21 audit, finding 96): images.json's `unload` was checked but never
         # called, so an image server kept 6-12 GB beside the next task's coding model
         import base64, threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import media
         got, fail = [], [False]
 
@@ -10282,7 +10305,7 @@ class Images(Base):
         # #753 (the 2026-11-21 audit, finding 100): a Forge url got an OpenAI body and "sent no
         # image", though listed as ready
         import base64, threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         got = []
 
         class H(BaseHTTPRequestHandler):
@@ -10317,7 +10340,7 @@ class Images(Base):
         """A fake ComfyUI on a port of its own: ``history(n)`` is what its nth /history poll
         answers; what it was sent is in the list returned."""
         import threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         got, polls = [], []
 
         class H(BaseHTTPRequestHandler):
@@ -10454,7 +10477,7 @@ class Images(Base):
         # on Windows under WSL2's NAT went unseen, and the skill proposed the 11 GB install again
         import socket
         import threading
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import images, models
 
         def serving(host, code, body):
@@ -10520,7 +10543,7 @@ class Images(Base):
 
     def test_a_server_engine_and_the_failures(self):
         import base64, threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         got = []
 
         class H(BaseHTTPRequestHandler):
@@ -10555,7 +10578,7 @@ class Images(Base):
         # that isn't JSON a traceback, a 400 only "HTTP Error 400: Bad Request"; and a server
         # started with an API key was listed as ready, then failed 401 on every generation
         import base64, threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import audio, images
         seen = []
 
@@ -11277,7 +11300,7 @@ class Audio(Base):
         # listener kept its weights after the batch let the GPU lease go
         import threading
         import wave as _wave
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         buf = io.BytesIO()
         with _wave.open(buf, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\x00\x30" * 8000)
@@ -11325,7 +11348,7 @@ class Audio(Base):
     def test_a_server_engine_a_server_listener_and_the_unload_after_the_batch(self):
         import threading
         import wave as _wave
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         buf = io.BytesIO()
         with _wave.open(buf, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\x00\x30" * 8000)
@@ -18502,6 +18525,16 @@ class WebChat(Base):
             for srv in servers:
                 srv.server_close()
 
+    def test_the_suites_own_test_servers_listen_without_looking_their_host_name_up(self):
+        # #950: 35 s per server on GitHub's macOS runners, before the server listened
+        with mock.patch("socket.getfqdn", side_effect=AssertionError("looked up")):
+            for cls in (HTTPServer, ThreadingHTTPServer):
+                srv = cls(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+                try:
+                    self.assertEqual(srv.server_name, "127.0.0.1")
+                finally:
+                    srv.server_close()
+
     def test_a_listener_or_server_under_a_recycled_or_foreign_pid_is_gone(self):
         # #532: listener.json's pid, live again under a root daemon (EPERM), read as a session
         # listening; one of ours started since, as the listener too
@@ -19195,7 +19228,7 @@ class WebChat(Base):
 
             def log_message(self, *a):
                 pass
-        svc = http.server.HTTPServer(("127.0.0.1", 0), Svc)
+        svc = HTTPServer(("127.0.0.1", 0), Svc)
         threading.Thread(target=svc.serve_forever, daemon=True).start()
         self.addCleanup(svc.server_close)
         self.addCleanup(svc.shutdown)
@@ -19352,7 +19385,7 @@ class WebChat(Base):
 
             def log_message(self, *a):
                 pass
-        svc = http.server.HTTPServer(("127.0.0.1", 0), Svc)
+        svc = HTTPServer(("127.0.0.1", 0), Svc)
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(tmp / "c.pem", tmp / "k.pem")
         svc.socket = tls.wrap_socket(svc.socket, server_side=True)
@@ -19791,7 +19824,7 @@ class WebChat(Base):
     def test_wb_chat_on_never_shows_a_link_to_another_programs_server(self):
         # #200 (the 2026-11-19 audit): a bare connect counted any program on the port as the chat,
         # and a started server was reported after a fixed half second, up or not
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler
 
         class Other(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -20817,7 +20850,7 @@ class Top(Base):
     def test_a_server_with_eight_aliases_is_asked_once_a_probe_and_a_stalled_one_never_holds_the_tick(self):
         # #561: 8 entries on one llama-swap made 8 GET /v1/models a probe, one after another, and
         # a server that accepted and then stalled held the tick (q, the GPU rows) up to 16 s
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import models, top
         asked = []
 
