@@ -4092,7 +4092,7 @@ test('the opening animation plays on the first /workbench of a session, and the 
   await ui.unmount()
 })
 
-test('the opening animation plays once a session: not on /workbench again, nor after a reload', async ($, on) => {
+test('the opening animation plays once while the mode is on: not on /workbench again, nor after a reload', async ($, on) => {
   const { clock, ticks } = splashClock(on)
   const w = splashWorld(on)
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
@@ -4112,6 +4112,26 @@ test('the opening animation plays once a session: not on /workbench again, nor a
   expect(await splashing(ui)).toBe(false)
   await clock.advance(3000)
   expect(w.splashes()).toBe(played)
+  await ui.unmount()
+})
+
+test('after /workbench-quit, the next /workbench opens with the animation again', async ($, on) => {
+  // the owner quit and ran /workbench again, and expected it (2026-11-21)
+  const { clock } = splashClock(on)
+  const w = splashWorld(on)
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  let ui = await $.ui.mount(splashPane())
+  await clock.advance(6000)
+  await ui.unmount()
+  const played = w.splashes()
+  await $.command.run({ command: 'workbench-quit', args: '' })
+  await workbench($)
+  ui = await $.ui.mount(splashPane())
+  expect(await splashing(ui)).toBe(true)
+  await clock.advance(6000)
+  expect(w.splashes()).toBeGreaterThan(played)
+  expect(await splashing(ui)).toBe(false)                                // and ends as before
   await ui.unmount()
 })
 
