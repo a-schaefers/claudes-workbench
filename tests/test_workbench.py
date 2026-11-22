@@ -1738,6 +1738,38 @@ class Lifecycle(Base):
                               capture_output=True, text=True).stdout
         self.assertIn("blob.bin", tree)
 
+    def test_a_file_the_agent_wrote_under_an_ignored_path_is_named_and_never_dropped_at_accept(self):
+        # audit round 2 of 1.91: a module the agent wrote under Python.gitignore's lib/ was left
+        # out of the diff and the commit, then deleted with the worktree, while main imported it
+        self.start("t-ign", "ok")
+        wait_phase("t-ign", {"review"})
+        t = store.Task("t-ign")
+        (t.worktree / ".gitignore").write_text("lib/\nbuild/\n")
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "util.py").write_text("def answer():\n    return 42\n")
+        (t.worktree / "build").mkdir()
+        (t.worktree / "build" / "out.o").write_text("x")  # the tests' output: not the agent's
+        store.append_jsonl(t.dir / "events.jsonl", {"ts": time.time(), "round": 1, "kind": "tool",
+                                                    "tool": "write", "ok": True, "sig": "w",
+                                                    "brief": "lib/util.py",
+                                                    "path": str(t.worktree / "lib" / "util.py")})
+        self.assertEqual(runner.ignored_writes(t), ["lib/util.py"])
+        run_wb("feedback", "t-ign", "--text", "1. Keep it.")
+        wait_phase("t-ign", {"review"})
+        self.assertIn("NOTE: git ignores files the agent wrote (lib/util.py)", run_wb("report", "t-ign"))
+        for cmd in (("next", "t-ign", "--spec", "-", "-m", "feat: one"), ("accept", "t-ign", "-m", "feat: one")):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err), \
+                    mock.patch("sys.stdin", io.StringIO("Step two.")):
+                run_wb(*cmd)
+            self.assertIn("not committed: git ignores files the agent wrote (lib/util.py)", err.getvalue())
+            self.assertEqual(self.branch("delegate/t-ign"), t.spec["base"])   # nothing committed
+        self.assertIn("accepted t-ign", run_wb("accept", "t-ign", "-m", "feat: one", "--include"))
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "delegate/t-ign"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("lib/util.py", tree)
+        self.assertNotIn("build/out.o", tree)
+
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
         # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,
         # and git said "unknown revision"
