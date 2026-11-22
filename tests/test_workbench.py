@@ -16384,6 +16384,43 @@ class Update(Base):
         self.assertIn("claude isn't on PATH", self.update())
         self.assertFalse((self.copy / "new.txt").exists())
 
+    def test_a_clone_pulled_by_hand_says_its_mod_is_older_than_claude_codes_copy(self):
+        # 2026-11-21: the owner's clone was current, pulled with git, and wb update --check said
+        # "up to date" while Claude Code ran its cached mod from four days before: no splash
+        cc = Path(self.tmp.name) / "elsewhere"
+        os.environ["CLAUDE_CONFIG_DIR"] = str(cc)                       # a clone, not the marketplace's
+        git = lambda *a: subprocess.run(["git", "-C", str(self.copy), *a], check=True,
+                                        capture_output=True, text=True).stdout.strip()
+        git("pull", "-q", "--ff-only")
+        (self.copy / "mod").mkdir()
+        (self.copy / "mod/register.tsx").write_text("old\n")
+        git("add", "mod"); git("commit", "-qm", "mod")
+        installed = git("rev-parse", "HEAD")
+        (self.copy / "mod/register.tsx").write_text("new\n")
+        git("commit", "-qam", "the splash")
+        plugins = cc / "plugins/installed_plugins.json"
+        plugins.parent.mkdir(parents=True)
+        at = lambda sha: plugins.write_text(json.dumps({"version": 2, "plugins": {"workbench@workbench": [
+            {"scope": "user", "installPath": "/x", "gitCommitSha": sha}]}}))
+        at(installed)
+        self.assertIn(f"update available: Claude Code runs the mod as of {installed[:7]}",
+                      self.update("--check"))
+        self.assertIn(installed[:7], self.update("--check", "--if-due"))  # no network needed
+        out = self.update()                                    # the fake claude refreshes nothing
+        self.assertIn(f"Claude Code still has the mod as of {installed[:7]}", out)
+        (Path(self.tmp.name) / "fakebin/claude").write_text(  # this one does, as Claude Code's would
+            f'#!/bin/sh\necho "$@" >> {self.calls}\n[ "$2" = update ] && [ "$3" = workbench@workbench ] && '
+            f'printf %s {shlex.quote(json.dumps({"plugins": {"workbench@workbench": [{"gitCommitSha": git("rev-parse", "HEAD")}]}}))} '
+            f'> {shlex.quote(str(plugins))}\nexit 0\n')
+        out = self.update()
+        self.assertIn(f"the mod was as of {installed[:7]}, now {git('rev-parse', '--short=7', 'HEAD')}", out)
+        self.assertIn("up to date", self.update("--check"))
+        (self.copy / "notes.txt").write_text("docs\n")              # news outside mod/: the mod is current
+        git("add", "notes.txt"); git("commit", "-qm", "docs")
+        self.assertEqual(self.update("--check").strip(), "up to date")
+        at("0" * 40)                                             # a commit this clone never had
+        self.assertEqual(self.update("--check").strip(), "up to date")
+
     def test_a_marketplace_copy_updates_through_claude_code(self):
         out = self.update()
         self.assertIn("already up to date", out)        # the fake claude pulled nothing
