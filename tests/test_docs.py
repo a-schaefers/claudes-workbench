@@ -100,6 +100,16 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn(f"{models.MIN_WINDOW // 1024}K at the least", readme)
         self.assertIn("32K context window recommended", readme)
 
+    def test_the_panes_probe_row_names_the_line_count_the_code_holds(self):
+        # the review of #857's off and on (2026-11-22): the pane's "On: large files only" sentence
+        # copies context.PROBE_FILE_LINES, which it can't import, so a change to one is caught here
+        from workbench import context
+        said = f"one function of a file over {context.PROBE_FILE_LINES:,} lines with probe"
+        pane = (ROOT / "mod/hooks/register.tsx").read_text()
+        stops = pane[pane.index("const PROBE_STOPS"):]
+        self.assertIn(said, stops[:stops.index("]\n")], "the pane's PROBE_STOPS on sentence")
+        self.assertIn(said, " ".join(ARCH.split()), "ARCHITECTURE.md's pane row")
+
     def test_claude_md_stays_under_claude_codes_size_warning(self):
         # Claude Code warns past 40,000 characters, and every session that changes the code
         # loads this file (local agents too, when workbench delegates work on itself)

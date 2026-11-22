@@ -333,31 +333,32 @@ def commands_conf() -> dict:
     return conf
 
 
+# the file length from which the probe experiment's note and protocol line apply: its gain
+# showed only on a 2,700-line file, its cost on 1,500-line ones (#857)
+PROBE_FILE_LINES = 1500
+
 # Experiments: a change to what the agent may do, not yet measured enough to be supported
 # (ARCHITECTURE.md, *Experiments*). Each is off unless the user turns it on: `wb experiment <name> on|off`
 # sets it (experiments.json), and `wb start` records its value per task (task.json `experiments`),
 # so a flip changes only the tasks started after it. Off, the agent's rules are main's exactly.
 EXPERIMENTS = {
-    # what each level does and what every level adds, since `wb experiment` said neither (the
-    # review, 2026-11-21)
-    "probe": "the agent's shell may run probe, and its handbook says how: a file's outline and "
-             "one function, instead of the whole file; moderate tells it to extract the function it "
-             "needs from a long file, aggressive never to read one whole, adaptable learns which "
-             "per model; every level also caps one shell call's output at a tenth of the window "
-             "and outlines the spec's long files in round 1",
+    # what on does and all it adds, since `wb experiment` said neither (the review, 2026-11-21).
+    # probe is off and on, on is large files only (the owner, 2026-11-22, #857): its levels
+    # (adaptable, moderate, aggressive) went, on is what moderate did
+    "probe": "on means large files only: from a file over "
+             f"{PROBE_FILE_LINES} lines the agent is told to extract the function it needs with "
+             "probe instead of reading the file whole, and its handbook says how (a file's outline, "
+             "one function, a search); on also caps one shell call's output at a tenth of the "
+             "window and outlines the spec's long files in round 1, and is off for a task whose "
+             "repo has no such file",
 }
-# An experiment's settings besides "off", in the pane's order (one with none here is "on"). probe's
-# (the owner's design, 2026-11-21, #857): moderate, the condition measured to do no harm;
-# aggressive, the order that cost more on a 27B at 40K but may pay on a stronger model or a wider
-# window; adaptable, moderate until this machine's own results move it (the probe_aggressive
-# knob, tuning.py). "on", the setting before levels, reads as adaptable.
-EXPERIMENT_LEVELS = {"probe": ("adaptable", "moderate", "aggressive")}
-# Whether the pane marks adaptable "recommended": Claude sets it once a measurement says moderate,
-# with the read cap and the outline, is at least as good as off (#857's step 6); not yet
+# probe's levels before it was off and on (the owner, 2026-11-22, #857: off and on, on is large
+# files only): one saved in experiments.json reads as on, and `wb experiment probe <level>` still
+# sets on (a running A/B calls `wb experiment probe adaptable`); neither help nor listing shows them
+OLD_LEVELS = {"probe": ("adaptable", "moderate", "aggressive")}
+# Whether the pane marks probe's on "recommended": Claude sets it once a measurement says on, with
+# the read cap and the outline, is at least as good as off (#857's step 6); not yet
 PROBE_RECOMMENDED = False
-# the file length from which the probe experiment's note and protocol line apply: its gain
-# showed only on a 2,700-line file, its cost on 1,500-line ones (#857)
-PROBE_FILE_LINES = 1500
 # With probe on, round 1's prompt ends with an outline of each file over PROBE_FILE_LINES the spec
 # names (runner.add_outline), at most this many tokens in all, so the agent starts knowing where
 # things are instead of exploring for it, as Aider's repo map and Agentless's skeleton do (the
@@ -399,11 +400,6 @@ EXPERIMENT_PROTOCOL = {
     "probe": "- When you need one function from a file over {probe_lines} lines, `probe extract "
              "<file>#<name>` it instead of reading the whole file.\n",
 }
-# probe's aggressive level: the order of the quick A/B (2026-11-21), which explored more and
-# failed big-compaction on a 27B at 40K, kept for the models and windows where it may pay (#857)
-PROBE_AGGRESSIVE_PROTOCOL = ("- Never read a file over {probe_lines} lines whole: `probe extract "
-                             "<file>#<name>` the function you need (`probe symbols <file>` first "
-                             "when you don't know its name).\n").replace("{probe_lines}", str(PROBE_FILE_LINES))
 EXPERIMENT_NOTES = {k: v.replace("{probe_lines}", str(PROBE_FILE_LINES)) for k, v in EXPERIMENT_NOTES.items()}
 EXPERIMENT_PROTOCOL = {k: v.replace("{probe_lines}", str(PROBE_FILE_LINES))
                        for k, v in EXPERIMENT_PROTOCOL.items()}
@@ -443,8 +439,7 @@ def experiment_protocol(task: store.Task | None = None, experiments: dict | None
     task's, or ``experiments`` as task.json will record them (wb start writes round 1's prompt
     before task.json, #873)."""
     have = experiments if experiments is not None else (task.spec.get("experiments") or {}) if task else {}
-    return "".join(PROBE_AGGRESSIVE_PROTOCOL if name == "probe" and have.get(name) == "aggressive"
-                   else line for name, line in EXPERIMENT_PROTOCOL.items() if have.get(name))
+    return "".join(line for name, line in EXPERIMENT_PROTOCOL.items() if have.get(name))
 
 
 def experiments_path() -> Path:
@@ -452,13 +447,10 @@ def experiments_path() -> Path:
 
 
 def setting(name: str, value) -> str:
-    """An experiment's setting as experiments.json or `wb experiment` gives it: "off", or one of
-    its EXPERIMENT_LEVELS ("on" for one without levels). "on" (True) before probe had levels
-    reads as adaptable (2026-11-21); anything else is off."""
-    levels = EXPERIMENT_LEVELS.get(name, ("on",))
-    if value is True or value == "on":
-        return levels[0]
-    return value if value in levels else "off"
+    """An experiment's setting as experiments.json or `wb experiment` gives it: "on" or "off".
+    "on", True or one of its OLD_LEVELS (probe's, before it was off and on, 2026-11-22) is on;
+    anything else is off."""
+    return "on" if value is True or value == "on" or value in OLD_LEVELS.get(name, ()) else "off"
 
 
 def experiments() -> dict[str, str]:
@@ -469,7 +461,7 @@ def experiments() -> dict[str, str]:
 
 
 def set_experiment(name: str, value) -> None:
-    """Set ``name`` to a level (or "on"/"off"; True and False mean the same)."""
+    """Set ``name`` on or off (True and False, or an old level, mean the same: setting)."""
     with store.locked(experiments_path().with_suffix(".lock")):
         saved = store.read_json(experiments_path(), {}) or {}
         saved = saved if isinstance(saved, dict) else {}
@@ -504,8 +496,8 @@ PROBE_RELEASES = "github.com/probelabs/probe/releases"
 
 def task_experiments() -> dict:
     """What `wb start` records: each experiment's setting only when set and able to work (probe
-    installed), else False, so a task's record says what its agent really had (probe's adaptable
-    is resolved after, probe_start). An experiment that is off isn't checked at all: a `probe` on
+    installed), else False, so a task's record says what its agent really had (probe is then off
+    where the repo has no long file, probe_off). An experiment that is off isn't checked at all: a `probe` on
     PATH ran on every start with it off, and one printing a non-UTF-8 byte failed the start after
     its branch and worktree were made (#518)."""
     able = {"probe": probe_bin}
@@ -701,27 +693,12 @@ def probe_off(spec: str, repo: Path, sub: str | None, rev: str | None) -> tuple[
     return (PROBE_OFF_GAVE_UP if read["spent"] else PROBE_OFF_SHORT), {}
 
 
-def probe_start(level: str, model: str, window, task_name: str, long: bool) -> tuple[str, bool]:
-    """(the level this task's agent gets, whether it is the knob's exploration): adaptable goes
-    through the probe_aggressive knob (tuning.py), which explores only when the spec names a
-    file over PROBE_FILE_LINES, the only tasks where the levels act differently: elsewhere a try
-    of aggressive would teach nothing (the owner's design, 2026-11-21, #857)."""
-    if level != "adaptable":
-        return level, False
-    from . import tuning
-    v, explored = tuning.choose("probe_aggressive", model, window, task_name, explore=long)
-    return ("aggressive" if v else "moderate"), explored
-
-
 def experiment(task: store.Task, name: str) -> bool:
+    """Whether this task's agent has experiment ``name``: task.json records "on" (or False). A
+    task from before probe was off and on recorded its level ("moderate", "aggressive") or True:
+    on too, with on's protocol line (the owner, 2026-11-22, #857: off and on, on is large files
+    only)."""
     return bool((task.spec.get("experiments") or {}).get(name))
-
-
-def probe_level(task: store.Task) -> str | None:
-    """The probe level this task's agent has: moderate or aggressive, None when off. A task
-    started before the levels recorded True and had moderate's condition."""
-    v = (task.spec.get("experiments") or {}).get("probe")
-    return None if not v else v if v in ("moderate", "aggressive") else "moderate"
 
 
 def brace_names(text: str) -> list[str]:

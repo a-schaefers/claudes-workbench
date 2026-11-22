@@ -7635,7 +7635,7 @@ class RealOpenCode(Base):
         # shell's output to its last lines; `read` keeps its own 2,000 lines or 50 KB
         fake_probe(Path(self.tmp.name))
         long_code(self.repo)
-        run_wb("experiment", "probe", "moderate")
+        run_wb("experiment", "probe", "on")
         lines = 1000  # 42 KB for the shell, under a 32K window whole; 3000 for `read`, past its own limit
         def before(task):
             for f, n in (("big.txt", 3000), ("mid.txt", lines)):
@@ -22357,12 +22357,12 @@ class ProbeExperiment(Base):
         self.start("t-probe", "ok")
         wait_phase("t-probe", {"review"})
         task = store.Task("t-probe")
-        self.assertEqual(task.spec["experiments"], {"probe": "moderate"})   # on: adaptable's pick
+        self.assertEqual(task.spec["experiments"], {"probe": "on"})
         self.assertTrue(self.probe_rules(task))
         handbook = (context.rules_dir(task) / "HANDBOOK.md").read_text()
         self.assertTrue(handbook.startswith(context.HANDBOOK.read_text()))
         self.assertTrue(handbook.endswith(context.EXPERIMENT_NOTES["probe"]))
-        self.assertIn("probe: adaptable and working (probe-code 0.6.0)", cli.experiment_lines())
+        self.assertIn("probe: on and working (probe-code 0.6.0)", cli.experiment_lines())
         # and the round's protocol says it too: the handbook alone went unread, 0 probe calls in
         # 14 replays (2026-11-21)
         prompt = task.round_dir(1).joinpath("prompt.md").read_text()
@@ -22397,8 +22397,7 @@ class ProbeExperiment(Base):
         st = task.status
         self.assertEqual(st.get("experiment_use"), {"probe": 1})   # the compound line, not grep's
         self.assertEqual(st.get("long_reads"), 1)                   # the whole read, not the part
-        self.assertIn("probe (adaptable → moderate, no long file named): 1 call(s); whole reads of files "
-                      "over 300 lines: 1", run_wb("status", "t-used"))
+        self.assertIn("probe: 1 call(s); whole reads of files over 300 lines: 1", run_wb("status", "t-used"))
         run_wb("discard", "t-used")
         row = [r for r in store.results(trials=True) if r["task"] == "t-used"][-1]
         self.assertEqual((row["experiment_use"], row["long_reads"]), ({"probe": 1}, 1))
@@ -22451,7 +22450,7 @@ class ProbeExperiment(Base):
     def test_it_is_off_until_turned_on_even_with_probe_installed(self):
         fake_probe(Path(self.tmp.name))
         self.assertEqual(context.experiments(), {"probe": "off"})
-        self.assertIn("probe: off (wb experiment probe adaptable|moderate|aggressive)", cli.experiment_lines())
+        self.assertIn("probe: off (wb experiment probe on)", cli.experiment_lines())
         self.start("t-default", "ok")
         wait_phase("t-default", {"review"})
         task = store.Task("t-default")
@@ -22511,7 +22510,7 @@ class ProbeExperiment(Base):
         self.start("t-after", "ok")
         wait_phase("t-after", {"review"})
         before, after = store.Task("t-before"), store.Task("t-after")
-        self.assertEqual(before.spec["experiments"], {"probe": "moderate"})
+        self.assertEqual(before.spec["experiments"], {"probe": "on"})
         self.assertEqual(after.spec["experiments"], {"probe": False})
         self.assertTrue(self.probe_rules(before))
         self.assertEqual(self.probe_rules(after), [])
@@ -22521,7 +22520,7 @@ class ProbeExperiment(Base):
         rows = {r["task"]: r for r in store.results()}
         self.assertEqual(rows["t-before"]["experiments"], ["probe"])   # the results rows say which
         self.assertNotIn("experiments", rows["t-after"])
-        self.assertIn("probe: adaptable", run_wb("experiment", "probe", "on"))   # on: adaptable
+        self.assertIn("probe: on", run_wb("experiment", "probe", "on"))
 
     def test_a_probe_without_symbols_counts_as_not_installed(self):
         # crates.io's probe-code 0.6.0: `symbols` read as a search word (2026-11-20)
@@ -22541,10 +22540,13 @@ class ProbeExperiment(Base):
 
 
 
-class ProbeLevels(Base):
-    """probe's levels, one of them adaptive (the owner's design, 2026-11-21, #857): off, moderate
-    (the condition), aggressive (the order) and adaptable (moderate until the probe_aggressive
-    knob moves it, learning only from tasks whose spec names a long file)."""
+class ProbeOn(Base):
+    """probe is off and on, on is large files only (the owner, 2026-11-22, #857): its levels
+    (adaptable, moderate, aggressive) went, and on is what moderate did: the condition's protocol
+    line, the note, the read cap and round 1's outline."""
+
+    # the old aggressive level's order, which no task gets any more
+    AGGRESSIVE = "Never read a file over 1500 lines whole"
 
     def setUp(self):
         super().setUp()
@@ -22559,34 +22561,55 @@ class ProbeLevels(Base):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "big"], check=True)
         self.spec.write_text(f"Write the answer to answer.txt; `{name}` has the helpers.\n")
 
-    def named(self, explores: bool) -> str:
-        """A task name the knob's exploration picks (or doesn't), by its hash."""
-        from workbench import tuning
-        return next(f"t-lvl-{i}" for i in range(500)
-                    if tuning.choose("probe_aggressive", "m", 1, f"t-lvl-{i}")[1] == explores)
-
-    def test_each_level_gives_the_agent_its_own_protocol_line_and_the_same_note_and_rules(self):
-        for level, line in (("moderate", context.EXPERIMENT_PROTOCOL["probe"]),
-                            ("aggressive", context.PROBE_AGGRESSIVE_PROTOCOL)):
-            run_wb("experiment", "probe", level)
-            self.start(f"t-{level}", "ok")
-            wait_phase(f"t-{level}", {"review"})
-            task = store.Task(f"t-{level}")
-            self.assertEqual((task.spec["experiments"], task.spec["probe_setting"]), ({"probe": level}, level))
-            prompt = task.round_dir(1).joinpath("prompt.md").read_text()
-            self.assertIn(line, prompt)
-            other = context.PROBE_AGGRESSIVE_PROTOCOL if level == "moderate" else context.EXPERIMENT_PROTOCOL["probe"]
-            self.assertNotIn(other, prompt)
-            self.assertTrue((context.rules_dir(task) / "HANDBOOK.md").read_text().endswith(
-                context.EXPERIMENT_NOTES["probe"]))                       # the note: every level's
-            self.assertTrue([r for r in context.shell_rules(task) if "probe" in r["resource"].split()])
-            self.assertIn(f"probe ({level}): ", run_wb("status", f"t-{level}"))
-        self.assertIn("Never read a file over 1500 lines whole: `probe extract <file>#<name>`",
-                      context.PROBE_AGGRESSIVE_PROTOCOL)
-        # wb start writes round 1's prompt before task.json (#873): from the levels it will record
-        self.assertEqual(context.experiment_protocol(experiments={"probe": "aggressive"}),
-                         context.PROBE_AGGRESSIVE_PROTOCOL)
+    def test_a_task_with_probe_on_gets_the_conditions_protocol_line_and_never_the_old_aggressive_one(self):
+        run_wb("experiment", "probe", "on")
+        self.long_file()
+        self.start("t-on", "ok")
+        wait_phase("t-on", {"review"})
+        task = store.Task("t-on")
+        self.assertEqual(task.spec["experiments"], {"probe": "on"})
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertIn(context.EXPERIMENT_PROTOCOL["probe"], prompt)
+        self.assertNotIn(self.AGGRESSIVE, prompt)
+        self.assertTrue((context.rules_dir(task) / "HANDBOOK.md").read_text().endswith(
+            context.EXPERIMENT_NOTES["probe"]))
+        self.assertTrue([r for r in context.shell_rules(task) if "probe" in r["resource"].split()])
+        self.assertFalse(hasattr(context, "PROBE_AGGRESSIVE_PROTOCOL"))
+        # wb start writes round 1's prompt before task.json (#873): from what it will record; an
+        # old level is on's line too
+        for v in ("on", "moderate", "aggressive", True):
+            self.assertEqual(context.experiment_protocol(experiments={"probe": v}),
+                             context.EXPERIMENT_PROTOCOL["probe"])
         self.assertEqual(context.experiment_protocol(), "")
+
+    def test_a_task_started_at_an_old_level_reads_as_on_and_its_next_round_gets_ons_line(self):
+        # task.json from before off and on: {"probe": "aggressive"}, adaptable's setting, the
+        # knob's exploration and its tuned value (the owner, 2026-11-22, #857)
+        run_wb("experiment", "probe", "on")
+        self.long_file()
+        self.start("t-old", "ok")
+        wait_phase("t-old", {"review"})
+        task = store.Task("t-old")
+        spec = {**task.spec, "experiments": {"probe": "aggressive"}, "probe_setting": "adaptable",
+                "probe_explored": True}
+        store.write_json(task.dir / "task.json", spec)
+        task.set_status(tuned={**task.status["tuned"], "probe_aggressive": 1})
+        task = store.Task("t-old")
+        self.assertTrue(context.experiment(task, "probe"))
+        self.assertIn("probe: ", run_wb("status", "t-old"))
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Write the second answer to answer2.txt.\n")
+        run_wb("next", "t-old", "--spec", str(step2), "-m", "feat: step one")  # the prompt's protocol again
+        wait_phase("t-old", {"review"})
+        prompt = task.round_dir(2).joinpath("prompt.md").read_text()
+        self.assertIn(context.EXPERIMENT_PROTOCOL["probe"], prompt)
+        self.assertNotIn(self.AGGRESSIVE, prompt)
+        run_wb("accept", "t-old", "-m", "feat: answer")
+        row = [r for r in store.results() if r["task"] == "t-old"][-1]
+        self.assertEqual((row["experiments"], row["probe_long"]), (["probe"], True))
+        for v in (True, "moderate"):                                       # and the others
+            store.write_json(task.dir / "task.json", {**spec, "experiments": {"probe": v}})
+            self.assertTrue(context.experiment(store.Task("t-old"), "probe"))
 
     def test_off_leaves_the_task_exactly_as_without_the_experiment(self):
         run_wb("experiment", "probe", "off")
@@ -22601,93 +22624,79 @@ class ProbeLevels(Base):
         self.assertEqual(prompt, self.spec.read_text().rstrip() + cli.PROTOCOL.format(
             branch=task.spec["branch"], test_line=cli.test_line(None), budget=task.spec["ask_budget"],
             experiment_protocol=""))                                      # byte for byte
-        self.assertNotIn("probe_aggressive", task.status["tuned"])
         self.assertNotIn("outline", task.status)                          # no probe symbols run
         self.assertNotIn("tool_output", json.loads((context.rules_dir(task) / "opencode.json").read_text()))
         run_wb("discard", "t-off")
         row = [r for r in store.results(trials=True) if r["task"] == "t-off"][-1]
         self.assertFalse({k for k in row if k.startswith("probe")})
 
-    def test_on_is_read_as_adaptable_and_a_bad_level_is_refused(self):
+    def test_an_old_saved_level_or_true_reads_as_on_and_a_bad_value_is_refused(self):
+        # the owner, 2026-11-22 (#857): experiments.json from before off and on keeps probe on
         context.experiments_path().parent.mkdir(parents=True, exist_ok=True)
-        context.experiments_path().write_text('{"probe": "on"}')          # set before the levels
-        self.assertEqual(context.experiments(), {"probe": "adaptable"})
-        run_wb("experiment", "probe", "on")
-        self.assertEqual(json.loads(context.experiments_path().read_text()), {"probe": "adaptable"})
+        for old in ("adaptable", "moderate", "aggressive", True, "on"):
+            context.experiments_path().write_text(json.dumps({"probe": old}))
+            self.assertEqual(context.experiments(), {"probe": "on"}, old)
+            self.assertEqual(context.task_experiments(), {"probe": "on"}, old)
         context.experiments_path().write_text('{"probe": "loud"}')
         self.assertEqual(context.experiments(), {"probe": "off"})
         with self.assertRaises(SystemExit):
             run_wb("experiment", "probe", "loud")
+        self.assertEqual(json.loads(context.experiments_path().read_text()), {"probe": "loud"})  # untouched
 
-    def test_wb_experiment_says_what_each_level_does_and_recommends_adaptable_set_up_or_not(self):
-        # the review, 2026-11-21 (#857): the levels and what every level adds went unsaid, and a
-        # probe not installed dropped the recommendation the pane reads
+    def test_wb_experiment_probe_adaptable_sets_on_as_the_running_ab_calls_it(self):
+        # a running A/B calls `wb experiment probe adaptable` (2026-11-22): still accepted, on
+        for old in ("adaptable", "moderate", "aggressive"):
+            run_wb("experiment", "probe", "off")
+            out = run_wb("experiment", "probe", old)
+            self.assertTrue(out.startswith("probe: on and working (probe-code 0.6.0)"), out)
+            self.assertEqual(json.loads(context.experiments_path().read_text()), {"probe": "on"})
+        self.long_file()
+        self.start("t-ab", "ok")
+        wait_phase("t-ab", {"review"})
+        task = store.Task("t-ab")
+        self.assertEqual(task.spec["experiments"], {"probe": "on"})
+        self.assertEqual(task.spec["probe_files"], {"big.py": context.PROBE_FILE_LINES + 100})
+        self.assertFalse({"probe_setting", "probe_explored"} & set(task.spec))
+        self.assertNotIn("probe_aggressive", task.status["tuned"])
+        self.assertIn("probe: 0 call(s)", run_wb("status", "t-ab"))
+
+    def test_wb_experiment_shows_only_on_and_off_says_what_on_does_and_recommends_on_set_up_or_not(self):
+        # the review, 2026-11-21 (#857): what on adds went unsaid, and a probe not installed
+        # dropped the recommendation the pane reads; the owner, 2026-11-22: off and on only
         listing = run_wb("experiment")
-        for said in ("moderate tells it to extract", "aggressive never to read one whole",
-                     "adaptable learns which per model", "caps one shell call's output",
-                     "outlines the spec's long files in round 1"):
+        for said in ("on means large files only", f"from a file over {context.PROBE_FILE_LINES} lines",
+                     "caps one shell call's output", "outlines the spec's long files in round 1",
+                     "probe: off (wb experiment probe on)"):
             self.assertIn(said, listing)
-        run_wb("experiment", "probe", "adaptable")
+        parser_help = io.StringIO()
+        with redirect_stdout(parser_help), self.assertRaises(SystemExit):
+            cli.main(["experiment", "--help"])
+        for shown in (listing, parser_help.getvalue()):
+            for gone in ("adaptable", "moderate", "aggressive"):
+                self.assertNotIn(gone, shown)
+        self.assertIn("on|off", parser_help.getvalue())
+        run_wb("experiment", "probe", "on")
         with mock.patch.object(context, "PROBE_RECOMMENDED", True):
             for found in (None, "/x/probe"):
                 with mock.patch.object(context, "probe_bin", return_value=found):
-                    self.assertTrue(cli.experiment_lines()[0].endswith("; adaptable is recommended"))
+                    self.assertTrue(cli.experiment_lines()[0].endswith("; on is recommended"))
         with mock.patch.object(context, "probe_bin", return_value=None):
             self.assertNotIn("recommended", cli.experiment_lines()[0])
 
-    def test_adaptable_records_its_setting_and_resolves_to_moderate_without_evidence(self):
-        run_wb("experiment", "probe", "adaptable")
-        self.long_file()
-        name = self.named(explores=False)
-        self.start(name, "ok")
-        wait_phase(name, {"review"})
-        task = store.Task(name)
-        self.assertEqual(task.spec["experiments"], {"probe": "moderate"})
-        self.assertEqual(task.spec["probe_setting"], "adaptable")
-        self.assertEqual(task.spec["probe_files"], {"big.py": context.PROBE_FILE_LINES + 100})
-        self.assertEqual((task.status["tuned"]["probe_aggressive"], task.status["explored"]), (0, []))
-        self.assertIn("probe (adaptable → moderate): ", run_wb("status", name))
-        run_wb("accept", name, "-m", "feat: answer")
-        row = [r for r in store.results() if r["task"] == name][-1]
-        self.assertEqual((row["probe_level"], row["probe_setting"], row["probe_long"]),
-                         ("moderate", "adaptable", True))
-        self.assertEqual(row["tuned"]["probe_aggressive"], 0)
-
-    def test_a_spec_that_names_no_long_file_never_explores_aggressive(self):
-        # only where the levels act differently is a try evidence (the owner's design, #857)
-        run_wb("experiment", "probe", "adaptable")
-        name = self.named(explores=True)
-        self.start(name, "ok")                                            # names answer.txt only
-        wait_phase(name, {"review"})
-        task = store.Task(name)
-        self.assertEqual(task.spec["experiments"], {"probe": "moderate"})
-        self.assertNotIn("probe_explored", task.spec)
-        self.assertEqual(task.spec["probe_files"], {})
-        self.assertNotIn("probe_aggressive", task.status["explored"])
-        self.assertIn("probe (adaptable → moderate, no long file named)", run_wb("status", name))
-        run_wb("discard", name)
-        row = [r for r in store.results(trials=True) if r["task"] == name][-1]
+    def test_a_spec_that_names_no_long_file_is_recorded_as_such(self):
+        run_wb("experiment", "probe", "on")
+        self.start("t-short", "ok")                                       # names answer.txt only
+        wait_phase("t-short", {"review"})
+        task = store.Task("t-short")
+        self.assertEqual((task.spec["experiments"], task.spec["probe_files"]), ({"probe": "on"}, {}))
+        run_wb("discard", "t-short")
+        row = [r for r in store.results(trials=True) if r["task"] == "t-short"][-1]
         self.assertFalse(row["probe_long"])
-        from workbench import tuning
-        self.assertFalse(tuning.acted("probe_aggressive", row))         # no evidence either way
+        self.assertFalse({"probe_level", "probe_setting"} & set(row))
 
-    def test_a_spec_that_names_a_long_file_is_where_adaptable_tries_aggressive(self):
-        run_wb("experiment", "probe", "adaptable")
-        self.long_file()
-        name = self.named(explores=True)
-        self.start(name, "ok")
-        wait_phase(name, {"review"})
-        task = store.Task(name)
-        self.assertEqual(task.spec["experiments"], {"probe": "aggressive"})
-        self.assertTrue(task.spec["probe_explored"])
-        self.assertIn(context.PROBE_AGGRESSIVE_PROTOCOL, task.round_dir(1).joinpath("prompt.md").read_text())
-        self.assertEqual(task.status["tuned"]["probe_aggressive"], 1)
-        self.assertIn("probe_aggressive", task.status["explored"])
-        self.assertIn("probe (adaptable → aggressive, a try)", run_wb("status", name))
-
-    def test_any_level_caps_one_tool_output_to_a_tenth_of_the_window_where_no_project_can_lift_it(self):
+    def test_on_caps_one_tool_output_to_a_tenth_of_the_window_where_no_project_can_lift_it(self):
         from workbench import models, runner
-        run_wb("experiment", "probe", "aggressive")
+        run_wb("experiment", "probe", "on")
         self.start("t-capped", "ok")
         wait_phase("t-capped", {"review"})
         task = store.Task("t-capped")
@@ -22734,7 +22743,7 @@ class ProbeLevels(Base):
     def test_round_one_starts_with_a_capped_outline_of_the_long_files_the_spec_names_and_later_rounds_dont(self):
         # the owner's design (2026-11-21, #857): the agent starts knowing where things are
         ran = self.symbols_probe()
-        run_wb("experiment", "probe", "moderate")
+        run_wb("experiment", "probe", "on")
         self.long_file()
         self.start("t-outline", "ok")
         wait_phase("t-outline", {"review"})
@@ -22759,7 +22768,7 @@ class ProbeLevels(Base):
     def test_the_outline_and_the_long_files_named_are_only_those_in_a_language_probe_reads(self):
         # #857 (the owner, 2026-11-21): probe symbols of a CSV or a Nim file is its lines as text
         ran = self.symbols_probe()
-        run_wb("experiment", "probe", "moderate")
+        run_wb("experiment", "probe", "on")
         self.long_file()
         long = context.PROBE_FILE_LINES + 10
         (self.repo / "data.csv").write_text("".join(f"{i},x\n" for i in range(long)))
@@ -22778,7 +22787,7 @@ class ProbeLevels(Base):
     def test_a_probe_that_fails_or_hangs_adds_no_outline_and_the_round_runs(self):
         from workbench import runner
         self.symbols_probe(script="print('not json'); sys.exit(3)")
-        run_wb("experiment", "probe", "moderate")
+        run_wb("experiment", "probe", "on")
         self.long_file()
         self.start("t-noline", "ok")
         st = wait_phase("t-noline", {"review"})
@@ -22800,7 +22809,7 @@ class ProbeLevels(Base):
     def test_the_outline_shares_its_budget_between_the_long_files_named(self):
         from workbench import runner
         self.symbols_probe(n=800)
-        run_wb("experiment", "probe", "moderate")
+        run_wb("experiment", "probe", "on")
         for f in ("a.py", "b.py"):
             self.long_file(f)
         self.spec.write_text("Change `a.py` and b.py (and see README.md).\n")
@@ -22817,7 +22826,7 @@ class ProbeLevels(Base):
         # review, 2026-11-21 (#857): the agent runs in worktree/<subdir>, and the outline named
         # pkg/big.py from the worktree's top, a path that isn't there from pkg/
         ran = self.symbols_probe(n=800)
-        run_wb("experiment", "probe", "moderate")
+        run_wb("experiment", "probe", "on")
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
         pkg = self.repo / "pkg"
         pkg.mkdir()
@@ -22856,48 +22865,36 @@ class ProbeLevels(Base):
         with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("read whole")):
             self.assertEqual(context.long_files("data.csv", self.repo), {})
 
-    def test_aggressive_becomes_adaptables_pick_only_once_both_levels_have_five_long_file_tasks(self):
-        # the owner's design (2026-11-21, #857): five evidence tasks per value; the default
-        # once stayed in the running with one (review, 2026-11-21)
+    def test_an_old_tuning_json_and_results_rows_with_probe_aggressive_are_ignored(self):
+        # the knob went with the levels (the owner, 2026-11-22, #857): what an older version
+        # wrote of it is never read, and never crashes
         from workbench import tuning
-        run_wb("experiment", "probe", "adaptable")
+        self.assertNotIn("probe_aggressive", tuning.KNOBS)
+        store.write_json(store.home() / "tuning.json", {"probe_aggressive": 1, "fresh_at": 0.6})
+        run_wb("experiment", "probe", "on")
         self.long_file()
-        first = self.named(explores=False)
-        self.start(first, "ok")
-        wait_phase(first, {"review"})
-        model, window = store.Task(first).spec["model"], store.Task(first).status["window"]
-        row = lambda v, reviews, **x: {"model": model, "window": window, "outcome": "accepted",  # noqa
-                                       "reviews": reviews, "active_minutes": 10, "probe_long": True,
-                                       "tuned": {"probe_aggressive": v}, **x}
-        results = store.home() / "results.jsonl"
-        store.append_jsonl(results, row(0, 1))                            # one moderate, five aggressive
-        for _ in range(5):
-            store.append_jsonl(results, row(1, 0))
-        self.assertEqual(tuning.best("probe_aggressive", model, window), 0)  # moderate's 1 < try_min
-        results.unlink()
-        for _ in range(5):                                                 # moderate: sent back once each
-            store.append_jsonl(store.home() / "results.jsonl", row(0, 1))
-        for _ in range(4):
-            store.append_jsonl(store.home() / "results.jsonl", row(1, 0))
-        for _ in range(6):                                                 # not evidence: no long file
-            store.append_jsonl(store.home() / "results.jsonl", row(1, 0, probe_long=False))
-        self.assertEqual(tuning.best("probe_aggressive", model, window), 0)  # 4 < try_min
-        store.append_jsonl(store.home() / "results.jsonl", row(1, 0))
-        self.assertEqual(tuning.best("probe_aggressive", model, window), 1)
-        self.assertEqual(tuning.KNOBS["probe_aggressive"].try_min, 5)
-        name = self.named(explores=False)
-        name = name if name != first else next(f"t-x-{i}" for i in range(500) if not tuning.choose(
-            "probe_aggressive", "m", 1, f"t-x-{i}")[1])
-        self.start(name, "ok")
-        wait_phase(name, {"review"})
-        self.assertEqual(store.Task(name).spec["experiments"], {"probe": "aggressive"})
-        self.assertIn("probe (adaptable → aggressive): ", run_wb("status", name))
-        run_wb("experiment", "probe", "moderate")                          # a fixed level: no knob's pick
-        self.start("t-fixed", "ok")
-        wait_phase("t-fixed", {"review"})
-        self.assertEqual(store.Task("t-fixed").spec["experiments"], {"probe": "moderate"})
-        self.assertEqual(store.Task("t-fixed").status["tuned"]["probe_aggressive"], 0)
-
+        self.start("t-first", "ok")
+        wait_phase("t-first", {"review"})
+        model, window = store.Task("t-first").spec["model"], store.Task("t-first").status["window"]
+        for v in (0, 1, 1, 1, 1, 1):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "task": f"old-{v}", "model": model, "window": window, "outcome": "accepted",
+                "reviews": 0, "active_minutes": 10, "probe_long": True, "probe_level": "aggressive",
+                "probe_setting": "adaptable", "experiments": ["probe"],
+                "tuned": {"fresh_at": 0.6, "self_review": 1, "probe_aggressive": v},
+                "explored": ["probe_aggressive"], "tuned_max": {"fresh_at": 0.8}})
+        self.start("t-next", "ok")
+        wait_phase("t-next", {"review"})
+        task = store.Task("t-next")
+        self.assertEqual(set(task.status["tuned"]), set(tuning.KNOBS))
+        self.assertEqual(task.status["tuned"]["fresh_at"], 0.6)          # the pin still read
+        self.assertNotIn("probe_aggressive", task.status["explored"])
+        table = run_wb("tune")
+        self.assertNotIn("probe_aggressive", table)
+        self.assertIn("fresh_at", table)
+        self.assertIsInstance(tuning.best("fresh_at", model, window), float)
+        run_wb("accept", "t-next", "-m", "feat: answer")
+        self.assertNotIn("probe_aggressive", [r for r in store.results() if r["task"] == "t-next"][-1]["tuned"])
 
 
 class ProbeWhereItHelps(Base):
@@ -22910,7 +22907,7 @@ class ProbeWhereItHelps(Base):
     def setUp(self):
         super().setUp()
         fake_probe(Path(self.tmp.name))
-        run_wb("experiment", "probe", "moderate")
+        run_wb("experiment", "probe", "on")
 
     @staticmethod
     def code(lines: int, line: str = "def f{i}():\n    return {i}\n") -> str:
@@ -22955,15 +22952,12 @@ class ProbeWhereItHelps(Base):
         self.assertEqual(set(runner.agent_env(cant)), set(runner.agent_env(plain)))  # no PROBE_MAX_TOKENS
         for t in (cant, plain):
             self.assertNotIn("outline", t.status)                                   # no probe symbols
-            self.assertNotIn("probe_aggressive", t.status["tuned"])                 # no level's evidence
         self.assertIn("probe: off for this task (no file over 1500 lines in a language probe reads)",
                       run_wb("status", "t-cant"))
         self.assertNotIn("probe:", run_wb("status", "t-none"))
         run_wb("discard", "t-cant")
         row = [r for r in store.results(trials=True) if r["task"] == "t-cant"][-1]
         self.assertFalse({k for k in row if k.startswith("probe") or k.startswith("experiment")})
-        from workbench import tuning
-        self.assertFalse(tuning.acted("probe_aggressive", row))
 
     def test_a_mixed_repo_with_a_long_python_file_beside_nim_has_probe_on(self):
         files = {"main.nim": self.code(self.LONG, "proc f{i}(): int = {i}\n"), "big.py": self.code(self.LONG)}
@@ -22976,7 +22970,7 @@ class ProbeWhereItHelps(Base):
         self.start("t-mixed", "ok")
         wait_phase("t-mixed", {"review"})
         task = store.Task("t-mixed")
-        self.assertEqual(task.spec["experiments"], {"probe": "moderate"})
+        self.assertEqual(task.spec["experiments"], {"probe": "on"})
         self.assertNotIn("experiments_off", task.spec)
         self.assertEqual(task.spec["probe_files"], {})                             # nim: probe can't read it
 
