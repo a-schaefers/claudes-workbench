@@ -50,7 +50,7 @@ one shows there, not in the agent's rounds.
 
 | Language | Configured: the signal → the check | Syntax only, no config |
 |---|---|---|
-| C, C++ | the build (`make`, `cmake --build build`, `meson compile -C build`) with the project's warnings; `.clang-tidy` + `compile_commands.json` → `clang-tidy -p build <files>`; `.cppcheck`/CI → `cppcheck --error-exitcode=1 <dirs>` | `cc -fsyntax-only -Wall <file>` (with the project's `-I` flags) |
+| C, C++ | the build (`make`, `cmake --build build`, `meson compile -C build`): it uses the project's own compiler and warnings, so it is the check; `.clang-tidy` + `compile_commands.json` → `clang-tidy -p build <files>` (clang's parser: on a GCC-only project it can refuse GCC's flags, so only where the project already runs it); `.cppcheck`/CI → `cppcheck --error-exitcode=1 <dirs>` | the project's compiler, never `cc`, which is GCC on Linux and clang on macOS: see *C and C++: which compiler* |
 | Python | `[tool.mypy]`/`mypy.ini`/`setup.cfg [mypy]` → `mypy`; `pyrightconfig.json`/`[tool.pyright]` → `pyright`; `[tool.basedpyright]` → `basedpyright`; `ruff.toml`/`[tool.ruff]` → `ruff check`; `.flake8`/`[flake8]` → `flake8` | `python3 -m compileall -q <src>` |
 | Go | always: `go vet ./...` (it type-checks); `staticcheck.conf`/CI → `staticcheck ./...`; `.golangci.yml` → `golangci-lint run` | `gofmt -e -l <dir> >/dev/null` |
 | Rust | always: `cargo check --all-targets` (`--workspace` in a workspace); `clippy.toml` or CI's clippy → `cargo clippy --all-targets -- -D warnings` | (cargo check is it) |
@@ -82,6 +82,26 @@ one shows there, not in the agent's rounds.
 | Scheme: Chez, Gauche, Chibi, MIT | no checker worth trusting: the tests are the check (compiling a Chez program catches only syntax) | none |
 | Common Lisp (SBCL) | ASDF: the form below; SBCL's compiler infers types, so a type error is a compile-time warning | one file: the form below |
 | Forth | none: words compile as the file loads, which runs it; the tests are the check | none |
+
+## C and C++: which compiler
+Not every project builds with both GCC and clang: GCC-only extensions and flags (nested functions,
+`-fanalyzer`, some `__attribute__`s), clang-only warnings and flags, or a cross compiler. So a
+check never picks one; it uses the one the project builds with:
+- **Prefer the build.** With a build system, the build itself is the check, through its own
+  configuration; add `-Werror` only where the project already uses it.
+- **Find the compiler** when you need a syntax-only check: `compile_commands.json`'s `command` or
+  `arguments` (the first word), `CMakeCache.txt`'s `CMAKE_C_COMPILER`/`CMAKE_CXX_COMPILER`, the
+  Makefile's `CC`/`CXX`, `meson introspect --compilers build`, or the README and CI. Then
+  `"$CC" -fsyntax-only <the project's -I, -D and -std flags> <file>`: GCC and clang both take
+  `-fsyntax-only`.
+- **With `compile_commands.json`**, each file's own command is exact: run it with `-fsyntax-only`
+  in place of `-c` and its `-o <obj>` dropped. A per-file loop over the files the task touches
+  stays fast.
+- **A project built with both** (CI with a GCC and a clang job): the check runs both, `make CC=gcc
+  && make clean && make CC=clang`, when the base passes both.
+- **clang-tidy on a GCC project**: only where the project runs it; it parses with clang, and
+  GCC-only flags in `compile_commands.json` make it fail on the base (`--extra-arg=-Wno-unknown-warning-option`
+  quiets only unknown warnings, not unknown flags).
 
 The two forms that need care, each failing by exit status (run here, 2026-11-22):
 ```sh
