@@ -220,10 +220,10 @@ def git(cwd, *args, check=True, env=None) -> str:
     return _run(cwd, args, env, check).stdout.decode("utf-8", "replace")
 
 
-def git_bytes(cwd, *args) -> bytes:
+def git_bytes(cwd, *args, env=None) -> bytes:
     """git's output exactly, for fingerprints: two different non-UTF-8 bytes must not both
     read as U+FFFD."""
-    return _run(cwd, args).stdout
+    return _run(cwd, args, env).stdout
 
 
 def git_hash(cwd, h, *args) -> None:
@@ -239,6 +239,65 @@ def git_hash(cwd, h, *args) -> None:
         if p.wait():
             err.seek(0)
             raise GitError(f"git {' '.join(args)}: {err.read().decode('utf-8', 'replace').strip()}")
+
+
+# what a feed_blobs callback returns to skip the rest of the blob it is fed (True stops them all)
+SKIP_BLOB = "skip"
+
+
+def feed_blobs(cwd, oids, h, env=None) -> None:
+    """Each blob in ``oids`` fed to ``h(oid, chunk)`` a chunk at a time, through one `git cat-file
+    --batch`, until ``h`` returns True: then git is stopped mid-blob. SKIP_BLOB skips the rest of
+    that blob: git is stopped and a new one asked for the blobs after it, so a minified bundle's
+    megabytes are never read past the first chunks (#857, 2026-11-21). A blob missing is skipped.
+    Whether a repo has a long file probe reads (context.probe_off, #857, 2026-11-21) counts lines
+    of many blobs and needs only the first lines past the limit of one: a process per blob, read
+    to its end, cost a large repo seconds at wb start, inside Claude's Bash limit. ``env``: a
+    partial clone's GIT_NO_LAZY_FETCH, so a blob it lacks is `missing`, not fetched (#436)."""
+    todo = list(oids)
+    while todo:
+        todo = _feed_some(cwd, todo, h, env)
+
+
+def _feed_some(cwd, oids, h, env) -> list:
+    """feed_blobs through one git: the blobs left after a SKIP_BLOB mid-blob, else []."""
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), "cat-file", "--batch"],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, env=_env(env))
+        try:
+            for i, oid in enumerate(oids):
+                p.stdin.write(oid.encode() + b"\n")
+                p.stdin.flush()
+                head = p.stdout.readline().split()
+                if head[1:] == [b"missing"]:
+                    continue
+                if len(head) != 3 or not head[2].isdigit():
+                    return []
+                left = int(head[2])
+                while left:
+                    chunk = p.stdout.read(min(left, 1 << 16))
+                    if not chunk:
+                        return []
+                    left -= len(chunk)
+                    said = h(oid, chunk)
+                    if said == SKIP_BLOB:
+                        if left:
+                            return oids[i + 1:]
+                        break
+                    if said:
+                        return []
+                p.stdout.read(1)  # the newline after each object
+        except OSError:  # git gone: what it fed is all there is
+            return []
+        finally:
+            p.kill()
+            p.wait()
+            for f in (p.stdin, p.stdout):
+                try:
+                    f.close()
+                except OSError:
+                    pass
+    return []
 
 
 def toplevel(path) -> Path:
@@ -490,7 +549,7 @@ def partial_clone(repo: Path) -> bool:
                for line in out.splitlines())
 
 
-def _sparse_keeps(repo: Path) -> Callable[[str], bool] | None:
+def sparse_keeps(repo: Path) -> Callable[[str], bool] | None:
     """Whether a path is in the checkout's sparse cone (or its patterns), None when it isn't
     sparse. Cone mode: every file at the top and in a cone directory's parents, everything under
     a cone directory. Otherwise (patterns, which only git matches): what the checkout's own index
@@ -545,7 +604,7 @@ def _submodules_size(repo: Path, commit: str) -> tuple[int, int]:
 
 
 def _tree_size(repo: Path, commit: str, sparse: bool) -> tuple[int, int]:
-    keeps = _sparse_keeps(repo) if sparse else None
+    keeps = sparse_keeps(repo) if sparse else None
     lazy = partial_clone(repo)
     no_fetch = {"GIT_NO_LAZY_FETCH": "1"}
     size, unknown, pointers, blobs = 0, 0, [], []

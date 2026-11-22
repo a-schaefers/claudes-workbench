@@ -7,6 +7,7 @@ import re
 import glob
 import fnmatch
 import http.client
+import http.server
 import io
 import json
 import queue
@@ -16,6 +17,7 @@ import os
 import shutil
 import signal
 import socket
+import socketserver
 import stat
 import subprocess
 import sys
@@ -36,6 +38,27 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from workbench import runner, ask_mcp, audio, cli, context, events, gitops, hardware, lane, progress, store, transcript  # noqa: E402
+
+class _Listens:
+    """A test server that listens as soon as it is made. HTTPServer's own server_bind looks the
+    address's name up (socket.getfqdn) between bind and listen, which took 35 s on GitHub's macOS
+    runners, per server: the nightly's macOS shards spent minutes before their fake model servers
+    and services answered (#950, 2026-11-21). Nothing in the tests reads server_name. Not patched
+    into http.server for the whole suite: chat.py's own server must still be caught doing the
+    lookup (WebChat, #236)."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+class HTTPServer(_Listens, http.server.HTTPServer):
+    pass
+
+
+class ThreadingHTTPServer(_Listens, http.server.ThreadingHTTPServer):
+    pass
+
 
 FAKE = shlex.join([sys.executable, str(ROOT / "tests" / "fake_opencode.py")])  # a path may hold spaces
 TEST_CMD = "grep -qx 42 answer.txt"
@@ -68,14 +91,31 @@ def not_merged(*argv) -> str:
     return buf.getvalue()
 
 
+# `probe search --help`'s --language, as probe-code 0.6.0 prints it (2026-11-21): where
+# context.probe_languages reads the languages probe reads (#857)
+SEARCH_HELP = ("  -l, --language <LANGUAGE>\n          Programming language to limit search to specific "
+               "file extensions\n\n          [possible values: rust, rs, javascript, js, jsx, typescript, "
+               "ts, tsx, python, py, go, c, h, cpp, cc, cxx, hpp, hxx, java, ruby, rb, php, swift, "
+               "solidity, sol, crystal, cr, haskell, hs, lhs, csharp, cs, yaml, yml, bash, sh, qml]\n")
+
+
 def fake_probe(tmp: Path) -> None:
     """A `probe` first on PATH, as its release binary installs one (*Experiments*)."""
     bin_ = tmp / "probe-bin"
     bin_.mkdir()
     (bin_ / "probe").write_text('#!/bin/sh\nif [ "$1" = --help ]; then printf "Commands:\\n  symbols  List symbols\\n"; '
+                                f'elif [ "$1 $2" = "search --help" ]; then printf %s {shlex.quote(SEARCH_HELP)}; '
                                 'else echo probe-code 0.6.0; fi\n')
     (bin_ / "probe").chmod(0o755)
     os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
+
+
+def long_code(repo: Path, name: str = "lib.py") -> None:
+    """A committed file over PROBE_FILE_LINES lines in a language probe reads, which no spec names:
+    probe is off for a task whose repo has none (#857, the owner, 2026-11-21)."""
+    (repo / name).write_text("".join(f"def g{i}():\n    return {i}\n" for i in range(context.PROBE_FILE_LINES)))
+    subprocess.run(["git", "-C", str(repo), "add", name], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "long code"], check=True)
 
 
 def wait_phase(name, phases, timeout=30):
@@ -4107,6 +4147,149 @@ class Context(Base):
         self.assertEqual(len(evs), 1)
         self.assertIn("OpenCode compacted the agent's session mid-round at 51%", evs[0]["text"])
 
+    def compaction_failed(self, name, *, edit, exit_code=None):
+        """A task whose first session's compaction fails (#969), to review."""
+        if edit:
+            os.environ["FAKE_COMPACT_EDIT"] = "1"
+        if exit_code is not None:
+            os.environ["FAKE_COMPACT_EXIT"] = str(exit_code)
+        self.start(name, "compactfail", "--test", TEST_CMD)
+        st = wait_phase(name, {"review", "stuck", "failed"}, timeout=60)
+        evs = store.read_jsonl(store.Task(name).dir / "events.jsonl")[0]
+        return st, evs
+
+    def assert_handed_over_after_the_failed_compaction(self, name, st, evs, diff):
+        self.assertEqual((st["phase"], st["handovers"]), ("review", 1))  # never failed
+        first, second = self.runs()
+        self.assertFalse(second["session"])                     # a fresh one, not the dead one
+        p = second["prompt"]
+        self.assertTrue(p.startswith("You are picking this task up in a fresh session (OpenCode "
+                                     "failed to compact the last session)"), p[:200])
+        self.assertIn("Write the answer to answer.txt.", p)     # the spec
+        self.assertIn(diff, p)                                  # the work so far
+        self.assertIn("Your last session filled up", p.split("## Now")[1])
+        self.assertIn("> Reading the whole test file next.", p)  # its last words
+        kinds = [e["kind"] for e in evs]
+        # the tests ran once, on the fresh session's work: never sent back to the dead one
+        self.assertNotIn("autofix", kinds)
+        self.assertEqual(kinds.count("tests"), 1)
+        self.assertEqual(st.get("auto_fixes", 0), 0)
+        fresh = [e for e in evs if e["kind"] == "fresh"]
+        self.assertTrue(fresh[0]["compacted"])                  # a compaction: results.step's
+        from workbench import results
+        self.assertTrue(results.step(store.Task(name), landed=False)["compacted"])
+        self.assertIn("OpenCode's compaction of the agent's session failed (Compaction produced "
+                      "no summary): a fresh one takes over",
+                      run_wb("watch", name, "--once", "--no-color"))
+
+    def test_a_failed_compaction_before_any_edit_that_exits_1_hands_over_instead_of_failing(self):
+        # #969 (a bench replay, 2026-11-21): the agent read a long test file whole while
+        # exploring, OpenCode's compaction failed ("Compaction produced no summary") and it
+        # exited 1: the task failed after 4.5 minutes, no handover possible before a change
+        st, evs = self.compaction_failed("t-969a", edit=False, exit_code=1)
+        self.assert_handed_over_after_the_failed_compaction("t-969a", st, evs, "No uncommitted changes yet.")
+        self.assertFalse([r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                          if r["task"] == "t-969a" and r["kind"] == "failed"])
+
+    def test_a_failed_compaction_after_an_edit_that_exits_0_hands_over_instead_of_auto_fixing(self):
+        # #969 (night-e2-sight, ember-4a, night-e3-combo-n): OpenCode exited 0 after the error,
+        # the tests failed on the half-done work and auto-fix sent them back to the dead session
+        st, evs = self.compaction_failed("t-969b", edit=True)
+        self.assert_handed_over_after_the_failed_compaction("t-969b", st, evs, "+41")
+
+    def test_a_failed_compaction_after_an_edit_that_exits_1_hands_over_too(self):
+        # #969: either exit, before or after a change
+        st, evs = self.compaction_failed("t-969c", edit=True, exit_code=1)
+        self.assert_handed_over_after_the_failed_compaction("t-969c", st, evs, "+41")
+
+    def test_a_failed_compaction_before_any_edit_that_exits_0_hands_over_too(self):
+        # #969: either exit, before or after a change
+        st, evs = self.compaction_failed("t-969d", edit=False)
+        self.assert_handed_over_after_the_failed_compaction("t-969d", st, evs, "No uncommitted changes yet.")
+
+    def test_a_failed_compaction_hands_over_even_when_claude_asked_to_keep_the_context(self):
+        # #969: --keep-context holds a session that can go on; one whose compaction failed can't
+        self.start("t-969k", "ok", "--test", TEST_CMD)
+        wait_phase("t-969k", {"review"})
+        os.environ.update(FAKE_SCENARIO="compactfail", FAKE_COMPACT_EXIT="1")
+        run_wb("feedback", "t-969k", "--message", str(self.feedback), "--keep-context")
+        st = wait_phase("t-969k", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["handovers"]), ("review", 1))
+        third = self.runs()[2]
+        self.assertFalse(third["session"])
+        self.assertIn("1. Add a trailing comment line.", third["prompt"].split("## Now")[1])
+
+    def test_failed_compactions_past_the_handover_limit_are_stuck_and_say_so_never_failed(self):
+        # #969: every fresh session reads the same and fails to compact again: HANDOVER_MAX
+        # still holds, and the stuck report names the failed compaction
+        os.environ["FAKE_REFAIL"] = "1"
+        st, evs = self.compaction_failed("t-969m", edit=False, exit_code=1)
+        self.assertEqual((st["phase"], st["handovers"]), ("stuck", runner.HANDOVER_MAX))
+        self.assertIn(f"handed over to a fresh session {runner.HANDOVER_MAX} times in this round "
+                      "without finishing (the last when OpenCode's compaction failed: Compaction "
+                      "produced no summary): the step is too big", st["last"])
+        self.assertEqual(len(self.runs()), runner.HANDOVER_MAX + 1)
+        self.assertNotIn("autofix", [e["kind"] for e in evs])
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-969m"]
+        self.assertEqual([r["kind"] for r in rows if r["kind"] != "checkin"], ["stuck"])
+
+    def stuck_on_failed_compactions(self, name):
+        """A task stuck past HANDOVER_MAX, its last session's compaction failed (#969), with
+        the next runs ordinary ones."""
+        os.environ["FAKE_REFAIL"] = "1"
+        st, _ = self.compaction_failed(name, edit=False, exit_code=1)
+        self.assertEqual(st["phase"], "stuck")
+        dead = st["session"]
+        self.assertTrue(dead)                                   # the dead session is still current
+        for k in ("FAKE_REFAIL", "FAKE_COMPACT_EXIT"):
+            os.environ.pop(k, None)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        return dead
+
+    def assert_the_next_run_is_handed_to_a_fresh_session(self, dead):
+        last = self.runs()[-1]
+        self.assertFalse(last["session"])                       # not --session <dead>
+        self.assertTrue(last["prompt"].startswith("You are picking this task up in a fresh "
+                                                  "session (OpenCode failed to compact the last "
+                                                  "session)"), last["prompt"][:200])
+        self.assertNotIn(dead, json.dumps(last))
+
+    def test_feedback_after_failed_compactions_past_the_limit_goes_to_a_fresh_session(self):
+        # #969 (review, 2026-11-21): stuck past HANDOVER_MAX, the dead session stayed in status
+        # `session`; wb feedback clears `context`, the export counts only completed compactions
+        # and no_room held with nothing changed, so the feedback round went back to the session
+        # whose compaction failed, and failing again there (or a context-length exit 1) failed
+        # the task, the #969 outcome
+        dead = self.stuck_on_failed_compactions("t-969f")
+        run_wb("feedback", "t-969f", "--message", str(self.feedback))
+        st = wait_phase("t-969f", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review")
+        self.assert_the_next_run_is_handed_to_a_fresh_session(dead)
+        self.assertIn("1. Add a trailing comment line.", self.runs()[-1]["prompt"].split("## Now")[1])
+
+    def test_feedback_keeping_the_context_after_failed_compactions_still_goes_to_a_fresh_session(self):
+        # #969: a session whose compaction failed can't be kept, --keep-context or not
+        dead = self.stuck_on_failed_compactions("t-969g")
+        run_wb("feedback", "t-969g", "--message", str(self.feedback), "--keep-context")
+        st = wait_phase("t-969g", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review")
+        self.assert_the_next_run_is_handed_to_a_fresh_session(dead)
+
+    def test_next_after_failed_compactions_goes_to_a_fresh_session_and_says_why(self):
+        # #969 (review, 2026-11-21): wb next clears `context` too, and said "to the same
+        # session" for the dead one. wb next takes a step under review, so the stuck task is put
+        # there by hand: what the next step's fresh_reason makes of the dead session is the test
+        dead = self.stuck_on_failed_compactions("t-969n")
+        store.Task("t-969n").set_status(phase="review")
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also write the question to question.txt.\n")
+        out = run_wb("next", "t-969n", "--spec", str(step2), "-m", "feat: step one")
+        self.assertIn("to a fresh session (OpenCode failed to compact the last session)", out)
+        st = wait_phase("t-969n", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review")
+        self.assert_the_next_run_is_handed_to_a_fresh_session(dead)
+        self.assertIn("question.txt", self.runs()[-1]["prompt"])
+
     def test_a_fresh_round_run_again_after_its_server_died_is_handed_over_once(self):
         # #780 (the second 2026-11-21 audit): a round that began fresh, revived before its first
         # event, ran _start_fresh again: the handoff went over instructions.md and was wrapped in
@@ -7392,6 +7575,7 @@ class RealOpenCode(Base):
     def test_the_probe_experiment_lets_the_agent_run_probe_and_only_while_on(self):
         # *Experiments*: the rule and the PATH reach the agent's shell, in its lane
         fake_probe(Path(self.tmp.name))
+        long_code(self.repo)  # probe is on only where the repo has long code (#857)
         run_wb("experiment", "probe", "on")
         def shell(name):
             return [{"name": "shell", "arguments": {"command": "probe symbols README.md",
@@ -7401,6 +7585,37 @@ class RealOpenCode(Base):
         run_wb("experiment", "probe", "off")
         _, off = self.run_calls("t-probe-off", shell("t-probe-off"))
         self.assertIn("permission.rejected", off[0])
+
+    def test_probes_output_cap_bounds_the_shell_but_not_the_read_tool_and_no_project_lifts_it(self):
+        # the owner's design (2026-11-21, #857): tool_output sized to the window, in the layer
+        # and in OPENCODE_CONFIG_CONTENT (RESTATED). Measured on OpenCode 2.3.2: it cuts the
+        # shell's output to its last lines; `read` keeps its own 2,000 lines or 50 KB
+        fake_probe(Path(self.tmp.name))
+        long_code(self.repo)
+        run_wb("experiment", "probe", "moderate")
+        lines = 1000  # 42 KB for the shell, under a 32K window whole; 3000 for `read`, past its own limit
+        def before(task):
+            for f, n in (("big.txt", 3000), ("mid.txt", lines)):
+                (task.worktree / f).write_text("".join(f"line {i:05d} {'x' * 30}\n" for i in range(n)))
+            # a project's own config, loaded after the layer: it must not lift the cap
+            (task.worktree / "opencode.json").write_text(json.dumps(
+                {"tool_output": {"max_bytes": 1_000_000, "max_lines": 100_000}}))
+        name = "t-cap"
+        wt = lambda: str(store.Task(name).worktree)  # noqa: E731
+        task, answers = self.run_calls(name, [
+            {"name": "read", "arguments": {"path": f"{wt()}/big.txt"}},
+            {"name": "shell", "arguments": {"command": "cat mid.txt", "workdir": wt()}}], before=before)
+        cap = json.loads((context.rules_dir(task) / "opencode.json").read_text())["tool_output"]
+        shell = json.loads(answers[1])
+        shell = shell if isinstance(shell, str) else json.dumps(shell)
+        self.assertLess(len(shell.encode()), cap["max_bytes"] + 1000)     # cut, with its notice
+        self.assertIn(f"of {lines}; full output saved to ", shell)
+        self.assertIn(f"line {lines - 1:05d}", shell)                     # the last lines kept
+        read = json.loads(answers[0])
+        read = read if isinstance(read, str) else json.dumps(read)
+        self.assertGreater(len(read.encode()), 2 * cap["max_bytes"])       # read: not bounded by it
+        self.assertIn("[Output truncated. Continue reading with offset: ", read)
+        self.assertIn("2,000 lines (or 50 KB)", context.EXPERIMENT_NOTES["probe"])
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     @home_outside_the_lane
@@ -9978,7 +10193,7 @@ class Images(Base):
         # #925: IncompleteRead is an HTTPException, not an OSError: a server killed mid-body gave
         # Claude a traceback from wb image / wb audio instead of one line
         import threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import images, media
 
         class H(BaseHTTPRequestHandler):
@@ -10027,7 +10242,7 @@ class Images(Base):
         # #749 (the 2026-11-21 audit, finding 96): images.json's `unload` was checked but never
         # called, so an image server kept 6-12 GB beside the next task's coding model
         import base64, threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import media
         got, fail = [], [False]
 
@@ -10090,7 +10305,7 @@ class Images(Base):
         # #753 (the 2026-11-21 audit, finding 100): a Forge url got an OpenAI body and "sent no
         # image", though listed as ready
         import base64, threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         got = []
 
         class H(BaseHTTPRequestHandler):
@@ -10125,7 +10340,7 @@ class Images(Base):
         """A fake ComfyUI on a port of its own: ``history(n)`` is what its nth /history poll
         answers; what it was sent is in the list returned."""
         import threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         got, polls = [], []
 
         class H(BaseHTTPRequestHandler):
@@ -10262,7 +10477,7 @@ class Images(Base):
         # on Windows under WSL2's NAT went unseen, and the skill proposed the 11 GB install again
         import socket
         import threading
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import images, models
 
         def serving(host, code, body):
@@ -10328,7 +10543,7 @@ class Images(Base):
 
     def test_a_server_engine_and_the_failures(self):
         import base64, threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         got = []
 
         class H(BaseHTTPRequestHandler):
@@ -10363,7 +10578,7 @@ class Images(Base):
         # that isn't JSON a traceback, a 400 only "HTTP Error 400: Bad Request"; and a server
         # started with an API key was listed as ready, then failed 401 on every generation
         import base64, threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import audio, images
         seen = []
 
@@ -11085,7 +11300,7 @@ class Audio(Base):
         # listener kept its weights after the batch let the GPU lease go
         import threading
         import wave as _wave
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         buf = io.BytesIO()
         with _wave.open(buf, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\x00\x30" * 8000)
@@ -11133,7 +11348,7 @@ class Audio(Base):
     def test_a_server_engine_a_server_listener_and_the_unload_after_the_batch(self):
         import threading
         import wave as _wave
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         buf = io.BytesIO()
         with _wave.open(buf, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\x00\x30" * 8000)
@@ -18310,6 +18525,16 @@ class WebChat(Base):
             for srv in servers:
                 srv.server_close()
 
+    def test_the_suites_own_test_servers_listen_without_looking_their_host_name_up(self):
+        # #950: 35 s per server on GitHub's macOS runners, before the server listened
+        with mock.patch("socket.getfqdn", side_effect=AssertionError("looked up")):
+            for cls in (HTTPServer, ThreadingHTTPServer):
+                srv = cls(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+                try:
+                    self.assertEqual(srv.server_name, "127.0.0.1")
+                finally:
+                    srv.server_close()
+
     def test_a_listener_or_server_under_a_recycled_or_foreign_pid_is_gone(self):
         # #532: listener.json's pid, live again under a root daemon (EPERM), read as a session
         # listening; one of ours started since, as the listener too
@@ -19003,7 +19228,7 @@ class WebChat(Base):
 
             def log_message(self, *a):
                 pass
-        svc = http.server.HTTPServer(("127.0.0.1", 0), Svc)
+        svc = HTTPServer(("127.0.0.1", 0), Svc)
         threading.Thread(target=svc.serve_forever, daemon=True).start()
         self.addCleanup(svc.server_close)
         self.addCleanup(svc.shutdown)
@@ -19160,7 +19385,7 @@ class WebChat(Base):
 
             def log_message(self, *a):
                 pass
-        svc = http.server.HTTPServer(("127.0.0.1", 0), Svc)
+        svc = HTTPServer(("127.0.0.1", 0), Svc)
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(tmp / "c.pem", tmp / "k.pem")
         svc.socket = tls.wrap_socket(svc.socket, server_side=True)
@@ -19599,7 +19824,7 @@ class WebChat(Base):
     def test_wb_chat_on_never_shows_a_link_to_another_programs_server(self):
         # #200 (the 2026-11-19 audit): a bare connect counted any program on the port as the chat,
         # and a started server was reported after a fixed half second, up or not
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler
 
         class Other(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -20625,7 +20850,7 @@ class Top(Base):
     def test_a_server_with_eight_aliases_is_asked_once_a_probe_and_a_stalled_one_never_holds_the_tick(self):
         # #561: 8 entries on one llama-swap made 8 GET /v1/models a probe, one after another, and
         # a server that accepted and then stalled held the tick (q, the GPU rows) up to 16 s
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import models, top
         asked = []
 
@@ -21534,6 +21759,20 @@ class Detector(unittest.TestCase):
         self.assertEqual(events.normalize({"type": "step_finish", "part": {"tokens": 5}}, 1)["in"], 0)
         self.assertEqual(events.normalize({"type": "error", "error": "boom"}, 1)["text"], "boom")
 
+    def test_only_opencodes_compaction_errors_read_as_a_failed_compaction(self):
+        # #969 (2026-11-21): "Compaction produced no summary" (a bench replay, night-e2-sight),
+        # "... reached the output token limit" (ember-4a): each left a session that can't go on
+        err = lambda e: {"type": "error", "timestamp": 1, "sessionID": "s", "error": e}  # noqa: E731
+        for msg in ("Compaction produced no summary", "Compaction summary reached the output token limit",
+                    "Compaction summary did not match the required template"):
+            self.assertTrue(events.compaction_failed(err({"type": "compaction.failed", "message": msg})))
+            self.assertTrue(events.compaction_failed(err({"type": "unknown", "message": msg})))
+        self.assertTrue(events.compaction_failed(err({"type": "provider.content-filter",
+                                                      "message": "Compaction summary was blocked by the provider"})))
+        for raw in (err("boom"), err({"type": "provider.transport", "message": "Timed out"}), err(None),
+                    {"type": "retry", "error": {"type": "compaction.failed", "message": "x"}}, None, 5):
+            self.assertFalse(events.compaction_failed(raw))
+
     def test_four_different_files_with_one_long_header_are_not_the_same_call(self):
         # #497 (the audit of 1.90, reproduced): the signature was the input's JSON cut to 400
         # characters, `content` sorting before `filePath`, so four new files opening with one
@@ -22006,6 +22245,10 @@ class ProbeExperiment(Base):
     """The probe experiment (ARCHITECTURE.md, *Experiments*): off by default, recorded per task,
     and nothing at all where it is off or probe isn't installed."""
 
+    def setUp(self):
+        super().setUp()
+        long_code(self.repo)  # probe is on only where the repo has long code (#857)
+
     def fake_probe(self):
         fake_probe(Path(self.tmp.name))
         context.set_experiment("probe", True)
@@ -22018,12 +22261,12 @@ class ProbeExperiment(Base):
         self.start("t-probe", "ok")
         wait_phase("t-probe", {"review"})
         task = store.Task("t-probe")
-        self.assertEqual(task.spec["experiments"], {"probe": True})
+        self.assertEqual(task.spec["experiments"], {"probe": "moderate"})   # on: adaptable's pick
         self.assertTrue(self.probe_rules(task))
         handbook = (context.rules_dir(task) / "HANDBOOK.md").read_text()
         self.assertTrue(handbook.startswith(context.HANDBOOK.read_text()))
         self.assertTrue(handbook.endswith(context.EXPERIMENT_NOTES["probe"]))
-        self.assertIn("probe: on and working (probe-code 0.6.0)", cli.experiment_lines())
+        self.assertIn("probe: adaptable and working (probe-code 0.6.0)", cli.experiment_lines())
         # and the round's protocol says it too: the handbook alone went unread, 0 probe calls in
         # 14 replays (2026-11-21)
         prompt = task.round_dir(1).joinpath("prompt.md").read_text()
@@ -22058,7 +22301,8 @@ class ProbeExperiment(Base):
         st = task.status
         self.assertEqual(st.get("experiment_use"), {"probe": 1})   # the compound line, not grep's
         self.assertEqual(st.get("long_reads"), 1)                   # the whole read, not the part
-        self.assertIn("probe: 1 call(s); whole reads of files over 300 lines: 1", run_wb("status", "t-used"))
+        self.assertIn("probe (adaptable → moderate, no long file named): 1 call(s); whole reads of files "
+                      "over 300 lines: 1", run_wb("status", "t-used"))
         run_wb("discard", "t-used")
         row = [r for r in store.results(trials=True) if r["task"] == "t-used"][-1]
         self.assertEqual((row["experiment_use"], row["long_reads"]), ({"probe": 1}, 1))
@@ -22110,8 +22354,8 @@ class ProbeExperiment(Base):
 
     def test_it_is_off_until_turned_on_even_with_probe_installed(self):
         fake_probe(Path(self.tmp.name))
-        self.assertEqual(context.experiments(), {"probe": False})
-        self.assertIn("probe: off (wb experiment probe on)", cli.experiment_lines())
+        self.assertEqual(context.experiments(), {"probe": "off"})
+        self.assertIn("probe: off (wb experiment probe adaptable|moderate|aggressive)", cli.experiment_lines())
         self.start("t-default", "ok")
         wait_phase("t-default", {"review"})
         task = store.Task("t-default")
@@ -22145,7 +22389,9 @@ class ProbeExperiment(Base):
         context.set_experiment("probe", True)
         self.start("t-bytes", "ok")
         wait_phase("t-bytes", {"review"})
-        self.assertEqual(store.Task("t-bytes").spec["experiments"], {"probe": True})
+        # and its `search --help` lists no languages: off for the task, never on (#857)
+        self.assertEqual(store.Task("t-bytes").spec["experiments"], {"probe": False})
+        self.assertEqual(store.Task("t-bytes").spec["experiments_off"], {"probe": context.PROBE_OFF_HELP})
 
     def test_without_probe_installed_the_task_runs_as_main_does(self):
         context.set_experiment("probe", True)
@@ -22169,7 +22415,7 @@ class ProbeExperiment(Base):
         self.start("t-after", "ok")
         wait_phase("t-after", {"review"})
         before, after = store.Task("t-before"), store.Task("t-after")
-        self.assertEqual(before.spec["experiments"], {"probe": True})
+        self.assertEqual(before.spec["experiments"], {"probe": "moderate"})
         self.assertEqual(after.spec["experiments"], {"probe": False})
         self.assertTrue(self.probe_rules(before))
         self.assertEqual(self.probe_rules(after), [])
@@ -22179,7 +22425,7 @@ class ProbeExperiment(Base):
         rows = {r["task"]: r for r in store.results()}
         self.assertEqual(rows["t-before"]["experiments"], ["probe"])   # the results rows say which
         self.assertNotIn("experiments", rows["t-after"])
-        self.assertIn("probe: on", run_wb("experiment", "probe", "on"))
+        self.assertIn("probe: adaptable", run_wb("experiment", "probe", "on"))   # on: adaptable
 
     def test_a_probe_without_symbols_counts_as_not_installed(self):
         # crates.io's probe-code 0.6.0: `symbols` read as a search word (2026-11-20)
@@ -22197,6 +22443,697 @@ class ProbeExperiment(Base):
             run_wb("experiment", "telepathy", "on")
         self.assertFalse(context.experiments_path().exists())
 
+
+
+class ProbeLevels(Base):
+    """probe's levels, one of them adaptive (the owner's design, 2026-11-21, #857): off, moderate
+    (the condition), aggressive (the order) and adaptable (moderate until the probe_aggressive
+    knob moves it, learning only from tasks whose spec names a long file)."""
+
+    def setUp(self):
+        super().setUp()
+        fake_probe(Path(self.tmp.name))
+        long_code(self.repo)  # probe is on only where the repo has long code (#857)
+
+    def long_file(self, name="big.py", lines=None):
+        """A committed file over PROBE_FILE_LINES lines, and a spec that names it."""
+        lines = lines or context.PROBE_FILE_LINES + 100
+        (self.repo / name).write_text("".join(f"def f{i}():\n    return {i}\n" for i in range(lines // 2)))
+        subprocess.run(["git", "-C", str(self.repo), "add", name], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "big"], check=True)
+        self.spec.write_text(f"Write the answer to answer.txt; `{name}` has the helpers.\n")
+
+    def named(self, explores: bool) -> str:
+        """A task name the knob's exploration picks (or doesn't), by its hash."""
+        from workbench import tuning
+        return next(f"t-lvl-{i}" for i in range(500)
+                    if tuning.choose("probe_aggressive", "m", 1, f"t-lvl-{i}")[1] == explores)
+
+    def test_each_level_gives_the_agent_its_own_protocol_line_and_the_same_note_and_rules(self):
+        for level, line in (("moderate", context.EXPERIMENT_PROTOCOL["probe"]),
+                            ("aggressive", context.PROBE_AGGRESSIVE_PROTOCOL)):
+            run_wb("experiment", "probe", level)
+            self.start(f"t-{level}", "ok")
+            wait_phase(f"t-{level}", {"review"})
+            task = store.Task(f"t-{level}")
+            self.assertEqual((task.spec["experiments"], task.spec["probe_setting"]), ({"probe": level}, level))
+            prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+            self.assertIn(line, prompt)
+            other = context.PROBE_AGGRESSIVE_PROTOCOL if level == "moderate" else context.EXPERIMENT_PROTOCOL["probe"]
+            self.assertNotIn(other, prompt)
+            self.assertTrue((context.rules_dir(task) / "HANDBOOK.md").read_text().endswith(
+                context.EXPERIMENT_NOTES["probe"]))                       # the note: every level's
+            self.assertTrue([r for r in context.shell_rules(task) if "probe" in r["resource"].split()])
+            self.assertIn(f"probe ({level}): ", run_wb("status", f"t-{level}"))
+        self.assertIn("Never read a file over 1500 lines whole: `probe extract <file>#<name>`",
+                      context.PROBE_AGGRESSIVE_PROTOCOL)
+        # wb start writes round 1's prompt before task.json (#873): from the levels it will record
+        self.assertEqual(context.experiment_protocol(experiments={"probe": "aggressive"}),
+                         context.PROBE_AGGRESSIVE_PROTOCOL)
+        self.assertEqual(context.experiment_protocol(), "")
+
+    def test_off_leaves_the_task_exactly_as_without_the_experiment(self):
+        run_wb("experiment", "probe", "off")
+        self.long_file()
+        self.start("t-off", "ok")
+        wait_phase("t-off", {"review"})
+        task = store.Task("t-off")
+        self.assertEqual(task.spec["experiments"], {"probe": False})
+        self.assertFalse({k for k in task.spec if k.startswith("probe_")})
+        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_bytes(), context.HANDBOOK.read_bytes())
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertEqual(prompt, self.spec.read_text().rstrip() + cli.PROTOCOL.format(
+            branch=task.spec["branch"], test_line=cli.test_line(None), budget=task.spec["ask_budget"],
+            experiment_protocol=""))                                      # byte for byte
+        self.assertNotIn("probe_aggressive", task.status["tuned"])
+        self.assertNotIn("outline", task.status)                          # no probe symbols run
+        self.assertNotIn("tool_output", json.loads((context.rules_dir(task) / "opencode.json").read_text()))
+        run_wb("discard", "t-off")
+        row = [r for r in store.results(trials=True) if r["task"] == "t-off"][-1]
+        self.assertFalse({k for k in row if k.startswith("probe")})
+
+    def test_on_is_read_as_adaptable_and_a_bad_level_is_refused(self):
+        context.experiments_path().parent.mkdir(parents=True, exist_ok=True)
+        context.experiments_path().write_text('{"probe": "on"}')          # set before the levels
+        self.assertEqual(context.experiments(), {"probe": "adaptable"})
+        run_wb("experiment", "probe", "on")
+        self.assertEqual(json.loads(context.experiments_path().read_text()), {"probe": "adaptable"})
+        context.experiments_path().write_text('{"probe": "loud"}')
+        self.assertEqual(context.experiments(), {"probe": "off"})
+        with self.assertRaises(SystemExit):
+            run_wb("experiment", "probe", "loud")
+
+    def test_wb_experiment_says_what_each_level_does_and_recommends_adaptable_set_up_or_not(self):
+        # the review, 2026-11-21 (#857): the levels and what every level adds went unsaid, and a
+        # probe not installed dropped the recommendation the pane reads
+        listing = run_wb("experiment")
+        for said in ("moderate tells it to extract", "aggressive never to read one whole",
+                     "adaptable learns which per model", "caps one shell call's output",
+                     "outlines the spec's long files in round 1"):
+            self.assertIn(said, listing)
+        run_wb("experiment", "probe", "adaptable")
+        with mock.patch.object(context, "PROBE_RECOMMENDED", True):
+            for found in (None, "/x/probe"):
+                with mock.patch.object(context, "probe_bin", return_value=found):
+                    self.assertTrue(cli.experiment_lines()[0].endswith("; adaptable is recommended"))
+        with mock.patch.object(context, "probe_bin", return_value=None):
+            self.assertNotIn("recommended", cli.experiment_lines()[0])
+
+    def test_adaptable_records_its_setting_and_resolves_to_moderate_without_evidence(self):
+        run_wb("experiment", "probe", "adaptable")
+        self.long_file()
+        name = self.named(explores=False)
+        self.start(name, "ok")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.assertEqual(task.spec["experiments"], {"probe": "moderate"})
+        self.assertEqual(task.spec["probe_setting"], "adaptable")
+        self.assertEqual(task.spec["probe_files"], {"big.py": context.PROBE_FILE_LINES + 100})
+        self.assertEqual((task.status["tuned"]["probe_aggressive"], task.status["explored"]), (0, []))
+        self.assertIn("probe (adaptable → moderate): ", run_wb("status", name))
+        run_wb("accept", name, "-m", "feat: answer")
+        row = [r for r in store.results() if r["task"] == name][-1]
+        self.assertEqual((row["probe_level"], row["probe_setting"], row["probe_long"]),
+                         ("moderate", "adaptable", True))
+        self.assertEqual(row["tuned"]["probe_aggressive"], 0)
+
+    def test_a_spec_that_names_no_long_file_never_explores_aggressive(self):
+        # only where the levels act differently is a try evidence (the owner's design, #857)
+        run_wb("experiment", "probe", "adaptable")
+        name = self.named(explores=True)
+        self.start(name, "ok")                                            # names answer.txt only
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.assertEqual(task.spec["experiments"], {"probe": "moderate"})
+        self.assertNotIn("probe_explored", task.spec)
+        self.assertEqual(task.spec["probe_files"], {})
+        self.assertNotIn("probe_aggressive", task.status["explored"])
+        self.assertIn("probe (adaptable → moderate, no long file named)", run_wb("status", name))
+        run_wb("discard", name)
+        row = [r for r in store.results(trials=True) if r["task"] == name][-1]
+        self.assertFalse(row["probe_long"])
+        from workbench import tuning
+        self.assertFalse(tuning.acted("probe_aggressive", row))         # no evidence either way
+
+    def test_a_spec_that_names_a_long_file_is_where_adaptable_tries_aggressive(self):
+        run_wb("experiment", "probe", "adaptable")
+        self.long_file()
+        name = self.named(explores=True)
+        self.start(name, "ok")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.assertEqual(task.spec["experiments"], {"probe": "aggressive"})
+        self.assertTrue(task.spec["probe_explored"])
+        self.assertIn(context.PROBE_AGGRESSIVE_PROTOCOL, task.round_dir(1).joinpath("prompt.md").read_text())
+        self.assertEqual(task.status["tuned"]["probe_aggressive"], 1)
+        self.assertIn("probe_aggressive", task.status["explored"])
+        self.assertIn("probe (adaptable → aggressive, a try)", run_wb("status", name))
+
+    def test_any_level_caps_one_tool_output_to_a_tenth_of_the_window_where_no_project_can_lift_it(self):
+        from workbench import models, runner
+        run_wb("experiment", "probe", "aggressive")
+        self.start("t-capped", "ok")
+        wait_phase("t-capped", {"review"})
+        task = store.Task("t-capped")
+        cfg = models.resolve(task.spec["model"]).config
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        want = runner.output_cap(cfg)
+        self.assertEqual(layer["tool_output"], want)
+        self.assertIn("tool_output", runner.RESTATED)
+        pinned = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(pinned["tool_output"], want)                      # said again, last
+        # about a tenth of the usable input at ~4 bytes a token, floor 8000, ceiling OpenCode's own
+        self.assertEqual(runner.output_cap({"limit": {"context": 40960}}),
+                         {"max_bytes": 16384, "max_lines": 409})
+        self.assertEqual(runner.output_cap({"limit": {"context": 8192}})["max_bytes"], 8000)
+        self.assertEqual(runner.output_cap({"limit": {"context": 262144}})["max_bytes"], 51_200)
+        self.assertEqual(runner.output_cap({"limit": {"context": 131072, "input": 20000}})["max_bytes"], 8000)
+        self.assertEqual(runner.output_cap({})["max_bytes"], 51_200)
+        run_wb("experiment", "probe", "off")                              # off: no cap at all
+        self.start("t-uncapped", "ok")
+        wait_phase("t-uncapped", {"review"})
+        off = json.loads(runner.write_config_layer(store.Task("t-uncapped")).read_text())
+        self.assertNotIn("tool_output", off)
+        self.assertNotIn("tool_output", json.loads(runner.rules_env(off)["OPENCODE_CONFIG_CONTENT"]))
+
+    def symbols_probe(self, n=400, script=None) -> Path:
+        """A `probe` first on PATH whose `symbols -o json` lists ``n`` functions, the longest last
+        (or runs ``script``); the file each of its runs is noted in."""
+        bin_ = Path(self.tmp.name) / "symbols-probe"
+        bin_.mkdir()
+        ran = bin_ / "ran"
+        body = script or (f"syms = [{{'name': f'f{{i}}', 'kind': 'function', 'signature': f'def f{{i}}():', "
+                          f"'line': 2 * i + 1, 'end_line': 2 * i + 2 + i // 50}} for i in range({n})]\n"
+                          "print(json.dumps([{'file': sys.argv[-1], 'symbols': syms}]))")
+        (bin_ / "probe").write_text(
+            f"#!{sys.executable}\nimport json, sys, time\nopen({str(ran)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "if sys.argv[1:] == ['--help']:\n    print('Commands:\\n  symbols  List symbols'); sys.exit(0)\n"
+            f"if sys.argv[1:] == ['search', '--help']:\n    print({SEARCH_HELP!r}); sys.exit(0)\n"
+            "if sys.argv[1:] == ['--version']:\n    print('probe-code 0.6.0'); sys.exit(0)\n"
+            + body + "\n")
+        (bin_ / "probe").chmod(0o755)
+        os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
+        return ran
+
+    def test_round_one_starts_with_a_capped_outline_of_the_long_files_the_spec_names_and_later_rounds_dont(self):
+        # the owner's design (2026-11-21, #857): the agent starts knowing where things are
+        ran = self.symbols_probe()
+        run_wb("experiment", "probe", "moderate")
+        self.long_file()
+        self.start("t-outline", "ok")
+        wait_phase("t-outline", {"review"})
+        task = store.Task("t-outline")
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertIn("symbols --allow-tests -o json big.py", ran.read_text())
+        head = context.OUTLINE_HEAD.format(file="big.py")
+        self.assertIn(head, prompt)
+        section = prompt[prompt.index(head):]
+        self.assertLessEqual(len(section), context.PROBE_OUTLINE_TOKENS * context.CHARS_PER_TOKEN)
+        self.assertRegex(section, r"… \d+ more: `probe symbols big\.py`\n$")
+        first = section.splitlines()[1]
+        self.assertTrue(first.startswith("701-709 def f350():"), first)     # the longest first, in order
+        self.assertEqual(task.status["outline"], ["big.py"])
+        self.assertTrue(prompt.startswith(self.spec.read_text().rstrip()))  # the opening unchanged
+        run_wb("feedback", "t-outline", "--text", "1. Again.")
+        wait_phase("t-outline", {"review"})
+        self.assertNotIn("Outline of", task.round_dir(2).joinpath("prompt.md").read_text())
+        self.assertEqual(prompt, task.round_dir(1).joinpath("prompt.md").read_text())  # once
+        self.assertEqual(ran.read_text().count("symbols"), 1)
+
+    def test_the_outline_and_the_long_files_named_are_only_those_in_a_language_probe_reads(self):
+        # #857 (the owner, 2026-11-21): probe symbols of a CSV or a Nim file is its lines as text
+        ran = self.symbols_probe()
+        run_wb("experiment", "probe", "moderate")
+        self.long_file()
+        long = context.PROBE_FILE_LINES + 10
+        (self.repo / "data.csv").write_text("".join(f"{i},x\n" for i in range(long)))
+        (self.repo / "main.nim").write_text("".join(f"proc f{i}(): int = {i}\n" for i in range(long)))
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "data"], check=True)
+        self.spec.write_text("Change data.csv, main.nim and `big.py`.\n")
+        self.start("t-kinds", "ok")
+        wait_phase("t-kinds", {"review"})
+        task = store.Task("t-kinds")
+        self.assertEqual(task.spec["probe_files"], {"big.py": context.PROBE_FILE_LINES + 100})
+        self.assertEqual(task.status["outline"], ["big.py"])
+        self.assertNotIn("data.csv", ran.read_text())
+        self.assertNotIn("main.nim", ran.read_text())
+
+    def test_a_probe_that_fails_or_hangs_adds_no_outline_and_the_round_runs(self):
+        from workbench import runner
+        self.symbols_probe(script="print('not json'); sys.exit(3)")
+        run_wb("experiment", "probe", "moderate")
+        self.long_file()
+        self.start("t-noline", "ok")
+        st = wait_phase("t-noline", {"review"})
+        task = store.Task("t-noline")
+        self.assertNotIn("Outline of", task.round_dir(1).joinpath("prompt.md").read_text())
+        self.assertEqual(st["outline"], [])
+        hang = Path(self.tmp.name) / "hang-probe"
+        hang.write_text("#!/bin/sh\nsleep 30\n")
+        hang.chmod(0o755)
+        with mock.patch.object(runner, "OUTLINE_TIMEOUT", 0.5):
+            began = time.time()
+            self.assertIsNone(runner.probe_symbols(str(hang), task.worktree, "big.py"))
+            self.assertLess(time.time() - began, 10)
+        # probe off: no outline, whatever the spec names
+        run_wb("experiment", "probe", "off")
+        self.start("t-noprobe", "ok")
+        self.assertNotIn("outline", wait_phase("t-noprobe", {"review"}))
+
+    def test_the_outline_shares_its_budget_between_the_long_files_named(self):
+        from workbench import runner
+        self.symbols_probe(n=800)
+        run_wb("experiment", "probe", "moderate")
+        for f in ("a.py", "b.py"):
+            self.long_file(f)
+        self.spec.write_text("Change `a.py` and b.py (and see README.md).\n")
+        self.start("t-two", "ok")
+        wait_phase("t-two", {"review"})
+        task = store.Task("t-two")
+        section, files = runner.outline_section(task, self.spec.read_text())
+        self.assertEqual(files, ["a.py", "b.py"])                         # README.md: short
+        self.assertLessEqual(len(section), context.PROBE_OUTLINE_TOKENS * context.CHARS_PER_TOKEN)
+        a, b = section.split("\n\n")
+        self.assertLess(abs(len(a) - len(b)), 200)                         # shared, not first come
+
+    def test_a_package_tasks_outline_names_each_file_as_the_agent_reaches_it_from_the_package(self):
+        # review, 2026-11-21 (#857): the agent runs in worktree/<subdir>, and the outline named
+        # pkg/big.py from the worktree's top, a path that isn't there from pkg/
+        ran = self.symbols_probe(n=800)
+        run_wb("experiment", "probe", "moderate")
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        pkg = self.repo / "pkg"
+        pkg.mkdir()
+        (pkg / "CLAUDE.md").write_text("# pkg\nThe package.\n")
+        body = "".join(f"def f{i}():\n    return {i}\n" for i in range(context.PROBE_FILE_LINES))
+        (pkg / "big.py").write_text(body)
+        (self.repo / "top.py").write_text(body)
+        g("add", "-A")
+        g("commit", "-qm", "a package")
+        self.spec.write_text("Change `big.py`, using `top.py`.\n")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-pkg", "--spec", str(self.spec), "--repo", str(pkg), "--model", "mimo")
+        wait_phase("t-pkg", {"review"})
+        task = store.Task("t-pkg")
+        self.assertEqual(task.spec["subdir"], "pkg")
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertIn("symbols --allow-tests -o json pkg/big.py", ran.read_text())  # run from the top
+        for shown in ("big.py", "../top.py"):                              # said from the package
+            self.assertIn(context.OUTLINE_HEAD.format(file=shown), prompt)
+            self.assertIn(f"more: `probe symbols {shown}`", prompt)
+            self.assertTrue((task.workdir / shown).is_file())
+        self.assertNotIn("pkg/big.py", prompt)
+        self.assertEqual(task.status["outline"], ["pkg/big.py", "top.py"])
+
+    def test_counting_a_named_files_lines_reads_it_a_chunk_at_a_time(self):
+        # review, 2026-11-21 (#857): read whole, a spec naming a large data file loaded all of it
+        lines = context.PROBE_FILE_LINES + 1
+        (self.repo / "data.csv").write_bytes(b"x" * (1 << 17) + b"\n" * (lines - 1) + b"end")
+        self.assertEqual(context.long_files("See data.csv and empty.txt.", self.repo), {"data.csv": lines})
+        (self.repo / "empty.txt").write_bytes(b"")
+        self.assertEqual(context.long_files("empty.txt", self.repo), {})
+        subprocess.run(["git", "-C", str(self.repo), "add", "data.csv"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "data"], check=True)
+        (self.repo / "data.csv").write_bytes(b"short\n")                  # the commit's, not the file's
+        self.assertEqual(context.long_files("data.csv", self.repo, rev="HEAD"), {"data.csv": lines})
+        with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("read whole")):
+            self.assertEqual(context.long_files("data.csv", self.repo), {})
+
+    def test_aggressive_becomes_adaptables_pick_only_once_both_levels_have_five_long_file_tasks(self):
+        # the owner's design (2026-11-21, #857): five evidence tasks per value; the default
+        # once stayed in the running with one (review, 2026-11-21)
+        from workbench import tuning
+        run_wb("experiment", "probe", "adaptable")
+        self.long_file()
+        first = self.named(explores=False)
+        self.start(first, "ok")
+        wait_phase(first, {"review"})
+        model, window = store.Task(first).spec["model"], store.Task(first).status["window"]
+        row = lambda v, reviews, **x: {"model": model, "window": window, "outcome": "accepted",  # noqa
+                                       "reviews": reviews, "active_minutes": 10, "probe_long": True,
+                                       "tuned": {"probe_aggressive": v}, **x}
+        results = store.home() / "results.jsonl"
+        store.append_jsonl(results, row(0, 1))                            # one moderate, five aggressive
+        for _ in range(5):
+            store.append_jsonl(results, row(1, 0))
+        self.assertEqual(tuning.best("probe_aggressive", model, window), 0)  # moderate's 1 < try_min
+        results.unlink()
+        for _ in range(5):                                                 # moderate: sent back once each
+            store.append_jsonl(store.home() / "results.jsonl", row(0, 1))
+        for _ in range(4):
+            store.append_jsonl(store.home() / "results.jsonl", row(1, 0))
+        for _ in range(6):                                                 # not evidence: no long file
+            store.append_jsonl(store.home() / "results.jsonl", row(1, 0, probe_long=False))
+        self.assertEqual(tuning.best("probe_aggressive", model, window), 0)  # 4 < try_min
+        store.append_jsonl(store.home() / "results.jsonl", row(1, 0))
+        self.assertEqual(tuning.best("probe_aggressive", model, window), 1)
+        self.assertEqual(tuning.KNOBS["probe_aggressive"].try_min, 5)
+        name = self.named(explores=False)
+        name = name if name != first else next(f"t-x-{i}" for i in range(500) if not tuning.choose(
+            "probe_aggressive", "m", 1, f"t-x-{i}")[1])
+        self.start(name, "ok")
+        wait_phase(name, {"review"})
+        self.assertEqual(store.Task(name).spec["experiments"], {"probe": "aggressive"})
+        self.assertIn("probe (adaptable → aggressive): ", run_wb("status", name))
+        run_wb("experiment", "probe", "moderate")                          # a fixed level: no knob's pick
+        self.start("t-fixed", "ok")
+        wait_phase("t-fixed", {"review"})
+        self.assertEqual(store.Task("t-fixed").spec["experiments"], {"probe": "moderate"})
+        self.assertEqual(store.Task("t-fixed").status["tuned"]["probe_aggressive"], 0)
+
+
+
+class ProbeWhereItHelps(Base):
+    """Probe is off for a task whose repo has no file over PROBE_FILE_LINES in a language probe
+    reads (the owner, 2026-11-21, #857: "No sense in clogging up the subagents with irrelevant
+    information. Ensure we are robust about handling this."): the task runs as with probe off."""
+
+    LONG = context.PROBE_FILE_LINES + 10
+
+    def setUp(self):
+        super().setUp()
+        fake_probe(Path(self.tmp.name))
+        run_wb("experiment", "probe", "moderate")
+
+    @staticmethod
+    def code(lines: int, line: str = "def f{i}():\n    return {i}\n") -> str:
+        return "".join(line.format(i=i) for i in range(lines // line.count("\n") + 1))
+
+    def repo_with(self, files: dict, name: str = "r") -> Path:
+        """A new repo whose one commit holds ``files`` ({path: text or bytes}; none: empty)."""
+        repo = Path(self.tmp.name) / name
+        repo.mkdir()
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)  # noqa
+        g("init", "-q", "-b", "main")
+        for path, body in files.items():
+            (repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (repo / path).write_bytes(body if isinstance(body, bytes) else body.encode())
+        g("add", "-A")
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "one")
+        return repo
+
+    def off(self, repo: Path, spec: str = "Change it.", sub=None) -> str | None:
+        return context.probe_off(spec, repo, sub, "HEAD")[0]
+
+    def test_a_task_whose_repo_has_only_short_files_runs_byte_for_byte_as_with_probe_off(self):
+        self.start("t-cant", "ok")                        # README.md and CLAUDE.md: short
+        wait_phase("t-cant", {"review"})
+        run_wb("experiment", "probe", "off")
+        self.start("t-none", "ok")
+        wait_phase("t-none", {"review"})
+        cant, plain = store.Task("t-cant"), store.Task("t-none")
+        self.assertEqual(cant.spec["experiments"], {"probe": False})
+        self.assertEqual(cant.spec["experiments_off"], {"probe": context.PROBE_OFF_SHORT})
+        self.assertEqual(context.PROBE_OFF_SHORT, "no file over 1500 lines in a language probe reads")
+        self.assertNotIn("experiments_off", plain.spec)
+        self.assertFalse({k for k in cant.spec if k.startswith("probe_")})
+        same = lambda text: text.replace("t-cant", "t-none")  # noqa: E731: the names, equally long
+        prompt = lambda t: t.round_dir(1).joinpath("prompt.md").read_text()  # noqa: E731
+        self.assertEqual(same(prompt(cant)), prompt(plain))                          # the prompt
+        self.assertEqual((context.rules_dir(cant) / "HANDBOOK.md").read_bytes(),    # the handbook
+                         (context.rules_dir(plain) / "HANDBOOK.md").read_bytes())
+        self.assertEqual(same(json.dumps(context.shell_rules(cant))), json.dumps(context.shell_rules(plain)))
+        self.assertEqual(same(runner.write_config_layer(cant).read_text()),         # the layer, its cap
+                         runner.write_config_layer(plain).read_text())
+        self.assertEqual(set(runner.agent_env(cant)), set(runner.agent_env(plain)))  # no PROBE_MAX_TOKENS
+        for t in (cant, plain):
+            self.assertNotIn("outline", t.status)                                   # no probe symbols
+            self.assertNotIn("probe_aggressive", t.status["tuned"])                 # no level's evidence
+        self.assertIn("probe: off for this task (no file over 1500 lines in a language probe reads)",
+                      run_wb("status", "t-cant"))
+        self.assertNotIn("probe:", run_wb("status", "t-none"))
+        run_wb("discard", "t-cant")
+        row = [r for r in store.results(trials=True) if r["task"] == "t-cant"][-1]
+        self.assertFalse({k for k in row if k.startswith("probe") or k.startswith("experiment")})
+        from workbench import tuning
+        self.assertFalse(tuning.acted("probe_aggressive", row))
+
+    def test_a_mixed_repo_with_a_long_python_file_beside_nim_has_probe_on(self):
+        files = {"main.nim": self.code(self.LONG, "proc f{i}(): int = {i}\n"), "big.py": self.code(self.LONG)}
+        self.assertIsNone(self.off(self.repo_with(files)))
+        for path, body in files.items():                                           # and a task there
+            (self.repo / path).write_text(body)
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "mixed"], check=True)
+        self.spec.write_text("Change `main.nim`.\n")
+        self.start("t-mixed", "ok")
+        wait_phase("t-mixed", {"review"})
+        task = store.Task("t-mixed")
+        self.assertEqual(task.spec["experiments"], {"probe": "moderate"})
+        self.assertNotIn("experiments_off", task.spec)
+        self.assertEqual(task.spec["probe_files"], {})                             # nim: probe can't read it
+
+    def test_a_long_file_only_in_languages_probe_cant_read_leaves_it_off(self):
+        nim = self.code(self.LONG, "proc f{i}(): int = {i}\n")
+        # swift: probe-code 0.6.0 lists it but has no parser; .mjs: it reads it as text
+        repo = self.repo_with({"main.nim": nim, "App.swift": nim, "a.mjs": nim, "short.py": "x = 1\n"})
+        self.assertEqual(self.off(repo), context.PROBE_OFF_SHORT)
+        self.assertEqual(self.off(repo, "Change main.nim and App.swift."), context.PROBE_OFF_SHORT)
+
+    def test_only_short_files_leave_it_off(self):
+        repo = self.repo_with({f"m{i}.py": self.code(context.PROBE_FILE_LINES - 2) for i in range(30)})
+        self.assertEqual(self.off(repo), context.PROBE_OFF_SHORT)
+        self.assertIsNone(self.off(self.repo_with({"one.py": self.code(context.PROBE_FILE_LINES + 1)}, "r2")))
+
+    def test_an_empty_repo_leaves_it_off(self):
+        repo = self.repo_with({})
+        self.assertEqual(self.off(repo), context.PROBE_OFF_SHORT)
+        self.assertEqual(context.probe_off("Change big.py.", repo, None, None)[0], context.PROBE_OFF_SHORT)
+
+    def test_a_long_file_only_in_a_submodule_leaves_it_off(self):
+        # a submodule is another project's code, filled read-only in the worktree
+        # (gitops.fill_submodules): the task can't change it
+        inner = self.repo_with({"big.py": self.code(self.LONG)}, "inner")
+        outer = self.repo_with({"CLAUDE.md": "# outer\n"}, "outer")
+        subprocess.run(["git", "-C", str(outer), "-c", "protocol.file.allow=always", "submodule", "add",
+                        "-q", str(inner), "vendor"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(outer), "-c", "user.email=t@t", "-c", "user.name=t", "commit",
+                        "-qm", "vendor"], check=True)
+        self.assertTrue((outer / "vendor" / "big.py").is_file())
+        self.assertEqual(self.off(outer), context.PROBE_OFF_SHORT)
+        self.assertEqual(self.off(outer, "Change vendor/big.py."), context.PROBE_OFF_SHORT)
+
+    def test_long_data_files_leave_it_off(self):
+        rows = "".join(f'{{"id": {i}}},\n' for i in range(self.LONG))
+        repo = self.repo_with({"data.json": "[\n" + rows + "{}]\n",
+                               "table.csv": "".join(f"{i},x\n" for i in range(self.LONG)),
+                               "conf.yaml": "".join(f"k{i}: {i}\n" for i in range(self.LONG)),
+                               "conf.yml": "".join(f"k{i}: {i}\n" for i in range(self.LONG)),
+                               "notes.md": "line\n" * self.LONG, "log.txt": "line\n" * self.LONG,
+                               "art.svg": "<g/>\n" * self.LONG, "blob.bin": b"\0\n" * self.LONG})
+        self.assertEqual(self.off(repo, "See data.json, table.csv and conf.yaml."), context.PROBE_OFF_SHORT)
+        kinds = context.probe_languages(context.probe_bin())
+        self.assertIn(".py", kinds)
+        for data in (".json", ".csv", ".yaml", ".yml", ".md", ".txt", ".svg", ".toml", ".xml", ".lock"):
+            self.assertNotIn(data, kinds)    # yaml is in probe's list: left out on purpose
+
+    def test_without_probe_installed_nothing_changes(self):
+        long_code(self.repo)
+        with mock.patch.object(context, "probe_bin", return_value=None):
+            self.start("t-noprobe", "ok")
+        wait_phase("t-noprobe", {"review"})
+        task = store.Task("t-noprobe")
+        self.assertEqual(task.spec["experiments"], {"probe": False})
+        self.assertNotIn("experiments_off", task.spec)                            # off as before
+        self.assertNotIn("probe:", run_wb("status", "t-noprobe"))
+
+    def recording_probe(self, help_text: str, version: str = "probe-code 0.6.0") -> Path:
+        """A `probe` first on PATH answering --help, --version and `search --help`; its runs noted."""
+        bin_ = Path(self.tmp.name) / f"rec-probe-{len(list(Path(self.tmp.name).glob('rec-probe-*')))}"
+        bin_.mkdir()
+        ran = bin_ / "ran"
+        (bin_ / "probe").write_text(
+            f"#!{sys.executable}\nimport sys\nopen({str(ran)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "a = sys.argv[1:]\n"
+            "if a == ['--help']:\n    print('Commands:\\n  symbols  List symbols')\n"
+            f"elif a == ['--version']:\n    print({version!r})\n"
+            f"elif a == ['search', '--help']:\n    print({help_text!r})\n")
+        (bin_ / "probe").chmod(0o755)
+        os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
+        return ran
+
+    def test_the_languages_come_from_the_installed_probes_help_read_once_per_version(self):
+        ran = self.recording_probe(SEARCH_HELP)
+        exe = context.probe_bin()
+        first = context.probe_languages(exe)
+        self.assertEqual(context.probe_languages(exe), first)
+        self.assertEqual(ran.read_text().count("search --help"), 1)               # cached
+        saved = json.loads(context.probe_languages_path().read_text())
+        self.assertEqual((saved["version"], saved["probe"]), ("probe-code 0.6.0", os.path.realpath(exe)))
+        self.assertIn("python", saved["languages"])
+        # a newer probe that reads Nim: read again, and only the table needs its row
+        newer = SEARCH_HELP.replace(", qml]", ", qml, nim]")
+        ran = self.recording_probe(newer, "probe-code 0.7.0")
+        exe = context.probe_bin()
+        self.assertNotIn(".nim", context.probe_languages(exe))                     # no row yet
+        self.assertEqual(ran.read_text().count("search --help"), 1)
+        nim = self.repo_with({"main.nim": self.code(self.LONG, "proc f{i}(): int = {i}\n")})
+        self.assertEqual(self.off(nim), context.PROBE_OFF_SHORT)
+        with mock.patch.dict(context.PROBE_LANGUAGES, {"nim": (".nim",)}):
+            self.assertIn(".nim", context.probe_languages(exe))
+            self.assertIsNone(self.off(nim))
+
+    def test_a_probe_whose_help_cant_be_read_or_parsed_leaves_it_off_never_on(self):
+        long_code(self.repo)
+        for help_text in ("", "usage: probe search [OPTIONS]", "--language <L>\n[possible values: ]"):
+            context.probe_languages_path().unlink(missing_ok=True)
+            self.recording_probe(help_text, f"probe-code {len(help_text)}")
+            self.assertIsNone(context.probe_languages(context.probe_bin()), help_text)
+            self.assertEqual(self.off(self.repo, "Change lib.py."), context.PROBE_OFF_HELP)
+            self.assertFalse(context.probe_languages_path().exists())              # asked again next time
+        self.start("t-nohelp", "ok")
+        wait_phase("t-nohelp", {"review"})
+        task = store.Task("t-nohelp")
+        self.assertEqual((task.spec["experiments"], task.spec["experiments_off"]),
+                         ({"probe": False}, {"probe": context.PROBE_OFF_HELP}))
+        self.assertIn(f"probe: off for this task ({context.PROBE_OFF_HELP})", run_wb("status", "t-nohelp"))
+
+    def test_counting_a_repos_lines_stops_once_one_file_is_long_and_never_reads_one_whole(self):
+        big = self.code(self.LONG).encode() + b"x" * (8 << 20) + b"\n"            # 8 MB more after
+        repo = self.repo_with({"big.py": big, "small.py": "x = 1\n"})
+        fed = []
+        real = context._Lines.update
+        with mock.patch.object(context._Lines, "update", lambda s, c: (fed.append(len(c)), real(s, c))):
+            self.assertIsNone(self.off(repo))
+        self.assertLess(sum(fed), 1 << 20)
+        # and a repo of long-lined code only is counted no further than PROBE_SCAN_BYTES
+        wide = self.repo_with({f"min{i}.js": b"var a=1;" * (1 << 17) for i in range(4)}, "wide")
+        fed.clear()
+        with mock.patch.object(context, "PROBE_SCAN_BYTES", 2 << 20), \
+                mock.patch.object(context._Lines, "update", lambda s, c: (fed.append(len(c)), real(s, c))):
+            self.assertEqual(self.off(wide), context.PROBE_OFF_SHORT)
+        self.assertLessEqual(sum(fed), (2 << 20) + (1 << 16))
+
+    def test_a_package_task_counts_its_package_and_the_files_its_spec_names(self):
+        repo = self.repo_with({"pkg/CLAUDE.md": "# pkg\n", "pkg/a.py": "x = 1\n", "top.py": self.code(self.LONG)})
+        self.assertEqual(self.off(repo, "Change a.py.", "pkg"), context.PROBE_OFF_SHORT)
+        self.assertIsNone(self.off(repo, "Change a.py, using top.py.", "pkg"))      # named: counted
+        self.assertIsNone(self.off(repo, "Change a.py."))                           # the whole repo
+
+    def objects(self, repo: Path) -> int:
+        """The objects ``repo`` holds, loose and packed."""
+        out = subprocess.run(["git", "-C", str(repo), "count-objects", "-v"], check=True,
+                             capture_output=True, text=True).stdout
+        rows = dict(line.split(": ") for line in out.splitlines())
+        return int(rows["count"]) + int(rows["in-pack"])
+
+    def test_a_blobless_clone_fetches_nothing_to_count_its_files(self):
+        # review, #857, 2026-11-21: ls-tree -l and cat-file fetched every blob of a blobless
+        # clone, one at a time, at wb start (as checkout_size once did, #436)
+        src = self.repo_with({f"m{i}.py": self.code(200) for i in range(30)} |
+                             {"big.py": self.code(self.LONG)}, "src")
+        subprocess.run(["git", "-C", str(src), "config", "uploadpack.allowFilter", "true"], check=True)
+        clone = Path(self.tmp.name) / "blobless"
+        subprocess.run(["git", "clone", "-q", "--no-checkout", "--filter=blob:none", f"file://{src}",
+                        str(clone)], check=True, capture_output=True)
+        self.assertTrue(gitops.partial_clone(clone))
+        held = self.objects(clone)
+        self.assertEqual(self.off(clone), context.PROBE_OFF_SHORT)         # it holds no blob to count
+        self.assertEqual(self.objects(clone), held)                         # and fetched none
+        with mock.patch.object(gitops, "version", return_value=(2, 43, 0)):  # no GIT_NO_LAZY_FETCH
+            self.assertEqual(self.off(clone), context.PROBE_OFF_PARTIAL)
+        self.assertEqual(self.objects(clone), held)
+        subprocess.run(["git", "-C", str(clone), "reset", "-q", "--hard"], check=True,
+                       capture_output=True)                                 # the blobs it now holds
+        held = self.objects(clone)
+        self.assertIsNone(self.off(clone))
+        self.assertEqual(self.objects(clone), held)
+
+    def test_a_long_file_outside_the_sparse_cone_leaves_it_off(self):
+        # review, #857, 2026-11-21: the task's worktree takes the user's sparse patterns
+        # (gitops.apply_sparse), so a long file outside the cone is one its agent never sees
+        repo = self.repo_with({"a/big.py": self.code(self.LONG), "b/small.py": "x = 1\n", "CLAUDE.md": "# r\n"})
+        self.assertIsNone(self.off(repo))
+        subprocess.run(["git", "-C", str(repo), "sparse-checkout", "set", "--cone", "b"], check=True,
+                       capture_output=True)
+        self.assertEqual(self.off(repo), context.PROBE_OFF_SHORT)
+        self.assertEqual(self.off(repo, "Change a/big.py."), context.PROBE_OFF_SHORT)
+        subprocess.run(["git", "-C", str(repo), "sparse-checkout", "set", "--cone", "a"], check=True,
+                       capture_output=True)
+        self.assertIsNone(self.off(repo))
+
+    def test_languages_are_read_from_the_language_option_only_in_either_of_claps_forms(self):
+        # review, #857, 2026-11-21: in clap's long form the search ran past --language and read
+        # --format's [possible values: …] as the languages
+        fmt = "\n  -o, --format <FORMAT>\n          Output\n\n          [possible values: terminal, markdown, json]\n"
+        long_form = ("  -l, --language <LANGUAGE>\n          Programming language\n\n"
+                     "          Possible values:\n          - rust:   Rust\n          - python: Python\n"
+                     "          - c++\n" + fmt)
+        self.assertEqual(context.probe_language_names(long_form), ["rust", "python", "c++"])
+        self.assertEqual(context.probe_language_names(SEARCH_HELP + fmt)[:3], ["rust", "rs", "javascript"])
+        self.assertIsNone(context.probe_language_names("  -l, --language <LANGUAGE>\n          Any\n" + fmt))
+        long_code(self.repo)
+        for help_text in (long_form.replace("- rust:   Rust\n          - python: Python\n", ""),  # no row
+                          "  -l, --language <LANGUAGE>\n          Any\n" + fmt):
+            context.probe_languages_path().unlink(missing_ok=True)
+            self.recording_probe(help_text, f"probe-code 9.{len(help_text)}")
+            self.assertIsNone(context.probe_languages(context.probe_bin()))
+            self.assertEqual(self.off(self.repo, "Change lib.py."), context.PROBE_OFF_HELP)
+            self.assertFalse(context.probe_languages_path().exists())
+        self.recording_probe(long_form, "probe-code 9.0")
+        self.assertEqual(context.probe_languages(context.probe_bin()), frozenset({".rs", ".py"}))
+
+    def test_minified_bundles_dont_use_up_the_count_before_a_long_file(self):
+        # review, #857, 2026-11-21: largest first, a 70 MiB one-line big.min.js was counted whole
+        # and the long a.py beside it never reached
+        repo = self.repo_with({f"dist/b{i}.min.js": b"var a=1;" * (3 << 17) for i in range(3)} |
+                              {"a.py": self.code(self.LONG)})
+        fed = []
+        real = context._Lines.update
+        with mock.patch.object(context, "PROBE_SCAN_BYTES", 4 << 20), \
+                mock.patch.object(context._Lines, "update", lambda s, c: (fed.append(len(c)), real(s, c))):
+            self.assertIsNone(self.off(repo))
+        self.assertLess(sum(fed), 1 << 20)                  # each bundle: its first chunk or two
+        # and where the count runs out among real code, the reason says it gave up
+        dense = self.repo_with({f"m{k}.py": self.code(context.PROBE_FILE_LINES - 2, f"def f{k}_{{i}}():\n    pass\n")
+                                for k in range(6)}, "dense")              # six blobs, not one
+        with mock.patch.object(context, "PROBE_SCAN_BYTES", 64 << 10):
+            self.assertEqual(self.off(dense), context.PROBE_OFF_GAVE_UP)
+        self.assertEqual(self.off(dense), context.PROBE_OFF_SHORT)
+
+    def test_wb_image_and_wb_audio_never_start_an_agent_so_probe_cant_reach_them(self):
+        # #857: they call the local engines directly, never OpenCode or a runner, so nothing of
+        # the experiment (its note, protocol line, rules, cap) is in what they run
+        long_code(self.repo)
+        tmp = Path(self.tmp.name)
+        fake = tmp / "fake_image.py"
+        fake.write_text("import sys\na = sys.argv[1:]\n"
+                        "open(a[a.index('-o') + 1], 'wb').write(" + repr(image_png(64, 64)) + ")\n")
+        images_json, audio_json = tmp / "images.json", tmp / "audio.json"
+        images_json.write_text(json.dumps({"fake": {"command": f"{sys.executable} {fake} -p {{prompt}} "
+                                                                "-o {out} --seed {seed}"}}))
+        tone = tmp / "tone.py"
+        tone.write_text(TONE)
+        audio_json.write_text(json.dumps({"tts": {"command": f"{sys.executable} {tone} --text {{text}} "
+                                                             "--seed {seed} --out {out}", "gpu": False}}))
+        os.environ.update(WB_IMAGES=str(images_json), WB_AUDIO=str(audio_json))
+        seen = []
+        real = subprocess.Popen
+
+        class Spy(real):
+            def __init__(self, args, *a, **k):
+                seen.append((args if isinstance(args, (list, tuple)) else [args], k.get("env") or {}))
+                super().__init__(args, *a, **k)
+        no_runner = mock.patch.object(cli, "spawn_runner", side_effect=AssertionError("a runner"))
+        with mock.patch.object(subprocess, "Popen", Spy), no_runner:
+            self.assertIn("1 image(s)", run_wb("image", "a fox", "--n", "1", "--out", str(tmp / "img")))
+            self.assertIn("1 clip(s)", run_wb("audio", "a bell", "--n", "1", "--no-check",
+                                              "--out", str(tmp / "snd")))
+        self.assertTrue(seen)                                                       # the engines ran
+        said = context.EXPERIMENT_NOTES["probe"].strip()[:60]
+        for argv, env in seen:
+            words = " ".join(map(str, argv))
+            self.assertFalse({"opencode", "probe"} & {Path(str(x)).name for x in argv}, words)
+            self.assertNotIn("runner", words)
+            self.assertNotIn(said, words)
+            self.assertFalse({"OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "PROBE_MAX_TOKENS"} & set(env))
+        self.assertFalse((store.home() / "tasks").exists() and list((store.home() / "tasks").iterdir()))
+        for mod in ("images", "audio", "media"):                                    # nor could they
+            src = (ROOT / "workbench" / f"{mod}.py").read_text()
+            self.assertIsNone(re.search(r"from \. import [^\n]*\b(runner|context|cli)\b", src), mod)
+            for word in ("spawn_runner", "opencode_bin", "OPENCODE_CONFIG", "EXPERIMENT", "probe_"):
+                self.assertNotIn(word, src, f"{mod}: {word}")
 
 if __name__ == "__main__":
     unittest.main()

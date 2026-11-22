@@ -34,7 +34,7 @@ from pathlib import Path
 
 from . import (ask_mcp, context, gitguard, gitops, hardware, lane, lessons, models, progress, skills,
                stats, store, tuning)
-from .events import StuckDetector, normalize
+from .events import StuckDetector, compaction_failed, normalize
 from .watch import Watcher
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
@@ -263,9 +263,10 @@ def write_config_layer(task: store.Task) -> Path:
     path = context.rules_dir(task) / "opencode.json"
     wait_ms = int(task.spec.get("ask_timeout", 1200) + 60) * 1000
     try:
-        buffer = compaction_buffer(models.resolve(task.spec["model"]).config)
+        cfg = models.resolve(task.spec["model"]).config
     except KeyError:
-        buffer = None
+        cfg = {}
+    buffer = compaction_buffer(cfg)
     store.write_json(path, {
         "$schema": "https://opencode.ai/config.json",
         **models._merge(models.agent_providers(), provider_timeouts(task)),
@@ -281,6 +282,8 @@ def write_config_layer(task: store.Task) -> Path:
         # queued ahead of the agent's next step on a one-slot server and evicting its cache,
         # then thrown away at the handover (#661)
         "compaction": {"background": False, **({"auto": True, "buffer": buffer} if buffer else {})},
+        # with probe on, at any level, one tool call's output sized to the window (output_cap)
+        **({"tool_output": output_cap(cfg)} if context.experiment(task, "probe") else {}),
         "mcp": {"servers": {**users_servers_off(), "workbench": {  # 2.x shape: mcp.servers.<name>
             "type": "local",
             "command": [sys.executable, str(PKG_ROOT / "bin" / "wb-ask-mcp")],
@@ -292,6 +295,29 @@ def write_config_layer(task: store.Task) -> Path:
     })
     os.chmod(path, 0o600)  # a provider copied in may carry its apiKey
     return path
+
+
+# One tool call's output, at most, with probe on (the config layer's `tool_output`): about a tenth
+# of the usable input. OpenCode's default, 51,200 bytes, is about 13-14K tokens, a third of a 40K
+# window from one result; the outlines, extracts and greps that stayed in context filled the
+# window in the A/B (2026-11-21, #857). Measured on OpenCode 2.3.2 (RealOpenCode): it bounds the
+# shell's output (the last lines kept, "[showing lines A-B of N; full output saved to <file>]"),
+# not the built-in `read`, which keeps its own 2,000 lines or 50 KB ("[Output truncated. Continue
+# reading with offset: N]"): the probe note says so instead.
+OUTPUT_CAP_SHARE = 0.1
+OUTPUT_CAP_MIN = 8000     # bytes: under it a test failure's traceback is cut
+OUTPUT_CAP_MAX = 51_200   # bytes: OpenCode 2.3's own default, never raised
+OUTPUT_CAP_LINE = 40      # bytes a line, for max_lines
+
+
+def output_cap(cfg: dict) -> dict:
+    """`tool_output` for a model entry: max_bytes about OUTPUT_CAP_SHARE of its usable input
+    (usable_input, at context.CHARS_PER_TOKEN bytes a token), within OUTPUT_CAP_MIN and
+    OUTPUT_CAP_MAX; max_lines at OUTPUT_CAP_LINE bytes a line."""
+    usable = usable_input(cfg.get("limit") or {})
+    cap = int(usable * OUTPUT_CAP_SHARE * context.CHARS_PER_TOKEN) if usable else OUTPUT_CAP_MAX
+    cap = max(OUTPUT_CAP_MIN, min(OUTPUT_CAP_MAX, cap))
+    return {"max_bytes": cap, "max_lines": cap // OUTPUT_CAP_LINE}
 
 
 def users_servers_off() -> dict:
@@ -321,8 +347,9 @@ CONFIG_CONTENT_MAX = 120_000
 # the compaction backstop past the handover point, the model for titles and summaries, OpenCode
 # updating itself (#353). A project config set compaction `auto: false` (a session past the
 # handover point then overflowed), sent titles to its cloud small_model, and turned updates on
-# past OPENCODE_TESTED (#519).
-RESTATED = ("small_model", "autoupdate", "compaction")
+# past OPENCODE_TESTED (#519). And probe's output cap (output_cap, #857), which a project's
+# `tool_output` would lift.
+RESTATED = ("small_model", "autoupdate", "compaction", "tool_output")
 
 
 def model_pins(model_id) -> dict:
@@ -765,14 +792,102 @@ def steer_prompt(notes: list[dict], interrupted: bool) -> str:
             "and finish with a short summary as before.")
 
 
+OUTLINE_TIMEOUT = 20  # seconds for each `probe symbols`: a probe that hangs costs round 1 no more
+
+
+def add_outline(task: store.Task) -> None:
+    """Round 1's prompt, before its first OpenCode call, gains the outline of the long files its
+    spec names (outline_section), once: a restarted runner doesn't add it again. Only with probe
+    on; nothing it meets (no probe, a failure, a timeout) fails the round or adds anything."""
+    if context.probe_level(task) is None or "outline" in task.status or task.status.get("session"):
+        return
+    path = task.round_dir(1) / "prompt.md"
+    try:
+        section, files = outline_section(task, path.read_text())
+        if section:
+            path.write_text(path.read_text().rstrip("\n") + "\n\n" + section)
+    except Exception as e:  # noqa: BLE001: the outline is a help, never the round's end
+        print(f"workbench: no outline for round 1 ({e})", file=sys.stderr)
+        files = []
+    task.set_status(outline=files)
+
+
+def outline_section(task: store.Task, prompt: str) -> tuple[str, list[str]]:
+    """(the outline section, the files in it): for each file of more than PROBE_FILE_LINES lines
+    the spec names (context.long_files, in the worktree), `probe symbols`, its symbols longest
+    first, all of them within PROBE_OUTLINE_TOKENS, shared evenly (what a file leaves goes to the
+    next: a 5,900-line file took it all and two others named beside it got nothing, trying it on
+    workbench, 2026-11-21); a file cut short ends with OUTLINE_MORE. Only files in a language
+    probe reads (context.probe_languages): probe symbols of a CSV or a Nim file prints its lines
+    as `"kind": "text"`, no outline at all (#857, 2026-11-21)."""
+    exe = context.probe_bin()
+    kinds = context.probe_languages(exe) if exe else None
+    if not kinds:
+        return "", []
+    from .cli import PROTOCOL  # cli imports this module
+    spec = prompt.split(PROTOCOL.split("{branch}")[0])[0]  # the spec, not the protocol's names
+    left = context.PROBE_OUTLINE_TOKENS * context.CHARS_PER_TOKEN
+    found = [(rel, syms) for rel in context.long_files(spec, task.worktree, task.spec.get("subdir"),
+                                                       kinds=kinds)
+             if (syms := probe_symbols(exe, task.worktree, rel))]
+    parts, files = [], []
+    for k, (rel, syms) in enumerate(found):
+        room = left // (len(found) - k)
+        # named as the agent reaches it from where it runs (task.workdir): in a package task
+        # `pkg/big.py`, from the worktree's top, sent it to pkg/pkg/big.py (review, 2026-11-21)
+        shown = os.path.relpath(task.worktree / rel, task.workdir)
+        head = context.OUTLINE_HEAD.format(file=shown)
+        more = lambda n: context.OUTLINE_MORE.format(n=n, file=shown)  # noqa: E731
+        if room < len(head) + len(more(len(syms))) + 2:
+            continue
+        lines, room = [head], room - len(head) - 1
+        for i, (a, b, sig, parent) in enumerate(syms):
+            line = (f"{a}-{b}" if b > a else f"{a}") + f" {sig}" + (f"  (in {parent})" if parent else "")
+            if len(line) + 1 + (len(more(len(syms))) + 1 if i < len(syms) - 1 else 0) > room:
+                lines.append(more(len(syms) - i))
+                break
+            lines.append(line)
+            room -= len(line) + 1
+        text = "\n".join(lines)
+        left -= len(text) + 2
+        parts.append(text)
+        files.append(rel)
+    return ("\n\n".join(parts) + "\n" if parts else ""), files
+
+
+def probe_symbols(exe: str, root: Path, rel: str) -> list[tuple[int, int, str, str]] | None:
+    """`probe symbols --allow-tests` of one file, as (first line, last line, signature, the class
+    it is in), longest first, or None when probe fails, times out or prints what isn't its JSON.
+    Read with errors="replace": a probe that isn't probelabs' may print anything (#518)."""
+    try:
+        r = subprocess.run([exe, "symbols", "--allow-tests", "-o", "json", rel], cwd=root,
+                           capture_output=True, text=True, errors="replace", timeout=OUTLINE_TIMEOUT,
+                           stdin=subprocess.DEVNULL)
+        found = json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    out: list[tuple[int, int, str, str]] = []
+
+    def walk(syms, parent: str) -> None:
+        for x in syms if isinstance(syms, list) else ():
+            if not isinstance(x, dict) or not isinstance(x.get("line"), int):
+                continue
+            end = x.get("end_line") if isinstance(x.get("end_line"), int) else x["line"]
+            sig = " ".join(str(x.get("signature") or x.get("name") or "").split())[:160]
+            out.append((x["line"], max(end, x["line"]), sig, parent))
+            walk(x.get("children"), str(x.get("name") or ""))
+    for f in found if isinstance(found, list) else ():
+        walk(f.get("symbols") if isinstance(f, dict) else None, "")
+    out.sort(key=lambda s: (s[0] - s[1], s[0]))
+    return out or None
+
+
 def outside_spec(task: store.Task, files: str) -> list[str]:
     """Changed files the current spec never names, when it names any: the agent's drift shows
     here first (seen 2026-11-16: a flow-field module nobody asked for). Matched by path or name;
     a brace form names each (`src/replay_io.{h,c}`: flagged as unnamed on 2026-11-18)."""
     spec = current_task_prompt(task)
-    spec += "\n" + " ".join(a + part + b for a, parts, b in
-                             re.findall(r"([\w./-]*)\{([\w.-]+(?:,[\w.-]+)+)\}([\w./-]*)", spec)
-                             for part in parts.split(","))
+    spec += "\n" + " ".join(context.brace_names(spec))
     paths = [line[3:].split(" -> ")[-1].strip('"') for line in files.splitlines()]
     if not any(p in spec or Path(p).name in spec for p in paths):
         return []
@@ -1115,6 +1230,20 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                         _reading_full(task, n, used, window, floor)
             elif row["kind"] == "error":
                 out["errors"].append(f"opencode: {row['text']}")
+                if compaction_failed(raw):
+                    # OpenCode's compaction failed ("Compaction produced no summary"): the session
+                    # is over its window and can't go on, so a fresh one takes over, whether or
+                    # not a file has changed and even under --keep-context; HANDOVER_MAX still
+                    # bounds it. Before, OpenCode exited 1 and the task failed (a bench replay
+                    # whose agent read a long test file whole), or exited 0 and auto-fix sent the
+                    # failing tests back to the dead session (2026-11-21, #969).
+                    out["compact_failed"] = row["text"]
+                    # the dead session, named: past HANDOVER_MAX it stays the task's `session`,
+                    # and wb feedback / wb next clear `context`, so fresh_reason knows it by this
+                    # (the export counts only completed compactions), never continuing it (#969)
+                    task.set_status(compact_failed_session=raw.get("sessionID") or task.status.get("session"))
+                    if not out["full"]:  # the context it carried: its last step's, else all of it
+                        out["full"], out["compacted"] = last_step[1] or window or 1, True
             elif row["kind"] == "retry":
                 out["retries"].append(row["text"])
                 task.set_status(last=f"OpenCode retries a request: {row['text']}"[:200])
@@ -2409,6 +2538,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
 # session that is handed exactly what it needs: the task, the work so far and the new instructions.
 ASKED_FRESH = "Claude asked for a fresh session"
 COMPACTED = "OpenCode had to compact the last session"
+# OpenCode's compaction failed (events.compaction_failed): the session was over its window, so
+# it counts as compacted (results.step, the tuning), and the successor is told why (#969).
+COMPACTION_FAILED = "OpenCode failed to compact the last session"
 # The handoff carries the diff while it is under this share of the window (at ~4 characters a
 # token: 12K characters, ~3K tokens, on a 32K one); a bigger diff is listed, for the agent to read.
 HANDOFF_DIFF_SHARE = 0.09
@@ -2468,9 +2600,13 @@ def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
     if not st.get("session"):  # the step's first round, or one whose session never started
         first = (st.get("step_round") or 1) == st.get("round", 1)
         return None if first else "the last session ended before it began"
+    if st["session"] == st.get("compact_failed_session"):  # it can't go on, nor be kept (#969)
+        return COMPACTION_FAILED
     if st.get("context") == "keep":
         return None
     if st.get("context") == "full":  # handed over mid-round; after OpenCode compacted it (#774)
+        if st.get("full_compact_failed"):  # or failed to (#969)
+            return COMPACTION_FAILED
         return COMPACTED if st.get("full_compacted") else f"the last session was {st.get('full_pct')}% full"
     c = context_state(task)
     if c.get("compactions"):
@@ -2628,7 +2764,7 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
     if again and not st.get("session"):  # no session was replaced: the handover is counted once
         return
     task.event({"ts": store.now(), "round": n, "kind": "fresh", "overflow": why != ASKED_FRESH,
-                "compacted": why == COMPACTED,
+                "compacted": why in (COMPACTED, COMPACTION_FAILED),  # results.step (#969)
                 "text": f"{FRESH_SAID}{why}"})
 
 
@@ -2983,6 +3119,10 @@ def drive(task: store.Task) -> None:
         _base_check(task)  # on the untouched base, before the agent and the GPU
     if opencode_moved(task):  # before the GPU is taken for a round that can't run (#866)
         return
+    if task.status.get("round", 1) == 1:  # before round 1's first OpenCode call (probe on), and
+        # before the lease: it needs no GPU, and a probe that hangs (20 s a file) held it from the
+        # other tasks, the model already loaded (review, 2026-11-21)
+        add_outline(task)
     # beside the running tasks' models when all fit the GPU, else alone once they finish
     with models.GpuLease(m, task.name, say) as lease:
         # this runner reached the lease: from now on gpu.json says whether it holds the GPU, so
@@ -2993,8 +3133,12 @@ def drive(task: store.Task) -> None:
             window = (m.config.get("limit") or {}).get("context")
             task.set_status(window=window)
             own = task.spec.get("self_review")  # --self-review / --no-self-review, else learned
+            # probe's level was fixed at wb start, its prompt written then (context.probe_start)
+            level = context.probe_level(task)
             tuning.tune(task, task.spec["model"], window, {"fresh_at": fresh_ceiling(m.config)},
-                        {} if own is None else {"self_review": int(own)})
+                        {**({} if own is None else {"self_review": int(own)}),
+                         "probe_aggressive": None if level is None else int(level == "aggressive")},
+                        ("probe_aggressive",) if task.spec.get("probe_explored") else ())
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
         handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)
@@ -3053,7 +3197,12 @@ def drive(task: store.Task) -> None:
                     continue
                 rnd["guard"] = "handovers"
                 rnd["stuck"] = (f"handed over to a fresh session {HANDOVER_MAX} times in this "
-                                "round without finishing: the step is too big for this model's "
+                                "round without finishing"
+                                # the last one a failed compaction, named: not a silent failure,
+                                # and the reading, not OpenCode, is what to cut (#969)
+                                + (f" (the last when OpenCode's compaction failed: "
+                                   f"{rnd['compact_failed']})" if rnd.get("compact_failed") else "")
+                                + ": the step is too big for this model's "
                                 "window; split it (wb next) or take it over")
             _round_end(task, n, rnd, began)
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
@@ -3241,9 +3390,12 @@ HANDOVER_MAX = 5
 
 
 def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
-    window = task.status["window"]
-    pct = 100 * rnd["full"] // window
-    text = (f"the agent's session reached {pct}% of its window "
+    window = task.status.get("window")
+    pct = 100 * rnd["full"] // window if window else None
+    failed = rnd.get("compact_failed")  # #969: OpenCode prints no size for it, so its message is said
+    text = (f"OpenCode's compaction of the agent's session failed ({failed}): a fresh one takes over"
+            if failed else
+            f"the agent's session reached {pct}% of its window "
             f"({rnd['full'] / 1000:.1f}K of {window // 1024}K)"
             + (", then OpenCode compacted it" if rnd.get("compacted") else "")  # #774
             + ": a fresh one takes over")
@@ -3263,6 +3415,7 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
         + (f"\n\n{folded_notes(task, n + 1, notes)}" if notes else ""))
     task.set_status(round=n + 1, context="full", full_pct=pct,
                     full_compacted=True if rnd.get("compacted") else None,  # #774: fresh_reason
+                    full_compact_failed=True if failed else None,  # #969: and its reason
                     handovers=task.status.get("handovers", 0) + 1,
                     steer_taken=task.status.get("steer_taken", 0) + len(notes))
 

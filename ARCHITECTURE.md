@@ -808,7 +808,8 @@ outside `OPENCODE_TESTED`.
    `verify.gpu`) takes the GPU first and its turn only around the run itself (`verify.on_base`'s
    `turn`): taken first, the turn was held through the whole wait for the GPU, behind another
    task's rounds, and every queued task's setup waited with it (#679). A round's own tests don't
-   take a turn: the GPU lease already orders the rounds.
+   take a turn: the GPU lease already orders the rounds. With probe on, round 1's outline
+   (`add_outline`, *Experiments*) comes next, still before the lease.
 2. Hold one `GpuLease` for everything that follows, except where it steps aside
    (`lease.step_aside`: out of `gpu.json`, `gpu.lock` unlocked) because the task needs no GPU: the
    tests, and a wait for a server that is down. All of `drive` ran under it, so queued tasks waited
@@ -866,7 +867,9 @@ outside `OPENCODE_TESTED`.
 4. After the round, in this order: full → `_full_round` (a handover; the successor's prompt
    carries any pending notes), unless this runner has already handed over `HANDOVER_MAX` (5)
    times: then the round is stuck ("handed over to a fresh session 5 times in this round without
-   finishing: the step is too big for this model's window…"). Interrupted, or a note pending and the round not stuck →
+   finishing: the step is too big for this model's window…"; when the last was a failed
+   compaction, "without finishing (the last when OpenCode's compaction failed: <its message>): …",
+   #969). Interrupted, or a note pending and the round not stuck →
    `_steer_round` (the next round carries the notes). Opencode exited non-zero, or the silence
    guard stopped the round (OpenCode retrying), while the model's server is down (it went away
    under the round), whatever the model had said first (an out-of-memory kill comes late in a
@@ -1042,11 +1045,33 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
   for a successor (the floor as above; the last step's context when nothing had changed before
   it) a fresh session takes over (status `full_compacted`, so the next round's reason is
   `COMPACTED` and the tuning sees it); otherwise it carries on and a `compacted` event says so.
+  OpenCode's compaction *failing* (an `error` event of type `compaction.failed`: "Compaction
+  produced no summary", "… did not match the required template", "… reached the output token
+  limit"; or any error whose message opens "Compaction ", `events.compaction_failed`) leaves a
+  session over its window that can't go on, so a fresh session takes over at once, whatever the
+  exit and with or without a change made, `keep` (`--keep-context`) and `HANDOVER_ROOM` aside:
+  the round's `full` is the last step's context (else the window), `compacted` and
+  `compact_failed` (the message) are set, and `_full_round` writes the `full` event "OpenCode's
+  compaction of the agent's session failed (<message>): a fresh one takes over" and status
+  `full_compact_failed`, so the next round's reason is `COMPACTION_FAILED` ("OpenCode failed to
+  compact the last session"). The handover branch comes before the exit is judged, so the round
+  is never failed and the tests never run on the dead session; `HANDOVER_MAX` still holds (past
+  it the round is stuck, the reason naming the failed compaction, and status
+  `compact_failed_session` keeps the next `wb feedback` or `wb next` off that session). Seen
+  2026-11-21 (#969): OpenCode exited 1 on it before any change (a bench replay whose agent read a
+  long test file whole) and the task failed; or exited 0 after one, the tests failed on half-done
+  work and auto-fix sent them back to it. It counts as a compaction: the `fresh` event's
+  `compacted`, so `results.step`'s `compacted` and the tuning's `COMPACT_PENALTY` see it.
 - *Between rounds* (`fresh_reason`, for n > 1, also used by `wb next` to say what will happen):
   Claude asked (`--fresh`, `wb resume`) → fresh, even with no session yet; no session → continue
   on the step's first round, else fresh ("the last session ended before it began", so a session
-  that never started still hands the next round the task); `keep` → continue; the last round handed over (`context: full`) → fresh
-  (`COMPACTED` when OpenCode had compacted it first, `full_compacted`); OpenCode compacted the
+  that never started still hands the next round the task); the session is the one whose compaction
+  failed (status `compact_failed_session`: stuck past `HANDOVER_MAX`, it stays the task's session,
+  and `wb feedback` and `wb next` clear `context`, while the export counts only completed
+  compactions; it went back to the dead session, #969 review) → fresh, `COMPACTION_FAILED`, even
+  under `keep`; `keep` → continue; the last round handed over (`context: full`) → fresh
+  (`COMPACTED` when OpenCode had compacted it first, `full_compacted`; `COMPACTION_FAILED` when its
+  compaction failed, `full_compact_failed`, #969); OpenCode compacted the
   session (`session export` lists a completed compaction) → fresh; the session's last assistant
   message that counted any tokens (`context_state`: one whose counts are all 0, an aborted step,
   is passed over, #481) carried `fresh_at` or more of the window (input + cache read + cache write + output + reasoning) →
@@ -1362,7 +1387,7 @@ by prefix; rewording one silently changes those:
 | `Review feedback from the senior reviewer` (`lessons.FEEDBACK_HEAD`) | `wb feedback` | `lessons` (feedback items), `round_asks` (stops there), `transcript` (label) |
 | `The acceptance tests fail` | the auto-fix round | `transcript` |
 | `Before Claude reviews this` (`SELF_REVIEW`) | the self-review round | `transcript` |
-| `You are picking this task up in a fresh session` | `handoff_prompt` | `transcript`, the fake OpenCode (`fill`) |
+| `You are picking this task up in a fresh session` | `handoff_prompt` | `transcript`, the fake OpenCode (`fill`, `compact`, `compactfail`) |
 | `Step N of this task is done and committed` | `wb next` | `transcript` |
 | `INTERRUPT_HEAD`, `NOTE_HEAD` | `_steer_round` | `transcript` |
 | `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's) |
@@ -1370,9 +1395,11 @@ by prefix; rewording one silently changes those:
 | `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`) |
 | `agent's summary:` | `summary_text` | `lessons` |
 | `--title "wb: <task>"` | `run_round` | `transcript.find_session` |
+| `Outline of <file> (from probe symbols):` (`context.OUTLINE_HEAD`), `… N more: `+"`probe symbols <file>`"+` (`OUTLINE_MORE`) | `runner.add_outline`, after round 1's protocol (probe on, *Experiments*) | nothing by prefix: being after the protocol, `transcript`'s fold and `bench._spec_of` leave it out of the spec (a replay makes its own) |
 
 The skills note is prepended to the prompt argument; the transcript skips past it (to its first
-blank line) before matching the label, so the prompt keeps its own.
+blank line) before matching the label, so the prompt keeps its own. The probe outline is the one
+text appended, not an opening: keep it after the protocol, where the fold cuts.
 
 ## What the agent knows
 
@@ -2020,11 +2047,24 @@ What else the layer sets is said there again
 too, so a project config can't change it either (#519, checked on OpenCode 2.3.2: the project's
 document won each): `RESTATED` (`small_model`, `autoupdate`, `compaction`: a project's
 `compaction.auto: false` left a session past the handover point with no backstop, its
-`small_model` got the titles, its `autoupdate` moved OpenCode past `OPENCODE_TESTED`), and the
+`small_model` got the titles, its `autoupdate` moved OpenCode past `OPENCODE_TESTED`; and
+`tool_output`, the probe experiment's output cap below, which a project's own `tool_output`
+lifted, checked by RealOpenCode), and the
 task model's `limit` and `options.max_tokens` from wb's own reading of the entry (`model_pins`:
 a `provider` overlay, merged over the user's providers and the layer's timeouts, never a `baseURL` or key; a
 wider window there moved OpenCode's compaction off the one wb planned the handover against).
-The layer's `small_model` is the task's model, which is how `rules_env` finds it. A project
+The layer's `small_model` is the task's model, which is how `rules_env` finds it.
+With the probe experiment on, at any level (*Experiments*), the layer also sets `tool_output`
+(`runner.output_cap`): `max_bytes` about a tenth (`OUTPUT_CAP_SHARE`) of the model's usable input
+(`usable_input`) at `context.CHARS_PER_TOKEN` bytes a token, never under `OUTPUT_CAP_MIN` 8,000
+nor over `OUTPUT_CAP_MAX` 51,200 (OpenCode 2.3's own default, about 13–14K tokens: a third of a 40K
+window from one call), and `max_lines` a line per `OUTPUT_CAP_LINE` 40 bytes; 16,384 bytes and 409
+lines at 40K (the owner's design, 2026-11-21, #857). Measured on OpenCode 2.3.2 with
+`tests/capture_llm.py` (RealOpenCode, from the layer and from `OPENCODE_CONFIG_CONTENT` alike): it
+bounds the shell's output, keeping the last lines with `[showing lines A-B of N; full output saved
+to <OpenCode's data dir>/opencode/shell/…/sh_….out]`; it does **not** bound the built-in `read`,
+which keeps its own 2,000 lines or 50 KB and ends `[Output truncated. Continue reading with offset:
+N]`, so the probe note says how to read on instead. Off, the layer has no `tool_output`. A project
 config can still change what the layer doesn't set: another provider's entries, the task model's
 other options (`temperature`) and its provider's `baseURL`. The layer's `edit` rule also denies
 `OPENCODE_FILES` (`*opencode.json`, `*opencode.jsonc`, `.opencode/*`, `*/.opencode/*`), and the
@@ -2448,8 +2488,24 @@ task only when one did (the row's `self_review_due`, set by the runner whether o
 self-review then ran; a row from before it, only when its last tests passed, `tests_ok`): a task
 without `--test`, or whose tests failed through every auto-fix, ran alike under 0 and 1, and its
 noise could turn self-review off for the tasks it exists for (#816).
+The third is `probe_aggressive` (default 0; candidates 0 and 1): whether the probe experiment's
+`adaptable` level runs at aggressive (*Experiments*). It is chosen at `wb start`, not by the
+runner's `tune`, since round 1's prompt carries the level (`context.probe_start`, through
+`choose`; the runner's `tune` takes it as fixed, `chosen` naming it when that was the
+exploration). A knob that acts only on a long file (`Knob.long`) counts a task only when its spec
+named a file over `context.PROBE_FILE_LINES` with probe on (the row's `probe_long`), and
+`choose(explore=False)` keeps a spec without one from trying the other value: there the levels
+act alike, so a try teaches nothing (the owner's design, 2026-11-21, #857). A task at a fixed
+level (`moderate`, `aggressive`) is evidence of its value, as a `--self-review` flag is; one with
+probe off has no value at all (`fixed` None: nothing in `tuned`). Its `try_min` is 5, not
+`TRY_MIN`: one long-file task in five (`EXPLORE`) runs a level that measured worse, and one
+replay's time moved 41 to 13 minutes, so five evidence tasks at each value, moderate as well as
+aggressive, come before aggressive can be the pick (`best`: a knob whose `try_min` is above
+`TRY_MIN` keeps its default until the default has that many too; asked of aggressive alone, five
+tasks at a fixed aggressive beside one at moderate made it the pick on that one, the review of
+2026-11-21). Moderate, the default, runs the other four in five, and the fixed-level tasks count too.
 Each value's mean is smoothed toward the others' (`PRIOR`, two tasks' worth), and a value other
-than the default can be the pick only once `TRY_MIN` (3) tasks ran at it (an untried value sits at
+than the default can be the pick only once `TRY_MIN` (3) tasks ran at it (the knob's `try_min`) (an untried value sits at
 the pooled mean, so any one task above it won), so one lucky task moves nothing, and the pick
 walks one step at a time toward whatever scores best. Values past the model's ceiling (`runner.fresh_ceiling`: one step's growth, at least
 `tuning.CEILING_MARGIN` 0.05 of the window, before OpenCode's compaction, #644) are never tried (a
@@ -2727,14 +2783,22 @@ nothing until a surface attaches.
   `Only when I say`, `Ask me first`, `Let Claude decide (default)` (`CODING_STOPS`); a pick runs `wb coding
   <mode>`, and each draw reads `coding.json` again. **Web chat** (`CHAT_STOPS`, both saying what it
   is: `A localhost web server to interact with Claude.`): `Off (default)` and `On`; a pick runs `wb chat on|off` and reads the switch and the link back at once.
-  **Agent code navigation** (`PROBE_STOPS`, key `probe`, options `probe:off|on`,
-  *Experiments*): `Off (default)` and `On`; a pick runs `wb experiment probe off|on` (`setProbe`), and each
-  draw reads `experiments.json` again (`probeMode`; no file or no `probe` key: off). The row says
-  whether it works, since it read `On` while nothing changed (the user, 2026-11-20): while it's on,
-  the Settings tab asks `wb experiment probe` (`probeStatus`, at most every `PROBE_RECHECK_MS`, 30 s,
-  and again after each pick, so a probe installed meanwhile shows) and the option reads `On, working`
-  (its sentence naming probe's version) or `On, not set up` (`probeStops`; wb's answer unreadable:
-  plain `On`). Turned on, a toast says how it came out: on and working, or on but not set up, which
+  **Agent code navigation** (`PROBE_STOPS`, key `probe`, options
+  `probe:off|adaptable|moderate|aggressive`, in that order, *Experiments*; the owner's design,
+  2026-11-21, #857): `Off (default)`, `Adaptable` (`Moderate with probe, trying aggressive on
+  some long-file tasks, until this machine's results pick the better one for the model.`: it
+  explores from the first task, which "until the results show" hid, the review of 2026-11-21),
+  `Moderate`, `Aggressive`, each saying what it does, each sentence with "with probe" in it; a pick
+  runs `wb experiment probe <level>` (`setProbe`), and each draw reads `experiments.json` again
+  (`probeMode`, as `context.setting` reads it: `on` is adaptable; no file, no `probe` key or no
+  level: off). `Adaptable` reads `Adaptable (recommended)` only when wb's line ends `; adaptable is
+  recommended` (`context.PROBE_RECOMMENDED`, false until a measurement sets it). The row says
+  whether it works, since it read `On` while nothing changed (the user, 2026-11-20): the Settings
+  tab asks `wb experiment probe` (`probeStatus`, at most every `PROBE_RECHECK_MS`, 30 s, and again
+  after each pick, so a probe installed meanwhile shows; off too, for the recommendation, and wb
+  runs no probe then) and the chosen level reads `<Level>, working` (its sentence naming probe's
+  version after "with probe") or `<Level>, not set up` (`probeStops`; wb's answer unreadable: the plain level). Set to a
+  level, a toast says how it came out: `is <level> and working`, or on but not set up, which
   also queues `PROBE_SETUP_NOTE` for Claude (once while it waits): wb's line, then offer to set
   probe up with the user's yes, from its release page, and check with `wb experiment probe`. A
   failed `wb` call is a toast of its last line.
@@ -5505,12 +5569,13 @@ conversation as a row with the new rule (`sayRules`, #540). A shell edit isn't s
 
 An experiment is a change to what the agent may do that isn't measured enough to be supported:
 it ships off, marked experimental, for the user to turn on, and the bench (`--label`) or the
-results rows' `experiments` say whether it earns a place; one that doesn't is removed. `context.EXPERIMENTS` names each with its purpose. `wb experiment <name> on|off` (or the pane's Settings row) sets it in
+results rows' `experiments` say whether it earns a place; one that doesn't is removed. `context.EXPERIMENTS` names each with its purpose. `wb experiment <name> on|off` (or a level: `context.EXPERIMENT_LEVELS`; or the pane's Settings row) sets it in
 `$WB_HOME/experiments.json`, and `wb start` records what the task's agent has in task.json
 `experiments` (`context.task_experiments`: on only when set on and able to work), so a flip
 changes only the tasks started after it, a replay's task records which arm it ran in, and a
-results row lists the ones that were on. Off, or unable to work, the agent's prompt and rules are
-exactly those without the experiment.
+results row lists the ones that were on. Off, unable to work, or unable to help (probe in a repo
+with no long code: *Only where probe can help*), the agent's prompt and rules are exactly those
+without the experiment.
 
 **probe** (`probe-code`, an outside program, like opencode, not a dependency): the agent reads
 a file's outline (`probe symbols <file>`) and one function (`probe extract <file>#<name>`)
@@ -5528,8 +5593,9 @@ failed the start after its branch and worktree were made (#518); its output is r
 (`symbols`, `extract`, `search`, `grep`, `query`; `shell_rules`, after `ALLOWED_COMMANDS`), and
 refuse `--lsp` on any of them; its copy of the handbook ends with `EXPERIMENT_NOTES["probe"]`
 (`instruction_files`; `agent/HANDBOOK.md` itself is unchanged), and each round prompt's protocol
-carries `EXPERIMENT_PROTOCOL["probe"]` beside the acceptance line (`context.experiment_protocol`,
-the protocol's `{experiment_protocol}`). Its shell gets `PROBE_MAX_TOKENS` (the user's, else
+carries its level's line beside the acceptance line (`context.experiment_protocol`, the protocol's
+`{experiment_protocol}`: `EXPERIMENT_PROTOCOL["probe"]` at moderate, `PROBE_AGGRESSIVE_PROTOCOL` at
+aggressive; *Levels* below). Its shell gets `PROBE_MAX_TOKENS` (the user's, else
 `context.PROBE_MAX_TOKENS` 2000, `runner.agent_env`): `probe search` has no output limit of its
 own, and one plain query on workbench printed 169 KB, about 42K tokens, more than a 40K window
 holds (#857). The cap is on the matched code, not on what probe prints: in its default `outline`
@@ -5555,6 +5621,119 @@ protocol's line on refused writes said "don't probe it" until then. So it stays 
 no daemon, no network. The rule was `probe *` until 2026-11-21, when testing the experiment found
 that it let the agent run `probe lsp` (a daemon and language servers), `--lsp` on a read (the
 same), `probe config set|reset` (probe's config) and `probe benchmark`.
+
+**Levels** (the owner's design, 2026-11-21, #857). The A/B below settled that pushing probe
+harder costs more on a 27B at 40K, not that it never pays: a stronger model or a wider window may
+change that. So probe has levels instead of on and off, `wb experiment probe
+off|moderate|adaptable|aggressive` (`context.EXPERIMENT_LEVELS`; `on`, the setting before them,
+reads as adaptable, `context.setting`), the same in the pane's row:
+
+| Level | Protocol line |
+|---|---|
+| **off** (default) | none: prompt, handbook, rules and layer exactly as without the experiment |
+| **moderate** | the condition, `EXPERIMENT_PROTOCOL["probe"]`: "When you need one function from a file over 1500 lines, `probe extract <file>#<name>` it instead of reading the whole file." |
+| **adaptable** | moderate, trying aggressive on one long-file task in five, until this machine's results pick the better one for the model (the `probe_aggressive` knob, *Self-tuning*) |
+| **aggressive** | the order, `PROBE_AGGRESSIVE_PROTOCOL`: "Never read a file over 1500 lines whole: `probe extract <file>#<name>` the function you need (`probe symbols <file>` first when you don't know its name)." |
+
+The handbook note, the shell rules and `PROBE_MAX_TOKENS` are the same at every level, and so is
+what every level adds besides: **a read cap**, OpenCode's `tool_output` in the config layer sized
+to a tenth of the window and restated so a project can't lift it (`runner.output_cap`, *What the
+agent knows*: it bounds the shell's output, not the built-in `read`, which keeps 2,000 lines or
+50 KB; so the note's last sentence, "A read of a long file returns only its first 2,000 lines (or
+50 KB): read further with `offset` and `limit`, or `probe extract` the function"), and **an outline
+in round 1**: before round 1's first OpenCode call (`runner.add_outline`, from `drive`, once: status
+`outline` lists the files, from the worktree's top, `[]` when none; a restarted runner adds
+nothing), and before the GPU lease, since it needs none and a hanging probe would hold the GPU
+from other tasks with the model loaded (the review, 2026-11-21), for each file over
+`PROBE_FILE_LINES` in a language probe reads that the spec names in the worktree (`context.long_files`, the spec cut at the
+protocol; lines counted a chunk at a time, `context._Lines`, so a named data file is never read
+whole), the runner runs `probe symbols --allow-tests -o json <file>` (`runner.probe_symbols`,
+the probe `context.probe_bin` finds, in the worktree, `OUTLINE_TIMEOUT` 20 s each, read with
+`errors="replace"`; JSON rather than probe's text, whose signatures run over lines) and appends to
+the prompt, per file, `Outline of <file> (from probe symbols):` and one line per symbol,
+`<first>-<last> <signature>` (`  (in <class>)` for a method), longest first, then `… N more:
+`+"`probe symbols <file>`"+` when cut, `<file>` named from where the agent runs (`task.workdir`: in a
+package task `big.py` or `../top.py`, not `pkg/big.py`). All of it within `context.PROBE_OUTLINE_TOKENS` (1000, at
+`CHARS_PER_TOKEN`: about 4,000 characters), shared evenly between the files (one 5,900-line file
+took it all when tried on workbench). A probe that fails, times out or prints what isn't its JSON
+adds nothing and never fails the round; later rounds get no outline. The agent starts knowing
+where things are instead of exploring for it, the way Aider's repo map and Agentless's skeleton
+work.
+`context.experiment(task, "probe")` is true at any level. task.json `experiments.probe` records the
+level the task's agent got, `moderate` or `aggressive` (`context.probe_level`; `true` on a task from
+before the levels reads as moderate, whose condition it had), `probe_setting` the setting it came
+from, and the results row both (`probe_level`, `probe_setting`). Adaptable is resolved at `wb start`,
+whose round 1 prompt carries the line (`context.probe_start`): the knob's pick for the model and
+window, and in one task in five (`tuning.EXPLORE`) the other value, but only when the spec names a
+file over `PROBE_FILE_LINES` (`context.long_files` at the base: the paths in the spec's text,
+`spec_paths`, brace forms too, `brace_names`, tried in the package first; task.json `probe_files`,
+the row's `probe_long`), the only tasks on which the levels act differently. The knob learns only
+from those tasks, a fixed level's among them, and needs five at each level before aggressive can
+be the pick. `wb status <task>` names the level: `probe (adaptable → moderate)`, `probe (adaptable →
+aggressive, a try)`, `probe (adaptable → moderate, no long file named)`, `probe (aggressive)`. The
+pane marks adaptable "recommended" only when `context.PROBE_RECOMMENDED` is true, which Claude sets
+after the check that moderate, with the read cap and the outline, is at least as good as off
+(#857's step 6): it is false.
+
+**Only where probe can help** (the owner, 2026-11-21, #857: "No sense in clogging up the subagents
+with irrelevant information"). Set at any level and installed, probe still counts as off for a task
+whose repo has no file in a language probe reads over `PROBE_FILE_LINES` (`context.probe_off`, at
+`wb start`): a project in a language probe doesn't read, a docs- or assets-only repo, an empty one,
+a small project where it has nothing to save. Such a task records task.json `experiments: {probe:
+false}` and `experiments_off: {probe: "<why>"}`, and everything else follows from `experiments`:
+the prompt, the handbook, the shell rules, the config layer (no `tool_output` cap), the agent's
+environment (no `PROBE_MAX_TOKENS`) and round 1 (no outline) are byte for byte a probe-off task's,
+`tuned` has no `probe_aggressive` and the results row no `experiments` or `probe_*`, so adaptable
+never counts it as evidence for any level. `wb status <task>` says why: `probe: off for this task
+(no file over 1500 lines in a language probe reads)` (`context.PROBE_OFF_SHORT`), `(… among the
+largest it counted)` (`PROBE_OFF_GAVE_UP`: `PROBE_SCAN_BYTES` ran out first), `(a partial clone,
+whose files git before 2.44 can't count without fetching each)` (`PROBE_OFF_PARTIAL`), or `(probe's
+languages couldn't be read from `+"`probe search --help`"+`)` (`PROBE_OFF_HELP`).
+- **Which files count.** The blobs of the base commit (`git ls-tree -r -l` at `base`, `--full-tree`),
+  in a package task (`subdir`) only the package's, where the agent works, plus any file the spec
+  names anywhere in the repo (`context.long_files` with `kinds`, tried in the package first). Only
+  extensions of probe's languages; a blob of no more than `PROBE_FILE_LINES` bytes can't be long and
+  isn't read. The rest are counted largest first through `git cat-file --batch`
+  (`gitops.feed_blobs`), a chunk at a time (`context._Lines`), stopping at the first line past the
+  limit, so no file is read whole; identical files are one blob, counted once. A blob whose first
+  `PROBE_SPARSE_AFTER` (64 KiB) or more average over `PROBE_SPARSE_BYTES` (2 MiB) per
+  `PROBE_FILE_LINES` lines is generated (minified, a bundle): the rest of it is skipped
+  (`gitops.SKIP_BLOB`: that git is stopped and a new one asked for the blobs after it), so a
+  70 MiB one-line `big.min.js` costs a chunk, not the budget, and the long `a.py` beside it is
+  still reached (it wasn't, in review). At most `PROBE_SCAN_BYTES` (64 MiB) are counted in all,
+  past which the task is off with `PROBE_OFF_GAVE_UP`. Only what the checkout's sparse cone or
+  patterns keep counts (`gitops.sparse_keeps`, named files too): the task's worktree takes the
+  same patterns (`gitops.apply_sparse`), so a long file outside them is one its agent never sees.
+  In a partial clone (`gitops.partial_clone`) both git calls run with `GIT_NO_LAZY_FETCH=1`, as
+  `gitops.checkout_size` does (#436): a blob it lacks is `BAD` to `ls-tree -l` and `missing` to
+  `cat-file`, and isn't counted; unset, a blobless clone fetched every blob one at a time at
+  `wb start`. A git before 2.44 ignores that variable, so there only the named files count
+  (`PROBE_OFF_PARTIAL` when none is long). A submodule's files don't count: its gitlink is no
+  blob, and its checkout in the worktree is filled read-only (`gitops.fill_submodules`), another
+  project's code the task can't change. Symbolic links don't count either.
+- **Which languages.** The installed probe's own `probe search --help`, `--language`'s `[possible
+  values: …]` or, in clap's long form, its `Possible values:` and one `- <name>: …` line each,
+  read from its option line to the next option's only (searched further, the long form read
+  `--format`'s values as the languages: `context.probe_language_names`), each mapped to the extensions `probe symbols`
+  parses by one table, `context.PROBE_LANGUAGES`, whose comment says how it was made: each value of
+  probe-code 0.6.0's list tried on a one-function file (a file it has no parser for comes back as
+  `"kind": "text"` lines, so `.mjs`, `.cjs`, `.mts`, `.cts`, `.pyi`, `.c++`, `.cu` are out). Two
+  values map to nothing on purpose: `yaml`/`yml`, data rather than code (JSON, CSV, Markdown and
+  the like aren't in probe's list at all), and `swift`, which 0.6.0 lists but can't parse. A value
+  with no row counts for nothing, so a newer probe's new language needs only its row. Read once per
+  probe (its real path) and version (`probe --version`) and kept in `probe-languages.json`
+  (`context.probe_languages`); a probe that prints no version is asked each time. Help that can't
+  be read, lists no values, or lists only values with no row in the table (another option's, or a
+  probe that renamed them all): off, with that reason, never on, and nothing is cached.
+- **The outline** runs only on the named files in those languages (`runner.outline_section`
+  passes `kinds`), and task.json `probe_files` lists only those, so a spec naming a long CSV is no
+  long-file task for the knob either.
+- **Probe not installed** is as before: `experiments: {probe: false}` from `task_experiments`, no
+  `experiments_off`, nothing said.
+- **Image and audio generation** never reach probe: `wb image` and `wb audio` call the engines in
+  `images.json`/`audio.json` directly (`images.generate`, `audio.generate`, through `media`) and
+  never start a runner or OpenCode, so nothing of an experiment is in what they run. A test pins it
+  (`ProbeWhereItHelps`: every process they start, and the modules' imports).
 
 **Measured (2026-11-21, the second A/B).** Four large-file cases made from workbench's own
 commits (each step changes a file of 1,500–3,000 lines, graded by the commit's own tests), one
@@ -5613,8 +5792,10 @@ So, on this model and window, no wording made probe better than not having it. T
 keeps the condition (what an opted-in user gets does no harm), stays opt-in and off by default,
 and gets no "recommended" note. What filled the window in every arm was OpenCode's own reads
 (one `read` returns up to 2,000 lines or 50 KB, 14K tokens for models.py), which a per-call output
-cap (`tool_output`) sized to the window would bound for every task, probe or not; a `probe` shim
-and the outline in round 1's prompt are the other levers left untried. `wb bench report --label <arm>` prints the use line per arm (`bench.use_lines`).
+cap (`tool_output`) sized to the window was expected to bound; measured since (OpenCode 2.3.2,
+2026-11-21), `tool_output` bounds the shell's output but not `read`, so the levels' cap (*Levels*)
+bounds probe's, `cat`'s and the tests' output, and the note tells the agent how to page a long
+read. A `probe` shim is the lever left untried. `wb bench report --label <arm>` prints the use line per arm (`bench.use_lines`).
 
 ## Verifying a fix against the base
 
@@ -6948,8 +7129,8 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb progress [on\|off]` | `--after MIN` (with `on`, or alone to move the threshold of checks already on; refused with `off` or while off, #602; default: the task's typical length on its model; kept through a bare `on`/`off`, `0` clears it) | The user's opt-in to progress checks; with no argument, what it is (*Progress checks*). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (a smaller step: the note opens with `STEP_NOTE`; after a progress check, recorded as a `smaller` intervention, else a `hint`) | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
-| `wb experiment [<name> [on\|off]]` | | The experiments (*Experiments*): with no argument, each one's purpose and state (`cli.experiment_lines`: `probe: on and working (probe-code 0.6.0)`, then, once a task with it on has closed, whether the agents used it (`cli.use_recent`: `; the agent used it in 2 of the last 5 task(s) with it on (14 call(s))`, the latest `USE_RECENT` 5 results rows that have it on, bench replays and trials too, #857), `probe: on, but not set up: no probe with `+"`symbols`"+` is on PATH, so it changes nothing yet (probe, a code-search tool: github.com/probelabs/probe; its release binary from …)`, `probe: off (wb experiment probe on)`); with a name, its state; with `on`/`off`, sets it in `experiments.json` for the tasks started from then (`; tasks already started keep theirs`). An unknown name is refused. |
 | `wb splash [on\|off]` | | The pane's opening animation on the `/workbench` that turns the mode on (*Seeing what the agent does*, #963): with no argument, whether it is on; `on` (the default) or `off` writes `$WB_HOME/splash.json`, which the mod's Settings row runs and reads back. |
+| `wb experiment [<name> [on\|off\|<level>]]` | | The experiments (*Experiments*): with no argument, each one's purpose and state (`cli.experiment_lines`: `probe: adaptable and working (probe-code 0.6.0)`, the setting first, then, once a task with it on has closed, whether the agents used it (`cli.use_recent`: `; the agent used it in 2 of the last 5 task(s) with it on (14 call(s))`, the latest `USE_RECENT` 5 results rows that have it on, bench replays and trials too, #857), `probe: adaptable, but not set up: no probe with `+"`symbols`"+` is on PATH, so it changes nothing yet (probe, a code-search tool: github.com/probelabs/probe; its release binary from …)`, `probe: off (wb experiment probe adaptable\|moderate\|aggressive)`; each line, set up or not, ends `; adaptable is recommended` while `context.PROBE_RECOMMENDED` is true; with no argument the purpose line before them, `context.EXPERIMENTS`, says what each level does and that every level caps one shell call's output and outlines the spec's long files in round 1); with a name, its state; with `off`, a level (probe's `moderate`, `adaptable`, `aggressive`: `context.EXPERIMENT_LEVELS`) or `on` (the first level: adaptable), sets it in `experiments.json` for the tasks started from then (`; tasks already started keep theirs`). An unknown name or level is refused. |
 | `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent; with `--when`, a one-task exception granted ahead, spent only once Claude has started on it. `used` records what Claude changed under it and says to hand the testing back; exit 1 with none. |
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat` (post the pair to the web chat), `--setup` (run the setup in each checkout) | At review, for a visual task: the project's capture command run on the base and on the candidate, each in a scratch checkout under the task's lane; where each PNG is, or why a side has none (*Screenshots of the base and the candidate*). |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions` (from Claude Code's Bash, without `--repo`/`--session`, the scope is the calling session's: `cli._caller`, every id its process had, `claude-sessions/<CLAUDE_PID>`, and its directory, #693; this flag, or a terminal, takes every session's), `--user` | Stops the runner, phase `review`, "Claude took over", status `taken_over`; Claude edits in the worktree and accepts, or hands back with feedback. Refuses (exit 1) a task whose checkout hasn't finished, running or failed (`its worktree isn't ready yet: wait for it, or wb discard <task>`): the hand-back's runner made the checkout again from nothing, and Claude's edits went with it (#655). Outside "Let Claude decide" it needs the user's recorded yes for the task, else exit 3; `--user` (the mod's hand-back command) is the user's own ask, and records one (*Claude coding*). `--all`: every task that isn't closed; a task refused (the coding gate, exit 3) is said and the rest are still taken over, then it exits with the refusal's code (#601: the first refusal left every other runner going). A task not checked out yet, or failed at checkout, is skipped, not refused (`not ready: <task> (its checkout hasn't finished): wait for it, or wb discard <task>`), so it can't fail every hand-back (#918). `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR or inside it, or DIR is inside the task's spot (its package, else its `cwd` inside the repo, else the repo: #695), or its `cwd` is DIR or inside it, by whole components of real paths (in lower case where the file system ignores case), never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
@@ -6964,7 +7145,9 @@ delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb wait [<task>]` | `--timeout S` (0: none), unnamed: `--repo DIR`, `--session ID…`, `--all-sessions` (as `wb status`'s scope, `_caller`: from Claude Code's Bash, the calling session's tasks only, #696) | Reaps dead runners, then blocks (inotify) until a notice past a task's `acked` arrives, prints `[<kind>] <task>\n<text>` and acks it (under the task's ack lock, `cli.claim_ack`: of two waits, or a wait and the mod, one takes it, #696; a bare wait skips another session's tasks, whose mod then never woke for a notice it took) (skipping notices no longer true, rows that aren't whole and removed tasks'). Named: a closed task exits 2; a task already waiting whose notice was taken elsewhere prints it again "(already delivered once)"; one stopped or taken over by hand prints `[<phase>] <task> (no notice: <last>)`. Bare, with no open task: exits 2. |
-| `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID`, `--all-sessions` (from Claude Code's Bash, without `--repo`/`--session`, the scope is the calling session's: `cli._caller`, every id its process had, `claude-sessions/<CLAUDE_PID>`, and its directory, #693; this flag, or a terminal, takes every session's) | Reaps dead runners. One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died within `REAP_GRACE`. Named: also `worktree: <path>` while it exists, and with an experiment on, what its agent has used of it so far (`cli.use_line`: `probe: 3 call(s); whole reads of files over 300 lines: 1`, #857). A task `wb stop --all` parked (`store.parked`: still stuck, `parked` set) shows as phase `parked`, and without `--all` or a name is left out of the table for one line, `parked by wb stop --all (/workbench-quit): …; leave them unless the user asks`, after it ("no open tasks" first when it was all there was, so the mod's context block stays out; #541). `--session ID`, `--repo DIR` (the mod's context block): only that session's tasks (as for `wb stop`), then `open elsewhere (other sessions'): …`, by name. |
+| `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID`, `--all-sessions` (from Claude Code's Bash, without `--repo`/`--session`, the scope is the calling session's: `cli._caller`, every id its process had, `claude-sessions/<CLAUDE_PID>`, and its directory, #693; this flag, or a terminal, takes every session's) | Reaps dead runners. One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died within `REAP_GRACE`. Named: also `worktree: <path>` while it exists, and with an experiment on, what its agent has used of it so far (`cli.use_line`: `probe (adaptable → moderate): 3 call(s); whole reads of files over 300 lines: 1`, #857; probe with its level, `cli._level_said`: `probe (aggressive)` for a fixed level, adaptable's pick with `, a try` when the knob explored and `, no long file named` when the spec named none, so no try could come); and each experiment set but off for the task,
+with why, task.json `experiments_off`: `probe: off for this task (no file over 1500 lines in a
+language probe reads)`, or one of the other reasons there (*Experiments*, *Only where probe can help*). A task `wb stop --all` parked (`store.parked`: still stuck, `parked` set) shows as phase `parked`, and without `--all` or a name is left out of the table for one line, `parked by wb stop --all (/workbench-quit): …; leave them unless the user asks`, after it ("no open tasks" first when it was all there was, so the mod's context block stays out; #541). `--session ID`, `--repo DIR` (the mod's context block): only that session's tasks (as for `wb stop`), then `open elsewhere (other sessions'): …`, by name. |
 | `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden: one pass of JSON lines, the mod's pane), `--last N` (hidden, with `--json`: the newest N transcript lines) | The live transcript (`transcript.follow`); default task: the most recently updated open one, else the most recently updated task, never a `wb bench` replay (#555). |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, and one line for each kind `wb watch` shows (`transcript.EVENT_KINDS`, one set for both: questions, answers, stops, auto-fixes, rounds, tests, errors, retries, the runner's gpu, handover, compaction, load, steer and interrupt rows among them; it once printed nine kinds, #861). `-n` counts the lines printed, the rows that never print (one `step` per model request) left out first: they once used up the count (#861). `-f` follows until the task needs Claude or is closed, looking at the phase before each wait (on a finished task it returns at once: it waited 30 s, #90) and printing the events that came with it; each pass reaps a task whose runner died (`cli.reap`), so the follow ends on its error instead of following it for ever, and each line is flushed, so a pipe or a file gets it as it comes (#545). |
 | `wb report <task>` | `--round N` | The round's summary.md. |
@@ -7030,7 +7213,8 @@ $WB_HOME (~/.local/state/workbench)
   gc.json                        the last gc: {at, archived, notices, rules, runtime, scratch, starts, uploads, branches, refs, …}
   archive/<task>/                a task closed and untouched for ARCHIVE_DAYS (30), moved from tasks/ by gc
   coding.json                    Claude coding, the user's choice: {mode: only|ask|decide, ts}; none: decide
-  experiments.json  .lock        wb experiment: {<name>: "on"|"off"}; a missing name is off (*Experiments*)
+  experiments.json  .lock        wb experiment: {<name>: "off"|<level>}, probe's levels adaptable|moderate|aggressive ("on", from before them: adaptable); a missing name or another value is off (*Experiments*)
+  probe-languages.json           the languages the installed probe reads, from its `probe search --help`: {probe: its real path, version: `probe --version`, languages: [--language's values], at}; read again when either differs (context.probe_languages, *Experiments*)
   progress.json                  progress checks, the user's opt-in: {on, after?, ts}; none: off
   splash.json                    the pane's opening animation (wb splash): {on, ts}; none, or anything but "on": false: on
   results.jsonl                  one row per closed task: what the router, slices, tuning and skill records learn from
@@ -7245,8 +7429,16 @@ flags with commands.json `repos`, *Setting the worktree up*; `lib` one level up,
 `ask_timeout`, `checkin`, `round_timeout`, `silence_timeout`, `think_timeout`, `timeouts_given`
 (which of `round`, `silence`, `think` a flag gave: the rest stretch, `runner.stretch_limits`,
 #814), `test_timeout`,
-`created_at`, `wb_version`, `experiments` (`{probe: true|false}`: what this task's agent has,
-`context.task_experiments`; missing on a task from before them: all off). Read but written by no command: `stuck` (the guards' thresholds),
+`created_at`, `wb_version`, `experiments` (`{probe: "moderate"|"aggressive"|false}`: what this task's agent has,
+`context.task_experiments`, adaptable resolved by `context.probe_start`; `true` on a task from before
+the levels, read as moderate by `context.probe_level`; missing on a task from before them: all off),
+and with probe on `probe_setting` (the setting it came from: `adaptable`, `moderate`, `aggressive`),
+`probe_files` (`{path: lines}`: each file the spec names in a language probe reads with more than
+`PROBE_FILE_LINES` lines, at the base, `context.long_files`; `{}` for none) and `probe_explored` (true when adaptable's level is
+the knob's exploration); `experiments_off` (`{probe: "<why>"}`: set but off for this task, when
+its repo has no file in a language probe reads over `PROBE_FILE_LINES` (in its sparse cone, among
+what a partial clone holds), the count gave up or probe's languages couldn't be read, `context.probe_off`; `wb status <task>` shows it; missing when nothing was turned
+off). Read but written by no command: `stuck` (the guards' thresholds),
 `deny_skills`. A missing key takes the runner's own default (auto-fix 0, think and
 check-ins off), not `wb start`'s.
 
@@ -7280,6 +7472,7 @@ check-ins off), not `wb start`'s.
 | `failed_before` | `setup` or `load`: the runner failed the task on its setup or its model's load before the agent ran (`_prepare`, `_load_failed`); the results row copies it (#581) |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
+| `outline` | with probe on, the files whose outline round 1's prompt got (`runner.add_outline`, *Experiments*); `[]` when none; set once, before round 1's first call |
 | `experiment_use`, `long_reads` | `{name: calls}`: the calls that used each experiment the task has on, live (`context.experiment_use`: probe when a shell line runs `probe`, by `events.shell_programs`); the whole reads (no `offset`/`limit`) of files over `context.LONG_FILE_LINES` 300 lines (`context.long_read`). `wb status <task>`, the results row and the bench row carry both, so an A/B sees within a replay whether the agent takes a tool up (#857) |
 | `live_used` | `{session, used}`: the context the round's last `step_finish` carried (input + cache + output + reasoning, #644), what the between-rounds check uses when the session export fails (#262) |
 | `gpu_wh` | the GPU energy its rounds used so far, in Wh (the runner's `_Power`, its share while tasks share the GPU: #706; absent for a remote model or no reading) |
@@ -7294,7 +7487,8 @@ check-ins off), not `wb start`'s.
 | `grants_kept` | the task's grants (`{allow, paths}`), set when it closes, before its rules directory goes: what `context.grants` reads afterwards, for `wb bench add` (#250) |
 | `session`, `sessions`, `session_mark`, `session_floor` | the OpenCode session; earlier ones; `gitops.mark` when it began; the context it had read at its first change |
 | `context` | a one-round instruction: `fresh`, `keep`, `full` (a handover happened) |
-| `full_pct`, `handovers`, `full_compacted` | the fill at the last mid-round handover; how many; whether OpenCode had compacted the session first (#774) |
+| `full_pct`, `handovers`, `full_compacted`, `full_compact_failed` | the fill at the last mid-round handover; how many; whether OpenCode had compacted the session first (#774), or failed to (#969) |
+| `compact_failed_session` | the last session whose compaction failed (`run_round`, #969): while it is still `session` (stuck past `HANDOVER_MAX`), `fresh_reason` hands the next round to a fresh one, whatever `wb feedback`, `wb next` or `--keep-context` leave in `context` |
 | `window`, `load_secs`, `loads` | the model's context window; the load time, summed over every runner of the task (`wb feedback`, `next`, `resume`) and the reloads before later rounds (`runner._loaded`); each load that happened, alone (`[secs…]`: the typical load's samples, #577) |
 | `tuned`, `explored`, `tuned_max` | the knob values this task runs at (`tuning.tune`) |
 | `self_review_due` | true once a round's tests passed, so self-review could run, whether or not it did: the row says whether `self_review` could act (`tuning.acted`, #816) |
@@ -7318,7 +7512,7 @@ check-ins off), not `wb start`'s.
 description, 90 characters; a skill's id), `text {text}` (2000 characters), `step {in, out,
 cache, reasoning?}` (reasoning tokens apart from `out`, when any, #644), `error {text}`, `retry {text, attempt}` (OpenCode resending a request, #491). From the runner: `round`, `stopped {text}`, `steer {now, by:
 "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow,
-compacted}`,
+compacted}` (`compacted` after a failed compaction too, #969),
 `autofix`, `self_review`, `reading_full`, `full`, `compacted {text}` (OpenCode compacted the session mid-round and it carried on, #774), `load` (the model reloaded before a round), `limits {text}` (the limits stretched for a model measured slow, #814), `left_bg {text}` (the round ended with a job still in the background, #658),
 `round_end {secs, how, guard?}` (with stats recording on: *Stats recording*), `export` (the session export failed: judged by `live_used`), `stopped {by:
 "signal"}` (a SIGTERM not from wb), `gpu {text}` (a warning from loading the model: a server wb
@@ -7344,13 +7538,15 @@ removed}` and `deleted` `{files, removed}` when a step had any (`gitops.footprin
 task saved*), `landed_steps` (discarded only:
 the steps `wb next` committed and the discard kept, when any; `steps_dropped` true after `--drop-steps`,
 #722), `backlog` (task.json's), `trial` (when set), `experiment_use` (with `experiments`: each one's
-calls, status's, #857), `long_reads` (status's);
+calls, status's, #857), `long_reads` (status's), with probe on `probe_level` (task.json's
+`experiments.probe`), `probe_setting` (task.json's) and `probe_long` (whether `probe_files` named any:
+`tuning.acted` for `probe_aggressive`, #857);
 with stats recording on (`results.for_stats`, each only when measured), `started_at`, `load_secs`, `setup_secs`,
 `nudges`, `asks` (`{questions, permissions, refused, answered}`), `guards`, `speed` (`{write, read, ttft}`, the
 medians of status `speeds`) and `gpu_w` (`{mean, peak}`); `commit` and `merged` on accept (and `merge_refused`, git's reason, when `--merge` was refused), `reason` on
 discard. A step (`results.step`): `files`,
 `lines` (added, against HEAD, new files included), `removed`, `window`, `landed`, `compacted` (its last
-session, or one a handover replaced: a `fresh` event's `compacted`), `handovers` (fresh sessions
+session, or one a handover replaced: a `fresh` event's `compacted`, a failed compaction's too, #969), `handovers` (fresh sessions
 with overflow; both leave out the `fresh` event a later step's first round began with, which
 replaced the session the step before left and judges that step, #958), `read_full`, `reviews`, `spec_rounds` (the step's rounds with a `--spec-gap`, a
 gap given on the `wb next` or `wb accept` closing it included: measured before it was recorded,
@@ -7377,7 +7573,7 @@ top: #425), `skills` (the original's), `original` (`model`, `rounds`,
 it didn't start, or the machine broke it, `<infra>: <last>`, #508), `why`, and from the replay's status `phase`, `rounds`, `auto_fixes`, `tok_in`, `tok_out`,
 `minutes`, `asks_refused`, `visible_ok` (its own last run of the acceptance command, before the
 hidden files), `handovers` (fresh sessions), `experiments` (the ones on: the arm it ran in),
-`experiment_use` and `long_reads` (status's, #857). A `wb bench self` row (`bench.self_run`) has `arm:
+`experiment_use` and `long_reads` (status's, #857), `probe_level` (with probe on). A `wb bench self` row (`bench.self_run`) has `arm:
 "claude"`, `model` and `label` `"claude"`, `claude` (spend's usage shape), `turns`,
 `claude_model`, `minutes`, `outcome` and `why`.
 
@@ -7533,7 +7729,8 @@ main (*Shipping to main*).
 - `tests/test_workbench.py`: end to end, one class per feature (Lifecycle, Context, Steering,
   WorktreeSetup, Watch, AskServer, ConfigLayer, AgentContext, SkillLibrary, RealOpenCode, GitGuard, Lane,
   Permission, Images, Audio, Discovery, Routing, Tuning, Notes, Setup, Update, Projects, ModelSet,
-  WebChat, ChatUploads, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, RealOpenCodeRun, Drift).
+  WebChat, ChatUploads, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, RealOpenCodeRun, Drift,
+  ProbeExperiment, ProbeLevels, ProbeWhereItHelps).
 - `tests/test_gpu.py`: sharing the GPU (side by side, taking turns, unknown VRAM, an exclusive
   holder, `wb start` refused or `--queue`d behind a holder, `wb image` refused or `--wait`ing,
   `wb audio` refused while a CPU engine runs beside a task, stale holders, a share Ollama couldn't keep), `can_share` (with `OLLAMA_MAX_LOADED_MODELS`) and
@@ -7547,6 +7744,10 @@ main (*Shipping to main*).
   start and between rounds, a lost round run again, a config error still failing at once), the
   polling watcher (`watch._libc = False`), the launchers on an old Python or native Windows, fit,
   budgets.
+  The tests' own HTTP servers are `test_workbench.py`'s `HTTPServer` and `ThreadingHTTPServer`
+  (`test_portable.py` imports the second), which listen at once: http.server's look the address's
+  name up first (`socket.getfqdn`), 35 s per server on GitHub's macOS runners (#950). Not patched
+  into http.server suite-wide, so `WebChat` still catches chat.py's own server doing the lookup (#236).
 - `tests/test_sizing.py`: the slice guess and its correction from real steps.
 - `tests/test_workflows.py`: the merge gate, in plain text (no YAML library): every action pinned
   to a commit with its version, every workflow with its own permissions, `check` never
@@ -7611,6 +7812,11 @@ of 32K, then sleeps: the runner hands over mid-round; the handover prompt turns 
 over: `HANDOVER_ROOM`), `refill` (every session changes a file, then fills: `HANDOVER_MAX`),
 `compact` (writes 41, a step at 52%, then one at 15%: compacted between them, #774; it hands
 over, or with `FAKE_COMPACT_READ`, a 50% reading floor, carries on and writes 42),
+`compactfail` (a read, a step at 52%, the text "Reading the whole test file next.", then OpenCode
+2.3's `error` line `{"type": "error", "timestamp", "sessionID", "error": {"type":
+"compaction.failed", "message": "Compaction produced no summary"}}`, `FAKE_COMPACT_MSG` another
+message, and it exits 0 or `FAKE_COMPACT_EXIT`, that run alone; `FAKE_COMPACT_EDIT` writes 41
+first; a fresh session handed the task runs like `ok`, unless `FAKE_REFAIL`: #969),
 `bgwait` (a `background_wait` line, then `FAKE_BGWAIT` seconds, 6, of quiet, then `ok`),
 `toolhang` (one tool call, then silent), `retry` (a `retry` line every `FAKE_RETRY_EVERY`
 seconds, 1, as OpenCode prints it cutting each request at the provider timeout). 
@@ -7632,7 +7838,8 @@ It answers one request at a time and listens as soon as it starts: HTTPServer's 
 address's name up before listening, 35 s on GitHub's macOS runners, where every connect to the
 port meanwhile timed out (#950).
 `RealOpenCode` and `RealOpenCodeSkillFiles` cover the MCP shape, skills, denials, compound shell
-commands, rule order, git by path, the edit rule, PATH and the lane; `RealOpenCodeRun` the
+commands, rule order, git by path, the edit rule, PATH, the lane and `tool_output` (it cuts the
+shell's output, not `read`'s, and a project's config can't lift it); `RealOpenCodeRun` the
 events, the export, `--session`, compaction and the header wait (CLAUDE.md's *OpenCode quirks*
 points here).
 With `CAPTURE_HEADER_DELAY=<seconds>` every POST waits that long before its headers: RealOpenCodeRun
@@ -7753,7 +7960,21 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **An experiment** (`context.EXPERIMENTS`) → its effects (`shell_rules`, `EXPERIMENT_NOTES`, `EXPERIMENT_PROTOCOL`),
   `task_experiments` (when it can work), `cli.experiment_lines`, the pane's Settings row
   (`PROBE_STOPS`, `probeMode`, `probeStatus` and `probeSaid`, which read `experiment_lines`' wording,
-  `PROBE_SETUP_NOTE`), and *Experiments*.
+  `PROBE_SETUP_NOTE`), and *Experiments*. **Its levels** (`context.EXPERIMENT_LEVELS`) → `context.setting`,
+  `wb experiment`'s choices, `PROBE_STOPS` and `PROBE_LEVELS` and `probeMode` in the mod (the same
+  order and names), `experiment_protocol` (a level's line: `PROBE_AGGRESSIVE_PROTOCOL`), `probe_level`
+  (results, bench, `cli._level_said`), and `probe_start` with the `probe_aggressive` knob.
+  **probe's languages** (`context.PROBE_LANGUAGES`, `probe_language_names`) → `probe_off` (wb
+  start's `experiments_off`), `long_files`' `kinds`, `runner.outline_section`, the tests'
+  `SEARCH_HELP` (probe-code 0.6.0's list) and *Only where probe can help*. What a checkout holds
+  (`gitops.sparse_keeps`, a partial clone's `GIT_NO_LAZY_FETCH`) → both `gitops.checkout_size` and
+  `context.probe_off`: a git call over a repo's blobs that skips either fetches or counts what the
+  task's worktree won't have (#436; #857's review).
+  `context.PROBE_RECOMMENDED` → `experiment_lines`' `; adaptable is recommended`, which `probeSaid` reads.
+  What every level adds (`runner.output_cap` in the layer and `RESTATED`, `runner.add_outline` with
+  `OUTLINE_HEAD`/`OUTLINE_MORE` in *The runner, inside*'s prompt texts) → the off test's byte-for-byte
+  check (ProbeLevels), and a task probe can't help, ProbeWhereItHelps's against a probe-off task,
+  which each must keep passing.
 - **What a handoff costs Claude, measured** → THESIS.md (the case for users, with the same
   numbers) and the README's sentence on it, which links there.
 - **Anything a reader looks up** (a command, flag, default, guard, key, file, prompt text,
@@ -7872,7 +8093,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   one of the few with a fixed line): #846's hard-coded list missed `compacted`, `limits` and
   `export`, which `wb watch` and the pane then dropped (#865).
 - **A new tuned knob** → `tuning.KNOBS`, read with `tuning.value(task, name)`, a ceiling in
-  `drive` if it has one.
+  `drive` if it has one; one with an evidence flag (`fills`, `passed`, `long`) → `tuning.acted` and
+  the results row field it reads (`peak_share`, `self_review_due`, `probe_long`).
 - **`chat.py` or `chat_static/`** → the browser test (`chat.yml` runs it on the pull request too).
 - **`/api/state`'s asks or messages** → `sw.js`, which builds the notification from them.
 - **A message's `from`** (`user`, `claude`, `notice`: #959) → `chat.NEWS` (what is pushed and

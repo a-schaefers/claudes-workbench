@@ -104,7 +104,7 @@ dependencies. No packaging: it runs from the clone.
   Claude's spec record (`spec_gap_line`). Read rows through `store.results()`, which leaves out
   trials.
 - `router.py`: the model per task size and stack, each model's slice, its time budgets and speeds.
-- `tuning.py`: knobs learned per model and window (`KNOBS`: `fresh_at`, the handover point; `self_review`).
+- `tuning.py`: knobs learned per model and window (`KNOBS`: `fresh_at`, `self_review`, `probe_aggressive`).
   A new knob goes in `KNOBS`; read it with `tuning.value`.
 - `models.py`: discovers local models from OpenCode's config, their status, residency
   (`make_resident`, `free_gpu`), GPU sharing (`GpuLease`, `can_share`), adding and retiring them.
