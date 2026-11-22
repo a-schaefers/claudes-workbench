@@ -1,7 +1,16 @@
-# Runs the whole suite on every push to main and every pull request: `python3 -m unittest`
-# (tests/test_docs.py included), then `claude plugin validate mod && claude plugin test mod`
-# against the Claude Code version the mod was last verified with, on Python 3.11 (the floor). nightly.yml runs the same on
-# the newest Claude Code. The README shows both as badges.
+# The merge gate, on every push to main and every pull request. `suite` runs `python3 -m unittest`
+# (tests/test_docs.py included) in six shards on Python 3.11 (the floor); `mod` runs `claude
+# plugin validate mod && claude plugin test mod` against the Claude Code version the mod was last
+# verified with; `check`, the ruleset's required check, is green only when both are. nightly.yml
+# runs the same on the newest Claude Code. The README shows both as badges.
+#
+# One serial job took 28 to 32 minutes at d80b924, its tests doubled in a day (#950), and a fifth
+# of that was one test sitting out a 300 s sleep. Six shards on separate runners (WB_TEST_SHARD,
+# tests/__init__.py: every sixth test, so each gets a slice of every class) take about five.
+#
+# A pull request that changes only what no test reads (the README, docs/releases/, the images in
+# docs/) runs tests/test_docs.py and tests/test_workflows.py, not the whole suite; main always
+# runs it. No path filter on the trigger: a required check must report on every pull request.
 #
 # The real-OpenCode tests run against the OpenCode pinned below (OPENCODE_VERSION, installed from
 # its release with the hash pinned here); opencode.yml runs them on the newest OpenCode. The Lane
@@ -24,24 +33,34 @@ concurrency:
   # apart cancelled the first one's (2026-11-19)
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+env:
+  # The Claude Code the mod was last verified with; the floor is in ARCHITECTURE.md, *The tests*.
+  CLAUDE_CODE_VERSION: '2.1.311'
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+  DISABLE_TELEMETRY: '1'
+  # The OpenCode the real-OpenCode tests were last verified with, and its release tarball's hash.
+  OPENCODE_VERSION: '2.3.0'
+  OPENCODE_SHA256: 'fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b'
+
 jobs:
-  check:
+  suite:
     runs-on: ubuntu-latest
-    # the suite: 7.5 minutes at 594c0bc, 24 to 28 at 24dfb6d, its tests doubled in a day (#950)
-    timeout-minutes: 60
+    # a shard: about five minutes; a hung test fails after WB_TEST_HANG_SECS, named
+    timeout-minutes: 30
+    strategy:
+      # a failed shard leaves the others running: each names its own failures, and ship.sh reads
+      # a cancelled one as failed too
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     env:
+      WB_TEST_SHARD: ${{ matrix.shard }}/6
       WB_TEST_HANG_SECS: '600'  # a hung test fails, named, and the suite goes on (tests/__init__.py, #950)
-      # The Claude Code the mod was last verified with; the floor is in ARCHITECTURE.md, *The tests*.
-      CLAUDE_CODE_VERSION: '2.1.311'
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
-      DISABLE_TELEMETRY: '1'
-      # The OpenCode the real-OpenCode tests were last verified with, and its release tarball's hash.
-      OPENCODE_VERSION: '2.3.0'
-      OPENCODE_SHA256: 'fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2  # a pull request's merge commit and its base: what the pull request changes
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -52,19 +71,65 @@ jobs:
         with:
           python-version: '3.11'
       - run: python3 --version
+      - name: Scope
+        id: scope
+        # docs: every path the pull request changes is one no test reads; else (or on main) full
+        run: |
+          scope=full
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            changed=$(git diff --name-only HEAD^1 HEAD) || changed=
+            if [ -n "$changed" ] && ! printf '%s\n' "$changed" |
+                grep -qvxE 'README\.md|docs/releases/[^/]+\.md|docs/[^/]+\.(png|jpe?g|gif|svg|webp)'; then
+              scope=docs
+            fi
+          fi
+          echo "scope: $scope"
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
       # The tests' repos carry their own identity; wb accept's commits in a worktree want one too.
       - run: |
           git config --global user.name "workbench CI"
           git config --global user.email "ci@invalid"
-      - run: scripts/install-opencode.sh "$OPENCODE_VERSION" "$OPENCODE_SHA256" >> "$GITHUB_PATH"
+      - if: steps.scope.outputs.scope == 'full'
+        run: scripts/install-opencode.sh "$OPENCODE_VERSION" "$OPENCODE_SHA256" >> "$GITHUB_PATH"
       # The Git LFS test (#382) skips without git-lfs; the runner image has it, else apt does.
       - name: Git LFS
+        if: steps.scope.outputs.scope == 'full'
         run: |
           git lfs version || { sudo apt-get update -q && sudo apt-get install -yq git-lfs && git lfs version; }
       - name: Landlock
+        if: steps.scope.outputs.scope == 'full'
         run: |
           python3 -c 'from workbench import lane; print("Landlock ABI", lane.abi() or "none here: the Lane tests skip")'
-      - run: python3 -m unittest
+      - if: steps.scope.outputs.scope == 'full'
+        run: python3 -m unittest
+      - if: steps.scope.outputs.scope == 'docs' && matrix.shard == 1
+        run: python3 -m unittest tests.test_docs tests.test_workflows
+
+  mod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
       - run: npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION
       - run: claude --version
       - run: claude plugin validate mod && claude plugin test mod
+
+  # The ruleset's required check (.github/rulesets/main.json): one name whatever the shards are
+  # called. always(): a failed or cancelled shard must fail it, not skip it, as a skip passes.
+  check:
+    needs: [suite, mod]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          SUITE: ${{ needs.suite.result }}
+          MOD: ${{ needs.mod.result }}
+        run: |
+          echo "suite: $SUITE, mod: $MOD"
+          [ "$SUITE" = success ] && [ "$MOD" = success ]

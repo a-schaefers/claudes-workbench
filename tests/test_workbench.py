@@ -12184,9 +12184,12 @@ class Cleanup(Base):
             shim = Path(self.tmp.name) / f"slow-git-{name}"
             shim.mkdir()
             after = "worktree add" in where  # the branch is made, then it sleeps
+            # only the runner's git sleeps: wb start runs the same rev-parse in this process, and
+            # the test sat out all 300 s of it, a fifth of the whole suite (CI, 2026-11-21)
             (shim / "git").write_text(f'#!/bin/sh\ncase " $* " in *" {where} "*) '
+                                      'case "$(ps -o args= -p $PPID)" in *workbench.runner*) '
                                       + (f'{real} "$@"; exec sleep 300;;' if after else 'exec sleep 300;;')
-                                      + f' esac\nexec {real} "$@"\n')
+                                      + f' esac;; esac\nexec {real} "$@"\n')
             (shim / "git").chmod(0o755)
             with mock.patch.dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}"):
                 self.start(name, "ok", "--queue")
