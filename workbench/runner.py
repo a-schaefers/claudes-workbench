@@ -34,7 +34,7 @@ from pathlib import Path
 
 from . import (ask_mcp, context, gitguard, gitops, hardware, lane, lessons, models, progress, skills,
                stats, store, tuning)
-from .events import StuckDetector, normalize
+from .events import StuckDetector, compaction_failed, normalize
 from .watch import Watcher
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
@@ -1115,6 +1115,16 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                         _reading_full(task, n, used, window, floor)
             elif row["kind"] == "error":
                 out["errors"].append(f"opencode: {row['text']}")
+                if compaction_failed(raw):
+                    # OpenCode's compaction failed ("Compaction produced no summary"): the session
+                    # is over its window and can't go on, so a fresh one takes over, whether or
+                    # not a file has changed and even under --keep-context; HANDOVER_MAX still
+                    # bounds it. Before, OpenCode exited 1 and the task failed (a bench replay
+                    # whose agent read a long test file whole), or exited 0 and auto-fix sent the
+                    # failing tests back to the dead session (2026-11-21, #969).
+                    out["compact_failed"] = row["text"]
+                    if not out["full"]:  # the context it carried: its last step's, else all of it
+                        out["full"], out["compacted"] = last_step[1] or window or 1, True
             elif row["kind"] == "retry":
                 out["retries"].append(row["text"])
                 task.set_status(last=f"OpenCode retries a request: {row['text']}"[:200])
@@ -2409,6 +2419,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
 # session that is handed exactly what it needs: the task, the work so far and the new instructions.
 ASKED_FRESH = "Claude asked for a fresh session"
 COMPACTED = "OpenCode had to compact the last session"
+# OpenCode's compaction failed (events.compaction_failed): the session was over its window, so
+# it counts as compacted (results.step, the tuning), and the successor is told why (#969).
+COMPACTION_FAILED = "OpenCode failed to compact the last session"
 # The handoff carries the diff while it is under this share of the window (at ~4 characters a
 # token: 12K characters, ~3K tokens, on a 32K one); a bigger diff is listed, for the agent to read.
 HANDOFF_DIFF_SHARE = 0.09
@@ -2471,6 +2484,8 @@ def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
     if st.get("context") == "keep":
         return None
     if st.get("context") == "full":  # handed over mid-round; after OpenCode compacted it (#774)
+        if st.get("full_compact_failed"):  # or failed to (#969)
+            return COMPACTION_FAILED
         return COMPACTED if st.get("full_compacted") else f"the last session was {st.get('full_pct')}% full"
     c = context_state(task)
     if c.get("compactions"):
@@ -2628,7 +2643,7 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
     if again and not st.get("session"):  # no session was replaced: the handover is counted once
         return
     task.event({"ts": store.now(), "round": n, "kind": "fresh", "overflow": why != ASKED_FRESH,
-                "compacted": why == COMPACTED,
+                "compacted": why in (COMPACTED, COMPACTION_FAILED),  # results.step (#969)
                 "text": f"{FRESH_SAID}{why}"})
 
 
@@ -3053,7 +3068,12 @@ def drive(task: store.Task) -> None:
                     continue
                 rnd["guard"] = "handovers"
                 rnd["stuck"] = (f"handed over to a fresh session {HANDOVER_MAX} times in this "
-                                "round without finishing: the step is too big for this model's "
+                                "round without finishing"
+                                # the last one a failed compaction, named: not a silent failure,
+                                # and the reading, not OpenCode, is what to cut (#969)
+                                + (f" (the last when OpenCode's compaction failed: "
+                                   f"{rnd['compact_failed']})" if rnd.get("compact_failed") else "")
+                                + ": the step is too big for this model's "
                                 "window; split it (wb next) or take it over")
             _round_end(task, n, rnd, began)
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
@@ -3241,9 +3261,12 @@ HANDOVER_MAX = 5
 
 
 def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
-    window = task.status["window"]
-    pct = 100 * rnd["full"] // window
-    text = (f"the agent's session reached {pct}% of its window "
+    window = task.status.get("window")
+    pct = 100 * rnd["full"] // window if window else None
+    failed = rnd.get("compact_failed")  # #969: OpenCode prints no size for it, so its message is said
+    text = (f"OpenCode's compaction of the agent's session failed ({failed}): a fresh one takes over"
+            if failed else
+            f"the agent's session reached {pct}% of its window "
             f"({rnd['full'] / 1000:.1f}K of {window // 1024}K)"
             + (", then OpenCode compacted it" if rnd.get("compacted") else "")  # #774
             + ": a fresh one takes over")
@@ -3263,6 +3286,7 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
         + (f"\n\n{folded_notes(task, n + 1, notes)}" if notes else ""))
     task.set_status(round=n + 1, context="full", full_pct=pct,
                     full_compacted=True if rnd.get("compacted") else None,  # #774: fresh_reason
+                    full_compact_failed=True if failed else None,  # #969: and its reason
                     handovers=task.status.get("handovers", 0) + 1,
                     steer_taken=task.status.get("steer_taken", 0) + len(notes))
 

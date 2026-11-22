@@ -4107,6 +4107,92 @@ class Context(Base):
         self.assertEqual(len(evs), 1)
         self.assertIn("OpenCode compacted the agent's session mid-round at 51%", evs[0]["text"])
 
+    def compaction_failed(self, name, *, edit, exit_code=None):
+        """A task whose first session's compaction fails (#969), to review."""
+        if edit:
+            os.environ["FAKE_COMPACT_EDIT"] = "1"
+        if exit_code is not None:
+            os.environ["FAKE_COMPACT_EXIT"] = str(exit_code)
+        self.start(name, "compactfail", "--test", TEST_CMD)
+        st = wait_phase(name, {"review", "stuck", "failed"}, timeout=60)
+        evs = store.read_jsonl(store.Task(name).dir / "events.jsonl")[0]
+        return st, evs
+
+    def assert_handed_over_after_the_failed_compaction(self, name, st, evs, diff):
+        self.assertEqual((st["phase"], st["handovers"]), ("review", 1))  # never failed
+        first, second = self.runs()
+        self.assertFalse(second["session"])                     # a fresh one, not the dead one
+        p = second["prompt"]
+        self.assertTrue(p.startswith("You are picking this task up in a fresh session (OpenCode "
+                                     "failed to compact the last session)"), p[:200])
+        self.assertIn("Write the answer to answer.txt.", p)     # the spec
+        self.assertIn(diff, p)                                  # the work so far
+        self.assertIn("Your last session filled up", p.split("## Now")[1])
+        self.assertIn("> Reading the whole test file next.", p)  # its last words
+        kinds = [e["kind"] for e in evs]
+        # the tests ran once, on the fresh session's work: never sent back to the dead one
+        self.assertNotIn("autofix", kinds)
+        self.assertEqual(kinds.count("tests"), 1)
+        self.assertEqual(st.get("auto_fixes", 0), 0)
+        fresh = [e for e in evs if e["kind"] == "fresh"]
+        self.assertTrue(fresh[0]["compacted"])                  # a compaction: results.step's
+        from workbench import results
+        self.assertTrue(results.step(store.Task(name), landed=False)["compacted"])
+        self.assertIn("OpenCode's compaction of the agent's session failed (Compaction produced "
+                      "no summary): a fresh one takes over",
+                      run_wb("watch", name, "--once", "--no-color"))
+
+    def test_a_failed_compaction_before_any_edit_that_exits_1_hands_over_instead_of_failing(self):
+        # #969 (a bench replay, 2026-11-21): the agent read a long test file whole while
+        # exploring, OpenCode's compaction failed ("Compaction produced no summary") and it
+        # exited 1: the task failed after 4.5 minutes, no handover possible before a change
+        st, evs = self.compaction_failed("t-969a", edit=False, exit_code=1)
+        self.assert_handed_over_after_the_failed_compaction("t-969a", st, evs, "No uncommitted changes yet.")
+        self.assertFalse([r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                          if r["task"] == "t-969a" and r["kind"] == "failed"])
+
+    def test_a_failed_compaction_after_an_edit_that_exits_0_hands_over_instead_of_auto_fixing(self):
+        # #969 (night-e2-sight, ember-4a, night-e3-combo-n): OpenCode exited 0 after the error,
+        # the tests failed on the half-done work and auto-fix sent them back to the dead session
+        st, evs = self.compaction_failed("t-969b", edit=True)
+        self.assert_handed_over_after_the_failed_compaction("t-969b", st, evs, "+41")
+
+    def test_a_failed_compaction_after_an_edit_that_exits_1_hands_over_too(self):
+        # #969: either exit, before or after a change
+        st, evs = self.compaction_failed("t-969c", edit=True, exit_code=1)
+        self.assert_handed_over_after_the_failed_compaction("t-969c", st, evs, "+41")
+
+    def test_a_failed_compaction_before_any_edit_that_exits_0_hands_over_too(self):
+        # #969: either exit, before or after a change
+        st, evs = self.compaction_failed("t-969d", edit=False)
+        self.assert_handed_over_after_the_failed_compaction("t-969d", st, evs, "No uncommitted changes yet.")
+
+    def test_a_failed_compaction_hands_over_even_when_claude_asked_to_keep_the_context(self):
+        # #969: --keep-context holds a session that can go on; one whose compaction failed can't
+        self.start("t-969k", "ok", "--test", TEST_CMD)
+        wait_phase("t-969k", {"review"})
+        os.environ.update(FAKE_SCENARIO="compactfail", FAKE_COMPACT_EXIT="1")
+        run_wb("feedback", "t-969k", "--message", str(self.feedback), "--keep-context")
+        st = wait_phase("t-969k", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["handovers"]), ("review", 1))
+        third = self.runs()[2]
+        self.assertFalse(third["session"])
+        self.assertIn("1. Add a trailing comment line.", third["prompt"].split("## Now")[1])
+
+    def test_failed_compactions_past_the_handover_limit_are_stuck_and_say_so_never_failed(self):
+        # #969: every fresh session reads the same and fails to compact again: HANDOVER_MAX
+        # still holds, and the stuck report names the failed compaction
+        os.environ["FAKE_REFAIL"] = "1"
+        st, evs = self.compaction_failed("t-969m", edit=False, exit_code=1)
+        self.assertEqual((st["phase"], st["handovers"]), ("stuck", runner.HANDOVER_MAX))
+        self.assertIn(f"handed over to a fresh session {runner.HANDOVER_MAX} times in this round "
+                      "without finishing (the last when OpenCode's compaction failed: Compaction "
+                      "produced no summary): the step is too big", st["last"])
+        self.assertEqual(len(self.runs()), runner.HANDOVER_MAX + 1)
+        self.assertNotIn("autofix", [e["kind"] for e in evs])
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-969m"]
+        self.assertEqual([r["kind"] for r in rows if r["kind"] != "checkin"], ["stuck"])
+
     def test_a_fresh_round_run_again_after_its_server_died_is_handed_over_once(self):
         # #780 (the second 2026-11-21 audit): a round that began fresh, revived before its first
         # event, ran _start_fresh again: the handoff went over instructions.md and was wrapped in
@@ -21380,6 +21466,20 @@ class Detector(unittest.TestCase):
             events.normalize(raw, 1)
         self.assertEqual(events.normalize({"type": "step_finish", "part": {"tokens": 5}}, 1)["in"], 0)
         self.assertEqual(events.normalize({"type": "error", "error": "boom"}, 1)["text"], "boom")
+
+    def test_only_opencodes_compaction_errors_read_as_a_failed_compaction(self):
+        # #969 (2026-11-21): "Compaction produced no summary" (a bench replay, night-e2-sight),
+        # "... reached the output token limit" (ember-4a): each left a session that can't go on
+        err = lambda e: {"type": "error", "timestamp": 1, "sessionID": "s", "error": e}  # noqa: E731
+        for msg in ("Compaction produced no summary", "Compaction summary reached the output token limit",
+                    "Compaction summary did not match the required template"):
+            self.assertTrue(events.compaction_failed(err({"type": "compaction.failed", "message": msg})))
+            self.assertTrue(events.compaction_failed(err({"type": "unknown", "message": msg})))
+        self.assertTrue(events.compaction_failed(err({"type": "provider.content-filter",
+                                                      "message": "Compaction summary was blocked by the provider"})))
+        for raw in (err("boom"), err({"type": "provider.transport", "message": "Timed out"}), err(None),
+                    {"type": "retry", "error": {"type": "compaction.failed", "message": "x"}}, None, 5):
+            self.assertFalse(events.compaction_failed(raw))
 
     def test_four_different_files_with_one_long_header_are_not_the_same_call(self):
         # #497 (the audit of 1.90, reproduced): the signature was the input's JSON cut to 400

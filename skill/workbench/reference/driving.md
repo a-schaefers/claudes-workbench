@@ -155,7 +155,8 @@ the 32K entry `wb model add` writes, and a model served under 16K can't take tas
 at once, mid-round if need be: the task, the work so far (the diff), the agent's last words and
 the new instructions. The fourth handover in a round is a check-in, and past the fifth the round is
 stopped as stuck (the step is too big for the window: split it). OpenCode's own compaction (the model summarising itself, which can lose the
-task) is only a backstop past that. Reports show `agent context: …` so you see it coming. A
+task) is only a backstop past that; when it fails ("Compaction produced no summary") a fresh
+session takes over too, even before any change, so the task isn't failed for it. Reports show `agent context: …` so you see it coming. A
 check-in or report that says `NOTE: the spec doesn't name …` lists files outside the spec: drift
 until you've looked, so read them and steer (`--now`) if the agent left its task. `NOTE: <dir>: a
 git repository of its own` is a nested repo the diff leaves out and `wb accept` refuses: have its

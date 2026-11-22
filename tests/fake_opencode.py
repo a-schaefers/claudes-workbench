@@ -28,6 +28,11 @@
   retry  no answer from the model's server: a `retry` line every FAKE_RETRY_EVERY seconds (1),
          OpenCode cutting the request at its provider timeout and sending it again (#491)
   say    a few words and no tool call ("I will inspect the files")
+  compactfail  reads, a step at 52% of a 32K window, then OpenCode's compaction fails: an
+         `error` event `compaction.failed`, "Compaction produced no summary" (FAKE_COMPACT_MSG
+         another), and the run ends, exiting 0 or FAKE_COMPACT_EXIT (1 in the bench replay,
+         #969). FAKE_COMPACT_EDIT: it writes "41" first. A fresh session handed the task
+         behaves like ok, unless FAKE_REFAIL (every session fails again)
 A `run` message must follow `--` when it starts with '-', or the fake prints its usage and exits
 1, as OpenCode does. FAKE_LATE: seconds before the first event (a model reading its prompt).
 FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_RUNS one that records
@@ -116,7 +121,8 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                              "cwd": os.getcwd(), "pwd": os.environ.get("PWD")}) + "\n")
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
-if scenario in ("fill", "compact") and "picking this task up in a fresh session" in args[-1]:
+if (scenario in ("fill", "compact") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
+        and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
 if scenario in ("crash", "crashtalk") and os.path.exists(os.environ.get("FAKE_DOWN", "") + ".crashed"):
     scenario = "ok"  # the server came back: this run works
@@ -301,6 +307,19 @@ elif scenario == "compact":  # #774: a tool result past the margin compacted it 
         finish()
     else:
         time.sleep(3600)
+elif scenario == "compactfail":  # #969: as OpenCode 2.3 prints it, then the run ends
+    if os.environ.get("FAKE_COMPACT_EDIT"):
+        with open("answer.txt", "w") as fh:
+            fh.write("41\n")
+        tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    tool("read", {"filePath": os.path.abspath("answer.txt")})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 14900}})  # 17000: 52%
+    emit("text", text="Reading the whole test file next.")
+    print(json.dumps({"type": "error", "timestamp": t(), "sessionID": session,
+                      "error": {"type": "compaction.failed", "message": os.environ.get(
+                          "FAKE_COMPACT_MSG", "Compaction produced no summary")}}), flush=True)
+    sys.exit(int(os.environ.get("FAKE_COMPACT_EXIT", 0)))  # this run's, not its successor's
 elif scenario == "fill":
     with open("answer.txt", "w") as fh:
         fh.write("41\n")
