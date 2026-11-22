@@ -1159,7 +1159,7 @@ with that step's tool results in, so a ceiling at the compaction point itself (8
 at 32K) let one 3K read compact the session first (#644). Both count a step's reasoning tokens
 (the step row's `reasoning`, the export's `tokens.reasoning`), as OpenCode's check does. A model without `limit.context` gets no
 mid-round handover, no `auto`/`buffer` and no ceiling. Every layer sets `compaction.background:
-false` (`RESTATED` repeats it after a project's config): OpenCode 2.3.2 writes the summary ahead
+false` (`RESTATED` repeats it in `OPENCODE_CONFIG_CONTENT`): OpenCode 2.3.2 writes the summary ahead
 by default (`SessionCompaction.precompute`, before each step once the context passes threshold −
 min(60000, (threshold − first request)/2), about 43% of the 32K `wb model add` entry), a
 full-context request on the agent's own server, below the handover point: a one-slot server
@@ -1431,6 +1431,8 @@ agent's lane, so it can't rewrite its own rules for its next round.
 
 **Instructions** (`context.instruction_files`), as absolute paths OpenCode loads into the system
 prompt, in this order:
+- the project's `AGENTS.md` files (`agents_files`), the task's directory's first: OpenCode no
+  longer reads them itself (*What the project's own config gave, handed back*, below);
 - the workbench handbook (`agent/HANDBOOK.md`), copied fresh into `rules/<task>/HANDBOOK.md`
   every round, so its path never points the agent at the workbench repo (a path there once led an
   agent to go looking for plans): unattended work, read before editing, imitate the codebase,
@@ -1465,8 +1467,8 @@ prompt, in this order:
   and the commits stay the whole repo's, and a plain subdirectory still means the repo's top.
   From packages/app the repo was refused for its root, and with `--no-claude-md` the agent ran
   `npm test` at the workspace root (#375, the audit of 1.6). With no CLAUDE.md found, the
-  refusal says a package with its own takes `--repo <the package's directory>`. OpenCode 2.3, started there, loads
-  the root's and the package's AGENTS.md (both count for the duplicate check below);
+  refusal says a package with its own takes `--repo <the package's directory>`. The package's
+  AGENTS.md, each one between, then the root's go first of all, nearest first (below);
 - the tracked `.claude/rules/**/*.md` from the worktree (`project_rules`), and the `.md` files
   under a tracked link to a directory there (`_md_under`): one whose real path is outside the
   worktree and the repo, through a file or a directory link (`.claude/rules/shared ->
@@ -1477,7 +1479,10 @@ prompt, in this order:
   (#828);
 - `context.md` in the task directory: a map of nested `CLAUDE.md`/`AGENTS.md` files in
   subdirectories (tracked, not under `.claude/`), "Before you change files under one of these
-  directories, read its file and follow it", instead of loading them all.
+  directories, read its file and follow it", instead of loading them all (not the `AGENTS.md`
+  files already loaded, between a package and the top);
+- last, the files a project's `opencode.json` names in `instructions`
+  (`project_config_instructions`, below).
 
 Each of these but the handbook is followed by what it `@` imports (`import_files`, depth first,
 as Claude Code loads them): OpenCode 2.3 reads an instruction file as a raw string, so a CLAUDE.md
@@ -1496,9 +1501,43 @@ part (never `.credentials.json`), and the user's own CLAUDE.md's reach anywhere 
 workbench's own files (`secret_paths`, `private_paths`). `fixed_prompt` counts each import as a
 part of its own. Not covered: an indented code block (read as text).
 
-OpenCode reads `AGENTS.md` itself but never `CLAUDE.md`. Files are deduplicated by content
-(SHA-256), seeded with the worktree's `AGENTS.md`, so a `CLAUDE.md` identical
-to `AGENTS.md` (or to an earlier file) isn't loaded twice.
+**What the project's own config gave, handed back** (#994, 2026-11-22). The agent's OpenCode
+runs with the project's config shut out (`OPENCODE_DISABLE_PROJECT_CONFIG`, *Project config
+can't lift the rules*), which also stops it reading what it found in the project itself, so wb
+lists those in the layer, from the task's directory (`Task.workdir`, a package's) and each one
+above it up to the worktree's top (`_project_dirs`; OpenCode went on up to the home directory,
+but above the worktree is workbench's state, not the project, and a `~/AGENTS.md` there would be
+the user's, not the project's):
+- `agents_files`: each `AGENTS.md`, nearest first, ahead of every other instruction file, where
+  OpenCode put them (after only its global `~/.config/opencode/AGENTS.md`, which still loads);
+- `project_skill_dirs`: each of `PROJECT_SKILL_DIRS` (`.claude/skills`, `.agents/skills`,
+  `.opencode/skills`, `.opencode/skill`) there, in the layer's `skills` after the handed ones (a
+  parent lists every skill under it, nested ones too, as OpenCode's own scan did);
+- `project_config_instructions`: the `instructions` of a project's `PROJECT_CONFIGS`
+  (`opencode.json`, `opencode.jsonc`, `.opencode/opencode.json`, `.opencode/opencode.jsonc`)
+  there, after the layer's own (OpenCode loaded that file after the layer), each pattern globbed
+  in the task's directory and each one up to the top, as OpenCode's `globUp`: only files in the
+  worktree, never a URL (OpenCode fetched it on every run, a network call nobody allowed) nor an
+  absolute or `~/` path (outside the project).
+
+The project config's other keys stay unread, on purpose: `plugin` and `.opencode/plugins` run
+code in OpenCode's own process, outside the rules and the shell's allowlist; `formatter` and `lsp`
+run commands (and may fetch language servers) the shell rules never see; `agent`, `mode` and
+`.opencode/agents` replace OpenCode's own prompt and tools, which wb measured
+(`OPENCODE_BASE_TOKENS`); `command` and `.opencode/commands` are for the interactive TUI;
+`permission(s)`, `mcp`, `provider`, `model`, `small_model`, `compaction`, `tool_output` and the
+like are the layer's. Measured on OpenCode 2.3.2 with `tests/capture_llm.py`, the switch drops
+exactly these: the project's `AGENTS.md` and those above it, its skills in all four places, its
+`opencode.json` (instructions, an agent's prompt) and `.opencode/` (agents, commands, plugins: a
+plugin no longer runs); the global `AGENTS.md`, the user's skills (denied below) and every tool
+stay. The prompt is otherwise the one OpenCode built itself, in the same order; RealOpenCode's
+`test_a_projects_agents_md_and_skills_reach_the_agent_and_its_config_lifts_nothing`
+checks it.
+
+OpenCode 2.3.2 also reads a `CLAUDE.md` itself, where no `AGENTS.md` sits beside it: the
+project's (now shut out) and `~/.claude/CLAUDE.md` when there is no global `AGENTS.md` (in the
+lane that one is unreadable, a secret). Files are deduplicated by content (SHA-256), so a
+`CLAUDE.md` identical to an `AGENTS.md` (or to an earlier file) isn't loaded twice.
 
 **Denied tools** (`DENIED_TOOLS`), which also leave the prompt (it shrinks from about 9K to 3.5K
 tokens, which a local model reads on every request): `question` (nobody answers it headless),
@@ -1558,7 +1597,7 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    projects put first, and can be steered: `terraform -chdir=. plan -out validate` matches
    `-chdir=* validate`, and `init -backend=false -from-module=<src>` fetches any module source.
    A family costs one entry where a glob covers it (each entry is ~135 bytes of the layer,
-   `CONFIG_CONTENT_MAX`): `gcc*`, `g++*`, `clang*` (clang++, clang-format, clang-tidy, the
+   with its `*=*` copy): `gcc*`, `g++*`, `clang*` (clang++, clang-format, clang-tidy, the
    versioned ones), `md5*`, `sha*sum`, `lua*` (lua, luajit, lua5.*, luac, luac5.*, luacheck,
    luarocks), `chez*`, `chicken-cs?`);
    not on it: `nix` (its builds go through the daemon's socket, outside the lane), `curl`, `wget`, `ssh`,
@@ -1664,9 +1703,8 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    --no-audit` and each reversed; `pnpm install`, `bun install`: `--frozen-lockfile` with
    `--prefer-offline` either side, `--ignore-scripts` or `--production`; #916, the third
    2026-11-21 audit: `pnpm install --frozen-lockfile --prefer-offline` and `npm install
-   --no-fund` asked; a short list, as every ordered pair with its `*=*` copy would take the rules
-   past `CONFIG_CONTENT_MAX`, whose fallback drops AGENTS.md and the project's skills, and no flag
-   with `=*`, whose `*` would pass a package name), and the
+   --no-fund` asked; a short list, as every ordered pair with its `*=*` copy came to ~80 KB of
+   rules, and no flag with `=*`, whose `*` would pass a package name), and the
    pip ones as `-e .[*]`, `-e ".[*]"`, `-e '.[*]'`, the project's own extras (#671: refused, an
    agent copying the project's `pnpm install --frozen-lockfile` spent a question; other flag
    combinations still ask, and `*` would also pass a second requirement with extras after it). The pip
@@ -1693,7 +1731,7 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `doas`, `pkexec`, `su`, `gh`), and the real git by its path (each `git` on the runner's PATH
    but the shim, its real path, and `GIT_PATHS`: `/usr/bin/git`, `/bin/git`,
    `/usr/local/bin/git`, `/opt/homebrew/bin/git`), each as `c *` (which matches a bare `c` too:
-   one rule each, as the rules travel in one environment string, `runner.CONFIG_CONTENT_MAX`), and
+   one rule each, not a second for the bare word), and
    each again behind the `_WRAPPERS`, a wrapper's own option shapes: `env`, `env -i`, `env --`;
    `xargs` bare, `-0`, `-r`, `-0r`, `-r0`, `--null`, `--no-run-if-empty`, `-??`, `-???`, `-? ?`,
    `-I {}`, `-I{}`; `nohup`, `nohup --`; `nice` bare, `-?`, `-??`, `-???`, `-n ?`, `-n ??`,
@@ -2036,7 +2074,7 @@ prefixes; `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_
 (`HF_HOME`, `HF_HUB_CACHE`, `HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE`, `HF_ENDPOINT`,
 `HF_HUB_DISABLE_TELEMETRY`, `TRANSFORMERS_OFFLINE`, `TOKENIZERS_PARALLELISM`, `AWS_REGION`,
 `AWS_DEFAULT_REGION`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_REGION`); plus `PWD` (the worktree),
-`OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT` (the rules again, below), `WB_TASK`, `WB_HOME`, `WB_RUN` (the run's id, for `sweep`), its
+`OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT` and `PROJECT_CONFIG_OFF` (below), `WB_TASK`, `WB_HOME`, `WB_RUN` (the run's id, for `sweep`), its
 own `XDG_RUNTIME_DIR` (`context.runtime_dir`, with the lane on) and in it, unless the user set
 one, `JUPYTER_RUNTIME_DIR` (`<runtime dir>/jupyter`: Jupyter's default,
 `~/.local/share/jupyter/runtime`, is outside the lane, and every notebook test, nbmake, nbval,
@@ -2125,27 +2163,37 @@ worktree's `src`); none left, no `PYTHONPATH`. The carrier itself never reaches 
 **Project config can't lift the rules.** OpenCode loads a project's `opencode.json` (the
 worktree's, `.opencode/`, and one in any directory above it) after `OPENCODE_CONFIG`, and appends
 its permissions after the layer's, so an allow-all there won (the 2026-11-16 audit: an agent
-could write one for its next round). `rules_env` passes the layer's permissions again as
-`OPENCODE_CONFIG_CONTENT`, which loads after every file; a list past `CONFIG_CONTENT_MAX`
-(120,000 bytes; one environment string holds 128 KiB) sets `OPENCODE_DISABLE_PROJECT_CONFIG=1`
-instead, which also drops AGENTS.md and the project's skills. A bare task's is about 108 KB in
-an empty home and 113.8 KB with every `TOOL_HOMES` directory present, whose lane rules add
-about 5.8 KB (2026-11-22, after the infra entries; each allowed entry costs about 135 bytes with
-its `*=*` copy, each `*`-led deny about 60, so a family of names is one glob where it can be:
-`gcc*`, `lua*`). `Permission`'s
-`test_a_bare_tasks_rules_leave_room_in_their_one_environment_string` measures both, in a home
-of its own, and fails with less than 8 KiB to spare in the first or 4 KiB in the second, so an
-addition that would leave the user's own content no room is seen. The user's own
+could write one for its next round). The rules then went a second time in
+`OPENCODE_CONFIG_CONTENT`, which loads after every file, with `OPENCODE_DISABLE_PROJECT_CONFIG`
+only the fallback past 120,000 bytes, as it drops AGENTS.md and the project's skills too; a bare
+task's rules came to about 108-114 KB, each allowed entry about 135 bytes with its `*=*` copy, so
+the allowlist couldn't grow (#994, 2026-11-22). Now `rules_env` always sets the switch, under both
+its names (`PROJECT_CONFIG_OFF`: `OPENCODE_DISABLE_PROJECT_CONFIG` and
+`OPENCODE_CONFIG_PROJECT_DISABLE`, which OpenCode 2.3.2 reads first, so a user's `=0` there would
+turn it back off), and the rules live in the layer file alone, whatever their size; wb hands back
+what the switch drops (*What the project's own config gave, handed back*). With it,
+`opencode debug config` lists the global files, the layer and `OPENCODE_CONFIG_CONTENT`, nothing
+else (measured on OpenCode 2.3.2), and the content is wb's. `CONFIG_CONTENT_MAX` (120,000 bytes;
+one environment string holds 128 KiB) now bounds only that content: past it, the user's own part
+is left out and wb's keys go alone. `Permission`'s
+`test_the_rules_stay_out_of_the_environment_however_long_they_grow` takes the rules past the old
+cap on the fullest machine the lane plans for (every `TOOL_HOMES` directory) and checks the
+environment carries the switch and a few pinned keys only. The user's own
 `OPENCODE_CONFIG_CONTENT` (`models.users_config_content`) goes under the rules, not away (#347,
-the audit of 1.4): its keys are kept but `mcp` (the user's MCP servers stay off) and any the
-layer sets itself (loaded last, the user's `compaction` would undo the handover's backstop), but
-`provider`, which the layer always sets now: the user's providers stay, with the layer's provider
-timeouts merged on top, so neither their content nor a project's `opencode.json` puts the 300 s
-header wait back (#491). Its `permissions` come before the layer's (the last match wins), and
-`share` is `disabled`; past the limit it goes alone, without its permissions.
-What else the layer sets is said there again
-too, so a project config can't change it either (#519, checked on OpenCode 2.3.2: the project's
-document won each): `RESTATED` (`small_model`, `autoupdate`, `compaction`: a project's
+the audit of 1.4): its `permissions`, and its 1.x `permission` object (`USERS_RULES`), go into
+the layer file, before the rules (the last match wins; `write_config_layer`), and leave the
+content, which loads after the layer and would otherwise come after them. OpenCode 2.3.2 still
+reads `permission`, as rules ahead of the same document's `permissions`; left in the content, a
+user's `{"*": "allow"}` there lifted every rule (#994's review, 2026-11-22; RealOpenCode's
+`test_the_users_own_config_contents_old_style_permission_lifts_no_rule`). Its other keys are kept
+but `mcp` (the user's MCP servers stay off) and any the layer sets itself (loaded last, the
+user's `compaction` would undo the handover's backstop), but `provider`, which the layer always
+sets now: the user's providers stay, with the layer's provider timeouts merged on top, so their
+content doesn't put the 300 s header wait back (#491), and `share` is `disabled`.
+What else the layer sets is said there again too (#519, checked on OpenCode 2.3.2 when the
+project's config still loaded: the project's document won each), so should an OpenCode release
+ever load a project's config despite the switch, it still can't change them: `RESTATED`
+(`small_model`, `autoupdate`, `compaction`: a project's
 `compaction.auto: false` left a session past the handover point with no backstop, its
 `small_model` got the titles, its `autoupdate` moved OpenCode past `OPENCODE_TESTED`; and
 `tool_output`, the probe experiment's output cap below, which a project's own `tool_output`
@@ -2164,9 +2212,8 @@ lines at 40K (the owner's design, 2026-11-21, #857). Measured on OpenCode 2.3.2 
 bounds the shell's output, keeping the last lines with `[showing lines A-B of N; full output saved
 to <OpenCode's data dir>/opencode/shell/…/sh_….out]`; it does **not** bound the built-in `read`,
 which keeps its own 2,000 lines or 50 KB and ends `[Output truncated. Continue reading with offset:
-N]`, so the probe note says how to read on instead. Off, the layer has no `tool_output`. A project
-config can still change what the layer doesn't set: another provider's entries, the task model's
-other options (`temperature`) and its provider's `baseURL`. The layer's `edit` rule also denies
+N]`, so the probe note says how to read on instead. Off, the layer has no `tool_output`. The
+layer's `edit` rule also denies
 `OPENCODE_FILES` (`*opencode.json`, `*opencode.jsonc`, `.opencode/*`, `*/.opencode/*`), and the
 round report flags them with Claude's files.
 
@@ -2226,13 +2273,15 @@ was diffed against nothing and taken as a plain `AGENTS.md` over the link, CLAUD
 **Git, read-only** (`gitguard.py`; *Git, commits and projects*). `runner.agent_env` writes a `git`
 of its own into `rules/<task>/bin/` and puts it first on `PATH`.
 
-**Skills**: the repo's own `.claude/skills` and `.agents/skills`, plus the library skills Claude
-handed this task (one directory each in the config's `skills` list). The user's personal
+**Skills**: the repo's own (`project_skill_dirs`: `.claude/skills`, `.agents/skills`,
+`.opencode/skills`, `.opencode/skill`, in the task's directory and each one up to the worktree's
+top, listed in the config's `skills` since OpenCode no longer finds them itself, #994), plus the
+library skills Claude handed this task (one directory each in the same list). The user's personal
 `~/.claude/skills` (including synced Claude app skills, `synced/*/*/SKILL.md`) and
 `~/.agents/skills` (the cross-tool place OpenCode 2.3 also reads, which reached every agent: #371,
 the audit of 1.6) are denied by name (`denied_skills`): an agent once read a personal skill as a
-"newer task" and went off into the user's files. A name the worktree's own `.claude/skills` or
-`.agents/skills` also has stays allowed (the project's skill wins); `workbench` and
+"newer task" and went off into the user's files. A name one of the project's skill directories
+also has, nested or not, stays allowed (the project's skill wins); `workbench` and
 task.json's `deny_skills` are always denied. `wb skill add` refuses the personal names. A
 library skill handed to the task keeps its name though a personal skill has it too (one synced by
 the app after the library's): denied by name, every load of it failed while the agent was told to
@@ -7997,7 +8046,10 @@ address's name up before listening, 35 s on GitHub's macOS runners, where every 
 port meanwhile timed out (#950).
 `RealOpenCode` and `RealOpenCodeSkillFiles` cover the MCP shape, skills, denials, compound shell
 commands, rule order, git by path, the edit rule, PATH, the lane and `tool_output` (it cuts the
-shell's output, not `read`'s, and a project's config can't lift it); `RealOpenCodeRun` the
+shell's output, not `read`'s, and a project's config can't lift it), and what the project's
+config gave, handed back with it shut out (its AGENTS.md, skills and `instructions`; its allow-all,
+its agent's prompt and its plugin lifting or running nothing, with rules past the old 120,000-byte
+cap, #994); `RealOpenCodeRun` the
 events, the export, `--session`, compaction and the header wait (CLAUDE.md's *OpenCode quirks*
 points here).
 With `CAPTURE_HEADER_DELAY=<seconds>` every POST waits that long before its headers: RealOpenCodeRun
@@ -8219,11 +8271,16 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **A file the runner or wb reads from the task directory, or one the ask server writes** → keep
   the lane's part of it to `worktree/` and `ask/`, and have the runner check what comes from there
   (`ask_mcp.relay`): nothing the agent writes may steer code outside its lane.
-- **The layer's `permissions`** → they go twice, in the file and as `OPENCODE_CONFIG_CONTENT`
-  (`rules_env`): keep them under `CONFIG_CONTENT_MAX`, or the fallback drops AGENTS.md (the
-  `Permission` test of a bare task's size wants 8 KiB spare in an empty home, 4 KiB with every
-  tool home). A new
-  layer key a project config mustn't change goes in `RESTATED` too.
+- **The layer's `permissions`** → they live in the layer file alone, the project's config shut
+  out (`rules_env`, `PROJECT_CONFIG_OFF`, #994): never put them back in `OPENCODE_CONFIG_CONTENT`
+  (one environment string, `CONFIG_CONTENT_MAX`), and keep the user's own content's permissions
+  (`USERS_RULES`, a new spelling OpenCode reads too) before them in the layer
+  (`write_config_layer`). A new layer key a project config mustn't change
+  goes in `RESTATED` too.
+- **What OpenCode reads from a project itself** (a new place for skills or instructions in an
+  OpenCode release) → `context.PROJECT_SKILL_DIRS`, `agents_files`, `PROJECT_CONFIGS` and
+  `project_config_instructions`, which hand it back with the project's config shut out; RealOpenCode's
+  #994 test and *What the project's own config gave, handed back*.
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.

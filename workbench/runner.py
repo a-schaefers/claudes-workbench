@@ -259,8 +259,18 @@ def stretch_limits(task: store.Task, m) -> dict:
 def write_config_layer(task: store.Task) -> Path:
     """The per-task OpenCode config: the providers OpenCode wouldn't load by itself
     (models.agent_providers), the task's provider's timeouts (provider_timeouts), the agent's
-    context and the ask_reviewer server."""
+    context and its rules (the user's own OPENCODE_CONFIG_CONTENT permissions, USERS_RULES,
+    before them: rules_env), and the ask_reviewer server."""
     path = context.rules_dir(task) / "opencode.json"
+    mine = context.layer(task)
+    users = models.users_config_content()
+    theirs = users.get("permissions")
+    mine["permissions"] = [*(theirs if isinstance(theirs, list) else []), *mine["permissions"]]
+    # and their 1.x `permission` object, which OpenCode 2.3.2 still reads, as rules ahead of the
+    # same document's `permissions`: left in the content, loaded after the layer, it came after
+    # the rules, and `{"*": "allow"}` there lifted every one (#994's review, 2026-11-22)
+    if "permission" in users:
+        mine = {"permission": users["permission"], **mine}
     wait_ms = int(task.spec.get("ask_timeout", 1200) + 60) * 1000
     try:
         cfg = models.resolve(task.spec["model"]).config
@@ -270,7 +280,7 @@ def write_config_layer(task: store.Task) -> Path:
     store.write_json(path, {
         "$schema": "https://opencode.ai/config.json",
         **models._merge(models.agent_providers(), provider_timeouts(task)),
-        **context.layer(task),
+        **mine,
         "share": "disabled",  # a user's `share: "auto"` would publish every agent session
         # the user's global small_model (titles, summaries) could be a cloud model whose key
         # auth.json holds, sent the task's text; an update mid-task could move OpenCode past
@@ -334,12 +344,21 @@ def users_servers_off() -> dict:
             for name in servers if name != "workbench"}
 
 
-# The rules again, as OPENCODE_CONFIG_CONTENT, which OpenCode loads after every config file: a
-# project's opencode.json (the worktree's, or one in a directory above it) loads after the layer
-# and its permissions come later, so `{"action": "shell", "resource": "*", "effect": "allow"}`
-# there lifted every deny (the 2026-11-16 audit). OPENCODE_DISABLE_PROJECT_CONFIG would shut it
-# out too, but it drops AGENTS.md and the project's skills with it, so it is only the fallback for
-# rules too long for one environment string (MAX_ARG_STRLEN, 128 KiB).
+# The project's own OpenCode config stays out of the agent's OpenCode: a project's opencode.json
+# (the worktree's, or one in a directory above it) and its .opencode/ load after the layer, so
+# `{"action": "shell", "resource": "*", "effect": "allow"}` there lifted every deny (the
+# 2026-11-16 audit). The rules then went again in OPENCODE_CONFIG_CONTENT, loaded last of all,
+# with OPENCODE_DISABLE_PROJECT_CONFIG only the fallback for rules too long for one environment
+# string, since it drops AGENTS.md and the project's skills too; a bare task's rules reached
+# ~110 KB of the 120,000 bytes and the allowlist couldn't grow (#994, 2026-11-22). Now the switch
+# is always on (both its names: OpenCode 2.3.2 reads OPENCODE_CONFIG_PROJECT_DISABLE first, so a
+# user's `=0` there would turn it back off), the rules live in the layer file alone, whatever their
+# size, and wb hands back what the switch drops (context.agents_files, project_skill_dirs,
+# project_config_instructions). With it, `opencode debug config` lists the global files, the
+# layer and OPENCODE_CONFIG_CONTENT, nothing else, and the content is wb's (rules_env).
+PROJECT_CONFIG_OFF = ("OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_CONFIG_PROJECT_DISABLE")
+# What OPENCODE_CONFIG_CONTENT may hold: one environment string can't pass MAX_ARG_STRLEN
+# (128 KiB) on Linux, or OpenCode wouldn't start. Past it, the user's own content is left out.
 CONFIG_CONTENT_MAX = 120_000
 
 
@@ -348,7 +367,9 @@ CONFIG_CONTENT_MAX = 120_000
 # updating itself (#353). A project config set compaction `auto: false` (a session past the
 # handover point then overflowed), sent titles to its cloud small_model, and turned updates on
 # past OPENCODE_TESTED (#519). And probe's output cap (output_cap, #857), which a project's
-# `tool_output` would lift.
+# `tool_output` would lift. With the project's config shut out (PROJECT_CONFIG_OFF, #994) they
+# are said again in OPENCODE_CONFIG_CONTENT all the same: should an OpenCode release ever load
+# the project's config despite the switch, these still hold (RealOpenCodeRun plants one, #519).
 RESTATED = ("small_model", "autoupdate", "compaction", "tool_output")
 
 
@@ -374,40 +395,37 @@ def model_pins(model_id) -> dict:
 
 # The user's own OPENCODE_CONFIG_CONTENT goes under the rules, not away: replaced, the providers,
 # instructions or permissions kept there were lost to the agent (#347, the audit of 1.4). Its
-# permissions come first, so the rules' (the last match wins) still decide; its MCP servers stay
-# off like the global files' ones (the layer's `mcp`, which this would load after). A key the
-# layer sets too is left to the layer: loaded last, the user's `compaction` would undo the
-# handover's backstop, and their `skills` or `instructions` replace the task's. But `provider`,
-# which the layer always sets now (its timeouts, #491): the user's providers stay, and the
-# layer's timeouts go on top of them here too, so neither their content nor a project's
-# opencode.json puts the 300 s header wait back. The RESTATED keys and the task model's pins
-# (model_pins; the layer's small_model is the task's model) are said again here, on top, so a
-# project config can't change them either (#519).
+# permissions (USERS_RULES: `permissions` and the 1.x `permission` object) go into the layer file,
+# before the rules (write_config_layer; the last match wins), and leave the content, which loads
+# after the layer and would otherwise come after the rules (#994); its MCP servers stay off like
+# the global files' ones (the layer's `mcp`, which this would load after). A key the layer sets too
+# is left to the layer: loaded last, the user's `compaction` would undo the handover's backstop,
+# and their `skills` or `instructions` replace the task's. But `provider`, which the layer always
+# sets now (its timeouts, #491): the user's providers stay, and the layer's timeouts go on top of
+# them here too, so their content doesn't put the 300 s header wait back. The RESTATED keys and the
+# task model's pins (model_pins; the layer's small_model is the task's model) are said again here,
+# on top (#519).
+USERS_RULES = ("permissions", "permission")
+
+
 def rules_env(layer: dict) -> dict:
     users = models.users_config_content()
-    theirs = users.get("permissions")
     users = {k: v for k, v in users.items()
-             if (k == "provider" or k not in layer) and k not in ("mcp", "permissions")}
+             if (k == "provider" or k not in layer) and k not in ("mcp", *USERS_RULES)}
     timeouts = {pid: {"options": {k: v["options"][k] for k in PROVIDER_TIMEOUTS if k in v["options"]}}
                 for pid, v in (layer.get("provider") or {}).items()
                 if isinstance(v, dict) and isinstance(v.get("options"), dict)
                 and any(k in v["options"] for k in PROVIDER_TIMEOUTS)}
-    if timeouts:
-        users["provider"] = models._merge(users["provider"] if isinstance(users.get("provider"), dict)
-                                          else {}, timeouts)
-    pinned = {k: layer[k] for k in RESTATED if k in layer}
-    if pins := model_pins(layer.get("small_model")):
-        mine = users.get("provider")  # theirs, with the layer's timeouts
-        pinned["provider"] = models._merge(mine if isinstance(mine, dict) else {}, pins["provider"])
-    rules = {"permissions": [*(theirs if isinstance(theirs, list) else []),
-                             *layer["permissions"]], "share": "disabled", **pinned}
-    content = json.dumps({**users, **rules}, separators=(",", ":"))
-    if len(content.encode()) <= CONFIG_CONTENT_MAX:
-        return {"OPENCODE_CONFIG_CONTENT": content}
-    # too long: the rules stay in the layer, so the user's content may not lift them either
-    rest = json.dumps({**users, "share": "disabled", **pinned}, separators=(",", ":"))
-    return {"OPENCODE_DISABLE_PROJECT_CONFIG": "1",
-            "OPENCODE_CONFIG_CONTENT": rest if len(rest.encode()) <= CONFIG_CONTENT_MAX else "{}"}
+    ours = {"share": "disabled", **{k: layer[k] for k in RESTATED if k in layer}}
+    if over := models._merge(timeouts, model_pins(layer.get("small_model")).get("provider") or {}):
+        ours["provider"] = over
+    content = {**users, **ours}
+    if over and isinstance(users.get("provider"), dict):
+        content["provider"] = models._merge(users["provider"], over)
+    text = json.dumps(content, separators=(",", ":"))
+    if len(text.encode()) > CONFIG_CONTENT_MAX:  # the user's own, too long to add to: wb's alone
+        text = json.dumps(ours, separators=(",", ":"))
+    return {**dict.fromkeys(PROJECT_CONFIG_OFF, "1"), "OPENCODE_CONFIG_CONTENT": text}
 
 
 # What OpenCode's own environment adds to the agent's: npx and `npm exec` run only what the
