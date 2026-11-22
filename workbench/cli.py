@@ -4587,11 +4587,9 @@ def cmd_chat(a):
         print(row["id"], row["answer"] or "open")
     elif a.action == "notice":  # the mod: a dialog waits in the terminal, the user not away (#959)
         if a.done:  # and was answered there: no push for it, the page says so
-            if not a.id:
-                die("wb chat notice --done <notice id>")
-            if not chat.notice_done(a.id):
-                die(f"wb chat notice --done: no notice {a.id} in the thread")
-            print("answered", a.id)
+            if not chat.notice_done(a.done):
+                die(f"wb chat notice --done: no notice {a.done} in the thread")
+            print("answered", a.done)
             return
         if not a.tool or a.kind not in chat.KINDS:
             die("wb chat notice needs --tool, and --kind permission|plan|question")
@@ -5779,13 +5777,15 @@ def parser() -> argparse.ArgumentParser:
                                       "claim", "pending", "ask", "notice", "wait", "answer"], nargs="?",
                    default="log")
     s.add_argument("id", nargs="?", help="ack, claim: the message id; wait, answer: the prompt's "
-                   "id; notice --done: the notice's id; listen: the clips (wb audio's takes, up to 8)")
+                   "id; listen: the clips (wb audio's takes, up to 8)")
     s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)  # listen's further clips
     s.add_argument("--tool", help="ask, notice: the tool asking")
     s.add_argument("--kind", default="permission", help="ask, notice: permission, plan or question")
-    s.add_argument("--done", action="store_true", help="notice: its dialog was answered in the "
-                   "terminal (no push for it)")
+    # --done takes the id itself: an optional positional after a flag (`notice --done <id>`) is
+    # left unparsed before Python 3.12, so the mod's call failed on 3.11 (CI, 2026-11-21)
+    s.add_argument("--done", metavar="ID", help="notice: the notice whose dialog was answered in "
+                   "the terminal (no push for it)")
     s.add_argument("--detail", help="ask: JSON, a question's {questions} or a plan's {plan} "
                    "or {plan_file}")
     s.add_argument("--session", help="ask: the Claude Code session asking (its plan file)")
