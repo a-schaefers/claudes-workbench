@@ -1549,7 +1549,7 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            ".terraform.d", ".pypirc", ".gem/credentials", ".cargo/credentials",
            ".cargo/credentials.toml", ".config/rclone", ".codex", ".pki", ".mozilla",
            ".thunderbird", ".config/chromium", ".config/google-chrome", ".config/BraveSoftware",
-           ".camoufox", ".cloakbrowser", ".irssi", ".bash_history", ".zsh_history",
+           ".camoufox", ".irssi", ".bash_history", ".zsh_history",
            ".python_history", ".claude", ".claude.json",
            ".config/opencode/service.json", ".local/state/opencode/service.json",
            ".config/git/credentials", ".gcm", ".pgpass", ".my.cnf", ".vault-token", ".s3cfg",
