@@ -194,11 +194,101 @@ ALLOWED_COMMANDS = (
     # review"). Not the migration tools: alembic, flyway or prisma migrate act on whatever the
     # worktree's .env names, which can be production
     "psql", "mysql", "mariadb", "redis-cli", "valkey-cli", "mongosh",
+    # and the wider set the research for #994 proposed (2026-11-22), each rechecked: each first
+    # use was a question and a wake. Off it or narrowed, and why (ARCHITECTURE.md lists them):
+    # what sends usage data by default runs only in its opt-out spelling (cdk, sam, redocly,
+    # semgrep, azurite) or not at all (turbo, moon, skaffold, vcpkg, oasdiff); what sends the
+    # project's runs or files to a service the repo names only with that off (nx, rush; `buf
+    # generate`, whose remote plugins run on the BSR, not at all); globs over names anyone
+    # publishes under (`wasm-*` takes wasm-to-oci, which pushes; `qemu-*` the setuid
+    # bridge helper; `protoc-gen-*`, `mdbook-*`, which protoc and mdbook run themselves) named.
+    # more IaC, offline
+    "packer fmt", "packer validate", "packer version",
+    "CDK_DISABLE_CLI_TELEMETRY=true cdk synth", "CDK_DISABLE_CLI_TELEMETRY=true cdk synthesize",
+    "CDK_DISABLE_CLI_TELEMETRY=true cdk ls", "CDK_DISABLE_CLI_TELEMETRY=true cdk list",
+    "SAM_CLI_TELEMETRY=0 sam validate", "SAM_CLI_TELEMETRY=0 sam build",
+    "cfn-guard", "bicep build", "bicep lint", "bicep format",
+    "ansible-galaxy collection build", "ansible-galaxy collection init", "ansible-galaxy role init",
+    "molecule syntax", "molecule list",
+    "opa build", "opa parse", "opa inspect", "regal lint", "kyverno test", "gator verify",
+    "pluto detect-files", "polaris audit *--audit-path*", "kics scan", "grype",
+    "cue vet", "cue eval", "cue export", "cue fmt", "cue def",
+    "jsonnet", "jsonnetfmt", "jsonnet-lint", "tk eval", "tk export", "tk fmt", "tk lint", "ytt",
+    "dhall", "dhall-to-json", "dhall-to-yaml", "nickel", "pkl eval", "pkl test",
+    "docker buildx bake *--print*", "podman-compose config", "act -l", "act --list",
+    "systemd-analyze verify", "systemd-analyze calendar", "systemd-analyze security",
+    "nginx -t", "nginx -T", "nginx -v", "nginx -V", "caddy validate", "caddy adapt", "caddy fmt",
+    "haproxy -c", "nomad fmt", "consul validate",
+    # local services for tests (started in the temp directory, as above); Firebase's only on a
+    # demo- project, whose code "interacts with emulators only" (its docs): a real project's
+    # functions reach the live services the emulators don't cover
+    "postgres", "pg_config", "mysqld", "mariadbd", "mariadb-install-db", "mysql_install_db",
+    "redis-benchmark", "valkey-server", "memcached", "mongod", "nats-server", "etcd",
+    "minio server", "duckdb", "azurite *--disableTelemetry*", "moto_server",
+    "firebase emulators:start *--project?demo-*", "firebase emulators:exec *--project?demo-*",
+    # build systems and monorepos
+    "buck2", "pants", "plz", "nx *--no-cloud*", "NX_NO_CLOUD=true nx",
+    "RUSH_BUILD_CACHE_WRITE_ALLOWED=0 rush", "rush install", "rush update", "rush list", "rushx",
+    "gn", "autoninja", "xmake", "premake5", "waf", "qmake", "qmake6", "samu", "muon", "colcon",
+    "cpack", "bear", "compiledb", "include-what-you-use", "autoconf", "automake", "aclocal",
+    "autoheader", "libtoolize", "libtool", "m4", "bison", "flex", "yacc", "re2c", "gperf", "swig",
+    "llvm-*", "lld", "ld.lld", "mold", "objcopy", "ranlib", "c++filt",
+    # languages
+    "dmd", "ldc2", "gdc", "rdmd", "dub", "dscanner", "dfmt",
+    "fpm", "flang", "flang-new", "lfortran", "fprettify", "gnatmake", "gprbuild", "gprclean",
+    "gnatprove", "alr", "fpc", "lazbuild", "cobc", "v", "odin", "valac", "hare", "haxe", "haxelib",
+    "purs", "spago", "purs-tidy", "rescript", "fantomas", "paket", "roc", "idris2", "agda",
+    "coqc", "coq_makefile", "coqdep", "rocq", "lake", "lean", "swipl", "gprolog", "tclsh",
+    "prove", "perltidy", "perlcritic", "carton", "raku", "zef", "octave", "octave-cli",
+    "groovy", "groovyc", "ktlint", "ktfmt", "detekt", "shadow-cljs", "bb", "cljfmt", "zprint",
+    # contracts, wasm, schemas (`forge create` and `forge script` deploy: not on it)
+    "forge build", "forge test", "forge fmt", "forge coverage", "forge snapshot", "forge inspect",
+    "forge clean", "forge doc", "forge tree", "anvil", "solc", "solhint", "slither", "vyper",
+    "wasm-pack", "wasm-opt", "wasm-tools", "wasm-bindgen", "wasm-ld", "wasm-objdump",
+    "wasm-validate", "wasm-interp", "wasm-strip", "wasm-merge", "wasm-dis", "wasm-as",
+    "wat2wasm", "wasm2wat", "wasmtime", "emcc", "em++", "emcmake", "emmake",
+    "buf build", "buf lint", "buf format", "buf breaking", "buf export", "buf convert",
+    "protolint", "graphql-codegen", "spectral",
+    "REDOCLY_TELEMETRY=off redocly lint", "REDOCLY_TELEMETRY=off redocly bundle",
+    "REDOCLY_TELEMETRY=off redocly build-docs", "REDOCLY_TELEMETRY=off redocly split",
+    "REDOCLY_TELEMETRY=off redocly join", "REDOCLY_TELEMETRY=off redocly stats",
+    "oapi-codegen", "openapi-generator-cli", "vacuum",
+    # docs
+    "mdbook", "hugo", "jekyll", "asciidoctor", "pandoc", "latexmk", "pdflatex",
+    "xelatex", "lualatex", "bibtex", "biber", "makeindex", "kpsewhich", "chktex", "tectonic",
+    "typst", "quarto", "zola", "doxygen", "plantuml", "dot", "mmdc", "d2", "typedoc",
+    "sphinx-autobuild", "sphinx-apidoc", "pdoc", "lychee", "rsvg-convert", "magick",
+    # shaders, Godot, embedded: compile and emulate, no flasher (the flashing steps are OUTWARD)
+    "glslangValidator", "glslc", "spirv-*", "dxc", "slangc", "naga", "godot", "godot4", "gdlint",
+    "gdformat", "arm-none-eabi-*", "avr-gcc", "avr-g++", "avr-objcopy", "avr-size",
+    "riscv64-unknown-elf-*", "riscv32-unknown-elf-*", "aarch64-linux-gnu-*",
+    "x86_64-w64-mingw32-*", "qemu-system-*", "qemu-img", "qemu-aarch64*", "qemu-arm*",
+    "qemu-riscv*", "qemu-x86_64*", "qemu-i386*", "renode",
+    "idf.py build", "idf.py set-target", "idf.py size", "idf.py fullclean", "idf.py reconfigure",
+    "west build", "twister", "arduino-cli compile",
+    # formatters, linters, test runners
+    "biome", "oxlint", "dprint", "stylua", "shfmt", "taplo", "editorconfig-checker", "typos",
+    "codespell", "vale", "sqlfluff", "cspell", "markdownlint-cli2", "markdownlint", "stylelint",
+    "buildifier", "buildozer", "cmake-format", "gersemi", "yamlfmt", "swiftlint", "swiftformat",
+    "scalafmt", "google-java-format", "checkstyle", "ormolu", "fourmolu", "ocamlformat",
+    "erlfmt", "nixfmt", "alejandra", "php-cs-fixer", "phpcs", "phpstan", "psalm", "phpunit",
+    "pint", "gitleaks", "detect-secrets", "osv-scanner", "bandit", "pip-audit",
+    "semgrep *--metrics?off*", "SEMGREP_SEND_METRICS=off semgrep",
+    "bats", "robot", "behave", "cucumber-js", "hyperfine", "mocha", "ava", "c8", "nyc",
+    "ginkgo", "gotestsum", "kcov", "lcov", "genhtml", "gcovr",
 )
 # The tools on that list only by their subcommands: `--test 'terraform validate'` granted
 # `terraform *` (test_allowances), so the agent could run `terraform apply` and `helm push`
-# under it. Theirs is the command as written, with more arguments, and no more.
-LIMITED = (frozenset(re.split(r"[ ?*]", e)[0] for e in ALLOWED_COMMANDS if " " in e)
+# under it. Theirs is the command as written, with more arguments, and no more. The tool of an
+# entry spelled with its opt-out first (`SAM_CLI_TELEMETRY=0 sam build`) is the word after it:
+# else `--test 'REDOCLY_TELEMETRY=off redocly lint'` granted `redocly *`, telemetry and `redocly
+# push` with it (#994, 2026-11-22)
+def _entry_tool(entry: str) -> str:
+    words = [w for w in entry.split(" ") if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", w)]
+    return re.split(r"[?*]", words[0])[0] if words else ""
+
+
+LIMITED = (frozenset(_entry_tool(e) for e in ALLOWED_COMMANDS if " " in e)
            - set(ALLOWED_COMMANDS))
 # and the tools that reach a cloud, a cluster, a registry, a host or a container daemon, on the
 # list by a subcommand or not at all: `--test 'terragrunt hcl fmt --check'` granted
@@ -209,7 +299,10 @@ OUTWARD_TOOLS = frozenset((
     "gsutil", "az", "doctl", "eksctl", "flyctl", "fly", "heroku", "vercel", "netlify", "wrangler",
     "firebase", "kubectl", "helm", "kind", "minikube", "k3d", "skaffold", "argocd", "flux", "oc",
     "docker", "docker-compose", "podman", "buildah", "ansible", "ansible-playbook", "vagrant",
-    "nomad", "vault", "consul"))
+    "nomad", "vault", "consul",
+    # and the monorepo runners whose remote cache uploads with the user's login, off the list
+    # (#994, 2026-11-22): `--test 'turbo run test'` mustn't grant `turbo *`
+    "turbo", "lerna"))
 # A project's own tools and builds, by their usual relative paths (`./x` is allowed already).
 PROJECT_BINS = (".venv/bin/*", "venv/bin/*", "node_modules/.bin/*", "build/*", "target/debug/*",
                 "target/release/*", "bin/*", "out/*", "dist/*", "zig-out/bin/*", "vendor/bin/*",
@@ -238,6 +331,23 @@ ASK_FIRST = (
     # project installed, as the runner sets npm_config_yes=false for OpenCode
     "npm x *", "npx -p *", "npx --package *", "npx --package=*", "bun x *", "uv tool run *",
     "uv tool install *", "uv run --with *", "deno run *npm:*", "deno run *jsr:*",
+    # the package steps of the tools #994 added (2026-11-22); `fpm install`, `v install`, `zef
+    # install` and `alr install` put programs or modules in the user's own prefix, like `cargo
+    # install`. Kept for the dropped tools too, for a grant of the whole tool
+    "nx add *", "nx migrate *", "rush add *", "rush remove *", "rush upgrade-interactive *",
+    "moon toolchain *", "moon setup *", "xmake require *", "vcpkg install *", "vcpkg add *",
+    "vcpkg x-update-baseline *", "dub add *", "dub fetch *", "dub add-local *", "dub add-path *",
+    "dub add-override *", "dub remove *", "alr with *", "alr get *", "alr toolchain *",
+    "alr install *", "alr index *", "haxelib install *", "haxelib git *", "haxelib hg *",
+    "haxelib update *",
+    "haxelib upgrade *", "haxelib setup *", "spago install *", "spago uninstall *",
+    "spago upgrade *", "paket add *", "zef install *", "zef upgrade *", "zef uninstall *",
+    "fpm install *", "v install *", "hugo mod get *", "quarto add *", "quarto install *",
+    "quarto use *", "quarto update *", "quarto remove *",
+    # `dub run <pkg>` fetches a registry package by name and runs it, as `uvx` does; `build` and
+    # `test` fetch one too. The project's own (bare, a flag first, `:sub`) are INSTALL_LISTED's
+    # (#994's review, 2026-11-22)
+    "dub run *", "dub build *", "dub test *",
 )
 # Inside the allowed tools, the steps that reach out: publishing to a registry, deploying,
 # changing infrastructure or a cluster (the owner, 2026-11-22, asking for the infra tools). They
@@ -292,6 +402,37 @@ OUTWARD = (
     "*kubectl* delete *", "*helm* install *", "*helm* upgrade *", "*helm* uninstall *",
     # an image to a registry; a chart rendered against the live cluster
     "*docker push *", "*helm * --validate*",
+    # the outward steps of the tools #994 added (2026-11-22): a publish, a login, a remote
+    # cache's link, a deploy, a self-update (it replaces the user's own program), a board
+    # flashed or its eFuses burned (`idf.py build flash`, `-t flash`, `--device-testing`,
+    # `compile -u`), results uploaded (polaris's to Fairwinds Insights). Kept for the dropped
+    # tools too (turbo, moon, vcpkg): a grant of the whole tool still stops at them
+    "*turbo login *", "*turbo link *", "*rush publish *", "*moon upgrade *", "*pants publish *",
+    "*pants experimental-deploy *", "*plz update *", "*buck2* install *", "*xmake update *",
+    "*xmake service *", "*xmake repo *", "*vcpkg integrate *", "*fpm publish *",
+    "*alr publish *", "*haxelib submit *", "*haxelib register *", "*spago publish *",
+    "*spago auth *", "*spago registry *", "*paket push *", "*lake upload *", "*lake cache put *",
+    "*lake exe cache put*",
+    "*wasm-pack publish *", "*wasm-pack login *", "*hugo deploy *", "*hugo server trust *",
+    "*quarto publish *", "*semgrep* ci *", "*semgrep* login *", "*semgrep* publish *",
+    "*nx login *", "*nx import *", "*nx configure-ai-agents *", "*typst update *",
+    "*cucumber* --publish*", "*polaris* --upload-insights*",
+    "*packer build *", "*bicep publish *", "*buf push *", "*redocly push *", "*forge create *",
+    "*forge* --broadcast*",
+    "*idf.py* *flash *", "*idf.py* *efuse-*", "*idf.py* *erase*", "*west build* -t flash *",
+    "*west build* --target?flash *", "*twister* --device-testing*", "*twister* --west-flash*",
+    "*arduino-cli* --upload*", "*arduino-cli* -u*", "*west build* -tflash*",
+    # and what the recheck's review found the research missed (#994, 2026-11-22): under
+    # `NX_NO_CLOUD=true nx` and `nx *--no-cloud*`, `nx release publish` ran npm publish with the
+    # readable ~/.npmrc's token, and `nx connect`, `view-logs` ("upload the most recent run
+    # details"), `record` and the other nx-cloud aliases ran (nx's command reference); results
+    # uploaded by a flag (psalm's to Shepherd, kcov's to coveralls.io); self-updates
+    "*nx release *", "*nx connect *", "*nx connect-to-nx-cloud*", "*nx view-logs *",
+    "*nx record *", "*nx start-ci-run *", "*nx start-agent *", "*nx start-nx-agents *",
+    "*nx stop-all-agents *", "*nx fix-ci *", "*nx apply-locally *", "*nx download-cloud-client *",
+    "*psalm* --shepherd*", "*kcov* --coveralls-id*",
+    "v up *", "* v up *", "*dprint upgrade *", "*php-cs-fixer* self-update*",
+    "*php-cs-fixer* selfupdate*",
 )
 # OpenCode's matcher makes a trailing " *" optional, so `npm install *` also matches a bare
 # `npm install`. Installing what the project already lists is the agent's: allowed again after.
@@ -304,6 +445,10 @@ INSTALL_LISTED = (
     "pip3.* install -r *", "pip3.* install -e .", "python3.* -m pip install -r *",
     "python3.* -m pip install -e .", "pipenv install", "pipenv install --dev", "pipenv sync",
     "pio pkg install", "platformio pkg install", "nimble install -d", "nimble install --depsOnly",
+    # and what the project lists, for the tools #994 added (2026-11-22): xmake.lua's
+    # add_requires, a build.hxml's libraries, spago.yaml's, the META6.json's, go.mod's modules
+    "xmake require", "haxelib install *.hxml", "spago install", "zef install --deps-only .",
+    "hugo mod get", *(f"dub {c}{a}" for c in ("run", "build", "test") for a in ("", " -*", " :*")),
 )
 # and with the flags projects spell those installs with, one flag each, and pip's extras of the
 # project itself: `pnpm install --frozen-lockfile` and `pip install -e ".[dev]"` were refused,
@@ -1005,7 +1150,18 @@ TOOL_HOMES = (".cache", ".cargo", ".rustup", "go/pkg", ".npm", ".bun/install/cac
               # the homes of ecosystems #672 allowed: `nimble install -d` writes ~/.nimble/pkgs2,
               # `elm make` in a fresh worktree takes ~/.elm's package lock, Clojure's git deps
               # fill ~/.gitlibs, and each was refused (#911, the third 2026-11-21 audit)
-              ".nimble", ".elm", ".gitlibs")
+              ".nimble", ".elm", ".gitlibs",
+              # the caches of tools #994 allowed (2026-11-22): Godot's user:// data (app_userdata,
+              # what `godot --headless --script` writes; its editor settings, which can hold a
+              # keystore's password, are ~/.config/godot, not here), LuaLaTeX's font cache in
+              # TeX Live's TEXMFVAR (`.texlive` on Arch, `.texlive2025` from TeX Live's
+              # installer; not texmf-config, read by every later run), dub's and xmake's packages
+              # and caches (not their settings), zef's store, cpanm's work directory (carton's),
+              # Foundry's RPC and Etherscan cache (not its keystores), tflint's plugins, Bicep's
+              # module cache
+              ".local/share/godot", ".texlive*/texmf-var", ".dub/packages", ".dub/cache",
+              ".xmake/packages", ".xmake/cache", ".zef/store", ".cpanm", ".foundry/cache",
+              ".tflint.d", ".bicep")
 # where the user moved them: a toolchain follows its variable, not the default path; GOPATH and
 # BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches. The second
 # line's were refused where the user moved them, HF_HOME though ENV_KEEP passes it on (#911)
@@ -1240,12 +1396,15 @@ def _split(place: str, out_of: set[str]) -> list[str]:
 
 def tool_homes() -> list[Path]:
     """TOOL_HOMES' places: under the home, or under XDG_DATA_HOME and XDG_STATE_HOME where those
-    are set (pnpm's store, hatch's and cabal's were refused there, #911)."""
+    are set (pnpm's store, hatch's and cabal's were refused there, #911). An entry with a `*` is
+    each place it matches (TeX Live's `.texlive2025`, #994)."""
     home, out = Path.home(), []
     for t in TOOL_HOMES:
         var = next((v, b) for v, b in (*XDG_BASES, (None, "")) if t.startswith(b))
-        out.append(Path(os.environ[var[0]]) / t[len(var[1]):] if var[0] and os.environ.get(var[0])
-                   else home / t)
+        base, rel = (Path(os.environ[var[0]]), t[len(var[1]):]) \
+            if var[0] and os.environ.get(var[0]) else (home, t)
+        out += [Path(g) for g in sorted(glob.glob(f"{glob.escape(str(base))}/{rel}"))] \
+            if "*" in rel else [base / rel]
     return out
 
 

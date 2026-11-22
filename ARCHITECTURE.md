@@ -1553,7 +1553,7 @@ one character (a space too), treats a trailing ` *` as optional (`npm install *`
 wins; no match means ask, which `--auto` allows. The rules, in order:
 1. deny `*`;
 2. allow `c *` (a bare `c` too) and `*=* c *` (`ASSIGN`: a variable set before it,
-   `PYTHONPATH=. pytest`) for each of `ALLOWED_COMMANDS` (about 350: the shell's builtins and
+   `PYTHONPATH=. pytest`) for each of `ALLOWED_COMMANDS` (about 730: the shell's builtins and
    everyday tools, files and text, archivers, builds and compilers, test runners, interpreters,
    package managers, `bash`/`sh`, `sqlite3`, `git` (the shim), and since #514 (the audit of 1.90)
    the toolchains the lane makes room for and the common runners and linters: `python3.*`,
@@ -1593,7 +1593,72 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    *--syntax-check` (the flag anywhere: it only parses; a dynamic inventory it loads can still
    call a cloud), `cfn-lint`; and a test's own database or cache, started in the temp directory,
    `initdb`, `pg_ctl`, `pg_isready`, `redis-server`, `psql`, `mysql`, `mariadb`, `redis-cli`,
-   `valkey-cli`, `mongosh`. A `*` inside an entry takes the flags
+   `valkey-cli`, `mongosh`; and since #994 (2026-11-22: the research's wider set, each entry
+   rechecked; the cap that held it back went with #997) more IaC checked offline (`packer fmt`,
+   `validate`, `version`; `cfn-guard`; `bicep build`, `lint`, `format`; `ansible-galaxy
+   collection build`/`init`, `role init`; `molecule syntax`, `list`; `opa build`, `parse`,
+   `inspect`; `regal lint`, `kyverno test`, `gator verify`, `pluto detect-files`, `polaris audit
+   *--audit-path*` (local files, not the cluster), `kics scan`, `grype`; `cue vet`, `eval`,
+   `export`, `fmt`, `def`; `jsonnet`, `jsonnetfmt`, `jsonnet-lint`, `tk eval`, `export`, `fmt`,
+   `lint`, `ytt`, `dhall`, `dhall-to-json`, `dhall-to-yaml`, `nickel`, `pkl eval`, `test`; `docker
+   buildx bake *--print*`, `podman-compose config`, `act -l`/`--list`; `systemd-analyze verify`,
+   `calendar`, `security`; `nginx -t`, `-T`, `-v`, `-V` (each exits before a signal), `caddy
+   validate`, `adapt`, `fmt`, `haproxy -c`, `nomad fmt`, `consul validate`), more local services
+   for a test (`postgres`, `pg_config`, `mysqld`, `mariadbd`, `mariadb-install-db`,
+   `mysql_install_db`, `redis-benchmark`, `valkey-server`, `memcached`, `mongod`, `nats-server`,
+   `etcd`, `minio server`, `duckdb`, `moto_server`; some listen on every interface by default:
+   the skill's `reference/checks.md` says to bind them to a socket or 127.0.0.1), build systems
+   and monorepo runners (`buck2`, `pants`, `plz`, `rushx`, `rush install`, `update`, `list`, `gn`,
+   `autoninja`, `xmake`, `premake5`, `waf`, `qmake`, `qmake6`, `samu`, `muon`, `colcon`, `cpack`,
+   `bear`, `compiledb`, `include-what-you-use`, the autotools, `m4`, `bison`, `flex`, `yacc`,
+   `re2c`, `gperf`, `swig`, `llvm-*`, `lld`, `ld.lld`, `mold`, `objcopy`, `ranlib`, `c++filt`),
+   more languages (D: `dmd`, `ldc2`, `gdc`, `rdmd`, `dub`, `dscanner`, `dfmt`; Fortran: `fpm`,
+   `flang`, `flang-new`, `lfortran`, `fprettify`; Ada: `gnatmake`, `gprbuild`, `gprclean`,
+   `gnatprove`, `alr`; `fpc`, `lazbuild`, `cobc`, `v`, `odin`, `valac`, `hare`, `haxe`, `haxelib`,
+   `purs`, `spago`, `purs-tidy`, `rescript`, `fantomas`, `paket`, `roc`, `idris2`, `agda`, `coqc`,
+   `coq_makefile`, `coqdep`, `rocq`, `lake`, `lean`, `swipl`, `gprolog`, `tclsh`, `prove`,
+   `perltidy`, `perlcritic`, `carton`, `raku`, `zef`, `octave`, `octave-cli`, `groovy`,
+   `groovyc`, `ktlint`, `ktfmt`, `detekt`, `shadow-cljs`, `bb`, `cljfmt`, `zprint`), contracts,
+   wasm and schemas (`forge build`, `test`, `fmt`, `coverage`, `snapshot`, `inspect`, `clean`,
+   `doc`, `tree`, `anvil`, `solc`, `solhint`, `slither`, `vyper`; `wasm-pack`, `wasm-opt`,
+   `wasm-tools`, `wasm-bindgen`, `wasm-ld`, `wasm-objdump`, `wasm-validate`, `wasm-interp`,
+   `wasm-strip`, `wasm-merge`, `wasm-dis`, `wasm-as`, `wat2wasm`, `wasm2wat`, `wasmtime`,
+   `emcc`, `em++`, `emcmake`, `emmake`; `buf build`, `lint`, `format`, `breaking`, `export`,
+   `convert`, `protolint`, `graphql-codegen`, `spectral`, `oapi-codegen`,
+   `openapi-generator-cli`, `vacuum`), docs (`mdbook`, `hugo`, `jekyll`, `asciidoctor`,
+   `pandoc`, `latexmk`, `pdflatex`, `xelatex`, `lualatex`, `bibtex`, `biber`, `makeindex`,
+   `kpsewhich`, `chktex`, `tectonic`, `typst`, `quarto`, `zola`, `doxygen`, `plantuml`, `dot`,
+   `mmdc`, `d2`, `typedoc`, `sphinx-autobuild`, `sphinx-apidoc`, `pdoc`, `lychee`,
+   `rsvg-convert`, `magick`), shaders, Godot and embedded, compiled and emulated but not flashed
+   (`glslangValidator`, `glslc`, `spirv-*`, `dxc`, `slangc`, `naga`, `godot`, `godot4`,
+   `gdlint`, `gdformat`, `arm-none-eabi-*`, `avr-gcc`, `avr-g++`, `avr-objcopy`, `avr-size`,
+   `riscv64-unknown-elf-*`, `riscv32-unknown-elf-*`, `aarch64-linux-gnu-*`,
+   `x86_64-w64-mingw32-*`, `qemu-system-*`, `qemu-img` and the user-mode emulators
+   `qemu-aarch64*`, `qemu-arm*`, `qemu-riscv*`, `qemu-x86_64*`, `qemu-i386*`, `renode`, `idf.py
+   build`, `set-target`, `size`, `fullclean`, `reconfigure`, `west build`, `twister`,
+   `arduino-cli compile`), and formatters, linters and test runners (`biome`, `oxlint`,
+   `dprint`, `stylua`, `shfmt`, `taplo`, `editorconfig-checker`, `typos`, `codespell`, `vale`,
+   `sqlfluff`, `cspell`, `markdownlint-cli2`, `markdownlint`, `stylelint`, `buildifier`,
+   `buildozer`, `cmake-format`, `gersemi`, `yamlfmt`, `swiftlint`, `swiftformat`, `scalafmt`,
+   `google-java-format`, `checkstyle`, `ormolu`, `fourmolu`, `ocamlformat`, `erlfmt`, `nixfmt`,
+   `alejandra`, `php-cs-fixer`, `phpcs`, `phpstan`, `psalm`, `phpunit`, `pint`, `gitleaks`,
+   `detect-secrets`, `osv-scanner` and `pip-audit` (they send the lockfile's package names and
+   versions to a vulnerability database to look them up, not the code), `bandit`, `bats`,
+   `robot`, `behave`, `cucumber-js`, `hyperfine`, `mocha`, `ava`, `c8`, `nyc`, `ginkgo`,
+   `gotestsum`, `kcov`, `lcov`, `genhtml`, `gcovr`). Of these, what sends usage data by default
+   (each tool's docs) runs only in its opt-out spelling, the entry starting with the variable or
+   holding the flag: `CDK_DISABLE_CLI_TELEMETRY=true cdk synth`, `synthesize`, `ls`, `list`
+   (the CDK CLI's telemetry since 2.1100.0), `SAM_CLI_TELEMETRY=0 sam validate`, `build`,
+   `REDOCLY_TELEMETRY=off redocly lint`, `bundle`, `build-docs`, `split`, `join`, `stats`,
+   `semgrep *--metrics?off*` and `SEMGREP_SEND_METRICS=off semgrep` (metrics go whenever rules
+   come from its registry), `azurite *--disableTelemetry*`; what sends the project's runs to a
+   service the repo names, only with that off: `nx *--no-cloud*` and `NX_NO_CLOUD=true nx` (a
+   workspace connected to Nx Cloud records every run there), `RUSH_BUILD_CACHE_WRITE_ALLOWED=0
+   rush` (a repo's `build-cache.json` may allow writes to a cloud cache, with the user's
+   `~/.rush-user` credentials); and Firebase's emulators only on a demo project, `firebase
+   emulators:start *--project?demo-*` and `emulators:exec *--project?demo-*`, where "code that
+   targets a resource without an emulator running will fail" (Firebase's docs) instead of
+   reaching the live project. A `*` inside an entry takes the flags
    projects put first, and can be steered: `terraform -chdir=. plan -out validate` matches
    `-chdir=* validate`, and `init -backend=false -from-module=<src>` fetches any module source.
    A family costs one entry where a glob covers it (each entry is ~135 bytes of the layer,
@@ -1610,7 +1675,28 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    registry, a cloud or a host, each with the user's credentials; the migration tools (`alembic`,
    `flyway`, `prisma migrate`), as the worktree's `.env` can name production (the database
    clients `psql`, `mysql`, `mariadb`, `redis-cli`, `valkey-cli` and `mongosh` are on it: python
-   reaches any database they do; the owner, 2026-11-22). OpenCode
+   reaches any database they do; the owner, 2026-11-22). And of #994's proposal (the recheck,
+   2026-11-22): `turbo` (telemetry on by default, and in a repo linked to a remote cache every
+   run uploads with the login in `~/.config/turborepo`), `lerna` (its runs go through Nx, its
+   `version` and `publish` push), `moon` (its `telemetry` setting defaults to true, in the
+   workspace file only), `skaffold` (metrics opted in by default, turned off only by its own
+   config), `vcpkg` (telemetry on by default; with it its `install` forms), `oasdiff` (its
+   maintainers put telemetry on by default, and its opt-out's values aren't documented); the
+   opt-out-less spellings above (`cdk synth`, `sam build`, `redocly lint`, `semgrep --config
+   p/python`, `azurite`, `nx test`, `rush build`, `firebase emulators:start` on a real project);
+   `gcloud emulators` and `gcloud beta emulators` (gcloud keeps its config, logs and credentials
+   in `~/.config/gcloud`, which the lane hides, and it isn't installed here to see whether it
+   runs without them: the emulators' own binaries, or Firebase's on a demo project, are the
+   way); `buf generate` (a `buf.gen.yaml`'s remote plugins run on the Buf Schema Registry, the
+   schema sent there) and `buf dep update` (it moves `buf.lock` to newer versions, a dependency
+   choice like `terraform get -update`); `cdk doctor` (nothing to check); and the globs that
+   could match a tool that reaches out or changes the machine: `wasm-*` (`wasm-to-oci` pushes to
+   a registry; the wasm tools are named instead), `qemu-*` (`qemu-nbd` attaches the kernel's
+   network block devices, `qemu-bridge-helper` is setuid and makes tap devices on the host's
+   bridges; the system and user-mode emulators and `qemu-img` are named), `protoc-gen-*` and
+   `mdbook-*` (protoc, buf and mdbook run their plugins themselves, and a glob over a naming
+   convention anyone publishes under can't be checked); and `carton install` as an install entry,
+   since `carton` is on the list whole and installs only what the cpanfile lists. OpenCode
    matches each simple command's raw text, so `FOO=1 ls` was refused while `ls` and `env FOO=1
    ls` ran, and a small model copying the
    project's own `CI=1 npm test` spent a Claude wake asking or stopped running the tests (#258, the
@@ -1636,11 +1722,16 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    can run the tool's other work (`npm run lint` under `npm test`, `earthly +lint` under
    `earthly +test`). Not a tool on the list only by its subcommands (`context.LIMITED`: `terraform`,
    `tofu`, `helm`, `kubectl`, `docker`, `conftest`, `opa`, `trivy`, `ansible-playbook`, `opam`,
-   `nix-instantiate`): `--test 'terraform validate'` granted `terraform *`, and with it `terraform
-   apply` and `plan`, `helm lint` `helm push` (2026-11-22); nor one that reaches a cloud, a
-   cluster, a registry, a host or a container daemon (`context.OUTWARD_TOOLS`, read only here:
+   `nix-instantiate`, and since #994 `packer`, `cdk`, `sam`, `bicep`, `forge`, `buf`, `idf.py`,
+   `west`, `arduino-cli`, `redocly`, `semgrep`, `nx`, `rush`, `firebase`, `azurite`, `polaris`,
+   `nginx`, `minio`, `act` and the rest; the tool of an entry spelled with its opt-out first is
+   the word after the variable, `context._entry_tool`, else `--test 'REDOCLY_TELEMETRY=off
+   redocly lint'` granted `redocly *`): `--test 'terraform validate'` granted `terraform *`,
+   and with it `terraform apply` and `plan`, `helm lint` `helm push` (2026-11-22); nor one that
+   reaches a cloud, a cluster, a registry, a host or a container daemon (`context.OUTWARD_TOOLS`, read only here:
    `terragrunt`, `pulumi`, `cdk`, `cdktf`, `sam`, `serverless`, `aws`, `gcloud`, `az`, `kubectl`,
-   `helm`, `docker`, `docker-compose`, `podman`, `ansible`, `vagrant`, `vault`, …), whether on the
+   `helm`, `docker`, `docker-compose`, `podman`, `ansible`, `vagrant`, `vault`, and since #994
+   `turbo` and `lerna`, whose remote caches upload, …), whether on the
    list or not: `--test 'terragrunt hcl fmt --check'` granted `terragrunt *` and with it
    `terragrunt apply`, `pulumi preview` `pulumi up` (the review, 2026-11-22). Such a command gets
    only itself with more arguments. Steps 5 and 6 still hold: granted in
@@ -1661,7 +1752,29 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    migrate deploy`, terraform's `apply`, `destroy`, `import`, `state`, `test`, `init … -upgrade`,
    tofu's `apply`, `destroy`, `test`, `init … -upgrade`, kubectl's `apply`, `create`, `delete`,
    helm's `install`, `upgrade`, `uninstall` and `--validate` (it reads the cluster), `docker push`
-   (the owner, 2026-11-22; the second set from the review the same day). After step 4, so
+   (the owner, 2026-11-22; the second set from the review the same day); and since #994 the
+   outward steps of the tools it added (kept for those it dropped, so a grant of the whole tool
+   still stops at them): `turbo login`, `link`, `rush publish`, `moon upgrade`, `pants publish`,
+   `experimental-deploy`, `plz update`, `buck2 … install`, `xmake update`, `service`, `repo`,
+   `vcpkg integrate`, `fpm publish`, `alr publish`, `haxelib submit`, `register`, `spago publish`,
+   `auth`, `registry`, `paket push`, `lake upload`, `cache put`, `exe cache put` (Mathlib's), `wasm-pack publish`, `login`,
+   `hugo deploy`, `server trust` (it installs a CA in the system's trust store), `quarto publish`,
+   `semgrep … ci`, `login`, `publish` (flags first too: `semgrep --metrics=off ci`), `nx login`,
+   `import`, `configure-ai-agents`, `typst update` (a self-update replaces the user's own
+   program), `cucumber… --publish…`, `polaris … --upload-insights…` (to Fairwinds Insights),
+   `packer build`, `bicep publish`, `buf push`, `redocly push`, `forge create`, `forge …
+   --broadcast…`, and the flashing steps: `idf.py … <x>flash` (`flash`, `app-flash`,
+   `erase-flash`), `idf.py … efuse-*` (burned eFuses can't be unburned), `idf.py … erase…`, `west
+   build … -t flash`, `-tflash`, `--target flash`, `twister … --device-testing…`,
+   `--west-flash…`, `arduino-cli … --upload…`, `-u…`; and what the research missed (the
+   review, 2026-11-22): `nx release` (its `publish` runs npm's with the readable `~/.npmrc`'s
+   token, and `NX_NO_CLOUD=true nx` and `nx *--no-cloud*` allowed it), `nx connect`,
+   `connect-to-nx-cloud`, `view-logs` (it uploads the latest run's details), `record`,
+   `start-ci-run`, `start-agent`, `start-nx-agents`, `stop-all-agents`, `fix-ci`,
+   `apply-locally`, `download-cloud-client` (the nx-cloud aliases, nx's command reference),
+   `psalm … --shepherd…` (results to Shepherd), `kcov … --coveralls-id…` (coverage to
+   coveralls.io), and the self-updates `v up` (as a word, `v up *` and `* v up *`: `just dev
+   up` runs), `dprint upgrade`, `php-cs-fixer … self-update` and `selfupdate`. After step 4, so
    `--test 'cargo test'` granting `cargo *` doesn't lift `cargo publish` (and `--test 'terraform
    test'` runs as written, step 7, while its more arguments ask); before step 7, so `wb allow`
    does. Most verbs are words, a space before and a space or the end after (`*mvn* deploy
@@ -1682,7 +1795,17 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `pipenv install *`, `pixi add *`, `conda install *`, `flutter pub add *`, `dart pub add *`,
    `pio pkg install *`, `conan install *--requires*`, `opam install *`, `nimble install *`
    (`nimble install -d` and `--depsOnly` allowed again), `gleam add *`, `elm install *`,
-   `clojure -Ttools *`, `clj -Ttools *`, `luarocks install *`, …) and fetching a package to run it (`npx -y *`,
+   `clojure -Ttools *`, `clj -Ttools *`, `luarocks install *`, and since #994 `nx add`,
+   `migrate`, `rush add`, `remove`, `upgrade-interactive`, `moon toolchain`, `setup`, `xmake
+   require`, `vcpkg install`, `add`, `x-update-baseline`, `dub add`, `fetch`, `add-local`,
+   `add-path`, `add-override`, `remove`, `alr with`, `get`, `toolchain`, `install`, `index`,
+   `haxelib install`, `git`, `hg`, `update`, `upgrade`, `setup`, `spago install`, `uninstall`,
+   `upgrade`, `paket add`, `zef install`, `upgrade`, `uninstall`, `fpm install`, `v install`,
+   `hugo mod get`, `quarto add`, `install`, `use`, `update`, `remove`, each `… *`: `fpm install`,
+   `v install`, `zef install` and `alr install` also put programs or modules in the user's own
+   prefix, like `cargo install`, …) and fetching a package to run it (`dub run *`, `build *`
+   and `test *` since #994's review, as `dub run dfmt` fetches dfmt from the registry and runs
+   it as `uvx` does, the project's own forms allowed again in step 6; `npx -y *`,
    `npx --yes *`, `npm exec *`, `npm x *`, `npx -p *`, `npx --package *`, `pnpm dlx *`,
    `yarn dlx *`, `bunx *`, `bun x *`, `uvx *`, `uv tool run *`, `uv tool install *`,
    `uv run --with *`, `deno run *npm:*`, `deno run *jsr:*`). A plain `npx <pkg>` stays allowed
@@ -1695,7 +1818,10 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `pip install -e .` (and `pip3`, `pip3.*`, `python -m pip`, `python3 -m pip`,
    `python3.* -m pip`, `uv pip` forms), `pipenv install`, `pipenv install --dev`, `pipenv sync`,
    `pio pkg install`, `platformio pkg install`, `nimble install -d`, `nimble install
-   --depsOnly`; the npm, pnpm and bun ones with one of
+   --depsOnly`, and since #994 `xmake require`, `haxelib install *.hxml`, `spago install`, `zef
+   install --deps-only .`, `hugo mod get`, and dub's `run`, `build` and `test` bare, with a flag
+   first (`dub test --coverage`, `dub run -- x`) or of a subpackage (`dub build :sub`), the
+   project's own (a package named first still asks); the npm, pnpm and bun ones with one of
    `INSTALL_FLAGS` (`--frozen-lockfile`, `--immutable`, `--prefer-offline`, `--offline`,
    `--legacy-peer-deps`, `--no-audit`, `--ignore-scripts`, `--prod`, `--production`,
    `--no-fund`), or with one of `INSTALL_FLAG_PAIRS`, the common CI lines with two, by the
@@ -1817,7 +1943,16 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   http and plugins caches, `.local/state/cabal`, Cabal 3.10's store without `~/.cabal`, and
   `.android`, the debug keystore, split around `adbkey`; since #911, the third 2026-11-21 audit,
   `.nimble`, `.elm` and `.gitlibs`, the homes of nimble, elm and Clojure's git deps, which #672
-  allowed but whose installs and builds the lane refused; the `.local/share/` and `.local/state/`
+  allowed but whose installs and builds the lane refused; since #994 (2026-11-22) the caches of
+  the tools it allowed, `.local/share/godot` (Godot's `user://` data; its editor settings, which
+  can hold a keystore's password, are `~/.config/godot`, outside), `.texlive*/texmf-var` (TeX
+  Live's TEXMFVAR, `.texlive` on Arch, `.texlive2025` from TeX Live's installer: lualatex quits
+  with "no writeable cache path" without it; not `texmf-config`, which every later run reads; an
+  entry with a `*` is each place it matches), `.dub/packages`, `.dub/cache`, `.xmake/packages`,
+  `.xmake/cache` (not their settings), `.zef/store`, `.cpanm` (carton's cpanm), `.foundry/cache`
+  (not its keystores), `.tflint.d` (`tflint --init`'s plugins: programs tflint runs later, the
+  trade the kept-whole homes make) and `.bicep` (its module cache); the `.local/share/` and
+  `.local/state/`
   entries under `$XDG_DATA_HOME` and `$XDG_STATE_HOME` instead when those are set, `tool_homes`,
   as `secret_paths` follows them), Flutter's `bin/cache` for
   `$FLUTTER_ROOT` and each `flutter` on PATH (`flutter_caches`: every flutter command opens
@@ -8226,6 +8361,11 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 
 - **A file a round's children load** (the lane, the git shim, the ask server, and what they
   import) → `runner.CHILD_CODE`, so an update under a running task is caught (*The runner, inside*).
+- **An `ALLOWED_COMMANDS` entry spelled with its opt-out** (`REDOCLY_TELEMETRY=off redocly
+  lint`, `nx *--no-cloud*`) → the skill's `reference/checks.md` (*Spell it the way the agent's
+  shell allows*), so Claude's `--test` uses the spelling the agent may run, and the shell rules'
+  step 2 here; a tool on the list by subcommands is `LIMITED` by itself (`_entry_tool`), one that
+  reaches out but isn't on the list goes in `OUTWARD_TOOLS` by hand.
 - **An experiment** (`context.EXPERIMENTS`) → its effects (`shell_rules`, `EXPERIMENT_NOTES`, `EXPERIMENT_PROTOCOL`),
   `task_experiments` (when it can work), `cli.experiment_lines`, the pane's Settings row
   (`PROBE_STOPS`, `probeMode`, `probeStatus` and `probeSaid`, which read `experiment_lines`' wording,

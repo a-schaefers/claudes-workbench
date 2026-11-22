@@ -8871,6 +8871,62 @@ class Lane(Base):
             self.assertEqual(runner.lane_grant(f"{home}/.nimble/pkgs2/x-1.0/x.nim"),
                              f"{home}/.nimble/pkgs2")        # never its bin/
 
+    @home_outside_the_lane
+    def test_the_homes_of_the_tools_the_wider_allowlist_added_are_in_the_lane_not_their_settings(self):
+        # #994 (2026-11-22): the wider allowlist let godot, lualatex, dub, xmake, zef, carton's
+        # cpanm, forge, tflint and bicep run, but their caches were out of the lane, so each
+        # first build or test was refused. Their settings and Foundry's keystores stay out
+        home = self.fake_home()
+        for d in (".local/share/godot", ".texlive/texmf-var", ".texlive/texmf-config",
+                  ".texlive2025/texmf-var", ".dub/packages", ".dub/cache", ".xmake/packages",
+                  ".xmake/cache", ".zef/store", ".cpanm", ".foundry/cache", ".foundry/keystores",
+                  ".tflint.d/plugins", ".bicep/br", "data/godot"):
+            (home / d).mkdir(parents=True)
+        for f in (".dub/settings.json", ".xmake/xmake.conf"):
+            (home / f).write_text("{}")
+        task = self.bare_task("t-994-homes", self.repo)
+        w = context.writable(task)
+        for p in (".local/share/godot", ".texlive/texmf-var", ".texlive2025/texmf-var",
+                  ".dub/packages", ".dub/cache", ".xmake/packages", ".xmake/cache", ".zef/store",
+                  ".cpanm", ".foundry/cache", ".tflint.d", ".bicep"):
+            self.assertIn(str(home / p), w, p)
+        for p in (".texlive/texmf-config", ".dub/settings.json", ".xmake/xmake.conf",
+                  ".foundry/keystores", ".foundry"):
+            self.assertFalse([q for q in w if q == str(home / p) or str(home / p).startswith(q + "/")],
+                             p)
+        with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(home / "data")}):
+            self.assertIn(str(home / "data/godot"), context.writable(task))   # follows it (#911)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @unittest.skipUnless(shutil.which("godot") and shutil.which("lualatex"),
+                         "needs godot and lualatex")
+    @home_outside_the_lane
+    def test_godot_and_lualatex_write_their_user_data_and_font_cache_inside_the_lane(self):
+        # #994 (2026-11-22): `godot --headless --script` writes user:// under
+        # ~/.local/share/godot, and lualatex its font cache under TeX Live's TEXMFVAR
+        # (~/.texlive/texmf-var here): with the tools allowed, the kernel refused both
+        home = self.fake_home()
+        for d in (".local/share/godot", ".texlive/texmf-var"):
+            (home / d).mkdir(parents=True)
+        work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, work, True)
+        (work / "project.godot").write_text('[application]\nconfig/name="wbt"\n')
+        (work / "s.gd").write_text('extends SceneTree\nfunc _init():\n\tvar f = FileAccess.open('
+                                   '"user://ok.txt", FileAccess.WRITE)\n\tf.store_string("ok")\n'
+                                   '\tf.close()\n\tquit()\n')
+        (work / "t.tex").write_text("\\documentclass{article}\\begin{document}hi\\end{document}\n")
+        task = self.bare_task("t-994-lane", self.repo)
+        run = lambda *cmd: subprocess.run(  # noqa: E731
+            lane.wrap(context.writable(task), list(cmd), context.readable(task)), cwd=work,
+            env=dict(os.environ), capture_output=True, text=True, timeout=60)
+        out = run("godot", "--headless", "--path", str(work), "--script", "s.gd")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual((home / ".local/share/godot/app_userdata/wbt/ok.txt").read_text(), "ok")
+        out = run("lualatex", "-interaction=nonstopmode", "-halt-on-error", "t.tex")
+        self.assertEqual(out.returncode, 0, out.stdout[-2000:] + out.stderr)
+        self.assertTrue((home / ".texlive/texmf-var/luatex-cache").is_dir())
+        self.assertTrue((work / "t.pdf").is_file())
+
     def test_an_empty_nimble_home_gets_what_nimble_makes_at_its_top_before_the_split(self):
         # #911's review: ~/.nimble is split around bin/, so an empty or half-made home granted
         # nothing at all (the #911 test pre-made pkgs2/), and nimble's first install, every build
@@ -10310,6 +10366,189 @@ class Permission(Base):
         task = self.bare_task("t-f1-cargo")
         context.grant(task, "test_tools", context.test_allowances("cargo test")[1])
         self.assertEqual(self.verdict(context.shell_rules(task), "cargo publish"), "deny")
+
+    def test_the_wider_allowlist_runs_offline_work_and_its_outward_steps_and_new_packages_ask(self):
+        # #994 (2026-11-22): the research's tier B, rechecked. Each group's tools ran only after
+        # a question and a wake; what sends usage data by default runs only in its opt-out
+        # spelling, and the publishing, deploying, flashing and package steps still ask
+        rules = context.shell_rules(self.bare_task("t-994"))
+        allowed = (
+            # IaC, offline
+            "packer validate .", "packer fmt -check .",
+            "CDK_DISABLE_CLI_TELEMETRY=true cdk synth --quiet", "SAM_CLI_TELEMETRY=0 sam validate --lint",
+            "cfn-guard validate -d t.yaml -r r.guard", "bicep build main.bicep",
+            "ansible-galaxy collection build", "molecule syntax", "opa build -b policy",
+            "regal lint policy", "kyverno test .", "gator verify suite", "pluto detect-files -d k8s",
+            "polaris audit --audit-path k8s --format pretty", "polaris audit --format=pretty --audit-path k8s",
+            "kics scan -p .", "grype dir:.", "cue vet ./...", "jsonnet -J lib main.jsonnet",
+            "tk export out environments/dev", "ytt -f config", "dhall-to-json --file x.dhall",
+            "pkl eval x.pkl", "docker buildx bake -f bake.hcl --print", "podman-compose config",
+            "act -l", "systemd-analyze verify app.service", "nginx -t -c /tmp/nginx.conf",
+            "caddy validate --config Caddyfile", "haproxy -c -f h.cfg", "nomad fmt -check",
+            "consul validate conf",
+            # local services for tests
+            "postgres -D /tmp/pg -k /tmp", "pg_config --includedir",
+            "mysqld --datadir=/tmp/m --socket=/tmp/m.sock", "mariadb-install-db --datadir=/tmp/m",
+            "valkey-server --port 0", "memcached -s /tmp/mc.sock", "mongod --dbpath /tmp/db",
+            "nats-server -a 127.0.0.1", "etcd --data-dir /tmp/e", "minio server /tmp/minio",
+            "duckdb t.db 'select 1'", "azurite --silent --disableTelemetry --location /tmp/az",
+            "moto_server -p 5000", "firebase emulators:exec --project demo-test 'npm test'",
+            "firebase emulators:start --only firestore --project=demo-x",
+            # build systems and monorepos
+            "buck2 build //...", "pants test ::", "plz test", "nx run-many -t test --no-cloud",
+            "NX_NO_CLOUD=true nx affected -t lint", "RUSH_BUILD_CACHE_WRITE_ALLOWED=0 rush build",
+            "rush install", "rushx test", "gn gen out", "autoninja -C out", "xmake", "xmake build",
+            "xmake require", "premake5 gmake2", "qmake6 app.pro", "colcon build", "bear -- make",
+            "autoconf", "bison -d g.y", "flex l.l", "re2c -o x.c x.re", "swig -python x.i",
+            "llvm-cov report", "llvm-profdata merge -o x.profdata a.profraw", "ld.lld x.o",
+            "mold -run make", "objcopy -O binary a.elf a.bin",
+            # languages
+            "dub test", "dub build --build=release", "dub run", "dub run -- --arg", "dub build :sub",
+            "ldc2 x.d", "fpm test", "gprbuild -P x.gpr",
+            "alr build", "fpc x.pas", "cobc -x x.cob", "v test .", "odin build .",
+            "haxe build.hxml", "haxelib install build.hxml", "spago test", "spago install",
+            "purs-tidy check src", "paket restore", "idris2 --check X.idr", "coqc X.v",
+            "lake build", "swipl -g main t.pl", "prove -lr t", "perlcritic lib", "carton install",
+            "carton exec prove", "raku t.raku", "zef install --deps-only .", "octave-cli t.m",
+            "ktlint", "detekt", "bb test", "zprint < x.clj",
+            # contracts, wasm, schemas
+            "forge build", "forge test -vvv", "forge fmt --check", "anvil", "solc --bin x.sol",
+            "slither .", "wasm-pack build", "wasm-pack test --node", "wasm-opt -O3 a.wasm -o b.wasm",
+            "wat2wasm x.wat", "wasmtime run x.wasm", "emcc x.c -o x.js", "buf lint",
+            "buf breaking --against '.git#branch=main'", "protolint lint .", "spectral lint api.yaml",
+            "REDOCLY_TELEMETRY=off redocly lint api.yaml", "oapi-codegen -package api api.yaml",
+            "vacuum lint api.yaml",
+            # docs
+            "mdbook build", "hugo --minify", "hugo mod get", "jekyll build", "pandoc -o x.pdf x.md",
+            "latexmk -pdf x.tex", "lualatex x.tex", "biber x", "tectonic x.tex",
+            "typst compile x.typ", "quarto render", "zola build", "doxygen Doxyfile",
+            "dot -Tsvg x.dot", "mmdc -i x.mmd -o x.svg", "d2 x.d2 x.svg", "typedoc", "pdoc mypkg",
+            "lychee docs", "magick a.png b.webp",
+            # shaders, Godot, embedded
+            "glslangValidator -V s.vert", "glslc s.frag", "spirv-val s.spv", "dxc -T ps_6_0 s.hlsl",
+            "naga s.wgsl", "godot --headless --script t.gd", "gdlint .", "arm-none-eabi-gcc -c x.c",
+            "arm-none-eabi-objcopy -O binary a.elf a.bin", "avr-gcc -mmcu=atmega328p x.c",
+            "riscv64-unknown-elf-gcc x.c", "aarch64-linux-gnu-gcc x.c", "x86_64-w64-mingw32-gcc x.c",
+            "qemu-system-arm -M lm3s6965evb -nographic -kernel a.elf", "qemu-aarch64 ./a.out",
+            "qemu-arm-static ./a.out", "qemu-img create -f qcow2 /tmp/d.qcow2 1G", "renode t.resc",
+            "idf.py build", "idf.py set-target esp32s3", "west build -b qemu_x86 app",
+            "west build -t run", "twister -T tests", "arduino-cli compile --fqbn arduino:avr:uno s",
+            # formatters, linters, test runners
+            "biome check .", "oxlint", "dprint check", "stylua --check .", "shfmt -d .",
+            "taplo fmt --check", "typos", "codespell", "vale docs", "sqlfluff lint",
+            "markdownlint-cli2 '**/*.md'", "buildifier -r .", "swiftlint", "scalafmt --check",
+            "ormolu --mode check x.hs", "ocamlformat --check x.ml", "nixfmt --check x.nix",
+            "phpstan analyse", "phpunit", "gitleaks detect --no-git", "osv-scanner -L package-lock.json",
+            "bandit -r src", "pip-audit -r requirements.txt",
+            "semgrep --metrics=off --config .semgrep.yml", "semgrep scan --config p/python --metrics off",
+            "SEMGREP_SEND_METRICS=off semgrep --config r.yml", "bats test", "robot tests", "behave",
+            "cucumber-js", "hyperfine make", "mocha", "c8 npm test", "ginkgo ./...",
+            "gotestsum -- ./...", "gcovr -r .", "psalm --no-cache", "kcov out ./t", "just dev up")
+        for cmd in allowed:
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        outward = (
+            "turbo login", "npx turbo link", "rush publish --publish",
+            "RUSH_BUILD_CACHE_WRITE_ALLOWED=0 rush publish -p", "pants publish ::",
+            "pants experimental-deploy ::", "plz update", "buck2 install //app:app", "xmake update",
+            "xmake repo --add x https://r", "vcpkg integrate install", "fpm publish", "alr publish",
+            "haxelib submit", "haxelib register", "spago publish", "paket push x.nupkg", "lake upload v1",
+            "lake cache put", "lake exe cache put", "wasm-pack publish", "wasm-pack login", "hugo deploy",
+            "hugo server trust", "quarto publish gh-pages", "semgrep ci", "semgrep login",
+            "semgrep --metrics=off ci", "cucumber-js --publish", "nx login", "nx import ../other",
+            "polaris audit --audit-path . --upload-insights --cluster-name x", "typst update",
+            "packer build .", "bicep publish x.bicep --target br:r.azurecr.io/x:1", "buf push",
+            "REDOCLY_TELEMETRY=off redocly push", "forge create src/X.sol:X",
+            "forge script s.sol --broadcast", "idf.py build flash", "idf.py -p /dev/ttyUSB0 flash monitor",
+            "idf.py build app-flash", "idf.py build efuse-burn-key", "idf.py build erase-flash",
+            "west build -t flash", "west build --target flash", "twister --device-testing --device-serial /dev/ttyACM0",
+            "twister -T t --west-flash", "arduino-cli compile --fqbn x s --upload -p /dev/ttyACM0",
+            "arduino-cli compile -u -p /dev/ttyACM0 --fqbn x s", "west build -tflash",
+            # the review's: under the opt-outs nx still ran `release publish` (npm publish with
+            # ~/.npmrc's token) and the nx-cloud aliases; uploads by a flag; self-updates
+            "NX_NO_CLOUD=true nx release publish", "nx release --no-cloud", "npx nx release",
+            "nx connect --no-cloud", "NX_NO_CLOUD=true nx view-logs",
+            "NX_NO_CLOUD=true nx record -- npm test", "NX_NO_CLOUD=true nx start-ci-run",
+            "psalm --shepherd", "kcov --coveralls-id=1 out ./t", "v up", "dprint upgrade",
+            "php-cs-fixer self-update")
+        for cmd in outward:
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+        new_packages = (
+            "nx add @nx/react --no-cloud", "rush add -p lodash", "xmake require zlib", "dub add vibe-d",
+            "dub fetch dfmt", "alr with aws", "alr get hello", "haxelib install heaps",
+            "haxelib git x https://r", "haxelib upgrade", "spago install aff", "paket add Newtonsoft.Json",
+            "zef install JSON::Fast", "zef upgrade", "hugo mod get github.com/x/y",
+            "quarto add quarto-ext/fontawesome", "quarto install tinytex", "fpm install", "v install ui",
+            "RUSH_BUILD_CACHE_WRITE_ALLOWED=0 rush add -p lodash", "haxelib hg x https://r",
+            # a registry package fetched by name and run, as `uvx` does (the review)
+            "dub run dfmt -- src", "dub build vibe-d", "dub test somepkg")
+        for cmd in new_packages:
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+        # and what the recheck dropped or narrowed: usage data sent by default, runs or files
+        # sent to a service the repo names, globs that reach outward or setuid helpers
+        dropped = (
+            "turbo run test", "lerna run test", "lerna publish", "moon run :test", "vcpkg install",
+            "skaffold diagnose", "gcloud emulators firestore start",
+            "gcloud beta emulators datastore start", "oasdiff breaking a.yaml b.yaml", "cdk synth",
+            "sam build", "redocly lint api.yaml", "semgrep --config p/python", "azurite --silent",
+            "nx test app", "rush build", "firebase emulators:start",
+            "firebase emulators:exec --project my-prod 'npm test'", "buf generate", "buf dep update",
+            "wasm-to-oci push x.wasm r/x:1", "qemu-nbd -c /dev/nbd0 d.qcow2", "qemu-bridge-helper",
+            "protoc-gen-go", "mdbook-mermaid install .", "nginx -s reload", "nginx",
+            "haproxy -f h.cfg", "act push", "polaris audit", "docker buildx bake",
+            "systemd-analyze set-log-level debug", "idf.py flash", "forge script s.sol")
+        for cmd in dropped:
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+        # the outward steps hold under a test command's grant of the whole tool, and `wb allow`
+        # lifts them
+        task = self.bare_task("t-994-allow")
+        exact, tools = context.test_allowances("hugo --minify && wasm-pack test --node")
+        context.grant(task, "allow", exact)
+        context.grant(task, "test_tools", tools)
+        self.assertIn("hugo *", tools)
+        rules = context.shell_rules(task)
+        for cmd in ("hugo deploy", "wasm-pack publish", "hugo mod get github.com/x/y"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+        context.grant(task, "allow", ["hugo deploy *", "wasm-pack publish *"])
+        rules = context.shell_rules(task)
+        for cmd in ("hugo deploy", "wasm-pack publish"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+
+    def test_a_test_command_doesnt_grant_the_whole_of_a_tool_the_wider_allowlist_limits(self):
+        # #994 (2026-11-22): the tools on the list only by their subcommands, or behind their
+        # telemetry opt-out, are LIMITED, so `--test 'forge test'` doesn't grant `forge *` and
+        # with it `forge script --broadcast`, nor `--test 'REDOCLY_TELEMETRY=off redocly lint'`
+        # `redocly *` (its telemetry, `redocly push`)
+        for test, tool, out in (
+                ("packer validate .", "packer", "packer init ."),
+                ("CDK_DISABLE_CLI_TELEMETRY=true cdk synth", "cdk", "cdk synth"),
+                ("SAM_CLI_TELEMETRY=0 sam build", "sam", "sam sync --watch"),
+                ("forge test", "forge", "forge script s.sol"),
+                ("buf lint", "buf", "buf generate"),
+                ("idf.py build", "idf.py", "idf.py monitor"),
+                ("REDOCLY_TELEMETRY=off redocly lint api.yaml", "redocly", "redocly lint api.yaml"),
+                ("opa build -b policy", "opa", "opa run -s"),
+                ("nx run-many -t test --no-cloud", "nx", "nx run-many -t test"),
+                ("RUSH_BUILD_CACHE_WRITE_ALLOWED=0 rush build", "rush", "rush build"),
+                ("semgrep --metrics=off --config r.yml", "semgrep", "semgrep --config p/python"),
+                ("polaris audit --audit-path k8s", "polaris", "polaris dashboard"),
+                ("west build -b qemu_x86 app", "west", "west flash"),
+                ("arduino-cli compile --fqbn x s", "arduino-cli", "arduino-cli upload -p /dev/ttyACM0"),
+                ("firebase emulators:exec --project demo-x 'npm test'", "firebase",
+                 "firebase emulators:exec 'npm test'"),
+                ("azurite --disableTelemetry", "azurite", "azurite --silent"),
+                ("nginx -t -c n.conf", "nginx", "nginx -c n.conf"),
+                ("minio server /tmp/m", "minio", "minio admin info")):
+            self.assertIn(tool, context.LIMITED | context.OUTWARD_TOOLS, tool)
+            task = self.bare_task(f"t-994-f1-{tool}")
+            exact, tools = context.test_allowances(test)
+            self.assertNotIn(f"{tool} *", tools, test)
+            context.grant(task, "allow", exact)
+            context.grant(task, "test_tools", tools)
+            rules = context.shell_rules(task)
+            self.assertEqual(self.verdict(rules, test), "allow", test)
+            self.assertEqual(self.verdict(rules, out), "deny", out)
+        # and a dropped tool that reaches a remote cache isn't granted whole either
+        self.assertNotIn("turbo *", context.test_allowances("turbo run test")[1])
 
     def test_the_rules_stay_out_of_the_environment_however_long_they_grow(self):
         # #994 (2026-11-22): the rules went again in OPENCODE_CONFIG_CONTENT, one environment

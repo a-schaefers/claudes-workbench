@@ -45,12 +45,21 @@ its dependency yourself: that is the user's (ask, and say what it would catch).
 - **The project's environment.** Run the checker the way the project does: `uv run mypy`,
   `poetry run pyright`, `bundle exec rubocop`, `vendor/bin/phpstan`, `./gradlew`, `npx
   --no-install tsc`; never a global copy of a different version.
+- **Spell it the way the agent's shell allows.** A checker that sends usage data by default runs
+  there only with its opt-out written in: `semgrep --metrics=off`, `REDOCLY_TELEMETRY=off
+  redocly lint`, `CDK_DISABLE_CLI_TELEMETRY=true cdk synth`, `SAM_CLI_TELEMETRY=0 sam validate
+  --lint`; an Nx workspace with `--no-cloud` (or `NX_NO_CLOUD=true`), Rush with
+  `RUSH_BUILD_CACHE_WRITE_ALLOWED=0`, Firebase's emulators on a `--project demo-<x>`. The plain
+  spelling is refused and would cost a question each round. A test's MySQL, MongoDB, NATS or
+  MinIO goes on a socket or `127.0.0.1` too (`mysqld --socket=$d/m.sock --skip-networking`):
+  some listen on every interface by default.
 - **Per-file syntax checks** take every file: `find src -name '*.php' -print0 | xargs -0 -n1 php
   -l >/dev/null` (xargs exits non-zero when any one fails).
 
 ## By language
-Checked on this machine (2026-11-22): Guile and SBCL, for the exit-status forms below. The rest is
-each tool's documented command line; the base check proves a command before round 1, so a wrong
+Checked on this machine (2026-11-22): Guile and SBCL, for the exit-status forms below, and `perl
+-c`, `protoc -o /dev/null`, `chktex -q`, `glslangValidator`. The rest is each tool's documented
+command line; the base check proves a command before round 1, so a wrong
 one shows there, not in the agent's rounds.
 
 | Language | Configured: the signal → the check | Syntax only, no config |
@@ -79,6 +88,13 @@ one shows there, not in the agent's rounds.
 | OCaml | dune → `dune build @check` (type-checks without linking) | (dune is it) |
 | Zig | `zig build` (a `check` step in `build.zig` → `zig build check`); Zig analyses only reached code, so `zig build test` covers more | `zig ast-check <file>` |
 | Terraform | `--setup 'terraform init -backend=false -input=false'`, then `terraform validate -no-color`; `.tflint.hcl` → `tflint`; `terraform fmt -check -recursive` only where CI enforces it; `plan` and `test` (it creates real infrastructure) are yours at review | (validate is it) |
+| Protobuf | `buf.yaml` → `buf lint` (and `buf breaking --against '.git#branch=main'` where CI runs it) | `protoc -o /dev/null <files>` |
+| OpenAPI | `.spectral.yaml` → `spectral lint <spec>`; `redocly.yaml` → `REDOCLY_TELEMETRY=off redocly lint`; a vacuum ruleset → `vacuum lint <spec>` | (the linter is it) |
+| Solidity | Foundry (`foundry.toml`) → `forge build` and `forge test` (never `forge script`: it can broadcast) | `solc --bin <file> >/dev/null` |
+| D | dub → `dub test`; `dscanner.ini` → `dscanner --styleCheck source` | `dmd -o- <file>` (the project's compiler) |
+| Perl | `prove -lr t`; `.perlcriticrc` → `perlcritic lib` | `perl -c <file>` |
+| LaTeX | `latexmk -pdf -halt-on-error -interaction=nonstopmode <main>.tex` (the engine the project uses); `.chktexrc` → `chktex -q <file>` | (the build is it) |
+| GLSL | the project's shader build; else `glslangValidator <file>` (`-V` for Vulkan) | (that is it) |
 | Nix | `statix`/`deadnix` configs → `statix check`, `deadnix --fail`; `nix flake check` needs the daemon: yours at review | `nix-instantiate --parse <file> >/dev/null` |
 | Clojure | `.clj-kondo/` → `clj-kondo --lint src:test`; Leiningen → `lein check` (compiles every namespace) | (clj-kondo is it) |
 | Racket | `raco make -v <main>.rkt` (a module's unbound names and syntax fail at compile; `#lang typed/racket` type-checks there) | (raco make is it) |
