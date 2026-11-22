@@ -476,7 +476,8 @@ EXPERIMENTS = {
 # sets on (a running A/B calls `wb experiment probe adaptable`); neither help nor listing shows them
 OLD_LEVELS = {"probe": ("adaptable", "moderate", "aggressive")}
 # Whether the pane marks probe's on "recommended": Claude sets it once a measurement says on, with
-# the read cap and the outline, is at least as good as off (#857's step 6); not yet
+# the read cap and the outline, is at least as good as off (#857's step 6). Measured 2026-11-22 on
+# a 27B at 40K, it wasn't (ARCHITECTURE.md, *Experiments*, the third A/B)
 PROBE_RECOMMENDED = False
 # With probe on, round 1's prompt ends with an outline of each file over PROBE_FILE_LINES the spec
 # names (runner.add_outline), at most this many tokens in all, so the agent starts knowing where

@@ -5776,7 +5776,7 @@ says whether there were any. `wb status <task>` names it with its use: `probe: 2
 reads of files over 300 lines: 1`. The pane marks on "recommended" only when
 `context.PROBE_RECOMMENDED` is true (`wb experiment`'s line then ends `; on is recommended`),
 which Claude sets after the check that on, with the read cap and the outline, is at least as good
-as off (#857's step 6): it is false.
+as off (#857's step 6): it is false, as the third A/B below found it no better.
 
 **Only where probe can help** (the owner, 2026-11-21, #857: "No sense in clogging up the subagents
 with irrelevant information"). Set on and installed, probe still counts as off for a task
@@ -5899,6 +5899,36 @@ cap (`tool_output`) sized to the window was expected to bound; measured since (O
 2026-11-21), `tool_output` bounds the shell's output but not `read`, so on's cap (*On (large files only)*)
 bounds probe's, `cat`'s and the tests' output, and the note tells the agent how to page a long
 read. A `probe` shim is the lever left untried. `wb bench report --label <arm>` prints the use line per arm (`bench.use_lines`).
+
+**Measured a third time (2026-11-22, #857's step 6: should on be recommended?).** The same model
+and card, the condition wording with the read cap and the round-1 outline, paired replays with the
+arm order alternated: three long-file cases six times each, and five nightly cases once (whose
+files are all under `PROBE_FILE_LINES`, so on was off for them, *Only where probe can help*:
+they showed only noise and were left out of the verdict), about 10 hours. The rule was set before
+the run: on is recommended only if probe is used in most on replays, on passes no more than
+one fewer than off, P(on is faster or reads fewer tokens) is at least 0.8 by a Bayesian bootstrap over the
+paired log ratios, and handovers don't go up. The long-file cases:
+
+| case | arm | passed | median min | median tokens read | handovers | probe calls |
+|---|---|---|---|---|---|---|
+| big-compaction (runner.py) | off | 5/6 | 6.8 | 33K | 2 | 0 |
+| | on | 6/6 | 11.8 | 59K | 3 | 9 |
+| big-logout (cli.py) | off | 5/6 | 10.4 | 79K | 5 | 0 |
+| | on | 3/6 | 7.0 | 63K | 3 | 25 |
+| big-this-host (models.py) | off | 5/6 | 19.3 | 102K | 8 | 0 |
+| | on | 4/6 | 23.9 | 111K | 5 | 54 |
+
+Over the 18 pairs: passed 15 off, 13 on; P(on faster) 0.39 (on 1.05× off's minutes, the geometric
+mean of the pairs); P(on reads fewer tokens) 0.50 (1.00×); handovers 15 off, 11 on; whole reads of
+long files 5 off, 0 on. Probe was used, and it kept the agent off whole reads and handed over
+less, but it neither saved time nor tokens, and passed two fewer: two of the four criteria fail,
+and with P near 0.5 more pairs would not reach 0.8. The runs started as adaptable (before the
+on/off change, which landed during them), which chose moderate, today's on, in all but the last
+two big-this-host replays. So `PROBE_RECOMMENDED` stays false: on stays opt-in, off by default,
+with no "recommended" note. This is one model (a 27B at Q3, a 40K window) on one 16 GB card: a
+smaller window, where a whole-file read costs more of it, or a model that explores less, may
+come out differently, and the same paired replays (`wb bench run --label`, `wb experiment probe
+on|off` between arms) are how to check one.
 
 ## Verifying a fix against the base
 
