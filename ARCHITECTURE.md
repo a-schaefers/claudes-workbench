@@ -1528,24 +1528,62 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    since #830 (the second 2026-11-21 audit) macOS's `shasum`, `md5`, `sysctl`, `sw_vers`, the
    wrappers `stdbuf` and `setsid`, `pkill`, `killall`, `expr`, `bc`, `truncate`, `dd`, `shuf`,
    `cksum`, `sha512sum`, `flock`, native builds' `ldd`, `readelf`, `addr2line`, `size`, `gcov`,
-   `ccache`, `sccache`, `gfortran`, `nvcc`, `mpirun` and versioned compilers (`gcc-*`, `g++-*`,
-   `clang-*`, `clang++-*`, written like `python3.*`), and `scons`, `protoc`, `ocaml`, `iex`,
+   `ccache`, `sccache`, `gfortran`, `nvcc`, `mpirun` and versioned compilers (`gcc-13`,
+   `clang++-18`), and `scons`, `protoc`, `ocaml`, `iex`,
    `ghci`, `runghc`, `irb`, `gem` (`gem install *` still asks), `luarocks` (`luarocks install
    *` asks), `busted`, `lua5.*`, `cython`, `maturin`, `virtualenv`, `sphinx-build`, `mkdocs`,
-   `terraform`, `corepack`; and since 2026-11-22 (the owner: "does our whitelisting too strict")
-   the Lisps, Schemes and Forth, `sbcl`, `ecl`, `ccl`, `clisp`, `racket`, `raco`, `guile`,
-   `guild`, `csc`, `csi`, `chicken-csc`, `chicken-csi`, `scheme`, `chez`, `chezscheme`, `petite`,
+   `corepack` (and `terraform` whole, until the infra entries below narrowed it); and since
+   2026-11-22 (the owner: "does our whitelisting too strict") the Lisps, Schemes and Forth,
+   `sbcl`, `ecl`, `ccl`, `clisp`, `racket`, `raco`, `guile`, `guild`, `csc`, `csi`,
+   `chicken-csc`, `chicken-csi`, `scheme`, `chez`, `chezscheme`, `petite`,
    `gosh`, `chibi-scheme`, `mit-scheme`, `gforth`, and the checkers the skill's
    `reference/checks.md` names, `luac`, `luac5.*`, `luacheck`, `selene`, `basedpyright`,
    `staticcheck`, `yamllint`, `actionlint`, `hlint`, `tflint`, `statix`, `deadnix`, `clj-kondo`,
-   and `nix-instantiate --parse` alone);
+   and `nix-instantiate --parse` alone; and since the same day (the owner: "dont forget about
+   common infra tools like docker podman terraform") the infrastructure a repo checks offline, by
+   subcommand where the tool also reaches out: `terraform fmt`, `validate`, `version`, `init
+   *-backend=false` (the flags before it too: `init -input=false -backend=false`), `-chdir=*
+   fmt`, `-chdir=* validate`, `-chdir=* init *-backend=false` (`terraform` is no longer whole:
+   `plan`, `show`, `output`, `refresh` read remote state with the user's credentials, `test`
+   creates real infrastructure, `apply`, `import`, `state` change it, and `get -update` moves the
+   modules); `tofu fmt`, `validate`, `init *-backend=false`, `-chdir=* fmt`, `-chdir=* validate`;
+   `terraform-docs`, `checkov`, `hadolint`, `docker?compose config` and `docker?compose -f *ml
+   config` (`docker compose` and `docker-compose`, a `-f` file first), `helm lint`, `template`,
+   `dependency build`, `dep build`, `kustomize`, `kubectl kustomize`, `kubeconform`, `conftest
+   test`, `opa test`, `trivy config`, `trivy fs`, `ansible-lint`, `ansible-playbook
+   *--syntax-check` (the flag anywhere: it only parses; a dynamic inventory it loads can still
+   call a cloud), `cfn-lint`; and a test's own database or cache, started in the temp directory,
+   `initdb`, `pg_ctl`, `pg_isready`, `redis-server`, `psql`, `mysql`, `mariadb`, `redis-cli`,
+   `valkey-cli`, `mongosh`. A `*` inside an entry takes the flags
+   projects put first, and can be steered: `terraform -chdir=. plan -out validate` matches
+   `-chdir=* validate`, and `init -backend=false -from-module=<src>` fetches any module source.
+   A family costs one entry where a glob covers it (each entry is ~135 bytes of the layer,
+   `CONFIG_CONTENT_MAX`): `gcc*`, `g++*`, `clang*` (clang++, clang-format, clang-tidy, the
+   versioned ones), `md5*`, `sha*sum`, `lua*` (lua, luajit, lua5.*, luac, luac5.*, luacheck,
+   luarocks), `chez*`, `chicken-cs?`);
    not on it: `nix` (its builds go through the daemon's socket, outside the lane), `curl`, `wget`, `ssh`,
-   `rsync`, `docker`, `systemctl`, `opencode`. OpenCode matches each simple command's raw text,
-   so `FOO=1 ls` was refused while `ls` and `env FOO=1 ls` ran, and a small model copying the
+   `rsync`, `systemctl`, `opencode`; `docker` but `compose config`, and `podman` (`podman
+   compose` neither: the lane has no
+   daemon's socket, and rootless podman needs the setuid `newuidmap`), so neither kind, minikube,
+   Testcontainers nor a build through them (Claude runs those at review); `kubectl` but `kustomize`,
+   helm's `install`, `upgrade`, `push`, `repo` and `dependency update`, `pulumi`, the cloud CLIs
+   (`aws`, `gcloud`, `az`), `ansible-playbook` runs (`--check` too) and `ansible`: a cluster, a
+   registry, a cloud or a host, each with the user's credentials; the migration tools (`alembic`,
+   `flyway`, `prisma migrate`), as the worktree's `.env` can name production (the database
+   clients `psql`, `mysql`, `mariadb`, `redis-cli`, `valkey-cli` and `mongosh` are on it: python
+   reaches any database they do; the owner, 2026-11-22). OpenCode
+   matches each simple command's raw text, so `FOO=1 ls` was refused while `ls` and `env FOO=1
+   ls` ran, and a small model copying the
    project's own `CI=1 npm test` spent a Claude wake asking or stopped running the tests (#258, the
    audit of 1.2). `*` matches spaces, so the prefix form also passes a line with an `=` anywhere
    before an allowed command's name: no more than `env *` already runs. Steps 4 to 6 get the
-   prefix form too (step 8 no longer does: #442);
+   prefix form too (step 8 no longer does: #442). So "not on it" bounds the plain spelling only:
+   the wrappers allowed whole (`env`, `timeout`, `nice`, `nohup`, `time`, `command`, `xargs`) and
+   an `=` before an allowed command's name lift every subcommand limit and the default deny
+   alike (`env terraform plan`, `timeout 60 kubectl patch …`, `env docker run`, `env pulumi up`,
+   `kubectl --context=prod exec x -- sh` through `*=* sh *`), as they did before these entries;
+   step 5's patterns are the ones that still hold behind them, and review is the guard for the
+   rest;
 3. allow `./*`, `../*`, and `<dir>/*` for every directory of the lane but those under `/dev` and `/proc` (a program the agent built
    runs by its path anywhere it can write: a debug binary in the temp directory was refused
    though `bash` could run it);
@@ -1557,13 +1595,50 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    names (`grants.json` `test_tools`, from `context.test_allowances`: each of its simple commands
    with more arguments, `npm test *`, and its tool, `<tool> *` and `*=* <tool> *`), so the agent
    can run the tool's other work (`npm run lint` under `npm test`, `earthly +lint` under
-   `earthly +test`) but steps 5 and 6 still hold: granted in step 7, `--test 'npm test'` allowed
-   `npm install left-pad`, `--test 'uv run pytest'` `uv add requests`, `--test 'npx vitest run'`
+   `earthly +test`). Not a tool on the list only by its subcommands (`context.LIMITED`: `terraform`,
+   `tofu`, `helm`, `kubectl`, `docker`, `conftest`, `opa`, `trivy`, `ansible-playbook`, `opam`,
+   `nix-instantiate`): `--test 'terraform validate'` granted `terraform *`, and with it `terraform
+   apply` and `plan`, `helm lint` `helm push` (2026-11-22); nor one that reaches a cloud, a
+   cluster, a registry, a host or a container daemon (`context.OUTWARD_TOOLS`, read only here:
+   `terragrunt`, `pulumi`, `cdk`, `cdktf`, `sam`, `serverless`, `aws`, `gcloud`, `az`, `kubectl`,
+   `helm`, `docker`, `docker-compose`, `podman`, `ansible`, `vagrant`, `vault`, …), whether on the
+   list or not: `--test 'terragrunt hcl fmt --check'` granted `terragrunt *` and with it
+   `terragrunt apply`, `pulumi preview` `pulumi up` (the review, 2026-11-22). Such a command gets
+   only itself with more arguments. Steps 5 and 6 still hold: granted in
+   step 7, `--test 'npm test'` allowed `npm install left-pad`, `--test 'uv run pytest'` `uv add
+   requests`, `--test 'npx vitest run'`
    `npx -y cowsay` (#646, the audit of main), and `--test 'npm install && npm test'`
    `npm install left-pad` through `npm install *`, `--test 'pip install -e . && pytest'`
    `pip install -e . requests` (#915, the third 2026-11-21 audit);
-5. deny `ASK_FIRST`: adding a dependency (`pip install *`, `npm install *`, `npm add *`,
-   `pnpm i *`, `yarn global add *`, `bun i *`, `deno add *`, `deno install *`, `cargo add *`,
+5. deny `OUTWARD`, a step out of the machine inside an allowed tool, each pattern starting with
+   `*` so a launcher's or wrapper's spelling is caught too (`pnpm publish`, `npx cdk deploy`,
+   `./mvnw deploy`, `timeout 600 terraform apply`, `env helm install`) and no `*=*` copy needed:
+   npm's `publish`, `unpublish`, `deprecate`, `dist-tag`, `owner`, `access`, `token`, `yarn
+   publish`, npm's and pnpm's `publish` after flags (`pnpm -r publish`, `npm -w packages/a
+   publish`, `pnpm --filter @x/a publish`), `cargo publish` (and `cargo +<toolchain> publish`),
+   `gem push`, `poetry publish`, `uv publish`, `twine upload`, `dotnet nuget push`, `pub
+   publish`, `hex.publish`, Maven's `deploy`, `deploy:*` and `release:*`, Gradle's `publish*`
+   and `:<project>:publish*`, `cdk deploy`, `wrangler … deploy`, `firebase deploy`, `prisma
+   migrate deploy`, terraform's `apply`, `destroy`, `import`, `state`, `test`, `init … -upgrade`,
+   tofu's `apply`, `destroy`, `test`, `init … -upgrade`, kubectl's `apply`, `create`, `delete`,
+   helm's `install`, `upgrade`, `uninstall` and `--validate` (it reads the cluster), `docker push`
+   (the owner, 2026-11-22; the second set from the review the same day). After step 4, so
+   `--test 'cargo test'` granting `cargo *` doesn't lift `cargo publish` (and `--test 'terraform
+   test'` runs as written, step 7, while its more arguments ask); before step 7, so `wb allow`
+   does. Most verbs are words, a space before and a space or the end after (`*mvn* deploy
+   *`): `*mvn* *deploy*` also refused `mvn -pl deploy-tools test`, a `*` reaching into the next
+   word as #442's did. Gradle's tasks and Maven's goals are prefixes, as their publish tasks are
+   (`:lib:publishToMavenCentral`, `publishPlugins`, `deploy:deploy-file`), so a project or task
+   named publish… (`./gradlew :publishing:test`, `build -x publish`) or a module `-pl deploy`
+   asks once, as does what else still matches (`npm publish --dry-run`, `./gradlew
+   publishToMavenLocal`, `wrangler deploy --dry-run`, `grep -rn terraform test`). Not `npm login`
+   or `adduser`, which wait on a browser or a terminal. They stop the plain and the wrapped
+   spelling of these steps only: a script, a Makefile target (`make deploy`), `bash -c`, an
+   interpreter, a verb not listed (`bun publish`, `sbt publish`, `cargo yank`), flags before a
+   verb other than npm's and cargo's (`yarn --cwd x publish`), and every step not here behind a
+   wrapper (step 2) pass, and review is the guard there. Then deny `ASK_FIRST`: adding a dependency (`pip install *`, `npm
+   install *`, `npm add *`, `pnpm i *`, `yarn global add *`, `bun i *`, `deno add *`, `deno
+   install *`, `cargo add *`,
    `go get *`, `dotnet add * package *`, `python3.* -m pip install *`, `pdm add *`,
    `pipenv install *`, `pixi add *`, `conda install *`, `flutter pub add *`, `dart pub add *`,
    `pio pkg install *`, `conan install *--requires*`, `opam install *`, `nimble install *`
@@ -2053,7 +2128,14 @@ its permissions after the layer's, so an allow-all there won (the 2026-11-16 aud
 could write one for its next round). `rules_env` passes the layer's permissions again as
 `OPENCODE_CONFIG_CONTENT`, which loads after every file; a list past `CONFIG_CONTENT_MAX`
 (120,000 bytes; one environment string holds 128 KiB) sets `OPENCODE_DISABLE_PROJECT_CONFIG=1`
-instead, which also drops AGENTS.md and the project's skills. The user's own
+instead, which also drops AGENTS.md and the project's skills. A bare task's is about 108 KB in
+an empty home and 113.8 KB with every `TOOL_HOMES` directory present, whose lane rules add
+about 5.8 KB (2026-11-22, after the infra entries; each allowed entry costs about 135 bytes with
+its `*=*` copy, each `*`-led deny about 60, so a family of names is one glob where it can be:
+`gcc*`, `lua*`). `Permission`'s
+`test_a_bare_tasks_rules_leave_room_in_their_one_environment_string` measures both, in a home
+of its own, and fails with less than 8 KiB to spare in the first or 4 KiB in the second, so an
+addition that would leave the user's own content no room is seen. The user's own
 `OPENCODE_CONFIG_CONTENT` (`models.users_config_content`) goes under the rules, not away (#347,
 the audit of 1.4): its keys are kept but `mcp` (the user's MCP servers stay off) and any the
 layer sets itself (loaded last, the user's `compaction` would undo the handover's backstop), but
@@ -8108,7 +8190,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   the lane's part of it to `worktree/` and `ask/`, and have the runner check what comes from there
   (`ask_mcp.relay`): nothing the agent writes may steer code outside its lane.
 - **The layer's `permissions`** → they go twice, in the file and as `OPENCODE_CONFIG_CONTENT`
-  (`rules_env`): keep them under `CONFIG_CONTENT_MAX`, or the fallback drops AGENTS.md. A new
+  (`rules_env`): keep them under `CONFIG_CONTENT_MAX`, or the fallback drops AGENTS.md (the
+  `Permission` test of a bare task's size wants 8 KiB spare in an empty home, 4 KiB with every
+  tool home). A new
   layer key a project config mustn't change goes in `RESTATED` too.
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and

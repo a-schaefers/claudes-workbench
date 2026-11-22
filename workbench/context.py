@@ -110,18 +110,20 @@ ALLOWED_COMMANDS = (
     "file", "identify", "stat", "du", "df", "tree", "realpath", "dirname", "basename", "readlink",
     "touch", "mkdir", "rmdir", "cp", "mv", "rm", "ln", "chmod", "install", "mktemp", "tar", "gzip",
     "gunzip", "zcat", "zip", "unzip", "xz", "bzip2", "zstd", "jq", "yq", "column", "nl", "od",
-    "xxd", "hexdump", "strings", "md5sum", "sha1sum", "sha256sum", "base64", "seq", "paste",
+    "xxd", "hexdump", "strings", "md5*", "sha*sum", "base64", "seq", "paste",
     "fold", "fmt", "expand", "rev", "tac", "split", "csplit", "join", "iconv", "less", "more",
     # building, testing, running code
     "make", "gmake", "cmake", "ctest", "ninja", "meson", "autoreconf", "configure", "pkg-config",
-    "cc", "gcc", "g++", "c++", "clang", "clang++", "ld", "ar", "nm", "objdump", "strip", "gdb",
-    "lldb", "valgrind", "clang-format", "clang-tidy", "cppcheck",
+    # `gcc*`, `g++*`, `clang*`: clang++, clang-format, clang-tidy and the versioned ones
+    # (`gcc-13`), one entry each (a family's names cost ~135 bytes each in the layer)
+    "cc", "gcc*", "g++*", "c++", "clang*", "ld", "ar", "nm", "objdump", "strip", "gdb",
+    "lldb", "valgrind", "cppcheck",
     "python", "python3", "pip", "pip3", "pytest", "ruff", "mypy", "black", "isort", "flake8",
     "pylint", "uv", "uvx", "poetry", "tox", "coverage",
     "node", "npm", "npx", "pnpm", "yarn", "bun", "bunx", "deno", "tsc", "tsx", "eslint",
     "prettier", "vitest", "jest", "playwright",
     "go", "gofmt", "cargo", "rustc", "rustfmt", "rustup", "java", "javac", "jar", "mvn", "gradle",
-    "dotnet", "ruby", "bundle", "rake", "rspec", "php", "composer", "lua", "luajit", "zig",
+    "dotnet", "ruby", "bundle", "rake", "rspec", "php", "composer", "zig",
     "swift", "swiftc", "kotlin", "kotlinc", "scala", "sbt", "ghc", "cabal", "stack", "elixir",
     "mix", "erl", "perl", "R", "Rscript", "julia",
     "bash", "sh", "zsh", "dash", "xvfb-run", "Xvfb", "sqlite3", "git",
@@ -139,24 +141,74 @@ ALLOWED_COMMANDS = (
     "mill", "scala-cli", "pod", "ant", "crystal", "nim", "erlc", "escript",
     "pushd", "popd", "printenv", ":", "ulimit", "local", "declare", "shift", "trap", "pgrep",
     # and the ordinary tools #514 and #672 still missed (#830, the second 2026-11-21 audit):
-    # macOS's own (no sha256sum or nproc there), the wrappers _WRAPPERS already bounds, process
-    # and coreutils tools, native builds' (versioned compilers like python3.*), more ecosystems'
-    "shasum", "md5", "sysctl", "sw_vers", "stdbuf", "setsid", "pkill", "killall", "expr", "bc",
-    "truncate", "dd", "shuf", "cksum", "sha512sum", "flock",
+    # macOS's own (`shasum`, `md5`: `sha*sum`, `md5*` above), the wrappers _WRAPPERS already
+    # bounds, process and coreutils tools, native builds' (versioned compilers like python3.*),
+    # more ecosystems'
+    "sysctl", "sw_vers", "stdbuf", "setsid", "pkill", "killall", "expr", "bc",
+    "truncate", "dd", "shuf", "cksum", "flock",
     "ldd", "readelf", "addr2line", "size", "gcov", "ccache", "sccache", "gfortran", "nvcc",
-    "mpirun", "gcc-*", "g++-*", "clang-*", "clang++-*",
-    "scons", "protoc", "ocaml", "iex", "ghci", "runghc", "irb", "gem", "luarocks", "busted",
-    "lua5.*", "cython", "maturin", "virtualenv", "sphinx-build", "mkdocs", "terraform", "corepack",
+    "mpirun",
+    "scons", "protoc", "ocaml", "iex", "ghci", "runghc", "irb", "gem", "busted",
+    # `lua*`: lua, luajit, lua5.*, luac, luac5.*, luacheck, luarocks (`luarocks install *` asks)
+    "lua*", "cython", "maturin", "virtualenv", "sphinx-build", "mkdocs", "corepack",
     # the Lisps, Schemes and Forth, and the checkers the skill's reference/checks.md puts in a
     # task's --test: an agent trying `guile t.scm` or `sbcl --script` mid-round was refused, each
     # first use a question and a wake (the owner, 2026-11-22: "does our whitelisting too strict").
     # `nix-instantiate --parse` only: nix's evaluation can fetch and build through the daemon
     "sbcl", "ecl", "ccl", "clisp", "racket", "raco", "guile", "guild", "csc", "csi",
-    "chicken-csc", "chicken-csi", "scheme", "chez", "chezscheme", "petite", "gosh", "chibi-scheme",
-    "mit-scheme", "gforth", "luac", "luac5.*", "luacheck", "selene", "basedpyright", "staticcheck",
+    "chicken-cs?", "scheme", "chez*", "petite", "gosh", "chibi-scheme",
+    "mit-scheme", "gforth", "selene", "basedpyright", "staticcheck",
     "yamllint", "actionlint", "hlint", "tflint", "statix", "deadnix", "clj-kondo",
     "nix-instantiate --parse",
+    # the infrastructure a repo checks offline (the owner, 2026-11-22: "dont forget about common
+    # infra tools like docker podman terraform"). Terraform and OpenTofu by subcommand, no longer
+    # whole: format, validate, fetch what the project lists (init, no backend; not `get`, whose
+    # `-update` moves the modules to newer versions, a dependency choice), no state. `plan`,
+    # `show`, `output`, `refresh` read remote state with the user's credentials, `test` "creates
+    # real infrastructure" (its help, 1.16.1), `apply`, `import`, `state` change it. Of docker,
+    # the compose file rendered (no daemon: the lane has no socket to one, rootless podman needs
+    # the setuid newuidmap); of kubectl, kustomize (every other subcommand is the cluster, with
+    # its credentials); of helm, what renders a chart offline; the scanners over local files;
+    # Ansible's syntax check, which reaches no host (a dynamic inventory it loads can still call
+    # a cloud); and a test's own database or cache, started
+    # in the temp directory (the skill's reference/checks.md says how). Postgres's and Redis's
+    # clients aren't here: what the worktree's .env names can be production. A `*` inside an
+    # entry takes the flags projects put first (`init -input=false -backend=false`, `-chdir=infra`,
+    # `compose -f ci.yml config`, `ansible-playbook site.yml --syntax-check`), and can be steered:
+    # `terraform -chdir=. plan -out validate` matches `-chdir=* validate` (the outward steps below
+    # still ask). `docker?compose` is `docker compose` and `docker-compose`, one entry
+    "terraform fmt", "terraform validate", "terraform version", "terraform init *-backend=false",
+    "terraform -chdir=* fmt", "terraform -chdir=* validate",
+    "terraform -chdir=* init *-backend=false",
+    "tofu fmt", "tofu validate", "tofu init *-backend=false", "tofu -chdir=* fmt",
+    "tofu -chdir=* validate",
+    "terraform-docs", "checkov", "hadolint", "docker?compose config",
+    "docker?compose -f *ml config",
+    "helm lint", "helm template", "helm dependency build", "helm dep build",
+    "kustomize", "kubectl kustomize", "kubeconform", "conftest test", "opa test", "trivy config",
+    "trivy fs", "ansible-lint", "ansible-playbook *--syntax-check", "cfn-lint",
+    "initdb", "pg_ctl", "pg_isready", "redis-server",
+    # and the database clients, to read the test's own database: python can already dial any
+    # database the lane reaches (the owner, 2026-11-22: "allow the clients, keep migrations for
+    # review"). Not the migration tools: alembic, flyway or prisma migrate act on whatever the
+    # worktree's .env names, which can be production
+    "psql", "mysql", "mariadb", "redis-cli", "valkey-cli", "mongosh",
 )
+# The tools on that list only by their subcommands: `--test 'terraform validate'` granted
+# `terraform *` (test_allowances), so the agent could run `terraform apply` and `helm push`
+# under it. Theirs is the command as written, with more arguments, and no more.
+LIMITED = (frozenset(re.split(r"[ ?*]", e)[0] for e in ALLOWED_COMMANDS if " " in e)
+           - set(ALLOWED_COMMANDS))
+# and the tools that reach a cloud, a cluster, a registry, a host or a container daemon, on the
+# list by a subcommand or not at all: `--test 'terragrunt hcl fmt --check'` granted
+# `terragrunt *`, and with it `terragrunt apply`; `pulumi preview` `pulumi up`, `cdk synth` `cdk
+# destroy` (the review, 2026-11-22). Read by test_allowances only: nothing in the layer
+OUTWARD_TOOLS = frozenset((
+    "terragrunt", "pulumi", "cdk", "cdktf", "sam", "serverless", "sls", "packer", "aws", "gcloud",
+    "gsutil", "az", "doctl", "eksctl", "flyctl", "fly", "heroku", "vercel", "netlify", "wrangler",
+    "firebase", "kubectl", "helm", "kind", "minikube", "k3d", "skaffold", "argocd", "flux", "oc",
+    "docker", "docker-compose", "podman", "buildah", "ansible", "ansible-playbook", "vagrant",
+    "nomad", "vault", "consul"))
 # A project's own tools and builds, by their usual relative paths (`./x` is allowed already).
 PROJECT_BINS = (".venv/bin/*", "venv/bin/*", "node_modules/.bin/*", "build/*", "target/debug/*",
                 "target/release/*", "bin/*", "out/*", "dist/*", "zig-out/bin/*", "vendor/bin/*",
@@ -185,6 +237,60 @@ ASK_FIRST = (
     # project installed, as the runner sets npm_config_yes=false for OpenCode
     "npm x *", "npx -p *", "npx --package *", "npx --package=*", "bun x *", "uv tool run *",
     "uv tool install *", "uv run --with *", "deno run *npm:*", "deno run *jsr:*",
+)
+# Inside the allowed tools, the steps that reach out: publishing to a registry, deploying,
+# changing infrastructure or a cluster (the owner, 2026-11-22, asking for the infra tools). They
+# stand at ASK_FIRST's place in the rules (shell_rules): after the acceptance command's tools, so
+# `--test 'cargo test'` granting `cargo *` doesn't let `cargo publish` through, and before the
+# user's and Claude's allowances, so `wb allow` lifts one. Each starts with `*`, so a launcher's
+# or wrapper's spelling is caught too (`pnpm publish`, `npx cdk deploy`, `./mvnw deploy`, `timeout
+# 600 terraform apply`, `env helm install`), and needs no `*=*` copy. Most verbs are matched as
+# a word, a space before it and a space or the end after it (the trailing ` *` is optional): the
+# looser `*mvn* *deploy*` also refused `mvn -pl deploy-tools test`, a `*` reaching into the next
+# word as #442's did before the hard words. Gradle's are prefixes, as its publish tasks are
+# (`publishToMavenCentral`, `:lib:publishAllPublicationsToSonatypeRepository`, `publishPlugins`),
+# and so are Maven's goals (`deploy:deploy-file`, `release:perform`): a project or task named
+# publish… (`./gradlew :publishing:test`, `-x publish`) or a module `-pl deploy` asks once, as
+# does what else still matches (`npm publish --dry-run`, `./gradlew publishToMavenLocal`,
+# `wrangler deploy --dry-run`, `rg 'npm publish x'`). What none can see: the same step from a
+# script, a Makefile target (`make deploy` names nothing a pattern can judge), `bash -c` or an
+# interpreter, the verbs not listed here (`bun publish`, `sbt publish`), flags before a verb
+# other than npm's and cargo's (`yarn --cwd x publish`), and anything behind a wrapper or an
+# `=` that isn't one of these steps: `env`, `timeout`, `nice`, `nohup`, `time`, `command` and
+# `xargs` are allowed whole, and `*=* <cmd> *` takes any line with an `=` before an allowed
+# command's name, so `env terraform plan`, `timeout 60 kubectl patch …`, `env docker run` and
+# `kubectl --context=prod exec x -- sh` run, every subcommand limit and the default deny lifted
+# alike. Review is the guard there; these only stop the plain and the wrapped spelling of each.
+OUTWARD = (
+    # npm's registry writes; `pnpm publish` and yarn 2's `yarn npm publish` contain them.
+    # ~/.npmrc stays readable for installs, so its token would work. Not `npm login` or
+    # `adduser`: they wait on a browser or a terminal, and with Landlock can't write ~/.npmrc
+    "*npm publish *", "*npm unpublish *", "*npm deprecate *", "*npm dist-tag *", "*npm owner *",
+    "*npm access *", "*npm token *", "*yarn publish *",
+    # and with flags before the verb: a workspace's or a monorepo's (`pnpm -r publish`, `npm -w
+    # packages/a publish`, `pnpm --filter @x/a publish`), a toolchain's (`cargo +nightly publish`)
+    "*npm -* publish *", "*cargo +* publish *",
+    # the other registries whose tools are allowed (`python -m twine upload` through `python *`)
+    "*cargo publish *", "*gem push *", "*poetry publish *", "*uv publish *", "*twine upload *",
+    "*dotnet nuget push *", "*pub publish *", "*hex.publish *",
+    # Maven's deploy phase and release plugin, Gradle's publish tasks (a subproject's too): their
+    # settings.xml and gradle.properties sit in the writable ~/.m2 and ~/.gradle
+    "*mvn* deploy *", "*mvn* deploy:*", "*mvn* release:*", "*gradle* publish*",
+    "*gradle* *:publish*",
+    # deploys through a project's own CLI (npx cdk, npx wrangler)
+    "*cdk deploy *", "*wrangler* deploy *", "*firebase deploy *", "*prisma migrate deploy *",
+    # infrastructure and cluster changes, for a grant (`wb allow 'terraform *'`) or a wrapper
+    # (`timeout *`, `env *`) the narrowed entries above don't bound
+    "*terraform* apply *", "*terraform* destroy *", "*terraform* import *", "*terraform* state *",
+    "*tofu* apply *", "*tofu* destroy *", "*kubectl* apply *", "*kubectl* create *",
+    # `test` creates real infrastructure, and `terraform -chdir=infra test` matched `*=* test *`
+    # (`grep -rn terraform test` and `make -C terraform test` ask once). `init -upgrade` moves
+    # the providers and modules to newer versions, a dependency choice, as `get -update` would
+    "*terraform* test *", "*tofu* test *",
+    "*terraform* init *-upgrade*", "*tofu* init *-upgrade*",
+    "*kubectl* delete *", "*helm* install *", "*helm* upgrade *", "*helm* uninstall *",
+    # an image to a registry; a chart rendered against the live cluster
+    "*docker push *", "*helm * --validate*",
 )
 # OpenCode's matcher makes a trailing " *" optional, so `npm install *` also matches a bare
 # `npm install`. Installing what the project already lists is the agent's: allowed again after.
@@ -273,7 +379,11 @@ def test_allowances(test: str | None) -> tuple[list[str], list[str]]:
     So does each command with more arguments: after the asks, `--test 'npm install && npm test'`
     allowed `npm install left-pad`, `pip install -e . && pytest` `pip install -e . requests`
     (#915, the third 2026-11-21 audit); only the command as written comes after them.
-    The hard limits come later in the rules, so no grant here lifts them."""
+    A tool on ALLOWED_COMMANDS only by its subcommands (LIMITED) isn't granted whole: `--test
+    'terraform validate'` granted `terraform *`, and with it `terraform apply` and `plan`
+    (2026-11-22). Nor one that reaches out (OUTWARD_TOOLS): `--test 'terragrunt hcl fmt
+    --check'` granted `terragrunt *` and `terragrunt apply`, `pulumi preview` `pulumi up` (the
+    review, 2026-11-22). The hard limits come later in the rules, so no grant here lifts them."""
     import shlex
     exact, tools = [], []
     for cmd in _simple_commands(test or ""):
@@ -284,7 +394,7 @@ def test_allowances(test: str | None) -> tuple[list[str], list[str]]:
         except ValueError:
             continue
         words = [w for w in words if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w)]
-        if words and "*" not in words[0]:
+        if words and "*" not in words[0] and words[0] not in LIMITED | OUTWARD_TOOLS:
             tools += [f"{words[0]} *", f"{ASSIGN} {words[0]} *"]
     return list(dict.fromkeys(exact)), list(dict.fromkeys(tools))
 
@@ -851,6 +961,8 @@ def shell_rules(task: store.Task) -> list[dict]:
     # the acceptance command's tools (test_allowances): before the asks, which still win (#646)
     rules += [{"action": "shell", "resource": r, "effect": "allow"}
               for r in grants(task).get("test_tools") or []]
+    # the outward steps: after those tools, which can't lift them, before what Claude allowed
+    rules += [{"action": "shell", "resource": p, "effect": "deny"} for p in OUTWARD]
     pip, theirs = python_installs(task)  # into the worktree's venv, not the user's (#490)
     rules += [{"action": "shell", "resource": r, "effect": "deny"}
               for p in (*ASK_FIRST, *(ENV_INSTALLS if theirs else ())) for r in (p, f"{ASSIGN} {p}")]

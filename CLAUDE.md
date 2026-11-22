@@ -80,7 +80,7 @@ dependencies. No packaging: it runs from the clone.
   `ask/`; and the runner's side (`relay`: checks each ask file, counts the budgets in status
   `asks`, raises the notice, keeps the phase `asking`), `write_answer` (never through a link).
 - `context.py`: what the agent knows and may do: instructions, denied tools and skills, the shell
-  allowlist (`shell_rules`: `ALLOWED_COMMANDS`, `PROJECT_BINS`, `ASK_FIRST`, `INSTALL_LISTED`,
+  allowlist (`shell_rules`: `ALLOWED_COMMANDS`, `PROJECT_BINS`, `OUTWARD`, `ASK_FIRST`, `INSTALL_LISTED`,
   `DENIED_SHELL` with its wrappers, `denied_shell()` adding git by path), the lane (`writable`:
   the worktree and `ask/`, not the rest of the task directory; `readable`, `SECRETS`,
   `private_paths` (workbench's own state and config), `lane_refusal`, `tool_roots`, on WSL

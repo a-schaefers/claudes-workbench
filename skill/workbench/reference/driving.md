@@ -13,7 +13,8 @@ check-in, when an agent asks for a command or a directory, a spec needs web rese
   (`wb answer`, with another way) to what reaches outside the task: deploys, other machines,
   system services, the user's data, a dependency the project shouldn't take on. Knowing a task
   needs something up front, `wb start … --allow "<pattern>"`; the `--test` command is granted by
-  itself (each of its commands, and `<its command> *`). sudo, git writes, git by its full
+  itself (each of its commands, and `<its command> *`); a publish, deploy or infrastructure
+  change (`npm publish`, `terraform apply`) asks even under it. sudo, git writes, git by its full
   path and `gh` stay refused whatever you allow. A plain `npx <pkg>` runs only what the project
   installed; to let it fetch one, allow `npx --yes <pkg>`.
 - **Directories it asks for.** The agent writes only in its lane (worktree, temp, build caches)

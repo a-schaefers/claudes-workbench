@@ -9939,6 +9939,168 @@ class Permission(Base):
         for cmd in ("nix-instantiate default.nix", "nix-instantiate --eval default.nix"):
             self.assertEqual(self.verdict(rules, cmd), "deny", cmd)   # nix's evaluation: not its parse
 
+    def bare_task(self, name):
+        task = store.Task(name)
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": name, "repo": str(self.repo)}))
+        return task
+
+    def test_the_infra_tools_check_offline_and_their_outward_steps_ask_first(self):
+        # the owner, 2026-11-22: "dont forget about common infra tools like docker podman
+        # terraform". The offline checks had no entry, so each cost a question and a wake, while
+        # `terraform` was allowed whole: apply, destroy, plan (remote state, the user's
+        # credentials) and `test` ("creates real infrastructure") ran unasked, and the publish and
+        # deploy steps of the allowed tools (`npm publish`, `./gradlew publish`) too
+        rules = context.shell_rules(self.bare_task("t-infra"))
+        for cmd in ("terraform fmt -check -recursive", "terraform validate",
+                    "terraform validate -json", "terraform validate -no-color",
+                    "terraform init -backend=false", "terraform init -backend=false -input=false",
+                    "terraform -chdir=infra validate", "TF_IN_AUTOMATION=1 terraform validate",
+                    "terraform init -input=false -backend=false", "tofu -chdir=infra validate",
+                    "terraform -chdir=infra init -backend=false", "tofu -chdir=infra fmt -check",
+                    "docker compose -f compose.ci.yml config -q",
+                    "ansible-playbook site.yml --syntax-check",
+                    "terraform version", "tofu validate", "tofu fmt -check",
+                    "tofu init -backend=false", "terraform-docs markdown table . --output-file README.md",
+                    "checkov -d .", "tflint --init", "hadolint Dockerfile", "docker compose config",
+                    "docker compose config --quiet", "docker-compose config", "helm lint charts/app",
+                    "helm template app charts/app -f values.yaml --set image.tag=x",
+                    "helm dependency build charts/app", "helm dep build charts/app",
+                    "kustomize build overlays/dev", "kubectl kustomize overlays/prod",
+                    "kubeconform -strict -summary k8s/", "conftest test deploy.yaml -p policy",
+                    "opa test policy/ -v", "trivy config .", "trivy fs --scanners vuln .",
+                    "ansible-lint", "ansible-lint roles/web",
+                    "ansible-playbook --syntax-check site.yml -i inventory", "cfn-lint template.yaml",
+                    "initdb -D /tmp/pg", "pg_isready -h /tmp",
+                    "pg_ctl -D /tmp/pg -o \"-k /tmp -c listen_addresses=''\" -l /tmp/pg.log start",
+                    "redis-server --port 0 --unixsocket /tmp/r.sock --save '' --dir /tmp",
+                    # the clients, not the migrations (the owner, 2026-11-22)
+                    "psql -h /tmp -c 'select 1'", "mysql -e 'select 1'", "mariadb -e 'select 1'",
+                    "redis-cli -s /tmp/r.sock ping", "valkey-cli ping", "mongosh --eval 'db.x.find()'"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        for cmd in ("alembic upgrade head", "flyway migrate", "npx prisma migrate deploy"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+        for cmd in ("terraform apply", "terraform apply -auto-approve",
+                    "terraform -chdir=infra apply -auto-approve", "terraform destroy",
+                    "terraform plan", "terraform test", "terraform init",
+                    "terraform state rm aws_s3_bucket.b", "terraform import aws_x.y id",
+                    "terraform workspace select prod", "tofu apply", "helm install app charts/app",
+                    "helm upgrade --install app .", "helm push app-1.0.tgz oci://r",
+                    "helm dependency update charts/app", "helm template . --validate",
+                    "kubectl apply -f k8s/", "kubectl get pods", "docker build .",
+                    "docker compose up -d", "docker push r/app", "podman run alpine",
+                    "kind create cluster", "ansible-playbook site.yml",
+                    "ansible-playbook site.yml --check", "ansible all -m ping", "pulumi up",
+                    "aws s3 ls", "npm publish", "pnpm publish --access public", "npx cdk deploy",
+                    "npx wrangler deploy", "env cdk deploy", "./mvnw clean deploy", "./gradlew publish",
+                    "./gradlew :lib:publish", "cargo publish", "dart pub publish",
+                    "python -m twine upload dist/*", "timeout 600 terraform apply -auto-approve",
+                    "env helm install x .", "nice kubectl apply -f k8s/"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+        # and the spellings the first version let through (the review, 2026-11-22): a
+        # subproject's publish task, Maven's deploy goal, flags before npm's and cargo's verb,
+        # `test` behind a wrapper or `-chdir=` (`*=* test *`), and `init -upgrade`
+        for cmd in ("./gradlew :lib:publishToMavenCentral", "./gradlew :plugin:publishPlugins",
+                    "./gradlew :core:publishAllPublicationsToSonatypeRepository",
+                    "mvn deploy:deploy-file -Durl=https://r -Dfile=x.jar", "pnpm -r publish",
+                    "pnpm -r publish --access public --no-git-checks", "pnpm --filter @x/a publish",
+                    "npm -w packages/a publish", "npm --workspaces publish", "cargo +nightly publish",
+                    "env terraform test", "terraform -chdir=infra test",
+                    "terraform -chdir=. test -filter validate", "tofu -chdir=infra test",
+                    "terraform init -backend=false -upgrade"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+        # the outward verbs are words, Gradle's tasks and Maven's goals prefixes: a `*` before
+        # one alone reached into the next word, as #442's did before the hard words, and refused
+        # ordinary builds and tests (`./gradlew :publishing:test` asks: a project named publish…)
+        for cmd in ("./gradlew test --tests com.x.PublishFlowTest", "mvn -pl deploy-tools test",
+                    "npm run test:publish", "npm -w packages/a test", "rg -n terraform tests/",
+                    "pnpm -r --filter ./pkgs/a run publish-docs",
+                    "pnpm publish-docs", "cargo test publish_flow", "grep -rn deploy src",
+                    "pytest -k deploy", "make deploy-docs", "mvn -Dmaven.deploy.skip=true verify",
+                    "mvn -B verify", "./gradlew build", "npm test", "rg -n 'terraform apply' docs",
+                    "terraform fmt -recursive test/"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        self.assertEqual(self.verdict(rules, "env helm install x . && sudo x"), "deny")
+
+    def test_a_test_command_doesnt_lift_a_tools_subcommand_limit(self):
+        # the owner's 2026-11-22 request for the infra tools: --test 'terraform validate' granted
+        # `terraform *` (test_allowances), so under a validate-only entry the agent could run
+        # `terraform apply` and `plan`, and `helm push` under `helm lint`. The command as written,
+        # with more arguments, is still the agent's; the outward steps ask even then
+        task = self.bare_task("t-f1")
+        exact, tools = context.test_allowances("terraform validate && helm lint .")
+        self.assertNotIn("terraform *", tools)
+        self.assertNotIn("helm *", tools)
+        context.grant(task, "allow", exact)
+        context.grant(task, "test_tools", tools)
+        rules = context.shell_rules(task)
+        for cmd in ("terraform apply -auto-approve", "terraform plan", "helm install x .",
+                    "helm push x oci://r", "TF_LOG=1 terraform plan"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+        for cmd in ("terraform validate", "terraform validate -json", "helm lint . --strict"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        # a subcommand Claude chose is granted as written, and no wider; an outward one's
+        # more arguments ask, as `--test 'mvn verify'` doesn't lift `mvn verify deploy`
+        task = self.bare_task("t-f1-test")
+        exact, tools = context.test_allowances("terraform validate -json")
+        context.grant(task, "allow", exact)
+        context.grant(task, "test_tools", tools)
+        rules = context.shell_rules(task)
+        self.assertEqual(self.verdict(rules, "terraform validate -json -no-color"), "allow")
+        self.assertEqual(self.verdict(rules, "terraform plan"), "deny")
+        task = self.bare_task("t-f1-tftest")
+        exact, tools = context.test_allowances("terraform test")
+        context.grant(task, "allow", exact)
+        context.grant(task, "test_tools", tools)
+        rules = context.shell_rules(task)
+        self.assertEqual(self.verdict(rules, "terraform test"), "allow")
+        self.assertEqual(self.verdict(rules, "terraform test -verbose"), "deny")
+        self.assertEqual(self.verdict(rules, "terraform plan"), "deny")
+        # nor one that reaches out, on the list or not: `--test 'terragrunt hcl fmt --check'`
+        # granted `terragrunt *`, `pulumi preview` `pulumi up` (the review, 2026-11-22)
+        for test, tool, out in (("terragrunt hcl fmt --check", "terragrunt", "terragrunt apply"),
+                                ("pulumi preview", "pulumi", "pulumi up --yes"),
+                                ("ansible-playbook site.yml --syntax-check", "ansible-playbook",
+                                 "ansible-playbook site.yml")):
+            task = self.bare_task(f"t-f1-{tool}")
+            exact, tools = context.test_allowances(test)
+            self.assertNotIn(f"{tool} *", tools, test)
+            context.grant(task, "allow", exact)
+            context.grant(task, "test_tools", tools)
+            rules = context.shell_rules(task)
+            self.assertEqual(self.verdict(rules, out), "deny", out)
+            self.assertEqual(self.verdict(rules, f"{test} -x"), "allow", test)
+        # a tool allowed whole still is, so its other work needs no question (#514)
+        self.assertIn("cargo *", context.test_allowances("cargo test")[1])
+        # and it can't lift the outward steps: `cargo *` comes before them
+        task = self.bare_task("t-f1-cargo")
+        context.grant(task, "test_tools", context.test_allowances("cargo test")[1])
+        self.assertEqual(self.verdict(context.shell_rules(task), "cargo publish"), "deny")
+
+    def test_a_bare_tasks_rules_leave_room_in_their_one_environment_string(self):
+        # the owner's 2026-11-22 request for the infra tools took a bare task's rules to about
+        # 112 KB of CONFIG_CONTENT_MAX's 120,000, every allowed entry ~135 bytes with its `*=*`
+        # copy. Past it the rules move to the layer file and OPENCODE_DISABLE_PROJECT_CONFIG,
+        # which drops AGENTS.md and the project's skills (rules_env). Measured in the suite's
+        # home it said less than a real install (the review, 2026-11-22): each tool home that
+        # exists adds its lane rules, about 5.8 KB for all of them. So a fixed home twice: an
+        # empty one keeps 8 KiB spare, so the next addition can't cross it unseen, and one with
+        # every TOOL_HOMES directory, the fullest machine the lane plans for, 4 KiB
+        self.start("t-room", "ok")
+        wait_phase("t-room", {"review"})
+        home = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, home, True)
+        self.addCleanup(os.environ.__setitem__, "HOME", os.environ["HOME"])
+        os.environ["HOME"] = str(home)
+        for spare, homes in ((8 * 1024, ()), (4 * 1024, context.TOOL_HOMES)):
+            for d in homes:
+                (home / d).mkdir(parents=True, exist_ok=True)
+            layer = json.loads(runner.write_config_layer(store.Task("t-room")).read_text())
+            env = runner.rules_env(layer)
+            self.assertNotIn("OPENCODE_DISABLE_PROJECT_CONFIG", env)
+            size = len(env["OPENCODE_CONFIG_CONTENT"].encode())
+            self.assertLessEqual(size, runner.CONFIG_CONTENT_MAX - spare, (size, len(homes)))
+
     def test_git_by_path_is_refused_but_a_directory_named_git_is_not(self):
         # `*/git` refused `go test ./internal/git` whatever Claude allowed, and `time -p sudo`
         # matched only the allow rule `time *` (the 2026-11-16 audit)
