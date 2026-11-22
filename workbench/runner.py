@@ -457,6 +457,22 @@ ENV_KEEP = frozenset({"HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "HF_DATASETS_
                       "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"})
 
 
+# The cloud SDKs' own switches off their instance metadata lookup (#993, 2026-11-22): on a cloud
+# VM, 169.254.169.254 hands the machine's role credentials to anyone who asks over plain HTTP,
+# and the lane doesn't restrict TCP, so an SDK that finds no credentials in the environment
+# (SECRET_ENV drops them) or in the hidden files falls back to it. AWS's SDKs and CLI
+# (AWS_EC2_METADATA_DISABLED, the AWS SDK reference), google-auth for Python (NO_GCE_CHECK:
+# compute_engine/_metadata.is_on_gce returns False for "true") and gcp-metadata for Node
+# (METADATA_SERVER_DETECTION=none: "don't try to use it"). Not GCE_METADATA_HOST or
+# GCE_METADATA_IP: they only move the server, and Google's Go metadata client
+# (cloud.google.com/go/compute/metadata) takes a set GCE_METADATA_HOST as being on GCE. Azure's
+# SDKs have no such switch, and neither has that Go client: a known gap, as is any program that
+# asks the address itself. The tests get them too
+# (run_in_lane takes agent_env): they run the agent's code, which must meet the same lane.
+METADATA_OFF = {"AWS_EC2_METADATA_DISABLED": "true", "NO_GCE_CHECK": "true",
+                "METADATA_SERVER_DETECTION": "none"}
+
+
 # OpenCode's switches that skip every .claude directory (OpenCode 2.3 reads either, as "1" or
 # "true"), and the project's own .claude/skills with them, without a word (#384, the audit of
 # 1.6). They stay out of the agent's environment: wb hands the instructions itself, and keeps the
@@ -538,7 +554,7 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     layer = write_config_layer(task)
     env = {**keep, "PWD": str(task.workdir),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(layer), **rules_env(json.loads(layer.read_text())),
-           "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV,
+           "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV, **METADATA_OFF,
            **({"WB_RUN": run} if run else {})}
     env.update(git_config_env(env))
     env["PATH"] = env.get("PATH") or os.defpath
@@ -549,6 +565,21 @@ def agent_env(task: store.Task, run: str = "") -> dict:
         # ~/.local/share/jupyter/runtime, is outside the lane, and every notebook test
         # (nbmake, nbval, papermill) failed with PermissionError before a kernel started (#668)
         env.setdefault("JUPYTER_RUNTIME_DIR", str(context.runtime_dir(task) / "jupyter"))
+        # helm's registry logins, its own: the user's are hidden (context.SECRETS, #992), and
+        # helm stops at every start, `helm lint` and `helm template` too, when the file it is
+        # given exists but can't be opened; one not made yet is an empty store
+        env["HELM_REGISTRY_CONFIG"] = str(context.runtime_dir(task) / "helm" / "registry.json")
+        # and k6's config, its own too (#992, 2026-11-22): `k6 run` reads ~/.config/k6/config.json,
+        # hidden for `k6 cloud login`'s token, at every start and stops when it can't. Made, since
+        # k6 forgives only a missing default; at the runtime dir's top, where O_EXCL won't follow
+        # a link the agent left
+        k6 = context.runtime_dir(task) / "k6.json"
+        try:
+            with open(k6, "x") as f:
+                f.write("{}\n")
+        except OSError:  # made already (an earlier round), or the agent's: k6 says what's wrong
+            pass
+        env["K6_CONFIG"] = str(k6)
         env.update(daemon_env(task, env))  # its own build daemons, not the user's (#669)
         # poetry's and pipenv's venv in the worktree, as `uv sync` makes it (own_venv): their
         # homes are split around an active venv (`poetry shell`, direnv), where no new one can

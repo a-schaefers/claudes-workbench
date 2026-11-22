@@ -5371,6 +5371,10 @@ def cmd_doctor(a):
             print(f"--  {gap}")
         if gap := context.home_gap():
             print(f"--  {gap}")
+        # what TCP reaches past the lane (#993, 2026-11-22): a warning, the user's own daemon
+        for port in context.listening_daemons():
+            print(f"--  port {port} listens here ({context.DAEMON_PORTS[port]}): the lane doesn't "
+                  "stop TCP, so an agent can reach it")
     else:
         print("--  agents' writes outside their lane and reads of credentials aren't refused here "
               "(no Landlock): only OpenCode's file tools keep to it; " +
