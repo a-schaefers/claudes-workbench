@@ -222,6 +222,10 @@
         : ' · Claude is waiting for your answer')))
       return meta
     }
+    if (m.from === 'notice') {  // settled once its dialog was answered in the terminal (#959)
+      meta.append(span('', clock(m.ts) + (m.answered ? ' · answered in the terminal ' + clock(m.answered) : ' · answer it in the terminal')))
+      return meta
+    }
     if (m.from === 'claude') {
       meta.append(span('', 'Claude · ' + clock(m.ts) + ' · '))
       const c = document.createElement('button'); c.textContent = 'copy'
@@ -500,8 +504,23 @@
   $('about-x').onclick = () => setAbout(null)
   setAbout(about)
 
+  // a dialog waiting in the terminal while the user was at it (#959): said, with what it would
+  // run, and no buttons, since only the terminal can answer it
+  function makeNotice(m) {
+    const row = document.createElement('div')
+    const b = document.createElement('div'); b.className = 'bubble'
+    b.append(span('notice-text', m.text))
+    if (m.what) { const c = document.createElement('code'); c.className = 'notice-what'; c.textContent = m.what; b.append(c) }
+    if (document.hidden && !seen.has(m.id) && !firstVisit) { unread++; document.title = `(${unread}) Workbench` }
+    seen.add(m.id); save(K.seen, [...seen].slice(-500))
+    row.append(b, document.createElement('div'))
+    row.lastChild.className = 'meta'
+    return row
+  }
+
   function makeRow(m) {
     if (m.ask) return makeAsk(m.ask)
+    if (m.from === 'notice') return makeNotice(m)
     const row = document.createElement('div')
     const b = document.createElement('div'); b.className = 'bubble'
     if (m.about) row.append(span('about-tag', aboutTag(m.about)))
@@ -1364,7 +1383,7 @@
     const using = document.hasFocus() && Date.now() - lastInput < USING_MS
     if (!using && !pushEndpoint) return
     const how = using ? 'all' : 'own'
-    const ids = [...state.messages.filter(m => m.from === 'claude').slice(-20).map(m => m.id),
+    const ids = [...state.messages.filter(m => m.from === 'claude' || m.from === 'notice').slice(-20).map(m => m.id),
       ...state.asks.filter(a => !a.answer).map(a => a.id)].filter(i => !reported.has('all:' + i) && !reported.has(how + ':' + i))
     if (!ids.length) return
     ids.forEach(i => reported.add(how + ':' + i))
@@ -1375,6 +1394,30 @@
   for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart'])
     addEventListener(ev, () => { lastInput = Date.now(); reportSeen() }, { capture: true, passive: true })
 
+  // Using this page counts as using this device (#959): "away" was only a message sent here, so
+  // the owner, who typed in the terminal and then picked up the phone with this page open, had a
+  // permission prompt stay in the terminal, neither shown here nor allowed by their setting. The
+  // page coming on screen (shown, focused, back from the cache) or a tap or key in it tells the
+  // computer, at most once per ACTIVE_MS while it stays in use, again at once when it comes
+  // back. Only a page on screen and focused: one merely open in a background tab, or visible
+  // beside the terminal, says nothing. A post that failed is not tried again on a timer: a page
+  // left in front on a phone put down retried until the line came back, after the user had typed
+  // in the terminal, and made them away with no use at all (the #959 review). The next real use
+  // reports at once instead.
+  const ACTIVE_MS = 30_000
+  let activeAt = 0
+  function reportActive() {
+    if (document.hidden || !document.hasFocus() || !token) return
+    if (Date.now() - activeAt < ACTIVE_MS) return
+    activeAt = Date.now()
+    post('/api/active', {}).catch(() => { activeAt = 0 })
+  }
+  document.addEventListener('visibilitychange', () => { if (document.hidden) activeAt = 0; else reportActive() })
+  addEventListener('focus', reportActive)
+  addEventListener('pageshow', reportActive)
+  for (const ev of ['pointerdown', 'keydown'])
+    addEventListener(ev, reportActive, { capture: true, passive: true })
+
   async function firstState() {  // at once, without waiting for a stream slot to free up
     try {
       const r = await fetch('/api/state', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
@@ -1383,5 +1426,5 @@
   }
 
   if (!token) keyless('')
-  else { render(); firstState(); connect(); flush(true); keepKey() }
+  else { render(); firstState(); connect(); flush(true); keepKey(); reportActive() }
 })()

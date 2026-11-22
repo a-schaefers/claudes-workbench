@@ -18837,6 +18837,88 @@ class WebChat(Base):
         self.assertEqual(run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
                                 "--detail", '{"plan": "x"}').split()[1], "open")
 
+    def test_using_the_page_marks_the_user_away_as_a_web_message_does_959(self):
+        # #959: the owner typed in the terminal, then picked up the phone with the chat open and
+        # "Let Claude go ahead" set; only a web message made them away, so the prompt stayed in
+        # the terminal, neither shown on the phone nor allowed
+        chat, tok = self.chat, self.chat.token()
+        d = chat.chat_dir()
+        self.assertEqual(self.call("/api/active", {})[0], 401)
+        self.assertEqual(self.call("/api/active", {"x": 1}, token=tok)[0], 400)
+        self.assertEqual(self.call("/api/active", {}, token=tok), (200, {}))
+        self.assertAlmostEqual(store.read_json(d / "page.json")["at"], store.now(), delta=5)
+        self.assertFalse((d / "away.json").exists())       # the chat off: no session sends it a dialog
+        chat.set_on(True)
+        store.write_json(d / "away.json", {"at": 0})        # the user typed in the terminal (the mod's back)
+        before = store.now()
+        self.assertEqual(self.call("/api/active", {}, token=tok)[0], 200)
+        away = store.read_json(d / "away.json")
+        self.assertEqual(away["by"], "page")
+        self.assertGreaterEqual(away["at"], before)          # newer than the terminal's: away
+
+    def test_a_dialog_at_the_terminal_is_a_notice_on_the_phone_only_for_a_user_of_the_chat_959(self):
+        # #959: at the terminal the prompt stays there, and the phone is told one waits, as a
+        # notice with no buttons (only the terminal can answer it), pushed as Claude's messages
+        chat, tok = self.chat, self.chat.token()
+        from workbench import webpush as wp
+        never = run_wb("chat", "notice", "--tool=Bash", "--text=rm -rf runs/*")
+        self.assertTrue(never.startswith("skipped:"), never)  # never set up the chat: nothing
+        self.assertEqual(chat.thread(), [])
+        store.write_json(chat.chat_dir() / "page.json", {"at": store.now() - chat.PAGE_RECENT - 60})
+        self.assertTrue(run_wb("chat", "notice", "--tool=Bash", "--text=ls").startswith("skipped:"))  # a page, too long ago
+        self.assertEqual(self.call("/api/active", {}, token=tok)[0], 200)   # a page in use today
+        nid = run_wb("chat", "notice", "--tool=Bash", "--text=rm -rf runs/*").strip()
+        row = chat.thread()[-1]
+        self.assertEqual((row["id"], row["from"], row["text"], row["tool"], row["what"]),
+                         (nid, "notice", "Claude is waiting on a permission in the terminal", "Bash", "rm -rf runs/*"))
+        self.assertEqual(chat.asks(), [])                     # not a card to answer
+        self.assertIn("notice: Claude is waiting on a permission in the terminal", run_wb("chat", "log"))
+        self.assertEqual(chat.latest()["messages"][-1]["id"], nid)  # what the push shows
+        plan = chat.notice("ExitPlanMode", "", "plan")
+        self.assertEqual((plan["text"], "what" in plan), ("Claude is waiting on a plan in the terminal", False))
+        with self.assertRaises(ValueError):
+            chat.notice("Bash", "ls", "nonsense")
+        # push on and no page in a day: still told, and pushed once, as news
+        store.write_json(chat.chat_dir() / "page.json", {"at": 0})
+        wp.subscribe("https://fcm.googleapis.com/fcm/send/abc")
+        pushed = chat.notice("Bash", "make deploy")
+        self.assertIsNotNone(pushed)
+        hub = chat.Hub()
+        self.addCleanup(hub.close)
+        pusher = chat.Pusher(hub, send=lambda eps: {e: 201 for e in eps})
+        t = pushed["ts"] + chat.PUSH_DELAY + 1
+        self.assertIn(pushed["id"], pusher.tick(t))
+        self.assertEqual(pusher.tick(t + 1), [])
+        # the mod's owed-reply check reads only Claude's own rows: a notice is no reply (#767)
+        self.assertNotIn(pushed["id"], [m["id"] for m in chat.thread() if m["from"] == "claude"])
+
+    def test_a_notice_whose_dialog_was_answered_in_the_terminal_is_never_pushed_and_says_answered_959(self):
+        # the #959 review: nothing settled a notice when its dialog was answered, so a prompt
+        # approved at the terminal in two seconds still buzzed the phone ten seconds later,
+        # saying Claude waited, and the thread said so for good
+        chat = self.chat
+        from workbench import webpush as wp
+        wp.subscribe("https://fcm.googleapis.com/fcm/send/abc")
+        row = chat.notice("Bash", "make deploy")
+        self.assertEqual(run_wb("chat", "notice", "--done", row["id"]).strip(), f"answered {row['id']}")
+        hub = chat.Hub()
+        self.addCleanup(hub.close)
+        sent = []
+        pusher = chat.Pusher(hub, send=lambda eps: (sent.append(eps), {e: 201 for e in eps})[1])
+        self.assertEqual(pusher.tick(row["ts"] + chat.PUSH_DELAY + 1), [])  # due, but settled: no push
+        self.assertEqual(sent, [])
+        got = chat.thread()[-1]
+        self.assertEqual((got["id"], bool(got["answered"])), (row["id"], True))  # the page says answered
+        self.assertEqual(chat.latest()["messages"], [])                         # and no push shows it
+        reply = chat.send("done", "claude")
+        self.assertEqual(chat.latest()["messages"][-1]["id"], reply["id"])
+        self.assertEqual(chat.pending(), [])                  # a notice's receipt is no user message's
+        # only a notice settles: a user's message or an unknown id is refused
+        mine = chat.send("hi", "user")
+        self.assertFalse(chat.notice_done(mine["id"]))
+        with self.assertRaises(SystemExit):
+            run_wb("chat", "notice", "--done", "123-abc")
+
     def test_vapid_signatures_are_es256_that_openssl_and_push_services_can_check(self):
         from workbench import webpush as wp
         # RFC 6979 A.2.5, P-256 with SHA-256, "sample": the known key, nonce and signature

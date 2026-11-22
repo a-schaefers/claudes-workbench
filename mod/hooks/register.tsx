@@ -154,7 +154,9 @@ const STATS_RETRY_MS = 60_000
 const RETRY_MAX_MS = 10 * 60_000
 const SETTINGS_HINT = 'Click a row to see its options, then click one; or Tab to it and press Enter. A change applies at once.'
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
-const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web message
+// the user counts as away this long after they last used the web chat: a web message, or a page
+// in use (chat/away.json's `at`, written by `wb chat serve`'s /api/active, #959)
+const AWAY_MS = 6 * 3600 * 1000
 // ...or for as long as this session has a backlog task open: a night's batch outlasts six hours,
 // and its permission prompts then waited in the terminal until morning (#110, 2026-11-18)
 export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: WbTask) => boolean): boolean {
@@ -175,6 +177,9 @@ export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) =>
 // message in chat/away.json and a prompt typed in any session clears it, so every delegating
 // session relays its dialogs and says AWAY_NOTE. Kept in the listener's own state, only it did:
 // another session's overnight backlog left its permission dialogs in the empty terminal (#110 again).
+// The chat server writes it too when a page is in use (#959): the owner typed in the terminal,
+// then picked up the phone, and a prompt neither reached it nor was allowed by their setting. So
+// away is the device last used: the chat, used after the last prompt typed here.
 const awayFile = () => `${mem.root}/chat/away.json`
 // Whether a prompt is the user's own (at the terminal, or through Remote Control), by the
 // engine's stamp: a /loop or scheduled firing, another plugin's prompt or an MCP channel's
@@ -200,9 +205,9 @@ async function back($: any) {
 // per conversation, so a user who went to the web chat later was never told of, and a task's
 // news reached only the terminal they had left.
 const AWAY_NOTE =
-  'The user is away from the terminal and last wrote from the web chat. Tell them ' +
+  'The user is away from the terminal: they last used the web chat. Tell them ' +
   'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
-  '`wb chat log` shows the thread. Typing in the terminal again ends this.'
+  '`wb chat log` shows the thread. Typing in the terminal, or answering a prompt there, ends this.'
 async function awayToo($: any, text: string): Promise<string> {
   return (await away($, await read($, chat))) ? `${text}\n\n${AWAY_NOTE}` : text
 }
@@ -1409,6 +1414,7 @@ const mem = {
   skill: '', // the /workbench skill's SKILL.md, for the workbench-mode block
   savingsFile: '', // savings.json, where wb keeps the kWh price ($WB_SAVINGS): the Stats key stamps it
   fold: false, // the session's directory is on a file system that ignores case (macOS): `within`
+  termDialogs: [] as TermDialog[], // dialogs up in the terminal while the user wasn't away (#959)
 }
 
 // Whether path b is path a or inside it, by whole components: /x/ab is not inside /x/a. In lower
@@ -2058,6 +2064,55 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
   }
 }
 
+// A dialog while the user is at the terminal stays there, and the phone is told one waits (#959):
+// typing in the terminal and then picking up the phone left a prompt there with the phone told
+// nothing. A notice, not a card (only the terminal can answer it), pushed as Claude's messages
+// are; wb skips it for a user who doesn't use the chat. Only a permission, as the owner asked, and
+// only one still unanswered after NOTICE_AFTER_MS: written at once, every prompt approved at the
+// terminal in two seconds buzzed the phone ten seconds later saying it still waited (the #959
+// review). One open notice at a time: a burst of prompts buzzed once per prompt.
+// Answering the dialog is using the terminal (termDialogDone): tapping the notice opened the page,
+// which made the user away, and the answer at the terminal submitted no prompt, so the next
+// prompt went to the phone, or was allowed by "Let Claude go ahead", with the user at the
+// terminal (the #959 review).
+const NOTICE_AFTER_MS = 30_000
+type TermDialog = { tool: string; agent: string; at: number; kind: string; text: string; id: string; sending: boolean; done: boolean }
+
+// The poll's tick: each permission dialog still up past NOTICE_AFTER_MS gets its notice, unless
+// another notice of this session's is still open
+async function termNotices($: any, now: number) {
+  if (mem.termDialogs.some(d => d.sending || (d.id && !d.done))) return
+  const d = mem.termDialogs.find(d => d.kind === 'permission' && !d.done && !d.id && now - d.at >= NOTICE_AFTER_MS)
+  if (!d) return
+  d.sending = true
+  try {
+    const { ok, out } = await runWb($, ['chat', 'notice', `--tool=${d.tool}`, '--kind=permission', `--text=${d.text}`], 15_000)
+    const id = (out.split('\n').pop() || '').trim()
+    if (!ok) warnOnce($, 'chat-notice', `the web chat wasn't told of a dialog here (${brief(out)})`)
+    d.id = ok && /^\d+-[0-9a-f]+$/.test(id) ? id : 'none' // 'none': wb skipped it, or failed: not again
+    if (d.done) await noticeDone($, d)
+  } finally {
+    d.sending = false
+  }
+}
+
+// The notice's dialog was answered here: no push owed for it, and the page says so
+async function noticeDone($: any, d: TermDialog) {
+  if (!d.id || d.id === 'none') return
+  const { ok, out } = await runWb($, ['chat', 'notice', '--done', d.id], 15_000)
+  if (!ok) warnOnce($, 'chat-notice-done', `the web chat wasn't told a dialog here was answered (${brief(out)})`)
+}
+
+// A dialog that came up at the terminal is over (its call went on, or the turn ended): the user
+// answered it there, so the phone used while it was up (the notice tapped) no longer counts as
+// the device last used, and its notice is settled
+async function termDialogDone($: any, d: TermDialog) {
+  d.done = true
+  mem.termDialogs = mem.termDialogs.filter(x => x !== d)
+  if (await webAt($) >= d.at) await back($)
+  if (!d.sending) void noticeDone($, d)
+}
+
 async function waitOnChat($: any, id: string, kind: string, i: Record<string, unknown>, signal?: AbortSignal) {
   $.ui.toast(`workbench: ${kind === 'plan' ? 'the plan' : kind === 'question' ? "Claude's question" : 'a permission prompt'} is waiting for you in the web chat`)
   const deadline = (await $.clock.now()) + ASK_WAIT_MS
@@ -2548,6 +2603,7 @@ function startEars($: any) {
   void ears($)
   $.clock.every(POLL_MS, async () => {
     const now = await $.clock.now()
+    if (mem.termDialogs.length) void termNotices($, now)
     if (!mem.eventsPid || mem.hasActive || mem.queued.length || now - mem.lastPoll > SAFETY_MS) void poll($)
   })
   $.clock.every(FRAME_MS, async () => {
@@ -2779,17 +2835,35 @@ export const register: Register = (on, options) => {
       const why = await codingRefusal($, path)
       if (why) return { deny: why }
     }
-    return next(e)
+    if (next.origin.plugin !== 'engine') return next(e)
+    // The engine's call settles its permission check, a dialog included, before it resolves: one
+    // whose dialog came up at the terminal is over once it does, answered there (#959): the oldest
+    // dialog of that tool in that loop (another loop's call of the tool settles none of its)
+    try {
+      return await next(e)
+    } finally {
+      const agent = e.agentId ?? ''
+      const d = mem.termDialogs.find(d => d.tool === e.tool && d.agent === agent)
+      if (d) await termDialogDone($, d)
+    }
   })
 
   // A dialog while the user is away on the web chat goes there (askOnChat): the moment it would
   // come up, in the session the chat listens to. A settings hook's own answer stands, and a
-  // failed hook leaves the dialog to come up as usual.
+  // failed hook leaves the dialog to come up as usual. At the terminal, the dialog stays there and
+  // is noted (mem.termDialogs, #959): a permission still up after NOTICE_AFTER_MS gets one notice
+  // on the phone (termNotices), and its answer here counts as terminal input (termDialogDone).
   on('classic.PermissionRequest', async ($, e, next) => {
     const r = await next(e)
     if (r.decision) return r
     const st = await read($, chat)
-    if (!st.delegating || !(await away($, st))) return r
+    if (!st.delegating || !st.web) return r
+    if (!(await away($, st))) {
+      const kind = KIND[e.tool_name] ?? 'permission'
+      mem.termDialogs.push({ tool: e.tool_name, agent: (e as any).agent_id ?? '', at: await $.clock.now(), kind,
+        text: kind === 'permission' ? askText(e.tool_input) : '', id: '', sending: false, done: false })
+      return r
+    }
     const decision = await askOnChat($, e.tool_name, e.tool_input, next.signal)
     return decision ? { ...r, decision } : r
   })
@@ -2934,6 +3008,9 @@ export const register: Register = (on, options) => {
       // runs: the card would wait on the page for ever (seen live, 2026-11-18)
       for (const id of mem.asksOpen) void runWb($, ['chat', 'answer', id, 'expired', '--by', 'interrupted'], 15_000)
       mem.asksOpen.clear()
+      // the dialogs at the terminal are over too, an interrupt's included (#959): the turn's
+      // subagents ended with it, and one left open here would hold every later notice back
+      for (const d of [...mem.termDialogs]) await termDialogDone($, d)
       mem.busy = false
       mem.skillTurn = false
       if (mem.chatQueued.size) void readQueued($)
