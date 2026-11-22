@@ -110,7 +110,7 @@ class ReleaseGates(unittest.TestCase):
         # cancelled on every run, and unittest reports failures only at the end, so ~40 failures
         # and an 18-minute hang went unseen
         mac = job("nightly.yml", "macos")
-        for want in ("shard: [1, 2, 3]", "fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/3",
+        for want in ("shard: [1, 2, 3, 4, 5]", "fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/5",
                      "WB_TEST_HANG_SECS:", "python3 -X faulthandler -m unittest -v"):
             self.assertIn(want, mac)
         for workflow, name in (("nightly.yml", "check"), ("nightly.yml", "wsl"), ("check.yml", "suite"),
@@ -245,7 +245,7 @@ class SuiteHooks(unittest.TestCase):
                     out.append(t.id())
             return out
         whole = ids()
-        for n in (3, 6):  # the macOS nightly's, check.yml's
+        for n in (5, 6):  # the macOS nightly's, check.yml's
             with self.subTest(shards=n):
                 parts = [ids(f"{k}/{n}") for k in range(1, n + 1)]
                 self.assertEqual(sorted(sum(parts, [])), sorted(whole))     # each test once

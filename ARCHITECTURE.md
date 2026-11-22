@@ -7703,7 +7703,8 @@ user who isn't root, a clone in WSL's own file system, OpenCode; no third-party 
 the repo's settings refuse). Either failing turns the run red, and a release waits for a
 green nightly on its commit (`docs/release-checklist.md`; the 2026-11-19 audit: the macOS job
 could fail unseen and ran without OpenCode, and nothing ran WSL). The `macos` job is a matrix of
-three shards (`WB_TEST_SHARD=K/3`: `tests/__init__.py`'s `load_tests` deals the i-th test of
+five shards (`WB_TEST_SHARD=K/5`, the most macOS jobs GitHub Free runs at once: three took up
+to 50 minutes each, 2026-11-21; `tests/__init__.py`'s `load_tests` deals the i-th test of
 discovery's sorted order to shard i mod N, so each shard gets a slice of every class; dealt as
 whole classes by size until 2026-11-21, Lifecycle's 147 runner-starting tests weighed on one
 shard, and no test has class or module fixtures to keep together; discovery is sharded, and so is the package named,
