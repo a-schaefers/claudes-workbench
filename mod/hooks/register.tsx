@@ -2665,10 +2665,12 @@ function startEars($: any) {
 // splash.json); a reload, /workbench again, a bring-back from the strip or a pane a task opened
 // never do (the `splashed` atom). While it plays the pane's Tasks tab is one Raster the size of
 // its body, repainted by its own timer through $.ui.blit; polling and loading carry on under it,
-// so the page it hands over to is current. It ends after its last frame, at any key (the
-// prompt's first, the pane's Tab, arrows and scroll), or when the pane is closed, resized or
-// can't take a blit, and the Tasks page draws as it always does. Its timer is cancelled then:
-// nothing of it runs after.
+// so the page it hands over to is current. It ends after its last frame, at a key in the pane
+// (Tab, a click, arrows and scroll), or when the pane is closed, resized or can't take a blit,
+// and the Tasks page draws as it always does. Its timer is cancelled then: nothing of it runs
+// after. Not at a key typed in the prompt: that needs a prompt.edit hook, which can't be taken
+// off again, so every keystroke of the session would wait on the mod for an animation long over
+// (2026-11-21, review of #963); typing goes on beside it, and it's over in five seconds.
 const SPLASH = 'splash' // its Raster's key, for $.ui.blit
 const SPLASH_WAIT = 25 // ticks (2 s) it waits for the pane's first draw before giving up
 const SPLASH_STOPS: [string, string, string][] = [
@@ -2982,13 +2984,6 @@ export const register: Register = (on, options) => {
     return { ...r, text: add(r.text) }
   })
 
-  // The first key typed in the prompt skips the opening animation and is typed as usual (#963):
-  // the edit passes through untouched
-  on('prompt.edit', async ($, e, next) => {
-    if (mem.splash) endSplash($)
-    return next(e)
-  })
-
   // Typed in the terminal: the user is back, so answers go here again
   on('prompt.submit', async ($, e, next) => {
     if (byUser(e) && !e.text.startsWith(WEB) && !e.text.startsWith('[workbench]')) {
@@ -3174,10 +3169,16 @@ export const register: Register = (on, options) => {
       const fits = (e as Row).surface === 'terminal' && view.tab === 'tasks' && props.placement !== 'widget' &&
         (!s.plan || (s.plan.cols === cols && s.plan.rows === rows)) // a resize is a redraw: the page then
       // where the page will put the apprentice and the modeline, as it stands now: the walk and the
-      // bar go there (an exact row found once is kept should a line it can't measure come later)
-      const target = fits ? splashTarget(pageShape(list, watched, delegating, saved, await $.clock.now(), cols), rows) : null
-      if (target && !s.plan) s.plan = plan(cols, rows, target, `${FACE.rest} ${MODELINE}`)
-      else if (target && s.plan) s.plan.target = target.bar === null && s.plan.target.bar !== null ? { ...target, bar: s.plan.target.bar } : target
+      // bar go there. A row the page can't measure any more (a line that may wrap came) is no
+      // row: an earlier exact one was measured without that line, so the page is taller now and
+      // the bar would land above the real modeline (2026-11-21, review of #963). Before the words
+      // leave, that makes them rise away; once they fall, the bar goes to the row the page
+      // reaches at least.
+      const shape = fits ? pageShape(list, watched, delegating, saved, await $.clock.now(), cols) : null
+      let target = shape ? splashTarget(shape, rows) : null
+      if (target && target.bar === null && s.plan?.ending === 'fall') target = { ...target, bar: Math.min(rows - 1, shape!.atLeast - 1) }
+      if (target && !s.plan) s.plan = plan(cols, rows, target)
+      else if (target && s.plan) s.plan.target = target
       if (target && s.plan) {
         return <Raster key={SPLASH} columns={cols} rows={rows} cells={packed(frameCells(s.plan, s.f))} />
       }

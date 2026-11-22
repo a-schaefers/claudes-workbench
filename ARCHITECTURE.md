@@ -2655,9 +2655,12 @@ nothing until a surface attaches.
   glint, the apprentice wipes its brow, and at its cheer (`tada`) a rainbow sweeps once through both
   words (frames 42-46, from the "stream" concept). Then the words fall as embers into the body's
   last row, lighting it column by column into the modeline's bar (`BAR`, the theme's `claude`
-  rgb(215,119,87), the words `[•_•] Claude's Workbench` in the terminal's own colour, the real one's
-  `inverseText` taking over at the swap), which slides up to the modeline's row when the page is
-  shorter than the pane, while the apprentice walks to its stage: 62 frames, 4.96 s. Where it
+  rgb(215,119,87)), which slides up to the modeline's row when the page is shorter than the pane,
+  while the apprentice walks to its stage: 62 frames, 4.96 s. The light spreads from where the
+  embers land as fast as it must to fill the row before it slides (frame 56): the title keeps its
+  width, so one column a frame left a wide pane's bar part dark. The bar carries no words: the
+  modeline's are `inverseText`, bold, which a Raster's cells can't name, so the page's own
+  modeline brings them on the row the bar has become. Where it
   lands comes from `pageShape` (the Tasks page's rows as the render lays them out: `pageParts` is
   what both read) and `splashTarget`: the page's last row when it fits (a docked pane draws from the
   top, an inline one keeps its top as it shrinks to the page), the body's last when it surely
@@ -2665,10 +2668,14 @@ nothing until a surface attaches.
   characters not surely one column, `NARROW`) and no sure overflow has no exact row: the words rise
   away as embers instead, as forge drew them (57 frames, 4.56 s), never landing on a guessed row.
   The target is recomputed at each draw while it plays, so the page it hands over to is the one the
-  polls made meanwhile (they and the loading carry on underneath). The Tasks page then draws as it
-  always does. Any key skips it, and the key still does its work: the prompt's first (`prompt.edit`,
-  passed on untouched), the pane's Tab or click (`ui.focus`) and scroll keys (`ui.scroll`); a close
-  by the user, a resize, another tab, a surface without Raster or a refused blit end it too. Its
+  polls made meanwhile (they and the loading carry on underneath); a page that stops being
+  measurable meanwhile makes the words rise away if they haven't left yet, else puts the bar on the
+  row the page reaches at least, never an earlier exact row the page has since outgrown. The Tasks page then draws as it
+  always does. A key in the pane skips it, and the key still does its work: Tab or a click
+  (`ui.focus`) and the scroll keys (`ui.scroll`); a close by the user, a resize, another tab, a
+  surface without Raster or a refused blit end it too. Typing in the prompt doesn't: that needs a
+  `prompt.edit` hook, which can't be taken off again, so every keystroke of the session would wait
+  on the mod for an animation long over; the typing goes on beside it. Its
   timer is cancelled when it ends; the apprentice's own `FRAME_MS` timer is untouched. It plays once
   a session: the `splash` atom (`splash-1`) is set at that first `/workbench`, whether it played or
   not, so a module reload, `/workbench` again, a bring-back from the strip and a pane a task opened

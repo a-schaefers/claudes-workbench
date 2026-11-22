@@ -3899,8 +3899,8 @@ function seeded(on: any, atoms: Record<string, [string, unknown]>) {
 // A session with workbench's files in memory, wb answering, and the animation's frames counted:
 // each blit of its Raster, and each period of an 80 ms timer (its own: the pane's other timers
 // run at 450 ms and 1.5 s)
-function splashWorld(on: any, files: Record<string, string> = {}, dirs: string[] = []) {
-  fakeTasks(on, files, dirs)
+function splashWorld(on: any, files: Record<string, string> = {}, dirs: string[] = [], ears = true) {
+  fakeTasks(on, files, dirs, true, [], ears)
   on('ui.toast', () => ({ value: undefined }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   const runs: string[][] = []
@@ -3910,8 +3910,9 @@ function splashWorld(on: any, files: Record<string, string> = {}, dirs: string[]
     return { value: { exitCode: 0, stdout: e.argv[1] === 'status' ? 'no open tasks' : '', stderr: '' } }
   })
   const blits: string[] = []
-  on('ui.blit', (_: any, e: any) => { blits.push(e.key); return { value: {} } })
-  return { runs, blits, splashes: () => blits.filter(k => k === 'splash').length }
+  const frames: string[] = [] // the splash's cells, as blitted
+  on('ui.blit', (_: any, e: any) => { blits.push(e.key); if (e.key === 'splash') frames.push(e.cells); return { value: {} } })
+  return { runs, blits, frames, splashes: () => blits.filter(k => k === 'splash').length }
 }
 // mock.clock, its every period of an 80 ms timer counted on the way (one hook an event: its own)
 function splashClock(on: any) {
@@ -4005,7 +4006,9 @@ test('a pane brought back from the strip, or opened by a task, opens on the page
   await ui.unmount()
 })
 
-test('the first key typed in the prompt skips the animation and is typed as usual, and its timer ends', async ($, on) => {
+test('typing in the prompt goes on beside the animation, which the mod keeps off the typing path', async ($, on) => {
+  // 2026-11-21, review of #963: a prompt.edit hook to skip it can't be taken off, so every key of
+  // the session would have waited on the mod; the typing goes on untouched and the animation ends on its own
   const { clock, ticks } = splashClock(on)
   const w = splashWorld(on)
   // the editor, beneath: the splice applied
@@ -4017,6 +4020,8 @@ test('the first key typed in the prompt skips the animation and is typed as usua
   expect(await splashing(ui)).toBe(true)
   const r = await $.prompt.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'h' } as any)
   expect(r.text).toBe('h')                                               // the key reached the prompt
+  expect(await splashing(ui)).toBe(true)
+  await clock.advance(4800)
   expect(await splashing(ui)).toBe(false)
   expect(await ui.find({ type: 'Text', text: 'Workbench mode is on.' })).toBeDefined()
   const [n, blits] = [ticks.n, w.splashes()]
@@ -4058,7 +4063,7 @@ test('a narrow or short pane gets the small animation, a smaller one none', asyn
   expect([w.splashes(), ticks.n]).toEqual([0, n])                      // and its timer went with it
   await ui.unmount()
   for (const [cols, rows, fits] of [[50, 27, 'small'], [60, 22, 'small'], [60, 24, 'big'], [56, 24, 'big'], [60, 19, null]] as const)
-    expect([cols, rows, plan(cols, rows, { stage: 1, bar: null }, '')?.big ?? null])
+    expect([cols, rows, plan(cols, rows, { stage: 1, bar: null })?.big ?? null])
       .toEqual([cols, rows, fits === null ? null : fits === 'big'])
 })
 
@@ -4099,7 +4104,7 @@ test('the Opening animation row of Settings cycles through wb and reads its choi
 
 // Every frame of a whole play, its ending decided as the pane would
 function allFrames(cols: number, rows: number, target: { stage: number; bar: number | null }) {
-  const p = plan(cols, rows, target, "[•_•] Claude's Workbench")!
+  const p = plan(cols, rows, target)!
   const out: Uint32Array[] = []
   for (let f = 0; f < 47 || f < frameCount(p); f++) out.push(frameCells(p, f))
   return { p, out }
@@ -4140,10 +4145,85 @@ test("the frames are forge.py's, but for the cheer's rainbow and the ending", ()
   }
   for (const [size, stage] of [['60x26', 17], ['40x22', 12]] as const) {
     const [cols, rows] = size.split('x').map(Number) as [number, number]
-    const p = plan(cols, rows + 1, { stage, bar: null }, '')!            // forge's rows, and the modeline's under them
+    const p = plan(cols, rows + 1, { stage, bar: null })!                // forge's rows, and the modeline's under them
     for (const [f, h] of Object.entries(want[size]!)) expect([size, Number(f), fnv(frameCells(p, Number(f)), cols * rows * 3)])
       .toEqual([size, Number(f), h])
   }
+})
+
+// A blitted frame's cells back as [codePoint, fg, bg] words
+const unpacked = (b64: string) => {
+  const bytes = Uint8Array.from(atob(b64), ch => ch.charCodeAt(0))
+  return new Uint32Array(bytes.buffer)
+}
+// The rows of a frame whose every cell has the bar's colour behind it
+const barRows = (cells: Uint32Array, cols: number, rows: number) =>
+  Array.from({ length: rows }, (_, r) => r).filter(r =>
+    Array.from({ length: cols }, (_, c) => cells[(r * cols + c) * 3 + 2]).every(bg => bg === BAR))
+
+test('the bar the words fall into is lit end to end before it slides up, at any pane width', () => {
+  // 2026-11-21, review of #963: lit one column a frame out from the embers, a 200-column bar was
+  // 121 columns dark at the last frame, and the page's modeline then popped in whole
+  const late: string[] = []
+  for (let cols = 40; cols <= 512; cols += cols < 160 ? 3 : 17)        // the widths a pane has, and wider
+    for (const rows of [22, 30]) {                                       // small and big
+      const p = plan(cols, rows, { stage: 1, bar: 10 })!
+      if (Math.max(...p.barAt) >= 57) late.push(`${cols}x${rows}`)  // 57: the slide's first frame
+    }
+  expect(late).toEqual([])
+  for (const [cols, rows, bar] of [[200, 50, 49], [120, 40, 12], [60, 27, 26], [40, 21, 20]] as const) {
+    const { out } = allFrames(cols, rows, { stage: 1, bar })
+    const last = out[out.length - 1]!
+    expect([cols, barRows(last, cols, rows)]).toEqual([cols, [bar]])        // whole, on the modeline's row at the end
+    // no words on it: the page's modeline brings them in the theme's inverseText, bold, as it always draws them
+    expect(Array.from({ length: cols }, (_, c) => last[(bar * cols + c) * 3]).every(ch => ch === 0x20)).toBe(true)
+  }
+})
+
+test('a page that stops being measurable while the animation plays never gets a bar above its modeline', async ($, on) => {
+  // 2026-11-21, review of #963: an exact row found early was kept after a line that may wrap came,
+  // so the embers landed on a row above the page's real modeline
+  const wide = (files: Record<string, string>, dirs: string[]) => {
+    task(files, 'fix-it', 'accepted', { repo: '/home/u/project', cwd: '/home/u/project' })
+    files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'accepted', round: 1, updated_at: ts0, last: '完成した' })
+    dirs.push('fix-it')
+  }
+  // before the words leave: they rise away, as forge drew it (56 frames after the first, no bar)
+  {
+    const { clock } = splashClock(on)
+    const [files, dirs]: [Record<string, string>, string[]] = [{}, []]
+    const w = splashWorld(on, files, dirs, false)                        // no watcher: a poll each 1.5 s
+    await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+    await workbench($)
+    const ui = await $.ui.mount(splashPane())
+    await clock.advance(400)
+    wide(files, dirs)                                                    // the next poll brings it
+    await clock.advance(5000)
+    expect(await splashing(ui)).toBe(false)
+    expect(await ui.find({ type: 'Text', text: /fix-it/ })).toBeDefined()
+    expect(w.splashes()).toBe(56)
+    expect(w.frames.map(f => barRows(unpacked(f), 60, 27).length).every(n => n === 0)).toBe(true)
+    await ui.unmount()
+  }
+})
+
+test('a page that grows past measuring after the words fell puts the bar no higher than the page reaches', async ($, on) => {
+  const { clock } = splashClock(on)
+  const [files, dirs]: [Record<string, string>, string[]] = [{}, []]
+  const w = splashWorld(on, files, dirs, false)                          // no watcher: a poll each 1.5 s
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  const ui = await $.ui.mount(splashPane())
+  await clock.advance(3900)                                              // the words are falling into row 10, the empty page's last
+  task(files, 'fix-it', 'accepted', { repo: '/home/u/project', cwd: '/home/u/project' })
+  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'accepted', round: 1, updated_at: ts0, last: '完成した' })
+  dirs.push('fix-it')
+  await clock.advance(1500)
+  expect(await splashing(ui)).toBe(false)
+  expect(w.splashes()).toBe(61)
+  // the page now: its task's row, its last line and its margin over the empty page's 11 rows, at least
+  expect(barRows(unpacked(w.frames[w.frames.length - 1]!), 60, 27)).toEqual([13])
+  await ui.unmount()
 })
 
 test('the words fall into the modeline\'s row: the page\'s last when it fits, the pane\'s last when it overflows, else they rise away', () => {

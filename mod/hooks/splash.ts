@@ -256,7 +256,7 @@ type Glyph = {
 export type Target = { stage: number; bar: number | null }
 export type Plan = {
   cols: number; rows: number; big: boolean; glyphs: Glyph[]; X0: number; Y0: number; floorY: number
-  sparks: [number, number, number, number, number, number][]; target: Target; barText: string
+  sparks: [number, number, number, number, number, number][]; target: Target
   /** decided as the words leave (RISE): 'fall' into the bar, or 'rise' away; null before */
   ending: 'fall' | 'rise' | null
   barAt: number[]; left: number; top: number
@@ -272,9 +272,9 @@ export function splashFont(cols: number, rows: number): 'big' | 'small' | null {
 /**
  * Lays the splash out for a Raster of cols x rows: forge's design in the rows above the bottom
  * one (forge's last row, under its floor, is where the Tasks page's tabs are), and the bottom row
- * for the bar. `barText` is what the modeline says. Null where the pane is too small.
+ * for the bar. Null where the pane is too small.
  */
-export function plan(cols: number, rows: number, target: Target, barText: string): Plan | null {
+export function plan(cols: number, rows: number, target: Target): Plan | null {
   const font = splashFont(cols, rows)
   if (!font) return null
   const F = font === 'big' ? BIG : SMALL
@@ -331,19 +331,34 @@ export function plan(cols: number, rows: number, target: Target, barText: string
     }
   })
   // where the falling embers land in the bar, and when: each column lights at its first ember,
-  // the ones none reach a frame after a neighbour (#963)
-  const barAt = Array.from({ length: cols }, () => Infinity)
+  // the ones none reach from the nearest landing, `k` columns a frame (#963)
+  const landed = new Map<number, number>()
   for (const g of glyphs) {
     for (const [x, y] of g.px) {
       const at = leaveAt(cols, x, y) + FALL - 1
       const c = Math.max(0, Math.min(cols - 1, pyRound(x + fallJitter(x, y) * FALL)))
-      barAt[c] = Math.min(barAt[c]!, at)
+      landed.set(c, Math.min(landed.get(c) ?? Infinity, at))
     }
   }
-  for (let c = 1; c < cols; c++) barAt[c] = Math.min(barAt[c]!, barAt[c - 1]! + 1)
-  for (let c = cols - 2; c >= 0; c--) barAt[c] = Math.min(barAt[c]!, barAt[c + 1]! + 1)
+  const lit = (k: number) => Array.from({ length: cols }, (_, c) => {
+    let at = Infinity
+    for (const [e, a] of landed) at = Math.min(at, a + Math.ceil(Math.abs(c - e) / k))
+    return at
+  })
+  // The title keeps its width at any pane width, so one column a frame left a wide pane's bar
+  // unlit, and its label unwritten, at the last frame (2026-11-21, review of #963: 23 columns at
+  // 100, 121 at 200): the light spreads as fast as it must to fill the row before it slides up.
+  // One a frame wherever that is enough, so a 60-column pane plays as it was judged.
+  const due = SLIDE[0] - 1
+  let [lo, hi] = [1, cols]
+  while (lo < hi) {
+    const k = (lo + hi) >> 1
+    if (Math.max(...lit(k)) <= due) hi = k
+    else lo = k + 1
+  }
+  const barAt = lit(lo).map(a => Math.min(a, due))
   const left = Math.min(...glyphs.map(g => g.u0))
-  return { cols, rows, big: font === 'big', glyphs, X0, Y0, floorY, sparks, target, barText, ending: null, barAt, left, top: 2 * top }
+  return { cols, rows, big: font === 'big', glyphs, X0, Y0, floorY, sparks, target, ending: null, barAt, left, top: 2 * top }
 }
 const leaveAt = (cols: number, x: number, y: number) => RISE + Math.trunc((x / cols) * 4 + h32(x, y, 21) * 3)
 const fallJitter = (x: number, y: number) => (h32(x, y, 22) - 0.5) * 1.2
@@ -475,7 +490,9 @@ export function frameCells(p: Plan, f: number): Uint32Array {
     const k = f - t0
     if (k < 0 || k >= 3) return
     const g = p.glyphs[gi]!
-    const [cx, cy] = [g.x + dx, g.y + dy]
+    // its centre two pixels down from the top at most, so its upper arm isn't cut off where the
+    // title starts at the pane's top (24 rows big, 20 small; 2026-11-21, review of #963)
+    const [cx, cy] = [g.x + dx, Math.max(2, g.y + dy)]
     const col = P.TWINKLE[n % 2]!
     put(cx, cy, col)
     for (let d = 1; d <= [1, 2, 0][k]!; d++)
@@ -541,17 +558,16 @@ export function frameCells(p: Plan, f: number): Uint32Array {
     }
   }
   // the bar the embers make, over everything in its row: each column lit by its first ember (a
-  // gold flash, then the modeline's colour), its words in the terminal's own colour as the
-  // modeline's are in the theme's (#963)
+  // gold flash, then the modeline's colour) (#963). No words on it: the modeline's are the
+  // theme's `inverseText` and bold, which a Raster's cells can't name, so drawn here they changed
+  // colour and weight as the page took over (2026-11-21, review of #963); the page's own modeline
+  // brings them, on the row the bar has become.
   if (p.ending === 'fall') {
     const r = barRow(p, f)
-    const text = [...p.barText]
     for (let c = 0; c < cols; c++) {
       const at = p.barAt[c]!
       if (f < at) continue
-      const o = (r * cols + c) * 3
-      const ch = f > at && c >= 1 && c - 1 < text.length ? text[c - 1]!.codePointAt(0)! : SPACE
-      out.set([ch, DEFAULT, f === at ? P.HEAT[0]! : BAR], o)
+      out.set([SPACE, DEFAULT, f === at ? P.HEAT[0]! : BAR], (r * cols + c) * 3)
     }
   }
   return out
