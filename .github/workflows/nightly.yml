@@ -68,19 +68,20 @@ jobs:
     runs-on: macos-latest
     # 21 minutes without OpenCode (no inotify there: waits poll), past 30 with it (2026-11-20),
     # then past 60 once the suite doubled, cancelled every run with nothing reported: unittest
-    # prints failures only at the end (#950). So three shards (tests/__init__.py, WB_TEST_SHARD:
-    # every third test), each test's name as it runs (-v), and a test hung past
-    # WB_TEST_HANG_SECS fails with every thread's stack instead of eating the budget.
+    # prints failures only at the end (#950). So shards (tests/__init__.py, WB_TEST_SHARD: every
+    # fifth test), each test's name as it runs (-v), and a test hung past WB_TEST_HANG_SECS fails
+    # with every thread's stack instead of eating the budget. Three took up to 50 minutes each
+    # (2026-11-21); five, the most macOS jobs GitHub Free runs at once, so none waits for a runner.
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5]
     env:
       # check.yml's OpenCode, its Apple silicon asset's hash
       OPENCODE_VERSION: '2.3.0'
       OPENCODE_SHA256: '7907df2b12720a840fbb49c5b978b9b82925b6bf75479a5fd216afa8932b6702'
-      WB_TEST_SHARD: ${{ matrix.shard }}/3
+      WB_TEST_SHARD: ${{ matrix.shard }}/5
       WB_TEST_HANG_SECS: '600'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

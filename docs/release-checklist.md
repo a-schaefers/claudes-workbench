@@ -14,7 +14,7 @@ three apart: a skip is not a pass. A release may ship with a skip only when its 
       `gh run watch`. Its three jobs:
   - [ ] `check`: the newest Claude Code, the runner's newer Python.
   - [ ] `macos`: Apple silicon, Python 3.11, OpenCode (no /proc, no inotify, no Landlock), its
-        three shards each finished (not cancelled), every failure fixed or with an issue.
+        five shards each finished (not cancelled), every failure fixed or with an issue.
   - [ ] `wsl`: WSL2's Debian, dash, a user who isn't root, OpenCode.
 - [ ] `opencode`: the newest OpenCode, or the break it found has an issue.
 - [ ] `chat`, when the web chat changed since the last release.
