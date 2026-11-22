@@ -471,6 +471,18 @@ ENV_KEEP = frozenset({"HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "HF_DATASETS_
 # (run_in_lane takes agent_env): they run the agent's code, which must meet the same lane.
 METADATA_OFF = {"AWS_EC2_METADATA_DISABLED": "true", "NO_GCE_CHECK": "true",
                 "METADATA_SERVER_DETECTION": "none"}
+# and the build tools' remote caches and remote execution, which a repo's own config turns on
+# without a flag (#999, 2026-11-22): the agent's unreviewed worktree mustn't write the team's
+# cache, nor run on its remote workers, and the tests run the same code. Nx: NX_NO_CLOUD and
+# --no-cloud stop only Nx Cloud (isNxCloudDisabled), and a self-hosted cache (@nx/s3-cache,
+# @nx/gcs-cache, @nx/azure-cache, @nx/shared-fs-cache, NX_SELF_HOSTED_REMOTE_CACHE_SERVER) was
+# still read and written; NX_SKIP_REMOTE_CACHE=true sets skipRemoteCache, which _getRemoteCache
+# checks first ("Includes Nx Cloud and self-hosted caches", its reference), and a flag can't undo
+# it. Pants: its environment beats pants.toml (its options docs), so writes and remote execution
+# stay off whatever the repo says; its reads stay. Their flag and variable spellings that turn
+# them back on are context.OUTWARD's.
+REMOTE_CACHES_OFF = {"NX_SKIP_REMOTE_CACHE": "true", "PANTS_REMOTE_CACHE_WRITE": "false",
+                     "PANTS_REMOTE_EXECUTION": "false"}
 
 
 # OpenCode's switches that skip every .claude directory (OpenCode 2.3 reads either, as "1" or
@@ -555,7 +567,7 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     env = {**keep, "PWD": str(task.workdir),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(layer), **rules_env(json.loads(layer.read_text())),
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV, **METADATA_OFF,
-           **({"WB_RUN": run} if run else {})}
+           **REMOTE_CACHES_OFF, **({"WB_RUN": run} if run else {})}
     env.update(git_config_env(env))
     env["PATH"] = env.get("PATH") or os.defpath
     places = context.writable(task)
@@ -580,6 +592,13 @@ def agent_env(task: store.Task, run: str = "") -> dict:
         except OSError:  # made already (an earlier round), or the agent's: k6 says what's wrong
             pass
         env["K6_CONFIG"] = str(k6)
+        # and semgrep's settings (#999, 2026-11-22): ~/.semgrep/settings.yml holds `semgrep
+        # login`'s token, hidden, and both semgrep's Python and its OCaml core find it there (the
+        # lane leaves access() and stat() alone: access(R_OK) said yes in a real lane) and then
+        # fail on the read, uncaught (settings.py has no except on it; Semgrep_settings.from_file
+        # catches only Failure). Not made: both take a missing one for the defaults, and save
+        # there what they keep (SEMGREP_SETTINGS_FILE, read by env.py and Semgrep_envvars.ml)
+        env["SEMGREP_SETTINGS_FILE"] = str(context.runtime_dir(task) / "semgrep-settings.yml")
         env.update(daemon_env(task, env))  # its own build daemons, not the user's (#669)
         # poetry's and pipenv's venv in the worktree, as `uv sync` makes it (own_venv): their
         # homes are split around an active venv (`poetry shell`, direnv), where no new one can

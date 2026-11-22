@@ -3,6 +3,7 @@ import ast
 import base64
 import contextlib
 import errno
+import functools
 import re
 import glob
 import fnmatch
@@ -9861,6 +9862,54 @@ class Lane(Base):
                              capture_output=True, text=True, timeout=20)
         self.assertEqual((out.returncode, out.stdout.strip()), (0, "refused"), out.stderr)
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_the_firebase_semgrep_and_rush_logins_are_unreadable_but_their_neighbours_are_not(self):
+        # #999 (2026-11-22): three logins #994's tier B left readable from the lane: the Firebase
+        # CLI's refresh token, `semgrep login`'s token, Rush's cloud cache credentials. The other
+        # tools' configstore files and semgrep's and Rush's other files stay readable
+        home = self.fake_home()
+        hidden = [".config/configstore/firebase-tools.json", ".semgrep/settings.yml",
+                  ".rush-user/credentials.json", ".xdg/.semgrep/settings.yml",
+                  ".xdg/configstore/firebase-tools.json", ".dots/semgrep.yml"]
+        kept = [".config/configstore/update-notifier-npm.json", ".semgrep/semgrep.log",
+                ".rush-user/settings.json"]
+        for rel in hidden + kept:
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text("x")
+        # where XDG_CONFIG_HOME and SEMGREP_SETTINGS_FILE moved them (semgrep's Python takes
+        # $XDG_CONFIG_HOME/.semgrep, configstore $XDG_CONFIG_HOME/configstore)
+        os.environ.update({"XDG_CONFIG_HOME": str(home / ".xdg"),
+                           "SEMGREP_SETTINGS_FILE": str(home / ".dots/semgrep.yml")})
+        self.addCleanup(os.environ.pop, "SEMGREP_SETTINGS_FILE", None)
+        task = self.bare_task("t-999", self.repo)
+        got = dict(zip(hidden + kept, self.reads_in_lane(task, [home / f for f in hidden + kept])))
+        self.assertEqual(got, {**{f: "refused" for f in hidden}, **{f: "read" for f in kept}})
+
+    def test_the_agent_gets_semgreps_settings_of_its_own_and_the_remote_build_caches_off(self):
+        # #999 (2026-11-22): semgrep stops when its settings file is there but unreadable, so the
+        # agent's names one of its own, not made (a missing one is the defaults). And Nx's
+        # self-hosted caches, which NX_NO_CLOUD and --no-cloud leave on, and Pants's remote
+        # cache writes and remote execution, which a repo's pants.toml turns on, are off for the
+        # agent and its tests, whatever the user's own environment says
+        check = ('test "$NX_SKIP_REMOTE_CACHE" = true && test "$PANTS_REMOTE_CACHE_WRITE" = false'
+                 ' && test "$PANTS_REMOTE_EXECUTION" = false')
+        with mock.patch.dict(os.environ, {"NX_SKIP_REMOTE_CACHE": "false",
+                                          "PANTS_REMOTE_CACHE_WRITE": "true"}):
+            self.start("t-999-env", "ok", "--test", check, "--no-base-check")
+            st = wait_phase("t-999-env", {"review"})
+        self.assertTrue(st["tests"]["ok"], st["tests"])
+        task = store.Task("t-999-env")
+        with mock.patch.dict(os.environ, {"SEMGREP_SETTINGS_FILE": "/x",
+                                          "PANTS_REMOTE_EXECUTION": "true"}):
+            env = runner.agent_env(task)
+        self.assertEqual({k: env.get(k) for k in runner.REMOTE_CACHES_OFF},
+                         {"NX_SKIP_REMOTE_CACHE": "true", "PANTS_REMOTE_CACHE_WRITE": "false",
+                          "PANTS_REMOTE_EXECUTION": "false"})
+        self.assertEqual(env["SEMGREP_SETTINGS_FILE"],
+                         str(context.runtime_dir(task) / "semgrep-settings.yml"))
+        self.assertFalse(Path(env["SEMGREP_SETTINGS_FILE"]).exists())
+
     def test_the_agent_and_its_tests_get_the_cloud_sdks_metadata_lookup_off(self):
         # #993 (2026-11-22): on a cloud VM the metadata endpoint hands out the machine's role
         # credentials, and the lane doesn't restrict TCP; the tests run the agent's code alike
@@ -10122,16 +10171,20 @@ class Permission(Base):
     def verdict(rules, command):
         """OpenCode's matcher as CLAUDE.md describes it: anchored, `*` matches anything, `?` one
         character, a trailing ` *` optional, the last matching rule wins."""
-        import re as _re
         found = None
         for r in rules:
-            pat = r["resource"]
-            rx = _re.escape(pat[:-2] if pat.endswith(" *") else pat).replace(r"\*", ".*") \
-                .replace(r"\?", ".")
-            rx += "( .*)?" if pat.endswith(" *") else ""
-            if _re.fullmatch(rx, command, _re.S):
+            if Permission._compiled(r["resource"]).fullmatch(command):
                 found = r["effect"]
         return found
+
+    @staticmethod
+    @functools.lru_cache(maxsize=None)
+    def _compiled(pat):
+        # compiled once: #999's runner forms took the rules past 3,800, and one test's few hundred
+        # lines against them spent 40 s compiling the same patterns again
+        rx = re.escape(pat[:-2] if pat.endswith(" *") else pat).replace(r"\*", ".*") \
+            .replace(r"\?", ".")
+        return re.compile(rx + ("( .*)?" if pat.endswith(" *") else ""), re.S)
 
     def test_installing_what_the_project_lists_with_its_usual_flags_needs_no_question(self):
         # #671 (the 2026-11-21 audit): `pnpm install --frozen-lockfile` and `pip install -e
@@ -10549,6 +10602,135 @@ class Permission(Base):
             self.assertEqual(self.verdict(rules, out), "deny", out)
         # and a dropped tool that reaches a remote cache isn't granted whole either
         self.assertNotIn("turbo *", context.test_allowances("turbo run test")[1])
+
+    def test_a_tool_the_project_installed_gets_its_plain_verdict_under_every_runner(self):
+        # #999 (2026-11-22): `npx *`, `pnpm *`, `yarn *`, `bun *`, `uv *` and
+        # `node_modules/.bin/*` are allowed whole, so `npx turbo run build` (turbo isn't allowed),
+        # `pnpm exec cdk synth` (cdk only with its telemetry off), `yarn nx test` (nx only with
+        # Nx Cloud off) and `uv run semgrep --config p/python` (semgrep only with its metrics off)
+        # ran without what their plain spelling needs. Each tool both ways, under each runner
+        rules = context.shell_rules(self.bare_task("t-999"))
+        node = ("npx {}", "npx --no {}", "pnpm {}", "pnpm exec {}", "pnpm --filter web exec {}",
+                "yarn {}", "yarn run {}", "yarn exec {}", "yarn workspace infra {}", "bun run {}",
+                "npm run {}", "node_modules/.bin/{}", "./node_modules/.bin/{}",
+                "/w/app/node_modules/.bin/{}", "CI=1 npx {}", "env npx {}")
+        python = ("uv run {}", "uv run --frozen {}", "poetry run {}", "pipenv run {}", "pdm run {}",
+                  "hatch run {}", "pixi run {}", ".venv/bin/{}", "./venv/bin/{}")
+        held = {  # refused as the plain form is
+            "node": ("turbo run build", "lerna run test", "moon run :test", "moonx :test",
+                     "cdk synth", "cdk destroy", "cdktf deploy", "nx test app", "nx run-many -t test",
+                     "rush build", "rush-pnpm install", "redocly lint api.yaml", "openapi lint api.yaml",
+                     "firebase emulators:start", "azurite --silent", "azurite-blob", "serverless deploy",
+                     "sls deploy", "vercel deploy", "vc deploy", "netlify deploy", "ntl deploy",
+                     "wrangler deploy", "wrangler2 dev", "cf-wrangler deploy"),
+            "python": ("semgrep --config p/python", "sam build", "sam deploy",
+                       "ansible-playbook site.yml", "ansible-galaxy install x", "molecule test",
+                       "aws s3 rm s3://b/k", "az group delete -n x", "gsutil rm gs://b/k",
+                       "docker-compose up")}
+        for eco, forms in (("node", node), ("python", python)):
+            for form in forms:
+                for cmd in held[eco]:
+                    line = form.format(cmd)
+                    self.assertEqual(self.verdict(rules, line), "deny", line)
+        # the allowed spellings, under the runners that take them anchored
+        for line in ("CDK_DISABLE_CLI_TELEMETRY=true npx cdk synth --quiet",
+                     "CDK_DISABLE_CLI_TELEMETRY=true pnpm exec cdk ls",
+                     "CI=1 CDK_DISABLE_CLI_TELEMETRY=true yarn cdk synth",
+                     "CDK_DISABLE_CLI_TELEMETRY=true node_modules/.bin/cdk synth",
+                     "npx nx run-many -t test --no-cloud", "NX_NO_CLOUD=true pnpm exec nx affected -t lint",
+                     "yarn nx test app --no-cloud", "RUSH_BUILD_CACHE_WRITE_ALLOWED=0 npx rush build",
+                     "npx rush install", "npx rushx test",
+                     "REDOCLY_TELEMETRY=off npx redocly lint api.yaml",
+                     "REDOCLY_TELEMETRY=off ./node_modules/.bin/redocly bundle api.yaml",
+                     "npx firebase emulators:exec --project demo-x 'npm test'",
+                     # Firebase's CLI stops on its hidden or unwritable store: a store of its own
+                     "XDG_CONFIG_HOME=$(mktemp -d) firebase emulators:exec --project demo-x 'npm test'",
+                     "npx azurite --silent --disableTelemetry --location /tmp/az",
+                     "SAM_CLI_TELEMETRY=0 uv run sam build", "SAM_CLI_TELEMETRY=0 .venv/bin/sam validate",
+                     "uv run semgrep --metrics=off --config r.yml",
+                     "SEMGREP_SEND_METRICS=off poetry run semgrep --config r.yml",
+                     "uv run ansible-playbook site.yml --syntax-check",
+                     "pdm run ansible-galaxy collection build", "uv run molecule syntax",
+                     "npx spago build", "npx spago install",
+                     # and what the project installed that the rules don't name, as before
+                     "npx vitest run", "npx tsc -p .", "pnpm exec vitest", "yarn test",
+                     "bun run test", "npx eslint .", "uv run pytest -k aws",
+                     "node_modules/.bin/jest", ".venv/bin/pytest"):
+            self.assertEqual(self.verdict(rules, line), "allow", line)
+        # the package names npx takes for them, and a version npx runs when it is the one
+        # installed: `npx nx@19 release` and `npx firebase-tools deploy` missed OUTWARD's words
+        for line in ("npx aws-cdk synth", "npx aws-cdk deploy", "npx cdktf-cli deploy",
+                     "npx @microsoft/rush publish", "npx @redocly/cli push", "npx @redocly/cli lint",
+                     "npx firebase-tools deploy", "npx @moonrepo/cli upgrade", "npx netlify-cli deploy",
+                     "npx nx@19 release", "npx nx@latest test --no-cloud", "npx cdk@2 deploy",
+                     "npx --no turbo@2 run build"):
+            self.assertEqual(self.verdict(rules, line), "deny", line)
+        # their outward steps hold under the runners, opt-out or not, and so do those of the
+        # tools allowed whole (OUTWARD's patterns start with `*`)
+        for line in ("CDK_DISABLE_CLI_TELEMETRY=true npx cdk synth && npx cdk deploy",
+                     "npx nx release --no-cloud", "NX_NO_CLOUD=true yarn nx release publish",
+                     "npx nx connect --no-cloud", "RUSH_BUILD_CACHE_WRITE_ALLOWED=0 npx rush publish -p",
+                     "REDOCLY_TELEMETRY=off npx redocly push", "npx turbo login", "pnpm exec turbo link",
+                     "npx wasm-pack publish", "npx dprint upgrade", "npx spago publish",
+                     "pnpm exec cucumber-js --publish", "npx wrangler deploy", "npx semgrep ci",
+                     "uv run semgrep --metrics=off ci", "npx firebase deploy"):
+            for part in context._simple_commands(line)[-1:]:
+                self.assertEqual(self.verdict(rules, part), "deny", line)
+        # their package steps ask first under the runners, what the project lists doesn't
+        for line in ("npx nx add @nx/react --no-cloud", "NX_NO_CLOUD=true pnpm exec nx migrate latest",
+                     "RUSH_BUILD_CACHE_WRITE_ALLOWED=0 npx rush add -p lodash", "npx spago install aff",
+                     "yarn spago upgrade", "npx moon toolchain add node"):
+            self.assertEqual(self.verdict(rules, line), "deny", line)
+        # an acceptance command under a runner grants itself with more arguments, as the plain
+        # form does, but never the runner whole: `npx *` would lift every line above
+        for test, more, other in (("npx turbo run test", "npx turbo run test --filter=web",
+                                   "npx turbo run build"),
+                                  ("npx vitest run", "npx vitest run src", "npx turbo run build"),
+                                  ("pnpm test", "pnpm test -- --watch=false", "pnpm exec cdk synth"),
+                                  ("uv run pytest", "uv run pytest -x", "uv run semgrep --config p/python"),
+                                  ("node_modules/.bin/turbo run test",
+                                   "node_modules/.bin/turbo run test --affected",
+                                   "node_modules/.bin/turbo run build")):
+            task = self.bare_task(f"t-999-{len(test)}-{test.split()[0].replace('/', '')}")
+            exact, tools = context.test_allowances(test)
+            context.grant(task, "allow", exact)
+            context.grant(task, "test_tools", tools)
+            granted = context.shell_rules(task)
+            for line in (test, more):
+                self.assertEqual(self.verdict(granted, line), "allow", (test, line))
+            self.assertEqual(self.verdict(granted, other), "deny", (test, other))
+        # a tool by its path is that tool: not granted whole (`/usr/bin/terraform *` was)
+        for test in ("node_modules/.bin/turbo run test", "/usr/bin/terraform validate",
+                     ".venv/bin/semgrep --metrics=off --config r.yml"):
+            first = test.split()[0]
+            self.assertNotIn(f"{first} *", context.test_allowances(test)[1], test)
+
+    def test_a_remote_build_cache_or_executor_named_by_a_flag_asks_first(self):
+        # #999 (2026-11-22): pants, buck2 and bazel are allowed whole, and a remote cache write
+        # or remote execution sends the agent's unreviewed build to the team's cache or workers.
+        # The agent's environment turns Pants's and Nx's off (REMOTE_CACHES_OFF); these are the
+        # spellings that turn them back on, and Bazel's and Buck2's flags that name one. What a
+        # repo's .bazelrc or .buckconfig turns on is the reviewer's to see
+        rules = context.shell_rules(self.bare_task("t-999-cache"))
+        for line in ("pants --remote-cache-write test ::", "pants --remote-cache-write=true test ::",
+                     "pants --remote-execution test ::", "pants --remote-execution=true test ::",
+                     "PANTS_REMOTE_CACHE_WRITE=true pants test ::",
+                     "env PANTS_REMOTE_EXECUTION=true pants test ::", "unset PANTS_REMOTE_CACHE_WRITE",
+                     "NX_SKIP_REMOTE_CACHE=false nx test --no-cloud", "unset NX_SKIP_REMOTE_CACHE",
+                     "env -u NX_SKIP_REMOTE_CACHE npx nx test --no-cloud",
+                     "bazel build --remote_cache=grpcs://cache.x //...",
+                     "bazel test --remote_cache grpc://x //...", "bazelisk build --remote_executor=grpc://x //...",
+                     "bazel build --bes_backend=grpcs://bes.x //...",
+                     "buck2 build //... --upload-all-actions", "buck2 build --write-to-cache-anyway //...",
+                     "buck2 build --remote-only //...", "buck2 test --prefer-remote //...",
+                     "buck2 build -c buck2_re_client.engine_address=grpc://x //...",
+                     "npx bazel build --remote_cache=grpc://x //..."):
+            self.assertEqual(self.verdict(rules, line), "deny", line)
+        for line in ("pants test ::", "pants --no-remote-cache-write test ::",
+                     "pants --no-remote-execution lint ::", "bazel test //...",
+                     "bazel build --config=ci //...", "bazelisk test --disk_cache=/tmp/bc //...",
+                     "buck2 build //...", "buck2 test --local-only //...", "nx test --no-cloud"):
+            self.assertEqual(self.verdict(rules, line), "allow", line)
 
     def test_the_rules_stay_out_of_the_environment_however_long_they_grow(self):
         # #994 (2026-11-22): the rules went again in OPENCODE_CONFIG_CONTENT, one environment

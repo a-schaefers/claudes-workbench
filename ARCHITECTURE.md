@@ -1653,7 +1653,8 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `semgrep *--metrics?off*` and `SEMGREP_SEND_METRICS=off semgrep` (metrics go whenever rules
    come from its registry), `azurite *--disableTelemetry*`; what sends the project's runs to a
    service the repo names, only with that off: `nx *--no-cloud*` and `NX_NO_CLOUD=true nx` (a
-   workspace connected to Nx Cloud records every run there), `RUSH_BUILD_CACHE_WRITE_ALLOWED=0
+   workspace connected to Nx Cloud records every run there; they leave a self-hosted cache on,
+   which the agent's `NX_SKIP_REMOTE_CACHE=true` turns off, #999), `RUSH_BUILD_CACHE_WRITE_ALLOWED=0
    rush` (a repo's `build-cache.json` may allow writes to a cloud cache, with the user's
    `~/.rush-user` credentials); and Firebase's emulators only on a demo project, `firebase
    emulators:start *--project?demo-*` and `emulators:exec *--project?demo-*`, where "code that
@@ -1708,7 +1709,9 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    alike (`env terraform plan`, `timeout 60 kubectl patch …`, `env docker run`, `env pulumi up`,
    `kubectl --context=prod exec x -- sh` through `*=* sh *`), as they did before these entries;
    step 5's patterns are the ones that still hold behind them, and review is the guard for the
-   rest;
+   rest. A package manager's runner (`npx`, `pnpm exec`, `yarn`, `uv run`, `node_modules/.bin/`)
+   is not one of those wrappers for the tools a project installs: their runner forms get the
+   plain form's verdict (step 4, #999);
 3. allow `./*`, `../*`, and `<dir>/*` for every directory of the lane but those under `/dev` and `/proc` (a program the agent built
    runs by its path anywhere it can write: a debug binary in the temp directory was refused
    though `bash` could run it);
@@ -1739,7 +1742,53 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    requests`, `--test 'npx vitest run'`
    `npx -y cowsay` (#646, the audit of main), and `--test 'npm install && npm test'`
    `npm install left-pad` through `npm install *`, `--test 'pip install -e . && pytest'`
-   `pip install -e . requests` (#915, the third 2026-11-21 audit);
+   `pip install -e . requests` (#915, the third 2026-11-21 audit). A tool by its path is that
+   tool here (`os.path.basename`): `--test '/usr/bin/terraform validate'` granted
+   `/usr/bin/terraform *`, `node_modules/.bin/turbo run test` `node_modules/.bin/turbo *` (#999).
+   Then the runner forms of the tools the rules name, as each ecosystem installs them
+   (`context.RUNNER_TOOLS`), get their plain form's verdict (#999, 2026-11-22): `npx *`, `pnpm *`,
+   `yarn *`, `bun *`, `uv *` and `node_modules/.bin/*` are allowed whole, so `npx turbo run
+   build` (turbo isn't allowed), `pnpm exec cdk synth` (cdk only with its telemetry off), `yarn
+   nx test` (nx only with Nx Cloud off), `npx lerna`, `npm run cdk` (a package.json script named
+   for it), `uv run semgrep --config p/python` and `.venv/bin/semgrep` ran without what their
+   plain spelling needs. npm's tools (each package's `bin` read from registry.npmjs.org,
+   2026-11-22): `turbo`, `lerna`, `moon`, `moonx`, `cdk`, `cdktf`, `nx`, `rush`, `rush-pnpm`,
+   `redocly` and `openapi` (Redocly's CLI ships both), `firebase`, `azurite` and its
+   `azurite-blob`, `-queue`, `-table`, `serverless`, `sls`, `vercel`, `vc`, `netlify`, `ntl`,
+   `wrangler`, `wrangler2`, `cf-wrangler`, and `spago` (allowed whole, here for its package steps),
+   with the package names npx takes for them (`NODE_PACKAGES`: `aws-cdk`, `cdktf-cli`,
+   `@microsoft/rush`, `@redocly/cli`, `firebase-tools`, `@moonrepo/cli`, `netlify-cli`); pip's:
+   `sam`, `semgrep`, `ansible`, `ansible-playbook`, `ansible-galaxy`, `molecule`, `aws`, `az`,
+   `gsutil`, `docker-compose` (semgrep and sam have no CLI on npm). For each such tool not allowed
+   whole (`RUNNER_HELD`), deny `RUNNER_DENY`, its forms under the runners (`RUNNER_FORMS`, each
+   starting with `*` as `OUTWARD`'s do, so `CI=1` or `env` before it is caught too): npm's
+   `*npx {t} *`, `*npx -* {t} *` (`npx --no turbo`), `*npx {t}@*` and `*npx -* {t}@*` (npx runs
+   a version that matches the installed one: `npx nx@19 release` missed `*nx release *`),
+   `*pnpm {t} *`, `*pnpm -* {t} *` (`pnpm --filter web exec cdk`), `*yarn {t} *`, `*yarn -* {t}
+   *`, `*yarn workspace * {t} *`, `*bun {t} *`, `*bun -* {t} *`; any runner's `*run {t} *`, `*run
+   -* {t} *`, `*exec {t} *`, `*exec -* {t} *` (`npm run`, `pnpm exec` and `yarn exec`, which run
+   any command, `bun run`, `uv run`, `poetry run`, `pipenv run`, `pdm run`, `hatch run`, `pixi
+   run`, `conda run`) and a bin directory's `*bin/{t} *` (`node_modules/.bin/`, `.venv/bin/`,
+   absolute paths too); pip's tools get only the last five. Then allow `RUNNER_ALLOW`: each of
+   their `ALLOWED_COMMANDS` entries under each runner's anchored spelling (`RUNNER_PREFIXES`:
+   `npx`, `pnpm`, `pnpm exec`, `yarn`, `yarn run`, `yarn exec`, `bun`, `bun run`,
+   `node_modules/.bin/`, `./node_modules/.bin/`; `uv run`, `poetry run`, `pipenv run`, `pdm
+   run`, `hatch run`, `pixi run`, `.venv/bin/`, `./.venv/bin/`, `venv/bin/`, `./venv/bin/`), its
+   variables first (`CDK_DISABLE_CLI_TELEMETRY=true npx cdk synth`, `SAM_CLI_TELEMETRY=0 uv run
+   sam build`, `npx nx test --no-cloud`), each also behind `*=*`. Then the acceptance command's
+   lines with more arguments again (`npx turbo run test *` under `--test 'npx turbo run test'`,
+   as plain `turbo run test *` is), never a tool it granted whole: `--test 'npx vitest run'`
+   granting `npx *` would lift every one of these. What the rules don't name runs under the
+   runners as before (`npx vitest`, `pnpm exec tsc`, `uv run pytest`). A word after a flag is
+   taken for the tool, so `pnpm --filter cdk build` (a package named cdk) or `uv run pytest -x
+   aws` asks once, and a flag's quoted command (`npx -c 'turbo run'`) passes, as `bash -c`
+   does; an absolute path to a bin directory asks too, as does a read of a tool's bin path
+   (`ls node_modules/.bin/nx`). `OUTWARD`'s patterns all start with `*`
+   but `v up *` (`* v up *` beside it), so the outward steps of the tools allowed whole hold under
+   the runners by their own names (`npx wasm-pack publish`, `npx dprint upgrade`, `npx spago
+   publish`); a package name other than the tool's or a version (`npx firebase-tools deploy`,
+   `npx nx@19 release`) missed them, and for the held tools those are denied above; for the ones
+   allowed whole, a version spelled (`npx dprint@0.47 upgrade`) still passes;
 5. deny `OUTWARD`, a step out of the machine inside an allowed tool, each pattern starting with
    `*` so a launcher's or wrapper's spelling is caught too (`pnpm publish`, `npx cdk deploy`,
    `./mvnw deploy`, `timeout 600 terraform apply`, `env helm install`) and no `*=*` copy needed:
@@ -1774,7 +1823,26 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `apply-locally`, `download-cloud-client` (the nx-cloud aliases, nx's command reference),
    `psalm … --shepherd…` (results to Shepherd), `kcov … --coveralls-id…` (coverage to
    coveralls.io), and the self-updates `v up` (as a word, `v up *` and `* v up *`: `just dev
-   up` runs), `dprint upgrade`, `php-cs-fixer … self-update` and `selfupdate`. After step 4, so
+   up` runs), `dprint upgrade`, `php-cs-fixer … self-update` and `selfupdate`; and since #999
+   (2026-11-22) a shared build cache written, or the build run on remote workers, from the
+   agent's unreviewed worktree. The agent's environment turns Pants's and Nx's off whatever the
+   repo's config says (`runner.REMOTE_CACHES_OFF`, *Its environment*), so these are the
+   spellings that turn them back on: Pants's flags, which beat its environment (its options
+   docs: flag, then environment, then `pants.toml`), `pants … --remote-cache-write` (and
+   `=…`), `--remote-execution` (and `=…`; `--no-remote-cache-write` runs), and either variable
+   named at all, `*PANTS_REMOTE_CACHE_WRITE*`, `*PANTS_REMOTE_EXECUTION*`,
+   `*NX_SKIP_REMOTE_CACHE*` (`unset` and `env -u` too; `=true` asks once). Bazel and Buck2 have no
+   environment switch, so only their flags that name a cache, an executor or a build-event server,
+   or send every action: `bazel … --remote_cache`, `--remote_executor`, `--bes_backend` (each
+   `=…` or a value after a space; `bazelisk` too), `buck2 … --upload-all-actions`,
+   `--write-to-cache-anyway`, `--remote-only`, `--prefer-remote`, and a `buck2_re_client.` config
+   override (`-c buck2_re_client.engine_address=…`). The engineer's call, 2026-11-22: a repo's
+   own `.bazelrc` (`build --remote_cache=…`, reached by `--config=remote` or by default) and its
+   `.buckconfig` (`[buck2_re_client]` and a platform with `remote_enabled`) turn the same on with
+   no flag at all, and the agent can edit either in its worktree, so the patterns hold only the
+   spelling least likely; what those files turn on is the reviewer's to see (a changed
+   `.bazelrc`, `.buckconfig` or `pants.toml` is in the diff), and Bazel's and Buck2's remote
+   caches take the agent's builds as they take anyone's from that checkout. After step 4, so
    `--test 'cargo test'` granting `cargo *` doesn't lift `cargo publish` (and `--test 'terraform
    test'` runs as written, step 7, while its more arguments ask); before step 7, so `wb allow`
    does. Most verbs are words, a space before and a space or the end after (`*mvn* deploy
@@ -1808,8 +1876,10 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    it as `uvx` does, the project's own forms allowed again in step 6; `npx -y *`,
    `npx --yes *`, `npm exec *`, `npm x *`, `npx -p *`, `npx --package *`, `pnpm dlx *`,
    `yarn dlx *`, `bunx *`, `bun x *`, `uvx *`, `uv tool run *`, `uv tool install *`,
-   `uv run --with *`, `deno run *npm:*`, `deno run *jsr:*`). A plain `npx <pkg>` stays allowed
-   (`npx tsc`), but OpenCode runs with `npm_config_yes=false` (`runner.OPENCODE_ENV`), so it runs
+   `uv run --with *`, `deno run *npm:*`, `deno run *jsr:*`), and `RUNNER_ASK`, the package steps
+   of `RUNNER_TOOLS`' under their runners, in step 4's deny forms (`npx nx add`, `pnpm exec nx
+   migrate`, `npx rush add`, `npx spago install aff`, #999). A plain `npx <pkg>` stays allowed
+   (`npx tsc`; the tools of step 4's runner forms excepted), but OpenCode runs with `npm_config_yes=false` (`runner.OPENCODE_ENV`), so it runs
    only what the project installed instead of fetching one (npm says yes by itself without a
    terminal); `npx --yes <pkg>` is the form to ask for;
 6. allow `INSTALL_LISTED`, installing what the project already lists, because with the optional
@@ -1819,7 +1889,8 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `python3.* -m pip`, `uv pip` forms), `pipenv install`, `pipenv install --dev`, `pipenv sync`,
    `pio pkg install`, `platformio pkg install`, `nimble install -d`, `nimble install
    --depsOnly`, and since #994 `xmake require`, `haxelib install *.hxml`, `spago install`, `zef
-   install --deps-only .`, `hugo mod get`, and dub's `run`, `build` and `test` bare, with a flag
+   install --deps-only .`, `hugo mod get` (and `RUNNER_LISTED`, those of `RUNNER_TOOLS`' under
+   step 4's anchored runner spellings: `npx spago install`, #999), and dub's `run`, `build` and `test` bare, with a flag
    first (`dub test --coverage`, `dub run -- x`) or of a subpackage (`dub build :sub`), the
    project's own (a package named first still asks); the npm, pnpm and bun ones with one of
    `INSTALL_FLAGS` (`--frozen-lockfile`, `--immutable`, `--prefer-offline`, `--offline`,
@@ -2053,13 +2124,18 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `.foundry/keystores`, `.mc` (the MinIO client's keys), `.erlang.cookie` and
   `.config/erlang/.erlang.cookie` (a test that starts distributed Erlang nodes needs a cookie of
   its own), `.mylogin.cnf`, `.dbt/profiles.yml` (a dbt project in the lane needs its profile in
-  the repo), `.config/openstack`, `.config/hcloud`, `.chef`, `.config/infracost`, `.minikube`),
+  the repo), `.config/openstack`, `.config/hcloud`, `.chef`, `.config/infracost`, `.minikube`;
+  and since #999, 2026-11-22, the Firebase CLI's login `.config/configstore/firebase-tools.json`
+  (its refresh token; the other tools' configstore files stay readable), semgrep's
+  `.semgrep/settings.yml` (`semgrep login`'s token; semgrep's Python reads
+  `$XDG_CONFIG_HOME/.semgrep` when that is set, so `.config/.semgrep/settings.yml` too) and Rush's
+  cloud build cache credentials `.rush-user/credentials.json`),
   the same under `$XDG_CONFIG_HOME`,
   `$XDG_DATA_HOME` and `$XDG_STATE_HOME`, wherever `SECRET_VARS` moved them (`GNUPGHOME`,
   `PASSWORD_STORE_DIR`, `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`, `AWS_SHARED_CREDENTIALS_FILE`,
   `AWS_CONFIG_FILE`, `CLOUDSDK_CONFIG`, `AZURE_CONFIG_DIR`, `HISTFILE`, `TF_CLI_CONFIG_FILE`,
   `REGISTRY_AUTH_FILE`, `HELM_REGISTRY_CONFIG`, `ANSIBLE_GALAXY_TOKEN_PATH`, `MC_CONFIG_DIR`,
-  `$CARGO_HOME`'s credentials) and Claude's directory (`secret_paths`); and workbench's own files
+  `SEMGREP_SETTINGS_FILE`, `$CARGO_HOME`'s credentials) and Claude's directory (`secret_paths`); and workbench's own files
   (`private_paths`): `$WB_HOME` (notify.jsonl, the chat log, the rules, other tasks) and its
   config (`~/.config/workbench` and wherever `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
   `WB_MODELS`, `WB_IMAGES`, `WB_AUDIO` moved its files): the audit read the chat token from a lane, which
@@ -2081,7 +2157,23 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   environment*), and so is k6's `.config/k6`, which `k6 run` reads at every start and stops
   when it can't: the agent's `K6_CONFIG` names its own. Vercel's CLI stops on every command,
   `vercel build` too, when its config or login can't be read, so for a user logged in it doesn't
-  run in the lane: deploying is Claude's. A hidden file in a writable tool home splits that home, which then refuses a
+  run in the lane: deploying is Claude's. Of #999's three, each checked with its file there but
+  unreadable: the Firebase CLI stops, at exit if not before (it uses configstore 5, which rethrows
+  `EACCES`, and its `cli.js` deletes `lastError` from the store on every exit; configstore's own
+  module, run in a real lane against the hidden file, exited 1, and with `XDG_CONFIG_HOME` on an
+  empty directory exited 0). Its store follows `XDG_CONFIG_HOME` alone, which would move
+  OpenCode's config and every other tool's with it, so the CLI doesn't run in the lane as
+  written, logged in or not: that exit handler writes the file on every run, so it is there for
+  anyone who has run the CLI, and where it isn't, the write fails (`~/.config/configstore` isn't
+  the lane's; configstore rethrows that `EACCES` too, seen with the directory read-only, the
+  review). `XDG_CONFIG_HOME=$(mktemp -d) firebase emulators:exec --project demo-x 'npm test'`
+  runs (a store of its own; the rules allow it, an `=` before an allowed entry). semgrep stops too (its Python and its OCaml core both find the file, since the
+  lane leaves `access()` and `stat()` alone, and neither catches the failed read): the agent's
+  `SEMGREP_SETTINGS_FILE` names its own (*Its environment*). Rush reads its credentials only for
+  a cloud build cache and only without `RUSH_BUILD_CACHE_CREDENTIAL`: its S3 and HTTP plugins
+  catch the failed read, warn and miss, and the build runs locally; the Azure plugin's first read
+  isn't caught (`AzureStorageBuildCacheProvider`, from its source, not run here), so in a repo on
+  Azure's cache the lane's build spells `RUSH_BUILD_CACHE_ENABLED=0` before it. A hidden file in a writable tool home splits that home, which then refuses a
   new entry at its top, so `context.SPLIT_MADE` makes what the tool makes there first, when a
   secret splits it: `~/.m2`'s `repository/` and `wrapper/` (`./mvnw`). And OpenCode's `auth.json` and
   session database in `.local/share/opencode` (OpenCode runs in the lane and needs them: keep
@@ -2268,7 +2360,20 @@ are hidden, #992, and helm stops at every start, `helm lint` and `helm template`
 file it is given exists but can't be opened; a missing one is an empty store) and `K6_CONFIG`
 (`<runtime dir>/k6.json`, made holding `{}`: the user's `~/.config/k6` is hidden, #992, `k6 run`
 stops when it can't read its config, and forgives only a missing default; made with `O_EXCL`,
-so never through a link the agent left),
+so never through a link the agent left) and `SEMGREP_SETTINGS_FILE`
+(`<runtime dir>/semgrep-settings.yml`, not made: the user's `~/.semgrep/settings.yml` is hidden,
+#999, and semgrep stops when it can't read the file it finds there; a missing one is its defaults,
+read by `semgrep/env.py` and `Semgrep_envvars.ml` alike),
+the build tools' remote caches off, whatever the user or the repo's config set
+(`REMOTE_CACHES_OFF`, #999, 2026-11-22: `NX_SKIP_REMOTE_CACHE=true`, since `NX_NO_CLOUD` and
+`--no-cloud` stop only Nx Cloud, `isNxCloudDisabled`, and a self-hosted cache, `@nx/s3-cache`,
+`@nx/gcs-cache`, `@nx/azure-cache`, `@nx/shared-fs-cache` or `NX_SELF_HOSTED_REMOTE_CACHE_SERVER`,
+was still read and written; it sets `skipRemoteCache`, which `_getRemoteCache` checks first, and a
+flag can't undo it. `PANTS_REMOTE_CACHE_WRITE=false` and `PANTS_REMOTE_EXECUTION=false`: Pants's
+environment beats `pants.toml`, so the agent's unreviewed builds neither write the team's cache
+nor run on its remote workers, and its cache reads stay; a repo whose toolchain lives only on
+remote workers then fails in the lane. The spellings that turn them back on are `OUTWARD`'s: step
+5 of *Commands, an allowlist*),
 `POETRY_VIRTUALENVS_IN_PROJECT=true` and `PIPENV_VENV_IN_PROJECT=1` unless the user set them
 (with the lane on: their venv in the worktree, #825, *Paths, a lane*), build
 daemons of its own (`daemon_env`, with the lane on: `GRADLE_OPTS` gets
@@ -2311,7 +2416,7 @@ host`, `ProxyError` and the like) says it again (`proxy_gap`: the setup's `faile
 status `tests.proxy`, which the report names), each with the `"env": [...]` line that passes it.
 OpenCode's own environment adds `OPENCODE_ENV`
 (`npm_config_yes=false`); the tests' doesn't. The tests' environment is `agent_env` all the same,
-`METADATA_OFF` with it: they run the agent's code, which meets the same lane.
+`METADATA_OFF` and `REMOTE_CACHES_OFF` with it: they run the agent's code, which meets the same lane.
 
 *The user's Python environment* (`context.python_env`, in `agent_env`, so the agent, the setup,
 the tests, the base check and `wb verify` alike). An activated venv or conda env (`source
@@ -8365,7 +8470,10 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   lint`, `nx *--no-cloud*`) → the skill's `reference/checks.md` (*Spell it the way the agent's
   shell allows*), so Claude's `--test` uses the spelling the agent may run, and the shell rules'
   step 2 here; a tool on the list by subcommands is `LIMITED` by itself (`_entry_tool`), one that
-  reaches out but isn't on the list goes in `OUTWARD_TOOLS` by hand.
+  reaches out but isn't on the list goes in `OUTWARD_TOOLS` by hand. A tool a package manager
+  installs into the project (npm's, pip's) also goes in `context.RUNNER_TOOLS`, and npx's other
+  name for it in `NODE_PACKAGES`, so its runner forms get the same verdict (#999): its
+  `ALLOWED_COMMANDS`, `ASK_FIRST` and `INSTALL_LISTED` entries follow it there by themselves.
 - **An experiment** (`context.EXPERIMENTS`) → its effects (`shell_rules`, `EXPERIMENT_NOTES`, `EXPERIMENT_PROTOCOL`),
   `task_experiments` (when it can work), `cli.experiment_lines`, the pane's Settings row
   (`PROBE_STOPS`, `probeMode`, `probeStatus` and `probeSaid`, which read `experiment_lines`' wording,
