@@ -147,6 +147,15 @@ ALLOWED_COMMANDS = (
     "mpirun", "gcc-*", "g++-*", "clang-*", "clang++-*",
     "scons", "protoc", "ocaml", "iex", "ghci", "runghc", "irb", "gem", "luarocks", "busted",
     "lua5.*", "cython", "maturin", "virtualenv", "sphinx-build", "mkdocs", "terraform", "corepack",
+    # the Lisps, Schemes and Forth, and the checkers the skill's reference/checks.md puts in a
+    # task's --test: an agent trying `guile t.scm` or `sbcl --script` mid-round was refused, each
+    # first use a question and a wake (the owner, 2026-11-22: "does our whitelisting too strict").
+    # `nix-instantiate --parse` only: nix's evaluation can fetch and build through the daemon
+    "sbcl", "ecl", "ccl", "clisp", "racket", "raco", "guile", "guild", "csc", "csi",
+    "chicken-csc", "chicken-csi", "scheme", "chez", "chezscheme", "petite", "gosh", "chibi-scheme",
+    "mit-scheme", "gforth", "luac", "luac5.*", "luacheck", "selene", "basedpyright", "staticcheck",
+    "yamllint", "actionlint", "hlint", "tflint", "statix", "deadnix", "clj-kondo",
+    "nix-instantiate --parse",
 )
 # A project's own tools and builds, by their usual relative paths (`./x` is allowed already).
 PROJECT_BINS = (".venv/bin/*", "venv/bin/*", "node_modules/.bin/*", "build/*", "target/debug/*",
