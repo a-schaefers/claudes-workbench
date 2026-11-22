@@ -75,6 +75,8 @@ import type { Register } from 'claude-code'
 import type { WbChat, WbLine, WbLive, WbPane, WbSaid, WbStats, WbTask, WbTop } from '../types'
 import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
+import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
+import type { Plan, Target } from './splash'
 
 const PANE = 'workbench'
 // Nothing waits on a timer for news: `wb events` (inotify) prints a line the moment a task, a
@@ -132,8 +134,13 @@ const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
 // 2026-11-19): a strip above the prompt stands in for it, a press there or /workbench brings it back.
 const pane = atom({ plugin: 'workbench', key: 'pane' } as const,
   { tab: 'tasks', open: '', focus: '', minimized: false } as WbPane, { shape: 'pane-1' })
+// Whether this session's first /workbench has come (#963): the opening animation plays at that
+// one alone. An atom, so a module reload (which runs session.start again with `mem` empty) can't
+// play it again; /workbench again and a bring-back from the strip find it set.
+const splashed = atom({ plugin: 'workbench', key: 'splash' } as const, false, { shape: 'splash-1' })
 const STRIP_HINT = 'minimized · restore: click, or Ctrl+X Tab then Enter'
 // Stats between them (#406): looked at more often than Settings
+const MODELINE = "Claude's Workbench" // the bar under the tabs
 const TABS: [string, string, string][] = [['tasks', 'Tasks', '1'], ['stats', 'Stats', '2'], ['settings', 'Settings', '3']]
 // The Stats tab's history (`wb stats --json`), read while the tab is shown: when it is first
 // shown in a load (`mem.statsLoaded`: the atom outlives a reload), on each press of the tab, again
@@ -153,7 +160,9 @@ const STATS_RETRY_MS = 60_000
 const RETRY_MAX_MS = 10 * 60_000
 const SETTINGS_HINT = 'Click a row to see its options, then click one; or Tab to it and press Enter. A change applies at once.'
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
-const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web message
+// the user counts as away this long after they last used the web chat: a web message, or a page
+// in use (chat/away.json's `at`, written by `wb chat serve`'s /api/active, #959)
+const AWAY_MS = 6 * 3600 * 1000
 // ...or for as long as this session has a backlog task open: a night's batch outlasts six hours,
 // and its permission prompts then waited in the terminal until morning (#110, 2026-11-18)
 export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: WbTask) => boolean): boolean {
@@ -174,6 +183,9 @@ export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) =>
 // message in chat/away.json and a prompt typed in any session clears it, so every delegating
 // session relays its dialogs and says AWAY_NOTE. Kept in the listener's own state, only it did:
 // another session's overnight backlog left its permission dialogs in the empty terminal (#110 again).
+// The chat server writes it too when a page is in use (#959): the owner typed in the terminal,
+// then picked up the phone, and a prompt neither reached it nor was allowed by their setting. So
+// away is the device last used: the chat, used after the last prompt typed here.
 const awayFile = () => `${mem.root}/chat/away.json`
 // Whether a prompt is the user's own (at the terminal, or through Remote Control), by the
 // engine's stamp: a /loop or scheduled firing, another plugin's prompt or an MCP channel's
@@ -199,9 +211,9 @@ async function back($: any) {
 // per conversation, so a user who went to the web chat later was never told of, and a task's
 // news reached only the terminal they had left.
 const AWAY_NOTE =
-  'The user is away from the terminal and last wrote from the web chat. Tell them ' +
+  'The user is away from the terminal: they last used the web chat. Tell them ' +
   'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
-  '`wb chat log` shows the thread. Typing in the terminal again ends this.'
+  '`wb chat log` shows the thread. Typing in the terminal, or answering a prompt there, ends this.'
 async function awayToo($: any, text: string): Promise<string> {
   return (await away($, await read($, chat))) ? `${text}\n\n${AWAY_NOTE}` : text
 }
@@ -290,6 +302,95 @@ const frameOf = (pose: Pose, tick: number): Pose => {
   if (pose === 'work') return tick % STROKE_EVERY ? 'swing' : 'work'
   if (pose === 'sleep' || pose === 'slump') return pose
   return tick % BLINK_EVERY === 0 ? 'blink' : pose
+}
+
+// What the Tasks page is made of, apart from its drawing: the render draws it and pageShape
+// measures it, so the two can't disagree (#963).
+function pageParts(list: WbTask[], watched: WbLive, delegating: boolean, now: number, spin: string, cols: number,
+  pixels: boolean) {
+  const when = (t: WbTask) =>
+    ACTIVE.has(t.phase) || NEEDS.has(t.phase) ? `for ${ago(now - t.createdAt)}` : `${ago(now - t.updatedAt)} ago`
+  // The history is drawn, newest within HISTORY_CHARS: the engine scrolls the pane (arrows,
+  // while focused) and follows the end as lines arrive. What the agent is doing now is the
+  // apprentice's to say.
+  const all = watched.lines.filter(l => !['activity', 'clock', 'meta'].includes(l.s))
+  let from = all.length // (each line was cut to LINE_CHARS when read)
+  for (let used = 0; from > 0 && used + (all[from - 1].t?.length ?? 0) + 1 <= HISTORY_CHARS; from--)
+    used += (all[from - 1].t?.length ?? 0) + 1
+  const history = all.slice(from)
+  const doing = watched.lines.find(l => l.s === 'activity')
+  const clock = watched.lines.find(l => l.s === 'clock')
+  const meta = watched.lines.find(l => l.s === 'meta')
+  const focus = focusOf(list, watched.task)
+  const sp = speechOf(focus, doing?.t ?? '', list, delegating)
+  const busy = sp.pose === 'work' || sp.pose === 'think'
+  return {
+    when, from, history, meta, focus, sp, busy,
+    // The bubble's inner width beside the apprentice (its columns, the mouth's, the border and
+    // padding), or beside the face on one line; each line drawn whole, never squeezed.
+    room: Math.max(10, pixels ? cols - COLUMNS - 1 - 4 : cols - 4),
+    say: `${busy && doing ? `${spin} ` : ''}${sp.say}`,
+    more: sp.more,
+    clock: clock && focus?.name === watched.task ? clock.t : '',
+  }
+}
+
+// Text a terminal draws one column a character, for sure: ASCII, Latin, Greek and Cyrillic, and
+// the punctuation, arrows, shapes and dingbats the pane uses, less the emoji drawn two wide.
+// Anything else (wide East Asian, emoji, combining marks, controls, a newline) and a line's
+// height isn't known.
+const NARROW = /^[\x20-\x7e -¬®-˿Ͱ-ԯ‐-‧‰- ⁰-⌙⌜-⌨⌫-⏨⏭-⏯⏱⏲⏴-◼◿-☓☖-♇♔-♾⚀-⚒⚔-⚠⚢-⚩⚬-⚼⚿-⛃⛆-⛍⛏-⛓⛕-⛩⛫-⛱⛴⛶-⛹⛻⛼⛾-✄✆-✉✌-✧✩-❋❍❏-❒❖❘-➔➘-➯➱-➾⟀-⬚⬝-⭏⭑-⭔⭖-⯿]*$/
+
+/**
+ * The Tasks page's height in rows, as the render lays it out, for the opening animation, whose
+ * words fall into the modeline's row and whose apprentice walks to its spot (#963). `rows` is
+ * null where a line may wrap: a Text wider than the pane wraps at Ink's own word boundaries,
+ * which can't be known here exactly, and `atLeast` counts each such line as one row. `stage` is
+ * the row the apprentice's Raster starts on, `tail` the rows from there to the end.
+ */
+export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, saved: string, now: number,
+  cols: number): { rows: number | null; atLeast: number; stage: number; tail: number | null } {
+  const spin = SPIN[0] ?? '✻'
+  const page = pageParts(list, watched, delegating, now, spin, cols, true)
+  let exact = true
+  const line = (text: string) => { // a Text that wraps: one row when it fits
+    if (!NARROW.test(text) || text.length > cols) exact = false
+    return 1
+  }
+  let rows = 0
+  for (const t of list) {
+    rows += line(`${t.phase === 'running' ? spin : MARK[t.phase] ?? '•'} ${t.name} ${t.phase} · round ${t.round} · ` +
+      `${t.label || t.model}${t.tests ? ` · tests ${t.tests}` : ''} · ${page.when(t)}`)
+    for (const l of t.name === watched.task ? [] : t.recent) rows += line(`  ${clip(l, cols - 2)}`)
+    if (t.allowed) for (const l of wrapWords(t.allowed, cols - 2)) rows += line(`  ${l}`)
+    if (t.name !== watched.task && t.recent.length === 0) rows += line(`  ${clip(t.last, cols - 2)}`)
+    rows += 1 // its marginBottom
+  }
+  if (watched.task) {
+    rows += line(clip(`── ${watched.task} · ↑↓ scrolls ` + '─'.repeat(cols), cols))
+    if (page.meta) rows += line(page.meta.t)
+    if (page.from > 0) rows += line(`… ${page.from} earlier lines: \`wb watch ${watched.task}\` has them all`)
+    for (const l of page.history) rows += line(l.t || ' ')
+  }
+  const said = wrapWords(page.say, page.room).length + (page.more ? wrapWords(page.more, page.room).length : 0) +
+    (page.clock ? wrapWords(page.clock, page.room).length : 0)
+  const stage = rows + 1 // the stage's marginTop
+  // the stage's height (the apprentice, the mouth, the bubble below its marginTop), the saving's
+  // line, the tabs' marginTop, the tabs, the modeline
+  const savedFits = !saved || (NARROW.test(saved) && saved.length <= cols)
+  const tail = Math.max(ROWS, MOUTH + 1, MOUTH - 1 + 2 + said) + (saved ? 1 : 0) + 3
+  return { rows: exact && savedFits ? stage + tail : null, atLeast: stage + tail, stage, tail: savedFits ? tail : null }
+}
+
+// Where the splash's last frame puts the apprentice and the modeline's bar, in a pane body of
+// `body` rows: the page's own rows when it fits (a docked pane draws it from the top; an inline
+// one, sized to it, keeps its top where it was), else its end, which the pane follows. A page
+// that may wrap and doesn't surely overflow has no exact bar row: the words rise away instead.
+export function splashTarget(shape: ReturnType<typeof pageShape>, body: number): Target {
+  if (shape.rows !== null && shape.rows <= body) return { stage: shape.stage, bar: shape.rows - 1 }
+  // more than the pane surely: its end, the modeline the pane's last row (the stage as near as known)
+  if (shape.atLeast > body) return { stage: body - (shape.tail ?? shape.atLeast - shape.stage), bar: body - 1 }
+  return { stage: shape.stage, bar: null }
 }
 
 const parseLines = (text: string): Row[] =>
@@ -620,7 +721,7 @@ function progressStops(after: number): [string, string, string][] {
   return [PROGRESS_OFF, ['on', `On, after ${after} min`,
     `A task past ${after} min of active work gets a check and one recommendation, waking Claude.`]]
 }
-const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress):/ // the rows whose ring the pane follows
+const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress|splash):/ // the rows whose ring the pane follows
 
 // One settings row: a Button naming the choice, which opens its options under it, each a Button
 // (a click, or Enter on the ring), the chosen one marked. Under them the sentence of the option
@@ -853,9 +954,16 @@ export function cardName(name: string): string {
 const RACK_MARK: Record<string, string> = { resident: '●', cpu: '●', split: '◑', idle: '○', "can't run": '✗', remote: '⇢' }
 const RACK_COLOR: Record<string, string> = { resident: 'success', cpu: 'success', split: 'warning', "can't run": 'error' }
 
+// The rack rows folded into one line when more than RACK_FOLD_MIN of them (`wb top`'s top.FOLD):
+// the owner, 2026-11-21: a machine with many models tried drew a row each, and the tab's menu sat
+// a long scroll below a new user's first look. `wb top` and `wb models` still list every one.
+const RACK_FOLD = new Set(['idle', "can't run", 'remote'])
+const RACK_FOLD_MIN = 2
+
 // The live view as lines of coloured parts: each GPU (memory and busy as bars, watts, busy's
-// sparkline), what runs now, the rack (every model: where it is, its speeds, its load time, the
-// task on it) and the queue. Nothing is said for what a platform can't tell.
+// sparkline), what runs now, the rack (every model resident or with a task: where it is, its
+// speeds, its load time, the task on it; the idle, can't-run and remote ones on one line past
+// RACK_FOLD_MIN) and the queue. Nothing is said for what a platform can't tell.
 export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; bold?: boolean; text: string }[][] {
   const s = t.snap
   // `why`: what `wb top` said as it ended, once it has failed twice: "Reading…" was all ever said (#553)
@@ -887,7 +995,10 @@ export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; 
     out.push([{ color: 'claude', text: '▶ ' }, { bold: true, text: `${r.task} ` }, { dim: true, text: `${r.label || r.model} · ${parts.join(' · ')}` }])
   }
   if (!(s.running ?? []).length) out.push([{ dim: true, text: 'Nothing running.' }])
-  for (const m of (s.rack ?? []) as Row[]) {
+  const rack = (s.rack ?? []) as Row[]
+  const folds = rack.filter(m => RACK_FOLD.has(m.state) && !m.tasks?.length)
+  const fold = folds.length > RACK_FOLD_MIN ? folds.length : 0
+  for (const m of fold ? rack.filter(m => !folds.includes(m)) : rack) {
     const where = m.state === 'cpu' && typeof m.cpu_bytes === 'number' ? ` ${gib(m.cpu_bytes)} GiB in RAM`
       : typeof m.gpu_bytes === 'number'
         ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
@@ -898,6 +1009,7 @@ export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; 
       { dim: true, text: facts.length ? ` · ${facts.join(' · ')}` : '' },
       ...(m.tasks?.length ? [{ color: 'claude', text: ` ← ${m.tasks.join(', ')}` }] : [])])
   }
+  if (fold) out.push([{ dim: true, text: `+${fold} more models idle, can't run or remote (wb top)` }])
   for (const q of (s.queue ?? []) as Row[])
     out.push([{ color: 'warning', text: '◌ ' }, { text: `${q.task} ` },
       { dim: true, text: `waits for the GPU${typeof q.waited_s === 'number' ? ` (${secs(q.waited_s)})` : ''}` }])
@@ -1087,6 +1199,11 @@ const GUARD_WORDS: Record<string, string> = {
   handovers: 'handovers without finishing',
 }
 
+// stats.STATS_MODEL_LINES, kept here too: the mod tracks main while wb runs from the user's clone,
+// so an older wb's feed (every model line, or only `models`) must not draw a row per model; and
+// with no line to go by (no task yet), what Optimized, Bench and What helps name (2026-11-21)
+const STATS_SHOWN = 3
+
 // The Stats tab's history as lines (a label in bold, then the text): what the feed holds, each
 // section left out when it has nothing, estimates said as such. A run of days that ended isn't
 // mentioned, only the best (the plan's rule: show what went right, never nag).
@@ -1136,10 +1253,12 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   if (q?.asked) out.push({ label: 'Questions', text: `${q.asked} asked mid-task` +
     (q.answered ? ` · ${q.answered} answered` : '') })
   // the models OpenCode has now, a wb optimize variant folded under its source, the most recently
-  // used first, the rest on one line (`model_lines`, #638); an older wb's feed: every model
-  const shown: [string, any][] = f.model_lines
+  // used first, the rest on one line (`model_lines`, #638); an older wb's feed: its `models`.
+  // Capped here as well as in wb: a wb from before the cap sends every line (2026-11-21)
+  const all: [string, any][] = f.model_lines
     ? (f.model_lines.lines ?? []).map((m: any) => [String(m.model), m])
     : Object.entries(f.models ?? {})
+  const shown = all.slice(0, STATS_SHOWN), past = all.slice(STATS_SHOWN)
   for (const [model, m] of shown) {
     const trend = spark((m.write_trend ?? []).map((p: number[]) => p[1]))
     const speed = m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''
@@ -1150,9 +1269,26 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
       (m.rounds != null ? ` · ${m.rounds} rounds` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
       speed + (trend ? ` ${trend}` : '') + change + (m.claude ? ` · Claude ~${kilo(m.claude)}/task` : '') })
   }
+  // the recent ones past stats.STATS_MODEL_LINES (and past this cap) and the older ones, one row;
+  // labelled "Other models" so the text after it doesn't say "more models" twice (2026-11-21)
   const older = f.model_lines?.older
-  if (older?.models) out.push({ label: 'Older models', text: `${older.models} older model${older.models === 1 ? '' : 's'}: ` +
-    `${older.tasks} task${older.tasks === 1 ? '' : 's'} (wb stats --all)` })
+  const moreModels = (f.model_lines?.more?.models ?? 0) + past.length
+  const moreTasks = (f.model_lines?.more?.tasks ?? 0) + past.reduce((n, [, m]) => n + (Number(m.tasks) || 0), 0)
+  const others = moreModels + (older?.models ?? 0), otherTasks = moreTasks + (older?.tasks ?? 0)
+  if (others) out.push({ label: 'Other models',
+    text: [moreModels ? `${moreModels} more` : '', older?.models ? `${older.models} older` : ''].filter(Boolean).join(' · ') +
+      ` model${others === 1 ? '' : 's'}: ${otherTasks} task${otherTasks === 1 ? '' : 's'} (wb stats --all)` })
+  // Optimized, Bench and What helps name only the models shown above, a line's variants with it,
+  // the rest counted, with where to see them (2026-11-21: 30 models' windows and runs made rows
+  // taller than the screen); no model line yet (no task, or only older ones): the first STATS_SHOWN
+  const ids = shown.length
+    ? new Set<string>(shown.flatMap(([model, m]) => [model, ...(m.variants ?? [])])) : null
+  const pick = <T,>(entries: [string, T][]): [[string, T][], number] => {
+    const kept = entries.filter(([m], i) => (ids ? ids.has(m) : i < STATS_SHOWN))
+    return [kept, entries.length - kept.length]
+  }
+  const counted = (kept: string[], rest: number, report: string) => kept.length
+    ? kept.join(' · ') + (rest ? ` · ${rest} more (${report})` : '') : `${rest} model${rest === 1 ? '' : 's'} (${report})`
   const sized = Object.entries(f.sizes ?? {}) as [string, any][]
   if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
   if (f.days?.length) {
@@ -1171,20 +1307,24 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   const guards = Object.entries(f.guards ?? {}) as [string, number][]
   if (guards.length) out.push({ label: 'What stopped agents', text: guards.sort((a, b) => b[1] - a[1])
     .map(([g, n]) => `${GUARD_WORDS[g] ?? g} ${n}`).join(' · ') })
-  for (const [model, h] of Object.entries(f.helps ?? {}) as [string, any][]) {
-    const said = Object.entries(h).filter(([, v]: any) => v[1]).map(([k, v]: any) => `a ${k === 'smaller' ? 'smaller step' : k} helped ${v[0]} of ${v[1]}`)
-    if (said.length) out.push({ label: `What helps (${model})`, text: said.join(' · ') })
-  }
-  const bench = Object.entries(f.bench ?? {}) as [string, any][]
+  const [helps, helpsRest] = pick(Object.entries(f.helps ?? {}) as [string, any][])
+  const helped = helps.map(([model, h]) => [model, Object.entries(h).filter(([, v]: any) => v[1])
+    .map(([k, v]: any) => `a ${k === 'smaller' ? 'smaller step' : k} helped ${v[0]} of ${v[1]}`)] as [string, string[]])
+    .filter(([, said]) => said.length)
+  helped.forEach(([model, said]) => out.push({ label: `What helps (${model})`, text: said.join(' · ') }))
+  // the rest on a row of their own, not on the last model's, where it read as that model's (2026-11-21);
+  // no text command prints them, the feed does
+  if (helpsRest) out.push({ label: 'What helps', text: `${helped.length ? `${helpsRest} more` : helpsRest} model${helpsRest === 1 ? '' : 's'} (wb stats --json)` })
+  const [bench, benchRest] = pick(Object.entries(f.bench ?? {}) as [string, any][])
   // the newest finished run, and a newer one beside it, never in its place (#570)
   const sofar = (p: any) => `${p.of} of ${p.planned} ${p.running ? 'so far' : 'before it stopped'}` +
     (p.of ? `, ${p.passed} passed` : '')
-  if (bench.length) out.push({ label: 'Bench', text: bench.map(([m, b]) => `${m} ` +
+  if (bench.length || benchRest) out.push({ label: 'Bench', text: counted(bench.map(([m, b]) => `${m} ` +
     [b.run !== undefined ? `${b.passed}/${b.of} (${b.day})` : '', b.partial ? `newer run ${sofar(b.partial)}` : '']
-      .filter(Boolean).join(', ')).join(' · ') })
-  const opt = Object.entries(f.optimized ?? {}) as [string, any][]
-  if (opt.length) out.push({ label: 'Optimized', text: opt.map(([m, o]) => `${m} ${Math.round(o.window / 1024)}K` +
-    (o.spill ? ` (${o.spill}% on the CPU)` : ' all on the GPU')).join(' · ') })
+      .filter(Boolean).join(', ')), benchRest, 'wb bench report') })
+  const [opt, optRest] = pick(Object.entries(f.optimized ?? {}) as [string, any][])
+  if (opt.length || optRest) out.push({ label: 'Optimized', text: counted(opt.map(([m, o]) => `${m} ${Math.round(o.window / 1024)}K` +
+    (o.spill ? ` (${o.spill}% on the CPU)` : ' all on the GPU')), optRest, 'wb optimize report') })
   return out
 }
 
@@ -1380,11 +1520,15 @@ const mem = {
   lastPoll: 0,
   listenerBody: '', // what this session last wrote to chat/listener.json
   tick: 0, // the apprentice's frame count
+  // the opening animation while it plays (#963): its plan once the pane drew it, the frame on
+  // screen, the ticks it waited for a first draw, its timer
+  splash: null as null | { plan: Plan | null; f: number; waited: number; timer: { cancel: () => void } | null },
   posed: '' as Pose | '', // its pose as last drawn in a Raster: the timer animates it while set
   shown: '' as Pose | '', // the frame on screen now
   skill: '', // the /workbench skill's SKILL.md, for the workbench-mode block
   savingsFile: '', // savings.json, where wb keeps the kWh price ($WB_SAVINGS): the Stats key stamps it
   fold: false, // the session's directory is on a file system that ignores case (macOS): `within`
+  termDialogs: [] as TermDialog[], // dialogs up in the terminal while the user wasn't away (#959)
 }
 
 // Whether path b is path a or inside it, by whole components: /x/ab is not inside /x/a. In lower
@@ -2034,6 +2178,55 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
   }
 }
 
+// A dialog while the user is at the terminal stays there, and the phone is told one waits (#959):
+// typing in the terminal and then picking up the phone left a prompt there with the phone told
+// nothing. A notice, not a card (only the terminal can answer it), pushed as Claude's messages
+// are; wb skips it for a user who doesn't use the chat. Only a permission, as the owner asked, and
+// only one still unanswered after NOTICE_AFTER_MS: written at once, every prompt approved at the
+// terminal in two seconds buzzed the phone ten seconds later saying it still waited (the #959
+// review). One open notice at a time: a burst of prompts buzzed once per prompt.
+// Answering the dialog is using the terminal (termDialogDone): tapping the notice opened the page,
+// which made the user away, and the answer at the terminal submitted no prompt, so the next
+// prompt went to the phone, or was allowed by "Let Claude go ahead", with the user at the
+// terminal (the #959 review).
+const NOTICE_AFTER_MS = 30_000
+type TermDialog = { tool: string; agent: string; at: number; kind: string; text: string; id: string; sending: boolean; done: boolean }
+
+// The poll's tick: each permission dialog still up past NOTICE_AFTER_MS gets its notice, unless
+// another notice of this session's is still open
+async function termNotices($: any, now: number) {
+  if (mem.termDialogs.some(d => d.sending || (d.id && !d.done))) return
+  const d = mem.termDialogs.find(d => d.kind === 'permission' && !d.done && !d.id && now - d.at >= NOTICE_AFTER_MS)
+  if (!d) return
+  d.sending = true
+  try {
+    const { ok, out } = await runWb($, ['chat', 'notice', `--tool=${d.tool}`, '--kind=permission', `--text=${d.text}`], 15_000)
+    const id = (out.split('\n').pop() || '').trim()
+    if (!ok) warnOnce($, 'chat-notice', `the web chat wasn't told of a dialog here (${brief(out)})`)
+    d.id = ok && /^\d+-[0-9a-f]+$/.test(id) ? id : 'none' // 'none': wb skipped it, or failed: not again
+    if (d.done) await noticeDone($, d)
+  } finally {
+    d.sending = false
+  }
+}
+
+// The notice's dialog was answered here: no push owed for it, and the page says so
+async function noticeDone($: any, d: TermDialog) {
+  if (!d.id || d.id === 'none') return
+  const { ok, out } = await runWb($, ['chat', 'notice', '--done', d.id], 15_000)
+  if (!ok) warnOnce($, 'chat-notice-done', `the web chat wasn't told a dialog here was answered (${brief(out)})`)
+}
+
+// A dialog that came up at the terminal is over (its call went on, or the turn ended): the user
+// answered it there, so the phone used while it was up (the notice tapped) no longer counts as
+// the device last used, and its notice is settled
+async function termDialogDone($: any, d: TermDialog) {
+  d.done = true
+  mem.termDialogs = mem.termDialogs.filter(x => x !== d)
+  if (await webAt($) >= d.at) await back($)
+  if (!d.sending) void noticeDone($, d)
+}
+
 async function waitOnChat($: any, id: string, kind: string, i: Record<string, unknown>, signal?: AbortSignal) {
   $.ui.toast(`workbench: ${kind === 'plan' ? 'the plan' : kind === 'question' ? "Claude's question" : 'a permission prompt'} is waiting for you in the web chat`)
   const deadline = (await $.clock.now()) + ASK_WAIT_MS
@@ -2524,6 +2717,7 @@ function startEars($: any) {
   void ears($)
   $.clock.every(POLL_MS, async () => {
     const now = await $.clock.now()
+    if (mem.termDialogs.length) void termNotices($, now)
     if (!mem.eventsPid || mem.hasActive || mem.queued.length || now - mem.lastPoll > SAFETY_MS) void poll($)
   })
   $.clock.every(FRAME_MS, async () => {
@@ -2535,6 +2729,62 @@ function startEars($: any) {
       .catch(() => ({ deny: 'gone' }))
     if (r.deny) mem.posed = '' // the next draw sets it again
   })
+}
+
+// The opening animation (splash.ts; #963, 2026-11-21: the owner's "it needs to end by pulling
+// in the Tasks page like normal and have no penalty beyond initial startup"). The first
+// /workbench of a session starts it, unless the Settings row turned it off (`wb splash off`,
+// splash.json); a reload, /workbench again, a bring-back from the strip or a pane a task opened
+// never do (the `splashed` atom). While it plays the pane's Tasks tab is one Raster the size of
+// its body, repainted by its own timer through $.ui.blit; polling and loading carry on under it,
+// so the page it hands over to is current. It ends after its last frame, at a key in the pane
+// (Tab, a click, arrows and scroll), or when the pane is closed, resized or can't take a blit,
+// and the Tasks page draws as it always does. Its timer is cancelled then: nothing of it runs
+// after. Not at a key typed in the prompt: that needs a prompt.edit hook, which can't be taken
+// off again, so every keystroke of the session would wait on the mod for an animation long over
+// (2026-11-21, review of #963); typing goes on beside it, and it's over in five seconds.
+const SPLASH = 'splash' // its Raster's key, for $.ui.blit
+const SPLASH_WAIT = 25 // ticks (2 s) it waits for the pane's first draw before giving up
+const SPLASH_STOPS: [string, string, string][] = [
+  ['on', 'Enabled (default)', 'The first /workbench of a session opens with a short animation; any key skips it.'],
+  ['off', 'Off', 'The Tasks page opens at once.'],
+]
+
+// splash.json as wb writes it (`wb splash on|off`): on unless it says off
+async function splashOn($: any): Promise<boolean> {
+  try {
+    return JSON.parse(await $.fs.read(`${mem.root}/splash.json`)).on !== false
+  } catch {
+    return true
+  }
+}
+
+function startSplash($: any) {
+  const s: NonNullable<typeof mem.splash> = { plan: null, f: 0, waited: 0, timer: null }
+  mem.splash = s
+  s.timer = $.clock.every(SPLASH_MS, () => { void splashTick($, s) })
+}
+
+async function splashTick($: any, s: NonNullable<typeof mem.splash>) {
+  if (mem.splash !== s) return
+  if (!s.plan) { // the pane hasn't drawn it yet
+    if (++s.waited > SPLASH_WAIT) endSplash($)
+    return
+  }
+  if (s.f + 1 >= frameCount(s.plan)) return endSplash($)
+  s.f += 1
+  const r = await $.ui.blit({ requestId: PANE, key: SPLASH, cells: packed(frameCells(s.plan, s.f)) })
+    .catch(() => ({ deny: 'gone' }))
+  if (r?.deny && mem.splash === s) endSplash($) // the pane is gone or drew something else: the page then
+}
+
+// Ends it: the timer cancelled, the page drawn (`redraw`: unless the render ending it draws it)
+function endSplash($: any, redraw = true) {
+  const s = mem.splash
+  if (!s) return
+  mem.splash = null
+  try { s.timer?.cancel() } catch { /* already stopped */ }
+  if (redraw) $.ui.invalidate('ui.render')
 }
 
 // Turning workbench mode on or off: the chat listens while it is on. The context block follows
@@ -2755,17 +3005,35 @@ export const register: Register = (on, options) => {
       const why = await codingRefusal($, path)
       if (why) return { deny: why }
     }
-    return next(e)
+    if (next.origin.plugin !== 'engine') return next(e)
+    // The engine's call settles its permission check, a dialog included, before it resolves: one
+    // whose dialog came up at the terminal is over once it does, answered there (#959): the oldest
+    // dialog of that tool in that loop (another loop's call of the tool settles none of its)
+    try {
+      return await next(e)
+    } finally {
+      const agent = e.agentId ?? ''
+      const d = mem.termDialogs.find(d => d.tool === e.tool && d.agent === agent)
+      if (d) await termDialogDone($, d)
+    }
   })
 
   // A dialog while the user is away on the web chat goes there (askOnChat): the moment it would
   // come up, in the session the chat listens to. A settings hook's own answer stands, and a
-  // failed hook leaves the dialog to come up as usual.
+  // failed hook leaves the dialog to come up as usual. At the terminal, the dialog stays there and
+  // is noted (mem.termDialogs, #959): a permission still up after NOTICE_AFTER_MS gets one notice
+  // on the phone (termNotices), and its answer here counts as terminal input (termDialogDone).
   on('classic.PermissionRequest', async ($, e, next) => {
     const r = await next(e)
     if (r.decision) return r
     const st = await read($, chat)
-    if (!st.delegating || !(await away($, st))) return r
+    if (!st.delegating || !st.web) return r
+    if (!(await away($, st))) {
+      const kind = KIND[e.tool_name] ?? 'permission'
+      mem.termDialogs.push({ tool: e.tool_name, agent: (e as any).agent_id ?? '', at: await $.clock.now(), kind,
+        text: kind === 'permission' ? askText(e.tool_input) : '', id: '', sending: false, done: false })
+      return r
+    }
     const decision = await askOnChat($, e.tool_name, e.tool_input, next.signal)
     return decision ? { ...r, decision } : r
   })
@@ -2794,6 +3062,11 @@ export const register: Register = (on, options) => {
     if (extra.length) mem.skillTurn = true
     const add = (text: string) => extra.length ? `${text}\n\n${extra.join('\n\n')}` : text
     mem.paneOpened = true // before the poll workbenchMode starts, which would open it too
+    // the session's first /workbench opens with the animation, before the pane's first draw (#963)
+    if (!(await read($, splashed))) {
+      await update($, splashed, () => true)
+      if (await splashOn($)) startSplash($)
+    }
     await workbenchMode($, true)
     await showPane($)
     if (again && !firstTask(e.text)) return { text: add(AGAIN_NOTE(mem.skill)) }
@@ -2910,6 +3183,9 @@ export const register: Register = (on, options) => {
       // runs: the card would wait on the page for ever (seen live, 2026-11-18)
       for (const id of mem.asksOpen) void runWb($, ['chat', 'answer', id, 'expired', '--by', 'interrupted'], 15_000)
       mem.asksOpen.clear()
+      // the dialogs at the terminal are over too, an interrupt's included (#959): the turn's
+      // subagents ended with it, and one left open here would hold every later notice back
+      for (const d of [...mem.termDialogs]) await termDialogDone($, d)
       mem.busy = false
       mem.skillTurn = false
       if (mem.chatQueued.size) void readQueued($)
@@ -2924,6 +3200,7 @@ export const register: Register = (on, options) => {
   // The person's scrolling decides whether the pane follows: up to read stops it, back down to
   // the end starts it again.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
+    if (e.origin.kind === 'person') endSplash($) // a key skips the opening animation, and still scrolls (#963)
     if (e.origin.kind === 'person') mem.follow = e.offset + e.bodyRows >= e.contentRows - 1
     return next(e)
   })
@@ -2931,6 +3208,7 @@ export const register: Register = (on, options) => {
   // The user's own close (its mark, Esc) puts the pane away: the strip above the prompt stands in
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin?.kind === 'person') {
+      endSplash($, false)
       await update($, pane, p => ({ ...p, minimized: true }))
       stopTop($) // put away: the live view ends with it
       $.ui.invalidate('ui.render')
@@ -2963,6 +3241,7 @@ export const register: Register = (on, options) => {
 
   // Where the ring is in the pane, so an open settings row shows that option's sentence; let through
   on('ui.focus', { requestId: PANE }, async ($, e, next) => {
+    if (e.origin.kind === 'person') endSplash($) // Tab or a click skips the opening animation, and still moves (#963)
     const focus = e.element && SETTING_ROWS.test(e.element) ? e.element : ''
     if (focus !== (await read($, pane)).focus) await update($, pane, p => ({ ...p, focus }))
     return next(e)
@@ -2976,6 +3255,28 @@ export const register: Register = (on, options) => {
     const { url, web, delegating } = await read($, chat)
     const saved = await read($, savings)
     const view = await read($, pane)
+    if (mem.splash) { // the opening animation, in place of the Tasks page while it plays (#963)
+      const props = (e.props ?? {}) as Row
+      const [cols, rows] = [Number(props.bodyColumns ?? 0), Number(props.scroll?.bodyRows ?? 0)]
+      const s = mem.splash
+      const fits = (e as Row).surface === 'terminal' && view.tab === 'tasks' && props.placement !== 'widget' &&
+        (!s.plan || (s.plan.cols === cols && s.plan.rows === rows)) // a resize is a redraw: the page then
+      // where the page will put the apprentice and the modeline, as it stands now: the walk and the
+      // bar go there. A row the page can't measure any more (a line that may wrap came) is no
+      // row: an earlier exact one was measured without that line, so the page is taller now and
+      // the bar would land above the real modeline (2026-11-21, review of #963). Before the words
+      // leave, that makes them rise away; once they fall, the bar goes to the row the page
+      // reaches at least.
+      const shape = fits ? pageShape(list, watched, delegating, saved, await $.clock.now(), cols) : null
+      let target = shape ? splashTarget(shape, rows) : null
+      if (target && target.bar === null && s.plan?.ending === 'fall') target = { ...target, bar: Math.min(rows - 1, shape!.atLeast - 1) }
+      if (target && !s.plan) s.plan = plan(cols, rows, target)
+      else if (target && s.plan) s.plan.target = target
+      if (target && s.plan) {
+        return <Raster key={SPLASH} columns={cols} rows={rows} cells={packed(frameCells(s.plan, s.f))} />
+      }
+      endSplash($, false) // too small, or not the Tasks tab on a terminal: the page at once
+    }
     // the web chat's link while it is on, on the Settings tab only (the user, 2026-11-19: never under
     // the tasks), then the tabs: last, since the pane follows its end (a row at the top scrolled away
     // under a long transcript)
@@ -2987,12 +3288,20 @@ export const register: Register = (on, options) => {
         </Text>
       </Box>
     ) : null
+    // under the tabs, on every tab, a modeline as in Emacs or Vim: the pane's name and the
+    // apprentice's face, in the theme's own colors so it reads on a dark or a light terminal (the
+    // user, 2026-11-21)
     const tabs = (
-      <Box flexDirection="row" columnGap={2} marginTop={1}>
-        {TABS.map(([tab, label, hotkey]) => (
-          <Button key={`tab-${tab}`} label={label} hotkey={hotkey} plain dimColor={view.tab !== tab}
-            onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => { void refreshStats($, true); void syncTop($) }) }} />
-        ))}
+      <Box flexDirection="column" marginTop={1}>
+        <Box flexDirection="row" columnGap={2}>
+          {TABS.map(([tab, label, hotkey]) => (
+            <Button key={`tab-${tab}`} label={label} hotkey={hotkey} plain dimColor={view.tab !== tab}
+              onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => { void refreshStats($, true); void syncTop($) }) }} />
+          ))}
+        </Box>
+        <Box key="modeline" backgroundColor="claude" paddingX={1}>
+          <Text color="inverseText" bold>{`${FACE.rest} ${MODELINE}`}</Text>
+        </Box>
       </Box>
     )
     // the Settings tab: Claude coding (#93), then the Stats tab's (#406), one row each at rest; the
@@ -3018,6 +3327,8 @@ export const register: Register = (on, options) => {
               v => picked(['stats', 'set', 'every', v]))}
             {settingRow(kit, $, 'progress', 'Progress checks', progressStops(prog.after), prog.on ? 'on' : 'off', view,
               v => runWb($, ['progress', v]))}
+            {settingRow(kit, $, 'splash', 'Opening animation', SPLASH_STOPS, (await splashOn($)) ? 'on' : 'off', view,
+              v => runWb($, ['splash', v]).then(({ ok, out }) => { if (!ok) $.ui.toast(`workbench: ${brief(out)}`) }))}
             <kit.Input key="price" label="▸ Electricity price per kWh: " value={mem.price ? String(mem.price) : ''}
               placeholder="not set (energy shows in Wh)" submitLabel="set" onSubmit={(v: string) => { void setPrice($, v) }} />
           </Box>
@@ -3067,42 +3378,23 @@ export const register: Register = (on, options) => {
     const props = (e.props ?? {}) as Row
     const cols = Math.max(30, Number(props.bodyColumns ?? e.viewport?.columns ?? 60))
     const now = await $.clock.now()
-    const spin = SPIN[Math.floor(now / 500) % SPIN.length]
+    const spin = SPIN[Math.floor(now / 500) % SPIN.length] ?? '✻'
 
     // the followed task's own recent lines are in its transcript below, in full
     const recentOf = (t: WbTask) => (t.name === watched.task ? [] : t.recent)
-    const when = (t: WbTask) =>
-      ACTIVE.has(t.phase) || NEEDS.has(t.phase) ? `for ${ago(now - t.createdAt)}` : `${ago(now - t.updatedAt)} ago`
-    // The history is drawn, newest within HISTORY_CHARS: the engine scrolls the pane (arrows,
-    // while focused) and follows the end as lines arrive. What the agent is doing now is the
-    // apprentice's to say.
-    const all = watched.lines.filter(l => !['activity', 'clock', 'meta'].includes(l.s))
-    let from = all.length // (each line was cut to LINE_CHARS when read)
-    for (let used = 0; from > 0 && used + (all[from - 1].t?.length ?? 0) + 1 <= HISTORY_CHARS; from--)
-      used += (all[from - 1].t?.length ?? 0) + 1
-    const history = all.slice(from)
-    const doing = watched.lines.find(l => l.s === 'activity')
-    const clock = watched.lines.find(l => l.s === 'clock')
-    const meta = watched.lines.find(l => l.s === 'meta')
-
     // The apprentice, in pixels where the pane has the rows for it (it takes six), else its face
     // on the line. Drawing it in pixels arms the timer that animates it. The stage keeps its
     // height beside a long history, and the bubble wraps its words onto more rows rather than
     // cutting them off: the pane can't be made wider.
-    const focus = focusOf(list, watched.task)
-    const sp = speechOf(focus, doing?.t ?? '', list, delegating)
-    const busy = sp.pose === 'work' || sp.pose === 'think'
     const pixels = (e as Row).surface === 'terminal' && Number(props.scroll?.bodyRows ?? 24) >= 20 && cols >= 40
-    // The bubble's inner width beside the apprentice (its columns, the mouth's, the border and
-    // padding), or beside the face on one line; each line drawn whole, never squeezed.
-    const room = Math.max(10, pixels ? cols - COLUMNS - 1 - 4 : cols - 4)
+    const page = pageParts(list, watched, delegating, now, spin, cols, pixels)
+    const { when, from, history, meta, focus, sp, busy } = page
     const lines = (text: string, props: Record<string, unknown>) =>
-      wrapWords(text, room).map(l => <Text {...props} wrap="truncate-end">{l}</Text>)
+      wrapWords(text, page.room).map(l => <Text {...props} wrap="truncate-end">{l}</Text>)
     const said = [
-      ...lines(`${busy && doing ? `${spin} ` : ''}${sp.say}`,
-        busy ? LINE_STYLE.activity : { color: sp.color, bold: true }),
-      ...(sp.more ? lines(sp.more, { dimColor: true }) : []),
-      ...(clock && focus?.name === watched.task ? lines(clock.t, { dimColor: true }) : []),
+      ...lines(page.say, busy ? LINE_STYLE.activity : { color: sp.color, bold: true }),
+      ...(page.more ? lines(page.more, { dimColor: true }) : []),
+      ...(page.clock ? lines(page.clock, { dimColor: true }) : []),
     ]
     let stage
     if (pixels) {

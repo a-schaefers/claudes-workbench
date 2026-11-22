@@ -501,6 +501,8 @@ def thread(limit: int = 200) -> list[dict]:
             got = receipts.get(r["id"])
             gone = got.get("how") == "expired" if got else _expired(r, now)  # retired (#741)
             r = {**r, "received": None if gone else got, **({"expired": True} if gone else {})}
+        elif r["from"] == "notice" and r["id"] in receipts:  # its dialog answered in the terminal (#959)
+            r = {**r, "answered": receipts[r["id"]].get("ts")}
         out.append(r)
     return out
 
@@ -579,6 +581,9 @@ def snapshot() -> dict:
 
 
 LATEST_BYTES = 1 << 20  # the messages' tail `latest` reads for Claude's last word
+# the messages that are news for the user: Claude's, and a notice that a dialog waits in the
+# terminal (`notice`, #959)
+NEWS = ("claude", "notice")
 
 
 def latest() -> dict:
@@ -591,7 +596,10 @@ def latest() -> dict:
     if ask and ask.get("kind") == "plan":
         ask = {k: v for k, v in ask.items() if k != "detail"}
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)
-    last = next((r for r in reversed(rows) if r.get("from") == "claude"), None)
+    # a notice whose dialog was answered in the terminal is no news (#959)
+    answered = {r.get("id") for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", LATEST_BYTES)
+                if r.get("how") == "answered"}
+    last = next((r for r in reversed(rows) if r.get("from") in NEWS and r.get("id") not in answered), None)
     return {"now": store.now(), "asks": [ask] if ask else [], "messages": [last] if last else [],
             "push": {"test": (store.read_json(chat_dir() / "push-test.json", None) or {}).get("ts")}}
 
@@ -732,7 +740,7 @@ def news(now: float | None = None) -> list[str]:
     not yet shown or pushed."""
     now = now or store.now()
     done = _seen()
-    items = [(m["id"], m["ts"]) for m in thread() if m.get("from") == "claude"]
+    items = [(m["id"], m["ts"]) for m in thread() if m.get("from") in NEWS]
     items += [(a["id"], a["ts"]) for a in asks() if a["answer"] is None]
     return [i for i, ts in items if now - PUSH_WINDOW < ts <= now - PUSH_DELAY and i not in done]
 
@@ -1005,6 +1013,67 @@ def set_prefs(**changes) -> dict:
             raise ValueError("away")
         store.write_json(chat_dir() / "prefs.json", p)
     return p
+
+
+# ---- which device the user last used (#959) ----
+# Away was where the user last typed: a web message made them away, typing in the terminal
+# brought them back. The owner typed in the terminal, then picked up the phone with the chat open
+# and "Let Claude go ahead" set; a permission prompt came up in the terminal, never reached the
+# phone and wasn't allowed (2026-11-21, #959). So using the page counts as using the phone: a page
+# on screen and in use posts /api/active, and that marks the user away as a web message does
+# (chat/away.json's `at`, which the mod reads), until they type in the terminal again or answer a
+# dialog there (the mod's `back`). chat/page.json `{at}`: when a page was last in use, so a dialog
+# at the terminal is announced only to a user who uses the chat: a page in use within
+# PAGE_RECENT, or push on.
+PAGE_RECENT = 86400
+NOTICE_WHAT = {"permission": "a permission", "plan": "a plan", "question": "a question"}
+
+
+def active() -> float:
+    """A chat page is in use now: recorded in page.json, and, with the chat on, in away.json, as
+    a web message would be. Off, no session sends a dialog here, and turning it off cleared away:
+    a page used meanwhile doesn't make the user away once it is turned on again."""
+    now = store.now()
+    store.write_json(chat_dir() / "page.json", {"at": now})
+    if is_on():
+        store.write_json(chat_dir() / "away.json", {"at": now, "by": "page"})
+    return now
+
+
+def page_used() -> float:
+    """When a chat page was last in use (seconds), 0 for never."""
+    try:
+        return float((store.read_json(chat_dir() / "page.json", None) or {}).get("at") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+
+
+def notice(tool: str, what: str, kind: str = "permission") -> dict | None:
+    """Tell the phone that a dialog waits in the terminal while the user isn't away (#959): a
+    `notice` row in the thread, with no buttons (only the terminal can answer it), pushed as
+    Claude's messages are. None, and nothing written, for a user who doesn't use the chat: no
+    page in use within PAGE_RECENT and no device with push on."""
+    if kind not in KINDS:
+        raise ValueError(kind)
+    if not webpush.subscriptions() and store.now() - page_used() > PAGE_RECENT:
+        return None
+    return send(f"Claude is waiting on {NOTICE_WHAT[kind]} in the terminal", "notice",
+                tool=tool[:200], what=what[:ASK_TEXT])
+
+
+def notice_done(msg_id: str) -> bool:
+    """The notice's dialog was answered in the terminal (#959): no push is owed for it (one not yet
+    due is never sent), and the thread shows it answered (a receipt `{id, ts, by: "terminal", how:
+    "answered"}`). Unsettled, every prompt approved at the terminal in two seconds still buzzed
+    the phone ten seconds later, saying it waited (the #959 review). False for an id that is no
+    notice in the thread."""
+    if not any(r.get("id") == msg_id and r.get("from") == "notice"
+               for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)):
+        return False
+    mark_seen([msg_id], "terminal")
+    store.append_jsonl(chat_dir() / "receipts.jsonl",
+                       {"id": msg_id, "ts": store.now(), "by": "terminal", "how": "answered"})
+    return True
 
 
 # The web chat's switch (the user, 2026-11-19): off unless they turn it on, from the pane or `wb chat
@@ -1877,7 +1946,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._allowed():
             return
-        if self.path not in ("/api/send", "/api/answer", "/api/prefs", "/api/seen", "/api/push"):
+        if self.path not in ("/api/send", "/api/answer", "/api/prefs", "/api/seen", "/api/push", "/api/active"):
             return self._json(404, {"error": "not found"})
         if not self._authed():
             return
@@ -1917,6 +1986,11 @@ class Handler(BaseHTTPRequestHandler):
                     or not (endpoint is None or webpush.accepted(endpoint)):
                 return self._json(400, {"error": "seen is {ids: [up to 200 ids], endpoint?: this device's push URL}"})
             mark_seen(ids, "page", endpoint)
+            return self._json(200, {})
+        if self.path == "/api/active":  # a page on screen and in use: the user is on this device (#959)
+            if body:
+                return self._json(400, {"error": "active is {}"})
+            active()
             return self._json(200, {})
         if self.path == "/api/push":  # this device's notifications: on, off, or a test
             if body.get("test") is True:

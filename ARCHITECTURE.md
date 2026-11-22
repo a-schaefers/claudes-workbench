@@ -719,8 +719,9 @@ of its own that ends when the run does:
 
 - **macOS**: `caffeinate -i -w <pid>` (idle sleep; a closed lid on battery still sleeps).
 - **Linux booted with systemd**: `systemd-inhibit --what=idle:sleep --who=workbench --why='task
-  <name>' --mode=block` around a wait for the pid (`AWAIT_PID`: a pidfd, else `kill -0` every
-  15 s); `systemd-inhibit --list` shows it. logind's polkit grants a sleep lock to a local active
+  <name>' --mode=block` around a wait for the pid (`AWAIT_PID`: a pidfd, else a kqueue's
+  `NOTE_EXIT`, both at the exit itself, else `kill -0` every 15 s, which a pid not yet reaped still
+  answers); `systemd-inhibit --list` shows it. logind's polkit grants a sleep lock to a local active
   session only, so where it refuses (SSH, a scope outside any session) an idle lock is held
   instead (`--what=idle`: it holds logind's `IdleAction`, not a desktop's suspend). It starts in
   the caller's session, not `runner_scope`'s scope, for that grant: under
@@ -1555,7 +1556,10 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    forms only where pip installs into the worktree's own venv, or with no Python environment
    active (the user's checkout's are left out: *Its environment*, below) while Landlock bounds
    what pip writes (`context.python_installs`); otherwise they ask first, since pip would write
-   the user's own conda env or tools venv, or their Python with no lane. While a venv of the
+   the user's own conda env or tools venv, or their Python with no lane. The pipenv ones wherever
+   no venv of the user's is active (the worktree's own may be), lane or none: pipenv installs into the active venv, else
+   makes its own in the worktree (`PIPENV_VENV_IN_PROJECT`), never the user's Python (#950: taken
+   for a pip form, `pipenv install` asked first on every Mac). While a venv of the
    user's stays active in the agent's shell (one that isn't the checkout's), `ENV_INSTALLS`
    (`poetry install *`, `poetry sync *`, `poetry remove *`, `uv sync --active *`, `uv pip sync
    *`, the `pip uninstall` forms), which change the active venv, ask first too (#490, the audit
@@ -2357,13 +2361,17 @@ rounds, whatever came of them), `auto_fixed_tasks` (their tests then passed), `h
 (`router.speed`), `write_trend` (`[[ts, tok/s]…]`, the newest 30 rows' own `speed.write`) and,
 from `TREND_MIN` 6 rows, `write_change_pct`: the newest third's median against the oldest
 third's), `model_lines` (what the tab draws, #638: `{lines: [{model, variants, windows, last,
-…the same}], older: {models, tasks}}`: the models OpenCode has now (`models.discover`), a `wb
-optimize` variant folded under its source (models.json `variant_of`, a retired variant's too),
+…the same}], more: {models, tasks}, older: {models, tasks}}`: the models OpenCode has now
+(`models.discover`), a `wb optimize` variant folded under its source (models.json `variant_of`,
+a retired variant's too; `variants` names each id folded in, the ones that ran and the configured
+ones that haven't yet, so their optimized window and bench run are the line's),
 an id the model had before folded under the one it has now (`renamed_from`, or an id gone from
 the config on the Ollama digest a configured one's rows ran on: #818),
-the most recently used first, its speeds the newest variant's; a model no longer configured or
-with no task in `stats.OLD_DAYS` 90 days is counted in `older`; `models` keeps every one
-split), `sizes`, `stacks` (`{tasks, accepted_pct}`), `days` (the last 30 local days: `{day,
+the most recently used first, its speeds the newest variant's, at most `stats.STATS_MODEL_LINES`
+3 lines and the other recent ones counted in `more` (the owner, 2026-11-21: a machine with a ton
+of models put the tab's menu a long scroll down); a model no longer configured or with no task
+in `stats.OLD_DAYS` 90 days is counted in `older`; each of `more` and `older` only when it
+counts any; `models` keeps every one split), `sizes`, `stacks` (`{tasks, accepted_pct}`), `days` (the last 30 local days: `{day,
 tasks, landed}`; the streak's and the days' arithmetic is on local dates, never `now - 86400`, which
 skipped or repeated a date across a daylight-saving change, #563), `guards` (summed), `helps` (`progress.helped`, per model tried), `bench` (each
 model's newest finished run: `{run, day, passed, of}`, the cases passed of those graded; a newer
@@ -2665,8 +2673,52 @@ nothing until a surface attaches.
 
 - **The pane** (opened by `/workbench`, or once per load when a task runs, and closed by a quit command;
   `/workbench` run again brings it back) has three tabs, **Tasks**, **Stats** and **Settings** (Buttons on its
-  last line, keys `1`, `2` and `3`: Stats in the middle, looked at more often than Settings; last, since the pane follows its end and a row at the top scrolled
-  away under a long transcript). Closed by the user (its mark, Esc), it is minimized, as
+  second-to-last line, keys `1`, `2` and `3`: Stats in the middle, looked at more often than Settings; at the foot, since the pane follows its end and a row at the top scrolled
+  away under a long transcript). Under them on every tab, always, is a modeline as in Emacs or Vim:
+  `[•_•] Claude's Workbench` (the apprentice's `FACE.rest`, `MODELINE`) on a bar in the theme's
+  `claude` color with `inverseText`, so it reads on a dark or a light terminal (the user, 2026-11-21).
+  **The opening animation** (#963, `mod/hooks/splash.ts`; the owner, 2026-11-21: about five seconds,
+  ending "by pulling in the Tasks page like normal" with "no penalty beyond initial startup"): on a
+  session's first `/workbench` (the `skill.prompt` hook, before `showPane`), the Tasks tab is first
+  one Raster the size of the body (key `splash`), repainted every `SPLASH_MS` (80 ms) by a
+  `$.clock.every` of its own through `$.ui.blit`. The "forge" concept: the apprentice on a crate at
+  its anvil strikes six blows, comets from each forge the letters of CLAUDE'S WORKBENCH (a 5 px font,
+  or 3 px under 56 columns or 24 rows), which land hot and cool into a warm and a cool gradient; a
+  glint, the apprentice wipes its brow, and at its cheer (`tada`) a rainbow sweeps once through both
+  words (frames 42-46, from the "stream" concept). Then the words fall as embers into the body's
+  last row, lighting it column by column into the modeline's bar (`BAR`, the theme's `claude`
+  rgb(215,119,87)), which slides up to the modeline's row when the page is shorter than the pane,
+  while the apprentice walks to its stage: 62 frames, 4.96 s. The light spreads from where the
+  embers land as fast as it must to fill the row before it slides (frame 56): the title keeps its
+  width, so one column a frame left a wide pane's bar part dark. The bar carries no words: the
+  modeline's are `inverseText`, bold, which a Raster's cells can't name, so the page's own
+  modeline brings them on the row the bar has become. Where it
+  lands comes from `pageShape` (the Tasks page's rows as the render lays them out: `pageParts` is
+  what both read) and `splashTarget`: the page's last row when it fits (a docked pane draws from the
+  top, an inline one keeps its top as it shrinks to the page), the body's last when it surely
+  overflows (the pane follows its end). A page with a line that may wrap (wider than the pane, or of
+  characters not surely one column, `NARROW`) and no sure overflow has no exact row: the words rise
+  away as embers instead, as forge drew them (57 frames, 4.56 s), never landing on a guessed row.
+  The target is recomputed at each draw while it plays, so the page it hands over to is the one the
+  polls made meanwhile (they and the loading carry on underneath); a page that stops being
+  measurable meanwhile makes the words rise away if they haven't left yet, else puts the bar on the
+  row the page reaches at least, never an earlier exact row the page has since outgrown. The Tasks page then draws as it
+  always does. A key in the pane skips it, and the key still does its work: Tab or a click
+  (`ui.focus`) and the scroll keys (`ui.scroll`); a close by the user, a resize, another tab, a
+  surface without Raster or a refused blit end it too. Typing in the prompt doesn't: that needs a
+  `prompt.edit` hook, which can't be taken off again, so every keystroke of the session would wait
+  on the mod for an animation long over; the typing goes on beside it. Its
+  timer is cancelled when it ends; the apprentice's own `FRAME_MS` timer is untouched. It plays once
+  a session: the `splash` atom (`splash-1`) is set at that first `/workbench`, whether it played or
+  not, so a module reload, `/workbench` again, a bring-back from the strip and a pane a task opened
+  never play it. Sizes: big at 56 columns and 24 rows or more, small at 40-55 columns or 20-23 rows,
+  none below (the pixel apprentice's limits) or without a Raster. The frames are computed as they
+  play, from the font tables and apprentice.ts's pixels (`pixels(pose, over)` takes the splash's own
+  `wipe`, `step_a`, `step_b` rows); nothing at module load, no file read. Every colour it draws but
+  the apprentice's own goes through `atLum` into WCAG luminance 0.105-0.295: 3:1 on black and on
+  white. forge.py, the reference generator the concept was judged on, is ported exactly (its hash,
+  its arithmetic order, Python's half-to-even rounding): the tests hold its frames 0-41 at 60x26
+  and 40x22. Settings' **Opening animation** row turns it off. Closed by the user (its mark, Esc), it is minimized, as
   backseat-driver's is (2026-11-19): a strip above the prompt stands in for it while workbench mode
   is on or the session has tasks, `▸ Workbench`, `Tasks`, `Stats`, `Settings` (each a way back, to that tab)
   and the status line's summary; a press there or `/workbench` brings it back; a quit command
@@ -2737,7 +2789,10 @@ nothing until a surface attaches.
   `€0.30` were refused with no hint why and a price could never be removed), shown from `wb
   savings --json`'s `price` (`priceOf`, `mem.price`). The ring's sentence follows any of these rows
   (`SETTING_ROWS`).
-  The rows go Claude coding, the Stats tab's, the price, then apart, under the heading
+  **Opening animation** (`SPLASH_STOPS`, key `splash`, options `splash:on|off`: `Enabled (default)` /
+  `Off`, the owner's words): a pick runs `wb splash on|off`, and each draw reads `splash.json` again
+  (`splashOn`: on unless it says `"on": false`).
+  The rows go Claude coding, the Stats tab's, the opening animation, the price, then apart, under the heading
   `Experimental · may change or go away`, Web chat and Agent code navigation: the two that may
   change or go away, kept off the settings here to stay (the user, 2026-11-21; the probe row's
   title said `(experimental, may go away)` until then).
@@ -2746,7 +2801,9 @@ nothing until a surface attaches.
   tab opened, the last `BUSY_KEEP` 60 samples, in memory only), a line per running task (phase,
   round, its time, tok/s, said `(last call)` when not live, context %), the rack (one line per
   model: resident, split, cpu, idle or can't run, where its memory is, its speeds and load time, the
-  tasks on it) and the queue. A line longer than the pane wraps at spaces, the rest indented
+  tasks on it; more than `RACK_FOLD_MIN` 2 idle, can't-run or remote models with no task, top.FOLD's
+  states as `RACK_FOLD`, fold into one dim "+N more models idle, can't run or remote (wb top)",
+  2026-11-21, so the tab stays a few rows high however many models a machine has) and the queue. A line longer than the pane wraps at spaces, the rest indented
   (`wrapParts`, colours kept): cut at the edge, a long GPU name took its busy bar, watts and
   sparkline. One child (`runTop`, read by `pumpTop`), started by `syncTop` only
   while the tab is shown, the pane not minimized and Live view on, checked at each poll, a tab's
@@ -2777,10 +2834,18 @@ Live view off: no child, no **Now**. The newest tick is the `top` atom
   questions (asked, and answered only as `wb answer` did), one
   line per model of `model_lines`, newest first, its windows beside the name when a variant
   folded in (`ollama/q (32K, 40K, 64K)`; tasks, landed, rounds, minutes, write speed with its trend as a sparkline,
-  `spark`, and the change, Claude's cost a task), then "Older models: N older models: M tasks (wb
-  stats --all)" (a feed without `model_lines`, an older wb's: a line per `models` entry), by size, the last 30 days as a sparkline, bests,
+  `spark`, and the change, Claude's cost a task), then one row for the rest, "Other models: N more
+  · M older models: T tasks (wb stats --all)" (a part that is 0 left out). The pane caps the
+  lines at `STATS_SHOWN` 3 itself and adds the rest to N and T: the mod tracks main while `wb`
+  runs from the user's clone, so a wb from before the cap sends every line and no `more`, and an
+  older one no `model_lines` (its `models` entries stand in), by size, the last 30 days as a sparkline, bests,
   the newest milestone, what stopped agents (`GUARD_WORDS`), what helps, bench (the last finished run, and "newer run k of N so far" beside it), the optimized
-  windows. A section with no data is left out; a feed with no section at all (a new install's)
+  windows. What helps, Bench and Optimized name only the models of the lines shown (a line's
+  `model` and `variants`; with no line shown, the first `STATS_SHOWN` 3), the rest counted with
+  where to see them: Bench and Optimized on their row, " · N more (wb bench report)" / "(wb
+  optimize report)", or "N models (…)" when none shown has one; What helps on a row of its own,
+  "What helps: N more models (wb stats --json)" ("N models" when none shown has one), not on the
+  last model's, where it read as that model's (2026-11-21). A section with no data is left out; a feed with no section at all (a new install's)
   says to delegate one with /workbench, while one with no judged task but an optimized window,
   a bench result or a period still shows them (#549). It is read (`refreshStats`) only while the tab is shown (`pane.tab` and `$.ui.panes()`
   `isShown`): on each press of the tab, then at each poll when the size or mtime of a file the
@@ -3725,7 +3790,7 @@ scales with the window (`limit.context`; unknown → 32K): files = max(1, round(
 max(50, round(15s)·10), s = min(window/32768, `GUESS_MAX` 4): 3 files/150 lines on 32K (measured
 2026-11-16), 12/600 from 128K. Correction from the last `SLICE_RECENT` (20) closed steps on that model and window
 (results rows' `steps`, with files ≥ 1, from rows `tuning.judged` keeps; files and lines without
-the generated ones, `gitops.footprint`): `_went` is badly when the step compacted (in its last session, or in one a handover replaced: the `fresh` event's `compacted`), filled up
+the generated ones, `gitops.footprint`): `_went` is badly when the step compacted (in its last session, or in one a handover replaced: the `fresh` event's `compacted`; not the one a later step's first round replaced, which was the step before's and counted there: a clean step 2 after a compacted step 1 went badly for it, 2026-11-21, #958), filled up
 reading (`read_full`), got stuck (a `stuck` or `failed` notice of its rounds, but not one whose
 `cause` is anything but `guard` or `agent` (`results.THE_STEP`, an allowlist: `signal`, `died`,
 `server`, `updated`, `opencode`, `update` are outside the step), nor one from before `cause` with
@@ -5996,14 +6061,23 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   `chat/listener.json` listens; it is known by its `wb events` process's pid and start.
 - **Claude knows where the user is.** A web message carries the same authority as one typed in
   the terminal, with a note: reply there, briefly; the web thread is all the user sees; a yes there
-  answers only a question asked there; nothing hard to undo on an ambiguous OK. For six hours after
-  a web message (until the user types in the terminal again) Claude also tells the user there
-  when something they asked for finishes or needs them.
+  answers only a question asked there; nothing hard to undo on an ambiguous OK. While the user is away (below) Claude also tells the
+  user there when something they asked for finishes or needs them.
+- **Away is the device the user last used** (#959). The user is away once they use the web
+  chat after they last typed in the terminal: a web message, or a page on screen and in use
+  (shown, focused, back from the cache, or a tap or key in it: `POST /api/active`), and until
+  they type in the terminal again or answer a dialog there; for at most 6 h after that use, or longer while one of this
+  session's `--backlog` tasks is open (a night's batch outlasts six hours, #110). `chat/away.json`
+  holds it, the user's, not one session's (#688). Only a web message counted until #959 (the
+  owner, 2026-11-21): typing in the terminal and then picking up the phone with "Let Claude go
+  ahead" set, they had a prompt stay in the terminal, neither shown on the phone nor allowed,
+  and the phone was told nothing. A page merely open in a background tab, or visible beside the
+  terminal without the focus, doesn't count. Answering a dialog in the terminal counts as typing
+  there (the #959 review): the notice below, tapped, opened the page and made the user away, and
+  the answer at the terminal submitted no prompt, so the next prompt went to the phone, or was
+  allowed by "Let Claude go ahead", with the user at the terminal.
 - **Claude Code's dialogs** (the user, 2026-11-18: the terminal's dialog waited for nobody). While
-  the user is away (a web message within 6 h, or since then while one of this session's
-  `--backlog` tasks is open: a night's batch outlasts six hours, #110; none typed in the terminal
-  since: `chat/away.json`, the user's, not one session's, #688), every delegating
-  session's mod puts them on the page as cards (`kind`):
+  the user is away, every delegating session's mod puts them on the page as cards (`kind`):
   - `permission`: the tool and what it would run, with Deny and Allow, alike in weight (green made
     allowing look like the right answer, #103). When Claude said what the call is for (Bash's
     `description`, which the mod sends as `detail.purpose`), the card leads with the decision,
@@ -6021,12 +6095,27 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   the card says so and the dialog stays in the terminal as usual. The gear's *Tool permissions while you're away*
   setting (`prefs.json` `away`) can instead let Claude go ahead: a permission is allowed at once
   and listed in the thread ("allowed by your setting"); questions and plans still ask, and deny
-  rules still hold (they never reach a dialog). How the mod does it: *The web chat listener*,
-  under *The mod*.
+  rules still hold (they never reach a dialog). While the user is at the terminal (not away), a
+  dialog stays there, and a permission still unanswered after 30 s (the mod's `NOTICE_AFTER_MS`)
+  gets one notice on the page (#959): "Claude is waiting on a permission in the terminal", the
+  command under it, no buttons (only the terminal can answer it), and a push as Claude's messages
+  get one. One open notice per session at a time; plans and questions get none (the owner asked
+  for permission prompts). Answered in the terminal, the notice is settled (`wb chat notice
+  --done`): never pushed if not yet due, and the page says "answered in the terminal". Written
+  at once and never settled, every prompt approved at the terminal in two seconds buzzed the
+  phone ten seconds later saying Claude still waited (the #959 review). Only for a user of the
+  chat: a page in use within `PAGE_RECENT` (a day, `chat/page.json`) or a device with push on;
+  `wb chat notice` writes nothing otherwise. How the mod does it: *The web chat listener*, under
+  *The mod*.
 
 **Files** (`$WB_HOME/chat/`):
-- `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude", text (empty when a user's
-  message is files alone), cid?, shots?, audio?, about?, files?}`. `files` (the user's attachments) is
+- `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude"|"notice", text (empty when a user's
+  message is files alone), cid?, shots?, audio?, about?, files?}`. A `notice` (`wb chat notice`,
+  #959) is `{…, text: "Claude is waiting on a permission|plan|question in the terminal", tool,
+  what?}` (`what`: a permission's command, file or pattern, 2000 characters): news as Claude's
+  rows are (`chat.NEWS`: pushed, `/api/latest`), but not Claude's reply, so the mod's owed reply
+  (#767) reads only `from: claude`. `chat.thread` adds `answered` (its receipt's `ts`) to a
+  notice settled in the terminal, and `/api/latest` skips one. `files` (the user's attachments) is
   `[{id, name, size, type, path}]`, from each upload's meta. A post whose `cid` the thread already holds returns that row instead of adding one
   (`_by_cid`: the file read on from where the last post stopped, the newest `CIDS_KEPT` 5000 ids
   kept; only the last 500 rows were checked, and a tab offline longer than that sent its message
@@ -6046,7 +6135,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   newest row per id stands (a queued one is acked `now` once its turn ends).
   `queued`: a mid-turn delivery didn't go through, so it was submitted as a prompt. `{id, ts, by:
   "wb", how: "expired"}`: the message was retired unread (below); `chat.thread` shows it expired,
-  not read.
+  not read. `{id, ts, by: "terminal", how: "answered"}`: a notice whose dialog was answered in the
+  terminal (`wb chat notice --done`, `chat.notice_done`, which also marks it seen, so no push
+  goes, #959).
 - `open.json`: `{messages: {<id>: row}, asks: {<id>: row}, answered: {<id>: ask}}`, the user's
   messages without a receipt and the asks without an answer (`chat.open_work`), under `open.lock`:
   `send` and `ack`, `ask` and `answer` keep it, and a state directory without it gets it built
@@ -6060,9 +6151,15 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   `CLAIM_STALE` (120 s) old (its session gone); exit 1 otherwise, and exit 1 with `<id> expired:
   over 6 hours unread, so not passed to Claude; the page offers to send it again` for an expired
   message (below).
-- `away.json`: `{at, by}`, written by the mod: when the listening session last passed on a web
-  message (seconds; `by` its key), `{at: 0}` once a prompt is typed in any session or the chat is
-  turned off. Every session reads it for whether the user is away (#688).
+- `away.json`: `{at, by}`: when the user last used the web chat (seconds), written by the mod when
+  the listening session passes on a web message (`by` its key) and by the server when a page is
+  in use while the chat is on (`POST /api/active`, `by: "page"`, #959); `{at: 0}` once a prompt is
+  typed in any session, a dialog that came up at the terminal is answered there after a later
+  use (the #959 review), or the chat is turned off. Every session reads it for whether the user is
+  away (#688).
+- `page.json`: `{at}`, when a chat page was last in use (`POST /api/active`, written whether the
+  chat is on or not), so a dialog at the terminal is announced only to a user who uses the chat
+  (`chat.notice`, `PAGE_RECENT` a day, #959).
 - `listener.json`: `{session, cwd, pid, start, machine, busy}`, written by the mod when it changes (`start`:
   its `wb events` process's, from the hello; `machine`, the hello's: another machine's mod never
   reads that pid as gone and takes the listener, #922). A listener counts while its pid is this user's and
@@ -6282,6 +6379,8 @@ thread no longer):
   stands (an earlier one, when the prompt was already answered).
 - `POST /api/prefs`: the same checks, `{away: "ask"|"allow"}` and nothing else (400) → 200
   `{state}`.
+- `POST /api/active`: the same checks, `{}` and nothing else (400) → 200 `{}`: a page on screen and
+  in use (`chat.active`: `page.json`, and `away.json` `{at: now, by: "page"}` while the chat is on, #959).
 - `POST /api/seen`: `{ids: up to 200 ids, endpoint?: a push service's URL}` (400 otherwise) → 200;
   the ids go in seen.jsonl, with `endpoint` (no push owed to that device alone) when it is given.
 - `POST /api/push`: `{endpoint, on: true|false}` subscribes or drops a device (400 unless the
@@ -6371,10 +6470,24 @@ waiting for your answer" and a hidden page's title "Claude asks: allow?" (a perm
 "Claude needs you"; answered, the buttons go and the meta says "you allowed it", "allowed by
 your setting", "you said no", "you answered" (the picks shown), "you passed", "you asked for
 changes" (the note shown), "settled in the terminal" (an interrupt, or the dialog answered
-there) or "no answer in time: it waits in the terminal". The gear in the header drops a settings
+there) or "no answer in time: it waits in the terminal". A `notice` row (`makeNotice`, #959) is a
+centred, dashed box with its sentence and the command, no buttons, and "answer it in the
+terminal" in its meta, "answered in the terminal <time>" once settled (`answered`). Using the page counts as using this device (#959): coming on screen
+(`visibilitychange` to visible, `focus`, `pageshow`, and the first load) or a `pointerdown` or
+`keydown` in it posts `/api/active` (`reportActive`), only while `!document.hidden` and
+`document.hasFocus()` (a tab in the background, or one visible beside the terminal, says nothing;
+nor does the page reloading itself unfocused), at most once per `ACTIVE_MS` 30 s while it stays in
+use, at once again when it comes back from hidden; a failed post isn't tried again on a timer,
+the next real use reports at once (the #959 review: a page left in front on a phone put down
+retried until the line came back, after the user had typed in the terminal, and made them away
+with no use). The gear in the header drops a settings
 sheet (`#settings`; closed by the gear, Escape or a tap outside), what people come back for first
 (#103): *Tool permissions while you're away* (Ask me here / Let Claude go ahead, posting
-`/api/prefs`, with what each means), *Notifications* and *What it saved* (`drawSaved`: the week's
+`/api/prefs`, with what each means, under when you're away, `#away-when`: "You're away from the
+moment you use this page (open it or send a message here) after using the terminal, until you
+type or answer a prompt in the terminal again. Away ends by itself 6 hours after you last used
+this page, unless a night's batch is still running. While you're at the terminal, prompts stay
+there, and one still waiting after half a minute is told here."; it said away lasted "from your first message here", #959), *Notifications* and *What it saved* (`drawSaved`: the week's
 `savings`, in a sentence, called an estimate, the GPU's energy with `, cost 0.27` once a price is
 set, no currency sign, as `wb savings` and the pane: a `$` made a euro or pound price dollars,
 #845; "Nothing to compare yet" before a task can be), then
@@ -6396,7 +6509,9 @@ twice (name, size, modified time) is one chip. Send takes the text and the chips
 the outbox item (`files`: `[{id, name, size, type}]`); `flush` makes sure each is uploaded before
 it posts `/api/send` with their ids, and a refused one marks the message not sent, naming the file
 (edit puts its files back in the tray, and what it was about back above the box: `setAbout`, a
-kept take shown by its `aboutTag`; the edited message went out as a general one, #843). In the thread a message shows its images as thumbnails
+kept take shown by its `aboutTag`; the edited message went out as a general one, #843; and its words
+back in the box, before what the box already holds: put over it, words typed after the refusal were
+lost, #958). In the thread a message shows its images as thumbnails
 (a tap shows one whole, `view`; a tap or Escape closes it) and other files as name and size (a
 tap saves it), each fetched once with the token as a blob (`fileURL`), or from this page's own
 bytes; one `wb gc` removed says "no longer on the computer". A thumbnail is fetched only once it
@@ -6432,7 +6547,9 @@ against RFC 6979's vectors and openssl), so nothing needs encrypting and nothing
 Claude write passes through Apple's, Google's or Mozilla's service: the worker fetches
 `/api/latest` (the whole `/api/state`, up to a megabyte with plans in it, until #755) with the key the page left it in Cache Storage (`wb-chat` `/key`, deleted before
 each write: WebKit drops a put over an entry a reloaded page wrote) and shows the newest open
-dialog that isn't `stale`, unless Claude's latest message is newer, else that message (or
+dialog that isn't `stale`, unless Claude's latest message (or notice) is newer, else that message
+(a notice as its own sentence for the title and the command as it is for the body, #959: `plain`
+would drop the `*` of `rm -rf runs/*`; or
 "Notifications work" for a test; a dead session's card beat every later reply, #538), tagged `wb-chat`; a
 tap focuses the chat or opens it. Which news is pushed: a page posts what it showed to
 `/api/seen`: for every device while it is in use (visible, focused, and a pointer, key, wheel or
@@ -6440,7 +6557,7 @@ touch within `USING_MS` 2 min; it reports again on focus and on each input), els
 device has notifications on, with its own `endpoint`, so only its push is spared; a page merely
 visible and unsubscribed reports nothing. Any visible tab counted for every device, so a desktop
 tab left open behind the terminal meant the phone was never notified (#537); the server's `Pusher` thread (woken by each change, and every `PUSH_DELAY`/2) sends
-one push to each device still owed Claude's messages and open dialogs that no page showed within
+one push to each device still owed Claude's messages, notices and open dialogs that no page showed within
 `PUSH_DELAY` 10 s and that are under `PUSH_WINDOW` 15 min old (never a backlog; with no device
 subscribed it works nothing out, and seen.jsonl is read on from where the last look stopped,
 `_seen_update` under `_seen_lock`: each tick reread the whole file, 94 ms at 60,000 rows with
@@ -6500,7 +6617,7 @@ mode back on, pane and all).
 ./types/index.d.ts`, one setting `userConfig.wake`, `on`|`off`, default `on`; changed with
 `claude plugin configure workbench@workbench`, which reloads the module), `mod/hooks/hooks.json`
 (`{"modules": ["./register.tsx"]}`), `mod/hooks/register.tsx` (everything), `mod/hooks/apprentice.ts`
-(the character's art), `mod/hooks/register.test.tsx` (run by `claude plugin test mod`),
+(the character's art), `mod/hooks/splash.ts` (the opening animation, #963), `mod/hooks/register.test.tsx` (run by `claude plugin test mod`),
 `mod/types/index.d.ts` (the atom types), `mod/.claude-plugin/icon.png` (the `work` pose).
 The repo root's `.claude-plugin/marketplace.json` makes the repo a folder marketplace (`workbench`,
 plugin source `./mod`), so the plugin id is `workbench@workbench` and it is read from the clone:
@@ -6515,7 +6632,7 @@ const bound to one; imports from the module's own files also pass). The helpers 
 "gating hook without .catch" notes) is the check. Env reads must be string literals: `HOME`,
 `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_COMPACT_AT`.
 
-**State.** Nine `$.state` atoms survive a module reload within a session; each has a shape tag,
+**State.** Ten `$.state` atoms survive a module reload within a session; each has a shape tag,
 and an atom read under an old tag is absent, so change the tag when its type changes:
 `tasks` (`tasks-8`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
 updatedAt, tokens, recent, repo, cwd, subdir, session, claude_pid, claude_start, backlog, parked, allowed), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
@@ -6528,7 +6645,8 @@ it was read from), `top` (`top-1`, {snap, busy}: `wb top --json`'s newest tick a
 % since the Stats tab opened), `said` (`said-1`, WbSaid | null, {notes, wakeOff, coding}: what the conversation was told of the
 rules that depend on the state, #540; kept across a reload, #697: in `mem` a reload emptied it, prompt.context doesn't fire
 again in that conversation, and `sayRules` waited for it for good, so wakes turned off mid-session were never said; a
-conversation's first context block sets it again). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
+conversation's first context block sets it again), `splash` (`splash-1`, boolean: this session's first `/workbench` has come, and
+with it the opening animation, #963: kept across a reload, so a reload never plays it again). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
 this session's open set, the session's resolved `cwd` and `home`, `person`, follow, sawTurn, scoutAsked,
 toasts sent, dropped wakes, the closed tasks no longer read, the events pid, `mem.said`, the `said` atom's copy, …). The task facts
 themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.json's
@@ -6689,10 +6807,11 @@ skill, not a mod command.
 conversation's first message and after a compaction or `/clear`, not every turn):
 `workbench-mode` while delegating (MODE_NOTE: the mode lasts until a quit, follow the skill,
 every plan is a handoff plan, the SKILL.md path); `user-notes` while delegating and notes.md has
-notes; `web-chat` for six hours after a web message (longer while a backlog task of this
-session's is open: `awayNow`), until a prompt is typed in the terminal
-(AWAY_NOTE: reply with `wb chat reply`, `wb chat log` shows the thread; each wake says it too
-while away, below); `workbench-wake` with the `wake`
+notes; `web-chat` while the user is away: for six hours after they last used the web chat (a
+web message, or a page in use, #959; longer while a backlog task of this session's is open:
+`awayNow`), until a prompt is typed in the terminal (AWAY_NOTE: "The user is away from the
+terminal: they last used the web chat", reply with `wb chat reply`, `wb chat log` shows the
+thread; each wake says it too while away, below); `workbench-wake` with the `wake`
 setting off, while delegating or with a task of this session's open (WAKE_OFF_NOTE: no wake will
 come; tell the user, pick it up when asked); `workbench` whenever `wb status` with `scope()`
 exits 0 listing open tasks (the status, plus `wb report`/`wb watch`; a failing one toasts once
@@ -6768,7 +6887,10 @@ as the next turn; the page said "Queued for Claude" for good, 2026-11-21), `chat
 `{at: now, by: <key>}`, a toast. Away is the user's (#688: `away()` reads that file, so every
 session in workbench mode relays its dialogs and ends its wakes with AWAY_NOTE, not only the
 listener; kept in the listener's own state, another session's overnight backlog left its dialogs in
-the empty terminal, #110 again); a prompt typed in any session writes `{at: 0}` (`back`). Typed
+the empty terminal, #110 again); the chat server writes `{at, by: "page"}` too when a page is in
+use (`POST /api/active`, #959), so away follows the device last used; a prompt typed in any
+session writes `{at: 0}` (`back`), as does a dialog at the terminal answered there after that use
+(`termDialogDone`, below). Typed
 is the engine's `origin.kind` (`byUser`): `composer`, `bridge`, `sdk`, `auto-continuation`, or an
 `unclassified` or unstamped one not `isMeta`; a /loop or scheduled firing, another plugin's
 prompt, an MCP channel's or a peer session's message ended away for every session and cancelled
@@ -6787,7 +6909,20 @@ user's return before it went left it queued, and it went anyway, #837); that tur
 ending without one too, `wb chat reply --text="Claude answered in the terminal; nothing was sent
 here."` (OWED_POSTED) goes to the chat, once per message. Dialogs
 (`classic.PermissionRequest`; the terminal shows its dialog meanwhile, and the hook's answer
-settles it): unless a settings hook already decided, or the session isn't delegating with
+settles it): unless a settings hook already decided, or the session isn't delegating with the
+chat on, the dialog goes one of two ways. At the terminal (not away), the hook notes it in
+`mem.termDialogs` (`{tool, agent: its agent_id, at, kind, text: a permission's askText, id}`) and
+passes the event on, so the dialog comes up at once (#959: the phone was told nothing). The poll's
+tick (`termNotices`) runs `wb chat notice --tool=<t> --kind=permission --text=<text>` for a
+permission still noted after NOTICE_AFTER_MS (30 s), only while no other notice of the session's is
+open, and keeps the id it prints (wb skips it for a user who doesn't use the chat; a failure is said
+once, `warnOnce`). The engine's `tool.call`, past its permission check, settles the oldest noted
+dialog of that tool in that loop (`agentId`), in a `finally` of the `tool.call` hook, and the main
+loop's `turn.complete` settles any left (an interrupt; the turn's subagents ended with it): `termDialogDone`
+drops it, runs `back` when `away.json`'s `at` is at or after the dialog's (the phone used while it
+was up, the notice tapped: answering it is terminal input), and `wb chat notice --done <id>` for
+its notice (the #959 review: an answered prompt's notice was pushed ten seconds later, and its
+tap left the user away at the terminal). Away, with
 `chat/away.json`'s `at` within AWAY_MS (6 h; a prompt typed in any session's terminal sets it to 0) or this session with a
 backlog task open (`awayNow`), `askOnChat` runs `wb
 chat ask --tool=<t> --kind=<KIND[tool], else permission> --text=<a permission's: the input's
@@ -6845,7 +6980,10 @@ per session until it's installed.
 link running `wb setup`, a wake held mid-turn and delivered once (and a stale one dropped), the transcript
 and pinned link, both quit commands (typed words stop nothing), KEEP_ON_COMPACT and the boundary
 compaction, the live header label, the weekly check, the chat listener (exact text, receipt,
-standing by, stopping after a quit), dialogs on the chat (only while away, allow and deny with
+standing by, stopping after a quit), dialogs on the chat (only while away, away after the page's
+use newer than the terminal's last input and not after an older one, a notice only for a
+permission still waiting after 30 s, once, settled when answered, and a dialog answered at the
+terminal after the notice's tap bringing the user back, #959; allow and deny with
 a note, a plan sent back, a question's answers, the go-ahead setting, an expiry, back in the
 terminal, one wb refuses posted to the phone, a long plan or preview cut), Bash `wb start` turning the mode on and mid-turn delivery,
 rewake, Raster vs face, `/workbench` alone, the update check and `/workbench-update`, `wrapWords`;
@@ -6855,7 +6993,9 @@ before, two wakes due in one turn, two open questions, another plugin's tool cal
 check beside the wakes, a notify.jsonl read by its tail, the pane read only while shown,
 the Stats tab read only while shown and again when a task closes, `wb top` run only while the
 Stats tab is on screen with Live view on and ended when left, its settings rows and the typed
-price, a history that says nothing it has no data for, a sticky
+price, the opening animation (#963: the first `/workbench` only, not after a reload, again, from the
+strip or for a task; a key skips it and still works; no timer left; the sizes; off; its row; every
+colour 3:1 on black and white; forge's frames; where it lands), a history that says nothing it has no data for, a sticky
 focus, a cut transcript, a long line clipped, `/workbench-models` once, wb missing (one toast, a
 backoff, no model check), wb failing (no open-tasks block, quit says so), no compaction without
 delegating, wake off told, closed tasks not re-read. Not covered: check-in wakes, the one-hour
@@ -6958,6 +7098,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (a smaller step: the note opens with `STEP_NOTE`; after a progress check, recorded as a `smaller` intervention, else a `hint`) | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
 | `wb experiment [<name> [on\|off\|<level>]]` | | The experiments (*Experiments*): with no argument, each one's purpose and state (`cli.experiment_lines`: `probe: adaptable and working (probe-code 0.6.0)`, the setting first, then, once a task with it on has closed, whether the agents used it (`cli.use_recent`: `; the agent used it in 2 of the last 5 task(s) with it on (14 call(s))`, the latest `USE_RECENT` 5 results rows that have it on, bench replays and trials too, #857), `probe: adaptable, but not set up: no probe with `+"`symbols`"+` is on PATH, so it changes nothing yet (probe, a code-search tool: github.com/probelabs/probe; its release binary from …)`, `probe: off (wb experiment probe adaptable\|moderate\|aggressive)`; each line, set up or not, ends `; adaptable is recommended` while `context.PROBE_RECOMMENDED` is true; with no argument the purpose line before them, `context.EXPERIMENTS`, says what each level does and that every level caps one shell call's output and outlines the spec's long files in round 1); with a name, its state; with `off`, a level (probe's `moderate`, `adaptable`, `aggressive`: `context.EXPERIMENT_LEVELS`) or `on` (the first level: adaptable), sets it in `experiments.json` for the tasks started from then (`; tasks already started keep theirs`). An unknown name or level is refused. |
+| `wb splash [on\|off]` | | The pane's opening animation on a session's first `/workbench` (*Seeing what the agent does*, #963): with no argument, whether it is on; `on` (the default) or `off` writes `$WB_HOME/splash.json`, which the mod's Settings row runs and reads back. |
 | `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent; with `--when`, a one-task exception granted ahead, spent only once Claude has started on it. `used` records what Claude changed under it and says to hand the testing back; exit 1 with none. |
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat` (post the pair to the web chat), `--setup` (run the setup in each checkout) | At review, for a visual task: the project's capture command run on the base and on the candidate, each in a scratch checkout under the task's lane; where each PNG is, or why a side has none (*Screenshots of the base and the candidate*). |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions` (from Claude Code's Bash, without `--repo`/`--session`, the scope is the calling session's: `cli._caller`, every id its process had, `claude-sessions/<CLAUDE_PID>`, and its directory, #693; this flag, or a terminal, takes every session's), `--user` | Stops the runner, phase `review`, "Claude took over", status `taken_over`; Claude edits in the worktree and accepts, or hands back with feedback. Refuses (exit 1) a task whose checkout hasn't finished, running or failed (`its worktree isn't ready yet: wait for it, or wb discard <task>`): the hand-back's runner made the checkout again from nothing, and Claude's edits went with it (#655). Outside "Let Claude decide" it needs the user's recorded yes for the task, else exit 3; `--user` (the mod's hand-back command) is the user's own ask, and records one (*Claude coding*). `--all`: every task that isn't closed; a task refused (the coding gate, exit 3) is said and the rest are still taken over, then it exits with the refusal's code (#601: the first refusal left every other runner going). A task not checked out yet, or failed at checkout, is skipped, not refused (`not ready: <task> (its checkout hasn't finished): wait for it, or wb discard <task>`), so it can't fail every hand-back (#918). `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR or inside it, or DIR is inside the task's spot (its package, else its `cwd` inside the repo, else the repo: #695), or its `cwd` is DIR or inside it, by whole components of real paths (in lower case where the file system ignores case), never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
@@ -7013,7 +7154,7 @@ their `plan.json` (`bench.prune_runs`: each replay's `wb.log`, `diff.patch` and 
 for good otherwise, #740), and closes what a killed driver left (`bench.sweep`), and refuses while a replay's runner still lives. Skips what an earlier run with the same label already passed or failed (an `error` runs again); with nothing left, says so and starts no driver. |
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run), archived tasks included (#270): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`; without a name, `[{backlog, tasks, open}]` (it printed the text, #602). |
 | `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X\|off` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive and finite, else exit 1) writes savings.json first; `--price off` removes `kwh_price`, its other keys kept (`savings.set_price(None)`, #609). The cost reads `GPU 600 Wh, cost 0.15`: no currency sign. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price}` (`price`: the kWh price set, or null; the pane's Settings row shows it). `--card FILE.svg`: the badge as an image (*The badge*). |
-| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (the feed, *The Stats feed*), `--all` (every model that ran a task) | `wb stats set` changes the Stats tab's settings (stats.json, *Stats recording*) and prints them. `wb stats` starts with the feed's headline (`stats.summary` over `feed(only=stats.SUMMARY)`: the week and all time, the streak, what the agents absorbed, their questions, the guards that fired), then the results by model and size (judged rows: it says how many spec-gap discards, tasks whose agent never ran and trials it left out, each among the models shown, #817; the models the Stats tab shows, each variant on its own row, then "N older model(s), retired or idle 90+ days: M task(s) (wb stats --all)"; `--all`: every model, #638), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
+| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (the feed, *The Stats feed*), `--all` (every model that ran a task) | `wb stats set` changes the Stats tab's settings (stats.json, *Stats recording*) and prints them. `wb stats` starts with the feed's headline (`stats.summary` over `feed(only=stats.SUMMARY)`: the week and all time, the streak, what the agents absorbed, their questions, the guards that fired), then the results by model and size (judged rows: it says how many spec-gap discards, tasks whose agent never ran and trials it left out, each among the models shown, #817; the models the Stats tab shows, each variant on its own row, the newest `stats.STATS_MODEL_LINES` 3, then "N more model(s) used in the last 90 days: T task(s); M older model(s), retired or idle 90+ days: U task(s) (wb stats --all)", each part only when it counts any; `--all`: every model, #638), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
 | `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`), the scratch directories (`store.SCRATCH_PREFIXES`: `.verify-`, `.base-`, `.check-`, `.submodule-`, `wb-index-`, `wb-merge-`, `.wb-image-`, `.wb-audio-`, each named `<prefix><maker's pid>.<start tag>.<machine tag>-` by `store.scratch`, the tag `models.start_tag`, a crc32 of its start, the machine's `store.machine_tag`, a crc32 of `store.machine()`: another machine's is left to that machine's gc for `FAR_SCRATCH_AGE`, a day, since gc here removed a live base check or verify clone there, its pid not in this process table, #876; and `wb bench add`'s half-made case `.<case>.<pid>.tmp`) in the state directory, `bench/`, `bench/cases/` and each default output directory of `wb image` and `wb audio` (`_scratch_homes`: only the top level was swept, and a bench add or a generation killed at Claude's Bash limit left its clone or temp directory for good, #589) `SCRATCH_AGE` (an hour) old whose maker is gone (`bench/`: a killed `wb bench add`'s clones, #439) (`_drop_scratches`, `_maker_alive`: a pid live again under a process with another start is gone, #532; an untagged name goes by the pid), half-made starts (`_dead_start`, `_drop_start`: a task directory with no task.json whose `starting.json` pid is gone or now another process's (its `start`, #532), or with none past `RULES_GRACE`; one another machine wrote (its `machine`) only once its `at` is `RULES_GRACE` old, #876; its worktree (unlocked first: killed mid-checkout, git leaves it locked "initializing", which remove and the registration's drop skip), its registration only (#641) and rules go too, and the branch only when `starting.json` says this start made it and only while it still points at `branch_at` (`delete_branch(at=)`: one `update-ref -d` compare-and-delete; an earlier task's unmerged `delegate/<task>` was deleted after a start killed before its worktree, #416); killed commands left full clones that `_disk_room` counted, and a killed start's name was refused for good: #376, the audit of 1.6), the web chat's uploads older than N days whose message has its receipt (an expired one is retired with one, #741), or that no unread message names (`chat.drop_old_uploads`, #623), and the delegate branches of accepted tasks that have landed, merged by `--merge` before accept deleted them itself or by hand after a plain accept (`_merged_branches`: each repo's `refs/heads/delegate/` listed once with `for-each-ref`, the tip recorded first, then `gitops.drop_landed_branch`: `branch 
 -d`, else a compare-and-delete when the task's `base_branch` holds the tip, never while a worktree has the branch checked out (`gitops.checked_out_in`, from `worktree list --porcelain`; update-ref skips git's own check, and a second worktree's HEAD was left naming no ref, every file staged, #930; skipped, it is asked again next time); a branch moved past the tip accept recorded is the user's and stays (#930: the tip compared was the one gc read); a branch gone or deleted is recorded, status `branch_gone`, and never looked at again: only `--merge` rows were considered, so a hand-merged branch stayed for good, and every merged task ever recorded cost a git call on every run, #686). A branch squash-merged elsewhere (a pull request) holds commits its target lacks, so it stays: `git branch -D` it. Then each accepted task's `refs/workbench/accepted/<task>`, which accept kept in the user's repo before the steps bundle (or when it couldn't make one) (`_released_refs`, `gitops.drop_accepted`, a compare-and-delete; status `accepted_ref_gone` then, never looked at again): deleted outright when its tip is in the task's `base_branch` (one `for-each-ref --merged` per repo and base branch), which keeps every step alive, else moved into the task's `steps.bundle` first (`gitops.bundle_steps`), which `wb bench add` reads (deleted without it only when the bundle can't be made and each step has its bench case); kept on every accept for good, each task's steps showed in `git log --all`, mirrors copied them and git gc could never prune them (#799). A `steps.bundle` stays as long as its task, every step cased or not: removed then, a case taken out with `wb bench rm` could never be made again after a squash accept (#940). And what history kept for good (#740, the 2026-11-21 audit): archived tasks closed over `store.SLIM_DAYS` (90) days lose `store.SLIM_GLOBS` (`runner.log`, `base-tests.txt`, `setup.txt`, `rounds/*/tests.txt`, verify's and shot's outputs, the earlier sessions' exports `.export-<sid>.json`, a cache `transcript.finished_export` fills again on demand; and wb shot's PNGs, each side of its shots.json marked `pruned` first, which `chat.shots` reports as no image and `/api/shot` answers with 410, so the web chat says the screenshot expired, not that it failed or couldn't load, #821; task.json, status.json, the prompts, summaries, events and asks stay: names stay taken, bench add reads the prompts, the lessons the events; `store.slim_archive`), `notify.old.jsonl` past `NOTIFY_OLD_MAX` (8 MiB) keeps its newest half from a whole line (`_cap_old_notices`), and `_drop_leftovers` removes `imports/` entries older than N days and `claude-sessions/<pid>` files older than that whose process is gone and that no open task records. 
 Prints the counts and the bytes freed; writes `gc.json`. Then (not in `cli.gc`, which a discard runs) `bench.sweep`: the bench replays a driver killed without warning left (*Bench*, #511), with a line naming them. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
@@ -7023,7 +7164,7 @@ Prints the counts and the bytes freed; writes `gc.json`. Then (not in `cli.gc`, 
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4; at least 1), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. An engine off this GPU (`"gpu": false`, or a url on another host) runs beside tasks; one pinned to a card (`devices`, `beside`) waits only for the tasks on it. A bare `list` or `ls` as the prompt acts as `--list`. |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music` (default: the first engine), `--n` (3; at least 1), `--seconds S` (engines with `{seconds}`; default the entry's `seconds`, else 5 for sfx, 30 for music, 10 otherwise), `--voice NAME` (default: the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check` (no listener, no spectrograms), `--list`, `--wait` | Clips from a local audio engine, each with one line of checks (see *Audio*). `--n` below 1 is refused (exit 2, before any lease: #592); a clip that isn't audio fails the command, unpublished. A GPU engine refuses while anything holds the GPU (`--wait` queues); a `"gpu": false` engine runs beside tasks. A bare `list` or `ls` acts as `--list`. An option the engine has no placeholder for is refused, naming it. |
-| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|wait\|answer]` | `listen <clip>… [--text]` (Claude's shortlist of `wb audio` takes for the user to play and pick, up to 8: *Listening by ear*, #397), `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses, leaving the switch off (#690), when another program or another account's chat answers there or its server didn't start, `off` stops only one it started; `url` first starts again one `on` started that is gone, #449), `--port` (the running server's, from `chat/port.json`, else the one `chat/serve.pid` names, else 1337: #349), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo --pid` (a plan's session and directory; `--pid`, the asking session's `wb events` process, #538; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|notice\|wait\|answer]` | `listen <clip>… [--text]` (Claude's shortlist of `wb audio` takes for the user to play and pick, up to 8: *Listening by ear*, #397), `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses, leaving the switch off (#690), when another program or another account's chat answers there or its server didn't start, `off` stops only one it started; `url` first starts again one `on` started that is gone, #449), `--port` (the running server's, from `chat/port.json`, else the one `chat/serve.pid` names, else 1337: #349), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo --pid` (a plan's session and directory; `--pid`, the asking session's `wb events` process, #538; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands), `notice --tool --kind --text` (a dialog waiting in the terminal while the user isn't away, #959: prints the notice's id, or `skipped: …` when no page was in use in a day and no device has push on), `notice --done <id>` (its dialog was answered in the terminal: no push for it, the page says so; prints `answered <id>`, exit 1 for an id that is no notice) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb try` | `--model <id or fragment>` (the router's pick) | A sample task that proves the setup (#112): copies `workbench/try/project/` (a tiny `stats.py` with its tests and a committed CLAUDE.md; `from __future__ import annotations`, so its `list[float]` imports on Python 3.7 and 3.8 too) into `~/.local/share/workbench/try/<n>`, without Python's caches (a `__pycache__` left in the clone's sample made `wb init` refuse the copy as generated files, 2026-11-21) (beside `$WB_SKILLS`: the state directory is hidden from the lane, and its agent had no git there, #164), sets it up as `wb init` does, and starts `workbench/try/spec.md` (add `median`) as `try-<n>`, `--size trivial --trial --test '<wb's python> -m unittest'` (`sys.executable`, quoted: PATH's `python3` is 3.6 on RHEL 8, and the untouched base failed, #530): never the router's evidence or the lessons. Prints what `wb start` does, the project's path and the hidden check for review, `<wb's python> <pkg>/workbench/try/check.py <worktree>` (the agent never sees it; it fails on the untouched base, also when its Python can't read the module, passes once `median` meets the spec, and leaves no `__pycache__`). A refusal, by `wb init` (no git identity: #530; a home that is a git repo no longer refuses it, #684) or by the start (the GPU busy without `--queue`, no model), removes the copy again (#161). |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked; in a repo with commits only the link is committed, the user's CLAUDE.md edits left alone, #931, and nothing while a merge, cherry-pick, revert or rebase waits: `gitops.under_way`). Refuses the home directory or above, inside another repo (but a home kept as a git repo, dotfiles in `~`, or one above it: the project gets a repo of its own nested there, else every new project and `wb try` were refused there, #684), a repo git refuses (git's reason: no `git init` over it; "not a repo" is told apart in any language, `gitops.NotARepo`), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name) with the line for the user's `$SHELL` (`cli.path_advice`: zsh's `~/.zshrc`, bash's `~/.bashrc`, on macOS `~/.bash_profile`, fish's `fish_add_path`, else `~/.profile`) and to start Claude Code again from a new terminal (the desktop app or an IDE too); "add it" was all it said (#274, the audit of 1.2), and `wb doctor`'s "wb isn't on PATH" gives the same line when that link is there; exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. Ends with a `first run:` checklist (`cli.first_run`, #111), one line each, `ok` or `--` with the fix: OpenCode 2.x (else `runner.OPENCODE_GET`: OpenCode's `/v2/install`, or `opencode upgrade --major` on 1.x; npm's `opencode-ai`, `opencode.ai/install` and GitHub's Latest release are the 1.x line, #654), a model server answering (a configured provider, this machine's Ollama, or a server on a default port; on WSL2 one only at the Windows host is a `--` line that it needs `local: true`, and none at all adds `models.WSL_NAT`, #663; else: start yours, or run /workbench and Claude lays out the ones that fit the machine, never steering to one; `wb model add --url`), a local model registered (else: run /workbench, and Claude picks one for the machine), Landlock. It names no model, and changes no exit code. |
@@ -7043,6 +7184,7 @@ $WB_HOME (~/.local/state/workbench)
   experiments.json  .lock        wb experiment: {<name>: "off"|<level>}, probe's levels adaptable|moderate|aggressive ("on", from before them: adaptable); a missing name or another value is off (*Experiments*)
   probe-languages.json           the languages the installed probe reads, from its `probe search --help`: {probe: its real path, version: `probe --version`, languages: [--language's values], at}; read again when either differs (context.probe_languages, *Experiments*)
   progress.json                  progress checks, the user's opt-in: {on, after?, ts}; none: off
+  splash.json                    the pane's opening animation (wb splash): {on, ts}; none, or anything but "on": false: on
   results.jsonl                  one row per closed task: what the router, slices, tuning and skill records learn from
   stats.json  stats.lock         the Stats tab's settings ({recording, live, every, ts}; none: all defaults: *Stats recording*)
   lessons.jsonl                  what each task taught, open until written into a skill or closed
@@ -7076,6 +7218,7 @@ $WB_HOME (~/.local/state/workbench)
   chat/                          messages.jsonl  receipts.jsonl  asks.jsonl  prefs.json  listener.json  claims.json
                                  switch.json ({on}: wb chat on|off)  serve.pid ({pid, port, start}; wb chat url revives from it)  serve.log (the server wb chat on started)
                                  port.json ({port, pid, start}: the port wb chat serve runs on, read back without --port)
+                                 away.json ({at, by}: when the user last used the chat, 0 once they type in the terminal)  page.json ({at}: a page last in use, #959)
                                  audio/<batch>/ (wb chat listen's copies, <n>.<ext>, and audio.json; the newest 20)
                                  uploads/<id>/ (an attachment: <name> 0600 and .meta.json; *The web chat*)  uploads.lock
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
@@ -7371,7 +7514,8 @@ medians of status `speeds`) and `gpu_w` (`{mean, peak}`); `commit` and `merged` 
 discard. A step (`results.step`): `files`,
 `lines` (added, against HEAD, new files included), `removed`, `window`, `landed`, `compacted` (its last
 session, or one a handover replaced: a `fresh` event's `compacted`), `handovers` (fresh sessions
-with overflow), `read_full`, `reviews`, `spec_rounds` (the step's rounds with a `--spec-gap`, a
+with overflow; both leave out the `fresh` event a later step's first round began with, which
+replaced the session the step before left and judges that step, #958), `read_full`, `reviews`, `spec_rounds` (the step's rounds with a `--spec-gap`, a
 gap given on the `wb next` or `wb accept` closing it included: measured before it was recorded,
 it counted as the agent's review round in the slice, #904), `stuck`, `took_over`, and `claude` (that
 step's share of the row's `claude`, `spend.usage_by_step`, same shape: only in a row of several
@@ -7686,7 +7830,9 @@ over https (no manifest link over localhost; a keyed one on an https origin rout
 the app (its worker runs and holds the
 key; the gear sends the install to https; notifications offered, or on iPhone sent to the installed app), what a page
 showed while in use reported to `/api/seen`, and not while only on screen (`hasFocus` false,
-#537), a server frozen (SIGSTOP) past the 40 s watchdog and then
+#537), the settings' words on when you're away, the page coming on screen in use posting
+`/api/active` (`page.json`, and `away.json` by `page` with the chat on) and not when unfocused,
+nor again within 30 s, a failed `/api/active` not tried again on a timer, only on the next use, a `wb chat notice` shown as a notice with no buttons and, after `--done`, "answered in the terminal" (#959), a server frozen (SIGSTOP) past the 40 s watchdog and then
 let go (the page heals with no reload; a message sent meanwhile lands once), a changed page file
 (the page reloads itself, keyed, with the thread), wb shot's pair, `wb chat listen`'s shortlist
 (each take plays from its blob with its length and check line, and Keep sends the pick with its
@@ -7699,7 +7845,8 @@ was uploaded once; sent, one message with one path reaches `wb chat pending`, it
 whole) and one refused on its chip (over chat.json's `upload_mb`, then dropped with ✕; the test's
 own `WB_CHAT_CONFIG`), no script errors; and once, in node (`swSays`: `sw.js` in a `vm` against a
 given state, since no browser here shows a push), a push's text: Claude's newer reply over an older
-or stale prompt, a newer open prompt over the reply (#538).
+or stale prompt, a newer open prompt over the reply (#538), a notice's sentence and its command
+as it is (#959).
 
 **Conventions for a new test.** Names read as sentences (`test_a_note_does_not_swallow_a_failure_claude_has_not_seen`);
 one class per feature with a one-line docstring; end to end through `self.start`/`wait_phase`/
@@ -7871,7 +8018,13 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
-- **A `$.state` atom's type** in the mod → its tag (`tasks-8`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`, `top-1`, `said-1`).
+- **A `$.state` atom's type** in the mod → its tag (`tasks-8`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`, `top-1`, `said-1`, `splash-1`).
+- **The Tasks page's layout** (the render's rows, margins, the stage, the tabs and the modeline) →
+  `pageParts` and `pageShape`, which the opening animation lands by (#963); **the modeline's look**
+  (`MODELINE`, the theme's `claude`) → splash.ts's `BAR` and the text it is given.
+- **What the Stats tab folds** (2026-11-21): `top.FOLD`'s states → the mod's `RACK_FOLD`;
+  `stats.STATS_MODEL_LINES` → the mod's `STATS_SHOWN`; `model_lines`' `more`/`older` and
+  `variants` → `statsLines` and `cli.cmd_stats`.
 - **The Claude coding choices** (`cli.CODING`: modes, labels, sentences) → the mod's
   `CODING_STOPS` (the Settings row) and `CODING_RULES` (the context block), and the skill's *Claude
   coding* bullet.
@@ -7899,6 +8052,15 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   the results row field it reads (`peak_share`, `self_review_due`, `probe_long`).
 - **`chat.py` or `chat_static/`** → the browser test (`chat.yml` runs it on the pull request too).
 - **`/api/state`'s asks or messages** → `sw.js`, which builds the notification from them.
+- **A message's `from`** (`user`, `claude`, `notice`: #959) → `chat.NEWS` (what is pushed and
+  `/api/latest`), `sw.js`, the page's `makeRow`, `metaFor` and `reportSeen`, `wb chat log`, and the
+  mod's owed reply (`owedAtTurnEnd`), which counts only `claude`.
+- **What makes the user away** (`chat/away.json`: the mod's `listen`, `back` and
+  `termDialogDone`, the server's `chat.active`) → `awayNow` in register.tsx, AWAY_NOTE, the page's
+  `#away-when`, and *The web chat* (#959).
+- **When a notice is settled** (the mod's `tool.call` `finally` and `turn.complete`, `wb chat
+  notice --done`) → `chat.notice_done`, the `answered` receipt `chat.thread` and `chat.latest`
+  read, and the page's `metaFor` (#959).
 - **A message's `about`** (a pair's `{task, n, step, round}`, a kept take's `{audio, n, name, path}`) → the mod's prefix for it in `listen` (register.tsx), the page's `aboutTag` and `aboutBody`, and `/api/send`'s check, which fills it in from the pair or the batch (#99, #397).
 - **`wb chat ask|wait|answer`'s output** (`<id> <state>` on the last line, `wait --json`'s ask) → `askOnChat` and `waitOnChat` in register.tsx, which parse it.
 - **AskUserQuestion's or ExitPlanMode's input shape** → `askOnChat` (`--detail`) and `makeAsk` in app.js.

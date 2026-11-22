@@ -67,7 +67,13 @@ class Sharing(Base):
         os.environ["WB_FAKE_GPU_GB"] = "24"           # 36 GB wanted: too much at once
         out = self.hold_big_then_start_small()
         self.assertIn("note: the GPU is busy with t-big; this task waits as queued", out)
-        time.sleep(1.5)
+        # its base check comes first: on the nightly's macOS runner it outlasted a fixed 1.5 s
+        # sleep, and `last` still said so (#950); the wait is the lease's, once it is in line
+        deadline = time.time() + 30
+        while not any(h["task"] == "t-small" and h.get("waiting") for h in models.holders().values()):
+            self.assertLess(time.time(), deadline, store.Task("t-small").status)
+            time.sleep(0.1)
+        time.sleep(0.5)                               # and it stays queued behind t-big
         st = store.Task("t-small").status
         self.assertEqual((st["phase"], st["last"]), ("queued", "waiting for the GPU (held by t-big)"))
         self.assertEqual(transcript.activity(store.Task("t-small"), {}),
@@ -263,9 +269,12 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.start("t-new", "ok", "--model", BIG, "--queue")
         os.environ["FAKE_SCENARIO"] = "ok"
         run_wb("feedback", "t-a", "--text", "feedback-for-t-a")
+        # both in line in gpu.json before the GPU comes free: status `last` read "waiting for the
+        # GPU" from the runner's start, before its checkout and its lease, so under CI's load
+        # t-big stopped while t-new was the only one in line, and it rightly went first (#950)
         deadline = time.time() + 30
-        while "waiting for the GPU" not in store.Task("t-a").status.get("last", ""):
-            self.assertLess(time.time(), deadline, store.Task("t-a").status)
+        while {"t-a", "t-new"} - {h["task"] for h in models.holders().values() if h.get("waiting")}:
+            self.assertLess(time.time(), deadline, (store.Task("t-a").status, models.holders()))
             time.sleep(0.1)
         run_wb("stop", "t-big")
         wait_phase("t-a", {"review"})
@@ -575,8 +584,11 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         wait_running("t-big")
         self.start("t-gpu", "ok", "--model", SMALL, "--no-base-check", "--unload-for-tests",
                    "--test", f"touch ran-tests; {TEST_CMD}")
+        # the runner says "waiting for the GPU: the tests use it alone" first, then the lease names
+        # who holds it: read between the two on a slow CI machine (2026-11-21), so wait for the
+        # second, which a test of the order of the two would also need
         deadline = time.time() + 30
-        while "the tests use it alone" not in store.Task("t-gpu").status.get("last", ""):
+        while "(held by" not in store.Task("t-gpu").status.get("last", ""):
             self.assertLess(time.time(), deadline, store.Task("t-gpu").status)
             time.sleep(0.1)
         self.assertEqual(store.Task("t-gpu").status["last"],
@@ -616,7 +628,13 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
             from workbench import models
             with models.GpuLease(models.resolve({BIG!r}), "t-act", lambda s: None):
                 Path({str(tmp / "act")!r}).write_text("in")
-                time.sleep(3)
+                # held until both loads have misfit beside it and queued: a fixed 3 s ran out
+                # first on the nightly's macOS runner, whose interpreters start slowly, and the
+                # second load, alone by then, rightly fit (#950)
+                deadline = time.time() + 30
+                while time.time() < deadline and not all(
+                        Path({str(tmp)!r}, n + "-queued").exists() for n in ("t-w1", "t-w2")):
+                    time.sleep(0.05)
             """)
         waiter = textwrap.dedent(f"""
             import sys, time
@@ -662,6 +680,14 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
 
 class Budget(unittest.TestCase):
     """The GPU budget: one runtime's GPUs, an iGPU's carve-out left out, Apple's real default."""
+
+    def setUp(self):
+        # the cards and the fake /proc these tests give are a Linux box's: on the nightly's macOS
+        # runner budget_devices kept only unified GPUs (#711) and ps stood in for /proc (#804),
+        # so every NVIDIA or AMD case read no budget at all (#950). Apple's case says macOS.
+        linux = mock.patch.object(hardware, "system", lambda: "linux")
+        linux.start()
+        self.addCleanup(linux.stop)
 
     def budget(self, gpus, env=None, why=False):
         with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}), \
@@ -751,6 +777,9 @@ class Budget(unittest.TestCase):
         # 75% of a 16 GB Mac let a model's context spill to the CPU (the 2026-11-16 audit)
         mac = lambda ram, wired=None: {"name": "Apple M3", "driver": "metal", "unified": True,  # noqa
                                        "vram": ram * 2 ** 30, "wired_limit": wired}
+        macos = mock.patch.object(hardware, "system", lambda: "macos")
+        macos.start()
+        self.addCleanup(macos.stop)
         self.assertEqual(self.budget([mac(16)])[0], 16 * 2 ** 30 * 2 // 3)
         self.assertEqual(self.budget([mac(36)])[0], 36 * 2 ** 30 * 2 // 3)
         self.assertEqual(self.budget([mac(64)])[0], 64 * 2 ** 30 * 3 // 4)
@@ -1087,6 +1116,10 @@ class CanShare(Base):
     def test_ollamas_default_model_limit_is_three_per_gpu(self):
         # #466 (the audit of 1.8; Ollama's server/sched.go: defaultModelsPerGPU * len(gpus)):
         # counted as 3 in all, a fourth task on a two-card box was refused sharing
+        # NVIDIA cards are a Linux box's: on macOS budget_devices keeps only unified GPUs (#711, #950)
+        linux = mock.patch.object(hardware, "system", lambda: "linux")
+        linux.start()
+        self.addCleanup(linux.stop)
         a, b, c, d = (self.model(f"ollama/{x}", gb=1) for x in "abcd")
         card = {"name": "RTX 3090", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30, "discrete": True}
         for cards, ok in (([card], False), ([card, dict(card)], True)):
@@ -1099,6 +1132,10 @@ class CanShare(Base):
     def test_the_model_limit_is_three_per_gpu_when_gpu_gb_sets_the_budget_too(self):
         # #811: gpu_gb (a hand-set headroom) left budget_devices no devices, so a two-card box
         # was allowed 3 models in all, and a fourth task was refused sharing that fit
+        # NVIDIA cards are a Linux box's: on macOS budget_devices keeps only unified GPUs (#711, #950)
+        linux = mock.patch.object(hardware, "system", lambda: "linux")
+        linux.start()
+        self.addCleanup(linux.stop)
         a, b, c, d = (self.model(f"ollama/{x}", gb=1) for x in "abcd")
         card = {"name": "RTX 3090", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30, "discrete": True}
         hand = Path(self.tmp.name) / "models.json"

@@ -9,12 +9,19 @@ so a test can fill the context window without sending it (OpenCode then compacts
 carrying its summary template gets the template's headings back, which it takes as a summary).
 With CAPTURE_HEADER_DELAY=<seconds>, every POST waits that long before its headers, as a slow
 reader's server does until its first token (#491).
+
+It answers one request at a time, as a model server with one slot does, but accepts every
+connection at once, as a real server's accept loop does. Single-threaded, it left a connection
+that came while it slept unaccepted: Linux completes the connect all the same, but on macOS
+OpenCode's first request of a round timed out connecting (`ETIMEDOUT: Unable to connect`), three
+times, in the nightly of 1.90.31 (#950).
 """
 import json
 import os
 import sys
+import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 OUT = sys.argv[2]
 CALLS = json.loads(sys.argv[3]) if len(sys.argv) > 3 else []
@@ -26,6 +33,7 @@ USAGE = {"prompt_tokens": READ, "completion_tokens": 1, "total_tokens": READ + 1
 SUMMARY = "\n\n".join(f"{h}\n- (none)" for h in (
     "## Objective", "## Requirements", "## Decisions", "## Work State\n### Completed",
     "### Active", "### Blocked", "## Next Move", "## Relevant Files", "## Important Context"))
+SLOT = threading.Lock()  # one request at a time
 
 
 def chunk(**fields):
@@ -55,6 +63,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        with SLOT:
+            self.answer(req)
+
+    def answer(self, req: dict):
         with open(OUT, "a") as f:
             f.write(json.dumps(req) + "\n")
         time.sleep(DELAY)
@@ -93,4 +105,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+    server = ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler)
+    server.daemon_threads = True
+    server.serve_forever()

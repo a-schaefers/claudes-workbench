@@ -47,7 +47,7 @@ export type WbLive = { task: string; lines: WbLine[] }
 export type WbChat = { key: string; delegating: boolean; url: string; web: boolean }
 
 /** The pane's view: its tab ('tasks', 'stats' or 'settings'), the settings row open ('' none,
- * 'coding', 'chat', 'record', 'live', 'every', 'progress'), the option the focus ring is on ('' none),
+ * 'coding', 'chat', 'record', 'live', 'every', 'progress', 'splash', 'probe'), the option the focus ring is on ('' none),
  * so its sentence shows, and whether the user closed it (a strip above the prompt stands in for it). */
 export type WbPane = { tab: string; open: string; focus: string; minimized: boolean }
 
@@ -78,6 +78,9 @@ declare module 'claude-code' {
       top: Shaped<WbTop>
       /** what the conversation was told of the rules (WbSaid, #540): kept across a reload (#697) */
       said: Shaped<WbSaid | null>
+      /** this session's first /workbench has come, and with it the opening animation (#963):
+       * kept across a reload, so nothing plays it again */
+      splash: Shaped<boolean>
     }
   }
 }

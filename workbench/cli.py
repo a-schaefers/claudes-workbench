@@ -224,7 +224,10 @@ def detach(argv: list[str], awake: str = "", **kw) -> subprocess.Popen:
     return proc
 
 
-# Waits for a pid to exit (argv[1]): a pidfd where Linux has one, else kill -0 every 15 s.
+# Waits for a pid to exit (argv[1]): a pidfd where Linux has one, a kqueue NOTE_EXIT where
+# there is one (macOS), else kill -0 every 15 s. Both events fire at the exit itself: kill -0
+# still finds a pid its parent hasn't reaped, and on macOS the tests' runs held their wait past
+# the run (#950)
 AWAIT_PID = """import os, select, sys, time
 pid = int(sys.argv[1])
 try:
@@ -233,6 +236,13 @@ except (AttributeError, OSError):
     fd = None
 if fd is not None:
     select.select([fd], [], [])
+elif hasattr(select, "kqueue"):
+    kq = select.kqueue()
+    try:  # returns at the exit, or at once with an error event for a pid already gone
+        kq.control([select.kevent(pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                  select.KQ_NOTE_EXIT)], 1, None)
+    except OSError:
+        pass
 else:
     while True:
         try:
@@ -1071,12 +1081,14 @@ def cmd_start(a):
     # (#529). What it would refuse is checked here first, the branch, a commit's own submodules.
     wt = context.tree(task.dir, repo, setup.get("siblings"), "worktree")  # #261
     base = gitops.base_commit(repo, a.base)
-    if why := gitops.branch_clash(repo, a.name):  # a branch `delegate` too (#792)
+    if clash := gitops.branch_clash(repo, a.name):  # a branch `delegate` too (#792)
         shutil.rmtree(task.dir, ignore_errors=True)
-        die(why)
-    if base and (why := gitops.case_clash(repo, base, task.dir, a.base)):
+        die(clash)
+    if base and (clash := gitops.case_clash(repo, base, task.dir, a.base)):
         shutil.rmtree(task.dir, ignore_errors=True)
-        die(why)  # #797: the checkout would have two paths in one file
+        die(clash)  # #797: the checkout would have two paths in one file
+    # `clash`, not `why`: reused, these checks emptied the router's reason, and task.json's route
+    # (wb watch's "routed:" line) was blank on every start since #792 (2026-11-21)
     store.write_json(task.dir / STARTING, {"repo": str(repo), "worktree": str(wt),
                                            "pid": os.getpid(), "at": store.now(),
                                            "start": models._started(os.getpid()),
@@ -2439,6 +2451,22 @@ def cmd_experiment(a):
           + ("; tasks already started keep theirs" if a.state is not None else ""))
 
 
+def splash_on() -> bool:
+    """Whether the pane opens with its animation (#963): on unless splash.json says off."""
+    d = store.read_json(store.home() / "splash.json")
+    return not (isinstance(d, dict) and d.get("on") is False)  # as the mod's splashOn reads it
+
+
+def cmd_splash(a):
+    """The pane's opening animation on the first /workbench of a session (#963): show it, or
+    turn it on or off. The mod's Settings row runs this and reads splash.json back; the mod
+    keeps no setting of its own."""
+    if a.state:
+        store.write_json(store.home() / "splash.json", {"on": a.state == "on", "ts": store.now()})
+    print("opening animation: " + ("Enabled (default): the first /workbench of a session plays it; "
+                                   "any key skips it" if splash_on() else "Off: the Tasks page opens at once"))
+
+
 def cmd_coding(a):
     """Show or set when Claude may write code for a delegated task, or record the user's yes
     for one task (#92)."""
@@ -3363,10 +3391,14 @@ def cmd_stats(a):
     head, shown = stats.summary(f), f.get("model_lines") or {}
     # the models OpenCode has now, as the Stats tab shows them; --all every one that ran (#638)
     only = None if a.all or not shown else {v for x in shown.get("lines", []) for v in x["variants"]}
-    old = shown.get("older") if only is not None else None
+    # the newest stats.STATS_MODEL_LINES of them, the rest counted on one line (2026-11-21)
+    more, old = (shown.get("more"), shown.get("older")) if only is not None else (None, None)
+    rest = "; ".join(([f"{more['models']} more model(s) used in the last {stats.OLD_DAYS} days: "
+                       f"{more['tasks']} task(s)"] if more else [])
+                     + ([f"{old['models']} older model(s), retired or idle {stats.OLD_DAYS}+ days: "
+                         f"{old['tasks']} task(s)"] if old else []))
     print("\n".join(head + [""] if head else []) + results.table(only)
-          + (f"\n{old['models']} older model(s), retired or idle {stats.OLD_DAYS}+ days: "
-             f"{old['tasks']} task(s) (wb stats --all)" if old else ""))
+          + (f"\n{rest} (wb stats --all)" if rest else ""))
 
 
 def cmd_savings(a):
@@ -4618,6 +4650,16 @@ def cmd_chat(a):
         except ValueError as e:
             die(f"wb chat ask: {e}")
         print(row["id"], row["answer"] or "open")
+    elif a.action == "notice":  # the mod: a dialog waits in the terminal, the user not away (#959)
+        if a.done:  # and was answered there: no push for it, the page says so
+            if not chat.notice_done(a.done):
+                die(f"wb chat notice --done: no notice {a.done} in the thread")
+            print("answered", a.done)
+            return
+        if not a.tool or a.kind not in chat.KINDS:
+            die("wb chat notice needs --tool, and --kind permission|plan|question")
+        row = chat.notice(a.tool, a.text or "", a.kind)
+        print(row["id"] if row else "skipped: no chat page in use in a day, and no device with push on")
     elif a.action == "wait":  # the mod: the answer once there is one; open at the timeout
         if not a.id:
             die("wb chat wait <ask id>")
@@ -4638,7 +4680,7 @@ def cmd_chat(a):
         print(cur["answer"])
     else:  # log
         for r in chat.thread()[-a.n:]:
-            who = "you" if r["from"] == "user" else "Claude"
+            who = {"user": "you", "notice": "notice"}.get(r["from"], "Claude")
             files = "".join(f" [attached: {f.get('path')}]" for f in r.get("files") or [] if isinstance(f, dict))
             print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}{files}")
         lst = chat.listener()
@@ -5674,6 +5716,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--user", action="store_true", help="the user's own command asked for it (the "
                    "mod's hand-back): past the Claude coding choice")
     s.set_defaults(f=cmd_takeover)
+    s = sub.add_parser("splash", help="the pane's opening animation on a session's first "
+                       "/workbench: show it, or turn it on (the default) or off")
+    s.add_argument("state", nargs="?", choices=["on", "off"])
+    s.set_defaults(f=cmd_splash)
     s = sub.add_parser("coding", help="when Claude may write code for a delegated task: show, "
                        "set (only, ask, decide), or allow one task's edit on the user's yes")
     s.add_argument("what", nargs="?", choices=[*CODING, "allow", "used"])
@@ -5798,16 +5844,21 @@ def parser() -> argparse.ArgumentParser:
                        "left), serve it, its link, reply to the user there, takes for the user "
                        "to pick by ear (listen), "
                        "the thread (log), receipts (ack, claim), what waits (pending), permission "
-                       "prompts for the away user (ask, wait, answer: the mod's)")
+                       "prompts for the away user (ask, wait, answer: the mod's), and a notice "
+                       "that one waits in the terminal (notice: the mod's)")
     s.add_argument("action", choices=["serve", "url", "on", "off", "reply", "listen", "log", "ack",
-                                      "claim", "pending", "ask", "wait", "answer"], nargs="?",
+                                      "claim", "pending", "ask", "notice", "wait", "answer"], nargs="?",
                    default="log")
     s.add_argument("id", nargs="?", help="ack, claim: the message id; wait, answer: the prompt's "
                    "id; listen: the clips (wb audio's takes, up to 8)")
     s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)  # listen's further clips
-    s.add_argument("--tool", help="ask: the tool asking")
-    s.add_argument("--kind", default="permission", help="ask: permission, plan or question")
+    s.add_argument("--tool", help="ask, notice: the tool asking")
+    s.add_argument("--kind", default="permission", help="ask, notice: permission, plan or question")
+    # --done takes the id itself: an optional positional after a flag (`notice --done <id>`) is
+    # left unparsed before Python 3.12, so the mod's call failed on 3.11 (CI, 2026-11-21)
+    s.add_argument("--done", metavar="ID", help="notice: the notice whose dialog was answered in "
+                   "the terminal (no push for it)")
     s.add_argument("--detail", help="ask: JSON, a question's {questions} or a plan's {plan} "
                    "or {plan_file}")
     s.add_argument("--session", help="ask: the Claude Code session asking (its plan file)")
@@ -5822,7 +5873,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--bind", action="append", help="serve: an address to listen on, `tailscale` "
                    "or 0.0.0.0 (default: chat.json's `bind`, else localhost)")
     s.add_argument("--host", action="append", help="serve: another host name to answer to (* any)")
-    s.add_argument("--text", help="reply, ask, listen: the text"); s.add_argument("--message", help="reply: file, or -")
+    s.add_argument("--text", help="reply, ask, notice, listen: the text"); s.add_argument("--message", help="reply: file, or -")
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
     s.add_argument("--how", choices=["now", "queued"], default="now", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_chat)

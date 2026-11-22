@@ -133,7 +133,7 @@ dependencies. No packaging: it runs from the clone.
   it short (prefill time).
 - `skill/workbench/`: the `/workbench` procedure (`SKILL.md`, `reference/`; `wb setup` links it).
 - `mod/`: the Claude Code plugin (`hooks/register.tsx`, `hooks/apprentice.ts` the pane's
-  character, `hooks/register.test.tsx`, `types/index.d.ts`; `.claude-plugin/plugin.json` has no
+  character, `hooks/splash.ts` its opening, `hooks/register.test.tsx`, `types/index.d.ts`; `.claude-plugin/plugin.json` has no
   version: installs track main's commits). Its marketplace: the root's `.claude-plugin/marketplace.json`.
 - `bin/wb`, `bin/wb-ask-mcp`: launchers that find the package from their real path.
 - `tests/`: `test_workbench.py` (end to end, one class per feature), `test_gpu.py`,
@@ -191,7 +191,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
 Plain files under `$WB_HOME` (`~/.local/state/workbench`); the tree and formats: ARCHITECTURE.md
 (*Files and formats*):
 ```
-notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json stats.json tuning.json speed.json gpu*.{lock,json,admit,load}
+notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json splash.json stats.json tuning.json speed.json gpu*.{lock,json,admit,load}
 scout.json update.json watch.json optimize.json gc.json wsl-gpus.json archive/ imports/ images/ audio/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,away,prefs,push,claims,switch,open,port}.json chat/uploads/
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md imports/ bin/git grants.json gitdir.json submodules.json (no lane)

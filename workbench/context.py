@@ -868,8 +868,13 @@ def shell_rules(task: store.Task) -> list[dict]:
     pip, theirs = python_installs(task)  # into the worktree's venv, not the user's (#490)
     rules += [{"action": "shell", "resource": r, "effect": "deny"}
               for p in (*ASK_FIRST, *(ENV_INSTALLS if theirs else ())) for r in (p, f"{ASSIGN} {p}")]
+    # pipenv isn't pip: it installs into the active venv, else makes its own in the worktree
+    # (PIPENV_VENV_IN_PROJECT), lane or no lane. Taken for a pip form by the "pip" in its name,
+    # `pipenv install` asked first wherever Landlock isn't, every macOS task (#950)
+    listed = [p for p in INSTALL_LISTED
+              if (not theirs if p.startswith("pipenv") else pip or "pip" not in p)]
     rules += [{"action": "shell", "resource": r, "effect": "allow"}
-              for p in INSTALL_LISTED if pip or "pip" not in p for r in (p, f"{ASSIGN} {p}")]
+              for p in listed for r in (p, f"{ASSIGN} {p}")]
     rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in allowed_patterns(task)]
     rules += [{"action": "shell", "resource": c, "effect": "deny"} for c in denied_shell()]
     return rules
