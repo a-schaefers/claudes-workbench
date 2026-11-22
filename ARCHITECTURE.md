@@ -43,7 +43,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
   spec, dispatch, drive, review, accept. SKILL.md holds what every session needs; what only some
   do (model servers and the weekly check, the agents' skill library, images, audio, steering and
   check-ins, handovers, permissions, the web and the web chat, the checks for a spec Claude
-  wrote) is in `reference/*.md` beside it, read when it comes up: every line of SKILL.md rides
+  wrote, the compiler, typecheck or lint per language that goes ahead of a task's tests in
+  `--test`, `checks.md`: OpenCode 2 runs no language servers, 2026-11-22) is in `reference/*.md` beside it, read when it comes up: every line of SKILL.md rides
   along on each of Claude's calls (it was 46KB; the 2026-11-17 measurement; 34KB to 30KB on
   2026-11-18). The review is in
   proportion to the task's size. The user types it once, then asks for things as usual;
@@ -1513,7 +1514,7 @@ one character (a space too), treats a trailing ` *` as optional (`npm install *`
 wins; no match means ask, which `--auto` allows. The rules, in order:
 1. deny `*`;
 2. allow `c *` (a bare `c` too) and `*=* c *` (`ASSIGN`: a variable set before it,
-   `PYTHONPATH=. pytest`) for each of `ALLOWED_COMMANDS` (about 320: the shell's builtins and
+   `PYTHONPATH=. pytest`) for each of `ALLOWED_COMMANDS` (about 350: the shell's builtins and
    everyday tools, files and text, archivers, builds and compilers, test runners, interpreters,
    package managers, `bash`/`sh`, `sqlite3`, `git` (the shim), and since #514 (the audit of 1.90)
    the toolchains the lane makes room for and the common runners and linters: `python3.*`,
@@ -1531,7 +1532,13 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `clang-*`, `clang++-*`, written like `python3.*`), and `scons`, `protoc`, `ocaml`, `iex`,
    `ghci`, `runghc`, `irb`, `gem` (`gem install *` still asks), `luarocks` (`luarocks install
    *` asks), `busted`, `lua5.*`, `cython`, `maturin`, `virtualenv`, `sphinx-build`, `mkdocs`,
-   `terraform`, `corepack`);
+   `terraform`, `corepack`; and since 2026-11-22 (the owner: "does our whitelisting too strict")
+   the Lisps, Schemes and Forth, `sbcl`, `ecl`, `ccl`, `clisp`, `racket`, `raco`, `guile`,
+   `guild`, `csc`, `csi`, `chicken-csc`, `chicken-csi`, `scheme`, `chez`, `chezscheme`, `petite`,
+   `gosh`, `chibi-scheme`, `mit-scheme`, `gforth`, and the checkers the skill's
+   `reference/checks.md` names, `luac`, `luac5.*`, `luacheck`, `selene`, `basedpyright`,
+   `staticcheck`, `yamllint`, `actionlint`, `hlint`, `tflint`, `statix`, `deadnix`, `clj-kondo`,
+   and `nix-instantiate --parse` alone);
    not on it: `nix` (its builds go through the daemon's socket, outside the lane), `curl`, `wget`, `ssh`,
    `rsync`, `docker`, `systemctl`, `opencode`. OpenCode matches each simple command's raw text,
    so `FOO=1 ls` was refused while `ls` and `env FOO=1 ls` ran, and a small model copying the

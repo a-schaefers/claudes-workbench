@@ -268,6 +268,10 @@ music): the same with `wb audio --list`, but you can't hear: read `reference/aud
 wb start <kebab-name> --spec <file|-> --repo <repo> --size significant|trivial \
    --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix 2]
 ```
+Put the project's compiler, typecheck or lint ahead of the tests in `--test` (`mypy && pytest`):
+its errors reach the agent as auto-fix rounds, not your review. Only one the project runs or
+configures, or a syntax-only check, and only when it passes on the base: `reference/checks.md`
+has each language's, the first time a task needs one.
 In a monorepo, `--repo` inside a package with its own committed CLAUDE.md (`package: …` printed)
 runs the agent, the setup and the tests in that package; the diff stays the whole repo's.
 The worktree holds only committed files. When the acceptance command needs what the user

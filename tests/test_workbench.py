@@ -9917,6 +9917,28 @@ class Permission(Base):
         layer = json.loads(runner.write_config_layer(task).read_text())   # still one string
         self.assertNotIn("OPENCODE_DISABLE_PROJECT_CONFIG", runner.rules_env(layer))
 
+    def test_the_lisps_schemes_forth_and_the_checks_guides_checkers_run_without_asking(self):
+        # the owner, 2026-11-22 ("does our whitelisting too strict"): Guile, SBCL, Racket and the
+        # rest had no entry, nor the checkers reference/checks.md names, so an agent trying one
+        # mid-round cost a question and a wake
+        self.start("t-lisp", "ok")
+        wait_phase("t-lisp", {"review"})
+        rules = context.shell_rules(store.Task("t-lisp"))
+        for cmd in ("sbcl --non-interactive --load t.lisp", "ecl --load t.lisp", "ccl -l t.lisp",
+                    "clisp t.lisp", "racket t.rkt", "raco make -v main.rkt", "raco test .",
+                    "guile t.scm", "guild compile -Wunbound-variable -o /tmp/x.go t.scm",
+                    "csc -analyze-only t.scm", "csi -s t.scm", "chicken-csc t.scm",
+                    "chicken-csi -s t.scm", "scheme --script t.ss", "chez --script t.ss",
+                    "petite --script t.ss", "gosh t.scm", "chibi-scheme t.scm",
+                    "mit-scheme --quiet < t.scm", "gforth t.fs -e bye", "luac -p t.lua",
+                    "luac5.4 -p t.lua", "luacheck .", "selene .", "basedpyright",
+                    "staticcheck ./...", "yamllint .", "actionlint", "hlint .", "tflint",
+                    "statix check", "deadnix --fail", "clj-kondo --lint src:test",
+                    "nix-instantiate --parse default.nix"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        for cmd in ("nix-instantiate default.nix", "nix-instantiate --eval default.nix"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)   # nix's evaluation: not its parse
+
     def test_git_by_path_is_refused_but_a_directory_named_git_is_not(self):
         # `*/git` refused `go test ./internal/git` whatever Claude allowed, and `time -p sudo`
         # matched only the allow rule `time *` (the 2026-11-16 audit)
