@@ -598,43 +598,56 @@ const CHAT_STOPS: [string, string, string][] = [
 ]
 
 // The probe experiment's row (ARCHITECTURE.md, *Experiments*): wb's choice (`wb experiment probe
-// on|off`, experiments.json), off by default. A task keeps what it started with.
+// off|adaptable|moderate|aggressive`, experiments.json; `on`, the setting before the levels, reads
+// as adaptable), off by default. A task keeps what it started with. The levels in the owner's
+// order (2026-11-21, #857): off, adaptable, moderate, aggressive. Each sentence says "with probe",
+// where a working probe's version goes; adaptable's says it tries aggressive from the first task,
+// since "until the results show" read as moderate only (the review, 2026-11-21)
 const PROBE_STOPS: [string, string, string][] = [
   ['off', 'Off (default)', 'The agent reads whole files, as without the experiment.'],
-  ['on', 'On', "The agent reads a file's outline and one function with probe (github.com/probelabs/probe)."],
+  ['adaptable', 'Adaptable', 'Moderate with probe, trying aggressive on some long-file tasks, until this machine\'s results pick the better one for the model.'],
+  ['moderate', 'Moderate', 'The agent may extract one function of a long file with probe (github.com/probelabs/probe).'],
+  ['aggressive', 'Aggressive', 'The agent is told never to read a long file whole, but to extract the function with probe.'],
 ]
+const PROBE_LEVELS = PROBE_STOPS.slice(1).map(s => s[0])
 
-// What wb says of it: off, on and working (with probe's version), or on but not set up (no probe
-// with `symbols` on PATH). The row says which, since it read "On" whether or not anything changed
-// (the user, 2026-11-20). Asked of wb (`wb experiment probe`) only while the Settings tab draws
-// with it on, at most every PROBE_RECHECK_MS, and again after each pick: a probe installed
-// meanwhile shows without a restart.
+// What wb says of it: off, on at a level and working (with probe's version), or on but not set up
+// (no probe with `symbols` on PATH), and whether adaptable is recommended (context.PROBE_RECOMMENDED,
+// set once a measurement says so). The row says which, since it read "On" whether or not anything
+// changed (the user, 2026-11-20). Asked of wb (`wb experiment probe`) only while the Settings tab
+// draws, at most every PROBE_RECHECK_MS, and again after each pick: a probe installed meanwhile
+// shows without a restart. Off too, since the recommendation is wb's to give; off, wb runs no probe.
 const PROBE_RECHECK_MS = 30_000
-type ProbeState = { state: 'off' | 'ready' | 'missing' | 'unknown'; version: string }
+type ProbeState = { state: 'off' | 'ready' | 'missing' | 'unknown'; version: string; recommended: boolean }
 function probeSaid(out: string): ProbeState {
   const line = out.split('\n').find(l => l.startsWith('probe:')) ?? ''
-  if (line.startsWith('probe: off')) return { state: 'off', version: '' }
-  if (line.includes('not set up')) return { state: 'missing', version: '' }
-  if (line.startsWith('probe: on')) return { state: 'ready', version: /and working \(([^)]*)\)/.exec(line)?.[1] ?? '' }
-  return { state: 'unknown', version: '' }
+  const recommended = line.includes('adaptable is recommended')
+  if (line.startsWith('probe: off')) return { state: 'off', version: '', recommended }
+  if (line.includes('not set up')) return { state: 'missing', version: '', recommended }
+  if (PROBE_LEVELS.some(l => line.startsWith(`probe: ${l}`)))
+    return { state: 'ready', version: /and working \(([^)]*)\)/.exec(line)?.[1] ?? '', recommended }
+  return { state: 'unknown', version: '', recommended }
 }
 
 async function probeStatus($: any): Promise<ProbeState> {
-  if ((await probeMode($)) === 'off') return { state: 'off', version: '' }
   const now = await $.clock.now()
   if (mem.probe && now - mem.probe.at < PROBE_RECHECK_MS) return mem.probe.said
   const { ok, out } = await runWb($, ['experiment', 'probe'], 15_000)
-  const said = ok ? probeSaid(out) : { state: 'unknown' as const, version: '' }
+  const said = ok ? probeSaid(out) : { state: 'unknown' as const, version: '', recommended: false }
   mem.probe = { at: now, said }
   return said
 }
 
-function probeStops(s: ProbeState): [string, string, string][] {
-  if (s.state === 'ready')
-    return [PROBE_STOPS[0], ['on', 'On, working', `The agent reads a file's outline and one function with probe${s.version ? ` (${s.version})` : ''}.`]]
-  if (s.state === 'missing')
-    return [PROBE_STOPS[0], ['on', 'On, not set up', "probe isn't installed, so nothing changes yet: Claude can set it up."]]
-  return PROBE_STOPS
+// The row's options: adaptable marked recommended when wb says so, and the level chosen says
+// whether it works
+function probeStops(s: ProbeState, mode: string): [string, string, string][] {
+  return PROBE_STOPS.map(([v, label, said]): [string, string, string] => {
+    const named = v === 'adaptable' && s.recommended ? `${label} (recommended)` : label
+    if (v !== mode || v === 'off') return [v, named, said]
+    if (s.state === 'ready') return [v, `${named}, working`, said.replace('with probe', `with probe${s.version ? ` (${s.version})` : ''}`)]
+    if (s.state === 'missing') return [v, `${named}, not set up`, "probe isn't installed, so nothing changes yet: Claude can set it up."]
+    return [v, named, said]
+  })
 }
 
 // Claude's turn when the user turns it on and probe isn't there: offer to set it up (the user,
@@ -647,7 +660,7 @@ const PROBE_SETUP_NOTE = (said: string) =>
   "lists `symbols` (crates.io's probe-code 0.6.0 doesn't, though it reports the same version). " +
   'Pick the asset for this OS and CPU from github.com/probelabs/probe/releases, put `probe` in a ' +
   'directory on the PATH you and wb run with (such as ~/.local/bin), then run `wb experiment ' +
-  'probe` until it says "on and working". Tasks started from then use it; running ones keep ' +
+  'probe` until it says "and working". Tasks started from then use it; running ones keep ' +
   'what they started with. If they would rather not, `wb experiment probe off`.'
 
 // Turns the probe experiment on or off through wb, then says how it came out: on and working, or
@@ -656,20 +669,23 @@ async function setProbe($: any, value: string) {
   const { ok, out } = await runWb($, ['experiment', 'probe', value])
   mem.probe = null // the row asks wb again
   if (!ok) { $.ui.toast(`workbench: ${brief(out)}`); return }
-  if (value !== 'on') return
+  if (value === 'off') return
   const s = probeSaid(out)
   if (s.state === 'missing') {
     $.ui.toast("workbench: Agent code navigation is on but not set up: probe isn't installed. Claude will offer to set it up.")
     const line = out.split('\n').find(l => l.startsWith('probe:')) ?? out
     if (!mem.queued.some(q => q.startsWith(PROBE_SETUP_NOTE('').slice(0, 60)))) mem.queued.push(PROBE_SETUP_NOTE(line))
   } else if (s.state === 'ready') {
-    $.ui.toast(`workbench: Agent code navigation is on and working${s.version ? ` (${s.version})` : ''}: tasks started from now use it.`)
+    $.ui.toast(`workbench: Agent code navigation is ${value} and working${s.version ? ` (${s.version})` : ''}: tasks started from now use it.`)
   }
 }
 
+// experiments.json's probe setting as wb reads it (context.setting): "on" is adaptable, anything
+// but a level is off
 async function probeMode($: any): Promise<string> {
   try {
-    return JSON.parse(await $.fs.read(`${mem.root}/experiments.json`)).probe === 'on' ? 'on' : 'off'
+    const v = JSON.parse(await $.fs.read(`${mem.root}/experiments.json`)).probe
+    return v === 'on' ? 'adaptable' : PROBE_LEVELS.includes(v) ? v : 'off'
   } catch {
     return 'off'
   }
@@ -3294,6 +3310,7 @@ export const register: Register = (on, options) => {
     if (view.tab === 'settings') {
       const st = await statsSettings($)
       const probe = await probeStatus($)
+      const probeAt = await probeMode($)
       const prog = await progressSettings($)
       const picked = (args: string[]) => runWb($, args).then(() => { void refreshStats($, true); void syncTop($) })
       return (
@@ -3318,7 +3335,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column" marginTop={1}>
             <Text><Text bold>Experimental</Text><Text dimColor> · may change or go away</Text></Text>
             {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
-            {settingRow(kit, $, 'probe', 'Agent code navigation', probeStops(probe), probe.state === 'off' ? 'off' : 'on', view,
+            {settingRow(kit, $, 'probe', 'Agent code navigation', probeStops(probe, probeAt), probeAt, view,
               v => setProbe($, v))}
           </Box>
           {pinned}

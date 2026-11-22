@@ -2,7 +2,7 @@
 from collections import defaultdict
 from statistics import median
 
-from . import gitops, skills, spend, stats, store
+from . import context, gitops, skills, spend, stats, store
 
 
 def step(task: store.Task, landed: bool, since: str = "HEAD", gaps=None) -> dict:
@@ -129,6 +129,11 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
                                                     if v)) else {}),
            # how much the agent used each (#857), and its whole reads of long files
            **({"experiment_use": {k: (st.get("experiment_use") or {}).get(k, 0) for k in on}} if on else {}),
+           # probe's level, the setting it came from, and whether the spec named a long file:
+           # the probe_aggressive knob's evidence (tuning.acted, #857)
+           **({"probe_level": lvl, "probe_setting": spec.get("probe_setting") or lvl,
+               "probe_long": bool(spec.get("probe_files"))}
+              if (lvl := context.probe_level(task)) else {}),
            "long_reads": st.get("long_reads", 0), **for_stats(task), **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row
