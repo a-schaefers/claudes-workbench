@@ -747,20 +747,34 @@ def main(every: float | None = None, as_json: bool = False, out=None, drm: Path 
     saved = None
     wake = None  # a pipe SIGCONT writes to: back from Ctrl-Z, the view redraws at once
 
-    def enter():  # cbreak for `q`, the alternate screen, the cursor hidden
+    def put(seq: str, raw: bool) -> None:
+        """An escape for the terminal; from a signal handler (``raw``) straight to its fd. The
+        handler can run inside out's own write, a frame waiting on a terminal that isn't reading
+        (Ctrl-S, a slow link, a Mac's small pty buffer), where out.write raised "reentrant call
+        inside <_io.BufferedWriter>" and Ctrl-Z quit wb top (#950, 2026-11-21)."""
+        if not raw:
+            out.write(seq)
+            out.flush()
+            return
+        try:
+            data = seq.encode()
+            while data:
+                data = data[os.write(out.fileno(), data):]
+        except (OSError, ValueError):  # raised in a handler, it would end wb top wherever it landed
+            pass
+
+    def enter(raw: bool = False):  # cbreak for `q`, the alternate screen, the cursor hidden
         if saved is not None:
             import tty as tty_mod
             try:
                 tty_mod.setcbreak(keys)
             except OSError:
                 pass
-        out.write("\033[?1049h\033[?25l")
-        out.flush()
+        put("\033[?1049h\033[?25l", raw)
 
-    def leave():  # the cursor, the main screen and the terminal's own mode back
+    def leave(raw: bool = False):  # the cursor, the main screen and the terminal's own mode back
         try:
-            out.write("\033[?25h\033[?1049l")
-            out.flush()
+            put("\033[?25h\033[?1049l", raw)
         except (BrokenPipeError, OSError):
             pass
         if saved is not None:
@@ -773,14 +787,14 @@ def main(every: float | None = None, as_json: bool = False, out=None, drm: Path 
     # Ctrl-Z: put the terminal back before stopping, and take it again on SIGCONT. It stopped with
     # the shell's prompt drawn over the frozen view, no cursor, and after `fg` `q` needed Enter (#607)
     def suspend(_signum, _frame):
-        leave()
+        leave(raw=True)
         signal.signal(signal.SIGTSTP, signal.SIG_DFL)
         os.kill(os.getpid(), signal.SIGTSTP)  # stops here until SIGCONT (an orphaned group: not)
         signal.signal(signal.SIGTSTP, suspend)
         resume(None, None)
 
     def resume(_signum, _frame):
-        enter()
+        enter(raw=True)
         try:
             os.write(wake[1], b"!")
         except (OSError, TypeError):

@@ -18253,12 +18253,22 @@ class KeepAwake(Base):
         while "released" not in log.read_text() and time.monotonic() < end:
             time.sleep(0.05)
         self.assertIn("released", log.read_text())           # and let go when it ends
+        log.unlink()                                          # the runner's hold logs afresh
         with mock.patch.object(hardware, "system", return_value="wsl"), \
                 mock.patch.object(context, "interop_on", return_value=True), \
                 mock.patch.object(hardware, "powershell", return_value=str(ps)):
             out = self.start("t-night", "ok", "--backlog", "night", "--queue")
         self.assertNotIn(cli.WSL_SLEEPS, out)                 # Windows is kept awake: no warning
         wait_phase("t-night", {"review"})
+        # The runner's own hold ends just after the runner, and the fake writes "released" into
+        # this test's directory then: tearDown waits for runners, not for it, so on macOS (#950,
+        # 2026-11-21) the write could land while tearDown removed the directory, recreating
+        # ps.log ("Directory not empty"). Wait for it: that it lets go is what this test checks.
+        end = time.monotonic() + 30
+        while "released" not in (log.read_text() if log.exists() else "") and \
+                time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertIn("released", log.read_text() if log.exists() else "")
 
     def test_with_no_tool_nothing_is_held_and_nothing_fails(self):
         with mock.patch("shutil.which", return_value=None), \
@@ -20724,6 +20734,17 @@ class Top(Base):
     def test_ctrl_z_gives_the_terminal_back_and_fg_takes_it_again_so_one_q_quits(self):
         # #607: stopped with the alternate screen up and the cursor hidden, and after `fg` the
         # terminal was canonical again, so `q` needed Enter
+        self.ctrl_z_fg_q()
+
+    def test_ctrl_z_while_a_frame_waits_on_a_paused_terminal_stops_it_rather_than_ending_it(self):
+        # #950 (2026-11-21): the handler ran inside the frame's blocked write and its own write
+        # raised "reentrant call inside <_io.BufferedWriter>": wb top quit instead of stopping.
+        # Seen once in 55 on a Mac's small pty buffer; Ctrl-S makes it every time, anywhere
+        self.ctrl_z_fg_q(paused=True)
+
+    def ctrl_z_fg_q(self, paused: bool = False):
+        """wb top on a pty under a shell's part: Ctrl-Z (after Ctrl-S has paused the terminal's
+        output and frames back up, when ``paused``), `fg`, then one `q`."""
         import pty
         import select
         import termios
@@ -20746,6 +20767,9 @@ class Top(Base):
             # no nvidia-smi: nothing to wait on. wb runs on this Python, not PATH's python3, which
             # on a Mac is Xcode's 3.9 (#950)
             os.environ["PATH"] = "/usr/bin:/bin"
+            attrs = termios.tcgetattr(0)
+            attrs[0] |= termios.IXON  # Ctrl-S and Ctrl-Q stop and start the output: a terminal's default
+            termios.tcsetattr(0, termios.TCSANOW, attrs)
             os.execv(sys.executable, [sys.executable, "-c", shell, str(ROOT / "bin" / "wb"), str(pidfile)])
         def reap_all():
             for pid in (int(pidfile.read_text()) if pidfile.exists() else 0, child):
@@ -20771,9 +20795,15 @@ class Top(Base):
         self.assertTrue(read_until(b"RUNNING"), bytes(got)[-2000:])
         top_pid = int(pidfile.read_text())
         self.assertFalse(termios.tcgetattr(fd)[3] & termios.ICANON)       # cbreak while it runs
+        if paused:
+            os.write(fd, b"\x13")  # Ctrl-S: nothing more reaches the screen, and frames back up
+            time.sleep(2)          # ten frames: past a pty's room, so the next write waits
         del got[:]
         os.kill(top_pid, signal.SIGTSTP)
-        self.assertTrue(read_until(b"\033[?1049l"))
+        if paused:
+            time.sleep(0.3)
+            os.write(fd, b"\x11")  # Ctrl-Q
+        self.assertTrue(read_until(b"\033[?1049l"), bytes(got)[-2000:])
         self.assertIn(b"\033[?25h", got)
         def state():  # ps, not /proc/<pid>/stat: a Mac has no /proc (#950)
             return subprocess.run(["ps", "-o", "stat=", "-p", str(top_pid)], capture_output=True,
@@ -20781,7 +20811,7 @@ class Top(Base):
         deadline = time.time() + 10
         while state() != "T" and time.time() < deadline:
             time.sleep(0.05)
-        self.assertEqual(state(), "T")
+        self.assertEqual(state(), "T", bytes(got)[-2000:])
         self.assertTrue(termios.tcgetattr(fd)[3] & termios.ICANON)        # the shell's mode back
         del got[:]
         os.kill(top_pid, signal.SIGCONT)
@@ -20789,7 +20819,19 @@ class Top(Base):
         self.assertIn(b"\033[?1049h", got)
         self.assertFalse(termios.tcgetattr(fd)[3] & termios.ICANON)
         os.write(fd, b"q")                                                # one key, no Enter
-        self.assertTrue(wait_gone(top_pid, 10))
+        # read on while it quits, as a terminal does: on a Mac its last frame and the mode put back
+        # with TCSADRAIN wait for the pty's output to be read, so a test that stopped reading saw
+        # it never quit (#950, 2026-11-21)
+        def alive():
+            try:
+                os.kill(top_pid, 0)
+            except ProcessLookupError:
+                return False
+            return True
+        deadline = time.time() + 10
+        while alive() and time.time() < deadline:
+            read_until(b"\0never", 0.1)
+        self.assertFalse(alive())
 
     def test_an_every_that_is_infinite_tiny_or_not_a_number_is_refused(self):
         # #611: inf printed "every": Infinity then overflowed time.sleep; 1e-6 spun a core

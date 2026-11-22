@@ -3020,7 +3020,10 @@ than hwdata isn't shown as "AMD/ATI", #576; `(rev …)` dropped), sizes in decim
 exit. Ctrl-Z (SIGTSTP) puts the cursor, the main screen and the saved termios back before it
 stops, and SIGCONT takes them again (cbreak, the alternate screen) and redraws at once (a wake
 pipe in the `select`): it stopped with the shell's prompt over the frozen view and no cursor,
-and after `fg` `q` needed Enter (#607). Taller than the terminal, the view folds the rack's
+and after `fg` `q` needed Enter (#607). The handlers write their escapes straight to the
+terminal's fd (`os.write`), never through `sys.stdout`: a handler can run inside a frame's write
+that waits on a terminal not reading (Ctrl-S, a slow link, a Mac's small pty buffer), where the
+buffered stream raised "reentrant call" and Ctrl-Z quit wb top (#950). Taller than the terminal, the view folds the rack's
 idle, `can't run` and `remote` models no task holds into one `+N idle, can't run or remote`
 line (`top.FOLD`), and if it still doesn't fit cuts the middle (the GPUs, RUNNING, RACK) with
 a `… N more lines` line, the QUEUE kept (`top.lines(snap, rows)`): it cut the bottom, so the
@@ -7620,6 +7623,9 @@ request and answers each request that offers tools with the next scripted tool c
 read (default 1), so a test can fill the window without sending it; a request carrying OpenCode's
 compaction template (`<template>`, `## Objective`) gets the template's headings back, which
 OpenCode accepts as a summary (anything else fails the compaction: `compaction.failed`).
+It answers one request at a time and listens as soon as it starts: HTTPServer's own bind looks the
+address's name up before listening, 35 s on GitHub's macOS runners, where every connect to the
+port meanwhile timed out (#950).
 `RealOpenCode` and `RealOpenCodeSkillFiles` cover the MCP shape, skills, denials, compound shell
 commands, rule order, git by path, the edit rule, PATH and the lane; `RealOpenCodeRun` the
 events, the export, `--session`, compaction and the header wait (CLAUDE.md's *OpenCode quirks*

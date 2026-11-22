@@ -11,13 +11,16 @@ With CAPTURE_HEADER_DELAY=<seconds>, every POST waits that long before its heade
 reader's server does until its first token (#491).
 
 It answers one request at a time, as a model server with one slot does, but accepts every
-connection at once, as a real server's accept loop does. Single-threaded, it left a connection
-that came while it slept unaccepted: Linux completes the connect all the same, but on macOS
-OpenCode's first request of a round timed out connecting (`ETIMEDOUT: Unable to connect`), three
-times, in the nightly of 1.90.31 (#950).
+connection at once, as a real server's accept loop does. It listens at once too: HTTPServer's
+own server_bind looks the address's name up (socket.getfqdn) between bind and listen, and on
+GitHub's macOS runners that took 35 s, while the kernel dropped every SYN to the bound, not yet
+listening port: OpenCode's first request of a round failed to connect (`ETIMEDOUT: Unable to
+connect`) three times and the round started 35 s late, whatever the header delay (#950,
+2026-11-21).
 """
 import json
 import os
+import socketserver
 import sys
 import threading
 import time
@@ -104,7 +107,15 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"data: [DONE]\n\n")
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def server_bind(self):
+        # not HTTPServer's, which looks the host's name up before listen (the docstring, #950):
+        # nothing reads server_name, as in chat.py's _Server (#236)
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler)
-    server.daemon_threads = True
-    server.serve_forever()
+    Server(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
