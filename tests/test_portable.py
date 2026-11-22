@@ -2964,8 +2964,9 @@ class StopAnExitedGroup(unittest.TestCase):
         # PermissionError from os.killpg, macOS's EPERM for a group whose members had all exited
         # (Linux says ESRCH, ProcessLookupError), and the task failed instead of handing over
         from workbench import runner
+        # killpg is faked, so the group's state doesn't matter (os.waitid, to wait for the exit
+        # without reaping it, doesn't exist on macOS: this test errored there, 2026-11-22)
         proc = subprocess.Popen(["true"], start_new_session=True)
-        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)  # exited, not yet reaped
         signals = []
 
         def killpg(pgid, sig):
