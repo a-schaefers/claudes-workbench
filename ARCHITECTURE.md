@@ -7539,6 +7539,10 @@ main (*Shipping to main*).
   start and between rounds, a lost round run again, a config error still failing at once), the
   polling watcher (`watch._libc = False`), the launchers on an old Python or native Windows, fit,
   budgets.
+  The tests' own HTTP servers are `test_workbench.py`'s `HTTPServer` and `ThreadingHTTPServer`
+  (`test_portable.py` imports the second), which listen at once: http.server's look the address's
+  name up first (`socket.getfqdn`), 35 s per server on GitHub's macOS runners (#950). Not patched
+  into http.server suite-wide, so `WebChat` still catches chat.py's own server doing the lookup (#236).
 - `tests/test_sizing.py`: the slice guess and its correction from real steps.
 - `tests/test_workflows.py`: the merge gate, in plain text (no YAML library): every action pinned
   to a commit with its version, every workflow with its own permissions, `check` never
