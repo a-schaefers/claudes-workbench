@@ -133,7 +133,7 @@ dependencies. No packaging: it runs from the clone.
   it short (prefill time).
 - `skill/workbench/`: the `/workbench` procedure (`SKILL.md`, `reference/`; `wb setup` links it).
 - `mod/`: the Claude Code plugin (`hooks/register.tsx`, `hooks/apprentice.ts` the pane's
-  character, `hooks/splash.ts` its opening, `hooks/register.test.tsx`, `types/index.d.ts`; `.claude-plugin/plugin.json` has no
+  face, `hooks/splash.ts` its opening, `hooks/modeline.ts` its ticker, `types/index.d.ts`; `.claude-plugin/plugin.json` has no
   version: installs track main's commits). Its marketplace: the root's `.claude-plugin/marketplace.json`.
 - `bin/wb`, `bin/wb-ask-mcp`: launchers that find the package from their real path.
 - `tests/`: `test_workbench.py` (end to end, one class per feature), `test_gpu.py`,

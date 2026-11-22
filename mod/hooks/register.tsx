@@ -77,6 +77,7 @@ import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
 import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
 import type { Plan, Target } from './splash'
+import { activity, loopLength, TICKER_MS, tickerCells } from './modeline'
 
 const PANE = 'workbench'
 // Nothing waits on a timer for news: `wb events` (inotify) prints a line the moment a task, a
@@ -1523,6 +1524,8 @@ const mem = {
   // the opening animation while it plays (#963): its plan once the pane drew it, the frame on
   // screen, the ticks it waited for a first draw, its timer
   splash: null as null | { plan: Plan | null; f: number; waited: number; timer: { cancel: () => void } | null },
+  // the modeline's ticker while its line is wider than the bar (#976): the line, its columns, the step
+  ticker: null as null | { line: string; room: number; off: number; timer: { cancel: () => void } },
   posed: '' as Pose | '', // its pose as last drawn in a Raster: the timer animates it while set
   shown: '' as Pose | '', // the frame on screen now
   skill: '', // the /workbench skill's SKILL.md, for the workbench-mode block
@@ -2782,6 +2785,34 @@ async function splashTick($: any, s: NonNullable<typeof mem.splash>) {
 }
 
 // Ends it: the timer cancelled, the page drawn (`redraw`: unless the render ending it draws it)
+// The modeline's ticker (#976, modeline.ts): a step a TICKER_MS, by blit alone, while the line is
+// wider than its room; stopped when it fits, goes, or the pane can't take a blit (closed: the next
+// draw starts it again, from where it was if the line is the same).
+const TICKER = 'ticker' // its Raster's key
+function syncTicker($: any, line: string, room: number): number {
+  const t = mem.ticker
+  if (t && t.line === line && t.room === room) return t.off
+  const off = t && t.line === line ? t.off % loopLength(line) : 0
+  stopTicker()
+  if (!line) return 0
+  const k: NonNullable<typeof mem.ticker> = { line, room, off, timer: { cancel: () => {} } }
+  mem.ticker = k
+  k.timer = $.clock.every(TICKER_MS, async () => {
+    if (mem.ticker !== k) return
+    k.off = (k.off + 1) % loopLength(k.line)
+    const r = await $.ui.blit({ requestId: PANE, key: TICKER, cells: tickerCells(k.line, k.off, k.room) })
+      .catch(() => ({ deny: 'gone' }))
+    if (r?.deny && mem.ticker === k) stopTicker(true)
+  })
+  return off
+}
+function stopTicker(keepLine = false) {
+  const t = mem.ticker
+  if (!t) return
+  try { t.timer.cancel() } catch { /* already stopped */ }
+  mem.ticker = keepLine ? { ...t, room: -1, timer: { cancel: () => {} } } : null // -1: none runs
+}
+
 function endSplash($: any, redraw = true) {
   const s = mem.splash
   if (!s) return
@@ -3300,6 +3331,11 @@ export const register: Register = (on, options) => {
     // under the tabs, on every tab, a modeline as in Emacs or Vim: the pane's name and the
     // apprentice's face, in the theme's own colors so it reads on a dark or a light terminal (the
     // user, 2026-11-21)
+    // what this session's agents are doing, after the name (#976): scrolling when wider than the bar
+    const doing = activity(list.filter(t => (ACTIVE.has(t.phase) || NEEDS.has(t.phase)) && mine(t)))
+    const room = Number(((e.props ?? {}) as Row).bodyColumns ?? 0) - 2 - `${FACE.rest} ${MODELINE} - `.length
+    const scrolls = !!doing && !!Raster && (e as Row).surface === 'terminal' && room >= 8 && [...doing].length > room
+    const offset = syncTicker($, scrolls ? doing : '', room)
     const tabs = (
       <Box flexDirection="column" marginTop={1}>
         <Box flexDirection="row" columnGap={2}>
@@ -3308,8 +3344,11 @@ export const register: Register = (on, options) => {
               onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => { void refreshStats($, true); void syncTop($) }) }} />
           ))}
         </Box>
-        <Box key="modeline" backgroundColor="claude" paddingX={1}>
-          <Text color="inverseText" bold>{`${FACE.rest} ${MODELINE}`}</Text>
+        <Box key="modeline" backgroundColor="claude" paddingX={1} flexDirection="row">
+          <Text color="inverseText" bold>{`${FACE.rest} ${MODELINE}${doing ? ' - ' : ''}`}</Text>
+          {scrolls
+            ? <Raster key={TICKER} columns={room} rows={1} cells={tickerCells(doing, offset, room)} />
+            : doing ? <Text color="inverseText">{doing}</Text> : null /* not bold: a scrolling line's Raster can't be */}
         </Box>
       </Box>
     )

@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, pageShape, parsePrice, priceOf, quietForJobs, savedLine, spark, splashTarget, statsLines, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
+import { activity, loopLength, tickerCells } from './modeline.js'
 import type { WbTask } from '../types'
 
 const PANE = {
@@ -2773,7 +2774,7 @@ test('the apprentice says how the followed task stands: in pixels in a terminal,
   expect(await ui.find({ type: 'Text', text: /Writing… 3\.0s/ })).toBeTruthy()
   await clock.advance(5400) // twelve frames: two strokes, up and down
   expect(blits).toContain('apprentice')
-  expect(blits.length).toBeLessThanOrEqual(5)
+  expect(blits.filter(k => k === 'apprentice').length).toBeLessThanOrEqual(5)  // (the modeline's ticker blits too, #976)
   await ui.unmount()
 
   // done: it says so, and the task's mark says so too
@@ -4479,4 +4480,80 @@ test('the words fall into the modeline\'s row: the page\'s last when it fits, th
   // ...unless the page surely overflows anyway
   const long = pageShape([t('fix-it', 'running')], { task: 'fix-it', lines: Array.from({ length: 40 }, () => ({ s: 'out', t: 'y'.repeat(70) })) }, false, '', 0, 60)
   expect(splashTarget(long, 27).bar).toBe(26)
+})
+
+// ---------------------------------------------------------------- the modeline's activity (#976)
+// The owner, 2026-11-21: "[roobot-guy] Claude's Workbench - [current thing we are doing one liner
+// here scrolls animated like a leaderboard ...]", from the tasks, never Claude's tokens.
+test('the activity line names each open task, its round and phase, oldest first, and leaves parked ones out', () => {
+  const t = (name: string, phase: string, createdAt: number, extra: any = {}) =>
+    ({ name, phase, round: 2, createdAt, parked: false, ...extra }) as any
+  expect(activity([])).toBe('')
+  expect(activity([t('b', 'testing', 2), t('a', 'running', 1)])).toBe('a: round 2, writing  ·  b: round 2, testing')
+  expect(activity([t('a', 'review', 1, { parked: true }), t('c', 'queued', 3, { round: 0 })])).toBe('c: queued')
+  expect(activity([t('d', 'accepted', 1)])).toBe('')
+})
+
+test('the ticker loops the line with a gap, a column a step, on the bar in black', () => {
+  const words = (b64: string) => { const u = Uint8Array.from(atob(b64), c => c.charCodeAt(0)); return new Uint32Array(u.buffer) }
+  const at = (line: string, off: number, w: number) => {
+    const c = words(tickerCells(line, off, w)); let out = ''
+    for (let i = 0; i < w; i++) out += String.fromCodePoint(c[i * 3]!)
+    return out
+  }
+  expect(at('abcdef', 0, 4)).toBe('abcd')
+  expect(at('abcdef', 3, 6)).toBe('def   ')                              // into the gap
+  expect(at('abcdef', loopLength('abcdef') - 1, 3)).toBe(' ab')          // and round again
+  expect(at('a✻b', 0, 3)).toBe('a?b')                                     // a cell is one column, for sure
+  const c = words(tickerCells('x', 0, 1))
+  expect([c[1], c[2]]).toEqual([0x000000, BAR])
+})
+
+function modelineWorld(on: any, files: Record<string, string>, dirs: string[]) {
+  files['/wb/splash.json'] = '{"on": false}'
+  return splashWorld(on, files, dirs)
+}
+
+test('a short line stands after the name; a long one scrolls by blit alone, and stops when the tasks close', async ($, on) => {
+  const { clock, ticks } = splashClock(on)
+  const files: Record<string, string> = {}
+  const dirs = ['fix-it']
+  task(files, 'fix-it', 'running')
+  const w = modelineWorld(on, files, dirs)
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  await clock.advance(2000)
+  let ui = await $.ui.mount(splashPane(80, 27))
+  expect(JSON.stringify(await ui.find({ key: 'modeline' }))).toContain("Claude's Workbench - ")
+  expect(JSON.stringify(await ui.find({ key: 'modeline' }))).toContain('fix-it: round 1, writing')
+  expect(await ui.find({ type: 'Raster', key: 'ticker' })).toBeUndefined()
+  await clock.advance(1000)
+  expect(w.blits.filter(k => k === 'ticker')).toHaveLength(0)            // nothing moves
+  await ui.unmount()
+
+  task(files, 'add-the-settings-page-with-every-option', 'testing', { created_at: ts0 })
+  dirs.push('add-the-settings-page-with-every-option')
+  await clock.advance(2000)
+  ui = await $.ui.mount(splashPane(60, 27))
+  const ticker = await ui.find({ type: 'Raster', key: 'ticker' }) as any
+  expect(ticker).toBeDefined()
+  expect(ticker.props.rows).toBe(1)
+  expect(ticker.props.columns).toBe(60 - 2 - "[•_•] Claude's Workbench - ".length)
+  const before = w.blits.filter(k => k === 'ticker').length
+  await clock.advance(1000)
+  expect(w.blits.filter(k => k === 'ticker').length - before).toBe(5)    // a column every 200 ms
+
+  delete files['/wb/tasks/fix-it/status.json']; delete files['/wb/tasks/fix-it/task.json']
+  delete files['/wb/tasks/add-the-settings-page-with-every-option/status.json']
+  delete files['/wb/tasks/add-the-settings-page-with-every-option/task.json']
+  dirs.length = 0
+  await clock.advance(3000)
+  await ui.redraw()
+  expect(await ui.find({ type: 'Raster', key: 'ticker' })).toBeUndefined()
+  expect(JSON.stringify(await ui.find({ key: 'modeline' }))).not.toContain(' - ')
+  const [n, b] = [ticks.n, w.blits.filter(k => k === 'ticker').length]
+  await clock.advance(2000)
+  expect(w.blits.filter(k => k === 'ticker').length).toBe(b)              // no timer of it left
+  void n
+  await ui.unmount()
 })

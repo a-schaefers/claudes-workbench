@@ -2701,6 +2701,20 @@ nothing until a surface attaches.
   away under a long transcript). Under them on every tab, always, is a modeline as in Emacs or Vim:
   `[•_•] Claude's Workbench` (the apprentice's `FACE.rest`, `MODELINE`) on a bar in the theme's
   `claude` color with `inverseText`, so it reads on a dark or a light terminal (the user, 2026-11-21).
+  After the name, ` - ` and what this session's agents are doing (#976, `mod/hooks/modeline.ts`; the
+  owner, 2026-11-21: "current thing we are doing one liner here scrolls animated like a leaderboard",
+  "not to waste Claude's tokens"): `activity` of the open tasks `mine` counts, oldest first, each
+  `<name>: round <n>, <phase>` (`SAID`: writing, testing, queued, asking Claude, awaiting review,
+  stuck, failed; parked ones left out), joined by ` · `; nothing after the name with none. It comes
+  from the polls alone, never from Claude: a call of Claude's re-reads its whole context. A line
+  that fits stands in `inverseText`, not bold. One wider than the room (`bodyColumns` less the
+  padding and the name, at least 8) scrolls on a terminal as a ticker: a one-row Raster (key
+  `ticker`, `tickerCells`) moved a column every `TICKER_MS` (200 ms) by `$.ui.blit` alone, looping
+  with `TICKER_GAP` (6) blanks, black on `BAR`. Its timer (`syncTicker`) runs only while a line
+  scrolls: the same line and room keep it and its place, a new line starts over, and a refused blit
+  (the pane closed) stops it until the next draw. A Raster's colours are four bits a channel, so
+  its coral is rgb(221,119,85) beside the theme's (215,119,87), not told apart by eye (checked in a
+  real session in truecolor).
   **The opening animation** (#963, `mod/hooks/splash.ts`; the owner, 2026-11-21: about five seconds,
   ending "by pulling in the Tasks page like normal" with "no penalty beyond initial startup"): on a
   session's first `/workbench` (the `skill.prompt` hook, before `showPane`), the Tasks tab is first
@@ -6649,7 +6663,7 @@ mode back on, pane and all).
 ./types/index.d.ts`, one setting `userConfig.wake`, `on`|`off`, default `on`; changed with
 `claude plugin configure workbench@workbench`, which reloads the module), `mod/hooks/hooks.json`
 (`{"modules": ["./register.tsx"]}`), `mod/hooks/register.tsx` (everything), `mod/hooks/apprentice.ts`
-(the character's art), `mod/hooks/splash.ts` (the opening animation, #963), `mod/hooks/register.test.tsx` (run by `claude plugin test mod`),
+(the character's art), `mod/hooks/splash.ts` (the opening animation, #963), `mod/hooks/modeline.ts` (the modeline's activity line and ticker, #976), `mod/hooks/register.test.tsx` (run by `claude plugin test mod`),
 `mod/types/index.d.ts` (the atom types), `mod/.claude-plugin/icon.png` (the `work` pose).
 The repo root's `.claude-plugin/marketplace.json` makes the repo a folder marketplace (`workbench`,
 plugin source `./mod`), so the plugin id is `workbench@workbench` and it is read from the clone:
@@ -8086,7 +8100,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **A `$.state` atom's type** in the mod → its tag (`tasks-8`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`, `top-1`, `said-1`, `splash-1`).
 - **The Tasks page's layout** (the render's rows, margins, the stage, the tabs and the modeline) →
   `pageParts` and `pageShape`, which the opening animation lands by (#963); **the modeline's look**
-  (`MODELINE`, the theme's `claude`) → splash.ts's `BAR` and the text it is given.
+  (`MODELINE`, the theme's `claude`) → splash.ts's `BAR` and the text it is given, and modeline.ts's
+  ticker (`BAR`, black), whose room `register.tsx` counts from the name; **a task phase** → modeline.ts's `SAID`.
 - **What the Stats tab folds** (2026-11-21): `top.FOLD`'s states → the mod's `RACK_FOLD`;
   `stats.STATS_MODEL_LINES` → the mod's `STATS_SHOWN`; `model_lines`' `more`/`older` and
   `variants` → `statsLines` and `cli.cmd_stats`.
