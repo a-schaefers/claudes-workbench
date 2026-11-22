@@ -75,7 +75,7 @@ const LOWER_HALF = 0x2584
 const SPACE = 0x20
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
-const base64 = (bytes: Uint8Array) => {
+export const base64 = (bytes: Uint8Array) => {
   let out = ''
   for (let i = 0; i < bytes.length; i += 3) {
     const n = (bytes[i] << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0)
@@ -85,9 +85,10 @@ const base64 = (bytes: Uint8Array) => {
   return out
 }
 
-/** The picture in a pose, as rows of colours (null: see-through). */
-export function pixels(pose: Pose): (number | null)[][] {
-  const rows = REST.map((row, i) => POSES[pose][i] ?? row)
+/** The picture in a pose, as rows of colours (null: see-through); `over`, rows of the
+ * splash's own poses (splash.ts) laid over it. */
+export function pixels(pose: Pose, over: Record<number, string> = {}): (number | null)[][] {
+  const rows = REST.map((row, i) => over[i] ?? POSES[pose][i] ?? row)
   return rows.map(row => [...row].map(ch => (ch === 'L' ? LAMP[pose] : PALETTE[ch] ?? null)))
 }
 

@@ -2412,6 +2412,22 @@ def cmd_experiment(a):
           + ("; tasks already started keep theirs" if a.state is not None else ""))
 
 
+def splash_on() -> bool:
+    """Whether the pane opens with its animation (#963): on unless splash.json says off."""
+    d = store.read_json(store.home() / "splash.json")
+    return not (isinstance(d, dict) and d.get("on") is False)  # as the mod's splashOn reads it
+
+
+def cmd_splash(a):
+    """The pane's opening animation on the first /workbench of a session (#963): show it, or
+    turn it on or off. The mod's Settings row runs this and reads splash.json back; the mod
+    keeps no setting of its own."""
+    if a.state:
+        store.write_json(store.home() / "splash.json", {"on": a.state == "on", "ts": store.now()})
+    print("opening animation: " + ("Enabled (default): the first /workbench of a session plays it; "
+                                   "any key skips it" if splash_on() else "Off: the Tasks page opens at once"))
+
+
 def cmd_coding(a):
     """Show or set when Claude may write code for a delegated task, or record the user's yes
     for one task (#92)."""
@@ -5661,6 +5677,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--user", action="store_true", help="the user's own command asked for it (the "
                    "mod's hand-back): past the Claude coding choice")
     s.set_defaults(f=cmd_takeover)
+    s = sub.add_parser("splash", help="the pane's opening animation on a session's first "
+                       "/workbench: show it, or turn it on (the default) or off")
+    s.add_argument("state", nargs="?", choices=["on", "off"])
+    s.set_defaults(f=cmd_splash)
     s = sub.add_parser("coding", help="when Claude may write code for a delegated task: show, "
                        "set (only, ask, decide), or allow one task's edit on the user's yes")
     s.add_argument("what", nargs="?", choices=[*CODING, "allow", "used"])

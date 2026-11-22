@@ -2644,7 +2644,49 @@ nothing until a surface attaches.
   second-to-last line, keys `1`, `2` and `3`: Stats in the middle, looked at more often than Settings; at the foot, since the pane follows its end and a row at the top scrolled
   away under a long transcript). Under them on every tab, always, is a modeline as in Emacs or Vim:
   `[•_•] Claude's Workbench` (the apprentice's `FACE.rest`, `MODELINE`) on a bar in the theme's
-  `claude` color with `inverseText`, so it reads on a dark or a light terminal (the user, 2026-11-21). Closed by the user (its mark, Esc), it is minimized, as
+  `claude` color with `inverseText`, so it reads on a dark or a light terminal (the user, 2026-11-21).
+  **The opening animation** (#963, `mod/hooks/splash.ts`; the owner, 2026-11-21: about five seconds,
+  ending "by pulling in the Tasks page like normal" with "no penalty beyond initial startup"): on a
+  session's first `/workbench` (the `skill.prompt` hook, before `showPane`), the Tasks tab is first
+  one Raster the size of the body (key `splash`), repainted every `SPLASH_MS` (80 ms) by a
+  `$.clock.every` of its own through `$.ui.blit`. The "forge" concept: the apprentice on a crate at
+  its anvil strikes six blows, comets from each forge the letters of CLAUDE'S WORKBENCH (a 5 px font,
+  or 3 px under 56 columns or 24 rows), which land hot and cool into a warm and a cool gradient; a
+  glint, the apprentice wipes its brow, and at its cheer (`tada`) a rainbow sweeps once through both
+  words (frames 42-46, from the "stream" concept). Then the words fall as embers into the body's
+  last row, lighting it column by column into the modeline's bar (`BAR`, the theme's `claude`
+  rgb(215,119,87)), which slides up to the modeline's row when the page is shorter than the pane,
+  while the apprentice walks to its stage: 62 frames, 4.96 s. The light spreads from where the
+  embers land as fast as it must to fill the row before it slides (frame 56): the title keeps its
+  width, so one column a frame left a wide pane's bar part dark. The bar carries no words: the
+  modeline's are `inverseText`, bold, which a Raster's cells can't name, so the page's own
+  modeline brings them on the row the bar has become. Where it
+  lands comes from `pageShape` (the Tasks page's rows as the render lays them out: `pageParts` is
+  what both read) and `splashTarget`: the page's last row when it fits (a docked pane draws from the
+  top, an inline one keeps its top as it shrinks to the page), the body's last when it surely
+  overflows (the pane follows its end). A page with a line that may wrap (wider than the pane, or of
+  characters not surely one column, `NARROW`) and no sure overflow has no exact row: the words rise
+  away as embers instead, as forge drew them (57 frames, 4.56 s), never landing on a guessed row.
+  The target is recomputed at each draw while it plays, so the page it hands over to is the one the
+  polls made meanwhile (they and the loading carry on underneath); a page that stops being
+  measurable meanwhile makes the words rise away if they haven't left yet, else puts the bar on the
+  row the page reaches at least, never an earlier exact row the page has since outgrown. The Tasks page then draws as it
+  always does. A key in the pane skips it, and the key still does its work: Tab or a click
+  (`ui.focus`) and the scroll keys (`ui.scroll`); a close by the user, a resize, another tab, a
+  surface without Raster or a refused blit end it too. Typing in the prompt doesn't: that needs a
+  `prompt.edit` hook, which can't be taken off again, so every keystroke of the session would wait
+  on the mod for an animation long over; the typing goes on beside it. Its
+  timer is cancelled when it ends; the apprentice's own `FRAME_MS` timer is untouched. It plays once
+  a session: the `splash` atom (`splash-1`) is set at that first `/workbench`, whether it played or
+  not, so a module reload, `/workbench` again, a bring-back from the strip and a pane a task opened
+  never play it. Sizes: big at 56 columns and 24 rows or more, small at 40-55 columns or 20-23 rows,
+  none below (the pixel apprentice's limits) or without a Raster. The frames are computed as they
+  play, from the font tables and apprentice.ts's pixels (`pixels(pose, over)` takes the splash's own
+  `wipe`, `step_a`, `step_b` rows); nothing at module load, no file read. Every colour it draws but
+  the apprentice's own goes through `atLum` into WCAG luminance 0.105-0.295: 3:1 on black and on
+  white. forge.py, the reference generator the concept was judged on, is ported exactly (its hash,
+  its arithmetic order, Python's half-to-even rounding): the tests hold its frames 0-41 at 60x26
+  and 40x22. Settings' **Opening animation** row turns it off. Closed by the user (its mark, Esc), it is minimized, as
   backseat-driver's is (2026-11-19): a strip above the prompt stands in for it while workbench mode
   is on or the session has tasks, `▸ Workbench`, `Tasks`, `Stats`, `Settings` (each a way back, to that tab)
   and the status line's summary; a press there or `/workbench` brings it back; a quit command
@@ -2707,7 +2749,10 @@ nothing until a surface attaches.
   `€0.30` were refused with no hint why and a price could never be removed), shown from `wb
   savings --json`'s `price` (`priceOf`, `mem.price`). The ring's sentence follows any of these rows
   (`SETTING_ROWS`).
-  The rows go Claude coding, the Stats tab's, the price, then apart, under the heading
+  **Opening animation** (`SPLASH_STOPS`, key `splash`, options `splash:on|off`: `Enabled (default)` /
+  `Off`, the owner's words): a pick runs `wb splash on|off`, and each draw reads `splash.json` again
+  (`splashOn`: on unless it says `"on": false`).
+  The rows go Claude coding, the Stats tab's, the opening animation, the price, then apart, under the heading
   `Experimental · may change or go away`, Web chat and Agent code navigation: the two that may
   change or go away, kept off the settings here to stay (the user, 2026-11-21; the probe row's
   title said `(experimental, may go away)` until then).
@@ -6413,7 +6458,7 @@ mode back on, pane and all).
 ./types/index.d.ts`, one setting `userConfig.wake`, `on`|`off`, default `on`; changed with
 `claude plugin configure workbench@workbench`, which reloads the module), `mod/hooks/hooks.json`
 (`{"modules": ["./register.tsx"]}`), `mod/hooks/register.tsx` (everything), `mod/hooks/apprentice.ts`
-(the character's art), `mod/hooks/register.test.tsx` (run by `claude plugin test mod`),
+(the character's art), `mod/hooks/splash.ts` (the opening animation, #963), `mod/hooks/register.test.tsx` (run by `claude plugin test mod`),
 `mod/types/index.d.ts` (the atom types), `mod/.claude-plugin/icon.png` (the `work` pose).
 The repo root's `.claude-plugin/marketplace.json` makes the repo a folder marketplace (`workbench`,
 plugin source `./mod`), so the plugin id is `workbench@workbench` and it is read from the clone:
@@ -6428,7 +6473,7 @@ const bound to one; imports from the module's own files also pass). The helpers 
 "gating hook without .catch" notes) is the check. Env reads must be string literals: `HOME`,
 `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_COMPACT_AT`.
 
-**State.** Nine `$.state` atoms survive a module reload within a session; each has a shape tag,
+**State.** Ten `$.state` atoms survive a module reload within a session; each has a shape tag,
 and an atom read under an old tag is absent, so change the tag when its type changes:
 `tasks` (`tasks-8`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
 updatedAt, tokens, recent, repo, cwd, subdir, session, claude_pid, claude_start, backlog, parked, allowed), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
@@ -6441,7 +6486,8 @@ it was read from), `top` (`top-1`, {snap, busy}: `wb top --json`'s newest tick a
 % since the Stats tab opened), `said` (`said-1`, WbSaid | null, {notes, wakeOff, coding}: what the conversation was told of the
 rules that depend on the state, #540; kept across a reload, #697: in `mem` a reload emptied it, prompt.context doesn't fire
 again in that conversation, and `sayRules` waited for it for good, so wakes turned off mid-session were never said; a
-conversation's first context block sets it again). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
+conversation's first context block sets it again), `splash` (`splash-1`, boolean: this session's first `/workbench` has come, and
+with it the opening animation, #963: kept across a reload, so a reload never plays it again). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
 this session's open set, the session's resolved `cwd` and `home`, `person`, follow, sawTurn, scoutAsked,
 toasts sent, dropped wakes, the closed tasks no longer read, the events pid, `mem.said`, the `said` atom's copy, …). The task facts
 themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.json's
@@ -6788,7 +6834,9 @@ before, two wakes due in one turn, two open questions, another plugin's tool cal
 check beside the wakes, a notify.jsonl read by its tail, the pane read only while shown,
 the Stats tab read only while shown and again when a task closes, `wb top` run only while the
 Stats tab is on screen with Live view on and ended when left, its settings rows and the typed
-price, a history that says nothing it has no data for, a sticky
+price, the opening animation (#963: the first `/workbench` only, not after a reload, again, from the
+strip or for a task; a key skips it and still works; no timer left; the sizes; off; its row; every
+colour 3:1 on black and white; forge's frames; where it lands), a history that says nothing it has no data for, a sticky
 focus, a cut transcript, a long line clipped, `/workbench-models` once, wb missing (one toast, a
 backoff, no model check), wb failing (no open-tasks block, quit says so), no compaction without
 delegating, wake off told, closed tasks not re-read. Not covered: check-in wakes, the one-hour
@@ -6891,6 +6939,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (a smaller step: the note opens with `STEP_NOTE`; after a progress check, recorded as a `smaller` intervention, else a `hint`) | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
 | `wb experiment [<name> [on\|off]]` | | The experiments (*Experiments*): with no argument, each one's purpose and state (`cli.experiment_lines`: `probe: on and working (probe-code 0.6.0)`, then, once a task with it on has closed, whether the agents used it (`cli.use_recent`: `; the agent used it in 2 of the last 5 task(s) with it on (14 call(s))`, the latest `USE_RECENT` 5 results rows that have it on, bench replays and trials too, #857), `probe: on, but not set up: no probe with `+"`symbols`"+` is on PATH, so it changes nothing yet (probe, a code-search tool: github.com/probelabs/probe; its release binary from …)`, `probe: off (wb experiment probe on)`); with a name, its state; with `on`/`off`, sets it in `experiments.json` for the tasks started from then (`; tasks already started keep theirs`). An unknown name is refused. |
+| `wb splash [on\|off]` | | The pane's opening animation on a session's first `/workbench` (*Seeing what the agent does*, #963): with no argument, whether it is on; `on` (the default) or `off` writes `$WB_HOME/splash.json`, which the mod's Settings row runs and reads back. |
 | `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent; with `--when`, a one-task exception granted ahead, spent only once Claude has started on it. `used` records what Claude changed under it and says to hand the testing back; exit 1 with none. |
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat` (post the pair to the web chat), `--setup` (run the setup in each checkout) | At review, for a visual task: the project's capture command run on the base and on the candidate, each in a scratch checkout under the task's lane; where each PNG is, or why a side has none (*Screenshots of the base and the candidate*). |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions` (from Claude Code's Bash, without `--repo`/`--session`, the scope is the calling session's: `cli._caller`, every id its process had, `claude-sessions/<CLAUDE_PID>`, and its directory, #693; this flag, or a terminal, takes every session's), `--user` | Stops the runner, phase `review`, "Claude took over", status `taken_over`; Claude edits in the worktree and accepts, or hands back with feedback. Refuses (exit 1) a task whose checkout hasn't finished, running or failed (`its worktree isn't ready yet: wait for it, or wb discard <task>`): the hand-back's runner made the checkout again from nothing, and Claude's edits went with it (#655). Outside "Let Claude decide" it needs the user's recorded yes for the task, else exit 3; `--user` (the mod's hand-back command) is the user's own ask, and records one (*Claude coding*). `--all`: every task that isn't closed; a task refused (the coding gate, exit 3) is said and the rest are still taken over, then it exits with the refusal's code (#601: the first refusal left every other runner going). A task not checked out yet, or failed at checkout, is skipped, not refused (`not ready: <task> (its checkout hasn't finished): wait for it, or wb discard <task>`), so it can't fail every hand-back (#918). `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR or inside it, or DIR is inside the task's spot (its package, else its `cwd` inside the repo, else the repo: #695), or its `cwd` is DIR or inside it, by whole components of real paths (in lower case where the file system ignores case), never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
@@ -6973,6 +7022,7 @@ $WB_HOME (~/.local/state/workbench)
   coding.json                    Claude coding, the user's choice: {mode: only|ask|decide, ts}; none: decide
   experiments.json  .lock        wb experiment: {<name>: "on"|"off"}; a missing name is off (*Experiments*)
   progress.json                  progress checks, the user's opt-in: {on, after?, ts}; none: off
+  splash.json                    the pane's opening animation (wb splash): {on, ts}; none, or anything but "on": false: on
   results.jsonl                  one row per closed task: what the router, slices, tuning and skill records learn from
   stats.json  stats.lock         the Stats tab's settings ({recording, live, every, ts}; none: all defaults: *Stats recording*)
   lessons.jsonl                  what each task taught, open until written into a skill or closed
@@ -7779,7 +7829,10 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
-- **A `$.state` atom's type** in the mod → its tag (`tasks-8`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`, `top-1`, `said-1`).
+- **A `$.state` atom's type** in the mod → its tag (`tasks-8`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`, `top-1`, `said-1`, `splash-1`).
+- **The Tasks page's layout** (the render's rows, margins, the stage, the tabs and the modeline) →
+  `pageParts` and `pageShape`, which the opening animation lands by (#963); **the modeline's look**
+  (`MODELINE`, the theme's `claude`) → splash.ts's `BAR` and the text it is given.
 - **What the Stats tab folds** (2026-11-21): `top.FOLD`'s states → the mod's `RACK_FOLD`;
   `stats.STATS_MODEL_LINES` → the mod's `STATS_SHOWN`; `model_lines`' `more`/`older` and
   `variants` → `statsLines` and `cli.cmd_stats`.

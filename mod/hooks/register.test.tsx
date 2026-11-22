@@ -1,5 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, parsePrice, priceOf, quietForJobs, savedLine, spark, statsLines, wrapParts, wrapWords } from './register.js'
+import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, pageShape, parsePrice, priceOf, quietForJobs, savedLine, spark, splashTarget, statsLines, wrapParts, wrapWords } from './register.js'
+import { pixels } from './apprentice.js'
+import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
+import type { WbTask } from '../types'
 
 const PANE = {
   plugin: 'workbench',
@@ -2791,7 +2794,7 @@ test('the apprentice says how the followed task stands: in pixels in a terminal,
 
 test('/workbench alone turns workbench mode on for the session: the pane opens, and a quit ends it', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = {}
+  const files: Record<string, string> = { '/wb/splash.json': '{"on": false}' }  // the opening animation: its own tests (#963)
   const ui: string[] = []
   fakeTasks(on, files, [], true, ui)
   on('ui.toast', () => ({ value: undefined }))
@@ -4015,4 +4018,381 @@ test('a machine with two models draws the stats tab as before the fold (2026-11-
   expect(history).toContain('Optimized: ollama/m0 32K all on the GPU · ollama/m1 32K all on the GPU')
   expect(history).toContain('Bench: ollama/m0 7/10 (2026-11-20) · ollama/m1 7/10 (2026-11-20)')
   expect(history.filter(l => l.startsWith('What helps'))).toHaveLength(2)
+})
+
+// ---------------------------------------------------------------- the opening animation (#963)
+// The owner, 2026-11-21: "it needs to end by pulling in the Tasks page like normal and have no
+// penalty beyond initial startup". The pane of forge's design: 60 columns, 26 rows and the
+// modeline's.
+const SPLASH_PANE = { ...PANE, props: { ...PANE.props, bodyColumns: 60, scroll: { offset: 0, bodyRows: 27 } } } as const
+const splashPane = (cols = 60, rows = 27) => ({ ...SPLASH_PANE, surface: 'terminal' as const,
+  props: { ...SPLASH_PANE.props, bodyColumns: cols, scroll: { offset: 0, bodyRows: rows } } })
+// What an earlier load of the mod left in an atom, for a test to seed
+function seeded(on: any, atoms: Record<string, [string, unknown]>) {
+  const held: Record<string, { value: unknown; version: number }> = {}
+  for (const [key, [shape, value]] of Object.entries(atoms)) held[key] = { value: { shape, value }, version: 1 }
+  const mine = (e: any) => e.plugin === 'workbench' && e.key in held
+  on('state.get', (_: any, e: any, next: any) => mine(e) ? { value: held[e.key] } : next(e))
+  on('state.set', (_: any, e: any, next: any) => {
+    if (!mine(e)) return next(e)
+    held[e.key] = { value: e.value, version: held[e.key]!.version + 1 }
+    return { value: { isSet: true, version: held[e.key]!.version } }
+  })
+}
+
+// A session with workbench's files in memory, wb answering, and the animation's frames counted:
+// each blit of its Raster, and each period of an 80 ms timer (its own: the pane's other timers
+// run at 450 ms and 1.5 s)
+function splashWorld(on: any, files: Record<string, string> = {}, dirs: string[] = [], ears = true) {
+  fakeTasks(on, files, dirs, true, [], ears)
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    if (e.argv[1] === 'splash' && e.argv[2]) files['/wb/splash.json'] = JSON.stringify({ on: e.argv[2] === 'on' })  // what wb writes
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'status' ? 'no open tasks' : '', stderr: '' } }
+  })
+  const blits: string[] = []
+  const frames: string[] = [] // the splash's cells, as blitted
+  on('ui.blit', (_: any, e: any) => { blits.push(e.key); if (e.key === 'splash') frames.push(e.cells); return { value: {} } })
+  return { runs, blits, frames, splashes: () => blits.filter(k => k === 'splash').length }
+}
+// mock.clock, its every period of an 80 ms timer counted on the way (one hook an event: its own)
+function splashClock(on: any) {
+  const ticks = { n: 0 }
+  const counting = (event: string, ...args: any[]) => {
+    if (event !== 'clock.every') return on(event, ...args)
+    const hook = args.pop()
+    return on(event, ...args, ($: any, e: any, next: any) => { if (e.ms === 80) ticks.n += 1; return hook($, e, next) })
+  }
+  return { clock: mock.clock(counting as any, { now: 1_800_000_000_000 }), ticks }
+}
+const workbench = ($: any) => $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+const splashing = async (ui: any) => !!(await ui.find({ type: 'Raster', key: 'splash' }))
+
+test('the opening animation plays on the first /workbench of a session, and the Tasks page follows it', async ($, on) => {
+  const { clock, ticks } = splashClock(on)
+  const w = splashWorld(on)
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  const ui = await $.ui.mount(splashPane())
+  expect(await splashing(ui)).toBe(true)                                  // in place of the page
+  expect(await ui.find({ type: 'Text', text: 'Workbench mode is on.' })).toBeUndefined()
+  await clock.advance(2000)
+  expect(w.splashes()).toBeGreaterThanOrEqual(20)                        // its frames, by blit
+  await clock.advance(3200)                                              // 4.96 s in all
+  expect(await splashing(ui)).toBe(false)
+  expect(await ui.find({ type: 'Text', text: 'Workbench mode is on.' })).toBeDefined()  // the page, as always
+  expect(await ui.find({ type: 'Raster', key: 'apprentice' })).toBeDefined()
+  expect(JSON.stringify(await ui.find({ key: 'modeline' }))).toContain("[•_•] Claude's Workbench")
+  const [n, blits] = [ticks.n, w.splashes()]
+  await clock.advance(3000)
+  expect([ticks.n, w.splashes()]).toEqual([n, blits])                  // no timer of it left running
+  await ui.unmount()
+})
+
+test('the opening animation plays once a session: not on /workbench again, nor after a reload', async ($, on) => {
+  const { clock, ticks } = splashClock(on)
+  const w = splashWorld(on)
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  let ui = await $.ui.mount(splashPane())
+  expect(await splashing(ui)).toBe(true)
+  await clock.advance(6000)
+  await ui.unmount()
+  const played = w.splashes()
+  await workbench($)                                                     // /workbench again
+  ui = await $.ui.mount(splashPane())
+  expect(await splashing(ui)).toBe(false)
+  await ui.unmount()
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })  // a reload
+  await workbench($)
+  ui = await $.ui.mount(splashPane())
+  expect(await splashing(ui)).toBe(false)
+  await clock.advance(3000)
+  expect(w.splashes()).toBe(played)
+  await ui.unmount()
+})
+
+test('after a reload the first /workbench of the session has come already: the animation stays away', async ($, on) => {
+  // the splash atom outlives the reload (mem doesn't): a /reload-plugins mid-session never plays it again
+  const { clock, ticks } = splashClock(on)
+  const w = splashWorld(on)
+  seeded(on, { splash: ['splash-1', true] })
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  const ui = await $.ui.mount(splashPane())
+  expect(await splashing(ui)).toBe(false)
+  await clock.advance(1000)
+  expect([w.splashes(), ticks.n]).toEqual([0, 0])
+  await ui.unmount()
+})
+
+test('a pane brought back from the strip, or opened by a task, opens on the page without the animation', async ($, on) => {
+  const { clock, ticks } = splashClock(on)
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running', { repo: '/home/u/project', cwd: '/home/u/project' })
+  const w = splashWorld(on, files, ['fix-it'])
+  seeded(on, { pane: ['pane-1', { tab: 'tasks', open: '', focus: '', minimized: true }],
+    chat: ['chat-4', { key: 'k1', delegating: true, url: '', web: false }] })
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)                                              // the task's poll
+  const band = await $.ui.mount({ plugin: 'workbench', component: 'AbovePrompt', requestId: 'above-prompt',
+    props: { bodyColumns: 120 }, surface: 'terminal' } as any)
+  await band.press({ key: 'restore' })
+  await band.unmount()
+  const ui = await $.ui.mount(splashPane())
+  expect(await splashing(ui)).toBe(false)
+  expect(await ui.find({ type: 'Text', text: /fix-it/ })).toBeDefined()
+  await clock.advance(1000)
+  expect([w.splashes(), ticks.n]).toEqual([0, 0])
+  await ui.unmount()
+})
+
+test('typing in the prompt goes on beside the animation, which the mod keeps off the typing path', async ($, on) => {
+  // 2026-11-21, review of #963: a prompt.edit hook to skip it can't be taken off, so every key of
+  // the session would have waited on the mod; the typing goes on untouched and the animation ends on its own
+  const { clock, ticks } = splashClock(on)
+  const w = splashWorld(on)
+  // the editor, beneath: the splice applied
+  on('prompt.edit', (_: any, e: any) => ({ text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end), cursor: e.start + 1 }))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  const ui = await $.ui.mount(splashPane())
+  await clock.advance(400)
+  expect(await splashing(ui)).toBe(true)
+  const r = await $.prompt.edit({ origin: { kind: 'composer' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'h' } as any)
+  expect(r.text).toBe('h')                                               // the key reached the prompt
+  expect(await splashing(ui)).toBe(true)
+  await clock.advance(4800)
+  expect(await splashing(ui)).toBe(false)
+  expect(await ui.find({ type: 'Text', text: 'Workbench mode is on.' })).toBeDefined()
+  const [n, blits] = [ticks.n, w.splashes()]
+  await clock.advance(2000)
+  expect([ticks.n, w.splashes()]).toEqual([n, blits])
+  await ui.unmount()
+})
+
+test('a key in the pane skips the animation and still moves the ring', async ($, on) => {
+  const { clock, ticks } = splashClock(on)
+  const w = splashWorld(on)
+  const ring: any[] = []
+  on('ui.focus', (_: any, e: any) => { ring.push(e); return { value: {} } })  // the engine, beneath: the ring moves
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  const ui = await $.ui.mount(splashPane())
+  await clock.advance(400)
+  expect(await splashing(ui)).toBe(true)
+  await $.ui.focus({ component: 'Pane', requestId: 'workbench', origin: { kind: 'person' } } as any)  // Tab
+  expect(ring.length).toBe(1)                                            // it went on to the engine
+  expect(await splashing(ui)).toBe(false)
+  expect(await ui.find({ key: 'tab-stats' })).toBeDefined()              // and the page's tabs are there to press
+  const n = ticks.n
+  await clock.advance(2000)
+  expect(ticks.n).toBe(n)
+  await ui.unmount()
+})
+
+test('a narrow or short pane gets the small animation, a smaller one none', async ($, on) => {
+  const { clock, ticks } = splashClock(on)
+  const w = splashWorld(on)
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  const ui = await $.ui.mount(splashPane(39, 27))                        // under 40 columns: none
+  expect(await splashing(ui)).toBe(false)
+  expect(await ui.find({ type: 'Text', text: 'Workbench mode is on.' })).toBeDefined()
+  const n = ticks.n                                                      // its first period, asked as it started
+  await clock.advance(1000)
+  expect([w.splashes(), ticks.n]).toEqual([0, n])                      // and its timer went with it
+  await ui.unmount()
+  for (const [cols, rows, fits] of [[50, 27, 'small'], [60, 22, 'small'], [60, 24, 'big'], [56, 24, 'big'], [60, 19, null]] as const)
+    expect([cols, rows, plan(cols, rows, { stage: 1, bar: null })?.big ?? null])
+      .toEqual([cols, rows, fits === null ? null : fits === 'big'])
+})
+
+test('with the opening animation off in Settings it never plays', async ($, on) => {
+  const { clock, ticks } = splashClock(on)
+  const w = splashWorld(on, { '/wb/splash.json': JSON.stringify({ on: false, ts: 1 }) })
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  const ui = await $.ui.mount(splashPane())
+  expect(await splashing(ui)).toBe(false)
+  await clock.advance(1000)
+  expect([w.splashes(), ticks.n]).toEqual([0, 0])
+  await ui.unmount()
+})
+
+test('the Opening animation row of Settings cycles through wb and reads its choice back', async ($, on) => {
+  const { clock, ticks } = splashClock(on)
+  const files: Record<string, string> = {}
+  const w = splashWorld(on, files)
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-settings' })
+  expect((await ui.find({ key: 'splash' }))?.props.label).toBe('▸ Opening animation: Enabled (default)')  // the owner's words
+  await ui.press({ key: 'splash' })
+  expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label).filter(l => /Enabled|Off$/.test(String(l))))
+    .toEqual(['▾ Opening animation: Enabled (default)', '  ❯ Enabled (default)', '    Off'])
+  await ui.press({ key: 'splash:off' })
+  expect(w.runs.filter(a => a[1] === 'splash')).toEqual([['wb', 'splash', 'off']])
+  expect(JSON.parse(files['/wb/splash.json']).on).toBe(false)            // kept by wb
+  expect((await ui.find({ key: 'splash' }))?.props.label).toBe('▸ Opening animation: Off')
+  await ui.press({ key: 'splash' })
+  await ui.press({ key: 'splash:on' })
+  expect((await ui.find({ key: 'splash' }))?.props.label).toBe('▸ Opening animation: Enabled (default)')
+  expect(w.runs.filter(a => a[1] === 'splash').map(a => a[2])).toEqual(['off', 'on'])
+  await ui.unmount()
+})
+
+// Every frame of a whole play, its ending decided as the pane would
+function allFrames(cols: number, rows: number, target: { stage: number; bar: number | null }) {
+  const p = plan(cols, rows, target)!
+  const out: Uint32Array[] = []
+  for (let f = 0; f < 47 || f < frameCount(p); f++) out.push(frameCells(p, f))
+  return { p, out }
+}
+
+test('every colour the animation draws has 3:1 contrast on a black terminal and a white one', () => {
+  // #963's rule; the apprentice's own colours are the character as the pane always draws it
+  const own = new Set<number>()
+  for (const pose of ['rest', 'blink', 'think', 'work', 'swing', 'tada', 'ask'] as const)
+    for (const row of pixels(pose)) for (const c of row) if (c !== null) own.add(c)
+  for (const row of pixels('rest', { 9: 'S.SSSSLLSSSS.S..' })) for (const c of row) if (c !== null) own.add(c)
+  const seen = new Set<number>()
+  for (const [cols, rows, target] of [[60, 27, { stage: 17, bar: 26 }], [60, 27, { stage: 1, bar: 10 }],
+    [60, 27, { stage: 17, bar: null }], [40, 21, { stage: 11, bar: 20 }], [120, 50, { stage: 40, bar: 49 }]] as const) {
+    const { out } = allFrames(cols, rows, target)
+    for (const cells of out) for (let i = 0; i < cells.length; i += 3) for (const c of [cells[i + 1]!, cells[i + 2]!])
+      if (c !== 0x01000000 && !own.has(c)) seen.add(c)
+  }
+  const bad = [...seen].filter(c => ratio(c, 0x000000) < 3 || ratio(c, 0xffffff) < 3).map(c => c.toString(16))
+  expect(bad).toEqual([])
+  expect(seen.size).toBeGreaterThan(50)                                  // the rainbow, the heat, the steel, the bar
+  expect(seen.has(BAR)).toBe(true)
+})
+
+test("the frames are forge.py's, but for the cheer's rainbow and the ending", () => {
+  // FNV-1a of each frame's [codePoint, fg, bg] words in forge's frames.json (60x26 and 40x22,
+  // stage rows 17 and 12): the reference generator the concept was judged on
+  const fnv = (w: Uint32Array, n: number) => {
+    let h = 0x811c9dc5
+    for (let i = 0; i < n; i++) h = Math.imul((h ^ w[i]!) >>> 0, 0x01000193) >>> 0
+    return h
+  }
+  const want: Record<string, Record<number, number>> = {
+    '60x26': { 0: 2408505272, 2: 3357349657, 6: 1891630570, 8: 3997093822, 12: 476572164, 17: 495746404,
+      23: 302150205, 29: 4257352361, 34: 640506108, 38: 591010844, 41: 1561149889 },
+    '40x22': { 0: 1065707268, 2: 56132453, 6: 2260355752, 8: 3409053422, 12: 120311301, 17: 2112970693,
+      23: 3484923390, 29: 2850109210, 34: 2744525239, 38: 1568522877, 41: 3957105177 },
+  }
+  for (const [size, stage] of [['60x26', 17], ['40x22', 12]] as const) {
+    const [cols, rows] = size.split('x').map(Number) as [number, number]
+    const p = plan(cols, rows + 1, { stage, bar: null })!                // forge's rows, and the modeline's under them
+    for (const [f, h] of Object.entries(want[size]!)) expect([size, Number(f), fnv(frameCells(p, Number(f)), cols * rows * 3)])
+      .toEqual([size, Number(f), h])
+  }
+})
+
+// A blitted frame's cells back as [codePoint, fg, bg] words
+const unpacked = (b64: string) => {
+  const bytes = Uint8Array.from(atob(b64), ch => ch.charCodeAt(0))
+  return new Uint32Array(bytes.buffer)
+}
+// The rows of a frame whose every cell has the bar's colour behind it
+const barRows = (cells: Uint32Array, cols: number, rows: number) =>
+  Array.from({ length: rows }, (_, r) => r).filter(r =>
+    Array.from({ length: cols }, (_, c) => cells[(r * cols + c) * 3 + 2]).every(bg => bg === BAR))
+
+test('the bar the words fall into is lit end to end before it slides up, at any pane width', () => {
+  // 2026-11-21, review of #963: lit one column a frame out from the embers, a 200-column bar was
+  // 121 columns dark at the last frame, and the page's modeline then popped in whole
+  const late: string[] = []
+  for (let cols = 40; cols <= 512; cols += cols < 160 ? 3 : 17)        // the widths a pane has, and wider
+    for (const rows of [22, 30]) {                                       // small and big
+      const p = plan(cols, rows, { stage: 1, bar: 10 })!
+      if (Math.max(...p.barAt) >= 57) late.push(`${cols}x${rows}`)  // 57: the slide's first frame
+    }
+  expect(late).toEqual([])
+  for (const [cols, rows, bar] of [[200, 50, 49], [120, 40, 12], [60, 27, 26], [40, 21, 20]] as const) {
+    const { out } = allFrames(cols, rows, { stage: 1, bar })
+    const last = out[out.length - 1]!
+    expect([cols, barRows(last, cols, rows)]).toEqual([cols, [bar]])        // whole, on the modeline's row at the end
+    // no words on it: the page's modeline brings them in the theme's inverseText, bold, as it always draws them
+    expect(Array.from({ length: cols }, (_, c) => last[(bar * cols + c) * 3]).every(ch => ch === 0x20)).toBe(true)
+  }
+})
+
+test('a page that stops being measurable while the animation plays never gets a bar above its modeline', async ($, on) => {
+  // 2026-11-21, review of #963: an exact row found early was kept after a line that may wrap came,
+  // so the embers landed on a row above the page's real modeline
+  const wide = (files: Record<string, string>, dirs: string[]) => {
+    task(files, 'fix-it', 'accepted', { repo: '/home/u/project', cwd: '/home/u/project' })
+    files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'accepted', round: 1, updated_at: ts0, last: '完成した' })
+    dirs.push('fix-it')
+  }
+  // before the words leave: they rise away, as forge drew it (56 frames after the first, no bar)
+  {
+    const { clock } = splashClock(on)
+    const [files, dirs]: [Record<string, string>, string[]] = [{}, []]
+    const w = splashWorld(on, files, dirs, false)                        // no watcher: a poll each 1.5 s
+    await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+    await workbench($)
+    const ui = await $.ui.mount(splashPane())
+    await clock.advance(400)
+    wide(files, dirs)                                                    // the next poll brings it
+    await clock.advance(5000)
+    expect(await splashing(ui)).toBe(false)
+    expect(await ui.find({ type: 'Text', text: /fix-it/ })).toBeDefined()
+    expect(w.splashes()).toBe(56)
+    expect(w.frames.map(f => barRows(unpacked(f), 60, 27).length).every(n => n === 0)).toBe(true)
+    await ui.unmount()
+  }
+})
+
+test('a page that grows past measuring after the words fell puts the bar no higher than the page reaches', async ($, on) => {
+  const { clock } = splashClock(on)
+  const [files, dirs]: [Record<string, string>, string[]] = [{}, []]
+  const w = splashWorld(on, files, dirs, false)                          // no watcher: a poll each 1.5 s
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  const ui = await $.ui.mount(splashPane())
+  await clock.advance(3900)                                              // the words are falling into row 10, the empty page's last
+  task(files, 'fix-it', 'accepted', { repo: '/home/u/project', cwd: '/home/u/project' })
+  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'accepted', round: 1, updated_at: ts0, last: '完成した' })
+  dirs.push('fix-it')
+  await clock.advance(1500)
+  expect(await splashing(ui)).toBe(false)
+  expect(w.splashes()).toBe(61)
+  // the page now: its task's row, its last line and its margin over the empty page's 11 rows, at least
+  expect(barRows(unpacked(w.frames[w.frames.length - 1]!), 60, 27)).toEqual([13])
+  await ui.unmount()
+})
+
+test('the words fall into the modeline\'s row: the page\'s last when it fits, the pane\'s last when it overflows, else they rise away', () => {
+  const t = (name: string, phase: string, extra: Partial<WbTask> = {}): WbTask => ({ name, phase, round: 1, model: 'm', label: '',
+    tests: null, last: 'it ended', createdAt: 0, updatedAt: 0, tokens: 0, recent: [], repo: '', cwd: '', subdir: '', session: '',
+    claude_pid: 0, claude_start: '', backlog: '', parked: false, allowed: '', ...extra })
+  const none = { task: '', lines: [] }
+  // the empty page: the stage's margin, the apprentice and a bubble of three lines, the tabs' margin, the tabs, the modeline
+  const empty = pageShape([], none, true, '', 0, 60)
+  expect(empty).toEqual({ rows: 11, atLeast: 11, stage: 1, tail: 10 })
+  expect(splashTarget(empty, 27)).toEqual({ stage: 1, bar: 10 })
+  // one closed task, out of the mode: its row, its last line, its margin, the stage's margin, a
+  // bubble of two lines beside the apprentice, the saving, the tabs' margin, the tabs, the modeline
+  const one = pageShape([t('fix-it', 'accepted')], none, false, 'this week: saved ~1.2M Claude tokens', 0, 60)
+  expect(one).toEqual({ rows: 3 + 1 + 6 + 1 + 3, atLeast: 14, stage: 4, tail: 10 })
+  expect(splashTarget(one, 27)).toEqual({ stage: 4, bar: 13 })
+  // many: the page overflows, the pane follows its end, the modeline is its last row
+  const many = pageShape(Array.from({ length: 12 }, (_, i) => t(`task-${i}`, 'accepted')), none, false, '', 0, 60)
+  expect(splashTarget(many, 27)).toEqual({ stage: 27 - many.tail!, bar: 26 })
+  // a line wider than the pane, or one of wide characters: its height isn't known, so no bar row
+  const wide = pageShape([t('fix-it', 'accepted', { last: 'x' })], { task: 'fix-it', lines: [{ s: 'out', t: 'y'.repeat(61) }] }, false, '', 0, 60)
+  expect([wide.rows, splashTarget(wide, 27).bar]).toEqual([null, null])
+  const cjk = pageShape([t('fix-it', 'accepted', { last: '完成した' })], none, false, '', 0, 60)
+  expect([cjk.rows, splashTarget(cjk, 27).bar]).toEqual([null, null])
+  // ...unless the page surely overflows anyway
+  const long = pageShape([t('fix-it', 'running')], { task: 'fix-it', lines: Array.from({ length: 40 }, () => ({ s: 'out', t: 'y'.repeat(70) })) }, false, '', 0, 60)
+  expect(splashTarget(long, 27).bar).toBe(26)
 })
