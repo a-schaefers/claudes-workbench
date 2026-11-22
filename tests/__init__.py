@@ -7,9 +7,11 @@ and fails with TimeoutError naming it, its tearDown runs, and the suite goes on,
 eating the job's budget unnamed.
 
 WB_TEST_SHARD=K/N: discovery (`python3 -m unittest`, no names) runs only the K-th of N shards,
-whole test classes dealt by their number of tests (each to the lightest shard so far), so a slow
-platform's suite splits across a matrix, as does naming the package (`python3 -m unittest tests`).
-Naming test modules, classes or tests on the command line runs exactly those."""
+every N-th test of the discovered order, so a suite splits across a matrix (check.yml's six, the
+macOS nightly's three), as does naming the package (`python3 -m unittest tests`). Tests, not
+classes: dealt whole by size, one class of slow end-to-end tests (Lifecycle, 147) weighed on one
+shard; dealt one by one, each shard gets a slice of every class (no test has class or module
+fixtures). Naming test modules, classes or tests on the command line runs exactly those."""
 import faulthandler
 import os
 import signal
@@ -52,7 +54,7 @@ _loading = False  # load_tests is under way: a nested call returns its modules u
 
 
 def load_tests(loader, standard_tests, pattern):
-    """Discovery of the package: every test module, or with WB_TEST_SHARD only one shard's classes."""
+    """Discovery of the package: every test module, or with WB_TEST_SHARD only one shard's tests."""
     global _loading
     here = os.path.dirname(os.path.abspath(__file__))
     nested, _loading = _loading, True
@@ -70,16 +72,6 @@ def load_tests(loader, standard_tests, pattern):
     k, n = (int(x) for x in shard.split("/"))
     if not 1 <= k <= n:
         raise ValueError(f"WB_TEST_SHARD={shard}: K/N with 1 <= K <= N")
-    cases = list(_cases(found))
-    key = lambda t: f"{type(t).__module__}.{type(t).__qualname__}"  # noqa: E731
-    sizes: dict[str, int] = {}
-    for t in cases:
-        sizes[key(t)] = sizes.get(key(t), 0) + 1
-    shards: list[set] = [set() for _ in range(n)]
-    load = [0] * n
-    for c in sorted(sizes, key=lambda c: (-sizes[c], c)):  # the largest class to the lightest shard
-        i = load.index(min(load))
-        shards[i].add(c)
-        load[i] += sizes[c]
-    standard_tests.addTests(t for t in cases if key(t) in shards[k - 1])
+    # discovery's order is sorted (modules, classes, methods), so every shard deals the same list
+    standard_tests.addTests(t for i, t in enumerate(_cases(found)) if i % n == k - 1)
     return standard_tests

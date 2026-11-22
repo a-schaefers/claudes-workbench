@@ -58,6 +58,22 @@ class RequiredCheck(unittest.TestCase):
         checks = rules["required_status_checks"]["required_status_checks"]
         self.assertIn({"context": "check", "integration_id": GITHUB_ACTIONS_APP}, checks)
 
+    def test_check_is_green_only_when_every_shard_and_the_mod_are(self):
+        # check.yml's suite in six shards (2026-11-21: 28 to 32 minutes in one job): a matrix job
+        # reports as `suite (1)`…, so `check` is the one name the ruleset waits for. Skipped
+        # passes a required check, so it runs always() and fails unless both succeeded
+        gate = job("check.yml", "check")
+        self.assertIn("needs: [suite, mod]", gate)
+        self.assertIn("if: always()", gate)
+        for want in ("${{ needs.suite.result }}", "${{ needs.mod.result }}", '[ "$SUITE" = success ]',
+                     '[ "$MOD" = success ]'):
+            self.assertIn(want, gate)
+        self.assertNotIn("continue-on-error", text("check.yml"))
+        suite = job("check.yml", "suite")
+        for want in ("fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/6", "run: python3 -m unittest\n"):
+            self.assertIn(want, suite)
+        self.assertIn("claude plugin validate mod && claude plugin test mod", job("check.yml", "mod"))
+
 
 def job(workflow: str, name: str) -> str:
     """One job's lines, up to the next job."""
@@ -97,7 +113,7 @@ class ReleaseGates(unittest.TestCase):
         for want in ("shard: [1, 2, 3]", "fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/3",
                      "WB_TEST_HANG_SECS:", "python3 -X faulthandler -m unittest -v"):
             self.assertIn(want, mac)
-        for workflow, name in (("nightly.yml", "check"), ("nightly.yml", "wsl"), ("check.yml", "check"),
+        for workflow, name in (("nightly.yml", "check"), ("nightly.yml", "wsl"), ("check.yml", "suite"),
                                ("opencode.yml", "check")):
             with self.subTest(workflow=workflow, job=name):
                 self.assertIn("WB_TEST_HANG_SECS:", job(workflow, name))
@@ -212,7 +228,7 @@ class SuiteHooks(unittest.TestCase):
         self.assertIn("test_then_this (__main__.Hangs.test_then_this) ... ok", r.stderr)
         self.assertIn("Ran 2 tests", r.stderr)
 
-    def test_the_shards_split_the_discovered_or_named_suite_by_whole_classes_with_none_lost(self):
+    def test_the_shards_deal_the_discovered_or_named_suite_test_by_test_with_none_lost(self):
         def ids(shard=None, named=False):
             env = {k: v for k, v in os.environ.items() if k != "WB_TEST_SHARD"}
             if shard:
@@ -229,13 +245,19 @@ class SuiteHooks(unittest.TestCase):
                     out.append(t.id())
             return out
         whole = ids()
-        parts = [ids(f"{k}/3") for k in (1, 2, 3)]
-        self.assertEqual(sorted(sum(parts, [])), sorted(whole))
-        classes = [{i.rsplit(".", 1)[0] for i in p} for p in parts]
-        self.assertFalse(classes[0] & classes[1] or classes[0] & classes[2] or classes[1] & classes[2])
-        self.assertLess(max(map(len, parts)) - min(map(len, parts)), len(whole) // 5)
-        # the package named, `python3 -m unittest tests`: the same shards, dealt once (the review
-        # of #950: its load_tests ran twice, nested, and each shard ran about a third of its own)
+        for n in (3, 6):  # the macOS nightly's, check.yml's
+            with self.subTest(shards=n):
+                parts = [ids(f"{k}/{n}") for k in range(1, n + 1)]
+                self.assertEqual(sorted(sum(parts, [])), sorted(whole))     # each test once
+                self.assertLessEqual(max(map(len, parts)) - min(map(len, parts)), 1)
+                # every class sliced across the shards: dealt whole, Lifecycle's 147 slow tests
+                # weighed on one shard (2026-11-21)
+                for cls in {i.rsplit(".", 1)[0] for i in whole}:
+                    each = [sum(i.rsplit(".", 1)[0] == cls for i in p) for p in parts]
+                    self.assertLessEqual(max(each) - min(each), 1, cls)
+                # the package named, `python3 -m unittest tests`: the same shards, dealt once (the
+                # review of #950: its load_tests ran twice, nested, and each shard ran about a
+                # third of its own)
+                for k, part in zip(range(1, n + 1), parts):
+                    self.assertEqual(sorted(ids(f"{k}/{n}", named=True)), sorted(part))
         self.assertEqual(sorted(ids(named=True)), sorted(whole))
-        for k, part in zip((1, 2, 3), parts):
-            self.assertEqual(sorted(ids(f"{k}/3", named=True)), sorted(part))

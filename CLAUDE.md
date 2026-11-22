@@ -33,7 +33,7 @@ the drift this rule exists to stop.
 
 ## Commands
 ```sh
-python3 -m unittest                                   # the whole suite, about 25 minutes
+python3 -m unittest                                   # the whole suite, about 20 minutes
 python3 -m unittest tests.test_workbench.Context      # one class (or .Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod: the $ rule, then mod/hooks/register.test.tsx
 PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat in WebKit and Chromium
@@ -140,7 +140,7 @@ dependencies. No packaging: it runs from the clone.
   `test_portable.py`, `test_sizing.py`, `test_docs.py` (the docs cover the code),
   `test_workflows.py` (the merge gate), `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`,
   `__init__.py` (CI's hooks).
-- `.github/`: CI (`workflows/check.yml`, the required check, on each push and PR,
+- `.github/`: CI (`workflows/check.yml`: `check` over 6 shards, each push and PR,
   Python 3.11, OpenCode `OPENCODE_VERSION`; `chat.yml`, the browser test; `nightly.yml`: the
   newest Claude Code, macOS, WSL2; `opencode.yml`: the newest OpenCode), `owner-merge.yml` (approves
   only the owner's PRs), `rulesets/main.json`, dependabot for the actions' pins.
@@ -230,7 +230,7 @@ mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs); 
 for the ask server and the agent); `WB_USER_PYTHONPATH` (the user's, for the agent); `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT` (`wb shot`); `CLAUDE_CODE_SESSION_ID` (Claude Code's: `wb start` records it,
 which session's task it is) and `CLAUDE_PID` (its process: once gone, the directory rule adopts the task). Tests only: `WB_OPENCODE_BIN` (split with
 `shlex`: the fake), `WB_FAKE_MODELS` (no model servers), `WB_FAKE_GPU_GB` (the fake GPU's size;
-unset: no sharing), `WB_TEST_SHARD` (K/N: one shard of the classes), `WB_TEST_HANG_SECS` (a hung
+unset: no sharing), `WB_TEST_SHARD` (K/N: every Nth test), `WB_TEST_HANG_SECS` (a hung
 test fails, named).
 
 ## Conventions
