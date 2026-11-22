@@ -215,6 +215,11 @@ class SuiteHooks(unittest.TestCase):
                   "class Hangs(unittest.TestCase):\n"
                   "    def test_hangs(self):\n"
                   "        time.sleep(60)\n"
+                  "    def test_hangs_where_an_oserror_is_caught(self):\n"
+                  "        try:\n"
+                  "            time.sleep(60)\n"
+                  "        except OSError:\n"
+                  "            pass\n"
                   "    def test_then_this(self):\n"
                   "        pass\n"
                   "unittest.main(argv=['x', '-v'])\n")
@@ -223,10 +228,13 @@ class SuiteHooks(unittest.TestCase):
                            env={**os.environ, "WB_TEST_HANG_SECS": "1"}, timeout=50)
         self.assertLess(time.monotonic() - began, 30)
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("TimeoutError: __main__.Hangs.test_hangs hung past WB_TEST_HANG_SECS (1 s)", r.stderr)
+        self.assertIn("tests.Hung: __main__.Hangs.test_hangs hung past WB_TEST_HANG_SECS (1 s)", r.stderr)
+        # a hang inside an `except OSError` fails too: as a TimeoutError it was caught there, in
+        # socket.getfqdn on the macOS nightly, and the test passed after 600 s (2026-11-22)
+        self.assertIn("tests.Hung: __main__.Hangs.test_hangs_where_an_oserror_is_caught hung past", r.stderr)
         self.assertIn("in test_hangs", r.stderr)                       # its stack, dumped
         self.assertIn("test_then_this (__main__.Hangs.test_then_this) ... ok", r.stderr)
-        self.assertIn("Ran 2 tests", r.stderr)
+        self.assertIn("Ran 3 tests", r.stderr)
 
     def test_the_shards_deal_the_discovered_or_named_suite_test_by_test_with_none_lost(self):
         def ids(shard=None, named=False):

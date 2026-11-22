@@ -18587,6 +18587,12 @@ class WebChat(Base):
         os.environ["WB_CHAT_CONFIG"] = str(Path(self.tmp.name) / "chat.json")  # not the user's
         from workbench import chat
         self.chat = chat
+        # a wildcard bind's names (chat.this_machine) ask socket.getfqdn, a reverse lookup that sat
+        # past WB_TEST_HANG_SECS' 600 s on GitHub's macOS runner (2026-11-22). No test here is
+        # about the lookup; #236's, that the server makes none, patch it again
+        fqdn = mock.patch("socket.getfqdn", lambda name="": name or socket.gethostname())
+        fqdn.start()
+        self.addCleanup(fqdn.stop)
         servers, _ = chat.make_servers(0, ["127.0.0.1"])
         self.srv = servers[0]
         self.port = self.srv.server_address[1]
@@ -20283,6 +20289,12 @@ class ChatUploads(Base):
         os.environ["WB_CHAT_CONFIG"] = str(Path(self.tmp.name) / "chat.json")  # not the user's
         from workbench import chat
         self.chat = chat
+        # a wildcard bind's names (chat.this_machine) ask socket.getfqdn, a reverse lookup that sat
+        # past WB_TEST_HANG_SECS' 600 s on GitHub's macOS runner (2026-11-22). No test here is
+        # about the lookup; #236's, that the server makes none, patch it again
+        fqdn = mock.patch("socket.getfqdn", lambda name="": name or socket.gethostname())
+        fqdn.start()
+        self.addCleanup(fqdn.stop)
         servers, _ = chat.make_servers(0, ["127.0.0.1"])
         self.srv = servers[0]
         self.port = self.srv.server_address[1]
