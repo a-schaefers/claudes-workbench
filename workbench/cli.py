@@ -4953,6 +4953,26 @@ def _fetch_origin() -> None:
 FETCH_SECS = 60  # under the mod's 120 s for a wb command
 
 
+def _mod_behind() -> str | None:
+    """A clone's Claude Code mod older than the clone: the commit Claude Code installed it from
+    (installed_plugins.json, `gitCommitSha`) when the clone's mod/ has changed since. Claude Code
+    runs that cached copy, which only `claude plugin update` refreshes; a clone pulled by hand
+    said "up to date" while every new session opened a four-day-old pane, no splash, no modeline
+    (2026-11-21). None when it is current, not installed from this clone, or unreadable."""
+    try:
+        rows = json.loads((context.claude_home() / "plugins/installed_plugins.json").read_text()
+                          ).get("plugins", {}).get("workbench@workbench") or []
+    except (OSError, ValueError, AttributeError):
+        return None
+    for row in rows if isinstance(rows, list) else []:
+        sha = row.get("gitCommitSha") if isinstance(row, dict) else None
+        if isinstance(sha, str) and sha and subprocess.run(  # 1: changed; 128: not this clone's
+                ["git", "-C", str(PKG_ROOT), "diff", "--quiet", sha, "HEAD", "--", "mod"],
+                capture_output=True, stdin=subprocess.DEVNULL).returncode == 1:
+            return sha[:7]
+    return None
+
+
 def cmd_update(a):
     """Bring this copy up to date with its origin: the marketplace's clone through Claude Code
     (which also refreshes the mod's cached copy), a developer's clone with a fast-forward pull.
@@ -4979,8 +4999,10 @@ def cmd_update(a):
             except gitops.GitError as e:
                 die(f"couldn't check for an update: {e}")
             store.write_json(path, {"checked_at": time.time(), "behind": behind, "kind": kind})
+        stale = _mod_behind() if kind == "clone" and not behind else None
         print(f"update available: {behind} new commit(s); /workbench-update (or wb update) installs it"
-              if behind else "up to date")
+              if behind else f"update available: Claude Code runs the mod as of {stale}, older than "
+              "this clone's; /workbench-update (or wb update) installs it" if stale else "up to date")
         return
     # every check that can refuse comes before any task is stopped: --stop stopped every
     # session's tasks, then died on a dirty clone, a missing claude, a failed fetch, or found
@@ -5025,6 +5047,7 @@ def cmd_update(a):
         if names:  # a step failing after the stop says what was stopped and how to go on (#775)
             stopped = f"; the tasks were stopped for it: wb resume {' '.join(names)} continues them"
     before = gitops.git(PKG_ROOT, "rev-parse", "HEAD").strip()
+    stale = _mod_behind() if kind == "clone" else None  # the plugin steps below refresh it
     pulled = ""
     for step in steps:
         try:
@@ -5041,7 +5064,12 @@ def cmd_update(a):
     after = gitops.git(PKG_ROOT, "rev-parse", "HEAD").strip()
     store.write_json(path, {"checked_at": time.time(), "behind": 0, "kind": kind})
     if before == after:
-        print("already up to date")
+        still = _mod_behind() if stale else None
+        print("already up to date" if not stale else
+              f"the clone was up to date; the mod was as of {stale}, now {after[:7]}: /reload-plugins "
+              "or a restart picks it up" if not still else
+              f"the clone is up to date, but Claude Code still has the mod as of {still} after claude "
+              "plugin update: reinstall it (/plugin), then a restart")
     else:
         try:  # Claude Code keeps its marketplace's clone shallow, one commit, and its update
             # replaces it: the old HEAD is gone, and counting from it failed a good update (a
@@ -5383,7 +5411,10 @@ def cmd_doctor(a):
             (context.claude_home() / "plugins/installed_plugins.json").read_text()).get("plugins", {}))
     except (OSError, ValueError, AttributeError):
         listed = False
-    print("ok  the Claude Code mod is installed (workbench@workbench)" if listed else
+    stale = _mod_behind() if listed else None
+    print(f"--  the Claude Code mod is installed as of {stale}, older than this clone's mod: wb update "
+          "refreshes it" if stale else
+          "ok  the Claude Code mod is installed (workbench@workbench)" if listed else
           "--  the Claude Code mod (the pane, the wake-ups) isn't among Claude Code's installed "
           "plugins: claude plugin install workbench@workbench, unless it loads another way")
     for row in experiment_lines():
