@@ -1081,12 +1081,14 @@ def cmd_start(a):
     # (#529). What it would refuse is checked here first, the branch, a commit's own submodules.
     wt = context.tree(task.dir, repo, setup.get("siblings"), "worktree")  # #261
     base = gitops.base_commit(repo, a.base)
-    if why := gitops.branch_clash(repo, a.name):  # a branch `delegate` too (#792)
+    if clash := gitops.branch_clash(repo, a.name):  # a branch `delegate` too (#792)
         shutil.rmtree(task.dir, ignore_errors=True)
-        die(why)
-    if base and (why := gitops.case_clash(repo, base, task.dir, a.base)):
+        die(clash)
+    if base and (clash := gitops.case_clash(repo, base, task.dir, a.base)):
         shutil.rmtree(task.dir, ignore_errors=True)
-        die(why)  # #797: the checkout would have two paths in one file
+        die(clash)  # #797: the checkout would have two paths in one file
+    # `clash`, not `why`: reused, these checks emptied the router's reason, and task.json's route
+    # (wb watch's "routed:" line) was blank on every start since #792 (2026-11-21)
     store.write_json(task.dir / STARTING, {"repo": str(repo), "worktree": str(wt),
                                            "pid": os.getpid(), "at": store.now(),
                                            "start": models._started(os.getpid()),
