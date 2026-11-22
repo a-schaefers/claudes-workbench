@@ -36,7 +36,12 @@ its dependency yourself: that is the user's (ask, and say what it would catch).
   rest of `context.TOOL_HOMES`), so builds work. Downloads go in `--setup` (`npm ci`, `mvn -q
   dependency:go-offline`, `terraform init -backend=false`, `dotnet restore`), and the check runs
   offline (`-o`, `--offline`, `--no-restore`, `npx --no-install`). A checker that talks to a daemon
-  over a UNIX socket outside the lane (the Nix daemon) can't run there: run it yourself at review.
+  over a UNIX socket outside the lane (the Nix daemon, Docker, so Testcontainers) can't run there:
+  run it yourself at review. A test's own Postgres or Redis runs from a temp directory, its socket
+  there too, in one script so the variable lasts (`d=$(mktemp -d); initdb -D $d/pg && pg_ctl -D
+  $d/pg -o "-k $d -c listen_addresses=''" -l $d/pg.log start`, then `PGHOST=$d`; `redis-server
+  --port 0 --unixsocket $d/r.sock --save '' --dir $d`): sockets only, so no port meets the user's
+  own server, and the default `/run/postgresql` is outside the lane.
 - **The project's environment.** Run the checker the way the project does: `uv run mypy`,
   `poetry run pyright`, `bundle exec rubocop`, `vendor/bin/phpstan`, `./gradlew`, `npx
   --no-install tsc`; never a global copy of a different version.
@@ -73,7 +78,7 @@ one shows there, not in the agent's rounds.
 | Haskell | Cabal → `cabal build all`; Stack → `stack build --fast`; `.hlint.yaml` → `hlint .` | (the build is it) |
 | OCaml | dune → `dune build @check` (type-checks without linking) | (dune is it) |
 | Zig | `zig build` (a `check` step in `build.zig` → `zig build check`); Zig analyses only reached code, so `zig build test` covers more | `zig ast-check <file>` |
-| Terraform | `--setup 'terraform init -backend=false -input=false'`, then `terraform validate -no-color`; `.tflint.hcl` → `tflint`; `terraform fmt -check -recursive` only where CI enforces it | (validate is it) |
+| Terraform | `--setup 'terraform init -backend=false -input=false'`, then `terraform validate -no-color`; `.tflint.hcl` → `tflint`; `terraform fmt -check -recursive` only where CI enforces it; `plan` and `test` (it creates real infrastructure) are yours at review | (validate is it) |
 | Nix | `statix`/`deadnix` configs → `statix check`, `deadnix --fail`; `nix flake check` needs the daemon: yours at review | `nix-instantiate --parse <file> >/dev/null` |
 | Clojure | `.clj-kondo/` → `clj-kondo --lint src:test`; Leiningen → `lein check` (compiles every namespace) | (clj-kondo is it) |
 | Racket | `raco make -v <main>.rkt` (a module's unbound names and syntax fail at compile; `#lang typed/racket` type-checks there) | (raco make is it) |
