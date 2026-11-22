@@ -7996,7 +7996,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   as you with `--match-head-commit`, and waits for the merge or names the failing check. It
   refuses to ship from main and acts only on this repository's own pull request at the commit it
   pushed. `--title`, `--body-file`, `--squash`, `--no-wait`, `--draft`. A red check leaves
-  auto-merge armed: fix, commit, run it again.
+  auto-merge armed: fix, commit, run it again. A `gh pr view` that fails while it waits is
+  retried; ten in a row end the wait (exit 2), auto-merge still armed (an empty reply once
+  crashed it under `set -e`, 2026-11-22).
 - **`scripts/github-settings.sh check|apply`** keeps the repository's settings in git (`check`
   names any drift, `apply` writes them; `gh` as admin): the ruleset; Actions may approve pull
   requests, the default token read only; auto-merge, merge commits, delete branch on merge, update

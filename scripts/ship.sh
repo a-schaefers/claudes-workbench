@@ -111,10 +111,28 @@ esac
 [ "$wait" = 1 ] || { echo "auto-merge armed on #$n; not waiting"; exit 0; }
 
 echo "waiting for #$n: the check, an approval, then the merge"
+# A gh call that fails (the API's hiccup, a dropped connection: an empty reply crashed the wait
+# under set -e with a JSONDecodeError, 2026-11-22, though the PR was open and armed) is retried;
+# ten in a row end the wait, auto-merge still armed.
+misses=0
 for _ in $(seq 1 180); do
-  verdict=$(gh pr view "$n" --json state,mergeCommit,statusCheckRollup,reviewDecision | python3 -c '
+  if ! view=$(gh pr view "$n" --json state,mergeCommit,statusCheckRollup,reviewDecision 2>/dev/null) \
+     || [ -z "$view" ]; then
+    misses=$((misses + 1))
+    if [ "$misses" -ge 10 ]; then
+      echo "ship.sh: gh pr view $n failed 10 times in a row; auto-merge stays armed (gh pr checks $n)" >&2
+      exit 2
+    fi
+    sleep 20
+    continue
+  fi
+  misses=0
+  verdict=$(printf '%s' "$view" | python3 -c '
 import json, sys
-p = json.load(sys.stdin)
+try:
+    p = json.load(sys.stdin)
+except ValueError:
+    print("pending "); sys.exit()
 if p["state"] == "MERGED":
     print("merged " + ((p.get("mergeCommit") or {}).get("oid") or "")); sys.exit()
 if p["state"] == "CLOSED":
