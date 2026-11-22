@@ -11340,6 +11340,18 @@ class Routing(Base):
         self.assertEqual(top.model.id, "ollama/mimo-v2.6:9b-q8_0")
         self.assertIn("the smallest model allowed trivial work", why)
 
+    def test_the_routers_reason_is_kept_in_task_json_and_shown_by_wb_watch(self):
+        # 2026-11-21: the branch and case-clash checks reused `why`, so every start since #792
+        # recorded an empty route and wb watch never said why the model was chosen
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-route", "--spec", str(self.spec), "--repo", str(self.repo), "--size", "significant")
+        task = store.Task("t-route")
+        self.assertIn("the largest model allowed significant work", task.spec.get("route") or "")
+        from workbench import transcript
+        self.assertRegex(transcript.header(task, transcript.Painter(False)),
+                         r"routed: strata/strata: the largest model allowed significant work")
+        run_wb("stop", "t-route")
+
     def test_the_size_policy_narrows_the_guess(self):
         from workbench import router
         run_wb("model", "sizes", "strata", "trivial")
