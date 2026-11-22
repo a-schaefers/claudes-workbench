@@ -75,6 +75,8 @@ import type { Register } from 'claude-code'
 import type { WbChat, WbLine, WbLive, WbPane, WbSaid, WbStats, WbTask, WbTop } from '../types'
 import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
+import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
+import type { Plan, Target } from './splash'
 
 const PANE = 'workbench'
 // Nothing waits on a timer for news: `wb events` (inotify) prints a line the moment a task, a
@@ -132,6 +134,10 @@ const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
 // 2026-11-19): a strip above the prompt stands in for it, a press there or /workbench brings it back.
 const pane = atom({ plugin: 'workbench', key: 'pane' } as const,
   { tab: 'tasks', open: '', focus: '', minimized: false } as WbPane, { shape: 'pane-1' })
+// Whether this session's first /workbench has come (#963): the opening animation plays at that
+// one alone. An atom, so a module reload (which runs session.start again with `mem` empty) can't
+// play it again; /workbench again and a bring-back from the strip find it set.
+const splashed = atom({ plugin: 'workbench', key: 'splash' } as const, false, { shape: 'splash-1' })
 const STRIP_HINT = 'minimized · restore: click, or Ctrl+X Tab then Enter'
 // Stats between them (#406): looked at more often than Settings
 const MODELINE = "Claude's Workbench" // the bar under the tabs
@@ -291,6 +297,95 @@ const frameOf = (pose: Pose, tick: number): Pose => {
   if (pose === 'work') return tick % STROKE_EVERY ? 'swing' : 'work'
   if (pose === 'sleep' || pose === 'slump') return pose
   return tick % BLINK_EVERY === 0 ? 'blink' : pose
+}
+
+// What the Tasks page is made of, apart from its drawing: the render draws it and pageShape
+// measures it, so the two can't disagree (#963).
+function pageParts(list: WbTask[], watched: WbLive, delegating: boolean, now: number, spin: string, cols: number,
+  pixels: boolean) {
+  const when = (t: WbTask) =>
+    ACTIVE.has(t.phase) || NEEDS.has(t.phase) ? `for ${ago(now - t.createdAt)}` : `${ago(now - t.updatedAt)} ago`
+  // The history is drawn, newest within HISTORY_CHARS: the engine scrolls the pane (arrows,
+  // while focused) and follows the end as lines arrive. What the agent is doing now is the
+  // apprentice's to say.
+  const all = watched.lines.filter(l => !['activity', 'clock', 'meta'].includes(l.s))
+  let from = all.length // (each line was cut to LINE_CHARS when read)
+  for (let used = 0; from > 0 && used + (all[from - 1].t?.length ?? 0) + 1 <= HISTORY_CHARS; from--)
+    used += (all[from - 1].t?.length ?? 0) + 1
+  const history = all.slice(from)
+  const doing = watched.lines.find(l => l.s === 'activity')
+  const clock = watched.lines.find(l => l.s === 'clock')
+  const meta = watched.lines.find(l => l.s === 'meta')
+  const focus = focusOf(list, watched.task)
+  const sp = speechOf(focus, doing?.t ?? '', list, delegating)
+  const busy = sp.pose === 'work' || sp.pose === 'think'
+  return {
+    when, from, history, meta, focus, sp, busy,
+    // The bubble's inner width beside the apprentice (its columns, the mouth's, the border and
+    // padding), or beside the face on one line; each line drawn whole, never squeezed.
+    room: Math.max(10, pixels ? cols - COLUMNS - 1 - 4 : cols - 4),
+    say: `${busy && doing ? `${spin} ` : ''}${sp.say}`,
+    more: sp.more,
+    clock: clock && focus?.name === watched.task ? clock.t : '',
+  }
+}
+
+// Text a terminal draws one column a character, for sure: ASCII, Latin, Greek and Cyrillic, and
+// the punctuation, arrows, shapes and dingbats the pane uses, less the emoji drawn two wide.
+// Anything else (wide East Asian, emoji, combining marks, controls, a newline) and a line's
+// height isn't known.
+const NARROW = /^[\x20-\x7e -¬®-˿Ͱ-ԯ‐-‧‰- ⁰-⌙⌜-⌨⌫-⏨⏭-⏯⏱⏲⏴-◼◿-☓☖-♇♔-♾⚀-⚒⚔-⚠⚢-⚩⚬-⚼⚿-⛃⛆-⛍⛏-⛓⛕-⛩⛫-⛱⛴⛶-⛹⛻⛼⛾-✄✆-✉✌-✧✩-❋❍❏-❒❖❘-➔➘-➯➱-➾⟀-⬚⬝-⭏⭑-⭔⭖-⯿]*$/
+
+/**
+ * The Tasks page's height in rows, as the render lays it out, for the opening animation, whose
+ * words fall into the modeline's row and whose apprentice walks to its spot (#963). `rows` is
+ * null where a line may wrap: a Text wider than the pane wraps at Ink's own word boundaries,
+ * which can't be known here exactly, and `atLeast` counts each such line as one row. `stage` is
+ * the row the apprentice's Raster starts on, `tail` the rows from there to the end.
+ */
+export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, saved: string, now: number,
+  cols: number): { rows: number | null; atLeast: number; stage: number; tail: number | null } {
+  const spin = SPIN[0] ?? '✻'
+  const page = pageParts(list, watched, delegating, now, spin, cols, true)
+  let exact = true
+  const line = (text: string) => { // a Text that wraps: one row when it fits
+    if (!NARROW.test(text) || text.length > cols) exact = false
+    return 1
+  }
+  let rows = 0
+  for (const t of list) {
+    rows += line(`${t.phase === 'running' ? spin : MARK[t.phase] ?? '•'} ${t.name} ${t.phase} · round ${t.round} · ` +
+      `${t.label || t.model}${t.tests ? ` · tests ${t.tests}` : ''} · ${page.when(t)}`)
+    for (const l of t.name === watched.task ? [] : t.recent) rows += line(`  ${clip(l, cols - 2)}`)
+    if (t.allowed) for (const l of wrapWords(t.allowed, cols - 2)) rows += line(`  ${l}`)
+    if (t.name !== watched.task && t.recent.length === 0) rows += line(`  ${clip(t.last, cols - 2)}`)
+    rows += 1 // its marginBottom
+  }
+  if (watched.task) {
+    rows += line(clip(`── ${watched.task} · ↑↓ scrolls ` + '─'.repeat(cols), cols))
+    if (page.meta) rows += line(page.meta.t)
+    if (page.from > 0) rows += line(`… ${page.from} earlier lines: \`wb watch ${watched.task}\` has them all`)
+    for (const l of page.history) rows += line(l.t || ' ')
+  }
+  const said = wrapWords(page.say, page.room).length + (page.more ? wrapWords(page.more, page.room).length : 0) +
+    (page.clock ? wrapWords(page.clock, page.room).length : 0)
+  const stage = rows + 1 // the stage's marginTop
+  // the stage's height (the apprentice, the mouth, the bubble below its marginTop), the saving's
+  // line, the tabs' marginTop, the tabs, the modeline
+  const savedFits = !saved || (NARROW.test(saved) && saved.length <= cols)
+  const tail = Math.max(ROWS, MOUTH + 1, MOUTH - 1 + 2 + said) + (saved ? 1 : 0) + 3
+  return { rows: exact && savedFits ? stage + tail : null, atLeast: stage + tail, stage, tail: savedFits ? tail : null }
+}
+
+// Where the splash's last frame puts the apprentice and the modeline's bar, in a pane body of
+// `body` rows: the page's own rows when it fits (a docked pane draws it from the top; an inline
+// one, sized to it, keeps its top where it was), else its end, which the pane follows. A page
+// that may wrap and doesn't surely overflow has no exact bar row: the words rise away instead.
+export function splashTarget(shape: ReturnType<typeof pageShape>, body: number): Target {
+  if (shape.rows !== null && shape.rows <= body) return { stage: shape.stage, bar: shape.rows - 1 }
+  // more than the pane surely: its end, the modeline the pane's last row (the stage as near as known)
+  if (shape.atLeast > body) return { stage: body - (shape.tail ?? shape.atLeast - shape.stage), bar: body - 1 }
+  return { stage: shape.stage, bar: null }
 }
 
 const parseLines = (text: string): Row[] =>
@@ -605,7 +700,7 @@ function progressStops(after: number): [string, string, string][] {
   return [PROGRESS_OFF, ['on', `On, after ${after} min`,
     `A task past ${after} min of active work gets a check and one recommendation, waking Claude.`]]
 }
-const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress):/ // the rows whose ring the pane follows
+const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress|splash):/ // the rows whose ring the pane follows
 
 // One settings row: a Button naming the choice, which opens its options under it, each a Button
 // (a click, or Enter on the ring), the chosen one marked. Under them the sentence of the option
@@ -1404,6 +1499,9 @@ const mem = {
   lastPoll: 0,
   listenerBody: '', // what this session last wrote to chat/listener.json
   tick: 0, // the apprentice's frame count
+  // the opening animation while it plays (#963): its plan once the pane drew it, the frame on
+  // screen, the ticks it waited for a first draw, its timer
+  splash: null as null | { plan: Plan | null; f: number; waited: number; timer: { cancel: () => void } | null },
   posed: '' as Pose | '', // its pose as last drawn in a Raster: the timer animates it while set
   shown: '' as Pose | '', // the frame on screen now
   skill: '', // the /workbench skill's SKILL.md, for the workbench-mode block
@@ -2561,6 +2659,60 @@ function startEars($: any) {
   })
 }
 
+// The opening animation (splash.ts; #963, 2026-11-21: the owner's "it needs to end by pulling
+// in the Tasks page like normal and have no penalty beyond initial startup"). The first
+// /workbench of a session starts it, unless the Settings row turned it off (`wb splash off`,
+// splash.json); a reload, /workbench again, a bring-back from the strip or a pane a task opened
+// never do (the `splashed` atom). While it plays the pane's Tasks tab is one Raster the size of
+// its body, repainted by its own timer through $.ui.blit; polling and loading carry on under it,
+// so the page it hands over to is current. It ends after its last frame, at any key (the
+// prompt's first, the pane's Tab, arrows and scroll), or when the pane is closed, resized or
+// can't take a blit, and the Tasks page draws as it always does. Its timer is cancelled then:
+// nothing of it runs after.
+const SPLASH = 'splash' // its Raster's key, for $.ui.blit
+const SPLASH_WAIT = 25 // ticks (2 s) it waits for the pane's first draw before giving up
+const SPLASH_STOPS: [string, string, string][] = [
+  ['on', 'Enabled (default)', 'The first /workbench of a session opens with a short animation; any key skips it.'],
+  ['off', 'Off', 'The Tasks page opens at once.'],
+]
+
+// splash.json as wb writes it (`wb splash on|off`): on unless it says off
+async function splashOn($: any): Promise<boolean> {
+  try {
+    return JSON.parse(await $.fs.read(`${mem.root}/splash.json`)).on !== false
+  } catch {
+    return true
+  }
+}
+
+function startSplash($: any) {
+  const s: NonNullable<typeof mem.splash> = { plan: null, f: 0, waited: 0, timer: null }
+  mem.splash = s
+  s.timer = $.clock.every(SPLASH_MS, () => { void splashTick($, s) })
+}
+
+async function splashTick($: any, s: NonNullable<typeof mem.splash>) {
+  if (mem.splash !== s) return
+  if (!s.plan) { // the pane hasn't drawn it yet
+    if (++s.waited > SPLASH_WAIT) endSplash($)
+    return
+  }
+  if (s.f + 1 >= frameCount(s.plan)) return endSplash($)
+  s.f += 1
+  const r = await $.ui.blit({ requestId: PANE, key: SPLASH, cells: packed(frameCells(s.plan, s.f)) })
+    .catch(() => ({ deny: 'gone' }))
+  if (r?.deny && mem.splash === s) endSplash($) // the pane is gone or drew something else: the page then
+}
+
+// Ends it: the timer cancelled, the page drawn (`redraw`: unless the render ending it draws it)
+function endSplash($: any, redraw = true) {
+  const s = mem.splash
+  if (!s) return
+  mem.splash = null
+  try { s.timer?.cancel() } catch { /* already stopped */ }
+  if (redraw) $.ui.invalidate('ui.render')
+}
+
 // Turning workbench mode on or off: the chat listens while it is on. The context block follows
 // at the next compaction or /clear, not at once: invalidating it would rewrite the first message
 // and cost the whole conversation's cache, and the skill or the quit note says it meanwhile.
@@ -2818,11 +2970,23 @@ export const register: Register = (on, options) => {
     if (extra.length) mem.skillTurn = true
     const add = (text: string) => extra.length ? `${text}\n\n${extra.join('\n\n')}` : text
     mem.paneOpened = true // before the poll workbenchMode starts, which would open it too
+    // the session's first /workbench opens with the animation, before the pane's first draw (#963)
+    if (!(await read($, splashed))) {
+      await update($, splashed, () => true)
+      if (await splashOn($)) startSplash($)
+    }
     await workbenchMode($, true)
     await showPane($)
     if (again && !firstTask(e.text)) return { text: add(AGAIN_NOTE(mem.skill)) }
     const r = await next(e)
     return { ...r, text: add(r.text) }
+  })
+
+  // The first key typed in the prompt skips the opening animation and is typed as usual (#963):
+  // the edit passes through untouched
+  on('prompt.edit', async ($, e, next) => {
+    if (mem.splash) endSplash($)
+    return next(e)
   })
 
   // Typed in the terminal: the user is back, so answers go here again
@@ -2948,6 +3112,7 @@ export const register: Register = (on, options) => {
   // The person's scrolling decides whether the pane follows: up to read stops it, back down to
   // the end starts it again.
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
+    if (e.origin.kind === 'person') endSplash($) // a key skips the opening animation, and still scrolls (#963)
     if (e.origin.kind === 'person') mem.follow = e.offset + e.bodyRows >= e.contentRows - 1
     return next(e)
   })
@@ -2955,6 +3120,7 @@ export const register: Register = (on, options) => {
   // The user's own close (its mark, Esc) puts the pane away: the strip above the prompt stands in
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin?.kind === 'person') {
+      endSplash($, false)
       await update($, pane, p => ({ ...p, minimized: true }))
       stopTop($) // put away: the live view ends with it
       $.ui.invalidate('ui.render')
@@ -2987,6 +3153,7 @@ export const register: Register = (on, options) => {
 
   // Where the ring is in the pane, so an open settings row shows that option's sentence; let through
   on('ui.focus', { requestId: PANE }, async ($, e, next) => {
+    if (e.origin.kind === 'person') endSplash($) // Tab or a click skips the opening animation, and still moves (#963)
     const focus = e.element && SETTING_ROWS.test(e.element) ? e.element : ''
     if (focus !== (await read($, pane)).focus) await update($, pane, p => ({ ...p, focus }))
     return next(e)
@@ -3000,6 +3167,22 @@ export const register: Register = (on, options) => {
     const { url, web, delegating } = await read($, chat)
     const saved = await read($, savings)
     const view = await read($, pane)
+    if (mem.splash) { // the opening animation, in place of the Tasks page while it plays (#963)
+      const props = (e.props ?? {}) as Row
+      const [cols, rows] = [Number(props.bodyColumns ?? 0), Number(props.scroll?.bodyRows ?? 0)]
+      const s = mem.splash
+      const fits = (e as Row).surface === 'terminal' && view.tab === 'tasks' && props.placement !== 'widget' &&
+        (!s.plan || (s.plan.cols === cols && s.plan.rows === rows)) // a resize is a redraw: the page then
+      // where the page will put the apprentice and the modeline, as it stands now: the walk and the
+      // bar go there (an exact row found once is kept should a line it can't measure come later)
+      const target = fits ? splashTarget(pageShape(list, watched, delegating, saved, await $.clock.now(), cols), rows) : null
+      if (target && !s.plan) s.plan = plan(cols, rows, target, `${FACE.rest} ${MODELINE}`)
+      else if (target && s.plan) s.plan.target = target.bar === null && s.plan.target.bar !== null ? { ...target, bar: s.plan.target.bar } : target
+      if (target && s.plan) {
+        return <Raster key={SPLASH} columns={cols} rows={rows} cells={packed(frameCells(s.plan, s.f))} />
+      }
+      endSplash($, false) // too small, or not the Tasks tab on a terminal: the page at once
+    }
     // the web chat's link while it is on, on the Settings tab only (the user, 2026-11-19: never under
     // the tasks), then the tabs: last, since the pane follows its end (a row at the top scrolled away
     // under a long transcript)
@@ -3049,6 +3232,8 @@ export const register: Register = (on, options) => {
               v => picked(['stats', 'set', 'every', v]))}
             {settingRow(kit, $, 'progress', 'Progress checks', progressStops(prog.after), prog.on ? 'on' : 'off', view,
               v => runWb($, ['progress', v]))}
+            {settingRow(kit, $, 'splash', 'Opening animation', SPLASH_STOPS, (await splashOn($)) ? 'on' : 'off', view,
+              v => runWb($, ['splash', v]).then(({ ok, out }) => { if (!ok) $.ui.toast(`workbench: ${brief(out)}`) }))}
             <kit.Input key="price" label="▸ Electricity price per kWh: " value={mem.price ? String(mem.price) : ''}
               placeholder="not set (energy shows in Wh)" submitLabel="set" onSubmit={(v: string) => { void setPrice($, v) }} />
           </Box>
@@ -3098,42 +3283,23 @@ export const register: Register = (on, options) => {
     const props = (e.props ?? {}) as Row
     const cols = Math.max(30, Number(props.bodyColumns ?? e.viewport?.columns ?? 60))
     const now = await $.clock.now()
-    const spin = SPIN[Math.floor(now / 500) % SPIN.length]
+    const spin = SPIN[Math.floor(now / 500) % SPIN.length] ?? '✻'
 
     // the followed task's own recent lines are in its transcript below, in full
     const recentOf = (t: WbTask) => (t.name === watched.task ? [] : t.recent)
-    const when = (t: WbTask) =>
-      ACTIVE.has(t.phase) || NEEDS.has(t.phase) ? `for ${ago(now - t.createdAt)}` : `${ago(now - t.updatedAt)} ago`
-    // The history is drawn, newest within HISTORY_CHARS: the engine scrolls the pane (arrows,
-    // while focused) and follows the end as lines arrive. What the agent is doing now is the
-    // apprentice's to say.
-    const all = watched.lines.filter(l => !['activity', 'clock', 'meta'].includes(l.s))
-    let from = all.length // (each line was cut to LINE_CHARS when read)
-    for (let used = 0; from > 0 && used + (all[from - 1].t?.length ?? 0) + 1 <= HISTORY_CHARS; from--)
-      used += (all[from - 1].t?.length ?? 0) + 1
-    const history = all.slice(from)
-    const doing = watched.lines.find(l => l.s === 'activity')
-    const clock = watched.lines.find(l => l.s === 'clock')
-    const meta = watched.lines.find(l => l.s === 'meta')
-
     // The apprentice, in pixels where the pane has the rows for it (it takes six), else its face
     // on the line. Drawing it in pixels arms the timer that animates it. The stage keeps its
     // height beside a long history, and the bubble wraps its words onto more rows rather than
     // cutting them off: the pane can't be made wider.
-    const focus = focusOf(list, watched.task)
-    const sp = speechOf(focus, doing?.t ?? '', list, delegating)
-    const busy = sp.pose === 'work' || sp.pose === 'think'
     const pixels = (e as Row).surface === 'terminal' && Number(props.scroll?.bodyRows ?? 24) >= 20 && cols >= 40
-    // The bubble's inner width beside the apprentice (its columns, the mouth's, the border and
-    // padding), or beside the face on one line; each line drawn whole, never squeezed.
-    const room = Math.max(10, pixels ? cols - COLUMNS - 1 - 4 : cols - 4)
+    const page = pageParts(list, watched, delegating, now, spin, cols, pixels)
+    const { when, from, history, meta, focus, sp, busy } = page
     const lines = (text: string, props: Record<string, unknown>) =>
-      wrapWords(text, room).map(l => <Text {...props} wrap="truncate-end">{l}</Text>)
+      wrapWords(text, page.room).map(l => <Text {...props} wrap="truncate-end">{l}</Text>)
     const said = [
-      ...lines(`${busy && doing ? `${spin} ` : ''}${sp.say}`,
-        busy ? LINE_STYLE.activity : { color: sp.color, bold: true }),
-      ...(sp.more ? lines(sp.more, { dimColor: true }) : []),
-      ...(clock && focus?.name === watched.task ? lines(clock.t, { dimColor: true }) : []),
+      ...lines(page.say, busy ? LINE_STYLE.activity : { color: sp.color, bold: true }),
+      ...(page.more ? lines(page.more, { dimColor: true }) : []),
+      ...(page.clock ? lines(page.clock, { dimColor: true }) : []),
     ]
     let stage
     if (pixels) {

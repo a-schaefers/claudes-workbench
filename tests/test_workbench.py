@@ -15710,6 +15710,23 @@ class LoneFlags(Base):
                          [{"backlog": "night-1", "tasks": 1, "open": 1}])
 
 
+class Splash(Base):
+    """The pane's opening animation (#963): on by default, `wb splash on|off` keeps the choice in
+    splash.json, which the mod's Settings row reads back."""
+    def test_on_by_default_and_wb_splash_keeps_the_choice_where_the_mod_reads_it(self):
+        self.assertIn("Enabled (default)", run_wb("splash"))
+        self.assertFalse((store.home() / "splash.json").exists())
+        self.assertIn("Off", run_wb("splash", "off"))
+        self.assertIs(json.loads((store.home() / "splash.json").read_text())["on"], False)
+        self.assertIn("Off", run_wb("splash"))
+        self.assertIn("Enabled (default)", run_wb("splash", "on"))
+        self.assertIs(json.loads((store.home() / "splash.json").read_text())["on"], True)
+
+    def test_a_splash_json_wb_cannot_read_leaves_it_on(self):
+        (store.home() / "splash.json").write_text("not json")
+        self.assertIn("Enabled (default)", run_wb("splash"))
+
+
 class Progress(Base):
     """Opt-in progress checks (#95): active work, evidence, a hint or a smaller step, and what
     helped, learned; the coding choice untouched."""
