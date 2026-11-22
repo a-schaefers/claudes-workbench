@@ -282,7 +282,7 @@ def write_config_layer(task: store.Task) -> Path:
         # queued ahead of the agent's next step on a one-slot server and evicting its cache,
         # then thrown away at the handover (#661)
         "compaction": {"background": False, **({"auto": True, "buffer": buffer} if buffer else {})},
-        # with probe on, at any level, one tool call's output sized to the window (output_cap)
+        # with probe on, one tool call's output sized to the window (output_cap)
         **({"tool_output": output_cap(cfg)} if context.experiment(task, "probe") else {}),
         "mcp": {"servers": {**users_servers_off(), "workbench": {  # 2.x shape: mcp.servers.<name>
             "type": "local",
@@ -802,7 +802,7 @@ def add_outline(task: store.Task) -> None:
     """Round 1's prompt, before its first OpenCode call, gains the outline of the long files its
     spec names (outline_section), once: a restarted runner doesn't add it again. Only with probe
     on; nothing it meets (no probe, a failure, a timeout) fails the round or adds anything."""
-    if context.probe_level(task) is None or "outline" in task.status or task.status.get("session"):
+    if not context.experiment(task, "probe") or "outline" in task.status or task.status.get("session"):
         return
     path = task.round_dir(1) / "prompt.md"
     try:
@@ -3160,12 +3160,8 @@ def drive(task: store.Task) -> None:
             window = (m.config.get("limit") or {}).get("context")
             task.set_status(window=window)
             own = task.spec.get("self_review")  # --self-review / --no-self-review, else learned
-            # probe's level was fixed at wb start, its prompt written then (context.probe_start)
-            level = context.probe_level(task)
             tuning.tune(task, task.spec["model"], window, {"fresh_at": fresh_ceiling(m.config)},
-                        {**({} if own is None else {"self_review": int(own)}),
-                         "probe_aggressive": None if level is None else int(level == "aggressive")},
-                        ("probe_aggressive",) if task.spec.get("probe_explored") else ())
+                        {} if own is None else {"self_review": int(own)})
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
         handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)

@@ -769,7 +769,9 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
                    # the arm it ran in and what its agent used of it (#857): an A/B reads both
                    experiments=sorted(k for k, v in (task.spec.get("experiments") or {}).items() if v),
                    experiment_use=st.get("experiment_use") or {}, long_reads=st.get("long_reads", 0),
-                   **({"probe_level": lvl} if (lvl := context.probe_level(task)) else {}))
+                   # "on" with probe on: once its level, moderate or aggressive (the owner,
+                   # 2026-11-22, #857: off and on, on is large files only)
+                   **({"probe_level": "on"} if context.experiment(task, "probe") else {}))
         if st.get("last") == PREEMPTED:
             return {**row, "outcome": "preempted"}
         if phase == "failed" and st.get("infra"):  # the setup, the server, the runner, the disk

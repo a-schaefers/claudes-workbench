@@ -599,21 +599,19 @@ const CHAT_STOPS: [string, string, string][] = [
 ]
 
 // The probe experiment's row (ARCHITECTURE.md, *Experiments*): wb's choice (`wb experiment probe
-// off|adaptable|moderate|aggressive`, experiments.json; `on`, the setting before the levels, reads
-// as adaptable), off by default. A task keeps what it started with. The levels in the owner's
-// order (2026-11-21, #857): off, adaptable, moderate, aggressive. Each sentence says "with probe",
-// where a working probe's version goes; adaptable's says it tries aggressive from the first task,
-// since "until the results show" read as moderate only (the review, 2026-11-21)
+// on|off`, experiments.json), off by default. A task keeps what it started with. Off and on, on
+// is large files only (the owner, 2026-11-22, #857: its levels adaptable, moderate and aggressive
+// went; on is what moderate did). On's sentence says "with probe", where a working probe's
+// version goes.
 const PROBE_STOPS: [string, string, string][] = [
   ['off', 'Off (default)', 'The agent reads whole files, as without the experiment.'],
-  ['adaptable', 'Adaptable', 'Moderate with probe, trying aggressive on some long-file tasks, until this machine\'s results pick the better one for the model.'],
-  ['moderate', 'Moderate', 'The agent may extract one function of a long file with probe (github.com/probelabs/probe).'],
-  ['aggressive', 'Aggressive', 'The agent is told never to read a long file whole, but to extract the function with probe.'],
+  ['on', 'On (large files only)', 'The agent may extract one function of a file over 1,500 lines with probe, instead of reading it whole (github.com/probelabs/probe).'],
 ]
-const PROBE_LEVELS = PROBE_STOPS.slice(1).map(s => s[0])
+// probe's levels from before it was off and on, each read as on (context.OLD_LEVELS)
+const PROBE_OLD_LEVELS = ['adaptable', 'moderate', 'aggressive']
 
-// What wb says of it: off, on at a level and working (with probe's version), or on but not set up
-// (no probe with `symbols` on PATH), and whether adaptable is recommended (context.PROBE_RECOMMENDED,
+// What wb says of it: off, on and working (with probe's version), or on but not set up
+// (no probe with `symbols` on PATH), and whether on is recommended (context.PROBE_RECOMMENDED,
 // set once a measurement says so). The row says which, since it read "On" whether or not anything
 // changed (the user, 2026-11-20). Asked of wb (`wb experiment probe`) only while the Settings tab
 // draws, at most every PROBE_RECHECK_MS, and again after each pick: a probe installed meanwhile
@@ -622,10 +620,10 @@ const PROBE_RECHECK_MS = 30_000
 type ProbeState = { state: 'off' | 'ready' | 'missing' | 'unknown'; version: string; recommended: boolean }
 function probeSaid(out: string): ProbeState {
   const line = out.split('\n').find(l => l.startsWith('probe:')) ?? ''
-  const recommended = line.includes('adaptable is recommended')
+  const recommended = line.includes('on is recommended')
   if (line.startsWith('probe: off')) return { state: 'off', version: '', recommended }
   if (line.includes('not set up')) return { state: 'missing', version: '', recommended }
-  if (PROBE_LEVELS.some(l => line.startsWith(`probe: ${l}`)))
+  if (line.startsWith('probe: on'))
     return { state: 'ready', version: /and working \(([^)]*)\)/.exec(line)?.[1] ?? '', recommended }
   return { state: 'unknown', version: '', recommended }
 }
@@ -639,11 +637,10 @@ async function probeStatus($: any): Promise<ProbeState> {
   return said
 }
 
-// The row's options: adaptable marked recommended when wb says so, and the level chosen says
-// whether it works
+// The row's options: on marked recommended when wb says so, and, chosen, whether it works
 function probeStops(s: ProbeState, mode: string): [string, string, string][] {
   return PROBE_STOPS.map(([v, label, said]): [string, string, string] => {
-    const named = v === 'adaptable' && s.recommended ? `${label} (recommended)` : label
+    const named = v === 'on' && s.recommended ? `${label} (recommended)` : label
     if (v !== mode || v === 'off') return [v, named, said]
     if (s.state === 'ready') return [v, `${named}, working`, said.replace('with probe', `with probe${s.version ? ` (${s.version})` : ''}`)]
     if (s.state === 'missing') return [v, `${named}, not set up`, "probe isn't installed, so nothing changes yet: Claude can set it up."]
@@ -681,12 +678,12 @@ async function setProbe($: any, value: string) {
   }
 }
 
-// experiments.json's probe setting as wb reads it (context.setting): "on" is adaptable, anything
-// but a level is off
+// experiments.json's probe setting as wb reads it (context.setting): "on", true or an old level
+// is on, anything else off
 async function probeMode($: any): Promise<string> {
   try {
     const v = JSON.parse(await $.fs.read(`${mem.root}/experiments.json`)).probe
-    return v === 'on' ? 'adaptable' : PROBE_LEVELS.includes(v) ? v : 'off'
+    return v === 'on' || v === true || PROBE_OLD_LEVELS.includes(v) ? 'on' : 'off'
   } catch {
     return 'off'
   }

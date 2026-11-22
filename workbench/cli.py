@@ -1100,16 +1100,12 @@ def cmd_start(a):
     exps = context.task_experiments()  # what this task's agent has: the prompt says it too
     probe, off = {}, {}
     # off where it can't help: no file in a language probe reads over PROBE_FILE_LINES in the
-    # repo, so the task runs as with probe off, and is no level's evidence (the owner, #857)
+    # repo, so the task runs as with probe off (the owner, #857). On is large files only, one
+    # setting: its levels went (the owner, 2026-11-22, #857: off and on, on is large files only)
     if exps.get("probe") and (no_probe := context.probe_off(spec_text, repo, sub, base))[0]:
         exps, off = {**exps, "probe": False}, {"probe": no_probe[0]}
-    elif exps.get("probe"):  # its level, adaptable's through the knob, and whether it is evidence
-        files = no_probe[1]  # the long files the spec names, in probe's languages
-        level, explored = context.probe_start(exps["probe"], m.id, (m.config.get("limit") or {})
-                                              .get("context"), a.name, bool(files))
-        probe = {"probe_setting": exps["probe"], "probe_files": files,
-                 **({"probe_explored": True} if explored else {})}
-        exps = {**exps, "probe": level}
+    elif exps.get("probe"):
+        probe = {"probe_files": no_probe[1]}  # the long files the spec names, in probe's languages
     prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
                                                   test_line=test_line(a.test), budget=budget,
                                                   experiment_protocol=context.experiment_protocol(
@@ -1155,7 +1151,7 @@ def cmd_start(a):
         # (a nudge, a full window, handovers, a cut base check) still wake
         "checkin": a.checkin or 0, "self_review": a.self_review,
         "experiments": exps,  # what this task's agent has: wb experiment
-        **probe,  # probe's setting, the long files its spec names, the knob's exploration
+        **probe,  # the long files its spec names, with probe on
         **({"experiments_off": off} if off else {}),  # set, but off for this task, and why
         "round_timeout": a.round_timeout or limits["round"],
         "silence_timeout": a.silence_timeout or limits["silence"],
@@ -2379,22 +2375,9 @@ def use_line(task: store.Task) -> str | None:
     if on:
         st = task.status
         used = st.get("experiment_use") or {}
-        out.append("; ".join(f"{_level_said(task, k)}: {used.get(k, 0)} call(s)" for k in on)
+        out.append("; ".join(f"{k}: {used.get(k, 0)} call(s)" for k in on)
                    + f"; whole reads of files over {context.LONG_FILE_LINES} lines: {st.get('long_reads', 0)}")
     return "\n".join(out) or None
-
-
-def _level_said(task: store.Task, name: str) -> str:
-    """An experiment as `wb status` names it: probe with its level, and adaptable's resolution
-    and why ("probe (adaptable → moderate)", "… → aggressive, a try")."""
-    if name != "probe" or not (level := context.probe_level(task)):
-        return name
-    setting = task.spec.get("probe_setting") or level
-    if setting != "adaptable":
-        return f"probe ({level})"
-    why = ", a try" if task.spec.get("probe_explored") else \
-        "" if task.spec.get("probe_files") else ", no long file named"
-    return f"probe (adaptable → {level}{why})"
 
 
 USE_RECENT = 5  # the tasks with an experiment on that wb experiment reports its use over
@@ -2418,10 +2401,9 @@ def experiment_lines() -> list[str]:
     on = context.experiments()
     out = []
     for name in context.EXPERIMENTS:
-        levels = context.EXPERIMENT_LEVELS.get(name, ("on",))
-        best = "; adaptable is recommended" if name == "probe" and context.PROBE_RECOMMENDED else ""
+        best = "; on is recommended" if name == "probe" and context.PROBE_RECOMMENDED else ""
         if on[name] == "off":
-            out.append(f"{name}: off (wb experiment {name} {'|'.join(levels)})" + best)
+            out.append(f"{name}: off (wb experiment {name} on)" + best)
         elif name == "probe" and not (path := context.probe_bin()):
             out.append(f"{name}: {on[name]}, but not set up: no probe with `symbols` is on PATH, so it "
                        f"changes nothing yet (probe, a code-search tool: {context.PROBE_HOME}; "
@@ -2443,9 +2425,10 @@ def cmd_experiment(a):
         return
     if a.name not in context.EXPERIMENTS:
         die(f"no experiment {a.name} (wb experiment lists them)")
-    levels = context.EXPERIMENT_LEVELS.get(a.name, ())
-    if a.state not in (None, "on", "off", *levels):
-        die(f"{a.name} is on|off" + (f" or {'|'.join(levels)}" if levels else ""))
+    # an old level of probe's still sets on, unshown (the owner, 2026-11-22, #857: off and on, on
+    # is large files only): a running A/B calls `wb experiment probe adaptable`
+    if a.state not in (None, "on", "off", *context.OLD_LEVELS.get(a.name, ())):
+        die(f"{a.name} is on|off")
     if a.state is not None:
         context.set_experiment(a.name, a.state)
     print(next(r for r in experiment_lines() if r.startswith(f"{a.name}:"))
@@ -5768,11 +5751,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("experiment", help="the experiments (changes measured before they are "
                        "supported): list them, or turn one on or off for the tasks started from now")
     s.add_argument("name", nargs="?")
-    s.add_argument("state", nargs="?", choices=["on", "off", *sorted({
-        v for levels in context.EXPERIMENT_LEVELS.values() for v in levels})],
-        help="off, on, or a level of probe's: moderate (extract the one function needed from a long "
-             "file), aggressive (never read a long file whole), adaptable (moderate or aggressive, "
-             "learned per model; what on means)")
+    # no choices: an old level of probe's is accepted (cmd_experiment) but never shown
+    s.add_argument("state", nargs="?", metavar="on|off",
+                   help="on or off; probe's on means large files only (wb experiment says what it does)")
     s.set_defaults(f=cmd_experiment)
     s = sub.add_parser("stop", help="stop a running task (wb resume or wb feedback continues it)")
     s.add_argument("name", nargs="?")
