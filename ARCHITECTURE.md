@@ -3705,7 +3705,7 @@ scales with the window (`limit.context`; unknown → 32K): files = max(1, round(
 max(50, round(15s)·10), s = min(window/32768, `GUESS_MAX` 4): 3 files/150 lines on 32K (measured
 2026-11-16), 12/600 from 128K. Correction from the last `SLICE_RECENT` (20) closed steps on that model and window
 (results rows' `steps`, with files ≥ 1, from rows `tuning.judged` keeps; files and lines without
-the generated ones, `gitops.footprint`): `_went` is badly when the step compacted (in its last session, or in one a handover replaced: the `fresh` event's `compacted`), filled up
+the generated ones, `gitops.footprint`): `_went` is badly when the step compacted (in its last session, or in one a handover replaced: the `fresh` event's `compacted`; not the one a later step's first round replaced, which was the step before's and counted there: a clean step 2 after a compacted step 1 went badly for it, 2026-11-21, #958), filled up
 reading (`read_full`), got stuck (a `stuck` or `failed` notice of its rounds, but not one whose
 `cause` is anything but `guard` or `agent` (`results.THE_STEP`, an allowlist: `signal`, `died`,
 `server`, `updated`, `opencode`, `update` are outside the step), nor one from before `cause` with
@@ -7220,7 +7220,8 @@ medians of status `speeds`) and `gpu_w` (`{mean, peak}`); `commit` and `merged` 
 discard. A step (`results.step`): `files`,
 `lines` (added, against HEAD, new files included), `removed`, `window`, `landed`, `compacted` (its last
 session, or one a handover replaced: a `fresh` event's `compacted`), `handovers` (fresh sessions
-with overflow), `read_full`, `reviews`, `spec_rounds` (the step's rounds with a `--spec-gap`, a
+with overflow; both leave out the `fresh` event a later step's first round began with, which
+replaced the session the step before left and judges that step, #958), `read_full`, `reviews`, `spec_rounds` (the step's rounds with a `--spec-gap`, a
 gap given on the `wb next` or `wb accept` closing it included: measured before it was recorded,
 it counted as the agent's review round in the slice, #904), `stuck`, `took_over`, and `claude` (that
 step's share of the row's `claude`, `spend.usage_by_step`, same shape: only in a row of several
