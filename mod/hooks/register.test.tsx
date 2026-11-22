@@ -2874,10 +2874,10 @@ test('the Tasks tab ends with the week\'s saving, read from wb savings; the web 
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   const at = texts.indexOf('this week: saved ~1.2M Claude tokens (88%, estimate) · 900 Wh')
   expect(at).toBeGreaterThan(-1)
-  expect(texts.slice(at + 1)).toEqual([])                                     // never under the tasks (the user, 2026-11-19)
+  expect(texts.slice(at + 1)).toEqual(["[•_•] Claude's Workbench"])          // never under the tasks (the user, 2026-11-19): only the modeline
   await ui.press({ key: 'tab-settings' })
-  expect((await ui.findAll({ type: 'Text' })).map(t => t.text).slice(-3)).toEqual(['web chat https://box.tail.ts.net/#token=abc',
-    'web chat ', 'https://box.tail.ts.net/#token=abc'])
+  expect((await ui.findAll({ type: 'Text' })).map(t => t.text).slice(-4, -1)).toEqual(['web chat https://box.tail.ts.net/#token=abc',
+    'web chat ', 'https://box.tail.ts.net/#token=abc'])                      // then the tabs and the modeline
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })
@@ -3092,6 +3092,11 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, scroll: { offset: 0, bodyRows: rows } } })
     expect(await ui.find({ key: 'coding' })).toBeUndefined()                                           // a tab of their own
     expect((await ui.findAll({ type: 'Button' })).slice(-3).map(b => b.props.label)).toEqual(['Tasks', 'Stats', 'Settings'])  // last
+    expect(JSON.stringify(await ui.find({ key: 'modeline' }))).toContain("[•_•] Claude's Workbench")  // the modeline under them
+    await ui.press({ key: 'tab-settings' })
+    expect(JSON.stringify(await ui.find({ key: 'modeline' }))).toContain("Claude's Workbench")         // on every tab
+    await ui.press({ key: 'tab-stats' })
+    expect(JSON.stringify(await ui.find({ key: 'modeline' }))).toContain("Claude's Workbench")
     await ui.press({ key: 'tab-settings' })
     expect((await ui.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Let Claude decide (default)')  // no saved choice
     expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: Off (default)')                      // off by default
@@ -3126,7 +3131,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   expect(runs.some(r => r.join(' ') === 'wb experiment probe on')).toBe(true)   // then the row asks how it came out
   expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On')
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  expect(texts.at(-1)).toBe('http://localhost:1337/#token=abc')                                   // the link, at once
+  expect(texts.at(-2)).toBe('http://localhost:1337/#token=abc')                                   // the link, at once (the modeline last)
   await ui.press({ key: 'tab-tasks' })
   expect(await ui.find({ type: 'Text', text: /token=abc/ })).toBeUndefined()                    // not under the tasks
   await ui.press({ key: 'tab-settings' })

@@ -134,6 +134,7 @@ const pane = atom({ plugin: 'workbench', key: 'pane' } as const,
   { tab: 'tasks', open: '', focus: '', minimized: false } as WbPane, { shape: 'pane-1' })
 const STRIP_HINT = 'minimized · restore: click, or Ctrl+X Tab then Enter'
 // Stats between them (#406): looked at more often than Settings
+const MODELINE = "Claude's Workbench" // the bar under the tabs
 const TABS: [string, string, string][] = [['tasks', 'Tasks', '1'], ['stats', 'Stats', '2'], ['settings', 'Settings', '3']]
 // The Stats tab's history (`wb stats --json`), read while the tab is shown: when it is first
 // shown in a load (`mem.statsLoaded`: the atom outlives a reload), on each press of the tab, again
@@ -3010,12 +3011,20 @@ export const register: Register = (on, options) => {
         </Text>
       </Box>
     ) : null
+    // under the tabs, on every tab, a modeline as in Emacs or Vim: the pane's name and the
+    // apprentice's face, in the theme's own colors so it reads on a dark or a light terminal (the
+    // user, 2026-11-21)
     const tabs = (
-      <Box flexDirection="row" columnGap={2} marginTop={1}>
-        {TABS.map(([tab, label, hotkey]) => (
-          <Button key={`tab-${tab}`} label={label} hotkey={hotkey} plain dimColor={view.tab !== tab}
-            onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => { void refreshStats($, true); void syncTop($) }) }} />
-        ))}
+      <Box flexDirection="column" marginTop={1}>
+        <Box flexDirection="row" columnGap={2}>
+          {TABS.map(([tab, label, hotkey]) => (
+            <Button key={`tab-${tab}`} label={label} hotkey={hotkey} plain dimColor={view.tab !== tab}
+              onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => { void refreshStats($, true); void syncTop($) }) }} />
+          ))}
+        </Box>
+        <Box key="modeline" backgroundColor="claude" paddingX={1}>
+          <Text color="inverseText" bold>{`${FACE.rest} ${MODELINE}`}</Text>
+        </Box>
       </Box>
     )
     // the Settings tab: Claude coding (#93), then the Stats tab's (#406), one row each at rest; the

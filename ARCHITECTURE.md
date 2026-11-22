@@ -719,8 +719,9 @@ of its own that ends when the run does:
 
 - **macOS**: `caffeinate -i -w <pid>` (idle sleep; a closed lid on battery still sleeps).
 - **Linux booted with systemd**: `systemd-inhibit --what=idle:sleep --who=workbench --why='task
-  <name>' --mode=block` around a wait for the pid (`AWAIT_PID`: a pidfd, else `kill -0` every
-  15 s); `systemd-inhibit --list` shows it. logind's polkit grants a sleep lock to a local active
+  <name>' --mode=block` around a wait for the pid (`AWAIT_PID`: a pidfd, else a kqueue's
+  `NOTE_EXIT`, both at the exit itself, else `kill -0` every 15 s, which a pid not yet reaped still
+  answers); `systemd-inhibit --list` shows it. logind's polkit grants a sleep lock to a local active
   session only, so where it refuses (SSH, a scope outside any session) an idle lock is held
   instead (`--what=idle`: it holds logind's `IdleAction`, not a desktop's suspend). It starts in
   the caller's session, not `runner_scope`'s scope, for that grant: under
@@ -1552,7 +1553,10 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    forms only where pip installs into the worktree's own venv, or with no Python environment
    active (the user's checkout's are left out: *Its environment*, below) while Landlock bounds
    what pip writes (`context.python_installs`); otherwise they ask first, since pip would write
-   the user's own conda env or tools venv, or their Python with no lane. While a venv of the
+   the user's own conda env or tools venv, or their Python with no lane. The pipenv ones wherever
+   no venv of the user's is active (the worktree's own may be), lane or none: pipenv installs into the active venv, else
+   makes its own in the worktree (`PIPENV_VENV_IN_PROJECT`), never the user's Python (#950: taken
+   for a pip form, `pipenv install` asked first on every Mac). While a venv of the
    user's stays active in the agent's shell (one that isn't the checkout's), `ENV_INSTALLS`
    (`poetry install *`, `poetry sync *`, `poetry remove *`, `uv sync --active *`, `uv pip sync
    *`, the `pip uninstall` forms), which change the active venv, ask first too (#490, the audit
@@ -2637,8 +2641,10 @@ nothing until a surface attaches.
 
 - **The pane** (opened by `/workbench`, or once per load when a task runs, and closed by a quit command;
   `/workbench` run again brings it back) has three tabs, **Tasks**, **Stats** and **Settings** (Buttons on its
-  last line, keys `1`, `2` and `3`: Stats in the middle, looked at more often than Settings; last, since the pane follows its end and a row at the top scrolled
-  away under a long transcript). Closed by the user (its mark, Esc), it is minimized, as
+  second-to-last line, keys `1`, `2` and `3`: Stats in the middle, looked at more often than Settings; at the foot, since the pane follows its end and a row at the top scrolled
+  away under a long transcript). Under them on every tab, always, is a modeline as in Emacs or Vim:
+  `[•_•] Claude's Workbench` (the apprentice's `FACE.rest`, `MODELINE`) on a bar in the theme's
+  `claude` color with `inverseText`, so it reads on a dark or a light terminal (the user, 2026-11-21). Closed by the user (its mark, Esc), it is minimized, as
   backseat-driver's is (2026-11-19): a strip above the prompt stands in for it while workbench mode
   is on or the session has tasks, `▸ Workbench`, `Tasks`, `Stats`, `Settings` (each a way back, to that tab)
   and the status line's summary; a press there or `/workbench` brings it back; a quit command
@@ -3699,7 +3705,7 @@ scales with the window (`limit.context`; unknown → 32K): files = max(1, round(
 max(50, round(15s)·10), s = min(window/32768, `GUESS_MAX` 4): 3 files/150 lines on 32K (measured
 2026-11-16), 12/600 from 128K. Correction from the last `SLICE_RECENT` (20) closed steps on that model and window
 (results rows' `steps`, with files ≥ 1, from rows `tuning.judged` keeps; files and lines without
-the generated ones, `gitops.footprint`): `_went` is badly when the step compacted (in its last session, or in one a handover replaced: the `fresh` event's `compacted`), filled up
+the generated ones, `gitops.footprint`): `_went` is badly when the step compacted (in its last session, or in one a handover replaced: the `fresh` event's `compacted`; not the one a later step's first round replaced, which was the step before's and counted there: a clean step 2 after a compacted step 1 went badly for it, 2026-11-21, #958), filled up
 reading (`read_full`), got stuck (a `stuck` or `failed` notice of its rounds, but not one whose
 `cause` is anything but `guard` or `agent` (`results.THE_STEP`, an allowlist: `signal`, `died`,
 `server`, `updated`, `opencode`, `update` are outside the step), nor one from before `cause` with
@@ -7216,7 +7222,8 @@ medians of status `speeds`) and `gpu_w` (`{mean, peak}`); `commit` and `merged` 
 discard. A step (`results.step`): `files`,
 `lines` (added, against HEAD, new files included), `removed`, `window`, `landed`, `compacted` (its last
 session, or one a handover replaced: a `fresh` event's `compacted`), `handovers` (fresh sessions
-with overflow), `read_full`, `reviews`, `spec_rounds` (the step's rounds with a `--spec-gap`, a
+with overflow; both leave out the `fresh` event a later step's first round began with, which
+replaced the session the step before left and judges that step, #958), `read_full`, `reviews`, `spec_rounds` (the step's rounds with a `--spec-gap`, a
 gap given on the `wb next` or `wb accept` closing it included: measured before it was recorded,
 it counted as the agent's review round in the slice, #904), `stuck`, `took_over`, and `claude` (that
 step's share of the row's `claude`, `spend.usage_by_step`, same shape: only in a row of several
