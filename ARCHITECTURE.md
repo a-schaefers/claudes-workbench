@@ -867,7 +867,9 @@ outside `OPENCODE_TESTED`.
 4. After the round, in this order: full → `_full_round` (a handover; the successor's prompt
    carries any pending notes), unless this runner has already handed over `HANDOVER_MAX` (5)
    times: then the round is stuck ("handed over to a fresh session 5 times in this round without
-   finishing: the step is too big for this model's window…"). Interrupted, or a note pending and the round not stuck →
+   finishing: the step is too big for this model's window…"; when the last was a failed
+   compaction, "without finishing (the last when OpenCode's compaction failed: <its message>): …",
+   #969). Interrupted, or a note pending and the round not stuck →
    `_steer_round` (the next round carries the notes). Opencode exited non-zero, or the silence
    guard stopped the round (OpenCode retrying), while the model's server is down (it went away
    under the round), whatever the model had said first (an out-of-memory kill comes late in a
@@ -1043,11 +1045,33 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
   for a successor (the floor as above; the last step's context when nothing had changed before
   it) a fresh session takes over (status `full_compacted`, so the next round's reason is
   `COMPACTED` and the tuning sees it); otherwise it carries on and a `compacted` event says so.
+  OpenCode's compaction *failing* (an `error` event of type `compaction.failed`: "Compaction
+  produced no summary", "… did not match the required template", "… reached the output token
+  limit"; or any error whose message opens "Compaction ", `events.compaction_failed`) leaves a
+  session over its window that can't go on, so a fresh session takes over at once, whatever the
+  exit and with or without a change made, `keep` (`--keep-context`) and `HANDOVER_ROOM` aside:
+  the round's `full` is the last step's context (else the window), `compacted` and
+  `compact_failed` (the message) are set, and `_full_round` writes the `full` event "OpenCode's
+  compaction of the agent's session failed (<message>): a fresh one takes over" and status
+  `full_compact_failed`, so the next round's reason is `COMPACTION_FAILED` ("OpenCode failed to
+  compact the last session"). The handover branch comes before the exit is judged, so the round
+  is never failed and the tests never run on the dead session; `HANDOVER_MAX` still holds (past
+  it the round is stuck, the reason naming the failed compaction, and status
+  `compact_failed_session` keeps the next `wb feedback` or `wb next` off that session). Seen
+  2026-11-21 (#969): OpenCode exited 1 on it before any change (a bench replay whose agent read a
+  long test file whole) and the task failed; or exited 0 after one, the tests failed on half-done
+  work and auto-fix sent them back to it. It counts as a compaction: the `fresh` event's
+  `compacted`, so `results.step`'s `compacted` and the tuning's `COMPACT_PENALTY` see it.
 - *Between rounds* (`fresh_reason`, for n > 1, also used by `wb next` to say what will happen):
   Claude asked (`--fresh`, `wb resume`) → fresh, even with no session yet; no session → continue
   on the step's first round, else fresh ("the last session ended before it began", so a session
-  that never started still hands the next round the task); `keep` → continue; the last round handed over (`context: full`) → fresh
-  (`COMPACTED` when OpenCode had compacted it first, `full_compacted`); OpenCode compacted the
+  that never started still hands the next round the task); the session is the one whose compaction
+  failed (status `compact_failed_session`: stuck past `HANDOVER_MAX`, it stays the task's session,
+  and `wb feedback` and `wb next` clear `context`, while the export counts only completed
+  compactions; it went back to the dead session, #969 review) → fresh, `COMPACTION_FAILED`, even
+  under `keep`; `keep` → continue; the last round handed over (`context: full`) → fresh
+  (`COMPACTED` when OpenCode had compacted it first, `full_compacted`; `COMPACTION_FAILED` when its
+  compaction failed, `full_compact_failed`, #969); OpenCode compacted the
   session (`session export` lists a completed compaction) → fresh; the session's last assistant
   message that counted any tokens (`context_state`: one whose counts are all 0, an aborted step,
   is passed over, #481) carried `fresh_at` or more of the window (input + cache read + cache write + output + reasoning) →
@@ -1363,7 +1387,7 @@ by prefix; rewording one silently changes those:
 | `Review feedback from the senior reviewer` (`lessons.FEEDBACK_HEAD`) | `wb feedback` | `lessons` (feedback items), `round_asks` (stops there), `transcript` (label) |
 | `The acceptance tests fail` | the auto-fix round | `transcript` |
 | `Before Claude reviews this` (`SELF_REVIEW`) | the self-review round | `transcript` |
-| `You are picking this task up in a fresh session` | `handoff_prompt` | `transcript`, the fake OpenCode (`fill`) |
+| `You are picking this task up in a fresh session` | `handoff_prompt` | `transcript`, the fake OpenCode (`fill`, `compact`, `compactfail`) |
 | `Step N of this task is done and committed` | `wb next` | `transcript` |
 | `INTERRUPT_HEAD`, `NOTE_HEAD` | `_steer_round` | `transcript` |
 | `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's) |
@@ -7458,7 +7482,8 @@ check-ins off), not `wb start`'s.
 | `grants_kept` | the task's grants (`{allow, paths}`), set when it closes, before its rules directory goes: what `context.grants` reads afterwards, for `wb bench add` (#250) |
 | `session`, `sessions`, `session_mark`, `session_floor` | the OpenCode session; earlier ones; `gitops.mark` when it began; the context it had read at its first change |
 | `context` | a one-round instruction: `fresh`, `keep`, `full` (a handover happened) |
-| `full_pct`, `handovers`, `full_compacted` | the fill at the last mid-round handover; how many; whether OpenCode had compacted the session first (#774) |
+| `full_pct`, `handovers`, `full_compacted`, `full_compact_failed` | the fill at the last mid-round handover; how many; whether OpenCode had compacted the session first (#774), or failed to (#969) |
+| `compact_failed_session` | the last session whose compaction failed (`run_round`, #969): while it is still `session` (stuck past `HANDOVER_MAX`), `fresh_reason` hands the next round to a fresh one, whatever `wb feedback`, `wb next` or `--keep-context` leave in `context` |
 | `window`, `load_secs`, `loads` | the model's context window; the load time, summed over every runner of the task (`wb feedback`, `next`, `resume`) and the reloads before later rounds (`runner._loaded`); each load that happened, alone (`[secs…]`: the typical load's samples, #577) |
 | `tuned`, `explored`, `tuned_max` | the knob values this task runs at (`tuning.tune`) |
 | `self_review_due` | true once a round's tests passed, so self-review could run, whether or not it did: the row says whether `self_review` could act (`tuning.acted`, #816) |
@@ -7482,7 +7507,7 @@ check-ins off), not `wb start`'s.
 description, 90 characters; a skill's id), `text {text}` (2000 characters), `step {in, out,
 cache, reasoning?}` (reasoning tokens apart from `out`, when any, #644), `error {text}`, `retry {text, attempt}` (OpenCode resending a request, #491). From the runner: `round`, `stopped {text}`, `steer {now, by:
 "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow,
-compacted}`,
+compacted}` (`compacted` after a failed compaction too, #969),
 `autofix`, `self_review`, `reading_full`, `full`, `compacted {text}` (OpenCode compacted the session mid-round and it carried on, #774), `load` (the model reloaded before a round), `limits {text}` (the limits stretched for a model measured slow, #814), `left_bg {text}` (the round ended with a job still in the background, #658),
 `round_end {secs, how, guard?}` (with stats recording on: *Stats recording*), `export` (the session export failed: judged by `live_used`), `stopped {by:
 "signal"}` (a SIGTERM not from wb), `gpu {text}` (a warning from loading the model: a server wb
@@ -7516,7 +7541,7 @@ with stats recording on (`results.for_stats`, each only when measured), `started
 medians of status `speeds`) and `gpu_w` (`{mean, peak}`); `commit` and `merged` on accept (and `merge_refused`, git's reason, when `--merge` was refused), `reason` on
 discard. A step (`results.step`): `files`,
 `lines` (added, against HEAD, new files included), `removed`, `window`, `landed`, `compacted` (its last
-session, or one a handover replaced: a `fresh` event's `compacted`), `handovers` (fresh sessions
+session, or one a handover replaced: a `fresh` event's `compacted`, a failed compaction's too, #969), `handovers` (fresh sessions
 with overflow; both leave out the `fresh` event a later step's first round began with, which
 replaced the session the step before left and judges that step, #958), `read_full`, `reviews`, `spec_rounds` (the step's rounds with a `--spec-gap`, a
 gap given on the `wb next` or `wb accept` closing it included: measured before it was recorded,
@@ -7778,6 +7803,11 @@ of 32K, then sleeps: the runner hands over mid-round; the handover prompt turns 
 over: `HANDOVER_ROOM`), `refill` (every session changes a file, then fills: `HANDOVER_MAX`),
 `compact` (writes 41, a step at 52%, then one at 15%: compacted between them, #774; it hands
 over, or with `FAKE_COMPACT_READ`, a 50% reading floor, carries on and writes 42),
+`compactfail` (a read, a step at 52%, the text "Reading the whole test file next.", then OpenCode
+2.3's `error` line `{"type": "error", "timestamp", "sessionID", "error": {"type":
+"compaction.failed", "message": "Compaction produced no summary"}}`, `FAKE_COMPACT_MSG` another
+message, and it exits 0 or `FAKE_COMPACT_EXIT`, that run alone; `FAKE_COMPACT_EDIT` writes 41
+first; a fresh session handed the task runs like `ok`, unless `FAKE_REFAIL`: #969),
 `bgwait` (a `background_wait` line, then `FAKE_BGWAIT` seconds, 6, of quiet, then `ok`),
 `toolhang` (one tool call, then silent), `retry` (a `retry` line every `FAKE_RETRY_EVERY`
 seconds, 1, as OpenCode prints it cutting each request at the provider timeout). 
