@@ -2672,8 +2672,11 @@ nothing until a surface attaches.
   measurable meanwhile makes the words rise away if they haven't left yet, else puts the bar on the
   row the page reaches at least, never an earlier exact row the page has since outgrown. The Tasks page then draws as it
   always does. A key in the pane skips it, and the key still does its work: Tab or a click
-  (`ui.focus`) and the scroll keys (`ui.scroll`); a close by the user, a resize, another tab, a
-  surface without Raster or a refused blit end it too. Typing in the prompt doesn't: that needs a
+  (`ui.focus`) and the scroll keys (`ui.scroll`); a close by the user, another tab, a pane
+  grown too small, a surface without Raster or a refused blit end it too. A resize plans it again at
+  the new size, from the same frame and with the ending already chosen: a dock's second draw is a
+  row shorter than its first (its close mark's row), and ending at a resize ended it after one
+  frame in every real session (seen at 64x44, then 64x43; 2026-11-21). Typing in the prompt doesn't: that needs a
   `prompt.edit` hook, which can't be taken off again, so every keystroke of the session would wait
   on the mod for an animation long over; the typing goes on beside it. Its
   timer is cancelled when it ends; the apprentice's own `FRAME_MS` timer is untouched. It plays at the

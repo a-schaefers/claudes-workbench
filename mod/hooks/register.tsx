@@ -2724,7 +2724,8 @@ function startEars($: any) {
 // `splashed` atom, which workbenchMode clears when the mode goes off). While it plays the pane's Tasks tab is one Raster the size of
 // its body, repainted by its own timer through $.ui.blit; polling and loading carry on under it,
 // so the page it hands over to is current. It ends after its last frame, at a key in the pane
-// (Tab, a click, arrows and scroll), or when the pane is closed, resized or can't take a blit,
+// (Tab, a click, arrows and scroll), or when the pane is closed, too small or can't take a blit
+// (a resize plans it again at the new size),
 // and the Tasks page draws as it always does. Its timer is cancelled then: nothing of it runs
 // after. Not at a key typed in the prompt: that needs a prompt.edit hook, which can't be taken
 // off again, so every keystroke of the session would wait on the mod for an animation long over
@@ -3246,8 +3247,7 @@ export const register: Register = (on, options) => {
       const props = (e.props ?? {}) as Row
       const [cols, rows] = [Number(props.bodyColumns ?? 0), Number(props.scroll?.bodyRows ?? 0)]
       const s = mem.splash
-      const fits = (e as Row).surface === 'terminal' && view.tab === 'tasks' && props.placement !== 'widget' &&
-        (!s.plan || (s.plan.cols === cols && s.plan.rows === rows)) // a resize is a redraw: the page then
+      const fits = (e as Row).surface === 'terminal' && view.tab === 'tasks' && props.placement !== 'widget'
       // where the page will put the apprentice and the modeline, as it stands now: the walk and the
       // bar go there. A row the page can't measure any more (a line that may wrap came) is no
       // row: an earlier exact one was measured without that line, so the page is taller now and
@@ -3257,8 +3257,14 @@ export const register: Register = (on, options) => {
       const shape = fits ? pageShape(list, watched, delegating, saved, await $.clock.now(), cols) : null
       let target = shape ? splashTarget(shape, rows) : null
       if (target && target.bar === null && s.plan?.ending === 'fall') target = { ...target, bar: Math.min(rows - 1, shape!.atLeast - 1) }
-      if (target && !s.plan) s.plan = plan(cols, rows, target)
-      else if (target && s.plan) s.plan.target = target
+      // a new size plans again, from the same frame: a dock's second draw is a row shorter than its
+      // first (its close mark's row), and ending at a resize ended every opening there after one
+      // frame (2026-11-21, the owner: "theres no splash"; seen at 64x44, then 64x43)
+      if (target && (!s.plan || s.plan.cols !== cols || s.plan.rows !== rows)) {
+        const ending = s.plan?.ending ?? null
+        s.plan = plan(cols, rows, target) // none when it is too small now: the page then
+        if (s.plan) s.plan.ending = ending
+      } else if (target && s.plan) s.plan.target = target
       if (target && s.plan) {
         return <Raster key={SPLASH} columns={cols} rows={rows} cells={packed(frameCells(s.plan, s.f))} />
       }
