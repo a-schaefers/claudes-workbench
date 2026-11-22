@@ -4133,7 +4133,30 @@ test('the opening animation plays on the first /workbench of a session, and the 
   await ui.unmount()
 })
 
-test('the opening animation plays once a session: not on /workbench again, nor after a reload', async ($, on) => {
+test('a pane drawn again a row shorter keeps the animation playing at its new size', async ($, on) => {
+  // 2026-11-21, the owner: "theres no splash". A docked pane's second draw was 64x43 after 64x44,
+  // and the animation ended at that "resize" after its first frame, in every real session.
+  const { clock } = splashClock(on)
+  const w = splashWorld(on)
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  const ui = await $.ui.mount(splashPane(64, 44))
+  expect(await splashing(ui)).toBe(true)
+  await ui.redraw(splashPane(64, 43).props)
+  expect(await splashing(ui)).toBe(true)
+  await clock.advance(2000)
+  expect(await splashing(ui)).toBe(true)
+  expect(w.splashes()).toBeGreaterThanOrEqual(20)
+  const raster = await ui.find({ type: 'Raster', key: 'splash' }) as any
+  expect([raster.props.columns, raster.props.rows]).toEqual([64, 43])
+  await clock.advance(3200)
+  expect(await splashing(ui)).toBe(false)                                // and ends as before
+  expect(await ui.find({ type: 'Text', text: 'Workbench mode is on.' })).toBeDefined()
+  await ui.redraw(splashPane(40, 10).props)                              // too small: the page at once
+  await ui.unmount()
+})
+
+test('the opening animation plays once while the mode is on: not on /workbench again, nor after a reload', async ($, on) => {
   const { clock, ticks } = splashClock(on)
   const w = splashWorld(on)
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
@@ -4153,6 +4176,26 @@ test('the opening animation plays once a session: not on /workbench again, nor a
   expect(await splashing(ui)).toBe(false)
   await clock.advance(3000)
   expect(w.splashes()).toBe(played)
+  await ui.unmount()
+})
+
+test('after /workbench-quit, the next /workbench opens with the animation again', async ($, on) => {
+  // the owner quit and ran /workbench again, and expected it (2026-11-21)
+  const { clock } = splashClock(on)
+  const w = splashWorld(on)
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await workbench($)
+  let ui = await $.ui.mount(splashPane())
+  await clock.advance(6000)
+  await ui.unmount()
+  const played = w.splashes()
+  await $.command.run({ command: 'workbench-quit', args: '' })
+  await workbench($)
+  ui = await $.ui.mount(splashPane())
+  expect(await splashing(ui)).toBe(true)
+  await clock.advance(6000)
+  expect(w.splashes()).toBeGreaterThan(played)
+  expect(await splashing(ui)).toBe(false)                                // and ends as before
   await ui.unmount()
 })
 
