@@ -4193,6 +4193,63 @@ class Context(Base):
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-969m"]
         self.assertEqual([r["kind"] for r in rows if r["kind"] != "checkin"], ["stuck"])
 
+    def stuck_on_failed_compactions(self, name):
+        """A task stuck past HANDOVER_MAX, its last session's compaction failed (#969), with
+        the next runs ordinary ones."""
+        os.environ["FAKE_REFAIL"] = "1"
+        st, _ = self.compaction_failed(name, edit=False, exit_code=1)
+        self.assertEqual(st["phase"], "stuck")
+        dead = st["session"]
+        self.assertTrue(dead)                                   # the dead session is still current
+        for k in ("FAKE_REFAIL", "FAKE_COMPACT_EXIT"):
+            os.environ.pop(k, None)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        return dead
+
+    def assert_the_next_run_is_handed_to_a_fresh_session(self, dead):
+        last = self.runs()[-1]
+        self.assertFalse(last["session"])                       # not --session <dead>
+        self.assertTrue(last["prompt"].startswith("You are picking this task up in a fresh "
+                                                  "session (OpenCode failed to compact the last "
+                                                  "session)"), last["prompt"][:200])
+        self.assertNotIn(dead, json.dumps(last))
+
+    def test_feedback_after_failed_compactions_past_the_limit_goes_to_a_fresh_session(self):
+        # #969 (review, 2026-11-21): stuck past HANDOVER_MAX, the dead session stayed in status
+        # `session`; wb feedback clears `context`, the export counts only completed compactions
+        # and no_room held with nothing changed, so the feedback round went back to the session
+        # whose compaction failed, and failing again there (or a context-length exit 1) failed
+        # the task, the #969 outcome
+        dead = self.stuck_on_failed_compactions("t-969f")
+        run_wb("feedback", "t-969f", "--message", str(self.feedback))
+        st = wait_phase("t-969f", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review")
+        self.assert_the_next_run_is_handed_to_a_fresh_session(dead)
+        self.assertIn("1. Add a trailing comment line.", self.runs()[-1]["prompt"].split("## Now")[1])
+
+    def test_feedback_keeping_the_context_after_failed_compactions_still_goes_to_a_fresh_session(self):
+        # #969: a session whose compaction failed can't be kept, --keep-context or not
+        dead = self.stuck_on_failed_compactions("t-969g")
+        run_wb("feedback", "t-969g", "--message", str(self.feedback), "--keep-context")
+        st = wait_phase("t-969g", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review")
+        self.assert_the_next_run_is_handed_to_a_fresh_session(dead)
+
+    def test_next_after_failed_compactions_goes_to_a_fresh_session_and_says_why(self):
+        # #969 (review, 2026-11-21): wb next clears `context` too, and said "to the same
+        # session" for the dead one. wb next takes a step under review, so the stuck task is put
+        # there by hand: what the next step's fresh_reason makes of the dead session is the test
+        dead = self.stuck_on_failed_compactions("t-969n")
+        store.Task("t-969n").set_status(phase="review")
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also write the question to question.txt.\n")
+        out = run_wb("next", "t-969n", "--spec", str(step2), "-m", "feat: step one")
+        self.assertIn("to a fresh session (OpenCode failed to compact the last session)", out)
+        st = wait_phase("t-969n", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review")
+        self.assert_the_next_run_is_handed_to_a_fresh_session(dead)
+        self.assertIn("question.txt", self.runs()[-1]["prompt"])
+
     def test_a_fresh_round_run_again_after_its_server_died_is_handed_over_once(self):
         # #780 (the second 2026-11-21 audit): a round that began fresh, revived before its first
         # event, ran _start_fresh again: the handoff went over instructions.md and was wrapped in

@@ -1054,7 +1054,9 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
   compaction of the agent's session failed (<message>): a fresh one takes over" and status
   `full_compact_failed`, so the next round's reason is `COMPACTION_FAILED` ("OpenCode failed to
   compact the last session"). The handover branch comes before the exit is judged, so the round
-  is never failed and the tests never run on the dead session; `HANDOVER_MAX` still holds. Seen
+  is never failed and the tests never run on the dead session; `HANDOVER_MAX` still holds (past
+  it the round is stuck, the reason naming the failed compaction, and status
+  `compact_failed_session` keeps the next `wb feedback` or `wb next` off that session). Seen
   2026-11-21 (#969): OpenCode exited 1 on it before any change (a bench replay whose agent read a
   long test file whole) and the task failed; or exited 0 after one, the tests failed on half-done
   work and auto-fix sent them back to it. It counts as a compaction: the `fresh` event's
@@ -1062,7 +1064,11 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
 - *Between rounds* (`fresh_reason`, for n > 1, also used by `wb next` to say what will happen):
   Claude asked (`--fresh`, `wb resume`) → fresh, even with no session yet; no session → continue
   on the step's first round, else fresh ("the last session ended before it began", so a session
-  that never started still hands the next round the task); `keep` → continue; the last round handed over (`context: full`) → fresh
+  that never started still hands the next round the task); the session is the one whose compaction
+  failed (status `compact_failed_session`: stuck past `HANDOVER_MAX`, it stays the task's session,
+  and `wb feedback` and `wb next` clear `context`, while the export counts only completed
+  compactions; it went back to the dead session, #969 review) → fresh, `COMPACTION_FAILED`, even
+  under `keep`; `keep` → continue; the last round handed over (`context: full`) → fresh
   (`COMPACTED` when OpenCode had compacted it first, `full_compacted`; `COMPACTION_FAILED` when its
   compaction failed, `full_compact_failed`, #969); OpenCode compacted the
   session (`session export` lists a completed compaction) → fresh; the session's last assistant
@@ -7182,6 +7188,7 @@ check-ins off), not `wb start`'s.
 | `session`, `sessions`, `session_mark`, `session_floor` | the OpenCode session; earlier ones; `gitops.mark` when it began; the context it had read at its first change |
 | `context` | a one-round instruction: `fresh`, `keep`, `full` (a handover happened) |
 | `full_pct`, `handovers`, `full_compacted`, `full_compact_failed` | the fill at the last mid-round handover; how many; whether OpenCode had compacted the session first (#774), or failed to (#969) |
+| `compact_failed_session` | the last session whose compaction failed (`run_round`, #969): while it is still `session` (stuck past `HANDOVER_MAX`), `fresh_reason` hands the next round to a fresh one, whatever `wb feedback`, `wb next` or `--keep-context` leave in `context` |
 | `window`, `load_secs`, `loads` | the model's context window; the load time, summed over every runner of the task (`wb feedback`, `next`, `resume`) and the reloads before later rounds (`runner._loaded`); each load that happened, alone (`[secs…]`: the typical load's samples, #577) |
 | `tuned`, `explored`, `tuned_max` | the knob values this task runs at (`tuning.tune`) |
 | `self_review_due` | true once a round's tests passed, so self-review could run, whether or not it did: the row says whether `self_review` could act (`tuning.acted`, #816) |

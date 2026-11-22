@@ -1123,6 +1123,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                     # whose agent read a long test file whole), or exited 0 and auto-fix sent the
                     # failing tests back to the dead session (2026-11-21, #969).
                     out["compact_failed"] = row["text"]
+                    # the dead session, named: past HANDOVER_MAX it stays the task's `session`,
+                    # and wb feedback / wb next clear `context`, so fresh_reason knows it by this
+                    # (the export counts only completed compactions), never continuing it (#969)
+                    task.set_status(compact_failed_session=raw.get("sessionID") or task.status.get("session"))
                     if not out["full"]:  # the context it carried: its last step's, else all of it
                         out["full"], out["compacted"] = last_step[1] or window or 1, True
             elif row["kind"] == "retry":
@@ -2481,6 +2485,8 @@ def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
     if not st.get("session"):  # the step's first round, or one whose session never started
         first = (st.get("step_round") or 1) == st.get("round", 1)
         return None if first else "the last session ended before it began"
+    if st["session"] == st.get("compact_failed_session"):  # it can't go on, nor be kept (#969)
+        return COMPACTION_FAILED
     if st.get("context") == "keep":
         return None
     if st.get("context") == "full":  # handed over mid-round; after OpenCode compacted it (#774)
