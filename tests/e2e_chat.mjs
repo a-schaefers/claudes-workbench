@@ -865,6 +865,20 @@ async function run(engine, device) {
     const r = messages().at(-1)
     if (JSON.stringify(r.about) !== JSON.stringify({ task: 'fix-nav', n: 1, step: 1, round: 2 })) throw new Error(JSON.stringify(r.about))
   })
+  await check('a refused message edited after typing a new one: both are in the box, nothing lost', async () => {
+    // #958 (the 2026-11-21 audit): edit put the refused words in the box over what was typed since
+    await page.fill('#input', 'y'.repeat(8001))                    // past MAX_TEXT: refused
+    await page.click('#send')
+    const row = page.locator('.row.user.pending', { hasText: 'Not sent' })
+    await until(async () => (await row.count()) === 1)
+    await page.fill('#input', 'and the footer too')
+    await row.locator('.meta button', { hasText: 'edit' }).click()
+    await until(async () => (await row.count()) === 0)
+    const box = await page.inputValue('#input')
+    if (box !== 'y'.repeat(8001) + '\n\nand the footer too') throw new Error('the box holds ' + JSON.stringify(box.slice(-40)))
+    if (await page.evaluate(() => localStorage.getItem('wb-chat-draft')) !== JSON.stringify(box)) throw new Error('the saved draft differs')
+    await page.fill('#input', '')
+  })
   await check('a photo attached, the page reloaded before sending: the chip is back, nothing uploaded twice; one message with one path reaches Claude', async () => {
     // #623, the owner (2026-11-20): never a file uploaded twice by a refresh
     const puts = []

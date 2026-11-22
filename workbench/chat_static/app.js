@@ -249,7 +249,11 @@
           if (m.about) setAbout(m.about)  // what it was about comes back with it (#843)
           for (const f of m.files || []) if (!draft.some(d => d.id === f.id)) draft.push({ ...f, mod: 0, state: 'up' })
           keepDraft(); drawTray(); pump()
-          input.value = m.text; save(K.draft, m.text); grow(); armSend()
+          // what the box holds now is kept after the old words, never replaced: typed after the
+          // refusal, it was lost, the undo history with it (2026-11-21, the audit of #958)
+          const typed = input.value.trim()
+          const text = !typed || typed === m.text ? m.text : m.text ? m.text + '\n\n' + input.value : input.value
+          input.value = text; save(K.draft, text); grow(); armSend()
           render(); input.focus()
         }
         meta.append(b, span('', ' · '), ed, span('', ' · '), d)
