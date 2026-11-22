@@ -2797,19 +2797,19 @@ nothing until a surface attaches.
   <mode>`, and each draw reads `coding.json` again. **Web chat** (`CHAT_STOPS`, both saying what it
   is: `A localhost web server to interact with Claude.`): `Off (default)` and `On`; a pick runs `wb chat on|off` and reads the switch and the link back at once.
   **Agent code navigation** (`PROBE_STOPS`, key `probe`, options `probe:off|on`, *Experiments*):
-  `Off (default)` and `On: large files only` (the owner, 2026-11-22, #857: off and on, on is large
+  `Off (default)` and `On (large files only)` (the owner, 2026-11-22, #857: off and on, on is large
   files only; the levels `Adaptable`, `Moderate` and `Aggressive` went, on is what moderate did),
   on saying what it does (`The agent may extract one function of a file over 1,500 lines with
   probe, instead of reading it whole (github.com/probelabs/probe).`); a pick runs `wb experiment
   probe on|off` (`setProbe`), and each draw reads `experiments.json` again (`probeMode`, as
   `context.setting` reads it: `on`, `true` or an old level, `PROBE_OLD_LEVELS`, is on; no file, no
-  `probe` key or anything else: off). On reads `On: large files only (recommended)` only when wb's
+  `probe` key or anything else: off). On reads `On (large files only) (recommended)` only when wb's
   line ends `; on is recommended` (`context.PROBE_RECOMMENDED`, false until a measurement sets
   it). The row says whether it works, since it read `On` while nothing changed (the user,
   2026-11-20): the Settings tab asks `wb experiment probe` (`probeStatus`, at most every
   `PROBE_RECHECK_MS`, 30 s, and again after each pick, so a probe installed meanwhile shows; off
-  too, for the recommendation, and wb runs no probe then) and on reads `On: large files only,
-  working` (its sentence naming probe's version after "with probe") or `On: large files only, not
+  too, for the recommendation, and wb runs no probe then) and on reads `On (large files only),
+  working` (its sentence naming probe's version after "with probe") or `On (large files only), not
   set up` (`probeStops`; wb's answer unreadable: the plain label). Turned on, a toast says how it
   came out: `is on and working`, or on but not set up, which also queues `PROBE_SETUP_NOTE` for
   Claude (once while it waits): wb's line, then offer to set probe up with the user's yes, from
@@ -5607,7 +5607,7 @@ failed the start after its branch and worktree were made (#518); its output is r
 refuse `--lsp` on any of them; its copy of the handbook ends with `EXPERIMENT_NOTES["probe"]`
 (`instruction_files`; `agent/HANDBOOK.md` itself is unchanged), and each round prompt's protocol
 carries its line beside the acceptance line (`context.experiment_protocol`, the protocol's
-`{experiment_protocol}`: `EXPERIMENT_PROTOCOL["probe"]`; *On: large files only* below). Its shell gets `PROBE_MAX_TOKENS` (the user's, else
+`{experiment_protocol}`: `EXPERIMENT_PROTOCOL["probe"]`; *On (large files only)* below). Its shell gets `PROBE_MAX_TOKENS` (the user's, else
 `context.PROBE_MAX_TOKENS` 2000, `runner.agent_env`): `probe search` has no output limit of its
 own, and one plain query on workbench printed 169 KB, about 42K tokens, more than a 40K window
 holds (#857). The cap is on the matched code, not on what probe prints: in its default `outline`
@@ -5634,7 +5634,7 @@ no daemon, no network. The rule was `probe *` until 2026-11-21, when testing the
 that it let the agent run `probe lsp` (a daemon and language servers), `--lsp` on a read (the
 same), `probe config set|reset` (probe's config) and `probe benchmark`.
 
-**On: large files only** (the owner, 2026-11-22, #857: off and on, on is large files only).
+**On (large files only)** (the owner, 2026-11-22, #857: off and on, on is large files only).
 probe is `wb experiment probe on|off`, the same in the pane's row:
 
 | Setting | Protocol line |
@@ -5807,7 +5807,7 @@ keeps the condition (what an opted-in user gets does no harm), stays opt-in and 
 and gets no "recommended" note. What filled the window in every arm was OpenCode's own reads
 (one `read` returns up to 2,000 lines or 50 KB, 14K tokens for models.py), which a per-call output
 cap (`tool_output`) sized to the window was expected to bound; measured since (OpenCode 2.3.2,
-2026-11-21), `tool_output` bounds the shell's output but not `read`, so on's cap (*On: large files only*)
+2026-11-21), `tool_output` bounds the shell's output but not `read`, so on's cap (*On (large files only)*)
 bounds probe's, `cat`'s and the tests' output, and the note tells the agent how to page a long
 read. A `probe` shim is the lever left untried. `wb bench report --label <arm>` prints the use line per arm (`bench.use_lines`).
 

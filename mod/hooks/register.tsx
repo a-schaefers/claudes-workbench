@@ -605,7 +605,7 @@ const CHAT_STOPS: [string, string, string][] = [
 // version goes.
 const PROBE_STOPS: [string, string, string][] = [
   ['off', 'Off (default)', 'The agent reads whole files, as without the experiment.'],
-  ['on', 'On: large files only', 'The agent may extract one function of a file over 1,500 lines with probe, instead of reading it whole (github.com/probelabs/probe).'],
+  ['on', 'On (large files only)', 'The agent may extract one function of a file over 1,500 lines with probe, instead of reading it whole (github.com/probelabs/probe).'],
 ]
 // probe's levels from before it was off and on, each read as on (context.OLD_LEVELS)
 const PROBE_OLD_LEVELS = ['adaptable', 'moderate', 'aggressive']

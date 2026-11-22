@@ -3165,7 +3165,7 @@ test('the probe row says whether it works, and turned on without probe it asks C
   await ui.press({ key: 'probe:on' })
   expect(toasts.filter(t => t.includes('code navigation'))).toEqual([
     "workbench: Agent code navigation is on but not set up: probe isn't installed. Claude will offer to set it up."])
-  expect(await row(ui)).toBe('▸ Agent code navigation: On: large files only, not set up')
+  expect(await row(ui)).toBe('▸ Agent code navigation: On (large files only), not set up')
   await clock.advance(5000)                                         // the next poll starts Claude's turn
   expect(asked).toHaveLength(1)
   expect(asked[0]).toContain('The user just turned on Agent code navigation')
@@ -3177,7 +3177,7 @@ test('the probe row says whether it works, and turned on without probe it asks C
   await clock.advance(31_000)
   await ui.press({ key: 'tab-tasks' })
   await ui.press({ key: 'tab-settings' })
-  expect(await row(ui)).toBe('▸ Agent code navigation: On: large files only, working')
+  expect(await row(ui)).toBe('▸ Agent code navigation: On (large files only), working')
   await ui.press({ key: 'probe' })
   expect(await ui.find({ type: 'Text', text: /with probe \(probe-code 0\.6\.0\), instead of reading it whole/ })).toBeDefined()  // its version (the review, 2026-11-21)
   await ui.press({ key: 'probe:off' })
@@ -3211,10 +3211,10 @@ test('the probe row is off and on, on reading large files only, an old level rea
   await clock.advance(1000)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'tab-settings' })
-  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On: large files only')  // the old level: on
+  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On (large files only)')  // the old level: on
   await ui.press({ key: 'probe' })
   const options = async () => (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => / {2}[❯ ] /.test(l))
-  expect(await options()).toEqual(['    Off (default)', '  ❯ On: large files only'])
+  expect(await options()).toEqual(['    Off (default)', '  ❯ On (large files only)'])
   for (const value of ['off', 'on']) {                                // each through wb
     runs.length = 0
     await ui.press({ key: `probe:${value}` })
@@ -3227,17 +3227,17 @@ test('the probe row is off and on, on reading large files only, an old level rea
     files['/wb/experiments.json'] = JSON.stringify({ probe: old })
     await ui.press({ key: 'tab-tasks' })
     await ui.press({ key: 'tab-settings' })
-    expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On: large files only')
+    expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On (large files only)')
   }
   files['/wb/experiments.json'] = JSON.stringify({ probe: true })
   await ui.press({ key: 'tab-tasks' })
   await ui.press({ key: 'tab-settings' })
-  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On: large files only')
+  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On (large files only)')
   recommended = true                                                // Claude set PROBE_RECOMMENDED
   await clock.advance(31_000)
   await ui.press({ key: 'tab-tasks' })
   await ui.press({ key: 'tab-settings' })
-  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On: large files only (recommended)')
+  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On (large files only) (recommended)')
   await ui.unmount()
 })
 
@@ -3328,7 +3328,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:on' })
   expect(runs.some(r => r.join(' ') === 'wb experiment probe on')).toBe(true)   // then the row asks how it came out
-  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On: large files only')
+  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On (large files only)')
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts.at(-2)).toBe('http://localhost:1337/#token=abc')                                   // the link, at once (the modeline last)
   await ui.press({ key: 'tab-tasks' })
