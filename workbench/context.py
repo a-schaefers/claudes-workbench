@@ -338,18 +338,42 @@ def commands_conf() -> dict:
 # sets it (experiments.json), and `wb start` records its value per task (task.json `experiments`),
 # so a flip changes only the tasks started after it. Off, the agent's rules are main's exactly.
 EXPERIMENTS = {
+    # what each level does and what every level adds, since `wb experiment` said neither (the
+    # review, 2026-11-21)
     "probe": "the agent's shell may run probe, and its handbook says how: a file's outline and "
-             "one function, instead of the whole file",
+             "one function, instead of the whole file; moderate tells it to extract the function it "
+             "needs from a long file, aggressive never to read one whole, adaptable learns which "
+             "per model; every level also caps one shell call's output at a tenth of the window "
+             "and outlines the spec's long files in round 1",
 }
+# An experiment's settings besides "off", in the pane's order (one with none here is "on"). probe's
+# (the owner's design, 2026-11-21, #857): moderate, the condition measured to do no harm;
+# aggressive, the order that cost more on a 27B at 40K but may pay on a stronger model or a wider
+# window; adaptable, moderate until this machine's own results move it (the probe_aggressive
+# knob, tuning.py). "on", the setting before levels, reads as adaptable.
+EXPERIMENT_LEVELS = {"probe": ("adaptable", "moderate", "aggressive")}
+# Whether the pane marks adaptable "recommended": Claude sets it once a measurement says moderate,
+# with the read cap and the outline, is at least as good as off (#857's step 6); not yet
+PROBE_RECOMMENDED = False
 # the file length from which the probe experiment's note and protocol line apply: its gain
 # showed only on a 2,700-line file, its cost on 1,500-line ones (#857)
 PROBE_FILE_LINES = 1500
+# With probe on, round 1's prompt ends with an outline of each file over PROBE_FILE_LINES the spec
+# names (runner.add_outline), at most this many tokens in all, so the agent starts knowing where
+# things are instead of exploring for it, as Aider's repo map and Agentless's skeleton do (the
+# owner's design, 2026-11-21, #857). Each file's part opens with OUTLINE_HEAD, a prompt text
+# (ARCHITECTURE.md, *The runner, inside*), and ends, when cut, with OUTLINE_MORE.
+PROBE_OUTLINE_TOKENS = 1000
+OUTLINE_HEAD = "Outline of {file} (from probe symbols):"
+OUTLINE_MORE = "… {n} more: `probe symbols {file}`"
 
 
 # what an experiment adds to the agent's copy of the handbook, after its own text. probe aborts
 # (SIGABRT, a core dump, a desktop crash dialog) when a pipe closes early: Rust's println! panics
 # on EPIPE. Agents piped it into `head` (the A/B of 2026-11-21), so the note steers them to its
-# own limits and to `grep`, which reads to the end (#857)
+# own limits and to `grep`, which reads to the end (#857). OpenCode's `read` returns at most 2,000
+# lines or 50 KB, which the layer's `tool_output` cap doesn't bound (runner.output_cap, measured
+# on 2.3.2, 2026-11-21): the note says how to read on, since the agent paged through a long file
 EXPERIMENT_NOTES = {
     "probe": "\n## Reading code: probe\nWhen you need one function from a file over "
              "{probe_lines} lines, read just that function, not the whole file. You know its name: "
@@ -362,7 +386,9 @@ EXPERIMENT_NOTES = {
              "searches that miss, use `grep -n`. Stop exploring once you know the function you will "
              "change and what calls it. Never pipe probe into `head` (it crashes when its output is "
              "cut off): filter with `grep`. When probe says \"File too large\" (over 1 MB), use "
-             "`grep -n` for the names and read those lines.\n",
+             "`grep -n` for the names and read those lines. A read of a long file returns only its "
+             "first 2,000 lines (or 50 KB): read further with `offset` and `limit`, or `probe "
+             "extract` the function.\n",
 }
 # what an experiment adds to every round prompt's protocol, beside the acceptance line: the
 # handbook alone went unread (probe: 0 calls in 14 replays, 2026-11-21). A condition, not an
@@ -373,6 +399,11 @@ EXPERIMENT_PROTOCOL = {
     "probe": "- When you need one function from a file over {probe_lines} lines, `probe extract "
              "<file>#<name>` it instead of reading the whole file.\n",
 }
+# probe's aggressive level: the order of the quick A/B (2026-11-21), which explored more and
+# failed big-compaction on a 27B at 40K, kept for the models and windows where it may pay (#857)
+PROBE_AGGRESSIVE_PROTOCOL = ("- Never read a file over {probe_lines} lines whole: `probe extract "
+                             "<file>#<name>` the function you need (`probe symbols <file>` first "
+                             "when you don't know its name).\n").replace("{probe_lines}", str(PROBE_FILE_LINES))
 EXPERIMENT_NOTES = {k: v.replace("{probe_lines}", str(PROBE_FILE_LINES)) for k, v in EXPERIMENT_NOTES.items()}
 EXPERIMENT_PROTOCOL = {k: v.replace("{probe_lines}", str(PROBE_FILE_LINES))
                        for k, v in EXPERIMENT_PROTOCOL.items()}
@@ -412,25 +443,37 @@ def experiment_protocol(task: store.Task | None = None, experiments: dict | None
     task's, or ``experiments`` as task.json will record them (wb start writes round 1's prompt
     before task.json, #873)."""
     have = experiments if experiments is not None else (task.spec.get("experiments") or {}) if task else {}
-    return "".join(line for name, line in EXPERIMENT_PROTOCOL.items() if have.get(name))
+    return "".join(PROBE_AGGRESSIVE_PROTOCOL if name == "probe" and have.get(name) == "aggressive"
+                   else line for name, line in EXPERIMENT_PROTOCOL.items() if have.get(name))
 
 
 def experiments_path() -> Path:
     return store.home() / "experiments.json"
 
 
-def experiments() -> dict[str, bool]:
-    """Each experiment's setting: off unless experiments.json says "on"."""
+def setting(name: str, value) -> str:
+    """An experiment's setting as experiments.json or `wb experiment` gives it: "off", or one of
+    its EXPERIMENT_LEVELS ("on" for one without levels). "on" (True) before probe had levels
+    reads as adaptable (2026-11-21); anything else is off."""
+    levels = EXPERIMENT_LEVELS.get(name, ("on",))
+    if value is True or value == "on":
+        return levels[0]
+    return value if value in levels else "off"
+
+
+def experiments() -> dict[str, str]:
+    """Each experiment's setting: off unless experiments.json says otherwise."""
     saved = store.read_json(experiments_path(), {}) or {}
     saved = saved if isinstance(saved, dict) else {}
-    return {name: saved.get(name) == "on" for name in EXPERIMENTS}
+    return {name: setting(name, saved.get(name)) for name in EXPERIMENTS}
 
 
-def set_experiment(name: str, on: bool) -> None:
+def set_experiment(name: str, value) -> None:
+    """Set ``name`` to a level (or "on"/"off"; True and False mean the same)."""
     with store.locked(experiments_path().with_suffix(".lock")):
         saved = store.read_json(experiments_path(), {}) or {}
         saved = saved if isinstance(saved, dict) else {}
-        store.write_json(experiments_path(), {**saved, name: "on" if on else "off"})
+        store.write_json(experiments_path(), {**saved, name: setting(name, value)})
 
 
 def probe_bin() -> str | None:
@@ -459,18 +502,304 @@ PROBE_READS = ("symbols", "extract", "search", "grep", "query")
 PROBE_RELEASES = "github.com/probelabs/probe/releases"
 
 
-def task_experiments() -> dict[str, bool]:
-    """What `wb start` records: each experiment on only when set on and able to work (probe
-    installed), so a task's record says what its agent really had. An experiment that is off
-    isn't checked at all: a `probe` on PATH ran on every start with it off, and one printing a
-    non-UTF-8 byte failed the start after its branch and worktree were made (#518)."""
+def task_experiments() -> dict:
+    """What `wb start` records: each experiment's setting only when set and able to work (probe
+    installed), else False, so a task's record says what its agent really had (probe's adaptable
+    is resolved after, probe_start). An experiment that is off isn't checked at all: a `probe` on
+    PATH ran on every start with it off, and one printing a non-UTF-8 byte failed the start after
+    its branch and worktree were made (#518)."""
     able = {"probe": probe_bin}
-    return {name: on and (able[name]() is not None if name in able else True)
-            for name, on in experiments().items()}
+    return {name: s if s != "off" and (able[name]() is not None if name in able else True) else False
+            for name, s in experiments().items()}
+
+
+# Probe is off where it can't help (the owner, 2026-11-21, #857: "No sense in clogging up the
+# subagents with irrelevant information"): a task's repo needs a file in a language probe reads
+# over PROBE_FILE_LINES (probe_off), else the task runs exactly as with probe off.
+#
+# The languages: `probe search --help`'s `--language` possible values, as probe-code 0.6.0 lists
+# them (2026-11-21), each to the file extensions `probe symbols` parses for it, tried on a
+# one-function file of each (one it has no parser for comes back as `"kind": "text"` lines, so
+# .mjs, .cjs, .mts, .cts, .pyi, .c++ and .cu are left out). The list itself is read from the
+# installed probe (probe_languages): a newer probe's new language needs only its row here, and a
+# value with no row counts for nothing. Mapped to nothing on purpose: yaml, data rather than code
+# (a long YAML, JSON or CSV file is no reason to turn probe on; JSON and CSV aren't in probe's
+# list), and swift, which 0.6.0 lists but has no parser for ("Failed to get parser for
+# extension: swift").
+PROBE_LANGUAGES = {
+    "rust": (".rs",), "rs": (".rs",),
+    "javascript": (".js",), "js": (".js",), "jsx": (".jsx",),
+    "typescript": (".ts",), "ts": (".ts",), "tsx": (".tsx",),
+    "python": (".py",), "py": (".py",),
+    "go": (".go",),
+    "c": (".c", ".h"), "h": (".h",),
+    "cpp": (".cpp", ".cc", ".cxx", ".hpp", ".hxx", ".hh"), "cc": (".cc",), "cxx": (".cxx",),
+    "hpp": (".hpp", ".hh"), "hxx": (".hxx",),
+    "java": (".java",),
+    "ruby": (".rb",), "rb": (".rb",),
+    "php": (".php",),
+    "swift": (),
+    "solidity": (".sol",), "sol": (".sol",),
+    "crystal": (".cr",), "cr": (".cr",),
+    "haskell": (".hs", ".lhs"), "hs": (".hs",), "lhs": (".lhs",),
+    "csharp": (".cs",), "cs": (".cs",),
+    "yaml": (), "yml": (),
+    "bash": (".sh", ".bash"), "sh": (".sh",),
+    "qml": (".qml",),
+}
+# wb status's words for a task where probe was set but is off (task.json `experiments_off`)
+PROBE_OFF_SHORT = f"no file over {PROBE_FILE_LINES} lines in a language probe reads"
+PROBE_OFF_HELP = "probe's languages couldn't be read from `probe search --help`"
+PROBE_OFF_GAVE_UP = (f"no file over {PROBE_FILE_LINES} lines in a language probe reads among "
+                     "the largest it counted")
+PROBE_OFF_PARTIAL = "a partial clone, whose files git before 2.44 can't count without fetching each"
+# the most of a repo's blobs probe_off counts, largest first, before it gives up (PROBE_OFF_GAVE_UP)
+PROBE_SCAN_BYTES = 64 << 20
+# A blob sparser than this many bytes per PROBE_FILE_LINES lines is generated (minified, a
+# bundle), not code anyone reads by function: probe_off skips the rest of it once its first
+# PROBE_SPARSE_AFTER bytes are that sparse. Counted whole, a 70 MiB one-line big.min.js used up
+# PROBE_SCAN_BYTES and the 2,000-line a.py beside it was never reached: off (review, #857, 2026-11-21)
+PROBE_SPARSE_BYTES = 2 << 20
+PROBE_SPARSE_AFTER = 1 << 16
+
+
+def probe_languages_path() -> Path:
+    return store.home() / "probe-languages.json"
+
+
+def probe_language_names(help_text: str) -> list[str] | None:
+    """--language's possible values in `probe search --help`, or None when it lists none: from
+    its option line to the next option's, in clap's short form (`[possible values: rust, …]`) or
+    its long one (`Possible values:` and a `- rust: …` line each). Searched past its block, a
+    --language in the long form read --format's values (terminal, markdown, …) as the languages
+    (review, #857, 2026-11-21)."""
+    lines = help_text.splitlines()
+    at = next((i for i, line in enumerate(lines) if re.match(r"\s*(?:-\w,\s*)?--language\b", line)), None)
+    if at is None:
+        return None
+    block = [lines[at]]
+    for line in lines[at + 1:]:
+        if re.match(r"\s*-{1,2}[A-Za-z]", line):  # the next option ("- rust: …" has a space)
+            break
+        block.append(line)
+    text = "\n".join(block)
+    if m := re.search(r"\[possible values:([^\]]*)\]", text):
+        names = [n.strip() for n in m.group(1).split(",")]
+    elif "Possible values:" in text:
+        names = re.findall(r"^\s*- ([\w+#.-]+)", text.partition("Possible values:")[2], re.M)
+    else:
+        names = []
+    return [n for n in names if n] or None
+
+
+def probe_languages(exe: str) -> frozenset[str] | None:
+    """The file extensions the probe ``exe`` reads (PROBE_LANGUAGES of the languages its help
+    lists), or None when its help can't be read or parsed: then probe counts as off, never on.
+    Read once per probe version (`probe --version`) and kept in probe-languages.json."""
+    def run(*args) -> str | None:
+        try:  # any bytes: a `probe` that isn't probelabs' may print anything (#518)
+            r = subprocess.run([exe, *args], capture_output=True, text=True, errors="replace",
+                               timeout=10, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return r.stdout if r.returncode == 0 else None
+    version = (run("--version") or "").strip()
+    key = {"probe": os.path.realpath(exe), "version": version}
+    saved = store.read_json(probe_languages_path(), {}) if version else {}
+    saved = saved if isinstance(saved, dict) else {}
+    names = saved.get("languages") if all(saved.get(k) == v for k, v in key.items()) else None
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        names = probe_language_names(run("search", "--help") or "")
+        # values none of which PROBE_LANGUAGES knows are another option's, or a probe renamed:
+        # not its languages, and not cached (review, #857, 2026-11-21)
+        if names is None or not any(n in PROBE_LANGUAGES for n in names):
+            return None
+        if version:  # a probe that names no version is asked each time
+            try:
+                store.write_json(probe_languages_path(), {**key, "languages": names, "at": store.now()})
+            except OSError:
+                pass
+    return frozenset(e for n in names for e in PROBE_LANGUAGES.get(n, ()))
+
+
+def probe_off(spec: str, repo: Path, sub: str | None, rev: str | None) -> tuple[str | None, dict[str, int]]:
+    """(why probe is off for this task, or None; the long files its spec names in probe's
+    languages, from long_files). On only when the repo at commit ``rev`` has a file in a language
+    probe reads (probe_languages) over PROBE_FILE_LINES: one the spec names anywhere in the repo,
+    or any in the task's package ``sub`` (the whole repo without one), where the agent works.
+    Counted from git's objects, largest first, lines a chunk at a time and only until one is past
+    the limit, never a file read whole (_Lines), a sparse blob (PROBE_SPARSE_BYTES) no further
+    than its first chunks, at most PROBE_SCAN_BYTES in all. A submodule's files don't count: its
+    gitlink is no blob here, and its checkout in the worktree is read-only
+    (gitops.fill_submodules), another project's code the task can't change. Nor symbolic links,
+    nor a file outside a sparse checkout's cone, which the task's worktree doesn't have either
+    (gitops.apply_sparse). A partial clone's blobs are counted only where it holds them: asked
+    with lazy fetching off (git 2.44+), as gitops.checkout_size asks (#436); an older git's would
+    each be fetched, so only the named files count there (PROBE_OFF_PARTIAL). (the owner,
+    2026-11-21, #857; the review's sparse, partial and minified cases, the same day)"""
+    exe = probe_bin()
+    kinds = probe_languages(exe) if exe else None
+    if kinds is None:
+        return PROBE_OFF_HELP, {}
+    keeps = gitops.sparse_keeps(repo) if rev else None
+    named = {rel: n for rel, n in long_files(spec, repo, sub, rev, kinds).items()
+             if not keeps or keeps(rel)}
+    if named:
+        return None, named
+    if not rev or not kinds:
+        return PROBE_OFF_SHORT, {}
+    lazy = gitops.partial_clone(repo)
+    if lazy and (gitops.version() or (0,)) < (2, 44):
+        return PROBE_OFF_PARTIAL, {}
+    no_fetch = {"GIT_NO_LAZY_FETCH": "1"} if lazy else None  # a blob it lacks: size BAD, missing
+    try:
+        tree = gitops.git_bytes(repo, "ls-tree", "-r", "-l", "-z", "--full-tree", rev,
+                                *(["--", sub] if sub else []), env=no_fetch)
+    except gitops.GitError:
+        return PROBE_OFF_SHORT, {}
+    found = []
+    for entry in tree.split(b"\0"):
+        meta, _, path = entry.partition(b"\t")
+        meta = meta.split()
+        if len(meta) != 4 or meta[1] != b"blob" or meta[0] == b"120000" or not meta[3].isdigit():
+            continue
+        name = os.fsdecode(path)
+        # a file of more than N lines has more than N bytes: the rest can't be long
+        if int(meta[3]) > PROBE_FILE_LINES and os.path.splitext(name)[1] in kinds and \
+                (not keeps or keeps(name)):
+            found.append((int(meta[3]), meta[2].decode()))
+    found.sort(reverse=True)
+    now: dict[str, _Lines] = {}  # the blob being fed: one at a time, each once
+    read = {"bytes": 0, "blob": 0, "long": False, "spent": False}
+
+    def feed(oid: str, chunk: bytes):
+        if oid not in now:
+            now.clear()
+            now[oid] = _Lines()
+            read["blob"] = 0
+        lines = now[oid]
+        lines.update(chunk)
+        read["bytes"] += len(chunk)
+        read["blob"] += len(chunk)
+        if lines.count() > PROBE_FILE_LINES:
+            read["long"] = True
+            return True
+        if read["bytes"] >= PROBE_SCAN_BYTES:
+            read["spent"] = True
+            return True
+        if read["blob"] >= PROBE_SPARSE_AFTER and \
+                read["blob"] > (lines.count() + 1) * PROBE_SPARSE_BYTES // PROBE_FILE_LINES:
+            return gitops.SKIP_BLOB  # generated: the next blob
+        return False
+
+    seen: set[str] = set()  # two files alike are one blob, counted once
+    oids = [oid for _, oid in found if not (oid in seen or seen.add(oid))]
+    if oids:
+        gitops.feed_blobs(repo, oids, feed, env=no_fetch)
+    if read["long"]:
+        return None, {}
+    return (PROBE_OFF_GAVE_UP if read["spent"] else PROBE_OFF_SHORT), {}
+
+
+def probe_start(level: str, model: str, window, task_name: str, long: bool) -> tuple[str, bool]:
+    """(the level this task's agent gets, whether it is the knob's exploration): adaptable goes
+    through the probe_aggressive knob (tuning.py), which explores only when the spec names a
+    file over PROBE_FILE_LINES, the only tasks where the levels act differently: elsewhere a try
+    of aggressive would teach nothing (the owner's design, 2026-11-21, #857)."""
+    if level != "adaptable":
+        return level, False
+    from . import tuning
+    v, explored = tuning.choose("probe_aggressive", model, window, task_name, explore=long)
+    return ("aggressive" if v else "moderate"), explored
 
 
 def experiment(task: store.Task, name: str) -> bool:
     return bool((task.spec.get("experiments") or {}).get(name))
+
+
+def probe_level(task: store.Task) -> str | None:
+    """The probe level this task's agent has: moderate or aggressive, None when off. A task
+    started before the levels recorded True and had moderate's condition."""
+    v = (task.spec.get("experiments") or {}).get("probe")
+    return None if not v else v if v in ("moderate", "aggressive") else "moderate"
+
+
+def brace_names(text: str) -> list[str]:
+    """Each path a brace form names, `src/replay_io.{h,c}`: src/replay_io.h, src/replay_io.c
+    (flagged as unnamed by outside_spec on 2026-11-18)."""
+    return [a + part + b for a, parts, b in
+            re.findall(r"([\w./-]*)\{([\w.-]+(?:,[\w.-]+)+)\}([\w./-]*)", text)
+            for part in parts.split(",")]
+
+
+# a path in a spec: a name with an extension, maybe under directories (`workbench/cli.py`,
+# `cli.py`, `./src/a.c:120`, `a.py#run`)
+SPEC_PATH = re.compile(r"(?<![\w/.-])((?:\.{1,2}/)?(?:[\w.-]+/)*[\w-][\w.-]*\.[A-Za-z]\w*)(?![\w/-])")
+SPEC_PATHS_MAX = 40  # the paths a spec names that are looked at, in order
+
+
+def spec_paths(text: str) -> list[str]:
+    """The relative file paths a spec's text names, in order, once each (brace forms too)."""
+    seen: list[str] = []
+    for p in SPEC_PATH.findall(text + "\n" + " ".join(brace_names(text))):
+        p = p[2:] if p.startswith("./") else p
+        if p not in seen and ".." not in Path(p).parts:
+            seen.append(p)
+    return seen[:SPEC_PATHS_MAX]
+
+
+def long_files(text: str, root: Path, sub: str | None = None, rev: str | None = None,
+               kinds: frozenset[str] | None = None) -> dict[str, int]:
+    """{path from ``root``: its lines} for each file the spec names with more than
+    PROBE_FILE_LINES lines, in the order named: read in the checkout ``root`` (the worktree), or
+    at commit ``rev`` of the repo ``root`` (wb start, before the worktree exists). A name is
+    tried in the package ``sub`` first, then at the top; one outside ``root`` is none. With
+    ``kinds``, only names with one of those extensions (probe's languages: probe_languages)."""
+    out: dict[str, int] = {}
+    top = os.path.realpath(root)
+    for p in spec_paths(text):
+        if kinds is not None and os.path.splitext(p)[1] not in kinds:
+            continue  # the outline only for files probe reads (#857, 2026-11-21)
+        for rel in ([f"{sub}/{p}"] if sub else []) + [p]:
+            # counted a chunk at a time: read whole, a spec naming a large data file loaded all
+            # of it, at wb start inside Claude's Bash limit (review, 2026-11-21)
+            lines = _Lines()
+            if rev:
+                try:
+                    gitops.git_hash(root, lines, "cat-file", "blob", f"{rev}:{rel}")
+                except gitops.GitError:
+                    continue
+            else:
+                real = os.path.realpath(Path(root) / rel)
+                if not real.startswith(top + os.sep) or not os.path.isfile(real):
+                    continue
+                try:
+                    with open(real, "rb") as f:
+                        while chunk := f.read(1 << 16):
+                            lines.update(chunk)
+                except OSError:
+                    continue
+            n = lines.count()
+            if n > PROBE_FILE_LINES:
+                out.setdefault(rel, n)
+            break
+    return out
+
+
+class _Lines:
+    """A file's lines, fed a chunk at a time (as gitops.git_hash feeds a hash): its newlines,
+    and one more for a last line without one."""
+
+    def __init__(self):
+        self.n, self.last = 0, b"\n"
+
+    def update(self, chunk: bytes) -> None:
+        if chunk:
+            self.n += chunk.count(b"\n")
+            self.last = chunk[-1:]
+
+    def count(self) -> int:
+        return self.n + (self.last != b"\n")
 
 
 # How wb accept --merge lands: a merge commit, fast-forward only, or one squashed commit (#352)

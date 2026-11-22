@@ -14,7 +14,7 @@ import time
 import unittest
 import contextlib
 from contextlib import redirect_stderr, redirect_stdout
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from unittest import mock
 
@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a scri
 from unittest import mock
 
 from workbench import context, images, media, models, results, router, store, watch
-from tests.test_workbench import Base, TEST_CMD, run_wb, wait_phase
+from tests.test_workbench import Base, TEST_CMD, ThreadingHTTPServer, run_wb, wait_phase  # listens at once (#950)
 
 
 REAL_SLEPT = models.slept  # Real stands a machine that never sleeps in for it (#716)

@@ -7,7 +7,8 @@ and window, each value's mean reward smoothed toward the record of all values (P
 worth), among the default and the values tried TRY_MIN times, so one lucky task doesn't win; ties
 go to the default. A knob that acts only on a filling session (fresh_at) learns only from the
 tasks whose sessions reached its smallest value, and one that acts only after passing tests
-(self_review) only from the tasks with a round whose tests passed. One task in EXPLORE tries a
+(self_review) only from the tasks with a round whose tests passed, and one that acts only on a
+long file (probe_aggressive) only from the tasks whose spec named one. One task in EXPLORE tries a
 neighbouring value instead, the one tried less, so evidence keeps growing beside the pick and
 the pick walks toward a better value one step at a time, never jumping across the range.
 
@@ -57,6 +58,10 @@ class Knob:
     # the smallest value (results' `peak_share`) is no evidence of it (#721)
     passed: bool = False  # acts only after a round whose tests passed: a task with no --test, or
     # whose tests never passed, ran alike under every value (results' `self_review_due`, #816)
+    long: bool = False  # acts only where the spec names a file over context.PROBE_FILE_LINES,
+    # with probe on: elsewhere the levels behave alike (results' `probe_long`, #857)
+    try_min: int = TRY_MIN  # tasks a value other than the default needs before it can be the pick;
+    # above TRY_MIN, the default needs them too (best)
 
 
 KNOBS = {
@@ -72,6 +77,16 @@ KNOBS = {
     # own reviews don't spare Claude's rounds learns it off.
     "self_review": Knob((0, 1), 1, "whether the agent reviews its own change before Claude is woken",
                         passed=True),
+    # Whether probe's adaptable level runs at aggressive (1) or moderate (0) for this model and
+    # window (context.probe_start, at wb start). Moderate measured no worse than off on a 27B at
+    # 40K and aggressive worse (#857), but a stronger model or a wider window may earn aggressive
+    # by itself. Only a spec that names a long file is evidence, and only there is it explored;
+    # a fixed level (moderate, aggressive) is evidence of its own value. Five tasks at each
+    # value before aggressive can be the pick, not three: one long-file task in five (EXPLORE)
+    # runs a level that measured worse, and one replay's time moved 41 to 13 minutes (the
+    # owner's design, 2026-11-21)
+    "probe_aggressive": Knob((0, 1), 0, "whether adaptable probe runs at aggressive", long=True,
+                             try_min=5),
 }
 
 
@@ -181,6 +196,8 @@ def acted(name: str, row: dict, ceiling=None) -> bool:
     passed (`self_review_due`; a row from before it, when its last tests passed): a task without
     --test scored 0 or 1 though it ran alike under both, and could turn self-review off (#816)."""
     k = KNOBS[name]
+    if k.long and row.get("probe_long") is not True:
+        return False
     if k.passed:
         due = row.get("self_review_due")
         if not (due if isinstance(due, bool) else row.get("tests_ok") is True):
@@ -227,22 +244,32 @@ def scores(name: str, model: str, window, ceiling=None) -> dict:
 
 
 def best(name: str, model: str, window, ceiling=None) -> float:
-    """The best-scoring value among the default and those tried TRY_MIN times: an untried value
-    sits at the pooled mean, so any one task above it won the pick (#721)."""
+    """The best-scoring value among the default and those tried the knob's try_min times
+    (TRY_MIN): an untried value sits at the pooled mean, so any one task above it won the pick
+    (#721). A knob whose try_min is above TRY_MIN keeps its default until that has as many."""
     d, sc = default(name, ceiling), scores(name, model, window, ceiling)
     rec = record(name, model, window, ceiling)
-    ok = [v for v in sc if v == d or len(rec[v]) >= TRY_MIN]
+    need = KNOBS[name].try_min
+    if need > TRY_MIN and len(rec[d]) < need:
+        # a knob that asks more than TRY_MIN asks it of the default too: else five tasks at a
+        # fixed aggressive and one at moderate flipped adaptable to aggressive on that one
+        # (review, 2026-11-21; the owner's design: five tasks per value, #857)
+        return d
+    ok = [v for v in sc if v == d or len(rec[v]) >= need]
     return max(ok, key=lambda v: (round(sc[v], 9), v == d, -abs(v - d)))
 
 
-def choose(name: str, model: str, window, task_name: str, ceiling=None) -> tuple[float, bool]:
+def choose(name: str, model: str, window, task_name: str, ceiling=None,
+           explore: bool = True) -> tuple[float, bool]:
     """(value, explored) for a new task: a pin, else the best, else (one task in EXPLORE, by the
-    task's name, so a restarted runner picks the same) the less-tried neighbour of the best."""
+    task's name, so a restarted runner picks the same) the less-tried neighbour of the best.
+    ``explore`` False: never the neighbour, for a task that would be no evidence of it."""
     pin = pinned().get(name)
     if pin is not None:
         return pin, False
     pick = best(name, model, window, ceiling)
-    if int(hashlib.sha1(f"{name}\0{task_name}".encode()).hexdigest(), 16) % 1000 >= EXPLORE * 1000:
+    if not explore or \
+            int(hashlib.sha1(f"{name}\0{task_name}".encode()).hexdigest(), 16) % 1000 >= EXPLORE * 1000:
         return pick, False
     vals = allowed(name, ceiling)
     i = vals.index(pick)
@@ -259,15 +286,19 @@ def value(task: store.Task, name: str):
 
 
 def tune(task: store.Task, model: str, window, ceilings: dict | None = None,
-         fixed: dict | None = None) -> None:
+         fixed: dict | None = None, chosen: tuple = ()) -> None:
     """Fix every knob for this task once (a restarted runner keeps them). `fixed`: what Claude
-    set for this task itself (a flag), which wins over the record and a pin."""
+    set for this task itself (a flag), or what wb start chose already, which wins over the record
+    and a pin; None: the knob doesn't apply to the task (probe_aggressive with probe off), and
+    it records nothing. `chosen`: the fixed ones that wb start's choice explored."""
     if task.status.get("tuned") is not None:
         return
     ceilings, fixed = ceilings or {}, fixed or {}
     tuned, explored = {}, []
     for name in KNOBS:
-        v, e = (fixed[name], False) if name in fixed else \
+        if name in fixed and fixed[name] is None:
+            continue
+        v, e = (fixed[name], name in chosen) if name in fixed else \
             choose(name, model, window, task.name, ceilings.get(name))
         tuned[name] = v
         if e:
