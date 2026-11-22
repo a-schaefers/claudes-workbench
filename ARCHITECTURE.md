@@ -1906,11 +1906,25 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   gem credentials, OpenCode's service password (`.config/opencode/service.json`,
   `.local/state/opencode/service.json`: its background service runs outside the lane), password
   managers, cloud CLIs, browser and mail profiles (Flatpak's `.var/app` too), shell history,
-  `.claude`, `.claude.json` and its backups, and the like), the same under `$XDG_CONFIG_HOME`,
+  `.claude`, `.claude.json` and its backups, and the like; since #992, 2026-11-22, the deploy
+  CLIs' logins, `.config/.wrangler`, `.local/share/com.vercel.cli`, `.supabase/access-token`,
+  `.netlify`, `.config/netlify`, `.pulumi/credentials.json` (not the rest of `~/.pulumi`, its
+  plugins and binaries), `.serverlessrc`, `.config/k6`; the registry and publish logins,
+  `.terraformrc`, `.config/helm/registry`, `.config/dart/pub-credentials.json`,
+  `.ansible/galaxy_token`, Maven's master password `.m2/settings-security.xml` (a build reads
+  it only to decrypt a server password `settings.xml` holds encrypted: in the lane that login
+  fails, and with it a first download from that repository; what `~/.m2/repository` holds
+  already still resolves); and
+  `.foundry/keystores`, `.mc` (the MinIO client's keys), `.erlang.cookie` and
+  `.config/erlang/.erlang.cookie` (a test that starts distributed Erlang nodes needs a cookie of
+  its own), `.mylogin.cnf`, `.dbt/profiles.yml` (a dbt project in the lane needs its profile in
+  the repo), `.config/openstack`, `.config/hcloud`, `.chef`, `.config/infracost`, `.minikube`),
+  the same under `$XDG_CONFIG_HOME`,
   `$XDG_DATA_HOME` and `$XDG_STATE_HOME`, wherever `SECRET_VARS` moved them (`GNUPGHOME`,
   `PASSWORD_STORE_DIR`, `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`, `AWS_SHARED_CREDENTIALS_FILE`,
-  `AWS_CONFIG_FILE`, `CLOUDSDK_CONFIG`, `AZURE_CONFIG_DIR`, `HISTFILE`, `$CARGO_HOME`'s
-  credentials) and Claude's directory (`secret_paths`); and workbench's own files
+  `AWS_CONFIG_FILE`, `CLOUDSDK_CONFIG`, `AZURE_CONFIG_DIR`, `HISTFILE`, `TF_CLI_CONFIG_FILE`,
+  `REGISTRY_AUTH_FILE`, `HELM_REGISTRY_CONFIG`, `ANSIBLE_GALAXY_TOKEN_PATH`, `MC_CONFIG_DIR`,
+  `$CARGO_HOME`'s credentials) and Claude's directory (`secret_paths`); and workbench's own files
   (`private_paths`): `$WB_HOME` (notify.jsonl, the chat log, the rules, other tasks) and its
   config (`~/.config/workbench` and wherever `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
   `WB_MODELS`, `WB_IMAGES`, `WB_AUDIO` moved its files): the audit read the chat token from a lane, which
@@ -1919,7 +1933,22 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   shim), and so does the task's repo with its git directory when it lies there (`repo_dirs`): a
   bench replay's is a clone in `bench/runs/<run>/<task>/repo`, and with it hidden the agent's git
   failed in every replay, "gitfile does not point to a valid repository" (#858). Left readable on purpose: `.npmrc` and
-  `.yarnrc.yml` (the package managers read them to install) and OpenCode's `auth.json` and
+  `.yarnrc.yml` (the package managers read them to install), and by the same trade (#992) the
+  files a build or an install reads its repositories and their logins from: Maven's
+  `.m2/settings.xml` and Gradle's `.gradle/gradle.properties` (mirrors and the JVM options a build
+  needs too; Gradle and Maven aren't installed where this was made, so a lane build of either
+  is unchecked), NuGet's `.nuget/NuGet/NuGet.Config`, poetry's `.config/pypoetry/auth.toml` and
+  composer's `.config/composer/auth.json` (each read on every command, and an unreadable one
+  ends it), pub's `.config/dart/pub-tokens.json` (an unreadable one ends `dart pub get`) and
+  Hex's `.hex/hex.config` (its organisations' keys for `mix deps.get`). Helm's
+  `.config/helm/registry` is hidden although helm opens it at every start and stops, `helm lint`
+  too, when it can't: the agent's `HELM_REGISTRY_CONFIG` names a file of its own (*Its
+  environment*), and so is k6's `.config/k6`, which `k6 run` reads at every start and stops
+  when it can't: the agent's `K6_CONFIG` names its own. Vercel's CLI stops on every command,
+  `vercel build` too, when its config or login can't be read, so for a user logged in it doesn't
+  run in the lane: deploying is Claude's. A hidden file in a writable tool home splits that home, which then refuses a
+  new entry at its top, so `context.SPLIT_MADE` makes what the tool makes there first, when a
+  secret splits it: `~/.m2`'s `repository/` and `wrapper/` (`./mvnw`). And OpenCode's `auth.json` and
   session database in `.local/share/opencode` (OpenCode runs in the lane and needs them: keep
   cloud keys out of it). Of the home directory's own entries only the dotfiles and
   `HOME_READABLE` (`bin`, `go`, `R`, `perl5`) are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`,
@@ -2007,7 +2036,8 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   get every right; files only write, read, truncate and the socket right. No-new-privileges,
   which disables setuid programs (sudo, su, and snap-confine, so a snap can't run in the lane:
   `wb start` refuses a `--test` that is one, `wb doctor` names those on PATH), is set on every
-  Linux machine, Landlock or not, before the lane. Directory listing and the network stay free;
+  Linux machine, Landlock or not, before the lane. Directory listing and the network stay free
+  (*What TCP reaches*, below);
   so does metadata: Landlock doesn't cover chmod, chown, utimes or xattrs, so those still succeed
   on a file outside the lane (only the shell patterns stand in their way). It fails closed: when
   Landlock is there but the lane can't be drawn, it prints `workbench lane: the kernel refused
@@ -2027,6 +2057,20 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `WSLInterop-late` reading `enabled`) a `--  WSL interop is on: …` line: a Windows program in
   the lane or the repo runs outside it; `[interop] enabled=false` in `/etc/wsl.conf` closes it,
   and stops wb reading Windows' GPUs (set `gpu_gb` then, #702).
+- *What TCP reaches* (#993, 2026-11-22). The lane can't stop the agent connecting over TCP:
+  Landlock's TCP rule (ABI 4) only allows ports, never an address, so it can't keep the agent
+  from a cloud VM's instance metadata endpoint (`169.254.169.254`), which hands the machine's
+  role credentials to anyone who asks over plain HTTP, nor from a local daemon on a TCP port.
+  For the metadata, the agent's environment turns the SDKs' own lookups off
+  (`runner.METADATA_OFF`, *Its environment*); a program that asks the address itself still
+  gets an answer, and so do Azure's SDKs and Google's Go metadata client, which have no switch.
+  For the daemons, `wb doctor` warns, one line each, `--  port N listens here (<what>): the lane
+  doesn't stop TCP, so an agent can reach it`, for each port of `context.DAEMON_PORTS` that
+  listens on this machine (`listening_daemons`, from `/proc/net/tcp` and `/proc/net/tcp6`, state
+  `0A`; with Landlock only, so not off Linux): a Docker or Podman API on 2375 or 2376 (it runs
+  containers as the user), adb's server on 5037 (their devices), OpenOCD's GDB server on 3333
+  and J-Link's on 2331 (their boards). Binding such a daemon to a UNIX socket instead puts it
+  behind the lane's socket rule (ABI 9).
 - *OpenCode's side* (`external_rules`): its `external_directory` permission, checked for its file
   tools' paths and the shell's working directory and `cd` targets (not other arguments), is deny
   `*`, then allow `<dir>/*` for the lane, `READABLE` (`/usr`, `/etc`, `/opt`, `/lib*`, `/bin`,
@@ -2074,11 +2118,22 @@ prefixes; `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_
 (`HF_HOME`, `HF_HUB_CACHE`, `HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE`, `HF_ENDPOINT`,
 `HF_HUB_DISABLE_TELEMETRY`, `TRANSFORMERS_OFFLINE`, `TOKENIZERS_PARALLELISM`, `AWS_REGION`,
 `AWS_DEFAULT_REGION`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_REGION`); plus `PWD` (the worktree),
-`OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT` and `PROJECT_CONFIG_OFF` (below), `WB_TASK`, `WB_HOME`, `WB_RUN` (the run's id, for `sweep`), its
+`OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT` and `PROJECT_CONFIG_OFF` (below), `WB_TASK`, `WB_HOME`, `WB_RUN` (the run's id, for `sweep`),
+the cloud SDKs' switches off their instance metadata lookup, whatever the user set
+(`METADATA_OFF`, #993, 2026-11-22: `AWS_EC2_METADATA_DISABLED=true` for AWS's SDKs and CLI,
+`NO_GCE_CHECK=true` for google-auth in Python, `METADATA_SERVER_DETECTION=none` for gcp-metadata
+in Node; not `GCE_METADATA_HOST` or `GCE_METADATA_IP`, which only move the server, and which
+Google's Go client takes as being on GCE; Azure has none: *What TCP reaches*), its
 own `XDG_RUNTIME_DIR` (`context.runtime_dir`, with the lane on) and in it, unless the user set
 one, `JUPYTER_RUNTIME_DIR` (`<runtime dir>/jupyter`: Jupyter's default,
 `~/.local/share/jupyter/runtime`, is outside the lane, and every notebook test, nbmake, nbval,
-papermill, failed with PermissionError writing its kernel connection file, #668),
+papermill, failed with PermissionError writing its kernel connection file, #668), and always
+`HELM_REGISTRY_CONFIG` (`<runtime dir>/helm/registry.json`, not made: the user's registry logins
+are hidden, #992, and helm stops at every start, `helm lint` and `helm template` too, when the
+file it is given exists but can't be opened; a missing one is an empty store) and `K6_CONFIG`
+(`<runtime dir>/k6.json`, made holding `{}`: the user's `~/.config/k6` is hidden, #992, `k6 run`
+stops when it can't read its config, and forgives only a missing default; made with `O_EXCL`,
+so never through a link the agent left),
 `POETRY_VIRTUALENVS_IN_PROJECT=true` and `PIPENV_VENV_IN_PROJECT=1` unless the user set them
 (with the lane on: their venv in the worktree, #825, *Paths, a lane*), build
 daemons of its own (`daemon_env`, with the lane on: `GRADLE_OPTS` gets
@@ -2120,7 +2175,8 @@ a test run that fails with a connection error (`NET_FAILED`: `ECONNREFUSED`, `Co
 host`, `ProxyError` and the like) says it again (`proxy_gap`: the setup's `failed` notice, and
 status `tests.proxy`, which the report names), each with the `"env": [...]` line that passes it.
 OpenCode's own environment adds `OPENCODE_ENV`
-(`npm_config_yes=false`); the tests' doesn't.
+(`npm_config_yes=false`); the tests' doesn't. The tests' environment is `agent_env` all the same,
+`METADATA_OFF` with it: they run the agent's code, which meets the same lane.
 
 *The user's Python environment* (`context.python_env`, in `agent_env`, so the agent, the setup,
 the tests, the base check and `wb verify` alike). An activated venv or conda env (`source
@@ -7383,7 +7439,7 @@ Prints the counts and the bytes freed; writes `gc.json`. Then (not in `cli.gc`, 
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked; in a repo with commits only the link is committed, the user's CLAUDE.md edits left alone, #931, and nothing while a merge, cherry-pick, revert or rebase waits: `gitops.under_way`). Refuses the home directory or above, inside another repo (but a home kept as a git repo, dotfiles in `~`, or one above it: the project gets a repo of its own nested there, else every new project and `wb try` were refused there, #684), a repo git refuses (git's reason: no `git init` over it; "not a repo" is told apart in any language, `gitops.NotARepo`), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name) with the line for the user's `$SHELL` (`cli.path_advice`: zsh's `~/.zshrc`, bash's `~/.bashrc`, on macOS `~/.bash_profile`, fish's `fish_add_path`, else `~/.profile`) and to start Claude Code again from a new terminal (the desktop app or an IDE too); "add it" was all it said (#274, the audit of 1.2), and `wb doctor`'s "wb isn't on PATH" gives the same line when that link is there; exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. Ends with a `first run:` checklist (`cli.first_run`, #111), one line each, `ok` or `--` with the fix: OpenCode 2.x (else `runner.OPENCODE_GET`: OpenCode's `/v2/install`, or `opencode upgrade --major` on 1.x; npm's `opencode-ai`, `opencode.ai/install` and GitHub's Latest release are the 1.x line, #654), a model server answering (a configured provider, this machine's Ollama, or a server on a default port; on WSL2 one only at the Windows host is a `--` line that it needs `local: true`, and none at all adds `models.WSL_NAT`, #663; else: start yours, or run /workbench and Claude lays out the ones that fit the machine, never steering to one; `wb model add --url`), a local model registered (else: run /workbench, and Claude picks one for the machine), Landlock. It names no model, and changes no exit code. |
 | `wb update` | `--check` (only say whether the upstream has news: `update available: N new commit(s)…` or `up to date`; for a clone with none, also whether Claude Code runs an older mod than the clone's, `cli._mod_behind`: the commit `installed_plugins.json` gives as `gitCommitSha`, when `git diff` shows `mod/` changed since it, `update available: Claude Code runs the mod as of <sha>…`; Claude Code runs its cached copy, which only `claude plugin update` refreshes, so a clone pulled by hand read `up to date` while new sessions opened a four-day-old pane, 2026-11-21), `--if-due` (with `--check`, refused without it, which pulled at once, #602: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`), `--stop` (stop the running tasks first, `cli._stop_for_update`: each stuck with `last` `UPDATE_STOP`, not parked, its news not acknowledged, and one `stuck` notice per owner, `store.owner`, naming `wb resume <a> <b> …` with `tasks`, the rest of a batch acknowledged with it, so each session, this one or another, is woken to continue its own; resumed by `--all` too, `UPDATE_STOP` being in `cli.INTERRUPTED`: #694) | Updates this copy (see *Installing*): refuses while any runner is live, naming whose each is (`this session's`, or `session <id> in <dir>`: `_whose`) and `--stop` (the advice was an unscoped `wb stop --all`, which parked other live sessions' agents and acknowledged their news, so their Claude waited for a wake that never came, #694); a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Every check that can refuse runs before `--stop` stops anything (#775: it stopped every session's tasks, then died or found nothing new): uncommitted changes, `claude` not on PATH, and for a clone the fetch (`_fetch_origin`, from the remote the branch's upstream is on, `branch.<name>.remote`, origin only when none is set, nothing for a local upstream: it fetched `origin` alone, so a fork's clone tracking `upstream/main` read "already up to date" against a stale ref, and one with no origin couldn't check, #875) and `HEAD..@{u}`, refusing a clone behind its upstream with commits it hasn't (or no upstream; one only ahead, a local patch, has nothing to pull and goes on to the plugin steps: it was refused, #875); a clone with nothing to pull stops no task and refuses none, runs only the plugin steps and prints `already up to date`, or, when the mod was older, `the clone was up to date; the mod was as of <a>, now <b>…` (or, if the plugin step left it so, that Claude Code still has the old one: reinstall it). A marketplace copy can't count its news beforehand (one commit deep), so a step failing after the stop ends with `the tasks were stopped for it: wb resume <a> <b> … continues them`; a step that can't run or runs past 300 s fails with a line (after a clone's pull: what is left to run), and update.json is written as soon as the pull lands. Prints `updated <kind> a..b (N commit(s))` or `already up to date`; without the count when `a` is gone, as in Claude Code's marketplace clone, which is one commit deep and replaced by its update (the count once failed an update that had landed, 2026-11-20). The check's fetch (`cli._fetch_origin`) never prompts and never hangs: no terminal, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, at most `FETCH_SECS` = 60 s; the user's own ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`) is kept, and with none ssh runs with `BatchMode`. In between, `--if-due` recounts `HEAD..@{u}` locally, so a pull made elsewhere shows at once. |
-| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes, or missing, either with `runner.OPENCODE_GET`; a version that doesn't parse is a `--` line; one outside `runner.OPENCODE_TESTED` another `--` line), the OpenCode config files (the user's `$OPENCODE_CONFIG` among them), the Python wb runs on (its version and path, and when the launcher handed over from an older `python3`, #259), git (BAD below `gitops.GIT_FLOOR`, 2.34: #527), models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), a `--` line for each model `wb optimize` measured with a window to change (`optimize.advice`), a `--` line for a model left thinking whose output cap (`options.max_tokens`, else `limit.output`: any server) at its measured write speed here outlasts its think budget (`router.thinking_stall`: it can sit silent until nudged and stopped; seen 2026-11-18 on a spilled 64K entry; harmless on a fast card, so measured per machine), the state directory (made if missing, then checked writable; BAD on a noexec mount, `store.noexec`, #851; a `--` line when it is on a network file system, whose machines each run and reap only their own tasks, #849; what it holds, counted for at most 3 s, and the free space beside it: BAD under 2 GB, #342; on WSL a `--` line naming the Windows drive that free space is capped by, `store.host_drive`, #897), a `--  waiting on Claude for 3+ days: <name> (<phase> <N>d[, parked]), …` line naming the tasks in review, stuck, failed or asking whose status hasn't changed for `IDLE_DAYS` (3) with `wb resume`, `wb report`, `wb discard` (`idle_line`: nothing else named a task left for weeks, #541), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), where the Ollama here had its settings read or that nothing could say (`cli.ollama_line`, a `--` line, with a local Ollama model: #379), the models this machine's Ollama has loaded that no task here holds (`models.unheld_loaded`, a `--` line: a task that needs the room unloads them once idle; on a shared Ollama `keep_loaded` keeps them and `gpu_gb` gives the budget that lets a model fit beside them, #378), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`), and a `--` line when the home directory lies in a temp root, which the lane writes whole (`context.home_gap`: its credentials are then readable to agents; the 2026-11-19 audit, a sandbox's profile under `/tmp`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings, and `repos` its settings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), what a logout would stop (`cli.logout_stops`), whether runs keep the machine awake (`cli.awake_line`, *Kept awake*: `ok` with caffeinate, with powershell.exe on WSL2 (#777), or with systemd-inhibit when a probe's sleep lock is granted; a `--` line for an idle lock only, for WSL2 without interop or powershell.exe, or for no tool), with web chat notifications subscribed, this Python's CA certificates (`webpush.has_cas`: loaded, or a CA directory with files; BAD without, with the fix, #539), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed), a `--` line instead when the clone's `mod/` has changed since the commit it was installed from (`cli._mod_behind`), and one `--  experiment …` line per experiment (`wb experiment`'s). `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes, or missing, either with `runner.OPENCODE_GET`; a version that doesn't parse is a `--` line; one outside `runner.OPENCODE_TESTED` another `--` line), the OpenCode config files (the user's `$OPENCODE_CONFIG` among them), the Python wb runs on (its version and path, and when the launcher handed over from an older `python3`, #259), git (BAD below `gitops.GIT_FLOOR`, 2.34: #527), models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), a `--` line for each model `wb optimize` measured with a window to change (`optimize.advice`), a `--` line for a model left thinking whose output cap (`options.max_tokens`, else `limit.output`: any server) at its measured write speed here outlasts its think budget (`router.thinking_stall`: it can sit silent until nudged and stopped; seen 2026-11-18 on a spilled 64K entry; harmless on a fast card, so measured per machine), the state directory (made if missing, then checked writable; BAD on a noexec mount, `store.noexec`, #851; a `--` line when it is on a network file system, whose machines each run and reap only their own tasks, #849; what it holds, counted for at most 3 s, and the free space beside it: BAD under 2 GB, #342; on WSL a `--` line naming the Windows drive that free space is capped by, `store.host_drive`, #897), a `--  waiting on Claude for 3+ days: <name> (<phase> <N>d[, parked]), …` line naming the tasks in review, stuck, failed or asking whose status hasn't changed for `IDLE_DAYS` (3) with `wb resume`, `wb report`, `wb discard` (`idle_line`: nothing else named a task left for weeks, #541), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), where the Ollama here had its settings read or that nothing could say (`cli.ollama_line`, a `--` line, with a local Ollama model: #379), the models this machine's Ollama has loaded that no task here holds (`models.unheld_loaded`, a `--` line: a task that needs the room unloads them once idle; on a shared Ollama `keep_loaded` keeps them and `gpu_gb` gives the budget that lets a model fit beside them, #378), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`), and a `--` line when the home directory lies in a temp root, which the lane writes whole (`context.home_gap`: its credentials are then readable to agents; the 2026-11-19 audit, a sandbox's profile under `/tmp`), and a `--  port N listens here (<what>): the lane doesn't stop TCP, so an agent can reach it` line for each local daemon's port listening here (`context.listening_daemons`, `DAEMON_PORTS`: Docker or Podman's API 2375/2376, adb 5037, OpenOCD 3333, J-Link 2331; #993, *What TCP reaches*); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings, and `repos` its settings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), what a logout would stop (`cli.logout_stops`), whether runs keep the machine awake (`cli.awake_line`, *Kept awake*: `ok` with caffeinate, with powershell.exe on WSL2 (#777), or with systemd-inhibit when a probe's sleep lock is granted; a `--` line for an idle lock only, for WSL2 without interop or powershell.exe, or for no tool), with web chat notifications subscribed, this Python's CA certificates (`webpush.has_cas`: loaded, or a CA directory with files; BAD without, with the fix, #539), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed), a `--` line instead when the clone's `mod/` has changed since the commit it was installed from (`cli._mod_behind`), and one `--  experiment …` line per experiment (`wb experiment`'s). `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -8264,7 +8320,10 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   tests on a Landlock machine; the protocol's lane line and the handbook's boundaries. What it
   leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`) and what WSL's
   interop runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes*
-  and *Reads* here, and `wb doctor`'s line.
+  and *Reads* here, and `wb doctor`'s line. A secret inside a writable tool home (`SECRETS` in a
+  `TOOL_HOMES` entry) → what that tool makes at the home's top in `SPLIT_MADE`; a secret a tool
+  opens at every start (helm's registry, k6's config) → the agent's own path for it in
+  `agent_env`.
 - **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → the
   mod's weekly check, which toasts only an `update available` answer, and `/workbench-update`, which
   reloads the plugins only after an `updated` one (register.tsx `poll` and the `UPDATE` command).

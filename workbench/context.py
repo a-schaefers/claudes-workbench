@@ -1054,6 +1054,10 @@ CARGO_MADE = ("registry/", "git/", ".package-cache", ".package-cache-mutate", ".
 # needs a first `nimble refresh` from Claude.
 NIMBLE_MADE = ("pkgs2/", "pkgcache/", "buildtemp/", "packages_temp.json", "nimbledata2.json")
 MADE_TEXT = {"nimbledata2.json": '{"version": 1, "reverseDeps": {}}\n'}
+# and what a tool makes at the top of its home when a secret inside splits it (SECRETS): with
+# Maven's master password in ~/.m2, a first build couldn't make repository/ there, nor the
+# wrapper (./mvnw, its base ~/.m2) its wrapper/ (#992, 2026-11-22)
+SPLIT_MADE = {".m2": ("repository/", "wrapper/")}
 # and what the common tools make in a cache home split around an active venv (poetry's, from
 # `poetry shell` or direnv), made first so the split grants them: Landlock can only allow, so a
 # split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825)
@@ -1367,6 +1371,11 @@ def writable(task: store.Task) -> list[str] | None:
     for c in {os.path.realpath(c) for c in (home / ".nimble", nimble) if c and os.path.isabs(c)}:
         if os.path.isdir(c):  # split around bin/ whenever it exists (MADE_FIRST, below)
             _make_first(c, NIMBLE_MADE)
+    hidden = _hidden()
+    for d, names in SPLIT_MADE.items():  # only a home a secret splits: else it is granted whole
+        c = os.path.realpath(home / d)
+        if os.path.isdir(c) and any(_under(h, c) for h in hidden):
+            _make_first(c, names)
     for k, n in MADE_FIRST.items():  # ~/.rustup's toolchains/, ~/.nimble's bin/ (#911)
         r = os.environ.get(k) if k.isupper() else str(home / k)
         if r and os.path.isabs(r) and os.path.isdir(r):  # made, so it is split out: else the
@@ -1377,7 +1386,7 @@ def writable(task: store.Task) -> list[str] | None:
     # the user's active Python environments too: a venv in a tool home (poetry's, pipenv's,
     # WORKON_HOME) was the agent's to install into (#490)
     envs = set(python_envs())
-    out_of = _hidden() | envs | not_writable()
+    out_of = hidden | envs | not_writable()
     cache = os.path.realpath(os.environ.get("XDG_CACHE_HOME") or home / ".cache")
     if any(_under(e, cache) for e in envs):  # (#825)
         for n in CACHE_MADE:
@@ -1634,6 +1643,25 @@ def drop_stale_runtime_dirs(tasks) -> int:
 # them: its background service runs outside the lane). Left readable on purpose: `.npmrc` and
 # `.yarnrc.yml` (the package managers read them to install) and OpenCode's own `auth.json`
 # (OpenCode runs in the lane and needs it).
+# #992 (2026-11-22) added the deploy and registry logins after `.android/adbkey`, each checked
+# against its tool's docs or source where they said. The same trade as `.npmrc` keeps these
+# readable, since an install reads them: Maven's `.m2/settings.xml` and Gradle's
+# `.gradle/gradle.properties` (mirrors, repository logins, the JVM options a build needs; only
+# Maven's master password, `settings-security.xml`, is hidden: a build reads it only to decrypt
+# a server password settings.xml holds encrypted, so in the lane such a login fails, and a first
+# download from that repository with it; what ~/.m2/repository already holds still resolves),
+# NuGet's `NuGet.Config` (restore's sources), poetry's `auth.toml` and composer's `auth.json`
+# (both read on every command, and an unreadable one ends it), pub's `pub-tokens.json` (an
+# unreadable one ends `dart pub get`; pub's own login, `pub-credentials.json`, is publishing
+# only and hidden) and Hex's `hex.config` (its organisations' keys for `mix deps.get`, in the
+# writable ~/.hex). Helm's `registry` is hidden although helm reads it at every start and stops
+# when it can't: the agent's HELM_REGISTRY_CONFIG names a file of its own (runner.agent_env).
+# So is k6's `.config/k6` (`k6 cloud login`'s token), which `k6 run` reads at every start and
+# stops when it can't (its readDiskConfig): the agent's K6_CONFIG names its own. Vercel's CLI
+# stops on every command, `vercel build` too, when its config or login can't be read: in the
+# lane it doesn't run for a user logged in, a deploy CLI, which is Claude's to run.
+# A hidden file inside a writable tool home splits it (writable): SPLIT_MADE lists what the tool
+# makes at that home's top, made first.
 SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".authinfo",
            ".authinfo.gpg", ".bitwarden.json", ".secrets.gpg", ".config/gh", ".config/hub",
            ".local/share/keyrings", ".aws", ".azure", ".config/gcloud", ".kube", ".docker",
@@ -1648,7 +1676,16 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            ".config/Bitwarden CLI", ".config/doctl", ".config/sops", ".config/age", ".fly",
            ".kaggle", ".oci", ".gemini", ".config/containers/auth.json",
            ".local/share/fish/fish_history", ".var/app", ".config/vivaldi",
-           ".config/microsoft-edge", ".config/opera", ".android/adbkey")
+           ".config/microsoft-edge", ".config/opera", ".android/adbkey",
+           # #992 (2026-11-22): deploy CLIs' logins, registry and publish tokens, cloud and
+           # database logins, signing keys: none an install needs (a test that does brings its own)
+           ".config/.wrangler", ".local/share/com.vercel.cli", ".supabase/access-token",
+           ".netlify", ".config/netlify", ".pulumi/credentials.json", ".serverlessrc",
+           ".config/k6", ".terraformrc", ".config/helm/registry",
+           ".config/dart/pub-credentials.json", ".ansible/galaxy_token", ".m2/settings-security.xml",
+           ".foundry/keystores", ".mc", ".erlang.cookie", ".config/erlang/.erlang.cookie",
+           ".mylogin.cnf", ".dbt/profiles.yml", ".config/openstack", ".config/hcloud", ".chef",
+           ".config/infracost", ".minikube")
 # The sockets inside a secret that a grant may still reach, to connect only (unix_paths): Docker
 # Desktop's, under ~/.docker beside the registry logins in config.json, so `wb allow --path` was
 # refused and only turning the lane off let a Testcontainers suite run (#441, the audit of 1.8)
@@ -1656,7 +1693,11 @@ SECRET_SOCKETS = (".docker/desktop/docker.sock", ".docker/run/docker.sock")
 # where the user moved them (a file, a directory, or a path list)
 SECRET_VARS = ("GNUPGHOME", "PASSWORD_STORE_DIR", "GH_CONFIG_DIR", "DOCKER_CONFIG", "KUBECONFIG",
                "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "CLOUDSDK_CONFIG",
-               "AZURE_CONFIG_DIR", "HISTFILE")
+               "AZURE_CONFIG_DIR", "HISTFILE",
+               # the files Terraform's CLI config, podman's and buildah's logins, helm's registry
+               # logins, Ansible Galaxy's token and the MinIO client's keys were moved to (#992)
+               "TF_CLI_CONFIG_FILE", "REGISTRY_AUTH_FILE", "HELM_REGISTRY_CONFIG",
+               "ANSIBLE_GALAXY_TOKEN_PATH", "MC_CONFIG_DIR")
 # Of the home directory's own entries, the dotfiles (tools' configs, caches, toolchains) stay
 # readable, and these (R's and Perl's user libraries); the user's documents and other projects
 # don't, beyond the task's repo, workbench itself, the programs on PATH and what Claude allowed.
@@ -1959,6 +2000,37 @@ def interop_gap() -> str | None:
             "repo still runs; [interop] enabled=false in /etc/wsl.conf (then wsl --shutdown) "
             "closes it, and also stops wb reading Windows' GPUs: set their memory in models.json "
             "gpu_gb then")  # a GPU only Windows sees had no budget at all after it (#702)
+
+
+# Local daemons that take commands over TCP, which the lane doesn't restrict (its socket rule is
+# for UNIX sockets; Landlock's TCP rule only allows ports, so it would have to list every other
+# one): a Docker or Podman API runs containers as the user, adb drives their devices, a GDB
+# server their boards. `wb doctor` names each one listening here (#993, 2026-11-22).
+DAEMON_PORTS = {2375: "a Docker or Podman API", 2376: "a Docker or Podman API (TLS)",
+                5037: "adb's server", 3333: "OpenOCD's GDB server", 2331: "J-Link's GDB server"}
+PROC_TCP = ("/proc/net/tcp", "/proc/net/tcp6")
+
+
+def listening_daemons(sources=PROC_TCP, ports=None) -> list[int]:
+    """The ports of ``ports`` (DAEMON_PORTS) listening on this machine, from the kernel's TCP
+    tables (LISTEN is state 0A); none where there are no such tables (off Linux)."""
+    ports = DAEMON_PORTS if ports is None else ports
+    found = set()
+    for src in sources:
+        try:
+            rows = Path(src).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            f = row.split()
+            if len(f) > 3 and f[3] == "0A" and ":" in f[1]:
+                try:
+                    port = int(f[1].rsplit(":", 1)[1], 16)
+                except ValueError:
+                    continue
+                if port in ports:
+                    found.add(port)
+    return sorted(found)
 
 
 def secret_paths() -> set[str]:

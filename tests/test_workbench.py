@@ -9742,6 +9742,118 @@ class Lane(Base):
                 (binfmt / "WSLInterop").write_text("disabled\ninterpreter /init\n")
                 self.assertIsNone(context.interop_gap())
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_deploy_and_registry_logins_are_unreadable_but_what_a_build_reads_is_not(self):
+        # #992 (2026-11-22): a research pass found these readable from the lane; the second
+        # group a build or an install reads (the .npmrc trade), so it stays readable
+        home = self.fake_home()
+        hidden = [".config/.wrangler/config/default.toml", ".local/share/com.vercel.cli/auth.json",
+                  ".pulumi/credentials.json", ".terraformrc", ".config/helm/registry/config.json",
+                  ".config/dart/pub-credentials.json", ".m2/settings-security.xml", ".mylogin.cnf",
+                  ".dbt/profiles.yml", ".erlang.cookie", ".foundry/keystores/k", ".mc/config.json",
+                  ".supabase/access-token", ".netlify/config.json", ".config/netlify/config.json",
+                  ".serverlessrc", ".config/k6/config.json", ".ansible/galaxy_token",
+                  ".config/erlang/.erlang.cookie", ".config/openstack/clouds.yaml",
+                  ".config/hcloud/cli.toml", ".chef/credentials", ".config/infracost/credentials.yml",
+                  ".minikube/profiles/p/client.key", ".dots/tf.rc", ".dots/auth.json",
+                  ".dots/helm.json", ".dots/galaxy", ".dots/mc/config.json"]
+        kept = [".m2/settings.xml", ".gradle/gradle.properties", ".pulumi/plugins/x",
+                ".dbt/.user.yml", ".config/pypoetry/auth.toml", ".config/composer/auth.json",
+                ".nuget/NuGet/NuGet.Config", ".hex/hex.config", ".config/dart/pub-tokens.json",
+                ".foundry/bin/forge", ".npmrc"]
+        for rel in hidden + kept:
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text("x")
+        # where their variables moved them: the files the variables name are hidden (SECRET_VARS)
+        os.environ.update({"TF_CLI_CONFIG_FILE": str(home / ".dots/tf.rc"),
+                           "REGISTRY_AUTH_FILE": str(home / ".dots/auth.json"),
+                           "HELM_REGISTRY_CONFIG": str(home / ".dots/helm.json"),
+                           "ANSIBLE_GALAXY_TOKEN_PATH": str(home / ".dots/galaxy"),
+                           "MC_CONFIG_DIR": str(home / ".dots/mc")})
+        for v in ("TF_CLI_CONFIG_FILE", "REGISTRY_AUTH_FILE", "HELM_REGISTRY_CONFIG",
+                  "ANSIBLE_GALAXY_TOKEN_PATH", "MC_CONFIG_DIR"):
+            self.addCleanup(os.environ.pop, v, None)
+        task = self.bare_task("t-992", self.repo)
+        got = dict(zip(hidden + kept, self.reads_in_lane(task, [home / f for f in hidden + kept])))
+        self.assertEqual(got, {**{f: "refused" for f in hidden}, **{f: "read" for f in kept}})
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_maven_home_split_around_its_master_password_still_takes_a_first_build(self):
+        # #992 (2026-11-22): settings-security.xml hidden splits the writable ~/.m2, and a split
+        # home refuses a new entry: a first build's repository/ and ./mvnw's wrapper/ are made
+        home = self.fake_home()
+        (home / ".m2").mkdir()
+        task = self.bare_task("t-m2", self.repo)
+        self.assertIn(str(home / ".m2"), context.writable(task))     # no secret: whole
+        self.assertFalse((home / ".m2" / "repository").exists())      # and nothing made
+        (home / ".m2" / "settings-security.xml").write_text("master")
+        (home / ".m2" / "settings.xml").write_text("<settings/>")
+        w = context.writable(task)
+        self.assertNotIn(str(home / ".m2"), w)
+        self.assertIn(str(home / ".m2" / "repository"), w)
+        self.assertIn(str(home / ".m2" / "wrapper"), w)
+        self.assertNotIn(str(home / ".m2" / "settings-security.xml"), w)
+        script = ("import os, sys\nh = sys.argv[1]\nos.makedirs(h + '/repository/org/x')\n"
+                  "open(h + '/repository/org/x/x.pom', 'w').write('x')\n"
+                  "os.makedirs(h + '/wrapper/dists/m')\nopen(h + '/settings.xml').read()\n"
+                  "try:\n    open(h + '/settings-security.xml').read(); print('read')\n"
+                  "except PermissionError:\n    print('refused')\n")
+        out = subprocess.run(lane.wrap(w, [sys.executable, "-c", script, str(home / ".m2")],
+                                       context.readable(task)),
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual((out.returncode, out.stdout.strip()), (0, "refused"), out.stderr)
+
+    def test_the_agent_and_its_tests_get_the_cloud_sdks_metadata_lookup_off(self):
+        # #993 (2026-11-22): on a cloud VM the metadata endpoint hands out the machine's role
+        # credentials, and the lane doesn't restrict TCP; the tests run the agent's code alike
+        check = ('test "$AWS_EC2_METADATA_DISABLED" = true && test "$NO_GCE_CHECK" = true && '
+                 'test "$METADATA_SERVER_DETECTION" = none')
+        with mock.patch.dict(os.environ, {"AWS_EC2_METADATA_DISABLED": "false"}):
+            self.start("t-993", "ok", "--test", check, "--no-base-check")
+            st = wait_phase("t-993", {"review"})
+        self.assertTrue(st["tests"]["ok"], st["tests"])
+        task = store.Task("t-993")
+        with mock.patch.dict(os.environ, {"NO_GCE_CHECK": "false", "HELM_REGISTRY_CONFIG": "/x"}):
+            env = runner.agent_env(task)
+        self.assertEqual({k: env.get(k) for k in ("AWS_EC2_METADATA_DISABLED", "NO_GCE_CHECK",
+                                                  "METADATA_SERVER_DETECTION")},
+                         {"AWS_EC2_METADATA_DISABLED": "true", "NO_GCE_CHECK": "true",
+                          "METADATA_SERVER_DETECTION": "none"})
+        # helm's registry logins are the agent's own: helm stops when the user's, hidden, is given
+        self.assertEqual(env["HELM_REGISTRY_CONFIG"],
+                         str(context.runtime_dir(task) / "helm" / "registry.json"))
+        # and k6's config: `k6 run` stops when the user's, hidden, can't be read, and forgives
+        # only a missing default, so the agent's is made, an empty one
+        self.assertEqual(env["K6_CONFIG"], str(context.runtime_dir(task) / "k6.json"))
+        self.assertEqual(json.loads(Path(env["K6_CONFIG"]).read_text()), {})
+
+    def test_doctor_finds_the_local_daemons_listening_on_tcp_from_the_kernels_tables(self):
+        # #993 (2026-11-22): TCP reaches a Docker API or adb, which the lane's socket rule can't
+        tcp, tcp6 = Path(self.tmp.name) / "tcp", Path(self.tmp.name) / "tcp6"
+        head = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid\n"
+        tcp.write_text(head + "   0: 0100007F:13AD 00000000:0000 0A 00000000:00000000 00:0 0 1000\n"
+                              "   1: 0100007F:0947 00000000:0000 0A 00000000:00000000 00:0 0 1000\n"
+                              "   2: 0100007F:0D05 0100007F:A000 01 00000000:00000000 00:0 0 1000\n"
+                              "   3: 00000000:0016 00000000:0000 0A 00000000:00000000 00:0 0 0\n")
+        tcp6.write_text(head + "   0: 00000000000000000000000000000000:091B "
+                               "00000000000000000000000000000000:0000 0A 00000000:00000000 00:0 0 1000\n")
+        # adb (5037) and Docker's API (2375) listen, J-Link's 2331 on IPv6; 3333 is a connection
+        # (01), not a listener, and ssh (22) isn't a daemon the list names
+        self.assertEqual(context.listening_daemons((str(tcp), str(tcp6))), [2331, 2375, 5037])
+        self.assertEqual(context.listening_daemons((str(Path(self.tmp.name) / "none"),)), [])
+
+    @unittest.skipUnless(os.path.exists("/proc/net/tcp"), "the kernel's TCP tables: Linux")
+    def test_doctor_finds_a_real_listening_socket_on_this_machine(self):
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+            self.assertEqual(context.listening_daemons(ports={port: "x"}), [])   # bound, not listening
+            s.listen(1)
+            self.assertEqual(context.listening_daemons(ports={port: "x"}), [port])
+
 
 class CheckoutVenv(Base):
     """#490 (the audit of 1.90): the user's activated venv, when it is their checkout's, stays out
