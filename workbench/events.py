@@ -148,6 +148,21 @@ def normalize(raw: dict, round_no: int):
     return None
 
 
+def compaction_failed(raw) -> bool:
+    """Whether an `error` event is OpenCode's compaction failing: `compaction.failed` in OpenCode
+    2.3 ("Compaction produced no summary", "... did not match the required template", "...
+    reached the output token limit"), or any error whose message opens "Compaction " (a provider
+    blocking the summary, a build that types it otherwise). The session is left over its window
+    and can't go on: OpenCode exited 1 on it and the task failed, or exited 0 and auto-fix sent
+    the failing tests back to it (2026-11-21, #969)."""
+    if not isinstance(raw, dict) or raw.get("type") != "error":
+        return False
+    err = raw.get("error")
+    if isinstance(err, dict) and err.get("type") == "compaction.failed":
+        return True
+    return _message(err).startswith("Compaction ")
+
+
 def _message(err) -> str:
     """An event's error, {type, message} in OpenCode 2.3, as its message."""
     err = err or {}

@@ -7,6 +7,7 @@ import re
 import glob
 import fnmatch
 import http.client
+import http.server
 import io
 import json
 import queue
@@ -16,6 +17,7 @@ import os
 import shutil
 import signal
 import socket
+import socketserver
 import stat
 import subprocess
 import sys
@@ -36,6 +38,27 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from workbench import runner, ask_mcp, audio, cli, context, events, gitops, hardware, lane, progress, store, transcript  # noqa: E402
+
+class _Listens:
+    """A test server that listens as soon as it is made. HTTPServer's own server_bind looks the
+    address's name up (socket.getfqdn) between bind and listen, which took 35 s on GitHub's macOS
+    runners, per server: the nightly's macOS shards spent minutes before their fake model servers
+    and services answered (#950, 2026-11-21). Nothing in the tests reads server_name. Not patched
+    into http.server for the whole suite: chat.py's own server must still be caught doing the
+    lookup (WebChat, #236)."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+class HTTPServer(_Listens, http.server.HTTPServer):
+    pass
+
+
+class ThreadingHTTPServer(_Listens, http.server.ThreadingHTTPServer):
+    pass
+
 
 FAKE = shlex.join([sys.executable, str(ROOT / "tests" / "fake_opencode.py")])  # a path may hold spaces
 TEST_CMD = "grep -qx 42 answer.txt"
@@ -4123,6 +4146,149 @@ class Context(Base):
                if e.get("kind") == "compacted"]
         self.assertEqual(len(evs), 1)
         self.assertIn("OpenCode compacted the agent's session mid-round at 51%", evs[0]["text"])
+
+    def compaction_failed(self, name, *, edit, exit_code=None):
+        """A task whose first session's compaction fails (#969), to review."""
+        if edit:
+            os.environ["FAKE_COMPACT_EDIT"] = "1"
+        if exit_code is not None:
+            os.environ["FAKE_COMPACT_EXIT"] = str(exit_code)
+        self.start(name, "compactfail", "--test", TEST_CMD)
+        st = wait_phase(name, {"review", "stuck", "failed"}, timeout=60)
+        evs = store.read_jsonl(store.Task(name).dir / "events.jsonl")[0]
+        return st, evs
+
+    def assert_handed_over_after_the_failed_compaction(self, name, st, evs, diff):
+        self.assertEqual((st["phase"], st["handovers"]), ("review", 1))  # never failed
+        first, second = self.runs()
+        self.assertFalse(second["session"])                     # a fresh one, not the dead one
+        p = second["prompt"]
+        self.assertTrue(p.startswith("You are picking this task up in a fresh session (OpenCode "
+                                     "failed to compact the last session)"), p[:200])
+        self.assertIn("Write the answer to answer.txt.", p)     # the spec
+        self.assertIn(diff, p)                                  # the work so far
+        self.assertIn("Your last session filled up", p.split("## Now")[1])
+        self.assertIn("> Reading the whole test file next.", p)  # its last words
+        kinds = [e["kind"] for e in evs]
+        # the tests ran once, on the fresh session's work: never sent back to the dead one
+        self.assertNotIn("autofix", kinds)
+        self.assertEqual(kinds.count("tests"), 1)
+        self.assertEqual(st.get("auto_fixes", 0), 0)
+        fresh = [e for e in evs if e["kind"] == "fresh"]
+        self.assertTrue(fresh[0]["compacted"])                  # a compaction: results.step's
+        from workbench import results
+        self.assertTrue(results.step(store.Task(name), landed=False)["compacted"])
+        self.assertIn("OpenCode's compaction of the agent's session failed (Compaction produced "
+                      "no summary): a fresh one takes over",
+                      run_wb("watch", name, "--once", "--no-color"))
+
+    def test_a_failed_compaction_before_any_edit_that_exits_1_hands_over_instead_of_failing(self):
+        # #969 (a bench replay, 2026-11-21): the agent read a long test file whole while
+        # exploring, OpenCode's compaction failed ("Compaction produced no summary") and it
+        # exited 1: the task failed after 4.5 minutes, no handover possible before a change
+        st, evs = self.compaction_failed("t-969a", edit=False, exit_code=1)
+        self.assert_handed_over_after_the_failed_compaction("t-969a", st, evs, "No uncommitted changes yet.")
+        self.assertFalse([r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                          if r["task"] == "t-969a" and r["kind"] == "failed"])
+
+    def test_a_failed_compaction_after_an_edit_that_exits_0_hands_over_instead_of_auto_fixing(self):
+        # #969 (night-e2-sight, ember-4a, night-e3-combo-n): OpenCode exited 0 after the error,
+        # the tests failed on the half-done work and auto-fix sent them back to the dead session
+        st, evs = self.compaction_failed("t-969b", edit=True)
+        self.assert_handed_over_after_the_failed_compaction("t-969b", st, evs, "+41")
+
+    def test_a_failed_compaction_after_an_edit_that_exits_1_hands_over_too(self):
+        # #969: either exit, before or after a change
+        st, evs = self.compaction_failed("t-969c", edit=True, exit_code=1)
+        self.assert_handed_over_after_the_failed_compaction("t-969c", st, evs, "+41")
+
+    def test_a_failed_compaction_before_any_edit_that_exits_0_hands_over_too(self):
+        # #969: either exit, before or after a change
+        st, evs = self.compaction_failed("t-969d", edit=False)
+        self.assert_handed_over_after_the_failed_compaction("t-969d", st, evs, "No uncommitted changes yet.")
+
+    def test_a_failed_compaction_hands_over_even_when_claude_asked_to_keep_the_context(self):
+        # #969: --keep-context holds a session that can go on; one whose compaction failed can't
+        self.start("t-969k", "ok", "--test", TEST_CMD)
+        wait_phase("t-969k", {"review"})
+        os.environ.update(FAKE_SCENARIO="compactfail", FAKE_COMPACT_EXIT="1")
+        run_wb("feedback", "t-969k", "--message", str(self.feedback), "--keep-context")
+        st = wait_phase("t-969k", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["handovers"]), ("review", 1))
+        third = self.runs()[2]
+        self.assertFalse(third["session"])
+        self.assertIn("1. Add a trailing comment line.", third["prompt"].split("## Now")[1])
+
+    def test_failed_compactions_past_the_handover_limit_are_stuck_and_say_so_never_failed(self):
+        # #969: every fresh session reads the same and fails to compact again: HANDOVER_MAX
+        # still holds, and the stuck report names the failed compaction
+        os.environ["FAKE_REFAIL"] = "1"
+        st, evs = self.compaction_failed("t-969m", edit=False, exit_code=1)
+        self.assertEqual((st["phase"], st["handovers"]), ("stuck", runner.HANDOVER_MAX))
+        self.assertIn(f"handed over to a fresh session {runner.HANDOVER_MAX} times in this round "
+                      "without finishing (the last when OpenCode's compaction failed: Compaction "
+                      "produced no summary): the step is too big", st["last"])
+        self.assertEqual(len(self.runs()), runner.HANDOVER_MAX + 1)
+        self.assertNotIn("autofix", [e["kind"] for e in evs])
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-969m"]
+        self.assertEqual([r["kind"] for r in rows if r["kind"] != "checkin"], ["stuck"])
+
+    def stuck_on_failed_compactions(self, name):
+        """A task stuck past HANDOVER_MAX, its last session's compaction failed (#969), with
+        the next runs ordinary ones."""
+        os.environ["FAKE_REFAIL"] = "1"
+        st, _ = self.compaction_failed(name, edit=False, exit_code=1)
+        self.assertEqual(st["phase"], "stuck")
+        dead = st["session"]
+        self.assertTrue(dead)                                   # the dead session is still current
+        for k in ("FAKE_REFAIL", "FAKE_COMPACT_EXIT"):
+            os.environ.pop(k, None)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        return dead
+
+    def assert_the_next_run_is_handed_to_a_fresh_session(self, dead):
+        last = self.runs()[-1]
+        self.assertFalse(last["session"])                       # not --session <dead>
+        self.assertTrue(last["prompt"].startswith("You are picking this task up in a fresh "
+                                                  "session (OpenCode failed to compact the last "
+                                                  "session)"), last["prompt"][:200])
+        self.assertNotIn(dead, json.dumps(last))
+
+    def test_feedback_after_failed_compactions_past_the_limit_goes_to_a_fresh_session(self):
+        # #969 (review, 2026-11-21): stuck past HANDOVER_MAX, the dead session stayed in status
+        # `session`; wb feedback clears `context`, the export counts only completed compactions
+        # and no_room held with nothing changed, so the feedback round went back to the session
+        # whose compaction failed, and failing again there (or a context-length exit 1) failed
+        # the task, the #969 outcome
+        dead = self.stuck_on_failed_compactions("t-969f")
+        run_wb("feedback", "t-969f", "--message", str(self.feedback))
+        st = wait_phase("t-969f", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review")
+        self.assert_the_next_run_is_handed_to_a_fresh_session(dead)
+        self.assertIn("1. Add a trailing comment line.", self.runs()[-1]["prompt"].split("## Now")[1])
+
+    def test_feedback_keeping_the_context_after_failed_compactions_still_goes_to_a_fresh_session(self):
+        # #969: a session whose compaction failed can't be kept, --keep-context or not
+        dead = self.stuck_on_failed_compactions("t-969g")
+        run_wb("feedback", "t-969g", "--message", str(self.feedback), "--keep-context")
+        st = wait_phase("t-969g", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review")
+        self.assert_the_next_run_is_handed_to_a_fresh_session(dead)
+
+    def test_next_after_failed_compactions_goes_to_a_fresh_session_and_says_why(self):
+        # #969 (review, 2026-11-21): wb next clears `context` too, and said "to the same
+        # session" for the dead one. wb next takes a step under review, so the stuck task is put
+        # there by hand: what the next step's fresh_reason makes of the dead session is the test
+        dead = self.stuck_on_failed_compactions("t-969n")
+        store.Task("t-969n").set_status(phase="review")
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also write the question to question.txt.\n")
+        out = run_wb("next", "t-969n", "--spec", str(step2), "-m", "feat: step one")
+        self.assertIn("to a fresh session (OpenCode failed to compact the last session)", out)
+        st = wait_phase("t-969n", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review")
+        self.assert_the_next_run_is_handed_to_a_fresh_session(dead)
+        self.assertIn("question.txt", self.runs()[-1]["prompt"])
 
     def test_a_fresh_round_run_again_after_its_server_died_is_handed_over_once(self):
         # #780 (the second 2026-11-21 audit): a round that began fresh, revived before its first
@@ -10027,7 +10193,7 @@ class Images(Base):
         # #925: IncompleteRead is an HTTPException, not an OSError: a server killed mid-body gave
         # Claude a traceback from wb image / wb audio instead of one line
         import threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import images, media
 
         class H(BaseHTTPRequestHandler):
@@ -10076,7 +10242,7 @@ class Images(Base):
         # #749 (the 2026-11-21 audit, finding 96): images.json's `unload` was checked but never
         # called, so an image server kept 6-12 GB beside the next task's coding model
         import base64, threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import media
         got, fail = [], [False]
 
@@ -10139,7 +10305,7 @@ class Images(Base):
         # #753 (the 2026-11-21 audit, finding 100): a Forge url got an OpenAI body and "sent no
         # image", though listed as ready
         import base64, threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         got = []
 
         class H(BaseHTTPRequestHandler):
@@ -10174,7 +10340,7 @@ class Images(Base):
         """A fake ComfyUI on a port of its own: ``history(n)`` is what its nth /history poll
         answers; what it was sent is in the list returned."""
         import threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         got, polls = [], []
 
         class H(BaseHTTPRequestHandler):
@@ -10311,7 +10477,7 @@ class Images(Base):
         # on Windows under WSL2's NAT went unseen, and the skill proposed the 11 GB install again
         import socket
         import threading
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import images, models
 
         def serving(host, code, body):
@@ -10377,7 +10543,7 @@ class Images(Base):
 
     def test_a_server_engine_and_the_failures(self):
         import base64, threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         got = []
 
         class H(BaseHTTPRequestHandler):
@@ -10412,7 +10578,7 @@ class Images(Base):
         # that isn't JSON a traceback, a 400 only "HTTP Error 400: Bad Request"; and a server
         # started with an API key was listed as ready, then failed 401 on every generation
         import base64, threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import audio, images
         seen = []
 
@@ -11134,7 +11300,7 @@ class Audio(Base):
         # listener kept its weights after the batch let the GPU lease go
         import threading
         import wave as _wave
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         buf = io.BytesIO()
         with _wave.open(buf, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\x00\x30" * 8000)
@@ -11182,7 +11348,7 @@ class Audio(Base):
     def test_a_server_engine_a_server_listener_and_the_unload_after_the_batch(self):
         import threading
         import wave as _wave
-        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from http.server import BaseHTTPRequestHandler
         buf = io.BytesIO()
         with _wave.open(buf, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\x00\x30" * 8000)
@@ -18396,6 +18562,16 @@ class WebChat(Base):
             for srv in servers:
                 srv.server_close()
 
+    def test_the_suites_own_test_servers_listen_without_looking_their_host_name_up(self):
+        # #950: 35 s per server on GitHub's macOS runners, before the server listened
+        with mock.patch("socket.getfqdn", side_effect=AssertionError("looked up")):
+            for cls in (HTTPServer, ThreadingHTTPServer):
+                srv = cls(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+                try:
+                    self.assertEqual(srv.server_name, "127.0.0.1")
+                finally:
+                    srv.server_close()
+
     def test_a_listener_or_server_under_a_recycled_or_foreign_pid_is_gone(self):
         # #532: listener.json's pid, live again under a root daemon (EPERM), read as a session
         # listening; one of ours started since, as the listener too
@@ -19089,7 +19265,7 @@ class WebChat(Base):
 
             def log_message(self, *a):
                 pass
-        svc = http.server.HTTPServer(("127.0.0.1", 0), Svc)
+        svc = HTTPServer(("127.0.0.1", 0), Svc)
         threading.Thread(target=svc.serve_forever, daemon=True).start()
         self.addCleanup(svc.server_close)
         self.addCleanup(svc.shutdown)
@@ -19246,7 +19422,7 @@ class WebChat(Base):
 
             def log_message(self, *a):
                 pass
-        svc = http.server.HTTPServer(("127.0.0.1", 0), Svc)
+        svc = HTTPServer(("127.0.0.1", 0), Svc)
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(tmp / "c.pem", tmp / "k.pem")
         svc.socket = tls.wrap_socket(svc.socket, server_side=True)
@@ -19685,7 +19861,7 @@ class WebChat(Base):
     def test_wb_chat_on_never_shows_a_link_to_another_programs_server(self):
         # #200 (the 2026-11-19 audit): a bare connect counted any program on the port as the chat,
         # and a started server was reported after a fixed half second, up or not
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler
 
         class Other(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -20711,7 +20887,7 @@ class Top(Base):
     def test_a_server_with_eight_aliases_is_asked_once_a_probe_and_a_stalled_one_never_holds_the_tick(self):
         # #561: 8 entries on one llama-swap made 8 GET /v1/models a probe, one after another, and
         # a server that accepted and then stalled held the tick (q, the GPU rows) up to 16 s
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from http.server import BaseHTTPRequestHandler
         from workbench import models, top
         asked = []
 
@@ -21619,6 +21795,20 @@ class Detector(unittest.TestCase):
             events.normalize(raw, 1)
         self.assertEqual(events.normalize({"type": "step_finish", "part": {"tokens": 5}}, 1)["in"], 0)
         self.assertEqual(events.normalize({"type": "error", "error": "boom"}, 1)["text"], "boom")
+
+    def test_only_opencodes_compaction_errors_read_as_a_failed_compaction(self):
+        # #969 (2026-11-21): "Compaction produced no summary" (a bench replay, night-e2-sight),
+        # "... reached the output token limit" (ember-4a): each left a session that can't go on
+        err = lambda e: {"type": "error", "timestamp": 1, "sessionID": "s", "error": e}  # noqa: E731
+        for msg in ("Compaction produced no summary", "Compaction summary reached the output token limit",
+                    "Compaction summary did not match the required template"):
+            self.assertTrue(events.compaction_failed(err({"type": "compaction.failed", "message": msg})))
+            self.assertTrue(events.compaction_failed(err({"type": "unknown", "message": msg})))
+        self.assertTrue(events.compaction_failed(err({"type": "provider.content-filter",
+                                                      "message": "Compaction summary was blocked by the provider"})))
+        for raw in (err("boom"), err({"type": "provider.transport", "message": "Timed out"}), err(None),
+                    {"type": "retry", "error": {"type": "compaction.failed", "message": "x"}}, None, 5):
+            self.assertFalse(events.compaction_failed(raw))
 
     def test_four_different_files_with_one_long_header_are_not_the_same_call(self):
         # #497 (the audit of 1.90, reproduced): the signature was the input's JSON cut to 400
