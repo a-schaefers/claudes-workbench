@@ -3,12 +3,14 @@ past its 60 minutes and was cancelled on every run, and unittest prints failures
 so about 40 failures and an 18-minute hang were never reported).
 
 WB_TEST_HANG_SECS=N: a test still running after N seconds gets every thread's stack on stderr
-and fails with TimeoutError naming it, its tearDown runs, and the suite goes on, instead of a hang
-eating the job's budget unnamed.
+and fails with Hung naming it, its tearDown runs, and the suite goes on, instead of a hang
+eating the job's budget unnamed. Hung is a BaseException: the TimeoutError it was, an OSError,
+was swallowed by the `except OSError` the hang sat in (socket.getfqdn's own, on the macOS
+nightly, 2026-11-22), and the test passed after 600 s.
 
 WB_TEST_SHARD=K/N: discovery (`python3 -m unittest`, no names) runs only the K-th of N shards,
 every N-th test of the discovered order, so a suite splits across a matrix (check.yml's six, the
-macOS nightly's three), as does naming the package (`python3 -m unittest tests`). Tests, not
+macOS nightly's five), as does naming the package (`python3 -m unittest tests`). Tests, not
 classes: dealt whole by size, one class of slow end-to-end tests (Lifecycle, 147) weighed on one
 shard; dealt one by one, each shard gets a slice of every class (no test has class or module
 fixtures). Naming test modules, classes or tests on the command line runs exactly those."""
@@ -21,6 +23,11 @@ import unittest
 
 HANG_SECS = int(os.environ.get("WB_TEST_HANG_SECS") or 0)
 
+
+class Hung(BaseException):
+    """A test past WB_TEST_HANG_SECS: past every `except OSError` or `except Exception` it is in;
+    unittest records it as the test's error."""
+
 if HANG_SECS and hasattr(signal, "SIGALRM"):
     _run = unittest.TestCase.run
 
@@ -30,7 +37,7 @@ if HANG_SECS and hasattr(signal, "SIGALRM"):
 
         def hung(signum, frame):
             faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
-            raise TimeoutError(f"{self.id()} hung past WB_TEST_HANG_SECS ({HANG_SECS} s)")
+            raise Hung(f"{self.id()} hung past WB_TEST_HANG_SECS ({HANG_SECS} s)")
         before = signal.signal(signal.SIGALRM, hung)
         signal.alarm(HANG_SECS)
         try:

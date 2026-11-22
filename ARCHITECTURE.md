@@ -7728,7 +7728,9 @@ prints failures only at the end, about 40 failures and an 18-minute hang were ne
 (#950). Every suite job (`check.yml`, `opencode.yml`, the nightly's three, through `WSLENV` and
 `ci-wsl.sh` for WSL) sets `WB_TEST_HANG_SECS` (600): `tests/__init__.py` arms `SIGALRM` around
 each test, and one still running then gets every thread's stack on stderr (`faulthandler`) and
-fails with `TimeoutError: <test id> hung past WB_TEST_HANG_SECS (N s)`, its tearDown run and the
+fails with `tests.Hung: <test id> hung past WB_TEST_HANG_SECS (N s)` (a `BaseException`: as
+a `TimeoutError`, an `OSError`, it was swallowed by `socket.getfqdn`'s own `except OSError`
+and the test passed after 600 s, the macOS nightly, 2026-11-22), its tearDown run and the
 suite going on. Their limits are 60 minutes, `check.yml`'s shards' 30. The credential-read enforcement test requires Landlock, and the Snap launcher test requires Linux.
 The killed-runner test checks immediate kernel cleanup on Linux and cleanup after reaping on both platforms. Neither is a required check:
 each pull request would wait on a macOS and a Windows runner. Both Linux jobs install the OpenCode the real-OpenCode tests were last verified with (`OPENCODE_VERSION`,
