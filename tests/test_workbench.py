@@ -18241,12 +18241,22 @@ class KeepAwake(Base):
         while "released" not in log.read_text() and time.monotonic() < end:
             time.sleep(0.05)
         self.assertIn("released", log.read_text())           # and let go when it ends
+        log.unlink()                                          # the runner's hold logs afresh
         with mock.patch.object(hardware, "system", return_value="wsl"), \
                 mock.patch.object(context, "interop_on", return_value=True), \
                 mock.patch.object(hardware, "powershell", return_value=str(ps)):
             out = self.start("t-night", "ok", "--backlog", "night", "--queue")
         self.assertNotIn(cli.WSL_SLEEPS, out)                 # Windows is kept awake: no warning
         wait_phase("t-night", {"review"})
+        # The runner's own hold ends just after the runner, and the fake writes "released" into
+        # this test's directory then: tearDown waits for runners, not for it, so on macOS (#950,
+        # 2026-11-21) the write could land while tearDown removed the directory, recreating
+        # ps.log ("Directory not empty"). Wait for it: that it lets go is what this test checks.
+        end = time.monotonic() + 30
+        while "released" not in (log.read_text() if log.exists() else "") and \
+                time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertIn("released", log.read_text() if log.exists() else "")
 
     def test_with_no_tool_nothing_is_held_and_nothing_fails(self):
         with mock.patch("shutil.which", return_value=None), \
