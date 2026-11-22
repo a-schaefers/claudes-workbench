@@ -7652,17 +7652,29 @@ the copy you want repoints the links; the state directory and the skill library 
 ## The tests
 
 Run from the repo root (`tests/__init__.py` makes `tests` a package; the other modules import
-`tests.test_workbench`): `python3 -m unittest` (the whole suite, six modules; 24 to 28 minutes on
-CI's Ubuntu at 24dfb6d, 7.5 at 594c0bc: its tests doubled in a day, #950),
+`tests.test_workbench`): `python3 -m unittest` (the whole suite, six modules; about 24 minutes in one process at
+d80b924, 7.5 at 594c0bc: its tests doubled in a day, #950, and a fifth of it was one test sitting
+out a 300 s sleep, 2026-11-21),
 one class or test with `python3 -m unittest tests.test_workbench.Context[.test_…]`, by name with
 `-k handover`. The mod's tests: `claude plugin validate mod && claude plugin test mod`
 (`mod/hooks/register.test.tsx`). The web chat in real browsers: `PLAYWRIGHT=…/node_modules/playwright
 node tests/e2e_chat.mjs`.
 
-**CI.** `.github/workflows/check.yml` runs `python3 -m unittest` and `claude plugin validate mod
-&& claude plugin test mod` on every push to main and every pull request, on Python 3.11 (the
-floor, through `actions/setup-python`: a 3.12+ API can't slip in) with the Claude Code the
-mod was last verified with (`CLAUDE_CODE_VERSION`); `nightly.yml` runs the same once a day on the
+**CI.** `.github/workflows/check.yml` runs on every push to main and every pull request: its
+`suite` job runs `python3 -m unittest` in six shards (`WB_TEST_SHARD=K/6`, a runner each, about
+five minutes; in one job it took 28 to 32 minutes at d80b924), on Python 3.11 (the floor, through
+`actions/setup-python`: a 3.12+ API can't slip in); its `mod` job runs `claude plugin validate mod
+&& claude plugin test mod` with the Claude Code the mod was last verified with
+(`CLAUDE_CODE_VERSION`); and its `check` job, the required one, `needs` both, runs `always()`
+(a skipped required check passes) and is green only when both succeeded, so the ruleset waits on
+one name whatever the shards are called (`suite (1)`…). `fail-fast` is off: a failed shard leaves
+the others to name their own failures. A pull request that changes only what no test reads
+(`README.md`, `docs/releases/`, the images in `docs/`: its merge commit against its base, the
+`Scope` step) runs `tests.test_docs` and `tests.test_workflows` in shard 1 and nothing else; the
+suite reads ARCHITECTURE.md, CLAUDE.md, the skill, the handbook and the release checklist, so a
+change to any of them runs it all, as does every push to main. No path filter on the trigger: a
+required check must report on every pull request.
+`nightly.yml` runs the same once a day on the
 newest Claude Code and the runner's newer python3, so a red nightly means a new release broke the
 mod, not that main is broken. Its `macos` job runs the Python suite on macOS on Apple silicon,
 Python 3.11, with OpenCode (`install-opencode.sh` takes this platform's asset, the
@@ -7672,8 +7684,10 @@ user who isn't root, a clone in WSL's own file system, OpenCode; no third-party 
 the repo's settings refuse). Either failing turns the run red, and a release waits for a
 green nightly on its commit (`docs/release-checklist.md`; the 2026-11-19 audit: the macOS job
 could fail unseen and ran without OpenCode, and nothing ran WSL). The `macos` job is a matrix of
-three shards (`WB_TEST_SHARD=K/3`: `tests/__init__.py`'s `load_tests` deals whole test classes,
-largest first, to the lightest shard; discovery is sharded, and so is the package named,
+three shards (`WB_TEST_SHARD=K/3`: `tests/__init__.py`'s `load_tests` deals the i-th test of
+discovery's sorted order to shard i mod N, so each shard gets a slice of every class; dealt as
+whole classes by size until 2026-11-21, Lifecycle's 147 runner-starting tests weighed on one
+shard, and no test has class or module fixtures to keep together; discovery is sharded, and so is the package named,
 `python3 -m unittest tests`, dealt once by the outermost `load_tests` (nested, it once sharded
 twice and each shard ran about a third of its tests, the review of #950); named modules,
 classes or tests run as named), each
@@ -7684,7 +7698,7 @@ prints failures only at the end, about 40 failures and an 18-minute hang were ne
 `ci-wsl.sh` for WSL) sets `WB_TEST_HANG_SECS` (600): `tests/__init__.py` arms `SIGALRM` around
 each test, and one still running then gets every thread's stack on stderr (`faulthandler`) and
 fails with `TimeoutError: <test id> hung past WB_TEST_HANG_SECS (N s)`, its tearDown run and the
-suite going on. Their limits are 60 minutes. The credential-read enforcement test requires Landlock, and the Snap launcher test requires Linux.
+suite going on. Their limits are 60 minutes, `check.yml`'s shards' 30. The credential-read enforcement test requires Landlock, and the Snap launcher test requires Linux.
 The killed-runner test checks immediate kernel cleanup on Linux and cleanup after reaping on both platforms. Neither is a required check:
 each pull request would wait on a macOS and a Windows runner. Both Linux jobs install the OpenCode the real-OpenCode tests were last verified with (`OPENCODE_VERSION`,
 from its GitHub release through `scripts/install-opencode.sh`, checked against the tarball's hash
@@ -7711,7 +7725,7 @@ the shared lease, OpenCode's system and global config, PATH's `bin` directories,
 --write-tree`, 2.38, and `GIT_NO_LAZY_FETCH`, 2.44, are checked; `wb doctor` is BAD below it, and
 the skill library no longer needs 2.28's `init -b`: #527, the audit of v1.90). Each Linux job's `Landlock`
 step prints the runner's Landlock ABI, or that it has none and the Lane tests skip. `check.yml`'s
-`Git LFS` step installs git-lfs when the runner image lacks it (the LFS test skips without it,
+`suite` job's `Git LFS` step installs git-lfs when the runner image lacks it (the LFS test skips without it,
 #382). The tests that hide credentials under the home directory also skip, saying why, when the home lies in a temp root (`home_outside_the_lane`: the lane writes those whole), and a profile without a git identity gets a scratch one for the run (the 2026-11-19 audit: Codex's clean profile under `/tmp` failed 11 isolation tests and seven on "Author identity unknown"). `chat.yml`
 runs the browser test (WebKit and Chromium, through the Playwright pinned there as
 `PLAYWRIGHT_VERSION`) on each pull request and push to main that changes `chat.py`, `webpush.py`,
@@ -7746,7 +7760,8 @@ main (*Shipping to main*).
 - `tests/test_sizing.py`: the slice guess and its correction from real steps.
 - `tests/test_workflows.py`: the merge gate, in plain text (no YAML library): every action pinned
   to a commit with its version, every workflow with its own permissions, `check` never
-  path-filtered and required by the ruleset from GitHub Actions, the ruleset with no bypass, the
+  path-filtered and required by the ruleset from GitHub Actions, green only when every `suite`
+  shard and `mod` are, the shards dealing each test once, the ruleset with no bypass, the
   plugin with no `version` (so installs track main), and `owner-merge.yml` approving only the
   owner's pull requests without running their code.
 - `tests/test_docs.py`: the docs cover the code: every `wb` command and flag (from `cli.main`'s
@@ -7916,7 +7931,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 
 - **The ruleset** (`.github/rulesets/main.json`, on the default branch): no deletion, no force
   push, a pull request with one approval (stale approvals dismissed on push), and `check` green
-  from GitHub Actions (integration 15368, so a status posted by anyone else doesn't count). No
+  from GitHub Actions (integration 15368, so a status posted by anyone else doesn't count):
+  `check.yml`'s summary job over its six `suite` shards and `mod` (*The tests*). No
   bypass actor: the owner and every agent get the same rule.
 - **Auto-merge for the owner only.** `.github/workflows/owner-merge.yml` (`pull_request_target`)
   approves a pull request whose author and event sender are both user id 26800291 (a-schaefers;
@@ -8117,7 +8133,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **The Python floor** (3.11) → the launchers' guard (`bin/wb`, `bin/wb-ask-mcp`), `check.yml`'s
   and the `macos` job's `python-version`, *The tests*, the README's *What you need*. A new
   OpenCode major → the README's *What you need* too.
-- **The merge gate** (`owner-merge.yml`, the ruleset, `check.yml`'s job name) →
+- **The merge gate** (`owner-merge.yml`, the ruleset, `check.yml`'s `check` job and what it
+  `needs`, the shard count in `suite` and `WB_TEST_SHARD`) →
   `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
 - **`mod/` for users** → nothing: plugin.json has no `version`, so every merge reaches them
   (*Installing*); adding one would freeze them on it. **A release** (by hand, when the owner

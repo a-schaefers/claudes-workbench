@@ -69,7 +69,7 @@ jobs:
     # 21 minutes without OpenCode (no inotify there: waits poll), past 30 with it (2026-11-20),
     # then past 60 once the suite doubled, cancelled every run with nothing reported: unittest
     # prints failures only at the end (#950). So three shards (tests/__init__.py, WB_TEST_SHARD:
-    # whole classes, dealt by size), each test's name as it runs (-v), and a test hung past
+    # every third test), each test's name as it runs (-v), and a test hung past
     # WB_TEST_HANG_SECS fails with every thread's stack instead of eating the budget.
     timeout-minutes: 60
     strategy:
