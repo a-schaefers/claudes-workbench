@@ -7785,7 +7785,11 @@ deletes the temp dir; it kills nothing, so a test stops its own `hang`/`slow` ta
 `SystemExit`, its message on stderr: `assertRaises(SystemExit)` + `redirect_stderr`).
 `wait_phase(name, phases, timeout=30)` waits until the phase is one of `phases` and the runner has
 cleared its pid (so it can't wait for `running`: `running(name)` does, until the agent's pid is
-set too). `wait_gone(pid)` waits for a process to end; `backdate(name)` ages the last status
+set too); both read status.json every `POLL` (0.05 s: at 0.2, ~470 waits each overshot by 0.1 s).
+The test servers (`HTTPServer`, `ThreadingHTTPServer`: `_Listens`) serve with a 0.02 s tick, so a
+tearDown's `shutdown()` doesn't wait out the default 0.5. A test that waits out a production
+cap it isn't about (`STOP_SETTLE`, `SIGN_SECS`, `OPTIMIZE_EXIT`) patches it short.
+`wait_gone(pid)` waits for a process to end; `backdate(name)` ages the last status
 change past `cli.REAP_GRACE`, for the dead-runner tests. `write_skill`,
 `RealOpenCode.run_calls`, and per-class helpers.
 

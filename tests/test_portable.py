@@ -964,7 +964,10 @@ class Real(unittest.TestCase):
         self.assertFalse(stopped.exists())
         self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}},
                     {"s": {"stop": f"touch {stopped}"}})
-        models.free_gpu(say=lambda m: None)
+        # this stop leaves the server answering: free_gpu waited out all of STOP_SETTLE's 30 s
+        # for it to go quiet (2026-11-21); what it waits for is another test's (#898)
+        with mock.patch.object(models, "STOP_SETTLE", 1):
+            models.free_gpu(say=lambda m: None)
         self.assertTrue(stopped.exists())
 
     def test_an_alias_is_checked_loaded_and_placed_by_the_id_its_server_knows(self):
@@ -2870,10 +2873,14 @@ class Optimize(unittest.TestCase):
         m = models.discover()["ollama/m"]
         from workbench import cli, optimize
         held = {"123": {"task": optimize.HOLDER, "model": None, "start": None}}
+        waited = []  # pid 123 is a real process here (a kernel thread): waiting on it took all of
+        # OPTIMIZE_EXIT's 30 s (2026-11-21). That it is waited for is #161's
         with mock.patch.object(cli, "_gpu_holders", lambda me=None, of=None: held), \
-                mock.patch.object(optimize, "stop", lambda: 123) as stop:
+                mock.patch.object(optimize, "stop", lambda: 123) as stop, \
+                mock.patch.object(cli, "wait_exit", lambda pid, secs: waited.append((pid, secs))):
             self.assertEqual(cli._preempt_bench(m, "t"),
                              "note: stopped wb optimize (what it measured is kept) to make room")
+        self.assertEqual(waited, [(123, cli.OPTIMIZE_EXIT)])
 
 
 def _strict(name):

@@ -51,6 +51,11 @@ class _Listens:
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
+    def serve_forever(self, poll_interval=0.02):
+        # shutdown() waits for the loop's next tick: 0.25 s on average at the default 0.5, paid by
+        # every server a tearDown stops, one after another (2026-11-21)
+        super().serve_forever(poll_interval)
+
 
 class HTTPServer(_Listens, http.server.HTTPServer):
     pass
@@ -118,13 +123,17 @@ def long_code(repo: Path, name: str = "lib.py") -> None:
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "long code"], check=True)
 
 
+# a status.json read is cheap: at 0.2 s, ~470 waits each overshot by 0.1 s on average (2026-11-21)
+POLL = 0.05
+
+
 def wait_phase(name, phases, timeout=30):
     deadline = time.time() + timeout
     while time.time() < deadline:
         st = store.Task(name).status
         if st.get("phase") in phases and not st.get("pid"):
             return st
-        time.sleep(0.2)
+        time.sleep(POLL)
     raise AssertionError(f"{name} never reached {phases}: {store.Task(name).status}")
 
 
@@ -146,7 +155,7 @@ def running(name, timeout=20) -> dict:
         st = store.Task(name).status
         if st.get("phase") == "running" and st.get("agent_pid") and st.get("pid"):
             return st
-        time.sleep(0.2)
+        time.sleep(POLL)
     raise AssertionError(f"{name} never ran: {store.Task(name).status}")
 
 
@@ -2607,7 +2616,9 @@ class Lifecycle(Base):
             g("config", "gpg.program", str(slow))
             before = g("rev-parse", "main")
             t0 = time.monotonic()
-            with mock.patch.object(gitops, "COMMIT_SECS", 2), \
+            # SIGN_SECS too: the refusal asks this gpg whether the key is on a card, and waited
+            # out its 10 s each time (2026-11-21)
+            with mock.patch.object(gitops, "COMMIT_SECS", 2), mock.patch.object(gitops, "SIGN_SECS", 1), \
                     self.assertRaisesRegex(gitops.GitError, "backed out") as e:
                 gitops.merge(repo, "t", "main", how=how)
             self.assertLess(time.monotonic() - t0, 20, how)
@@ -5033,7 +5044,7 @@ class Steering(Base):
         deadline = time.time() + 15
         while not store.Task(name).status.get("session"):
             self.assertLess(time.time(), deadline, "the agent never started")
-            time.sleep(0.1)
+            time.sleep(POLL)
 
     def test_now_interrupts_the_agent_and_continues_with_the_note_first(self):
         self.start("t-int", "slow", "--test", TEST_CMD)   # the first run would take an hour
@@ -16502,6 +16513,7 @@ class Update(Base):
         self.assertTrue(cli.runner_alive(store.Task("t")))
         self.assertEqual(self.calls.read_text().splitlines(),                   # the plugin still refreshed
                          ["plugin marketplace update workbench", "plugin update workbench@workbench"])
+        run_wb("stop", "t")  # its hang never ends: tearDown waited out its 15 s for it (2026-11-21)
 
     def test_a_step_failing_after_update_stop_says_how_to_resume_the_stopped_tasks(self):
         # #775: a marketplace copy can't count its news beforehand, so a failed step comes after
