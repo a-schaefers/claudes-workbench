@@ -1069,6 +1069,10 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
   long test file whole) and the task failed; or exited 0 after one, the tests failed on half-done
   work and auto-fix sent them back to it. It counts as a compaction: the `fresh` event's
   `compacted`, so `results.step`'s `compacted` and the tuning's `COMPACT_PENALTY` see it.
+  OpenCode has usually exited by the time the handover stops it: `runner._stop` reads macOS's
+  `PermissionError` (EPERM for a group whose members have all exited, where Linux says ESRCH)
+  as gone, as `_kill_group` does; it crashed the runner there and the task failed (the macOS
+  nightly, 2026-11-22).
 - *Between rounds* (`fresh_reason`, for n > 1, also used by `wb next` to say what will happen):
   Claude asked (`--fresh`, `wb resume`) → fresh, even with no session yet; no session → continue
   on the step's first round, else fresh ("the last session ended before it began", so a session

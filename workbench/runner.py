@@ -640,13 +640,16 @@ BG_GRACE = 120
 
 
 def _stop(proc: subprocess.Popen):
+    # PermissionError: macOS's answer (EPERM, not Linux's ESRCH) for a group whose members have all
+    # exited, the leader not yet reaped. OpenCode exits right after a failed compaction, and the
+    # handover's stop crashed the runner there, the task failed (the macOS nightly, 2026-11-22)
     try:
         os.killpg(proc.pid, signal.SIGTERM)
         proc.wait(timeout=10)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
+    except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
         try:
             os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
 
 

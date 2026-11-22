@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -2953,6 +2954,27 @@ class Fallback(unittest.TestCase):
             t0 = time.time()
             w.wait(30)
             self.assertLess(time.time() - t0, 1.5)  # callers re-check what no file says
+
+
+class StopAnExitedGroup(unittest.TestCase):
+    """runner._stop on a group with nothing left in it, as macOS answers it."""
+
+    def test_a_group_whose_members_all_exited_is_stopped_without_an_error(self):
+        # the macOS nightly (2026-11-22): every failed-compaction handover crashed the runner with
+        # PermissionError from os.killpg, macOS's EPERM for a group whose members had all exited
+        # (Linux says ESRCH, ProcessLookupError), and the task failed instead of handing over
+        from workbench import runner
+        proc = subprocess.Popen(["true"], start_new_session=True)
+        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)  # exited, not yet reaped
+        signals = []
+
+        def killpg(pgid, sig):
+            signals.append(sig)
+            raise PermissionError(1, "Operation not permitted")
+        with mock.patch.object(runner.os, "killpg", killpg):
+            runner._stop(proc)
+        self.assertEqual(signals[0], signal.SIGTERM)
+        self.assertEqual(proc.wait(timeout=5), 0)
 
 
 class Launchers(unittest.TestCase):
