@@ -584,8 +584,11 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         wait_running("t-big")
         self.start("t-gpu", "ok", "--model", SMALL, "--no-base-check", "--unload-for-tests",
                    "--test", f"touch ran-tests; {TEST_CMD}")
+        # the runner says "waiting for the GPU: the tests use it alone" first, then the lease names
+        # who holds it: read between the two on a slow CI machine (2026-11-21), so wait for the
+        # second, which a test of the order of the two would also need
         deadline = time.time() + 30
-        while "the tests use it alone" not in store.Task("t-gpu").status.get("last", ""):
+        while "(held by" not in store.Task("t-gpu").status.get("last", ""):
             self.assertLess(time.time(), deadline, store.Task("t-gpu").status)
             time.sleep(0.1)
         self.assertEqual(store.Task("t-gpu").status["last"],
