@@ -27407,5 +27407,489 @@ class ApiDiscovery(Base):
         self.assertNotIn("local", err.getvalue())                 # local: true is no way in
 
 
+class Privacy(_KeyholeTest):
+    """Privacy for API roles (#1021): where the code goes (cli.privacy.where and the start's note),
+    a per-repo or per-task local_only, standing copies and siblings named or refused, token
+    dotfiles hidden in an API lane when they hold a credential, and OpenRouter routed to the role's backends alone. An API
+    start is made the way #1016's wb start will make one: pick_model's answer stands in."""
+
+    def setUp(self):
+        super().setUp()
+        self.conf = Path(self.tmp.name) / "commands.json"
+        self.routes = Path(self.tmp.name) / "routes.json"
+        os.environ["WB_ROUTES"] = str(self.routes)
+        self.claude = Path(self.tmp.name) / "claude-home"   # no ~/.claude rules unless a test says
+        os.environ["CLAUDE_CONFIG_DIR"] = str(self.claude)
+
+    def api_model(self, mid=FLASH, label="DeepInfra (API)", free=False):
+        pid, name = mid.split("/", 1)
+        return runner.models.Model(id=mid, provider=pid, name=name, base_url="https://api.example/v1",
+                            engine="api", label=label, kind="api", key="stored", free=free,
+                            package=f"@opencode/ai/providers/{pid}")
+
+    def local_only(self, key=None, **more):
+        self.conf.write_text(json.dumps({"repos": {str(key or self.repo): {"local_only": True, **more}}}))
+
+    def role(self, role="significant", **entry):
+        self.routes.write_text(json.dumps({"v": 1, "roles": {role: entry}}))
+
+    def fails(self, *argv) -> tuple[int, str]:
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            cli.main(list(argv))
+        return cm.exception.code, err.getvalue()
+
+    def start_api(self, name, m=None, *extra):
+        """wb start as #1016 makes an API task: pick_model resolves to the API model; the GPU
+        lease, the bench and the runner (#1015's) are left out."""
+        m = m or self.api_model()
+        state = {"available": True, "resident": True, "why": "ready (API)"}
+        with mock.patch.object(cli, "pick_model", return_value=(m, state, "the trivial role")), \
+                mock.patch.object(cli, "_gpu_wait", return_value=({}, False)), \
+                mock.patch.object(cli, "_preempt_bench", return_value=""), \
+                mock.patch.object(cli, "spawn_runner"), \
+                mock.patch.object(runner.models, "box_others", return_value=[]):
+            out = run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo), *extra)
+        store.write_json(store.Task(name).dir / "task.json",       # #1016's keys
+                         {**store.Task(name).spec, "via": "api", "provider": m.provider})
+        return out
+
+    # 1-3, 5: local_only at start
+
+    def test_a_local_only_repo_refuses_an_api_role_with_both_choices_and_runs_a_gpu_one(self):
+        self.local_only()
+        self.role(via="api", api=FLASH)
+        code, err = self.fails("start", "t-lo", "--spec", str(self.spec), "--repo", str(self.repo))
+        self.assertEqual(code, 3)
+        self.assertIn(f'{cli.privacy.home_path(self.repo)} is local-only (commands.json "repos"): the '
+                      f"significant role is on API ({FLASH}). Choices: put significant on the GPU "
+                      "(wb route significant gpu, the user's yes), or the user lifts local_only "
+                      "for this repo.", err)
+        self.assertFalse(store.Task("t-lo").exists)
+        self.role(via="gpu", api=FLASH)                          # the same start, the role on the GPU
+        os.environ["FAKE_SCENARIO"] = "ok"
+        self.assertIn("started t-lo", run_wb("start", "t-lo", "--spec", str(self.spec),
+                                             "--repo", str(self.repo)))
+        wait_phase("t-lo", ("review",))
+
+    def test_local_only_for_one_task_refuses_an_api_role_in_a_repo_commands_json_never_named(self):
+        self.role("trivial", via="api", api=FLASH)
+        code, err = self.fails("start", "t-lo1", "--spec", str(self.spec), "--repo", str(self.repo),
+                               "--size", "trivial", "--local-only")
+        self.assertEqual(code, 3)
+        self.assertIn("is local-only (--local-only): the trivial role is on API", err)
+        self.assertIn("put trivial on the GPU (wb route trivial gpu, the user's yes), or the user "
+                      "drops --local-only for this task", err)
+        self.start("t-lo2", "ok", "--local-only")                # a GPU model: it runs, and says so
+        self.assertTrue(store.Task("t-lo2").spec["local_only"])
+        wait_phase("t-lo2", ("review",))
+
+    def test_an_api_model_asked_for_in_a_local_only_repo_is_refused_before_any_gate(self):
+        ApiHarness.catalog(self)
+        self.local_only()
+        with mock.patch.object(cli, "pick_model", wraps=cli.pick_model) as picked:
+            code, err = self.fails("start", "t-lo3", "--spec", str(self.spec), "--repo", str(self.repo),
+                                   "--model", FLASH)
+        self.assertEqual(code, 3)
+        self.assertIn(f"the task's model is API ({FLASH}, --model). Choices: a GPU model, or the "
+                      "user lifts local_only for this repo.", err)
+        picked.assert_not_called()                               # the model's gate (#1014) never asked
+        # and the line #1014's `wb route --dry-run --model` prints in place of its dialog, given
+        # the start's repo, so the user is never asked to approve a start that would be refused
+        self.assertIn(f"the task's model is API ({FLASH}, --model)",
+                      cli.local_only_refusal(self.repo, None, "significant", FLASH))
+        self.conf.write_text("{}")
+        self.assertEqual(cli.local_only_refusal(self.repo, None, "significant", FLASH), "")
+
+    def test_local_only_follows_the_nearest_entry_that_says_it_and_a_package_alone_may_be_one(self):
+        (self.repo / "pkg").mkdir()
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"local_only": True},
+                                                   str(self.repo / "pkg"): {"setup": "true"}}}))
+        self.assertTrue(cli.privacy.local_only(self.repo, "pkg"))    # a setup entry lifts nothing
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"local_only": True},
+                                                   str(self.repo / "pkg"): {"local_only": False}}}))
+        self.assertIsNone(cli.privacy.local_only(self.repo, "pkg"))  # said so, nearest
+        self.conf.write_text(json.dumps({"repos": {str(self.repo / "pkg"): {"local_only": True}}}))
+        self.assertTrue(cli.privacy.local_only(self.repo, "pkg"))
+        self.assertIsNone(cli.privacy.local_only(self.repo))         # the root isn't
+
+    def test_commands_json_refuses_a_local_only_that_isnt_true_or_false(self):
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"local_only": "yes"}}}))
+        with self.assertRaises(RuntimeError) as cm:
+            context.commands_conf()
+        self.assertIn('"local_only" is true or false', str(cm.exception))
+
+    # 4: local-only since the task started
+
+    def test_next_and_feedback_on_an_api_task_whose_repo_became_local_only_name_takeover_and_discard(self):
+        self.start("t-since", "ok")
+        wait_phase("t-since", ("review",))
+        t = store.Task("t-since")
+        store.write_json(t.dir / "task.json", {**t.spec, "via": "api", "provider": "deepinfra"})
+        self.local_only()
+        code, err = self.fails("next", "t-since", "--spec", str(self.spec), "-m", "step 1")
+        self.assertEqual(code, 3)
+        self.assertIn("this repo is local-only now; the task's model is API (deepinfra): "
+                      "wb takeover t-since or wb discard t-since", err)
+        self.assertEqual(self.fails("feedback", "t-since", "--text", "again")[0], 3)
+        self.assertEqual(t.status["phase"], "review")            # nothing was sent
+        store.write_json(t.dir / "task.json", {**t.spec, "via": "gpu"})  # a GPU task: as before
+        run_wb("feedback", "t-since", "--text", "again")
+        wait_phase("t-since", ("review",))
+
+    def test_resume_refuses_an_api_task_whose_repo_became_local_only_and_resume_all_goes_on_past_it(self):
+        for n in ("t-ra", "t-rb"):
+            self.start(n, "ok")
+            wait_phase(n, ("review",))
+            store.Task(n).set_status(phase="stuck", last=cli.RESTARTED)   # as a restart leaves them
+        t = store.Task("t-ra")
+        store.write_json(t.dir / "task.json", {**t.spec, "via": "api", "provider": "deepinfra"})
+        self.local_only()
+        code, err = self.fails("resume", "t-ra")
+        self.assertEqual(code, 3)
+        self.assertIn("this repo is local-only now; the task's model is API (deepinfra): "
+                      "wb takeover t-ra or wb discard t-ra", err)
+        # --all: one such task said, the GPU one after it resumed all the same (it exited the
+        # whole batch at the first, #1021's review)
+        out = run_wb("resume", "--all")
+        self.assertIn("this repo is local-only now; the task's model is API (deepinfra)", out)
+        self.assertIn("resumed t-rb", out)
+        self.assertEqual(t.status["phase"], "stuck")
+        wait_phase("t-rb", ("review",))
+
+    # 6: standing copies and siblings
+
+    def test_an_api_task_takes_a_standing_copy_only_when_named_and_a_gpu_task_as_before(self):
+        (self.repo / ".gitignore").write_text("local.cfg\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        (self.repo / "local.cfg").write_text("db=dev\n")
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["local.cfg"]}}}))
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            self.start_api("t-cp1")
+        self.assertEqual(cm.exception.code, 3)
+        self.assertIn('commands.json "repos" copies local.cfg into every task, and this one is on '
+                      "API (DeepInfra): name it (--copy local.cfg) to send it, or put the role on "
+                      "the GPU", err.getvalue())
+        out = self.start_api("t-cp2", None, "--copy", "local.cfg")
+        self.assertIn("and local.cfg (--copy) to DeepInfra", out)
+        self.assertEqual(store.Task("t-cp2").spec["copy"], ["local.cfg"])
+        self.start("t-cp3", "ok")                                # GPU: copied as today, unnamed
+        self.assertEqual(store.Task("t-cp3").spec["copy"], ["local.cfg"])
+        wait_phase("t-cp3", ("review",))
+
+    def test_an_api_task_takes_a_standing_sibling_only_when_named(self):
+        shared = self.repo.parent / "shared"
+        shared.mkdir()
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"siblings": ["shared"]}}}))
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            self.start_api("t-sib1")
+        self.assertEqual(cm.exception.code, 3)
+        self.assertIn("links shared beside every task", err.getvalue())
+        self.assertIn("shared (--sibling)", self.start_api("t-sib2", None, "--sibling", "../shared"))
+
+    # 11: the where-note
+
+    def test_the_first_api_task_of_a_repo_and_provider_says_what_goes_where_and_later_ones_dont(self):
+        self.claude.mkdir()
+        (self.claude / "CLAUDE.md").write_text("my rules\n")
+        out = self.start_api("t-w1")
+        self.assertIn("note: this task sends the repo, its spec, CLAUDE.md files and your ~/.claude "
+                      "rules to DeepInfra (data policy: https://docs.deepinfra.com/account/data-privacy)",
+                      out)
+        self.assertNotIn("this task sends", self.start_api("t-w2"))      # the same provider again
+        other = self.api_model("anthropic/claude-haiku-5-5", "Anthropic (API)")
+        self.assertIn("to Anthropic (data policy: https://www.anthropic.com/legal/privacy)",
+                      self.start_api("t-w3", other))
+        # archived tasks count too, so wb gc can't bring the note back
+        store.archive_dir().mkdir(parents=True, exist_ok=True)
+        for n in ("t-w1", "t-w2", "t-w3"):
+            shutil.move(str(store.Task(n).dir), str(store.archive_dir() / n))
+        self.assertNotIn("this task sends", self.start_api("t-w4"))
+
+    # 7: token dotfiles in an API lane
+
+    def bare(self, name, via):
+        task = store.Task(name)
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": name, "repo": str(self.repo), "via": via}))
+        return task
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_an_api_lane_hides_the_registry_tokens_a_gpu_lane_reads_and_m2_repository_stays_writable(self):
+        home = Lane.fake_home(self)
+        files = [".npmrc", ".m2/settings.xml", ".gradle/gradle.properties",
+                 ".config/pypoetry/auth.toml", ".hex/hex.config", ".nuget/NuGet/NuGet.Config"]
+        for rel in files:
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text("//registry.example/:_authToken=t\n")
+        (home / ".npmrc.bak").write_text("x")                       # a neighbour stays
+        script = ("import os, sys\nfor f in sys.argv[2:]:\n    try:\n        open(f).read(); print('read')\n"
+                  "    except PermissionError:\n        print('refused')\n"
+                  "os.makedirs(sys.argv[1] + '/repository/org/x', exist_ok=True)\n"
+                  "open(sys.argv[1] + '/repository/org/x/x.pom', 'w').write('x'); print('built')\n")
+        for via, want in (("api", "refused"), ("gpu", "read")):
+            task = self.bare(f"t-dot-{via}", via)
+            out = subprocess.run(lane.wrap(context.writable(task),
+                                           [sys.executable, "-c", script, str(home / ".m2"),
+                                            *(str(home / f) for f in files), str(home / ".npmrc.bak")],
+                                           context.readable(task)),
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.stdout.split(), [want] * len(files) + ["read", "built"], (via, out.stderr))
+        self.assertIn(str(home / ".gradle" / "caches"), context.writable(self.bare("t-dot-g", "api")))
+        self.assertIn("an API task can't read ~/.config/pypoetry/auth.toml, ~/.gradle/gradle.properties, "
+                      "~/.hex/hex.config, ~/.m2/settings.xml and 2 more", context.api_hidden_note())
+        for home_ in (home / ".hex", home / ".nuget"):              # the other split homes (#1021's review)
+            self.assertIn(str(home_ / "packages"), context.writable(self.bare(f"t-dot-{home_.name[1:]}", "api")))
+
+    # Each config with and without a credential: only the first is hidden (#1021's decision,
+    # 2026-11-23: hiding every one stopped Maven, Gradle, dotnet… for users with no secret there)
+    WITH_AND_WITHOUT = {
+        ".npmrc": ("//registry.example/:_authToken=npm_t\n",
+                   "registry=https://registry.example/\n//registry.example/:_authToken=${NPM_TOKEN}\n"),
+        ".m2/settings.xml": ("<settings><servers><server><id>r</id><username>u</username>"
+                             "<password>p</password></server></servers></settings>",
+                             "<settings>\n<!-- <server><password>example</password></server> -->\n"
+                             "<localRepository>/srv/m2</localRepository>\n</settings>\n"),
+        ".config/pip/pip.conf": ("[global]\nindex-url = https://u:tok@pypi.example/simple\n",
+                                 "[global]\nindex-url = https://pypi.org/simple\ntimeout = 60\n"),
+        ".pip/pip.conf": ("[global]\nextra-index-url = https://__token__@pypi.example/simple\n",
+                          "[global]\nno-cache-dir = true\n"),
+        ".bundle/config": ('---\nBUNDLE_GEMS__CONTRIBSYS__COM: "u:p"\n',
+                           '---\nBUNDLE_PATH: "vendor/bundle"\nBUNDLE_BUILD__NOKOGIRI: "--use-system-libraries"\n'),
+        ".bunfig.toml": ('[install.registry]\nurl = "https://registry.example/"\ntoken = "t"\n',
+                         '[install]\nregistry = "https://registry.npmjs.org/"\n'),
+        ".config/composer/auth.json": ('{"github-oauth": {"github.com": "ghp_t"}}', '{"github-oauth": {}}'),
+        ".gradle/gradle.properties": ("gpr.key=ghp_t\n", "org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=1g\n"),
+    }
+
+    def test_a_token_file_is_hidden_from_an_api_task_only_when_it_holds_a_credential(self):
+        home = Path(self.tmp.name) / "home"
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for v in ("XDG_CONFIG_HOME", "PIP_CONFIG_FILE", "BUNDLE_CONFIG", "BUNDLE_USER_CONFIG",
+                      "BUNDLE_USER_HOME", "NPM_CONFIG_USERCONFIG", "npm_config_userconfig"):
+                os.environ.pop(v, None)
+            for rel, (secret, plain) in self.WITH_AND_WITHOUT.items():
+                f = home / rel
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(plain)
+                self.assertNotIn(os.path.realpath(f), context.api_hidden_paths(), rel)
+                f.write_text(secret)
+                self.assertIn(os.path.realpath(f), context.api_hidden_paths(), rel)
+            # one that can't be read or parsed counts as holding one
+            (home / ".config/composer/auth.json").write_text('{"http-basic": ')
+            (home / ".npmrc").write_bytes(b"\xff\xfe_\x00a\x00")
+            hidden = context.api_hidden_paths()
+            for rel in (".config/composer/auth.json", ".npmrc"):
+                self.assertIn(os.path.realpath(home / rel), hidden, rel)
+            note = context.api_hidden_note()
+            self.assertIn("each holds a credential, which would reach the provider): in its lane", note)
+            self.assertIn("Bundler", note.split("stop")[0])          # Bundler stops on every run
+            self.assertIn("installs from a private registry fail", note)
+            # and where a variable moves pip's and Bundler's
+            moved = Path(self.tmp.name) / "moved"
+            moved.mkdir()
+            (moved / "pip.ini").write_text("[global]\nindex-url = https://u:p@x.example/simple\n")
+            (moved / "bundle").write_text('---\nBUNDLE_HTTPS://GEMS__EXAMPLE__COM/: "t"\n')
+            os.environ.update(PIP_CONFIG_FILE=str(moved / "pip.ini"), BUNDLE_USER_CONFIG=str(moved / "bundle"))
+            tools = context._api_hidden_tools()
+            self.assertEqual((tools[os.path.realpath(moved / "pip.ini")], tools[os.path.realpath(moved / "bundle")]),
+                             ("pip", "Bundler"))
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_an_api_lane_reads_a_config_with_no_credential_and_refuses_one_with(self):
+        home = Lane.fake_home(self)
+        files = [".npmrc", ".m2/settings.xml", ".config/pip/pip.conf"]
+        script = ("import sys\nfor f in sys.argv[1:]:\n    try:\n        open(f).read(); print('read')\n"
+                  "    except PermissionError:\n        print('refused')\n")
+        for rel in files:
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+        for state in ("plain", "secret"):
+            for rel in files:
+                (home / rel).write_text(self.WITH_AND_WITHOUT[rel][state == "plain"])
+            task = self.bare(f"t-cred-{state}", "api")
+            out = subprocess.run(lane.wrap(context.writable(task),
+                                           [sys.executable, "-c", script, *(str(home / f) for f in files)],
+                                           context.readable(task)),
+                                 capture_output=True, text=True, timeout=20)
+            want = "read" if state == "plain" else "refused"
+            self.assertEqual(out.stdout.split(), [want] * len(files), (state, out.stderr))
+
+    def test_a_moved_tool_home_with_a_token_file_is_hidden_and_split_with_what_it_makes(self):
+        """GRADLE_USER_HOME and HEX_HOME hide their files in an API lane and are split around
+        them, so what Gradle and Hex make at their top is made first; NuGet's home too, with
+        only the NuGet.Config dotnet writes on first use (#1021's review: a first restore
+        couldn't make packages/, and a moved Gradle home was granted nothing)."""
+        home, gh, hh = (Path(self.tmp.name) / n for n in ("home", "gradle-home", "hex-home"))
+        (home / ".nuget/NuGet").mkdir(parents=True)
+        (home / ".nuget/NuGet/NuGet.Config").write_text("<configuration/>")
+        gh.mkdir()
+        (gh / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2g\n")
+        hh.mkdir()
+        (hh / "hex.config").write_text("[]")
+        with mock.patch.dict(os.environ, {"HOME": str(home), "GRADLE_USER_HOME": str(gh), "HEX_HOME": str(hh)}):
+            for v in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+                os.environ.pop(v, None)
+            # with no credential in them nothing is hidden, and the homes are granted whole
+            self.assertEqual(context.api_hidden_paths(), set())
+            self.assertIn(str(gh), context.writable(self.bare("t-mv-none", "api")))
+            (home / ".nuget/NuGet/NuGet.Config").write_text(
+                '<configuration><packageSourceCredentials><feed><add key="ClearTextPassword" value="p" />'
+                "</feed></packageSourceCredentials></configuration>")
+            (gh / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2g\nmavenPassword=p\n")
+            (hh / "hex.config").write_text('{api_key,<<"k">>}.\n')
+            hidden = context.api_hidden_paths()
+            self.assertIn(os.path.realpath(gh / "gradle.properties"), hidden)
+            self.assertIn(os.path.realpath(hh / "hex.config"), hidden)
+            gpu = context.writable(self.bare("t-mv-gpu", "gpu"))
+            self.assertIn(str(gh), gpu)                              # the GPU's: granted whole
+            api = context.writable(self.bare("t-mv-api", "api"))
+            self.assertNotIn(str(gh), api)
+            for made in (gh / "caches", gh / "wrapper", hh / "packages", home / ".nuget/packages"):
+                self.assertIn(str(made), api)
+            self.assertIn("in its lane Gradle and dotnet stop on every run, and Hex installs from a "
+                          "private registry fail", context.api_hidden_note())
+
+    def test_the_start_says_which_token_files_an_api_lane_hides_and_a_gpu_start_doesnt(self):
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        (home / ".npmrc").write_text("//registry.example/:_authToken=t\n")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            self.assertIn("note: an API task can't read ~/.npmrc (it holds a credential, which would "
+                          "reach the provider): in its lane npm installs from a private registry fail",
+                          self.start_api("t-dn1"))
+            # a tool that stops on every run with its file unreadable is named as one (#1021's
+            # review: the note said only private installs fail, and Maven never ran at all)
+            (home / ".m2").mkdir()
+            (home / ".m2/settings.xml").write_text("<settings/>")
+            self.assertNotIn("Maven", context.api_hidden_note())     # no credential: Maven runs
+            (home / ".m2/settings.xml").write_text("<settings><servers><server><id>r</id>"
+                                                   "<password>p</password></server></servers></settings>")
+            self.assertIn("(each holds a credential, which would reach the provider): in its lane Maven "
+                          "stops on every run, and npm installs from a private registry fail",
+                          context.api_hidden_note())
+            self.assertNotIn("can't read ~/.npmrc", self.start("t-dn2", "ok"))
+            wait_phase("t-dn2", ("review",))
+
+    # 8, 9: OpenRouter
+
+    def test_an_openrouter_id_needs_its_backends_named_and_its_requests_go_to_them_alone(self):
+        rid = "openrouter/deepseek/deepseek-v4.1-flash"
+        why = cli.privacy.order_refusal(rid, [])
+        self.assertIn("is served by many backends that differ in quantization and data policy: pick "
+                      "them with --order <name>[,<name>] (openrouter.ai/deepseek/deepseek-v4.1-flash, "
+                      "Providers tab)", why)
+        self.assertIsNone(cli.privacy.order_refusal(rid, cli.privacy.parse_order("baseten")))
+        self.assertIsNone(cli.privacy.order_refusal(FLASH, []))       # one backend: nothing to pick
+        port, out, _ = ApiHarness.capture(self, "or")
+        m = self.model("openrouter", "deepseek/deepseek-v4.1-flash", "/api/v1",
+                       "@opencode/ai/providers/openrouter")
+        m.base_url = f"http://127.0.0.1:{port}/api/v1"
+        kh = self.keyhole(m, order=["baseten"])
+        self.assertEqual(self.post(kh, body={"model": m.name, "stream": True, "provider": {
+            "order": ["cheapest"], "allow_fallbacks": True, "data_collection": "deny"}})[0], 200)
+        sent = [json.loads(x) for x in out.read_text().splitlines()]
+        self.assertEqual(sent[-1]["provider"], {"order": ["baseten"], "allow_fallbacks": False,
+                                                "data_collection": "deny"})
+        di = self.keyhole(self.model(path="/v1/openai"))         # another provider: byte for byte
+        di_m = di.model
+        di_m.base_url = f"http://127.0.0.1:{port}/v1/openai"
+        kh2 = self.keyhole(di_m)
+        self.post(kh2, raw=b'{"model": "%s",  "stream": true, "provider": {"x": 1}}' % di_m.name.encode())
+        self.assertEqual(json.loads(out.read_text().splitlines()[-1])["provider"], {"x": 1})
+        # the task's order, as wb start records it: the keyhole's start reads it
+        store.write_json(self.task.dir / "task.json", {"silence_timeout": 900, "order": ["baseten"]})
+        with mock.patch.object(self.kh_mod, "load_key", return_value=self.kh_mod.Key("openrouter", self.CANARY)):
+            started = self.kh_mod.start(self.task, m, log=self.lines.append)
+        self.addCleanup(started.close)
+        self.assertEqual(started.order, ["baseten"])
+        # and the layer records it under the task's model (OpenCode 2.3.2 sends it, checked)
+        layer = runner.openrouter_routing(types.SimpleNamespace(spec={"via": "api", "model": rid, "order": ["baseten"]}))
+        self.assertEqual(layer, {"provider": {"openrouter": {"models": {"deepseek/deepseek-v4.1-flash": {
+            "options": {"provider": {"order": ["baseten"], "allow_fallbacks": False}}}}}}})
+        self.assertEqual(runner.openrouter_routing(types.SimpleNamespace(spec={"via": "api", "model": FLASH,
+                                                                         "order": ["x"]})), {})
+        # and in the layer write_config_layer writes, beside what it held already (#1021's review:
+        # the wiring was untested)
+        self.start("t-orl", "ok")
+        wait_phase("t-orl", ("review",))
+        t = store.Task("t-orl")
+        store.write_json(t.dir / "task.json", {**t.spec, "via": "api", "model": rid, "order": ["baseten"]})
+        with mock.patch.object(runner.models, "agent_providers", return_value={"provider": {"openrouter": {
+                "name": "OpenRouter", "models": {"deepseek/deepseek-v4.1-flash": {"name": "x"}}}}}):
+            written = json.loads(runner.write_config_layer(t).read_text())
+        self.assertEqual(written["provider"]["openrouter"]["models"]["deepseek/deepseek-v4.1-flash"],
+                         {"name": "x", "options": {"provider": {"order": ["baseten"], "allow_fallbacks": False}}})
+
+    def test_a_backend_outside_the_order_is_an_event_and_a_report_line_never_silent(self):
+        m = self.model("openrouter", "deepseek/deepseek-v4.1-flash", "/api/v1",
+                       "@opencode/ai/providers/openrouter")
+        kh = self.keyhole(m, order=["baseten", "deepinfra/fp8"])
+        self.up.by = "DeepInfra"                                   # its display name: in the order
+        self.post(kh)
+        self.up.by = "Novita"
+        self.post(kh)
+        rows = [e for e in store.read_jsonl(self.task.dir / "events.jsonl")[0] if e["kind"] == "backend"]
+        self.assertEqual([r["text"] for r in rows], ["OpenRouter served Novita, not baseten, deepinfra/fp8"])
+        self.assertEqual(runner.backend_lines(self.task, 1),
+                         ["NOTE: OpenRouter served Novita, not baseten, deepinfra/fp8"])
+        self.assertEqual(runner.backend_lines(self.task, 2), [])
+        self.assertIn("backend", transcript.EVENT_KINDS)
+        shown = [e for e in transcript.task_entries(self.task) if "OpenRouter served" in e.lines[0][1]]
+        self.assertEqual([e.lines for e in shown],                # wb watch shows it as bad news
+                         [[("bad", "■ OpenRouter served Novita, not baseten, deepinfra/fp8")]])
+        # display names that don't fold to their slug (OpenRouter's list, 2026-11-23)
+        self.assertFalse(cli.privacy.outside_order("Google", ["google-vertex"]))
+        self.assertFalse(cli.privacy.outside_order("Sakana AI", ["sakana"]))
+        self.assertTrue(cli.privacy.outside_order("Google AI Studio", ["google-vertex"]))
+        self.start("t-rep", "ok")                                # in the round's report
+        wait_phase("t-rep", ("review",))
+        t = store.Task("t-rep")
+        t.event({"ts": store.now(), "round": 1, "kind": "backend", "text": "OpenRouter served Novita, not baseten"})
+        rnd = {"secs": 60, "tok_in": 1, "tok_out": 1, "stuck": None, "exit": 0, "tools": {},
+               "errors": [], "texts": ["done"]}
+        self.assertIn("NOTE: OpenRouter served Novita, not baseten", runner.summary_text(t, 1, rnd, None))
+
+    # 10, and the line's other parts
+
+    def test_where_marks_a_free_model_and_names_the_policy_page_or_says_to_see_it(self):
+        free = cli.privacy.where(self.api_model("opencode/big-pickle-free", "OpenCode Zen (API)", free=True))
+        self.assertTrue(free["free"])
+        self.assertTrue(free["line"].endswith("the provider may keep or train on your code"))
+        self.assertEqual(free["policy"], "https://opencode.ai/docs/zen/")
+        paid = cli.privacy.where(self.api_model())
+        self.assertEqual(paid, {"provider": "deepinfra", "name": "DeepInfra",
+                                "line": "your code goes to DeepInfra",
+                                "policy": "https://docs.deepinfra.com/account/data-privacy",
+                                "free": False, "backends": []})
+        odd = cli.privacy.where(self.api_model("acme/m1", "Acme (API)"))
+        self.assertEqual((odd["policy"], odd["line"]), (None, "your code goes to Acme · see Acme's data policy"))
+        orr = cli.privacy.where(self.api_model("openrouter/deepseek/x", "OpenRouter (API)"), ["baseten"])
+        self.assertIn("via OpenRouter to baseten, no fallbacks (OpenRouter's account setting decides "
+                      "whether backends may keep it)", orr["line"])
+        self.assertEqual(orr["backends"], ["baseten"])
+
+    def test_doctor_mentions_the_free_models_once_and_opencodes_switch_for_them(self):
+        store.write_json(runner.models.hosted_path(), {"v": 1, "ts": time.time(), "stamp": None, "error": "",
+                                                "providers": {"opencode": {"name": "OpenCode Zen"}},
+                                                "models": {"opencode/a-free": {"free": True},
+                                                           "opencode/b": {"free": False}}})
+        self.assertIn("OpenCode lists 1 free model(s) (opencode/a-free): free: the provider may keep "
+                      "or train on your code; wb never suggests one; OPENCODE_DISABLE_FREE_MODELS=1 "
+                      "hides them", cli.privacy.free_note())
+
+        def doctor():
+            buf = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(io.StringIO()), contextlib.suppress(SystemExit):
+                cli.main(["doctor"])
+            return buf.getvalue()
+        self.assertEqual(doctor().count("--  OpenCode lists 1 free model(s)"), 1)
+        os.environ["OPENCODE_DISABLE_FREE_MODELS"] = "1"
+        self.assertEqual(cli.privacy.free_note(), "")
+        self.assertNotIn("free model", doctor())
+
+
 if __name__ == "__main__":
     unittest.main()

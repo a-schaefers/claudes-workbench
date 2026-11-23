@@ -34,6 +34,7 @@ from pathlib import Path
 
 from . import (ask_mcp, context, gitguard, gitops, hardware, lane, lessons, models, progress, skills,
                stats, store, tuning)
+from . import privacy
 from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize
 from .watch import Watcher
 
@@ -280,7 +281,7 @@ def write_config_layer(task: store.Task) -> Path:
     store.write_json(path, {
         "$schema": "https://opencode.ai/config.json",
         **models._merge(models._merge(models.agent_providers(), provider_timeouts(task)),
-                        stored_key(task)),
+                        models._merge(stored_key(task), openrouter_routing(task))),
         **mine,
         "share": "disabled",  # a user's `share: "auto"` would publish every agent session
         # the user's global small_model (titles, summaries) could be a cloud model whose key
@@ -306,6 +307,27 @@ def write_config_layer(task: store.Task) -> Path:
     })
     os.chmod(path, 0o600)  # a provider copied in may carry its apiKey
     return path
+
+
+def openrouter_routing(task: store.Task) -> dict:
+    """An OpenRouter task's routing in the layer, where `wb watch` and the layer's readers see it:
+    the role's `order` and `allow_fallbacks: false` under the task's model entry (V1
+    `provider.openrouter.models.<m>.options.provider`, which OpenCode 2.3.2 migrates to the
+    model's `settings.provider` and its OpenRouter package sends as the body's `provider`). The
+    keyhole sets the same on every request, so this is the record, not the guard (#1021)."""
+    order = task.spec.get("order")
+    mid = str(task.spec.get("model") or "")
+    if task.spec.get("via") != "api" or not order or mid.split("/", 1)[0] != privacy.OPENROUTER:
+        return {}
+    return {"provider": {privacy.OPENROUTER: {"models": {mid.split("/", 1)[1]: {
+        "options": {"provider": privacy.routing(order)}}}}}}
+
+
+def backend_lines(task: store.Task, n: int) -> list[str]:
+    """The round report's lines for a backend OpenRouter served outside the role's order
+    (keyhole `backend` events of round ``n``): never silent (#1021)."""
+    return [f"NOTE: {e.get('text', '')}" for e in store.read_jsonl(task.dir / "events.jsonl")[0]
+            if e.get("kind") == "backend" and e.get("round") == n]
 
 
 def stored_key(task: store.Task) -> dict:
@@ -2618,6 +2640,7 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
             if e.get("kind") == "reading_full" and e.get("round") == n]
     if full:
         lines.append("reading: " + full[-1]["text"])
+    lines += backend_lines(task, n)  # #1021
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
     elif rnd.get("left_bg"):  # #658: what the agent left running, stopped with it

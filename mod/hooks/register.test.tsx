@@ -3093,6 +3093,47 @@ test('a leftover task waiting on Claude stops neither the weekly check nor the o
   expect(quietForJobs([{ ...t('stuck', hour), parked: true }], now, ours)).toBe(true)
 })
 
+test('Claude\'s edit of commands.json never drops a repo\'s local_only; other edits pass (#1021)', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const conf = '/home/u/.config/workbench/commands.json'
+  const files: Record<string, string> = {
+    [conf]: JSON.stringify({ allow: ['make *'], repos: { '~/src/client': { local_only: true }, '~/src/app': { setup: 'npm ci' } } }, null, 1),
+  }
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('tool.call', () => ({ result: {}, text: '' }))                // the engine's own tool
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const edit = (old_string: string, new_string: string, path = conf) =>
+    $.tool.call({ tool: 'Edit', file_path: path, old_string, new_string } as any) as Promise<any>
+  const lifted = await edit('"local_only": true', '"local_only": false')
+  expect(lifted.deny).toContain('drops "local_only": true for ~/src/client')
+  expect(lifted.deny).toContain('Only the user lifts')
+  expect((await edit('"make *"', '"make *", "cargo *"')).deny).toBeUndefined()   // an allow pattern: as before
+  expect((await edit('"local_only": true', '"local_only": true,')).deny).toBeUndefined()  // broken JSON, the mark kept
+  expect((await edit('"local_only": true', '"local_only": tru')).deny).toContain('~/src/client')  // broken, and it's gone
+  const w = await $.tool.call({ tool: 'Write', file_path: conf, content: '{"allow": []}' } as any) as any
+  expect(w.deny).toContain('~/src/client')
+  expect((await $.tool.call({ tool: 'Write', file_path: conf, content: files[conf].replace('"make *"', '"go *"') } as any) as any).deny).toBeUndefined()
+  expect((await edit('"local_only": true', '"local_only": false', '/home/u/other.json')).deny).toBeUndefined()  // another file
+  // a nearer entry saying false lifts the root's (the nearest that states it decides): refused,
+  // as is a false written where none was (#1021's review)
+  const nearer = await edit('"repos": {', '"repos": {\n  "~/src/client/pkg": {"local_only": false},')
+  expect(nearer.deny).toContain('sets "local_only" to something other than true for ~/src/client/pkg')
+  expect((await edit('"setup": "npm ci"', '"setup": "npm ci", "local_only": false')).deny).toContain('~/src/app')
+  expect((await edit('"setup": "npm ci"', '"setup": "npm ci", "local_only": true')).deny).toBeUndefined()  // adding one: fine
+  // the same file by another spelling, or through a linked directory
+  expect((await edit('"local_only": true', '"local_only": false', '/home/u/.config/./workbench/commands.json')).deny).toContain('~/src/client')
+  links['/home/u/cfg/commands.json'] = conf
+  expect((await edit('"local_only": true', '"local_only": false', '/home/u/cfg/commands.json')).deny).toContain('~/src/client')
+  delete links['/home/u/cfg/commands.json']
+  engine.env = { WB_COMMANDS: '~/wb/commands.json' }               // moved: the guard follows it
+  files['/home/u/wb/commands.json'] = files[conf]
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect((await edit('"local_only": true', '"local_only": false', '/home/u/wb/commands.json')).deny).toContain('~/src/client')
+  engine.env = undefined
+})
+
 test('Claude coding: its own edit in a task\'s worktree waits for the user\'s yes, unless Claude decides', async ($, on) => {
   // #92: the user's choice of when Claude writes a delegated task's code
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

@@ -178,6 +178,15 @@ add a model you judge fit only for small work, and otherwise change it only when
 A newly added model has no record, so the router won't pick it over one with a good record:
 replay the bench on it first (`wb bench run --model <id>`, §6), then give it its first few
 real tasks with `--model` (ones you'd review closely anyway).
+**API models and privacy.** An API model sends the repo, its spec, the CLAUDE.md files and the
+user's `~/.claude` rules to its provider. When you propose an API role, say where the code goes
+(the provider and its data-policy page, from `wb route`'s line). Never remove a `local_only`
+from commands.json (a repo the user keeps off API models: `wb start` exits 3 with the choices;
+ask the user). Never name a free model first (the provider may keep or train on the code), and
+never pick an OpenRouter backend (`--order`) for the user: ask which. An API task's lane hides
+each registry config that holds a credential (a token, password, key; one without stays readable
+and its tool works); when `wb start`'s note says a tool stops on every run there (Maven, Gradle,
+dotnet, Bundler…), that repo's task won't build on API: tell the user, and offer the GPU role.
 Model servers (none runnable, which server, a model on another machine), updating workbench, and
 **the weekly model check** (the mod asks once a week; `/workbench-models`): read
 `reference/models.md` beside this file first.

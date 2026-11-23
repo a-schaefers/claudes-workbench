@@ -18,7 +18,9 @@ What a request must pass, in order (each refusal a JSON error body):
    UTF-8 JSON with no duplicate key, no NaN, and no top-level key that folds to `model` or
    `models` but isn't `model`: a server reading JSON otherwise (Go's encoding/json matches keys
    case-insensitively; some parsers keep the first duplicate) would route a body that passed.
-Then the body goes on as it is, the client's auth headers dropped and the real one added, and
+Then the body goes on as it is (an OpenRouter body with its `provider` routing set to the role's
+`order` and `allow_fallbacks: false`, whatever OpenCode sent: #1021), the client's auth headers
+dropped and the real one added, and
 the response comes back as it arrives (SSE a whole line at a time), its `data:` lines read on
 the way for the served model (status `served`) and the usage (`on_usage`); the key itself never
 passes, and an SSE line with an `error` goes through `redact`. An upstream error is read whole
@@ -59,7 +61,7 @@ import urllib.request
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import store
+from . import privacy, store
 
 NEEDS = "needs a key wb can hold outside the lane"
 REMEDY = "store an API key with /connect in OpenCode"
@@ -322,7 +324,8 @@ class Keyhole:
     ``log`` the start and refusal lines (runner.log: the runner's stdout)."""
 
     def __init__(self, task, model, key: Key, upstream: str, protocol: str = "bearer", *,
-                 timeout: float | None = None, on_usage=None, on_health=None, log=None):
+                 timeout: float | None = None, on_usage=None, on_health=None, log=None,
+                 order=None):
         if not isinstance(key, Key):
             raise TypeError("key must be a Key")
         if protocol not in ("bearer", "anthropic"):
@@ -332,6 +335,9 @@ class Keyhole:
         if up.scheme not in ("https", "http") or not up.hostname:
             raise KeyholeError(f"{model.id}'s API base isn't an http(s) URL")
         self.task, self.model, self._key, self.protocol = task, model, key, protocol
+        # OpenRouter's backends, as the role chose them (task.json `order`, #1021): every request
+        # is routed to them alone, and a response from another is an event and a report line
+        self.order = [str(b) for b in order or () if str(b).strip()]
         self._up = up
         self.upstream_path = up.path.rstrip("/")
         self.timeout = timeout if timeout is not None else _timeout(task)
@@ -402,6 +408,27 @@ class Keyhole:
         self.task.event({"ts": store.now(), "round": self.task.status.get("round", 1),
                          "kind": "served", **now,
                          "text": f"the provider served {_printable(model)}{via}"})
+        if self.model.provider == privacy.OPENROUTER and privacy.outside_order(now["by"], self.order):
+            self.task.event({"ts": store.now(), "round": self.task.status.get("round", 1),
+                             "kind": "backend", "by": now["by"],
+                             "text": f"OpenRouter served {_printable(now['by'])}, not "
+                                     f"{', '.join(_printable(b) for b in self.order)}"})
+
+    def route_body(self, body: dict, raw: bytes) -> bytes:
+        """The bytes forwarded: an OpenRouter request's `provider` routing set here, not trusted
+        to OpenCode (2.3.2 builds it from the model's `settings.provider`, which its resolver
+        replaces with the catalog's `canonical` provider id when one is set, model-resolver.ts):
+        the role's `order` and `allow_fallbacks: false` over whatever the body had; the rest of
+        its `provider` object (data_collection, zdr, only, ignore: each only narrows) kept.
+        Any other provider's body goes on byte for byte."""
+        if self.model.provider != privacy.OPENROUTER:
+            return raw
+        given = body.get("provider") if isinstance(body.get("provider"), dict) else {}
+        routing = privacy.routing(self.order)
+        if not self.order:  # none chosen (a gated --model start): no fallback all the same
+            routing.pop("order")
+        body["provider"] = {**given, **routing}
+        return json.dumps(body).encode()
 
     def health(self, state: str, why: str = "", until: float | None = None) -> None:
         try:
@@ -565,7 +592,7 @@ def _handler(kh: Keyhole):
             if "models" in body or asked != kh.model.name:  # a fallback list routes elsewhere
                 kh.refused("a fallback list" if "models" in body else str(asked))
                 return self.send_json(403, f"keyhole: this task may use only {kh.model.id}")
-            self.forward(raw)
+            self.forward(kh.route_body(body, raw))
 
         def do_PUT(self):
             self.refuse_path()
@@ -828,6 +855,7 @@ def start(task, m, *, log=None, on_usage=None, on_health=None) -> Keyhole:
         raise KeyholeError(f"{m.id} has no API base in OpenCode's catalog")
     key = load_key(m.provider, package)
     kh = Keyhole(task, m, key, mirror_path(package, m.base_url), protocol, log=log,
-                 on_usage=on_usage, on_health=on_health)
+                 on_usage=on_usage, on_health=on_health,
+                 order=task.spec.get("order") if task is not None else None)  # #1021
     kh.log(f"keyhole: {m.provider} on 127.0.0.1:{kh.port} for {m.id}")
     return kh
