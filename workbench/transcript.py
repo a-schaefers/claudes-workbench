@@ -360,7 +360,7 @@ EVENT_KINDS = frozenset({
     "round", "tests", "autofix", "self_review", "ask", "answer", "captain", "steer", "skills",
     "allow", "interrupted", "fresh", "full", "load", "left_bg", "reading_full", "compacted",
     "limits", "export", "resumed", "coding", "spec_gap", "next_step", "takeover", "stopped",
-    "error", "retry", "gpu", "served", "rate_limited"})
+    "error", "retry", "gpu", "served", "rate_limited", "backend"})
 
 
 def task_entries(task: store.Task) -> list[Entry]:
@@ -411,6 +411,8 @@ def task_entries(task: store.Task) -> list[Entry]:
                       "served",  # served: the keyhole, an API model's provider changed what ran
                       "rate_limited"):  # an API provider's wait, the clocks paused (#1020)
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
+        elif kind == "backend":  # OpenRouter served a backend outside the role's order (#1021)
+            out.append(Entry(ts, key, [("bad", f"■ {r.get('text', '')}")]))
         elif kind in ("resumed", "coding"):  # the text says who: Claude, or the user's allowance
             out.append(Entry(ts, key, [("claude", f"■ {r.get('text', '')}")]))
         elif kind == "spec_gap":

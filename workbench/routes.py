@@ -94,6 +94,14 @@ def normalize(doc) -> dict:
                 row[key] = e[key]
         if row["via"] == "api" and not row.get("api"):
             raise RoutesError(f"{r} is on API with no api model")
+        # an OpenRouter role's backends (#1021): the keyhole routes every request to them alone,
+        # and the start's where-note names them. Kept through every read and edit; wb route has
+        # no flag that sets it yet
+        if e.get("order") is not None:
+            order = e["order"]
+            if not isinstance(order, list) or not all(isinstance(b, str) and b.strip() for b in order):
+                raise RoutesError(f"{r}'s order is {order!r}, not a list of backend names")
+            row["order"] = list(order)
         for key in STAMPS:
             if key in e:
                 row[key] = e[key]

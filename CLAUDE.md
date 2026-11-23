@@ -50,7 +50,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   and OpenCode's environment (`opencode_env`: the task's home, the shell shim).
   `events.py`: OpenCode's events, the stuck detector. `ask_mcp.py`: `ask_reviewer`, both sides.
 - `context.py`: what the agent knows and may do (instructions, denies, the shell allowlist, the
-  lane's paths: `writable`, the worktree, `ask/` and the task's `opencode/`, `opencode_home`; grants). `lane.py`: the Landlock lane. `gitguard.py`: the agent's read-only `git`.
+  lane's paths: `writable`, the worktree, `ask/` and the task's `opencode/`, `opencode_home`;
+  `API_HIDDEN`, the token files an API task's lane hides too when they hold a credential; grants). `lane.py`: the Landlock lane. `gitguard.py`: the agent's read-only `git`.
   Neither imports the rest of the package: the lane runs as a file, the shim on every git call.
 - `keyhole.py`: the per-task key proxy, outside the lane: only the task's model, the key swapped
   in, errors redacted (ARCHITECTURE.md, *The keyhole*); `runner.drive` starts it for an API task,
@@ -63,6 +64,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   them; `wb patch send`, the one fork, push and pull request (through `gh`, never a token
   printed; under Claude Code only on the mod's dialog's yes). Its git calls run without hooks or a terminal, and it imports everything up front:
   `wb patch init` deletes the copy wb runs from.
+- `privacy.py`: where an API task's code goes (`where`, `PRIVACY_PAGES`, the first-task note),
+  `local_only`, OpenRouter's routing, `holds_credential` (which token files an API lane hides) (ARCHITECTURE.md, *Privacy for API roles*).
 - `results.py`: results.jsonl rows; read them through `store.results()`, which leaves out trials.
 - `router.py`: the model per size, slices, budgets. `tuning.py`: learned knobs (a new one goes in
   `KNOBS`, read with `tuning.value`). `models.py`: discovery (`discover`, GPU only; API models from
@@ -124,7 +127,8 @@ Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change mus
 ## State and config
 Plain files under `$WB_HOME` (`~/.local/state/workbench`); config in `~/.config/workbench/`; the
 skill library in `$WB_SKILLS` (`~/.local/share/workbench/skills`, its own git repo). Every file,
-key and format: ARCHITECTURE.md, *Files and formats*. Inside `$WB_HOME` the agent's lane
+key and format: ARCHITECTURE.md, *Files and formats*. commands.json `repos.<path>.local_only: true`
+keeps API models off a repo; only the user lifts it. Inside `$WB_HOME` the agent's lane
 writes only `tasks/<task>/worktree/`, `ask/` and `opencode/` (its OpenCode's own home; the rest of
 its lane: *What the agent knows*); `rules/<task>/` (with the shell shim, `shell/<name>`, and an
 API task's `catalog.json`, its `OPENCODE_MODELS_PATH`), `api/` (the provider slots) and
@@ -143,10 +147,10 @@ ARCHITECTURE.md, *Models: found, loaded, chosen*. GPU paths and the router read 
 API models (Ollama cloud ones too) are `hosted()`'s, cached in `hosted.json`, named by exact id.
 
 Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`,
-`WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_SAVINGS`, `WB_ROUTES`, `WB_GPU_DIR`,
+`WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR`,
 `WB_OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`, `WB_SOURCE` (`wb patch init`'s clone, else
-`~/.local/share/workbench/source`), `WB_ROUTES` (the roles) (relative or `~` allowed: a new one joins
-`store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; the agent's `WB_TASK`, `WB_RUN`,
+`~/.local/share/workbench/source`), `WB_ROUTES` (the roles; `wb start`'s local-only check reads it) (relative or `~` allowed: a new
+one joins `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; the agent's `WB_TASK`, `WB_RUN`,
 `WB_USER_PYTHONPATH`; `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), `CLAUDECODE` (under it `wb patch send`
 sends and `wb route` changes the API side only on the mod's dialog's yes: `send-ok.json`,

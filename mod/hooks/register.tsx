@@ -1877,6 +1877,62 @@ async function codingMode($: any): Promise<string> {
   }
 }
 
+// Each repo commands.json gives a `local_only`, with its value (#1021), or null when the text isn't JSON
+function localOnlyMarks(text: string): Map<string, unknown> | null {
+  try {
+    const repos = JSON.parse(text)?.repos
+    if (!repos || typeof repos !== 'object') return new Map()
+    return new Map(Object.entries(repos).filter(([, v]: [string, any]) => v && typeof v === 'object' && 'local_only' in v)
+      .map(([k, v]: [string, any]) => [k, v.local_only]))
+  } catch {
+    return null
+  }
+}
+
+// The text an Edit, MultiEdit or Write would leave in the file, from its text now
+function editedText(e: Row, now: string): string {
+  if (e.tool === 'Write') return String(e.content ?? '')
+  const edits = e.tool === 'MultiEdit' && Array.isArray(e.edits) ? e.edits : [e]
+  let text = now
+  for (const ed of edits) {
+    const from = String(ed.old_string ?? ''), to = String(ed.new_string ?? '')
+    text = ed.replace_all ? text.split(from).join(to) : text.replace(from, () => to)
+  }
+  return text
+}
+
+const marksOf = (text: string, value: string) => (text.match(new RegExp(`"local_only"\\s*:\\s*${value}\\b`, 'g')) ?? []).length
+
+// Why Claude's edit of commands.json is refused, or '': only the user lifts a repo's local_only
+// (#1021). Refused: an edit that drops a `"local_only": true`, and one that writes a `false` the
+// text didn't have, since the nearest entry that states it decides (privacy.local_only): a
+// package's `false` under a local-only root lifted it (#1021's review). A text that isn't JSON
+// counts the marks instead. The file is matched by real path, so another spelling of it (`/./`,
+// a linked config directory) is the same file. A shell's write isn't seen here, as with
+// routes.json (#1014's gate).
+async function localOnlyRefusal($: any, e: Row, path: string): Promise<string> {
+  if (!mem.commandsFile) return ''
+  const file = await realPath($, mem.commandsFile)
+  if (absolutePath(path, '', mem.cwd) !== file && await realPath($, absolutePath(path, '', mem.cwd)) !== file) return ''
+  const now = await $.fs.read(file).catch(() => '')
+  const text = editedText(e, now)
+  const before = localOnlyMarks(now), after = localOnlyMarks(text)
+  let dropped: string[], lifted: string[]
+  if (before && after) {
+    dropped = [...before].filter(([k, v]) => v === true && after.get(k) !== true).map(([k]) => k)
+    lifted = [...after].filter(([k, v]) => v !== true && before.get(k) !== v && !dropped.includes(k)).map(([k]) => k)
+  } else {  // not JSON before or after: by the marks' count
+    const named = before ? [...before].filter(([, v]) => v === true).map(([k]) => k) : ['a repo']
+    dropped = marksOf(text, 'true') < marksOf(now, 'true') ? named : []
+    lifted = marksOf(text, 'false') > marksOf(now, 'false') ? ['a repo'] : []
+  }
+  const why = [...(dropped.length ? [`drops "local_only": true for ${dropped.join(', ')}`] : []),
+    ...(lifted.length ? [`sets "local_only" to something other than true for ${lifted.join(', ')} (the nearest entry that says it decides, so it lifts one above)`] : [])]
+  if (!why.length) return ''
+  return `workbench: not changed: this edit ${why.join(' and ')} in commands.json. ` +
+    'Only the user lifts a repo\'s local_only (it keeps API models off that repo); tell them, and leave it as it is.'
+}
+
 // Why Claude may not make this edit now, or '': outside a task's worktree, under "decide", or
 // with the user's yes recorded for that task and not yet handed back (`wb coding allow`).
 async function codingRefusal($: any, path: string): Promise<string> {
@@ -2070,6 +2126,7 @@ const mem = {
   shown: '' as Pose | '', // the frame on screen now
   skill: '', // the /workbench skill's SKILL.md, for the workbench-mode block
   savingsFile: '', // savings.json, where wb keeps the kWh price ($WB_SAVINGS): the Stats key stamps it
+  commandsFile: '', // commands.json ($WB_COMMANDS): Claude's edit never drops a repo's local_only (#1021)
   fold: false, // the session's directory is on a file system that ignores case (macOS): `within`
   termDialogs: [] as TermDialog[], // dialogs up in the terminal while the user wasn't away (#959)
 }
@@ -3507,6 +3564,8 @@ export const register: Register = (on, options) => {
     mem.skill = `${config ? abs(config) : `${home}/.claude`}/skills/workbench/SKILL.md`
     const priced = await $.env.get('WB_SAVINGS')
     mem.savingsFile = priced ? abs(priced) : `${home}/.config/workbench/savings.json`
+    const commands = await $.env.get('WB_COMMANDS')
+    mem.commandsFile = commands ? abs(commands) : `${home}/.config/workbench/commands.json`
     mem.startedAt = await $.clock.now()
     // 2026-11-17: /delegate became /workbench. A copy updated across it still has only the old
     // skill link, which now leads nowhere: wb setup makes the new one and drops the old.
@@ -3584,6 +3643,7 @@ export const register: Register = (on, options) => {
     const path = field ? (e as any)[field] : undefined
     if (typeof path === 'string') {
       const why = (await codingRefusal($, path)) || (await routesFileRefusal($, path))
+        || (await localOnlyRefusal($, e as Row, path))
       if (why) return { deny: why }
     }
     // Nothing goes to workbench upstream without the user's yes to that very command (#1005,

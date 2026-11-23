@@ -30,6 +30,7 @@ from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardwa
 from .watch import Watcher, wait_exit
 from . import runner
 from . import meter
+from . import privacy
 from .runner import PKG_ROOT
 
 PROTOCOL = """
@@ -829,13 +830,15 @@ CACHE_DIRS = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".to
               ".cache", ".idea", ".vscode")
 
 
-def _worktree_setup(repo: Path, a, sub: str | None = None) -> dict:
+def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", where: str = "") -> dict:
     """The task's `setup`, `copy` and `siblings`: commands.json's `repos` entry for the repo,
     with --setup in its place and --copy/--sibling added, each checked (#201, the 2026-11-19
     audit). A copied path must be ignored in the checkout (else it shows in the review diff) and
     no secret (SECRET_FILES): the user's settings stay theirs. A sibling is a directory beside
     the repo the lane may read."""
     conf = context.repo_conf(repo, sub)  # the package's entry, not the repo's first (#778)
+    if via == "api":  # nothing standing goes to a provider unnamed (#1021)
+        _standing_refusal(conf, a, where)
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
     for raw in [*conf.get("copy", []), *(a.copy or [])]:
@@ -907,6 +910,100 @@ def _worktree_setup(repo: Path, a, sub: str | None = None) -> dict:
         die("--setup-timeout is seconds: a positive whole number")
     return {k: v for k, v in (("setup", setup), ("copy", copy), ("siblings", sibs),
                               ("setup_timeout", limit if setup else None)) if v}
+
+
+def _standing_refusal(conf: dict, a, where: str) -> None:
+    """An API task takes commands.json's standing `copy` and `siblings` only when this command
+    line names them too: a `.env.local` copied into every worktree, or a `../shared` the lane
+    reads, would reach the provider unasked (#1021). Exit 3, the entry and how to name it."""
+    named_copy = {os.path.normpath(x.strip()).rstrip("/") for x in a.copy or []}
+    named_sib = {x.strip().rstrip("/").removeprefix("../") for x in a.sibling or []}
+    for raw in conf.get("copy", []):
+        if os.path.normpath(raw.strip()).rstrip("/") not in named_copy:
+            die(privacy.standing_refusal("copy", raw, where), 3)
+    for raw in conf.get("siblings", []):
+        if raw.strip().rstrip("/").removeprefix("../") not in named_sib:
+            die(privacy.standing_refusal("siblings", raw, where), 3)
+
+
+def _routes() -> dict:
+    """routes.json's roles (#1014's routes.read: every role filled in, an unset one the GPU's),
+    which the local-only check and the where-note's OpenRouter order read. wb start has
+    refused an unreadable file already; anywhere else, one reads as no API role here."""
+    try:
+        return routes.read()["roles"]
+    except routes.RoutesError:
+        return {}
+
+
+def _role(a) -> str:
+    """The role a start runs on: --role (#1016), else the size's (trivial or significant)."""
+    return getattr(a, "role", None) or ("trivial" if a.size == "trivial" else "significant")
+
+
+def _local_only_check(a, repo: Path, sub: str | None) -> None:
+    """Refuse an API model for a local-only spot before any model is picked (#1021): exit 3 with
+    the choices (local_only_refusal); never the GPU instead."""
+    if why := local_only_refusal(repo, sub, _role(a), a.model, a.local_only):
+        die(why, 3)
+
+
+def local_only_refusal(repo: Path, sub: str | None, role: str, model: str | None,
+                       this_task: bool = False) -> str:
+    """Why an API model may not take this spot (commands.json `repos.<path>.local_only`, or
+    --local-only: ``this_task``), or '': ``model`` (--model) when it is an API id, else the
+    role's `via: api`. The line wb start dies with; #1014's `wb route --dry-run --model` gives it
+    the start's repo and prints it in place of a dialog line, so the user is never asked to
+    approve a start that would be refused (#1021's review)."""
+    key = privacy.local_only(repo, sub)
+    if not key and not this_task:
+        return ""
+    if model:
+        try:
+            m = models.resolve(model)
+        except KeyError:
+            return ""  # pick_model says why
+        if m.kind != "api":
+            return ""
+        model_id, asked = m.id, True
+    else:
+        entry = _routes().get(role) or {}
+        if entry.get("via") != "api" or not entry.get("api"):
+            return ""
+        model_id, asked = str(entry["api"]), False
+    at = privacy.home_path(Path(key).expanduser() if key else repo)
+    why = 'commands.json "repos"' if key else "--local-only"
+    return privacy.local_only_line(at, why, role, model_id, asked)
+
+
+def _local_only_now(task: store.Task) -> str:
+    """For an API task whose repo became local-only after it started, the line wb next, feedback
+    and resume refuse it with (takeover or discard: its model is fixed per task), else ''."""
+    if privacy.is_api_task(task) and privacy.local_only(task.spec["repo"], task.spec.get("subdir")):
+        return privacy.since_start_line(task)
+    return ""
+
+
+def _local_only_since(task: store.Task) -> None:
+    """wb next/feedback/resume on an API task whose repo became local-only since it started:
+    exit 3 (#1021)."""
+    if why := _local_only_now(task):
+        die(why, 3)
+
+
+def _api_notes(task_name: str, repo: Path, m: models.Model, a) -> list[str]:
+    """An API task's start notes: on the repo's first task to this provider, what goes and to
+    whom (privacy.where_note), and the token files its lane hides: those holding a credential (#1021)."""
+    notes = []
+    if privacy.first_for(repo, m.provider, task_name):
+        entry = _routes().get(_role(a)) or {}
+        info = privacy.where(m, entry.get("order") if entry.get("api") == m.id else None)
+        named = [f"{c} (--copy)" for c in a.copy or []] + [f"{x} (--sibling)" for x in a.sibling or []]
+        rules = (context.claude_home() / "CLAUDE.md").is_file() or (context.claude_home() / "rules").is_dir()
+        notes.append(privacy.where_note(info, rules, named))
+    if gap := context.api_hidden_note():
+        notes.append(gap)
+    return notes
 
 
 # What an install makes, at any depth: a monorepo's per-package node_modules or .venv
@@ -1079,6 +1176,7 @@ def cmd_start(a):
         routes.read()
     except routes.RoutesError as e:
         die(routes.unreadable(e), 3)
+    _local_only_check(a, repo, _package(repo, Path(a.repo).resolve(), a.base))  # #1021
     m, state, why = pick_model(a.size, a.model, stack, a.name)
     if not state["available"] and not a.force:
         fix = models.remedy(m, state)
@@ -1099,7 +1197,7 @@ def cmd_start(a):
         print(f"package: {sub} (its own CLAUDE.md): the agent, the setup and the tests run there")
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
-    setup = _worktree_setup(repo, a, sub)
+    setup = _worktree_setup(repo, a, sub, m.kind, models.provider_name(m))
     checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
@@ -1184,6 +1282,7 @@ def cmd_start(a):
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
+        **({"local_only": True} if a.local_only else {}),  # this task's alone (#1021)
         **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
         **({"worktree": str(wt.relative_to(task.dir))} if wt != task.dir / "worktree" else {}),
         "checkout": "runner",  # the runner makes the worktree, before its setup (#529)
@@ -1232,6 +1331,8 @@ def cmd_start(a):
         print("base check: the runner runs the acceptance command once on the base first; what "
               "it saw comes with the first report (a check-in at once if --test-timeout cuts it "
               "short)")  # a base that passes is a note in that report, no wake (#881)
+    for note in _api_notes(a.name, repo, m, a) if m.kind == "api" else ():  # #1021
+        print(f"note: {note}")
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
@@ -1331,6 +1432,7 @@ def _spec_gaps(task: store.Task, gaps: list[str] | None) -> None:
 def cmd_feedback(a):
     task = need(a.name)
     reap(task)
+    _local_only_since(task)  # #1021
     st = task.status
     if st.get("phase") not in ("review", "stuck", "failed"):
         die(f"{a.name} is {st.get('phase')}; feedback goes to a task waiting for review")
@@ -1431,6 +1533,7 @@ def cmd_next(a):
     worktree, same session (so it keeps what it has read), unless it is full or --fresh."""
     task = need(a.name)
     reap(task)
+    _local_only_since(task)  # #1021
     spec, st = task.spec, task.status
     if st.get("phase") != "review":
         die(f"{a.name} is {st.get('phase')}; wb next follows an approved step under review")
@@ -2183,6 +2286,9 @@ def cmd_resume(a):
         if not _rechecks_out(t) and (why := _worktree_problem(t)):
             print(why)  # as _resume would say it, without ending the batch
             continue
+        if why := _local_only_now(t):  # its repo became local-only: the rest still go on (#1021)
+            print(why)
+            continue
         with store.locked(runner.lock_file(t.name, "cmd")):  # as one_at_a_time, task by task
             _resume(t)
 
@@ -2205,6 +2311,7 @@ def _resume(task: store.Task) -> None:
     st, name = task.status, task.name
     if st.get("phase") not in ("stuck", "failed"):
         die(f"{name} is {st.get('phase')}; wb resume continues a stopped task")
+    _local_only_since(task)  # #1021
     if why := _accepting(task):  # (#878)
         die(why)
     if runner_alive(task):
@@ -2613,6 +2720,15 @@ def _route_start(a) -> None:
         return
     if not API_RUNS:  # exit 3: the mod lets the call through, and wb start refuses it, unasked
         die(f"{m.id} {API_NOT_YET}", 3)
+    # a local-only spot's refusal in place of a dialog line (#1021): never ask the user to
+    # approve a start wb start refuses
+    try:
+        repo = gitops.toplevel(Path(ns.repo).resolve())
+        sub = _package(repo, Path(ns.repo).resolve(), ns.base)
+    except gitops.GitError:
+        repo = sub = None  # wb start says why
+    if repo is not None and (why := local_only_refusal(repo, sub, _role(ns), ns.model, ns.local_only)):
+        die(why, 3)
     line = start_line(ns.name, m)
     print(json.dumps({"change": line, "gate": True,
                       "approval": {"start": {"task": ns.name, "model": m.id}, "change": line}})
@@ -5708,6 +5824,8 @@ def cmd_doctor(a):
     states = {mid: models.status(m, down) for mid, m in found.items()}
     for mid, st in states.items():
         print(f"{'ok ' if st['available'] else '-- '} model {mid}: {st['why']}")
+    if note := privacy.free_note():  # once, while OpenCode lists any (#1021)
+        print(f"--  {note}")
     if found and not any(st["available"] for st in states.values()):  # doctor said all was well
         mid = next(iter(found))                                         # (the 2026-11-16 audit)
         fix = models.remedy(found[mid], states[mid])
@@ -5988,6 +6106,9 @@ def parser() -> argparse.ArgumentParser:
                    "no room for its model: it waits behind them (else exit 4)")
     s.add_argument("--trial", action="store_true", help="a check of workbench itself (a scratch "
                    "repo): its result and lessons don't count as evidence")
+    s.add_argument("--local-only", action="store_true", help="this task's code stays on this "
+                   "machine: an API model is refused (exit 3), as for a repo commands.json marks "
+                   "local_only")
     s.add_argument("--backlog", metavar="NAME", help="one of a batch left to run (overnight): "
                    "wb backlog NAME reports on the batch")
     s.add_argument("--no-claude-md", action="store_true",
