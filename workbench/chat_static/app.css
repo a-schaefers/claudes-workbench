@@ -113,6 +113,13 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
   border-radius: 20px 20px 20px 6px; font: 16.5px/1.55 var(--serif); box-shadow: var(--shadow);
 }
 .claude .bubble.flowing { white-space: pre-wrap; }
+/* another agent's message (#1042): asked of Claude like the user's, but not theirs, and named */
+.row.agent { align-items: flex-end; }
+.agent .bubble {
+  background: var(--panel); border: 1px solid var(--line); padding: 9px 14px; border-radius: 20px 20px 6px 20px;
+  white-space: pre-wrap; box-shadow: var(--shadow);
+}
+.agent .agent-name { font-weight: 600; color: var(--fg); }
 /* a dialog waiting in the terminal (#959): said, not asked, so no card and no buttons */
 .row.notice { align-items: center; }
 .notice .bubble {
@@ -129,6 +136,8 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
 }
 .ask.done .card { background: var(--panel); border-color: var(--line); opacity: .8; }
 .ask .asks { font-weight: 600; }
+/* a dialog while Claude works on another agent's request (#1042): whose request it is */
+.ask .ask-for { display: block; font-size: 13px; color: var(--dim); margin-top: 2px; }
 .ask pre { font: 13.5px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 10px; }
 .ask.done pre { margin-bottom: 0; }
 .ask .choices { display: flex; gap: 10px; }

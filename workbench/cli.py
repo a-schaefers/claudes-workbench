@@ -4989,7 +4989,7 @@ TOP_EVERY = (0.2, 3600)  # wb top --every's range, in seconds (NaN and inf fail 
 
 def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
-    if a.more and a.action != "listen":
+    if a.more and a.action not in ("listen", "ended"):
         die(f"wb chat {a.action}: too many arguments")
     named = a.port is not None
     if a.port is None:  # named: that port; else the running server's, else the default (#349)
@@ -5040,8 +5040,15 @@ def cmd_chat(a):
                 Path(a.message).read_text() if a.message and a.message != "-" else sys.stdin.read()).strip()
         if not text:
             die("the reply is empty")
-        chat.send(text, "claude")
+        try:  # what it answers (`re`, `to`): --to, else the messages this turn took (#1042)
+            chat.reply(text, a.to)
+        except ValueError as e:
+            die(f"wb chat reply: {e}")
         print("sent to the web chat")
+    elif a.action == "token":  # other agents' tokens (#1042)
+        chat_token(a.id, a.verdict)
+    elif a.action == "ended":  # the mod: a turn of Claude's ended, having taken these messages (#1042)
+        chat.turn_ended([i for i in (a.id, a.verdict, *a.more) if i], a.by)
     elif a.action == "listen":  # the takes the user picks from by ear (#397)
         clips = [c for c in (a.id, a.verdict, *a.more) if c]
         try:
@@ -5076,7 +5083,7 @@ def cmd_chat(a):
         if not (a.text or a.kind != "permission"):
             die("wb chat ask --kind permission needs --text")
         try:
-            row = chat.ask(a.tool, a.text or "", a.kind, detail, pid=a.pid)
+            row = chat.ask(a.tool, a.text or "", a.kind, detail, pid=a.pid, for_=a.for_, here=a.here)
             if unknown:  # nothing to answer on the page: the dialog comes up in its terminal
                 row = chat.answer(row["id"], "expired", "terminal")
         except ValueError as e:
@@ -5112,11 +5119,38 @@ def cmd_chat(a):
         print(cur["answer"])
     else:  # log
         for r in chat.thread()[-a.n:]:
-            who = {"user": "you", "notice": "notice"}.get(r["from"], "Claude")
+            who = (f"agent {r['from']}" if r.get("role") == "agent"
+                   else {"user": "you", "notice": "notice"}.get(r["from"], "Claude"))
             files = "".join(f" [attached: {f.get('path')}]" for f in r.get("files") or [] if isinstance(f, dict))
             print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}{files}")
         lst = chat.listener()
         print(f"listening: {lst['cwd']}" if lst else "no session is listening")
+
+
+def chat_token(what: str | None, name: str | None) -> None:
+    """`wb chat token add|list|revoke <name>`: another agent's token for the web chat's API
+    (#1042), printed once by add; only its sha256 is kept."""
+    if what == "add" and name:
+        try:
+            secret = chat.agent_add(name)
+        except ValueError as e:
+            die(f"wb chat token add: {e}")
+        print(secret)
+        print(f"--  {name}'s token, shown this once: give it to that agent as CLAUDE_WB_TOKEN, with "
+              f"CLAUDE_WB_URL the chat's address (docs/chat-api.md); wb chat token revoke {name} ends it",
+              file=sys.stderr)
+    elif what == "list" and not name:
+        agents = chat.agent_tokens()
+        for n, rec in sorted(agents.items()):
+            print(f"{n}  since {time.strftime('%Y-%m-%d %H:%M', time.localtime(rec.get('ts') or 0))}")
+        if not agents:
+            print("no agent tokens (wb chat token add <name>)")
+    elif what == "revoke" and name:
+        if not chat.agent_revoke(name):
+            die(f"no agent {name} has a token")
+        print(f"revoked {name}'s token")
+    else:
+        die("wb chat token add <name> | list | revoke <name>")
 
 
 def chat_gap() -> str | None:
@@ -6476,14 +6510,17 @@ def parser() -> argparse.ArgumentParser:
                        "left), serve it, its link, reply to the user there, takes for the user "
                        "to pick by ear (listen), "
                        "the thread (log), receipts (ack, claim), what waits (pending), permission "
-                       "prompts for the away user (ask, wait, answer: the mod's), and a notice "
-                       "that one waits in the terminal (notice: the mod's)")
+                       "prompts for the away user (ask, wait, answer: the mod's), a notice "
+                       "that one waits in the terminal (notice: the mod's), other agents' tokens "
+                       "(token add|list|revoke), and a turn's end (ended: the mod's)")
     s.add_argument("action", choices=["serve", "url", "on", "off", "reply", "listen", "log", "ack",
-                                      "claim", "pending", "ask", "notice", "wait", "answer"], nargs="?",
+                                      "claim", "pending", "ask", "notice", "wait", "answer", "token",
+                                      "ended"], nargs="?",
                    default="log")
     s.add_argument("id", nargs="?", help="ack, claim: the message id; wait, answer: the prompt's "
-                   "id; listen: the clips (wb audio's takes, up to 8)")
-    s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired")
+                   "id; listen: the clips (wb audio's takes, up to 8); token: add, list or revoke; "
+                   "ended: the messages the turn took")
+    s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired; token: the agent's name")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)  # listen's further clips
     s.add_argument("--tool", help="ask, notice: the tool asking")
     s.add_argument("--kind", default="permission", help="ask, notice: permission, plan or question")
@@ -6497,6 +6534,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", help="ask: the session's directory (named when its plan is unknown)")
     s.add_argument("--pid", type=int, help="ask: the asking session's `wb events` process: once it "
                    "is gone, the ask expires")
+    s.add_argument("--for", dest="for_", action="append", metavar="AGENT", help="ask: the agent whose "
+                   "request Claude is working on (again for more): the page says so (#1042)")
+    s.add_argument("--here", action="store_true", help="ask: the user is at the terminal, so their "
+                   "away setting doesn't answer it")
     s.add_argument("--note", help="answer: words to pass on with it")
     s.add_argument("--timeout", type=float, default=30, help="wait: seconds")
     s.add_argument("--json", action="store_true", help="wait: the whole ask, answered or not")
@@ -6506,6 +6547,8 @@ def parser() -> argparse.ArgumentParser:
                    "or 0.0.0.0 (default: chat.json's `bind`, else localhost)")
     s.add_argument("--host", action="append", help="serve: another host name to answer to (* any)")
     s.add_argument("--text", help="reply, ask, notice, listen: the text"); s.add_argument("--message", help="reply: file, or -")
+    s.add_argument("--to", action="append", metavar="ID", help="reply: the message it answers (again "
+                   "for more; `user`: the user's thread; default: those this turn took, the user's alone if any)")
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
     s.add_argument("--how", choices=["now", "queued"], default="now", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_chat)

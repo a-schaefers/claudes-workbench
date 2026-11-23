@@ -67,6 +67,12 @@ PUSH_RETRY = 30         # seconds before a device whose push failed for now is t
 TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 # Tailscale for Windows' CLI under WSL's automount root, for a chat whose PATH lacks Windows' (#920)
 TAILSCALE_WINDOWS = "c/Program Files/Tailscale/tailscale.exe"
+API_VERSION = 1         # GET /api/state's and /api/health's `api`: bumped by a breaking change (docs/chat-api.md)
+AGENT_SENDS_PER_MIN = 30  # an agent token's POST /api/send per minute, then 429 with retry_after
+WAIT_DEFAULT = 300      # GET /api/wait's timeout when none is given, in seconds
+WAIT_MAX = 600          # and the most it may ask for
+MAX_WAITS = 16          # /api/wait calls held at once (each holds a thread, as a stream does)
+WAIT_LOOK = 1           # seconds between a held wait's looks at its client: one gone frees the slot
 STATIC = Path(__file__).parent / "chat_static"
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
@@ -120,6 +126,108 @@ def token() -> str:
     if len(got) < 16:  # an empty token would let in any request
         raise RuntimeError(f"{path} holds no usable token: delete it and wb chat makes a new one")
     return got
+
+
+# ---- agent tokens (#1042) ----
+# Other agents (another harness driving Claude through workbench) get tokens of their own: `wb chat
+# token add <name>` prints one once and keeps only its sha256 in chat-agents.json, beside the
+# user's token file (0600). An agent token reaches what a teammate needs (send, upload, read the
+# state and the stream, wait for replies) and never what only the user may do: Claude Code's
+# dialogs, the page's settings, push, and marking the user away (AGENT_DENIED, 403). Its messages
+# are stored `from: <name>, role: "agent"` and reach Claude as `[agent <name>] …`, never with the
+# user's authority. Revoked, it is 401 at once (the file is read per request).
+AGENT_NAME = re.compile(r"[a-z0-9-]{1,32}")
+AGENT_RESERVED = ("user", "claude", "notice", "agent", "wb")  # `from` values the thread already uses
+AGENT_PREFIX = "wba-"  # how an agent token looks, so a leaked one is recognised
+AGENT_DENIED = {"/api/answer": "answer Claude Code's dialogs",
+                "/api/prefs": "change the user's settings",
+                "/api/push": "change notifications",
+                "/api/active": "mark the user away",
+                "/api/seen": "mark what the user has seen"}
+
+
+def agents_path() -> Path:
+    """chat-agents.json, beside the user's token file (so $WB_CHAT_TOKEN moves both)."""
+    return token_path().with_name("chat-agents.json")
+
+
+def agent_tokens() -> dict:
+    """{name: {sha256, ts}}: the agents that have a token now; {} for none or an unreadable file."""
+    got = store.read_json(agents_path(), {}) or {}
+    agents = got.get("agents") if isinstance(got, dict) else None
+    return {k: v for k, v in (agents or {}).items() if isinstance(v, dict) and isinstance(v.get("sha256"), str)
+            and AGENT_NAME.fullmatch(k)} if isinstance(agents, dict) else {}
+
+
+def _agents_write(agents: dict) -> None:
+    store.write_json(agents_path(), {"agents": agents}, mode=0o600)
+
+
+def agent_add(name: str) -> str:
+    """A new token for agent ``name``, returned once: only its sha256 is kept. ValueError for a
+    bad or reserved name, or one that has a token already (revoke it first)."""
+    if not (isinstance(name, str) and AGENT_NAME.fullmatch(name)):
+        raise ValueError("an agent's name is 1 to 32 of a-z, 0-9 and -")
+    if name in AGENT_RESERVED:
+        raise ValueError(f"{name} is a name the thread uses already: pick another")
+    with store.locked(agents_path().with_name("chat-agents.lock")):
+        agents = agent_tokens()
+        if name in agents:
+            raise ValueError(f"{name} has a token already: wb chat token revoke {name} first")
+        secret = AGENT_PREFIX + secrets.token_urlsafe(32)
+        agents[name] = {"sha256": hashlib.sha256(secret.encode()).hexdigest(), "ts": store.now()}
+        _agents_write(agents)
+    return secret
+
+
+def agent_revoke(name: str) -> bool:
+    """Revoke ``name``'s token (False: it had none). Its next request is 401."""
+    with store.locked(agents_path().with_name("chat-agents.lock")):
+        agents = agent_tokens()
+        if agents.pop(name, None) is None:
+            return False
+        _agents_write(agents)
+    return True
+
+
+def agent_for(secret: str) -> str | None:
+    """The agent whose token ``secret`` is, or None (compared in constant time, by its sha256)."""
+    if not secret.startswith(AGENT_PREFIX):
+        return None
+    digest = hashlib.sha256(secret.encode()).hexdigest()
+    found = None
+    for name, rec in agent_tokens().items():
+        if hmac.compare_digest(rec["sha256"], digest):
+            found = name
+    return found
+
+
+class RateLimit:
+    """At most ``per_min`` events per key in any 60 seconds: hit(key) is 0 when allowed (and
+    counted), else the seconds until one is."""
+
+    def __init__(self, per_min: int):
+        self.per_min, self.seen, self.lock = per_min, {}, threading.Lock()
+
+    def hit(self, key: str, now: float | None = None) -> int:
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            q = [t for t in self.seen.get(key, []) if now - t < 60]
+            if len(q) >= self.per_min:
+                self.seen[key] = q
+                return max(1, int(60 - (now - q[0]) + 0.999))
+            self.seen[key] = q + [now]
+            return 0
+
+
+def _for_user(r: dict) -> bool:
+    """Whether a row of Claude's is news for the user: a reply only to agents is pushed to no phone."""
+    return "user" in (r.get("to") or ["user"])
+
+
+def _inbound(r: dict) -> bool:
+    """A message to Claude: the user's, or an agent's (#1042)."""
+    return r.get("from") == "user" or r.get("role") == "agent"
 
 
 def tailscale(windows: bool = False) -> dict:
@@ -311,10 +419,15 @@ def listen(clips: list, text: str = "") -> dict:
 def send(text: str, frm: str, cid: str | None = None, **extra) -> dict:
     """Append a message. A client id (cid) already in the thread returns that message instead,
     so a retried send never lands twice. ``extra``: a pair of screenshots (``shots``), or what a
-    reply is about (``about``)."""
+    reply is about (``about``); an agent's message's ``role: "agent"`` (``frm`` its name), a reply's
+    ``re`` and ``to`` (#1042)."""
     with _send_lock:
-        if cid and (r := _by_cid(cid)):
-            if r.get("from") == "user" and r.get("id") not in open_work()["messages"]:
+        if cid and (r := _by_cid(cid)) and r.get("from") != frm:
+            # an agent can read the user's cids in the state: one sent again as its own got the
+            # user's message back as its send, and a cut-off one re-indexed (#1042 review)
+            raise ValueError("that cid is another sender's")
+        if cid and r:
+            if _inbound(r) and r.get("id") not in open_work()["messages"]:
                 # a send cut off between the append and the index (a restart mid-request): the
                 # retry found the id and said sent, and the listener never had it (#446)
                 _open_update(lambda w: _reopen(w, r))
@@ -323,7 +436,7 @@ def send(text: str, frm: str, cid: str | None = None, **extra) -> dict:
                "from": frm, "text": text, **({"cid": cid} if cid else {}),
                **{k: v for k, v in extra.items() if v}}
         store.append_jsonl(chat_dir() / "messages.jsonl", row)
-        if frm == "user":
+        if _inbound(row):
             _open_update(lambda w: w["messages"].__setitem__(row["id"], row))
         return row
 
@@ -405,7 +518,7 @@ def _open_path() -> Path:
 def _open_rebuild() -> dict:
     got = {r.get("id") for r in store.read_jsonl(chat_dir() / "receipts.jsonl")[0]}
     msgs = {r["id"]: r for r in store.read_jsonl(chat_dir() / "messages.jsonl")[0]
-            if r.get("from") == "user" and r.get("id") and r["id"] not in got}
+            if _inbound(r) and r.get("id") and r["id"] not in got}
     open_asks: dict = {}
     answered: dict = {}
     for r in store.read_jsonl(chat_dir() / "asks.jsonl")[0]:
@@ -487,17 +600,19 @@ def _expired_receipt(msg_id: str) -> bool:
 THREAD_BYTES = 4 << 20  # the last 200 messages fit with room to spare (a reply is a few KB)
 
 
-def thread(limit: int = 200) -> list[dict]:
+def thread(limit: int = 200, keep=None) -> list[dict]:
     """The latest messages, each of the user's with its receipt (or None: not read yet), and
-    `expired` once unread past MESSAGE_EXPIRE: no session will be given it (#536)."""
+    `expired` once unread past MESSAGE_EXPIRE: no session will be given it (#536). ``keep``: only
+    the rows it passes (an agent's view, #1042)."""
     # bounded reads: the whole history was parsed on every poll (the 2026-11-19 audit: 56 ms at
     # 20,000 rows); a receipt comes after its message, so the newest ones cover the thread
-    rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)[-limit:]
+    rows = [r for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)
+            if keep is None or keep(r)][-limit:]
     receipts = {r["id"]: r for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", THREAD_BYTES)}
     now = store.now()
     out = []
     for r in rows:
-        if r["from"] == "user":
+        if _inbound(r):
             got = receipts.get(r["id"])
             gone = got.get("how") == "expired" if got else _expired(r, now)  # retired (#741)
             r = {**r, "received": None if gone else got, **({"expired": True} if gone else {})}
@@ -537,6 +652,138 @@ def pending() -> list[dict]:
     return [{**r, "received": None} for r in rows]
 
 
+# ---- replies and turns: send, then wait (#1042) ----
+# An agent sends a message and waits for Claude's answer to it (GET /api/wait). A reply row says
+# what it answers: `re`, the messages' ids (`wb chat reply --to`, else those Claude was given in
+# the turn still running: `taken`), and `to`, whose they are ("user", or an agent's name; a row
+# without `to` is the user's). The mod records each main-loop turn's end that took a message or
+# wrote a reply in turns.jsonl `{ids, ended, by}`, `ids` the messages it took. So a wait is done
+# for a message once a turn listing it has ended, and for a reply once a turn has ended after it
+# (the turn that wrote it, or a later one).
+
+def _turns() -> list[dict]:
+    return [r for r in store.read_jsonl_tail(chat_dir() / "turns.jsonl", THREAD_BYTES) if isinstance(r, dict)]
+
+
+def turn_ended(ids, by: str | None = None) -> dict:
+    """The mod: a turn of Claude's main loop ended, having taken the messages ``ids`` (maybe none)."""
+    ids = [i for i in dict.fromkeys(ids) if isinstance(i, str) and 0 < len(i) <= 64]
+    return store.append_jsonl(chat_dir() / "turns.jsonl",
+                              {"ids": ids, "ended": store.now(), **({"by": by} if by else {})})
+
+
+def taken() -> list[str]:
+    """The messages the listening session has (their receipt, newest per id, says `now`, by it)
+    that no ended turn lists yet, under MESSAGE_EXPIRE old: what the turn running now answers.
+    Only the listener's: a session that died mid-turn never recorded its end, and every reply of
+    the next session's for six hours went `to` that agent alone, pushed to no phone (the #1042
+    review)."""
+    lst = listener()
+    if not lst or not lst.get("session"):
+        return []
+    ended = {i for t in _turns() for i in t.get("ids") or [] if isinstance(i, str)}
+    last: dict = {}
+    for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", THREAD_BYTES):
+        if isinstance(r, dict) and isinstance(r.get("id"), str):
+            last.pop(r["id"], None)
+            last[r["id"]] = r
+    now = store.now()
+    return [i for i, r in last.items()
+            if r.get("how") == "now" and r.get("by") == lst["session"] and i not in ended
+            and now - r.get("ts", 0) <= MESSAGE_EXPIRE]
+
+
+def reply(text: str, to: list[str] | None = None, **extra) -> dict:
+    """Claude's reply (`wb chat reply`), with `re` (``to``, else `taken`) and `to` (whose those
+    messages are). ValueError for a ``to`` that is no message to Claude in the thread."""
+    rows = {r.get("id"): r for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)
+            if isinstance(r, dict) and _inbound(r)}
+    if to:
+        # "user": the user's thread, whatever this turn took: a consent question asked during an
+        # agent's request went `to` that agent alone, pushed to no phone (#1042 review)
+        ids = [i for i in dict.fromkeys(to) if i != "user"]
+        if missing := [i for i in ids if i not in rows]:
+            raise ValueError(f"no message {missing[0][:64]} to Claude in the thread")
+    else:
+        ids = [i for i in taken() if i in rows]
+        # a turn that took the user's message answers the user alone: an agent's message delivered
+        # into the user's running turn read every plain `wb chat reply` to them (the #1042 review)
+        if any(rows[i].get("from") == "user" for i in ids):
+            ids = [i for i in ids if rows[i].get("from") == "user"]
+    whose = list(dict.fromkeys(["user"] * bool(to and "user" in to) + [
+        "user" if rows[i].get("from") == "user" else str(rows[i].get("from")) for i in ids]))
+    return send(text, "claude", re=ids, to=whose, **extra)
+
+
+def waiting_on_user() -> bool:
+    """Whether Claude is paused on the user: a dialog open in the chat (an ask) or one the
+    terminal shows that the phone was told of (a notice not yet answered), under ASK_STALE old."""
+    now = store.now()
+    if any(a.get("answer") is None and not a.get("stale") for a in asks()):
+        return True
+    rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)
+    done = {r.get("id") for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", LATEST_BYTES)
+            if isinstance(r, dict) and r.get("how") == "answered"}
+    return any(isinstance(r, dict) and r.get("from") == "notice" and r.get("id") not in done
+               and now - r.get("ts", 0) <= ASK_STALE for r in rows)
+
+
+def addressed(row: dict, caller: str) -> bool:
+    """Whether Claude's ``row`` is for ``caller`` ("user", or an agent's name)."""
+    return row.get("from") == "claude" and caller in (row.get("to") or ["user"])
+
+
+def wait_state(after: str, caller: str) -> dict | None:
+    """What GET /api/wait answers for message ``after``: {replies (Claude's rows after it for the
+    caller), done (a turn has ended since the newest of those, else since ``after``: one that took
+    it, for a message to Claude)}; None when ``after`` is in no recent part of the thread."""
+    rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)
+    at = next((n for n, r in enumerate(rows) if isinstance(r, dict) and r.get("id") == after), None)
+    if at is None or (caller != "user" and not in_view(rows[at], caller)):  # another's is no message to it
+        return None
+    replies = [r for r in rows[at + 1:] if isinstance(r, dict) and addressed(r, caller)]
+    # done since the last row the caller now has: its newest reply's turn, else the message's
+    me, turns = (replies or rows[at:at + 1])[-1], _turns()
+    done = (any(me["id"] in (t.get("ids") or []) for t in turns) if _inbound(me)
+            else any(t.get("ended", 0) >= me.get("ts", 0) for t in turns))
+    return {"replies": replies, "done": done}
+
+
+# ---- an agent's view (#1042): its own conversation, nothing of the user's ----
+# Round one let an agent token read the whole state and stream: the user's own messages, Claude's
+# replies to the user, Claude Code's dialogs, the settings. An agent reads only its own messages
+# and Claude's rows whose `to` names it (`in_view`), the listener, the upload limits and the
+# clock; files only of its own uploads (`by`) or attached to rows in its view; never an ask, a
+# screenshot, an audio take or a push's summary (AGENT_UNREAD, 403).
+AGENT_UNREAD = {"/api/latest": "read the user's notifications",
+                "/api/ask/": "read Claude Code's dialogs",
+                "/api/shot": "read screenshots",
+                "/api/audio": "read audio takes"}
+
+
+def in_view(row: dict, agent: str) -> bool:
+    """Whether ``row`` is in ``agent``'s view: its own message, or Claude's to it."""
+    return isinstance(row, dict) and ((row.get("role") == "agent" and row.get("from") == agent)
+                                      or addressed(row, agent))
+
+
+def agent_snapshot(agent: str) -> dict:
+    """What GET /api/state (and the stream) carries for an agent's token."""
+    return {"api": API_VERSION, "messages": thread(keep=lambda r: in_view(r, agent)), "listener": listener(),
+            "uploads": upload_limits(), "expire": MESSAGE_EXPIRE, "now": store.now()}
+
+
+def agent_may_read(uid: str, agent: str) -> bool:
+    """Whether ``agent`` may read upload ``uid``: one it uploaded, or one attached to a row in its view."""
+    m = upload_meta(uid)
+    if not m:
+        return False
+    if m.get("by") == agent:
+        return True
+    return any(in_view(r, agent) and any(isinstance(f, dict) and f.get("id") == uid for f in r.get("files") or [])
+               for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES))
+
+
 # The page's state is sent over and over, so a settled ask travels without its bulk: an answered
 # (or stale) plan as its first PLAN_PREVIEW characters with `cut`, the rest fetched from GET
 # /api/ask/<id> when the user unfolds it; a settled question as its questions' text, all the page
@@ -573,7 +820,7 @@ _no_key: set[str] = set()
 
 
 def snapshot() -> dict:
-    return {"messages": thread(), "asks": [page_ask(a) for a in asks()], "listener": listener(), "prefs": prefs(),
+    return {"api": API_VERSION, "messages": thread(), "asks": [page_ask(a) for a in asks()], "listener": listener(), "prefs": prefs(),
             "push": {"key": _push_key_or_none(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
             "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
@@ -613,7 +860,7 @@ def latest() -> dict:
     # a notice whose dialog was answered in the terminal is no news (#959)
     answered = {r.get("id") for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", LATEST_BYTES)
                 if r.get("how") == "answered"}
-    last = next((r for r in reversed(rows) if r.get("from") in NEWS and r.get("id") not in answered), None)
+    last = next((r for r in reversed(rows) if r.get("from") in NEWS and _for_user(r) and r.get("id") not in answered), None)
     return {"now": store.now(), "asks": [ask] if ask else [], "messages": [last] if last else [],
             "push": {"test": (store.read_json(chat_dir() / "push-test.json", None) or {}).get("ts")}}
 
@@ -754,7 +1001,7 @@ def news(now: float | None = None) -> list[str]:
     not yet shown or pushed."""
     now = now or store.now()
     done = _seen()
-    items = [(m["id"], m["ts"]) for m in thread() if m.get("from") in NEWS]
+    items = [(m["id"], m["ts"]) for m in thread() if m.get("from") in NEWS and _for_user(m)]
     items += [(a["id"], a["ts"]) for a in asks() if a["answer"] is None]
     return [i for i, ts in items if now - PUSH_WINDOW < ts <= now - PUSH_DELAY and i not in done]
 
@@ -848,21 +1095,28 @@ AWAY = ("ask", "allow")  # prefs.json `away`: ask the user here, or let Claude g
 
 
 def ask(tool: str, text: str, kind: str = "permission", detail: dict | None = None,
-        pid: int | None = None) -> dict:
+        pid: int | None = None, for_: list[str] | None = None, here: bool = False) -> dict:
     """A new ask. A permission while the user's setting says `allow` is answered at once, by
     `setting`, and stays in the thread so they see what ran. ``pid``: the asking session's `wb
-    events` process, which lives exactly as long as the session; once it is gone the ask expires."""
+    events` process, which lives exactly as long as the session; once it is gone the ask expires.
+    ``for_``: the agents whose request Claude is working on (#1042: the page says "for <name>");
+    ``here``: the user is at the terminal, so their away setting doesn't answer it."""
     if kind not in KINDS:
         raise ValueError(kind)
+    names = list(dict.fromkeys(for_ or []))
+    if not all(isinstance(n, str) and AGENT_NAME.fullmatch(n) for n in names):
+        raise ValueError("--for is an agent's name")
     row = {"id": f"ask-{int(time.time() * 1000)}-{secrets.token_hex(4)}", "ts": store.now(),
            "tool": tool[:200], "text": text[:ASK_TEXT], "kind": kind}
     if detail is not None:
         row["detail"] = fit_detail(detail)
     if pid:
         row["pid"] = int(pid)
+    if names:
+        row["for"] = names
     store.append_jsonl(chat_dir() / "asks.jsonl", row)
     _open_update(lambda w: w["asks"].__setitem__(row["id"], row))
-    if kind == "permission" and prefs()["away"] == "allow":
+    if kind == "permission" and prefs()["away"] == "allow" and not here:
         return answer(row["id"], "allow", "setting")
     return {**row, "answer": None}
 
@@ -1539,11 +1793,12 @@ def _drain(body, n: int) -> None:
         n -= len(chunk)
 
 
-def save_upload(uid: str, name: str, ctype: str, length: int, body) -> tuple[dict, bool]:
+def save_upload(uid: str, name: str, ctype: str, length: int, body, by: str | None = None) -> tuple[dict, bool]:
     """Store ``length`` bytes from ``body`` as upload ``uid``: (its meta, whether this call stored
     it). An id already stored stores nothing and returns the first upload's meta, whatever this
     one's name or bytes. Refused (UploadError) before a byte is read: a bad id or name, a body over
-    the file limit, a link or a file where its directory is. A body cut short is discarded."""
+    the file limit, a link or a file where its directory is. A body cut short is discarded.
+    ``by``: the agent uploading (#1042), kept in the meta; an id stored by anyone else is 409 to it."""
     if not (isinstance(uid, str) and UPLOAD_ID.fullmatch(uid)):
         raise UploadError(400, "bad upload id")
     name = upload_name(name)
@@ -1553,6 +1808,7 @@ def save_upload(uid: str, name: str, ctype: str, length: int, body) -> tuple[dic
     ctype = (ctype or "").split(";")[0].strip().lower()
     ctype = ctype if len(ctype) <= 100 and UPLOAD_TYPE.fullmatch(ctype) else "application/octet-stream"
     if done := upload_meta(uid):  # a retry, or another tab: nothing to store
+        _not_theirs(done, by)
         _drain(body, length)
         return done, False
     d = _upload_dir(uid, make=True)
@@ -1572,6 +1828,7 @@ def save_upload(uid: str, name: str, ctype: str, length: int, body) -> tuple[dic
                 os.fsync(f.fileno())
             with _upload_lock, store.locked(chat_dir() / "uploads.lock"):
                 if done := _read_meta(d):  # a twin upload of this id finished first
+                    _not_theirs(done, by)
                     return done, False
                 try:
                     st = os.lstat(name, dir_fd=d)
@@ -1583,7 +1840,7 @@ def save_upload(uid: str, name: str, ctype: str, length: int, body) -> tuple[dic
                 # rename replaces whatever is at the name and never follows a link
                 os.rename(part, name, src_dir_fd=d, dst_dir_fd=d)
                 meta = {"id": uid, "name": name, "size": got, "type": ctype, "sha256": h.hexdigest(),
-                        "ts": store.now(), "path": str(chat_dir() / "uploads" / uid / name)}
+                        "ts": store.now(), "path": str(chat_dir() / "uploads" / uid / name), **({"by": by} if by else {})}
                 tmp = f".meta-{secrets.token_hex(6)}"
                 mfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=d)
                 with os.fdopen(mfd, "w", encoding="utf-8") as f:
@@ -1600,6 +1857,13 @@ def save_upload(uid: str, name: str, ctype: str, length: int, body) -> tuple[dic
 
 
 ATTACHED = ("id", "name", "size", "type", "path")  # what a message keeps of each of its files
+
+
+def _not_theirs(meta: dict, by: str | None) -> None:
+    """An agent's upload under an id stored by anyone else is refused: answered with the first
+    upload, it read the user's file's name and path (#1042)."""
+    if by and meta.get("by") != by:
+        raise UploadError(409, "that upload id is another sender's")
 
 
 def attachments(ids) -> list[dict]:
@@ -1688,6 +1952,10 @@ class Handler(BaseHTTPRequestHandler):
     secret = ""
     hub: "Hub"
     streams: threading.BoundedSemaphore
+    waits: threading.BoundedSemaphore
+    sends: RateLimit  # an agent token's sends (#1042)
+    agent: str | None = None  # the agent calling, by its token; None for the user's own
+    agent_token = ""  # that token, so a held wait or stream ends once it is revoked (_revoked)
 
     def log_message(self, *args):  # the journal needn't hold every poll
         pass
@@ -1738,18 +2006,98 @@ class Handler(BaseHTTPRequestHandler):
             return ""
         return addr.lower().removeprefix("::ffff:").split("%")[0]
 
-    def _authed(self) -> bool:
+    def _authed(self) -> str | None:
+        """Who calls: "user" for the user's token, "agent <name>" for an agent's (and ``agent``
+        set, #1042); else None, answered 401."""
         auth = self.headers.get("Authorization") or ""
         got = auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else ""
-        if not self.secret or not got or not hmac.compare_digest(got.encode(), self.secret.encode()):
-            self._json(401, {"error": "bad or missing token: open the link from `wb chat url`"})
+        self.agent = None
+        if self.secret and got and hmac.compare_digest(got.encode(), self.secret.encode()):
+            return "user"
+        if got and (name := agent_for(got)):
+            self.agent, self.agent_token = name, got
+            return f"agent {name}"
+        self._json(401, {"error": "bad or missing token: open the link from `wb chat url`"})
+        return None
+
+    def _revoked(self) -> bool:
+        """Whether the agent's token was revoked (or replaced) since this request began: a stream
+        open and a wait held went on reading Claude's replies to it after `wb chat token revoke`,
+        which no request wakes (the #1042 review). Checked at every wake, before anything is sent."""
+        return self.agent is not None and agent_for(self.agent_token) != self.agent
+
+    def _snap(self) -> dict:
+        """The state for whoever calls: the whole of it for the user, an agent's own view (#1042)."""
+        return agent_snapshot(self.agent) if self.agent else snapshot()
+
+    def _agent_unread(self, path: str) -> bool:
+        """For a path an agent may not read (AGENT_UNREAD): answered here (401, or 403 for an
+        agent) unless the user's token calls. True when answered."""
+        if not (key := next((k for k in AGENT_UNREAD if path == k or k.endswith("/") and path.startswith(k)), None)):
             return False
-        return True
+        if not self._authed():
+            return True
+        if self.agent:
+            self._json(403, {"error": f"agent tokens can't {AGENT_UNREAD[key]}"})
+            return True
+        return False
+
+    def _wait(self) -> None:
+        """GET /api/wait?after=<message id>&timeout=<s>&until=done|reply (#1042): Claude's replies
+        to the caller after that message, held until there is one, the turn is done (`until=done`,
+        the default), nobody listens, or the timeout. {replies, done, listener}."""
+        q = parse_qs(urlsplit(self.path).query)
+        after, until = (q.get("after") or [""])[0], (q.get("until") or ["done"])[0]
+        try:
+            timeout = float((q.get("timeout") or [WAIT_DEFAULT])[0])
+        except ValueError:
+            timeout = -1.0
+        if not 0 < len(after) <= 64 or not 0 <= timeout <= WAIT_MAX or until not in ("done", "reply"):
+            return self._json(400, {"error": f"wait is ?after=<message id>&timeout=<0 to {WAIT_MAX}>"
+                                             "&until=done|reply"})
+        if not self.waits.acquire(blocking=False):
+            return self._json(503, {"error": "too many waits open: try again in a moment"})
+        hub, caller = self.hub, self.agent or "user"
+        deadline = time.monotonic() + timeout
+        paused = None  # waiting_on_user at the first look: turning true returns, once
+        try:
+            while True:
+                with hub.cond:
+                    seen = hub.version  # before the look: a change after it wakes the wait
+                if self._revoked():
+                    return self._json(401, {"error": "bad or missing token: open the link from `wb chat url`"})
+                got = wait_state(after, caller)
+                if got is None:
+                    return self._json(404, {"error": "no such message"})
+                lst, left, held = listener(), deadline - time.monotonic(), waiting_on_user()
+                paused = held if paused is None else paused
+                if got["replies"] or (got["done"] and until == "done") or lst is None or left <= 0 \
+                        or (held and not paused):
+                    return self._json(200, {**got, "listener": lst, "waiting_on_user": held})
+                looked = time.monotonic()
+                while hub.version == seen and time.monotonic() - looked < PING_EVERY \
+                        and (left := deadline - time.monotonic()) > 0:
+                    if self._gone():  # a client that hung up holds no slot to its timeout (#1042 review)
+                        return
+                    with hub.cond:
+                        hub.cond.wait_for(lambda: hub.version != seen, timeout=min(left, WAIT_LOOK))
+        finally:
+            self.waits.release()
+
+    def _gone(self) -> bool:
+        """Whether the client hung up: its side readable with nothing to read."""
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            return bool(ready) and not self.connection.recv(1, socket.MSG_PEEK)
+        except (OSError, ValueError):
+            return True
 
     def do_GET(self):
         if not self._allowed():
             return
         path = self.path.split("?")[0]
+        if self._agent_unread(path):  # the user's alone (#1042)
+            return
         if path == "/manifest.webmanifest":  # with the key, it opens the installed app keyed
             k = (parse_qs(urlsplit(self.path).query).get("k") or [""])[0]
             m = json.loads((STATIC / "manifest.webmanifest").read_text())
@@ -1786,7 +2134,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/state":
             if self._authed():
-                self._json(200, snapshot())
+                self._json(200, self._snap())
+            return
+        if path == "/api/health":  # an agent's first call: is anyone listening (#1042)
+            if self._authed():
+                self._json(200, {"api": API_VERSION, "listening": listener() is not None})
+            return
+        if path == "/api/wait":  # send, then wait for the answer (#1042)
+            if self._authed():
+                self._wait()
             return
         if path.startswith("/api/ask/"):  # a settled plan's whole text, when it is unfolded (#755)
             if self._authed():
@@ -1817,6 +2173,8 @@ class Handler(BaseHTTPRequestHandler):
         again, so it is a resync."""
         hub = self.hub
         if not self.streams.acquire(blocking=False):
+            if self.agent:  # an agent's stream never pushes a page out (#1042 review)
+                return self._json(503, {"error": "too many open streams"})
             # Full: the oldest stream gives way, since a stream the phone dropped without a word
             # (asleep, a new network) lingers while a live page can't get in; once the cap filled
             # with those, the page said "Reconnecting" until a hard refresh (2026-11-18)
@@ -1847,10 +2205,10 @@ class Handler(BaseHTTPRequestHandler):
                     woke = hub.cond.wait_for(lambda: hub.version != seen,
                                              timeout=max(0.0, PING_EVERY - (time.monotonic() - sent)))
                     seen = hub.version
-                if self.evicted:
+                if self.evicted or self._revoked():  # revoked: it ends, and its reconnect is 401
                     return
                 if woke:
-                    snap = snapshot()
+                    snap = self._snap()
                     if had is None:  # the first: the whole state, recorded for the patches
                         had = {}
                         patch(had, snap)
@@ -1883,6 +2241,8 @@ class Handler(BaseHTTPRequestHandler):
         sends a byte again; GET /api/file/<id>: the file, an image as itself, anything else as a
         download."""
         kind, _, uid = path[len("/api/"):].partition("/")
+        if self.agent and not agent_may_read(uid, self.agent):  # not its own: as if none (#1042)
+            return self._json(404, {"error": "no such upload" if kind == "upload" else "no such file"})
         if kind == "upload":
             m = upload_meta(uid)
             return self._json(200, {"upload": {k: m.get(k) for k in ATTACHED}}) if m \
@@ -1924,7 +2284,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(411, {"error": "an upload needs its Content-Length"})
         try:
             meta, new = save_upload(self.path[len("/api/upload/"):], unquote(self.headers.get("X-File-Name") or ""),
-                                    self.headers.get("Content-Type") or "", n, self.rfile)
+                                    self.headers.get("Content-Type") or "", n, self.rfile, by=self.agent)
         except UploadError as e:
             return self._refuse(e.code, e.why)
         except (TimeoutError, ConnectionError):  # the line dropped mid-body: nothing was kept
@@ -1964,6 +2324,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "not found"})
         if not self._authed():
             return
+        if self.agent and self.path in AGENT_DENIED:  # the user's alone (#1042)
+            return self._json(403, {"error": f"agent tokens can't {AGENT_DENIED[self.path]}"})
+        if self.agent and self.path == "/api/send" and (wait := self.sends.hit(self.agent)):
+            return self._json(429, {"error": f"over {AGENT_SENDS_PER_MIN} sends a minute", "retry_after": wait})
         if (self.headers.get("Content-Type") or "").split(";")[0] != "application/json":
             return self._json(415, {"error": "json only"})
         try:  # -1 would read until the client hangs up (the 2026-11-16 audit)
@@ -2025,7 +2389,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": "prefs are {away: ask|allow}"})
             set_prefs(**body)
             return self._json(200, {"state": snapshot()})
+        if self.agent and body.get("about") is not None:  # what it answers is the user's (#1042)
+            return self._json(400, {"error": "agent messages can't carry about"})
         files = body.get("files")
+        if self.agent and isinstance(files, list):  # only its own uploads: another's is no upload to it (#1042)
+            if bad := next((i for i in files if isinstance(i, str) and (upload_meta(i) or {}).get("by") != self.agent), None):
+                return self._json(400, {"error": f"no upload {bad[:64]}: it must be uploaded before the message"})
         if files is not None:  # attachments, by the ids they were uploaded with (#623)
             try:
                 files = attachments(files)
@@ -2047,8 +2416,11 @@ class Handler(BaseHTTPRequestHandler):
             if not pair:
                 return self._json(400, {"error": "no such screenshots"})
             about = {k: pair[k] for k in ("task", "n", "step", "round")}
-        msg = send(text, "user", cid, about=about, files=files)
-        self._json(200, {"message": msg, "listener": listener(), "state": snapshot()})
+        try:
+            msg = send(text, self.agent or "user", cid, about=about, files=files, role="agent" if self.agent else None)
+        except ValueError as e:
+            return self._json(409, {"error": str(e)})
+        self._json(200, {"message": msg, "listener": listener(), "state": self._snap()})
 
 
 WILDCARD = ("0.0.0.0", "::")
@@ -2126,7 +2498,8 @@ def make_servers(port: int, binds: list[str] | None = None,
     p = plan(binds, hosts)
     handler = type("ChatHandler", (Handler,), {
         "hosts": p["hosts"], "secret": token(), "hub": Hub(),
-        "streams": threading.BoundedSemaphore(MAX_STREAMS)})
+        "streams": threading.BoundedSemaphore(MAX_STREAMS), "waits": threading.BoundedSemaphore(MAX_WAITS),
+        "sends": RateLimit(AGENT_SENDS_PER_MIN)})
     servers = []
     for addr in p["binds"]:
         try:

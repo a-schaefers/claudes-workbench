@@ -118,6 +118,15 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn("`wb route all gpu\\|api\\|both`", ref)
         self.assertIn("--role", (ROOT / "skill/workbench/SKILL.md").read_text())
 
+    def test_every_web_chat_api_path_is_in_the_api_reference(self):
+        # #1042: docs/chat-api.md is the page another agent is handed; a path the server answers
+        # that it doesn't name is one nobody can find
+        doc = (ROOT / "docs/chat-api.md").read_text()
+        paths = set(re.findall(r'"(/api/[a-z]+/?)', (ROOT / "workbench/chat.py").read_text()))
+        self.assertGreater(len(paths), 10)
+        missing = sorted(p for p in paths if p not in doc)
+        self.assertEqual(missing, [], "add these to docs/chat-api.md")
+
     def test_claude_md_stays_under_claude_codes_size_warning(self):
         # Claude Code warns past 40,000 characters, and every session that changes the code
         # loads this file (local agents too, when workbench delegates work on itself)
