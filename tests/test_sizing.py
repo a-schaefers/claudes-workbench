@@ -341,7 +341,7 @@ class ApiSizing(Base):
     def test_a_step_an_api_round_records_is_counted_by_the_next_slice_and_tuning(self):
         window = (self.m.config.get("limit") or {}).get("context")   # what drive writes to status
         self.assertEqual(window, 131072)
-        row = {"model": tw.FLASH, "outcome": "accepted", "ran": True, "window": window,
+        row = {"model": tw.FLASH, "kind": "api", "outcome": "accepted", "ran": True, "window": window,  # #1022's kind
                "steps": [{"files": 2, "lines": 90, "window": window, "landed": True,
                           "compacted": False, "stuck": False, "took_over": False}]}
         store.append_jsonl(store.home() / "results.jsonl", row)

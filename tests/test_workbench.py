@@ -29008,6 +29008,12 @@ class RateLimits(Base):
         m = models.resolve(task.spec["model"])
         before = router.slice(m)
         run_wb("discard", "t-size")
+        # the fake's model is a GPU entry run as an API task (task.json `via`): its row says `kind`
+        # api, and #1022's slice reads only rows of the model's own kind, so the row is given the
+        # entry's kind here, or neither check below would read it (the wave 2 merge)
+        rows, _ = store.read_jsonl(store.home() / "results.jsonl")
+        (store.home() / "results.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in [*rows[:-1], {**rows[-1], "kind": m.kind}]))
         row = store.results()[-1]
         self.assertIs(row["steps"][-1]["stuck"], False)
         self.assertEqual((router.slice(m).files, router.slice(m).lines), (before.files, before.lines))
@@ -30572,7 +30578,7 @@ class ApiStats(Base):
         from workbench import results
         gpu, api = self.api_task("t-g", via=None), self.api_task("t-a", {"gpu_wh": 12.0, "remote_gpu": True})
         with mock.patch.object(runner.models, "_fake", return_value=False), \
-                mock.patch.dict(runner.CURRENT, {"remote": False}):
+                mock.patch.dict(runner.CURRENT, {"remote": False, "api": False}):  # drive's, per task
             self.assertTrue(runner.measures_power(gpu))
             self.assertFalse(runner.measures_power(api))
         with mock.patch.object(results.spend, "usage_by_step", return_value=(None, [])):
