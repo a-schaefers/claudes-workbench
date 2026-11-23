@@ -19,14 +19,12 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
 - **Claude is the lead, your local models are the crew:** Claude assigns each step to a model
   sized for it, reviews what comes back, and returns it until it's right.
 - **Agents get Claude's know-how:** a library of skills Claude keeps and grows, handed out per
-  task ([the skill library](ARCHITECTURE.md#the-skill-library)).
+  task.
 - **It's still just Claude Code.** You talk to Claude as usual, your plugins, skills and settings
   keep working, and the agents work on their own branches, so your checkout is untouched until
   you accept.
 - **Beyond code: images and audio.** Optionally, Claude directs local image and audio models
-  for a project's icons, illustrations, voice lines, sound effects and music, and checks each one;
-  a voice or music you pick by ear ([images](ARCHITECTURE.md#images),
-  [audio](ARCHITECTURE.md#audio)).
+  for a project's icons, illustrations, voice lines, sound effects and music.
 
 On bigger coding tasks, once the session is already open, handing the coding off to the local
 model typically costs Claude about half the tokens of writing the code itself.
@@ -41,8 +39,6 @@ model typically costs Claude about half the tokens of writing the code itself.
 | touch what they shouldn't | their own git worktree, read-only git, and on Linux a Landlock sandbox |
 | cost Claude tokens to babysit | Claude sleeps until a task needs it: no polling |
 | differ from machine to machine | the model choice and time limits are learned from this machine's own results |
-
-How and why: [Why it's built this way](ARCHITECTURE.md#why-its-built-this-way).
 
 ## Quickstart
 
