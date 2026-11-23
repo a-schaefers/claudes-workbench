@@ -169,6 +169,34 @@ wake replaces. A run varies by about 0.2× from the next, and one round sent bac
 25K: replay files measured 1.18×, 1.40×, 1.38× and 0.90× as the self-review learned what the
 review rounds had been about.
 
+How it got there, on the two significant tasks: 2.5× and 2.1× at a 32K window with the early
+skill (5 and 7 compactions), 1.55× and 1.3× at 64K, 1.18–1.40× and 0.82× at the 40K window all on
+the GPU with a lean sign-off and self-review, and 0.90× for replay files once the agent proved
+each check it wrote by breaking it. The first handoffs (2026-11-17) cost 1.6–4.5× writing it; a
+night of measuring and about 35 pull requests (#28–#62) brought it under 1×. What mattered: the
+agent's self-review (each check it wrote commented out, a test seen to fail, put back), so Claude
+signs off in one call; the request pasted as the spec, not rewritten as long as the code; no wake
+without work for Claude (check-ins, repeated warnings and handover notices off by default or a
+line in the report); the diff in the wake, and after feedback only what changed; and a window
+that fits the card (`wb optimize`): one that spills into system RAM halves the writing speed,
+one too small compacts and loses its place.
+
+Claude writing the same tasks again on 2026-11-19, each from a fresh session (`wb bench self`):
+replay files 178K, score combos 160K, the date range 90K, the high score 83K. The significant ones
+are close to the table; the trivial ones cost more from a fresh session than warm.
+
+The electricity, on the test machine: the card draws 14 W idle and 290–317 W while the model
+writes (its own power sensor, about 38 tokens a second). A significant task kept it busy 6–30
+minutes, 0.03–0.16 kWh: 1–5 cents at $0.30 per kWh (the rest of the computer not measured). The
+warm significant handoff saved about 68K input-equivalent tokens, about 25 cents at the API list
+price of Claude's default model then ($4 per million input tokens).
+
+Where it doesn't hold: a trivial task costs about the same handed off or more, so trivial ones go
+in batches; a round sent back costs about 25K; it is four tasks and about fifteen handoff runs on
+one card and one model, a demonstration rather than a benchmark; a significant task takes the
+local model 6–30 minutes by the clock (Claude's tokens are the point); and the GPU is busy
+meanwhile.
+
 ## A task, start to finish
 
 ```
@@ -8421,7 +8449,7 @@ Ported from backseat-driver (2026-11-16), which has run it since 2026-10-10. mai
 push: every change is a pull request that merges once `check` is green and it is approved.
 
 A new `.md` file in the repository's root is never committed by accident: `.gitignore` ignores
-`/*.md` but README.md, CLAUDE.md, ARCHITECTURE.md and THESIS.md, so a scratch note (an
+`/*.md` but README.md, CLAUDE.md and ARCHITECTURE.md, so a scratch note (an
 experiment's steps, a draft) stays local. A root file already tracked (an audit's FINDINGS.md, until its fixes ship) stays tracked, and
 nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new root doc needs its own `!/` line.
 
@@ -8493,8 +8521,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `OUTLINE_HEAD`/`OUTLINE_MORE` in *The runner, inside*'s prompt texts) → the off test's byte-for-byte
   check (ProbeOn), and a task probe can't help, ProbeWhereItHelps's against a probe-off task,
   which each must keep passing.
-- **What a handoff costs Claude, measured** → THESIS.md (the case for users, with the same
-  numbers) and the README's sentence on it, which links there.
+- **What a handoff costs Claude, measured** → the README's sentence on it.
 - **Anything a reader looks up** (a command, flag, default, guard, key, file, prompt text,
   environment variable) → this file, CLAUDE.md if it names it, and the skill
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's

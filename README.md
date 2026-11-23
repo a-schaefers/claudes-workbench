@@ -29,8 +29,7 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
   [audio](ARCHITECTURE.md#audio)).
 
 On bigger coding tasks, once the session is already open, handing the coding off to the local
-model typically costs Claude about half the tokens of writing the code itself
-([how we measured it](THESIS.md)).
+model typically costs Claude about half the tokens of writing the code itself.
 
 ## Why small local models hold up
 
