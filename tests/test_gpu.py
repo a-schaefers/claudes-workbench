@@ -568,7 +568,12 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.assertTrue(said.startswith("exit 4: "), said)
         self.assertIn("task t-gpu", said)
         run_wb(*argv, "--queue")
-        time.sleep(2)
+        # the rival checks its base first (a fixed 2 s sleep lost that race on macOS's runner,
+        # nightly of f744898, 2026-11-23): wait for it to reach the GPU's queue
+        deadline = time.time() + 60
+        while time.time() < deadline and "the base" in (store.Task("t-rival").status.get("last") or "the base"):
+            time.sleep(0.1)
+        time.sleep(1)                                # and stay there, not let in beside the tests
         st = store.Task("t-rival").status
         self.assertEqual((st["phase"], st["last"]), ("queued", "waiting for the GPU (held by t-gpu)"))
         flag.write_text("")
