@@ -38,7 +38,7 @@ from datetime import date
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from workbench import runner, ask_mcp, audio, cli, context, events, gitops, hardware, lane, progress, store, transcript  # noqa: E402
+from workbench import runner, ask_mcp, audio, cli, context, events, gitops, hardware, lane, patches, progress, store, transcript  # noqa: E402
 
 class _Listens:
     """A test server that listens as soon as it is made. HTTPServer's own server_bind looks the
@@ -17448,6 +17448,472 @@ class Update(Base):
         out = self.update("--stop")
         self.assertIn("claude plugin marketplace update failed: offline", out)
         self.assertIn("the tasks were stopped for it: wb resume t continues them", out)
+
+
+class LocalPatches(Base):
+    """wb patch, and wb update with patches (#1005, 2026-11-22): Claude Code's marketplace update
+    re-clones its clone whenever HEAD differs from upstream's, so a local commit or edit there was
+    wiped while wb update said "updated marketplace", exit 0. A real origin and clone stand in for
+    this copy, as in Update; a fake `claude` records its calls."""
+    URL = "https://github.com/a-schaefers/claudes-workbench.git"
+
+    def setUp(self):
+        super().setUp()
+        tmp = Path(self.tmp.name)
+        self.origin = tmp / "origin"
+        self.g(tmp, "clone", "-q", str(self.repo), str(self.origin))
+        (self.origin / "bin").mkdir()
+        self.calls = tmp / "claude-calls"
+        # the new clone's wb: it records that it ran, and from where
+        (self.origin / "bin/wb").write_text(f'#!/bin/sh\necho "$0 $*" >> {shlex.quote(str(self.calls))}\n')
+        (self.origin / "bin/wb").chmod(0o755)
+        self.g(self.origin, "add", "bin"); self.g(self.origin, "commit", "-qm", "wb")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(tmp / "cc")
+        os.environ.pop("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", None)
+        os.environ.pop("WB_SOURCE", None)
+        self.market = tmp / "cc/plugins/marketplaces/workbench"
+        self.copy = self.market
+        self.g(tmp, "clone", "-q", str(self.origin), str(self.copy))
+        self.ident(self.copy)
+        self.base = self.g(self.copy, "rev-parse", "HEAD")
+        self.commit(self.origin, "new.txt", "x", "news")
+        bindir = tmp / "fakebin"; bindir.mkdir()
+        # Claude Code's marketplace add: the old clone is deleted when it switches to a directory
+        (bindir / "claude").write_text(
+            f'#!/bin/sh\necho "$*" >> {shlex.quote(str(self.calls))}\ncase "$*" in "plugin marketplace add"*)\n'
+            f'  rm -rf {shlex.quote(str(self.market))};; esac\n')
+        (bindir / "claude").chmod(0o755)
+        os.environ["PATH"] = f"{bindir}{os.pathsep}{os.environ['PATH']}"
+        patcher = mock.patch.object(cli, "PKG_ROOT", self.copy)
+        patcher.start(); self.addCleanup(patcher.stop)
+
+    def g(self, d, *a):
+        return subprocess.run(["git", "-C", str(d), *a], check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def ident(self, d):
+        self.g(d, "config", "user.email", "t@t"); self.g(d, "config", "user.name", "t")
+
+    def commit(self, d, name, text, msg):
+        (d / name).write_text(text)
+        self.g(d, "add", name); self.g(d, "commit", "-qm", msg)
+        return self.g(d, "rev-parse", "HEAD")
+
+    def wb(self, *a):
+        buf, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(buf), redirect_stderr(err):
+                cli.main(list(a))
+        except SystemExit:
+            pass
+        return buf.getvalue() + err.getvalue()
+
+    def as_clone(self, branch="local"):
+        """This copy as a clone the user owns (not Claude Code's), on ``branch`` tracking origin/main."""
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "elsewhere")
+        self.g(self.copy, "switch", "-q", "-c", branch, "--track", "origin/main")
+
+    def worktrees(self):
+        return self.g(self.copy, "worktree", "list", "--porcelain").count("worktree ")
+
+    def test_a_marketplace_update_refuses_and_rescues_a_local_commit_an_edit_or_an_untracked_file(self):
+        # #1005 (2026-11-22): Claude Code re-clones its clone over all three, and wb update said
+        # "updated marketplace <patched>..<upstream>", exit 0
+        # (a stash and another branch's commit too: the re-clone deletes them as well, and a
+        # check of HEAD's commits alone said "already up to date" over them)
+        live = types.SimpleNamespace(name="t-up", spec={})
+        for case in ("commit", "edit", "untracked", "stash", "branch"):
+            with self.subTest(case):
+                if case == "commit":
+                    self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+                elif case == "edit":
+                    (self.copy / "README.md").write_text("edited\n")
+                elif case == "untracked":
+                    (self.copy / "notes.txt").write_text("untracked\n")
+                elif case == "stash":
+                    (self.copy / "README.md").write_text("stashed\n")
+                    (self.copy / "loose.txt").write_text("loose\n")
+                    self.g(self.copy, "stash", "-q", "--include-untracked")
+                else:
+                    here = self.g(self.copy, "branch", "--show-current")
+                    self.g(self.copy, "switch", "-q", "-c", "side")
+                    self.commit(self.copy, "side.txt", "side\n", "work on a side branch")
+                    self.g(self.copy, "switch", "-q", here)
+                head, status = self.g(self.copy, "rev-parse", "HEAD"), self.g(self.copy, "status", "--porcelain")
+                with mock.patch.object(store, "all_tasks", lambda: [live]), \
+                        mock.patch.object(cli, "runner_alive", lambda t: True), \
+                        mock.patch.object(cli, "_stop_for_update", side_effect=AssertionError("stopped")):
+                    out = self.wb("update", "--stop")
+                self.assertIn("Claude Code's update re-clones it and would wipe them", out)
+                self.assertIn("wb patch init", out)
+                saved = Path(re.search(r"Saved in (\S+);", out).group(1))
+                self.assertTrue(saved.is_relative_to(store.home() / "rescued"))
+                if case == "commit":
+                    patch = next(saved.glob("0001-*.patch")).read_text()
+                    self.assertIn("a local fix", patch)
+                    self.assertIn("+mine", patch)
+                    self.assertFalse((saved / "uncommitted.diff").exists())
+                elif case == "stash":
+                    self.assertIn("1 stash(es)", out)
+                    diff = (saved / "stash-0.diff").read_text()
+                    self.assertIn("+stashed", diff)
+                    self.assertIn("+loose", diff)                                     # its untracked file
+                elif case == "branch":
+                    self.assertIn("1 commit(s) on other local branches (side)", out)
+                    self.assertIn("+side", next((saved / "branch-side").glob("0001-*.patch")).read_text())
+                else:
+                    diff = (saved / "uncommitted.diff").read_text()
+                    self.assertIn("+edited" if case == "edit" else "b/notes.txt", diff)
+                self.assertEqual(self.g(self.copy, "rev-parse", "HEAD"), head)        # nothing changed
+                self.assertEqual(self.g(self.copy, "status", "--porcelain"), status)  # nor staged
+                self.assertFalse(self.calls.exists())                                 # nor updated
+                self.g(self.copy, "reset", "-q", "--hard", self.base)
+                self.g(self.copy, "clean", "-qfd")
+                self.g(self.copy, "stash", "clear")
+                if case == "branch":
+                    self.g(self.copy, "branch", "-q", "-D", "side")
+
+    def test_the_check_on_a_marketplace_clone_with_local_changes_says_wb_update_would_refuse(self):
+        # #1005: --check said "up to date" (or only the news) of a clone Claude Code would wipe
+        (self.copy / "README.md").write_text("edited\n")
+        out = self.wb("update", "--check")
+        self.assertIn("update available: 1 new commit(s)", out)
+        self.assertIn("local changes in the marketplace clone: wb update would refuse (Claude Code "
+                      "re-clones it); wb patch init keeps them", out)
+        self.g(self.copy, "pull", "-q", "--ff-only")
+        out = self.wb("update", "--check")
+        self.assertNotIn("up to date", out)
+        self.assertIn("local changes in the marketplace clone", out)
+        self.g(self.copy, "checkout", "-q", "README.md")
+        self.assertEqual(self.wb("update", "--check").strip(), "up to date")
+
+    def test_update_rebases_the_patches_on_local_onto_upstreams_news(self):
+        # #1005: a clone with a patch died "has commits its upstream hasn't"
+        self.as_clone()
+        old = self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+        out = self.wb("update")
+        self.assertIn("updated clone", out)
+        self.assertIn("(1 commit(s))", out)                     # upstream's news, not the patch
+        self.assertIn("1 local patch(es) on top of upstream", out)
+        up = self.g(self.origin, "rev-parse", "HEAD")
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD^"), up)
+        self.assertEqual(self.g(self.copy, "log", "-1", "--format=%s"), "a local fix")
+        self.assertEqual(self.g(self.copy, "rev-parse", "refs/workbench/before-update"), old)
+        self.assertTrue((self.copy / "new.txt").exists() and (self.copy / "mine.txt").exists())
+        self.assertEqual(self.g(self.copy, "branch", "--show-current"), "local")
+        self.assertEqual(self.worktrees(), 1)                   # the scratch worktree is gone
+        self.assertEqual(self.calls.read_text().splitlines(),   # then the plugin steps
+                         ["plugin marketplace update workbench", "plugin update workbench@workbench"])
+
+    def test_a_patch_upstream_already_merged_is_reported_as_landed_and_dropped(self):
+        # #1005: once the pull request merges, the next wb update drops the local patch by itself
+        self.as_clone()
+        self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+        self.commit(self.copy, "keep.txt", "keep\n", "a preference")
+        self.commit(self.origin, "mine.txt", "mine\n", "a fix for everybody")
+        out = self.wb("update")
+        self.assertIn("landed upstream, dropped from local: a local fix", out)
+        self.assertNotIn("dropped from local: a preference", out)
+        self.assertIn("1 local patch(es) on top of upstream", out)
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD^"), self.g(self.origin, "rev-parse", "HEAD"))
+        self.assertEqual(self.g(self.copy, "log", "--format=%s", "@{u}..HEAD"), "a preference")
+
+    def test_a_patch_that_no_longer_applies_changes_nothing_and_is_named(self):
+        # #1005: mid-conflict in the live tree, every wb call from the clone died with a SyntaxError
+        self.as_clone()
+        mine = self.commit(self.copy, "README.md", "mine\n", "a local fix")
+        self.commit(self.origin, "README.md", "theirs\n", "upstream's rewrite")
+        out = self.wb("update")
+        self.assertIn(f"the local patch {mine[:7]} a local fix no longer applies", out)
+        self.assertIn("nothing changed", out)
+        self.assertIn(f"wb patch drop {mine[:7]}", out)
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD"), mine)
+        self.assertEqual(self.g(self.copy, "status", "--porcelain"), "")
+        self.assertEqual((self.copy / "README.md").read_text(), "mine\n")
+        self.assertEqual(self.worktrees(), 1)
+        self.assertEqual(list((store.home() / "patches").iterdir()), [])
+        self.assertFalse(self.calls.exists())                   # no plugin step either
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.copy), "rev-parse", "-q", "--verify",
+                                            patches.BEFORE], capture_output=True).returncode, 0)
+
+    def test_a_conflicting_patch_under_stop_refuses_before_any_task_is_stopped(self):
+        # #1005 with #775's rule: every refusal comes before --stop stops anything
+        self.as_clone()
+        mine = self.commit(self.copy, "README.md", "mine\n", "a local fix")
+        self.commit(self.origin, "README.md", "theirs\n", "upstream's rewrite")
+        with mock.patch.object(store, "all_tasks", lambda: [types.SimpleNamespace(name="t-up", spec={})]), \
+                mock.patch.object(cli, "runner_alive", lambda t: True), \
+                mock.patch.object(cli, "_stop_for_update", side_effect=AssertionError("stopped")):
+            out = self.wb("update", "--stop")
+        self.assertIn(f"the local patch {mine[:7]} a local fix no longer applies", out)
+        self.assertNotIn("stopped", out.replace("nothing changed", ""))
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD"), mine)
+
+    def test_an_untracked_file_in_the_rebased_patches_way_refuses_before_any_task_is_stopped(self):
+        # #1005 (2026-11-22): upstream's news added new.txt, the tree had an untracked new.txt:
+        # reset --keep failed after --stop had stopped the tasks, saying "the pull is done" of a
+        # branch that never moved, update.json said behind 0, and BEFORE named the unmoved tip
+        self.as_clone()
+        mine = self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+        (self.copy / "new.txt").write_text("the user's own\n")
+        with mock.patch.object(store, "all_tasks", lambda: [types.SimpleNamespace(name="t-up", spec={})]), \
+                mock.patch.object(cli, "runner_alive", lambda t: True), \
+                mock.patch.object(cli, "_stop_for_update", side_effect=AssertionError("stopped")):
+            out = self.wb("update", "--stop")
+        self.assertIn("would overwrite files in its tree, so nothing changed", out)
+        self.assertIn("new.txt", out)
+        self.assertNotIn("the pull is done", out)
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD"), mine)
+        self.assertEqual((self.copy / "new.txt").read_text(), "the user's own\n")
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.copy), "rev-parse", "-q", "--verify",
+                                            patches.BEFORE], capture_output=True).returncode, 0)
+        self.assertNotEqual(store.read_json(store.home() / "update.json", {}).get("behind"), 0)
+        self.assertFalse(self.calls.exists())
+        with mock.patch.object(patches, "check_move"):          # the move's own refusal, past the check
+            out = self.wb("update")
+        self.assertIn("the patches are rebased at", out)
+        self.assertIn("but local is unchanged", out)
+        self.assertNotIn("the pull is done", out)
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD"), mine)
+        self.assertNotEqual(store.read_json(store.home() / "update.json", {}).get("behind"), 0)
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.copy), "rev-parse", "-q", "--verify",
+                                            patches.BEFORE], capture_output=True).returncode, 0)
+
+    def test_a_commit_made_while_the_tasks_stopped_keeps_the_branch_where_it_is(self):
+        # #1005 (2026-11-22): the move didn't check HEAD was still the tip the rebase began from,
+        # so a commit made meanwhile fell off the branch, BEFORE naming the older tip
+        self.as_clone()
+        self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+
+        def stop(live):
+            self.commit(self.copy, "later.txt", "later\n", "a commit made meanwhile")
+            return "stopped t-up"
+        task = types.SimpleNamespace(name="t-up", spec={}, status={"last": cli.UPDATE_STOP})
+        with mock.patch.object(store, "all_tasks", lambda: [task]), \
+                mock.patch.object(cli, "runner_alive", lambda t: True), \
+                mock.patch.object(cli, "_stop_for_update", side_effect=stop):
+            out = self.wb("update", "--stop")
+        self.assertIn("moved from", out)
+        self.assertIn("nothing changed", out)
+        self.assertIn("the tasks were stopped for it: wb resume t-up continues them", out)
+        self.assertNotIn("the pull is done", out)
+        self.assertEqual(self.g(self.copy, "log", "-1", "--format=%s"), "a commit made meanwhile")
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.copy), "rev-parse", "-q", "--verify",
+                                            patches.BEFORE], capture_output=True).returncode, 0)
+        self.assertFalse(self.calls.exists())
+
+    def test_every_earlier_tip_stays_in_the_before_refs_reflog(self):
+        # #1005 (2026-11-22): a ref outside refs/heads gets no reflog by default, so each update or
+        # drop overwrote the tip the one before had saved
+        self.as_clone()
+        first = self.commit(self.copy, "a.txt", "a\n", "first")
+        self.commit(self.copy, "b.txt", "b\n", "second")
+        self.wb("update")                                       # BEFORE: the tip before the rebase
+        rebased = self.g(self.copy, "rev-parse", "HEAD")
+        self.wb("patch", "drop", self.g(self.copy, "rev-parse", "HEAD^"))
+        self.assertEqual(self.g(self.copy, "rev-parse", patches.BEFORE), rebased)
+        self.assertNotEqual(first, rebased)
+        logged = self.g(self.copy, "reflog", "show", "--format=%H", patches.BEFORE).splitlines()
+        self.assertEqual(len(logged), 2)
+
+    def test_a_branch_other_than_local_keeps_the_diverged_refusal(self):
+        self.as_clone("mine")
+        head = self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+        out = self.wb("update")
+        self.assertIn("a fast-forward pull can't update it", out)
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD"), head)
+
+    def test_patch_list_shows_each_patch_with_its_scope_and_the_upstream_branches(self):
+        self.as_clone()
+        a = self.commit(self.copy, "mine.txt", "mine\n", "fix the thing\n\nScope: everybody")
+        b = self.commit(self.copy, "pref.txt", "pref\n", "my preference")
+        (self.copy / "scratch.txt").write_text("x")
+        out = self.wb("patch", "list")
+        self.assertIn("branch local, tracking origin/main", out)
+        lines = out.splitlines()
+        self.assertLess(lines.index(f"{a[:7]}  fix the thing  [everybody]"),
+                        lines.index(f"{b[:7]}  my preference  [no Scope trailer]"))   # oldest first
+        self.assertIn("uncommitted: ?? scratch.txt", out)
+        self.wb("patch", "upstream", a, "--name", "fix-thing")
+        self.assertIn(f"upstream branch pr/fix-thing  {store.home() / 'upstream/fix-thing'}",
+                      self.wb("patch", "list"))
+        self.g(self.copy, "switch", "-q", "-c", "other")
+        self.assertIn("patches belong on local", self.wb("patch", "list"))
+
+    def test_patch_list_on_a_marketplace_install_points_at_patch_init(self):
+        self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+        out = self.wb("patch", "list")
+        self.assertIn("the marketplace clone can't keep patches", out)
+        self.assertIn("a local fix", out)
+        self.assertIn("wb patch init", out)
+
+    def test_patch_drop_removes_one_patch_and_keeps_the_old_tip(self):
+        self.as_clone()
+        a = self.commit(self.copy, "mine.txt", "mine\n", "first")
+        b = self.commit(self.copy, "pref.txt", "pref\n", "second")
+        self.assertIn("isn't one of local's patches", self.wb("patch", "drop", self.base))
+        out = self.wb("patch", "drop", a)
+        self.assertIn(f"dropped {a[:7]} first", out)
+        self.assertIn("wb update refreshes the mod", out)
+        self.assertEqual(self.g(self.copy, "log", "--format=%s", "@{u}..HEAD"), "second")
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD^"), self.base)
+        self.assertFalse((self.copy / "mine.txt").exists())
+        self.assertEqual(self.g(self.copy, "rev-parse", "refs/workbench/before-update"), b)
+        self.assertEqual(self.worktrees(), 1)
+        (self.copy / "pref.txt").write_text("edited\n")
+        self.assertIn("uncommitted changes", self.wb("patch", "drop", "HEAD"))
+        self.assertEqual(self.g(self.copy, "log", "--format=%s", "@{u}..HEAD"), "second")
+        self.g(self.copy, "checkout", "-q", "pref.txt")
+        c = self.commit(self.copy, "pref.txt", "more\n", "third, on top of second")
+        out = self.wb("patch", "drop", self.g(self.copy, "rev-parse", "HEAD^"))   # third needs it
+        self.assertIn(f"the later patch {c[:7]} third, on top of second doesn't apply: nothing changed", out)
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD"), c)
+        self.assertEqual(self.worktrees(), 1)
+
+    def test_patch_upstream_prepares_a_branch_from_fresh_upstream_and_pushes_nothing(self):
+        self.as_clone()
+        self.g(self.copy, "remote", "set-url", "origin", self.URL)
+        self.g(self.copy, "config", f"url.{self.origin}.insteadOf", self.URL)   # fetches the stand-in
+        self.commit(self.copy, "pref.txt", "pref\n", "my preference")
+        fix = self.commit(self.copy, "mine.txt", "mine\n", "fix the thing\n\nScope: everybody")
+        out = self.wb("patch", "upstream", fix, "--name", "fix-thing")
+        wt = store.home() / "upstream/fix-thing"
+        self.assertEqual(self.g(wt, "branch", "--show-current"), "pr/fix-thing")
+        self.assertEqual(self.g(wt, "rev-parse", "HEAD^"), self.g(self.origin, "rev-parse", "HEAD"))
+        self.assertEqual(self.g(wt, "log", "-1", "--format=%s"), "fix the thing")
+        self.assertFalse((wt / "pref.txt").exists())            # only that patch
+        self.assertIn(f"cd {wt} && python3 -m unittest\n", out)  # mod/ unchanged: no plugin test
+        self.assertIn("gh repo fork a-schaefers/claudes-workbench --remote --remote-name fork", out)
+        self.assertIn("git push -u fork pr/fix-thing", out)
+        self.assertIn("gh pr create --repo a-schaefers/claudes-workbench --head <your login>:pr/fix-thing", out)
+        self.assertIn("pull_request_template.md", out)
+        self.assertIn("the next wb update drops the local patch", out)
+        self.assertEqual(self.g(self.origin, "branch", "--list", "pr/*"), "")   # nothing pushed
+        self.assertIn("already prepared", self.wb("patch", "upstream", fix, "--name", "fix-thing"))
+        self.assertIn("lowercase letters", self.wb("patch", "upstream", fix, "--name", "Fix_It"))
+
+    def test_patch_upstream_off_github_prints_no_url_for_gh_and_flags_a_personal_patch(self):
+        # #1005 (2026-11-22): `gh repo fork <the origin's URL>` was printed for an origin off
+        # GitHub, and a Scope: me patch was offered with no word that it is a personal one
+        self.as_clone()
+        fix = self.commit(self.copy, "mine.txt", "mine\n", "my modeline\n\nScope: me")
+        out = self.wb("patch", "upstream", fix, "--name", "modeline")
+        self.assertNotIn(f"gh repo fork {self.origin}", out)
+        self.assertIn("gh repo fork <owner/repo> --remote --remote-name fork", out)
+        self.assertIn("isn't on GitHub", out)
+        self.assertIn("a personal patch", out)
+
+    def test_patch_init_moves_a_marketplace_install_to_a_clone_with_its_changes_as_patches(self):
+        # #1005: `claude plugin marketplace add <dir>` switches the install to a directory Claude
+        # Code never resets, and deletes the old clone, so the setup runs from the new one
+        old_up = self.g(self.copy, "rev-parse", "@{u}")
+        (self.copy / "stashme.txt").write_text("stashed\n")       # a stash: saved, not carried over
+        self.g(self.copy, "stash", "-q", "--include-untracked")
+        self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+        (self.copy / "README.md").write_text("edited\n")
+        (self.copy / "notes.txt").write_text("untracked\n")
+        dest = Path(self.tmp.name) / "source"
+        with mock.patch.object(store, "all_tasks", lambda: [types.SimpleNamespace(name="t-up", spec={})]), \
+                mock.patch.object(cli, "runner_alive", lambda t: True):
+            self.assertIn("tasks are running (t-up (no session))", self.wb("patch", "init", "--dir", str(dest)))
+        self.assertFalse(dest.exists())
+        out = self.wb("patch", "init", "--dir", str(dest))
+        self.assertIn(f"workbench runs from {dest} now, branch local tracking origin/main", out)
+        self.assertIn("2 patch(es) carried over", out)
+        self.assertIn("/reload-plugins", out)
+        saved = Path(re.search(r"kept only in (\S+): 1 stash\(es\)", out).group(1))
+        self.assertIn("+stashed", (saved / "stash-0.diff").read_text())
+        self.assertEqual(self.calls.read_text().splitlines(),
+                         [f"plugin marketplace add {dest}", f"{dest}/bin/wb setup --force",
+                          "plugin update workbench@workbench"])
+        self.assertFalse(self.market.exists())
+        self.assertEqual(self.g(dest, "branch", "--show-current"), "local")
+        self.assertEqual(self.g(dest, "rev-parse", "--abbrev-ref", "local@{u}"), "origin/main")
+        self.assertEqual(self.g(dest, "log", "--reverse", "--format=%s", f"{old_up}..local"),
+                         f"a local fix\n{patches.CARRIED}")
+        self.assertEqual((dest / "README.md").read_text(), "edited\n")
+        self.assertEqual((dest / "notes.txt").read_text(), "untracked\n")
+        self.assertEqual(self.g(dest, "status", "--porcelain"), "")
+        self.assertTrue(list((store.home() / "rescued").iterdir()))       # and a copy kept
+
+    def test_patch_init_refuses_a_directory_that_is_not_a_clone_of_the_same_origin(self):
+        dest = Path(self.tmp.name) / "taken"
+        dest.mkdir(); (dest / "x").write_text("x")
+        self.assertIn("isn't a clone of", self.wb("patch", "init", "--dir", str(dest)))
+        self.assertFalse(self.calls.exists())
+        self.assertTrue(self.market.exists())
+        os.environ["WB_SOURCE"] = "~/src/wb"                  # relative and ~ work, like WB_SKILLS
+        store.absolute_env()
+        self.assertEqual(patches.source_dir(), Path.home() / "src/wb")
+
+    def test_patch_init_refuses_without_claude_or_inside_the_marketplaces_directory(self):
+        # #1005 (2026-11-22): neither refusal had a test; each must come before any change
+        self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+        head = self.g(self.copy, "rev-parse", "HEAD")
+        dest = Path(self.tmp.name) / "source"
+        with mock.patch.object(cli.shutil, "which", lambda n: None if n == "claude" else shutil.which(n)):
+            self.assertIn("claude isn't on PATH", self.wb("patch", "init", "--dir", str(dest)))
+        inside = self.market.parent / "mine"
+        self.assertIn("inside Claude Code's marketplaces directory", self.wb("patch", "init", "--dir", str(inside)))
+        self.assertFalse(dest.exists() or inside.exists())
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD"), head)
+        self.assertFalse((store.home() / "rescued").exists())
+        self.assertFalse(self.calls.exists())
+
+    def test_patch_init_in_a_reused_directory_that_fails_leaves_no_local_branch_behind(self):
+        # #1005 (2026-11-22): the branch stayed, so the rerun took "already has branch local:
+        # nothing carried over", switched Claude Code over, and the changes lived only in rescued/
+        dest = Path(self.tmp.name) / "source"
+        self.g(Path(self.tmp.name), "clone", "-q", str(self.origin), str(dest))
+        self.g(dest, "remote", "set-url", "origin", self.g(self.copy, "config", "remote.origin.url"))
+        self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+        self.ident(dest)
+        real = patches._git
+
+        def git(cwd, *args, **kw):  # the carried-over commit doesn't apply there
+            if args[:1] == ("am",) and "--abort" not in args:
+                return subprocess.CompletedProcess(args, 1, b"", b"patch failed")
+            return real(cwd, *args, **kw)
+        with mock.patch.object(patches, "_git", git):
+            out = self.wb("patch", "init", "--dir", str(dest))
+        self.assertIn("don't apply", out)
+        self.assertIn("the marketplace install is as it was", out)
+        self.assertEqual(self.g(dest, "branch", "--show-current"), "main")
+        self.assertEqual(self.g(dest, "branch", "--list", "local"), "")
+        self.assertEqual(self.g(dest, "status", "--porcelain"), "")
+        self.assertTrue(self.market.exists())
+        self.assertFalse(self.calls.exists())
+
+    def test_patch_init_on_a_clone_install_says_it_already_is_one_and_changes_nothing(self):
+        self.as_clone("main-copy")
+        out = self.wb("patch", "init")
+        self.assertIn("already runs from a clone you own", out)
+        self.assertIn("branch main-copy", out)
+        self.assertIn("switch -c local", out)
+        self.assertFalse(self.calls.exists())
+
+    def test_a_crash_prints_its_traceback_then_how_to_get_it_fixed(self):
+        # #1005: a bug's traceback alone left the user's Claude no path to a fix the user keeps
+        err = io.StringIO()
+        with mock.patch.object(cli, "cmd_doctor", side_effect=ZeroDivisionError("boom")), \
+                mock.patch.object(sys, "argv", ["wb", "doctor"]), \
+                redirect_stderr(err), self.assertRaises(SystemExit) as e:
+            cli.main()                                          # as bin/wb runs it
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("ZeroDivisionError: boom", err.getvalue())
+        self.assertEqual(err.getvalue().splitlines()[-1],
+                         "wb crashed: a bug in workbench. Claude can fix it for you as a local patch "
+                         f"(wb patch) and offer it upstream ({self.copy / 'CONTRIBUTING.md'})")
+        with mock.patch.object(cli, "cmd_doctor", side_effect=KeyboardInterrupt), \
+                mock.patch.object(sys, "argv", ["wb", "doctor"]), self.assertRaises(KeyboardInterrupt):
+            cli.main()
+
+    def test_a_crash_in_process_stays_an_exception_so_no_refusal_test_passes_on_it(self):
+        # #1005 (2026-11-22): the hint's SystemExit(1) passed ~160 assertRaises(SystemExit)
+        # refusal tests on a crash in place of the refusal
+        with mock.patch.object(cli, "cmd_doctor", side_effect=ZeroDivisionError("boom")), \
+                self.assertRaises(ZeroDivisionError):
+            cli.main(["doctor"])
 
 
 class Projects(Base):

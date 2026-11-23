@@ -1,0 +1,95 @@
+name: Bug report
+description: Something in workbench is wrong, crashed, or reported something untrue.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fill this from real output, pasted as it printed, not from memory. An agent filing it for
+        its user: run each command given here and paste what it printed. See CONTRIBUTING.md.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What workbench did, with the exact error or output (a traceback in full).
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The commands, in order, from a state someone else can reach.
+      placeholder: |
+        1. wb start t --spec spec.md --repo . --size trivial --test 'python3 -m unittest'
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Workbench commit
+      description: 'git -C "$(dirname "$(readlink -f "$(command -v wb)")")/.." rev-parse --short HEAD'
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: wb doctor
+      description: The output of `wb doctor`, whole.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install
+      options:
+        - marketplace (the README's quickstart)
+        - own clone (wb patch init)
+        - developer clone
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - Linux
+        - WSL2
+        - macOS
+    validations:
+      required: true
+  - type: textarea
+    id: patches
+    attributes:
+      label: Local patches
+      description: |
+        The output of `wb patch list`: a local patch can be the cause, so say whether there are any.
+        "none" if it lists none.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: patch-diff
+    attributes:
+      label: The local patch, if any
+      description: |
+        The diff of your local patches against upstream:
+        git -C "$(dirname "$(readlink -f "$(command -v wb)")")/.." diff @{u}
+        Leave empty when there is none.
+      render: diff
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched the existing issues, open and closed, for this one.
+          required: true
+        - label: Filed by an agent for its user, who has read it. (Leave unticked if you wrote it yourself.)

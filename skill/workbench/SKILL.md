@@ -488,6 +488,17 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   tokens, so run it only when the user says yes. `wb bench rm <case>` drops one that no longer
   tells models apart (its results stay).
 
+## When workbench itself has a bug
+When `wb` crashes, reports something untrue, or its docs are wrong, offer the fix unprompted:
+"want me to patch it?" A local patch: `wb patch init` once (a marketplace install can't keep one:
+Claude Code re-clones it), then a commit on branch `local` with a `Scope: me` or `Scope:
+everybody` trailer; `wb update` keeps it, and drops it once upstream has it. Then weigh it
+seriously: a bug, a false result or a change every user would want on any hardware and model is
+for everybody; a preference, a path or a taste is the user's alone. Tell them which and why, and
+only for everybody ask "want me to PR it upstream for everybody?": `wb patch upstream <commit>
+--name <slug>`, then the steps it prints, each outward one (issue, fork, push, pull request) on
+their yes. Read `reference/patching.md` beside this file first; you write the patch yourself.
+
 ## Report to the user
 Short and honest: what was built, on which model, rounds (automatic and review), test result,
 what you fixed, sent back or flagged, the branch. Report the agent's misses plainly; they are

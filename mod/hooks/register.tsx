@@ -2256,9 +2256,14 @@ async function waitOnChat($: any, id: string, kind: string, i: Record<string, un
   return undefined
 }
 
+// wb's patches.CHECK_LINE: a marketplace clone whose local changes Claude Code's update would
+// wipe. It comes alone when nothing is new upstream, and only lines that began "update available"
+// were toasted, so the warning reached nobody (#1005, 2026-11-22)
+const LOCAL_CHANGES = 'local changes in the marketplace clone'
+
 async function checkUpdate($: any) {
   const { ok, out } = await runWb($, ['update', '--check', '--if-due'])
-  if (ok && out.startsWith('update available')) $.ui.toast(`workbench: ${out}`)
+  if (ok && (out.startsWith('update available') || out.includes(LOCAL_CHANGES))) $.ui.toast(`workbench: ${out}`)
 }
 
 // A turn a command asked for. One the engine drops (a settings hook's block, a Stop, a host's

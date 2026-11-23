@@ -1912,6 +1912,23 @@ test('an update is checked once a session is in use, and /workbench-update insta
   expect((await $.command.run({ command: 'workbench-update', args: '' })).text).toContain('already up to date')
 })
 
+test('#1005: local changes a marketplace update would wipe are toasted with nothing new upstream', async ($, on) => {
+  // 2026-11-22: the check's warning came alone, and only "update available" was toasted
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {}, [])
+  const said = 'local changes in the marketplace clone: wb update would refuse (Claude Code re-clones it); ' +
+    'wb patch init keeps them'
+  on('process.run', (_: any, e: any) => ({ value: { exitCode: 0, stdout: e.argv[1] === 'update' ? said : '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2000)
+  expect(toasts).toContain(`workbench: ${said}`)
+})
+
 test('a reply to a pair of screenshots reaches Claude with its task and step (#99)', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}

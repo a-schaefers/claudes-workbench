@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 from collections import defaultdict
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -24,7 +25,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons,
-               media, models, optimize, progress, results, router, savings, scan, skills, spend, stats, store,
+               media, models, optimize, patches, progress, results, router, savings, scan, skills, spend, stats, store,
                transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
@@ -4959,12 +4960,25 @@ def _mod_behind() -> str | None:
     return None
 
 
+def _install_kind() -> str:
+    """"marketplace": this copy is Claude Code's own clone, which its update re-clones; "clone":
+    one the user owns (a developer's, or wb patch init's)."""
+    marketplace = context.claude_home() / "plugins" / "marketplaces"
+    return "marketplace" if PKG_ROOT.resolve().is_relative_to(marketplace.resolve()) else "clone"
+
+
+def _running(live, a) -> str:
+    """The running tasks, each with whose it is, for a refusal (#694)."""
+    mine = {t.name for t in _scope(live, *_caller(a))[0]} if _caller(a)[1] else set()
+    return ", ".join(t.name + (" (this session's)" if t.name in mine else f" ({_whose(t)})") for t in live)
+
+
 def cmd_update(a):
     """Bring this copy up to date with its origin: the marketplace's clone through Claude Code
-    (which also refreshes the mod's cached copy), a developer's clone with a fast-forward pull.
+    (which also refreshes the mod's cached copy), a developer's clone with a fast-forward pull,
+    and a clone's patches on branch `local` rebased onto the news (#1005).
     --check only says whether there is news; --if-due asks the network at most weekly."""
-    marketplace = context.claude_home() / "plugins" / "marketplaces"
-    kind = "marketplace" if PKG_ROOT.resolve().is_relative_to(marketplace.resolve()) else "clone"
+    kind = _install_kind()
     path = store.home() / "update.json"
     last = store.read_json(path, {})
     if a.if_due and not a.check:  # it pulled and updated at once, weekly or not (#602)
@@ -4986,9 +5000,14 @@ def cmd_update(a):
                 die(f"couldn't check for an update: {e}")
             store.write_json(path, {"checked_at": time.time(), "behind": behind, "kind": kind})
         stale = _mod_behind() if kind == "clone" and not behind else None
-        print(f"update available: {behind} new commit(s); /workbench-update (or wb update) installs it"
-              if behind else f"update available: Claude Code runs the mod as of {stale}, older than "
-              "this clone's; /workbench-update (or wb update) installs it" if stale else "up to date")
+        try:  # Claude Code's update would re-clone over them: "up to date" hid that (#1005)
+            mine = kind == "marketplace" and bool(patches.local_changes(PKG_ROOT))
+        except gitops.GitError:
+            mine = False
+        news = (f"update available: {behind} new commit(s); /workbench-update (or wb update) installs it"
+                if behind else f"update available: Claude Code runs the mod as of {stale}, older than "
+                "this clone's; /workbench-update (or wb update) installs it" if stale else None)
+        print("\n".join(x for x in (news, patches.CHECK_LINE if mine else None) if x) or "up to date")
         return
     # every check that can refuse comes before any task is stopped: --stop stopped every
     # session's tasks, then died on a dirty clone, a missing claude, a failed fetch, or found
@@ -4996,9 +5015,12 @@ def cmd_update(a):
     steps = [["claude", "plugin", "marketplace", "update", "workbench"],
              ["claude", "plugin", "update", "workbench@workbench"]]
     behind = None  # a marketplace copy is one commit deep: its news can't be counted beforehand
+    rebased = None  # a clone's patches on `local`, rebased onto the news (#1005)
     if kind == "clone":  # a clone is its own marketplace: pull, then let Claude Code re-read it
         if gitops.git(PKG_ROOT, "status", "--porcelain", "--untracked-files=no").strip():
             die(f"{PKG_ROOT} has uncommitted changes: commit or stash them, then wb update")
+    elif refusal := patches.marketplace_refusal(PKG_ROOT):  # saved first, then refused (#1005)
+        die(refusal)
     if not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
         die("claude isn't on PATH: wb update refreshes the plugin through it (run /workbench-update "
             "in Claude Code, or put claude on PATH)")
@@ -5010,22 +5032,25 @@ def cmd_update(a):
             die(f"couldn't check for an update: {e}")
         # only a clone behind and diverged: one only ahead (a local patch) has nothing to pull,
         # and died here, skipping the plugin steps too (#875)
-        if behind and subprocess.run(["git", "-C", str(PKG_ROOT), "merge-base", "--is-ancestor",
-                                      "HEAD", "@{u}"], capture_output=True,
-                                     stdin=subprocess.DEVNULL).returncode:
+        diverged = behind and subprocess.run(["git", "-C", str(PKG_ROOT), "merge-base", "--is-ancestor",
+                                              "HEAD", "@{u}"], capture_output=True,
+                                             stdin=subprocess.DEVNULL).returncode
+        if diverged and patches.branch(PKG_ROOT) == patches.PATCH_BRANCH:
+            # the user's patches (#1005): rebased in a scratch worktree now, before any task is
+            # stopped, so a conflict refuses with nothing changed; the live branch moves below
+            rebased = patches.rebase_patches(PKG_ROOT)
+            patches.check_move(PKG_ROOT, rebased.tip)  # an untracked file in the way: refused now
+        elif diverged:
             die(f"{PKG_ROOT} has commits its upstream hasn't: a fast-forward pull can't update it "
                 "(push or rebase them, then wb update)")
-        if behind:  # nothing to pull: no task needs stopping, the plugin steps still run
+        elif behind:  # nothing to pull: no task needs stopping, the plugin steps still run
             steps.insert(0, ["git", "-C", str(PKG_ROOT), "pull", "-q", "--ff-only"])
     live = [t for t in store.all_tasks() if runner_alive(t)] if behind != 0 else []
     if live and not a.stop:  # a pull would change the git shim, the lane and the ask server under them
         # whose each is: the advice was an unscoped `wb stop --all`, which parked other live
         # sessions' agents and acknowledged their news, so no wake ever came there (#694)
-        mine = {t.name for t in _scope(live, *_caller(a))[0]} if _caller(a)[1] else set()
-        die("tasks are running (" + ", ".join(
-            t.name + (" (this session's)" if t.name in mine else f" ({_whose(t)})") for t in live)
-            + "): update when they finish, or wb update --stop (stops them; each one's session is "
-            "told to wb resume it)")
+        die(f"tasks are running ({_running(live, a)}): update when they finish, or wb update --stop "
+            "(stops them; each one's session is told to wb resume it)")
     stopped = ""
     if live:
         print(_stop_for_update(live))
@@ -5034,7 +5059,16 @@ def cmd_update(a):
             stopped = f"; the tasks were stopped for it: wb resume {' '.join(names)} continues them"
     before = gitops.git(PKG_ROOT, "rev-parse", "HEAD").strip()
     stale = _mod_behind() if kind == "clone" else None  # the plugin steps below refresh it
-    pulled = ""
+    # said only once HEAD has moved: the patches' branch once failed to move and was called pulled
+    pulled, done = "", ("; the pull is done: finish with claude plugin marketplace update workbench "
+                        "&& claude plugin update workbench@workbench, then /reload-plugins")
+    if rebased:  # the live branch moves only now, after any stop; HEAD must still be the rebased one
+        try:
+            patches.move_branch(PKG_ROOT, rebased.old, rebased.tip)
+        except (patches.PatchError, gitops.GitError) as e:
+            die(f"{e}{stopped}")
+        store.write_json(path, {"checked_at": time.time(), "behind": 0, "kind": kind})
+        pulled = done
     for step in steps:
         try:
             r = subprocess.run(step, capture_output=True, text=True, timeout=300)
@@ -5045,8 +5079,7 @@ def cmd_update(a):
             die(f"{' '.join(step[:4])} failed: {err}" + pulled + stopped)
         if step[0] == "git":  # landed: the count is 0 whatever the claude steps do next
             store.write_json(path, {"checked_at": time.time(), "behind": 0, "kind": kind})
-            pulled = ("; the pull is done: finish with claude plugin marketplace update workbench "
-                      "&& claude plugin update workbench@workbench, then /reload-plugins")
+            pulled = done
     after = gitops.git(PKG_ROOT, "rev-parse", "HEAD").strip()
     store.write_json(path, {"checked_at": time.time(), "behind": 0, "kind": kind})
     if before == after:
@@ -5060,11 +5093,37 @@ def cmd_update(a):
         try:  # Claude Code keeps its marketplace's clone shallow, one commit, and its update
             # replaces it: the old HEAD is gone, and counting from it failed a good update (a
             # user's 0.94 to 1.4, 2026-11-20)
-            n = f" ({int(gitops.git(PKG_ROOT, 'rev-list', '--count', f'{before}..{after}'))} commit(s))"
+            to = rebased.upstream if rebased else after  # upstream's news, not the rebased patches
+            n = f" ({int(gitops.git(PKG_ROOT, 'rev-list', '--count', f'{before}..{to}'))} commit(s))"
         except (gitops.GitError, ValueError):
             n = ""
         print(f"updated {kind} {before[:7]}..{after[:7]}{n}; /reload-plugins or a restart picks up "
               "the pane")
+        if rebased:
+            print("\n".join(patches.landed_lines(rebased)))
+
+
+def cmd_patch(a):
+    """wb patch: the user's own fixes to workbench, as commits on branch `local` of a clone they
+    own, kept across wb update and offered upstream (#1005)."""
+    kind = _install_kind()
+    if a.action == "init":
+        if kind == "clone":
+            print(patches.clone_note(PKG_ROOT))
+            return
+        if not shutil.which("claude"):
+            die("claude isn't on PATH: wb patch init switches Claude Code's marketplace through it "
+                "(put claude on PATH)")
+        live = [t for t in store.all_tasks() if runner_alive(t)]
+        if live:  # it moves the code, the git shim and the lane out from under them
+            die(f"tasks are running ({_running(live, a)}): run wb patch init when they finish")
+        patches.init(PKG_ROOT, patches.source_dir(a.dir))
+    elif a.action == "list":
+        patches.list_patches(PKG_ROOT, kind)
+    elif a.action == "drop":
+        patches.drop(PKG_ROOT, kind, a.commit)
+    else:
+        patches.upstream(PKG_ROOT, kind, a.commit, a.name)
 
 
 def _card_example(names: list[str]) -> str:
@@ -5433,6 +5492,13 @@ def main(argv=None):
             die(f"the disk is full ({e.filename or store.home()}: {e.strerror}): free some, or wb "
                 "discard an open task (wb status lists them)" + (f"; history: {kept}" if kept else ""))
         die(f"{e.filename}: {e.strerror}" if e.filename else str(e))  # (the 2026-11-16 audit)
+    except Exception:  # a bug: the traceback, then the way to a fix the user keeps (#1005)
+        if argv is not None:  # in-process (the tests): a crash caught as SystemExit passed ~160
+            raise             # refusal tests as if it were the refusal (#1005, 2026-11-22)
+        traceback.print_exc()
+        print("wb crashed: a bug in workbench. Claude can fix it for you as a local patch (wb patch) "
+              f"and offer it upstream ({PKG_ROOT / 'CONTRIBUTING.md'})", file=sys.stderr)
+        sys.exit(1)
 
 
 def _candidates(v: str) -> int:
@@ -5998,6 +6064,22 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--stop", action="store_true", help="stop the running tasks first; each one's "
                    "session is told to wb resume it")
     s.set_defaults(f=cmd_update)
+    s = sub.add_parser("patch", help="your own fixes to workbench, kept across wb update: init, list, "
+                       "drop, upstream")
+    ss = s.add_subparsers(dest="action", required=True)
+    x = ss.add_parser("init", help="move a marketplace install to a clone of your own, its changes "
+                      "carried over as patches")
+    x.add_argument("--dir", help="where the clone goes (default: $WB_SOURCE, else "
+                   "~/.local/share/workbench/source)")
+    ss.add_parser("list", help="the patches on branch local, uncommitted changes, prepared upstream branches")
+    x = ss.add_parser("drop", help="remove one patch from branch local")
+    x.add_argument("commit")
+    x = ss.add_parser("upstream", help="a branch from fresh upstream with one patch, and the commands "
+                      "that would open its pull request")
+    x.add_argument("commit")
+    x.add_argument("--name", required=True, help="the branch's slug: pr/<name> (lowercase letters, "
+                   "digits, hyphens)")
+    s.set_defaults(f=cmd_patch)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
     return ap
 
