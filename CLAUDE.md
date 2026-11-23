@@ -52,6 +52,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `context.py`: what the agent knows and may do (instructions, denies, the shell allowlist, the
   lane's paths: `writable`, the worktree, `ask/` and the task's `opencode/`, `opencode_home`; grants). `lane.py`: the Landlock lane. `gitguard.py`: the agent's read-only `git`.
   Neither imports the rest of the package: the lane runs as a file, the shim on every git call.
+- `keyhole.py`: the per-task key proxy, outside the lane: only the task's model, the key swapped
+  in, errors redacted (ARCHITECTURE.md, *The keyhole*; the runner starts it with #1013).
 - `gitops.py`: worktrees, the review diff, commits (no hooks); a call on a task's worktree is
   pinned to its git dir (`gitdir.json`).
 - `patches.py`: `wb patch`, the user's own fixes to workbench (ARCHITECTURE.md, *Local patches*):

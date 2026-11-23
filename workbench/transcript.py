@@ -360,7 +360,7 @@ EVENT_KINDS = frozenset({
     "round", "tests", "autofix", "self_review", "ask", "answer", "captain", "steer", "skills",
     "allow", "interrupted", "fresh", "full", "load", "left_bg", "reading_full", "compacted",
     "limits", "export", "resumed", "coding", "spec_gap", "next_step", "takeover", "stopped",
-    "error", "retry", "gpu"})
+    "error", "retry", "gpu", "served"})
 
 
 def task_entries(task: store.Task) -> list[Entry]:
@@ -407,7 +407,8 @@ def task_entries(task: store.Task) -> list[Entry]:
         # reading_full: why a session grew into compaction, beside fresh and full; it, resumed,
         # spec_gap and coding were dropped as kinds with no branch (#846), and then compacted,
         # limits and export, written just before (#865)
-        elif kind in ("fresh", "full", "load", "left_bg", "reading_full", "compacted", "limits", "export"):
+        elif kind in ("fresh", "full", "load", "left_bg", "reading_full", "compacted", "limits", "export",
+                      "served"):  # served: the keyhole, an API model's provider changed what ran
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
         elif kind in ("resumed", "coding"):  # the text says who: Claude, or the user's allowance
             out.append(Entry(ts, key, [("claude", f"■ {r.get('text', '')}")]))

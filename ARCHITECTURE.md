@@ -1275,6 +1275,94 @@ ROS, src layouts and the like got none, and naming it in `env` passed workbench'
 user's). `agent_env` gives it back, less workbench's root and a left-out env's directories, repo
 directories mapped to the worktree; none left, no `PYTHONPATH`. The carrier never reaches the agent.
 
+**The keyhole** (`workbench/keyhole.py`, #1012). An API model needs its provider's key on every
+request, and nothing OpenCode can read is hidden from its shell: its environment
+(`/proc/<pid>/environ`), the config layer, `OPENCODE_CONFIG_CONTENT`, and the lane doesn't restrict
+TCP. So the key never enters the lane: `keyhole.start(task, m)` loads it (`load_key`: `opencode auth
+export <provider>` with the runner's environment and the user's own OpenCode home, stdout read into
+memory, a failure's stderr cut to its first line and redacted, a `Key` whose repr is `Key(<provider>,
+api key)`) and serves a `Keyhole` from a daemon thread of the runner, outside the lane and dying with
+it, on `127.0.0.1:0` (never `localhost`, which may be `::1` first). It refuses
+(`KeyholeError("needs a key wb can hold outside the lane: <why>")`, remedy `keyhole.REMEDY`, "store
+an API key with /connect in OpenCode") an OAuth login (its tokens rotate: a copy refreshed would log
+the user out), an external credential, request signing (SigV4, Vertex: a header swap can't work),
+a key only in the environment (`{env:VAR}`, or `auth list` naming a variable: `SECRET_ENV` drops it
+from the agent anyway), and a key written in the user's `opencode.json` or `OPENCODE_CONFIG_CONTENT`
+as `options.apiKey` or as a header (`options.headers`: a name with `auth`, `key` or `token` in it,
+or a value shaped like a key or `Bearer …`) ("its key is written in <file>, which agents can read:
+store it with /connect instead"). A stored key is trimmed (a paste's newline: OpenCode trims only on
+`/connect`) and must then be printable ASCII (`KEY_CHARS`), else "can't use <provider>'s stored key:
+it holds a character an HTTP header can't carry" (http.client's refusal quoted the header, key and
+all, the 2026-11-23 review). The protocol comes from the catalog's provider package (`protocol_of`,
+`PACKAGES`: OpenCode 2.3.2's packages whose model routes post the base plus a `MODEL_PATHS` path):
+Anthropic's and `anthropic-compatible` take `x-api-key` (and keep `anthropic-version`); alibaba,
+cerebras, cloudflare-workers-ai, deepinfra, deepseek, digitalocean, fireworks, groq, meta, minimax,
+mistral, moonshot, openai, openai-compatible(-responses), openrouter, togetherai, venice, xai, zai
+and zai-coding-plan take `Authorization: Bearer`. Any other package (Google's `x-goog-api-key` and
+`/models/<id>:streamGenerateContent`, Azure's `api-key`, Cohere's native `/chat`, gateways with
+their own paths or headers, none at all) can't run: `start` raises "needs a key wb can hold
+outside the lane: <provider> takes its key in a way the keyhole doesn't speak" rather than a 401
+or 404 on every request. The upstream is the catalog's API base (`m.base_url`), never anything
+from a request, with what the package appends to it already appended (`mirror_path`: DeepInfra's
+`/openai`). OpenCode gets `layer_options(kh)`:
+`baseURL` the keyhole's `base` and `apiKey` its `token` (`secrets.token_urlsafe(32)`, new each
+runner). The base mirrors the upstream's path on 127.0.0.1, because a package builds its URL from
+the base alone (`new URL(trim(baseURL) + path)`, DeepInfra first appending `/openai` unless the base
+ends in it), so OpenCode posts to the path it would have posted upstream and the keyhole sends that
+path and its query to the upstream's host: DeepInfra `…/v1/openai/chat/completions`, Anthropic
+`…/v1/messages?beta=true` (*API models through OpenCode*; checked on real OpenCode in
+`RealOpenCodeAPI`). A package that rewrites its base by the host (Azure) would not map.
+A request passes, in order, each refusal a JSON error body: the path (a POST to exactly the base
+plus one of `MODEL_PATHS`, `chat/completions`, `responses`, `messages`, `messages/count_tokens`,
+no segment between, since OpenCode never posts one and `…/threads/<id>/messages` carried the key
+to OpenAI's Assistants API; `GET <base>/models` answered with only the task's model, nothing
+forwarded; else 404 `keyhole: <path> isn't a model request`), with a query of printable ASCII
+only (`QUERY`; else 400 `keyhole: a query that isn't printable ASCII`: a control character made
+http.client fail and marked the model unreachable); the token (`Authorization: Bearer` or
+`x-api-key`, `hmac.compare_digest`, never in the URL, which reaches OpenCode's error text and
+runner.log; 401 `keyhole: not this task's token`); the body (`BODY_CAP`, 32 MB, else 413 unread,
+a chunked body checked before each chunk, each size line hex of at most 8 digits (`CHUNK_SIZE`,
+`LINE_CAP`) else 400; UTF-8 JSON with no NaN, else 400; its `model` must be `Model.name` and it
+may hold no `models` fallback list, no duplicate key anywhere, and no other top-level key that
+folds (NFKC, `casefold`) to `model` or `models`, since Go's encoding/json matches keys
+case-insensitively and some parsers keep the first duplicate, so a body read here as the task's
+model went on to route elsewhere (`_strict_json`, the 2026-11-23 review): 403
+`invalid_request_error` "keyhole: this task may use only <id>", which OpenCode doesn't retry,
+logged once per model as `keyhole: refused <model> (this task runs <id>)`). Then the body goes on
+as it is, hop-by-hop and every client auth header (`authorization`, `x-api-key`, `api-key`)
+dropped and the real one added, `Host` the upstream's, `Accept-Encoding: identity`, on a new
+connection per request (`ssl.create_default_context()`, through wb's own `https_proxy` by
+`CONNECT` unless `NO_PROXY` covers the host or it is loopback; the timeout the task's silence limit
++ 60 s). A 2xx comes back as it arrives, SSE a whole line at a time (a partial line waits for its
+end), its `data:` lines read on the way for the served model (`model`, Anthropic's
+`message_start.message.model`, the Responses API's `response.model`) and OpenRouter's `provider`:
+status `served: {model, by}` when it first appears or changes, with a `served` event; and `usage`
+(top-level, `message.usage`, `response.usage` in `response.completed`) for `on_usage` (a no-op until
+the spend cap meters it). The key itself never passes (a body that isn't SSE holds back its last
+`len(key) - 1` bytes so a key split across reads is caught), and an SSE line whose JSON has an
+`error` goes through `redact`: a mid-stream error arrives inside a 200 (Anthropic's `event: error`,
+OpenRouter's `data: {"error": …}`). An error is read whole (`ERROR_CAP`, 64 KB; a longer one is cut
+and loses twice a key's length, at least 128 characters, from its end, so a key straddling the cut
+leaves no prefix) and passed through `redact` (the key, its first 8 and last 4 characters,
+`KEYLIKE`: the `sk-`/`sk-ant-`/`sk-or-`/`xai-`/`gsk-`/`dsk-` shapes, `Bearer …`, any run of 32 or
+more key characters, each `[key redacted]`, in one pass): OpenCode prints an upstream body
+verbatim. A transport failure is a 502 `keyhole: can't reach <host>: <reason>` (on macOS a
+certificate failure names Python's Install Certificates command); a request http.client won't send
+(`InvalidURL`, a `ValueError`) is a 502 `keyhole: can't send this request on (<type>)`, the type
+only and never `unreachable`. Anything else a handler raises is one line in the log, `keyhole: a
+request failed (<type>)` (`_Server.handle_error`), never socketserver's traceback on stderr. Each outcome goes to
+`on_health(state, why, until)`: 2xx `ok`; 402 or `insufficient_quota` `no_credit`; another 429
+`rate_limited` until `Retry-After`, else `RATE_LIMIT_SECS` (60 s); 5xx and transport failures
+`unreachable` (the model's health record takes it with #1013). The start line, `keyhole:
+<provider> on 127.0.0.1:<port> for <id>`, the refusals and that failure line are all it logs (the runner's stdout,
+runner.log); no request is logged, and no line holds the key or the token. Accepted: the agent's
+shell can reach the keyhole too, holding the token (the layer is readable), and spend on the task's
+model only, while the runner lives. Not yet wired: the runner's start of it in `drive` for an API
+model, the layer's provider overlay and `rules_env`'s restatement of it, `NO_PROXY` for the agent,
+and status `served` reaching the results come with API models (#1013); without Landlock the user's
+OpenCode store is readable anyway, and whether API roles then refuse or start saying so is the
+owner's call, still open.
+
 **Project config can't lift the rules.** OpenCode loads a project's `opencode.json` (worktree,
 `.opencode/`, any directory above) after `OPENCODE_CONFIG` and appends its permissions, so an
 allow-all there won (the 2026-11-16 audit: the agent could write one for its next round). The rules
@@ -4165,6 +4253,7 @@ off), not `wb start`'s.
 | `asks` | the runner's count of ask files, `{id: "q" \| "p" \| "x"}` (question, permission, refused): the budgets |
 | `answered` | ids `wb answer` answered, written outside the lane (an answer file the agent wrote isn't one): `questions.answered` |
 | `spec_gaps` | `[{round, text}]` from `--spec-gap` |
+| `served` | `{model, by}`: the model an API task's responses named and OpenRouter's provider (or null), from the keyhole when it first appears or changes |
 | `updated_at` | every write |
 
 **events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?}`
@@ -4173,7 +4262,7 @@ out, cache, reasoning?}` (reasoning apart from `out`), `error {text}`, `retry {t
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),
 `autofix`, `self_review`, `reading_full`, `full`, `compacted {text}` (mid-round, and it carried on), `load` (a reload before a round), `limits {text}` (stretched),
 `left_bg {text}` (a job left in the background), `round_end {secs, how, guard?}` (stats recording on), `export` (the
-export failed: judged by `live_used`), `stopped {by: "signal"}`, `gpu {text}` (a load warning), `ask {id}`, `answer {id}`. From
+export failed: judged by `live_used`), `stopped {by: "signal"}`, `gpu {text}` (a load warning), `ask {id}`, `answer {id}`, `served {model, by, text}` (the keyhole: the served model changed; `wb watch` and `wb log` show the text). From
 `wb`: `spec_gap`, `next_step`, `stopped` (bail out), `resumed`, `allow`, `steer {now}`, `captain`, `takeover`, `coding` (the user allowed Claude an edit), `error`
 (`reap`: the runner died without a report).
 
@@ -4462,7 +4551,7 @@ default, `FAKE_RETRY_EVERY` apart, each `{type: "retry", attempt, nextRetryAt, m
 of those states (or `ok`): its runs play that scenario, and a `nokey` provider drops out of `api model.list`, `models`
 and `auth list`, as one OpenCode can't authenticate does. Only the fake reads `WB_FAKE_API` and `WB_FAKE_CATALOG`.
 
-**Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`, `ApiHarness`'s
+**Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`, `RealOpenCodeAPI`, `ApiHarness`'s
 `test_real_opencode_*`; skip without `opencode`, the
 lane ones without `lane.abi()`). `capture_llm.py <port> <out.jsonl> [calls] [prompt tokens]` records every request,
 answers tool-offering ones with the next scripted `{"name", "arguments"}`, reports `prompt tokens` read (to fill the
@@ -4497,6 +4586,19 @@ and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7:
 outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, install over https, `/api/seen` and
 `/api/active` only while in use, notices, shot pairs, listen's shortlist, the keyboard, uploads; and `sw.js` in a node
 `vm` (`swSays`) for a push's text.
+
+**The keyhole's tests** (`Keyhole`, `RealOpenCodeAPI`, sharing `_KeyholeTest`): canary keys only
+(`CANARY`), never a real one, and no network: `_Upstream`, a provider in the test, records each
+request's path, headers and body and answers OpenAI or Anthropic SSE, an error status with a body
+echoing the key, chunks spaced in time, a served model and an OpenRouter provider. `fake_auth`
+stands in for `opencode auth export|list` (`FAKE_AUTH`). `RealOpenCodeAPI` runs real OpenCode
+(scratch homes, `OPENCODE_DISABLE_MODELS_FETCH=1`, an environment without the user's keys) on the
+built-in `deepinfra` and `anthropic` providers through the keyhole: one request upstream with the
+canary, OpenCode's own with only the token, at the path OpenCode would have used upstream. The
+2026-11-23 reviews' findings each have a `Keyhole` test: bodies other JSON parsers route elsewhere,
+a key with a newline, bad queries and chunk sizes (`raw_request`, for what http.client won't send),
+an error body cut across the key, errors inside a 200 stream (`_Upstream`'s "raw" mode), packages
+the keyhole can't speak, DeepInfra's appended `/openai`, a key written as a header.
 
 **Conventions for a new test.** Names read as sentences; one class per feature, a one-line docstring; end to end through
 `self.start`/`wait_phase`/`run_wb`, asserting the phrases Claude reads and the state files; real processes and servers
@@ -4557,6 +4659,10 @@ doc needs its own `!/` line).
   `context.PROBE_RECOMMENDED` → `; on is recommended`, which `probeSaid` reads. What on adds (`runner.output_cap`,
   `RESTATED`, `runner.add_outline`, `OUTLINE_HEAD`/`OUTLINE_MORE`) → ProbeOn's byte-for-byte off check and
   ProbeWhereItHelps.
+- **The keyhole's paths** (`keyhole.MODEL_PATHS`, the base mirroring the upstream's path in `layer_options`,
+  `mirror_path`) and **its packages** (`keyhole.PACKAGES`) → what OpenCode posts for each package and how it sends the
+  key (*API models through OpenCode*; packages/ai/src/providers): re-check with `RealOpenCodeAPI` and the source on
+  each OpenCode bump. `keyhole.redact` → any new place an upstream error is shown.
 - **What a handoff costs Claude, measured** → the README's sentence.
 - **Anything a reader looks up** → this file, CLAUDE.md if it names it, the skill if Claude uses it; README only for the
   quickstart (CLAUDE.md's *Keeping the docs true*).
