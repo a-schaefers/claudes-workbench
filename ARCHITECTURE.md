@@ -4237,7 +4237,7 @@ settles it), unless a settings hook decided or the session isn't delegating with
 the terminal: noted in `mem.termDialogs` (`{tool, agent, at, kind, text, id}`) and passed on;
 `termNotices` runs `wb chat notice --tool=<t> --kind=permission --text=<text>` for one past
 `NOTICE_AFTER_MS` while no other notice of the session's is open (a failure: `warnOnce`); the
-engine's `tool.call` past its permission check settles the oldest noted dialog of that tool in that
+engine's `tool.call` ending (its permission check and its run) settles the oldest noted dialog of that tool in that
 loop (`agentId`, in the hook's `finally`), and `turn.complete` any left: `termDialogDone` drops it,
 runs `back` when `away.json`'s `at` is at or after the dialog's, and `wb chat notice --done <id>`.
 Away (`awayNow`: `at` within `AWAY_MS` 6 h, or a backlog task of this session's open): `askOnChat`
@@ -4267,10 +4267,12 @@ answer it); the toast says `… for agent <name> is in the web chat too: answer 
 and a deny's message names `wb chat reply --to user`. Whichever answers first settles it: the
 page's answer is the hook's decision, which settles the terminal's dialog; the terminal's withdraws
 the card (`watchAsk`: `mem.chatAsks` `{tool, agent, input, here, at}` by id; at the hook's
-`next.signal` abort, or when the engine's call of that tool in that loop with the dialog's input
-(`sameCall`: every argument both carry equal, at least one shared unless the call has none, as
-ExitPlanMode's) goes on past its permission check, `askSettledHere` in the `tool.call` hook's
-`finally`), `withdrawAsk` writing `wb chat answer <id> expired --by interrupted`, which the page
+`next.signal` abort (an interrupt: a terminal answer doesn't abort it), or when the engine's call
+of that tool in that loop with the dialog's input (`sameCall`: every argument both carry equal, at
+least one shared unless the call has none, as ExitPlanMode's) ends, `askSettledHere` in the
+`tool.call` hook's `finally`; so a long command allowed in the terminal keeps its card until it
+ends, 22 s in the live check of 2026-11-23: this engine has no `tool.run` event, and an unknown
+event stops the module loading), `withdrawAsk` writing `wb chat answer <id> expired --by interrupted`, which the page
 shows as "settled in the terminal"; one asked with `--here` and settled so runs `back` when
 `away.json`'s `at` is at or after the ask's (its push tapped), as `termDialogDone`. Matched by tool
 and loop alone, a Read a rule allowed, finishing beside one whose card waited, withdrew that card,
