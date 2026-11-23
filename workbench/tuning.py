@@ -202,12 +202,16 @@ def acted(name: str, row: dict, ceiling=None) -> bool:
 def _rows(model: str, window) -> list[dict]:
     """The rows for this model and window recorded on the weights it has now (router.same_weights:
     knobs learned on another model under the same id don't carry over, #726), under the ids it
-    had before too (router.earlier: a renamed provider or alias started fresh, #818)."""
+    had before too (router.earlier: a renamed provider or alias started fresh, #818), and of the
+    model's own kind (router.same_kind: a GPU model's knobs never learn from an API one's tasks
+    under the same id, #1022)."""
     from . import models, router  # router imports this module
     m = models.lookup(model)  # an API task's model too (#1013)
     ids = {model, *(router.earlier(m) if m else [])}
     return router.same_weights([r for r in store.results() if r.get("model") in ids
-                                and r.get("window") == window], router.weights_now({model}))
+                                and r.get("window") == window
+                                and (m is None or router.same_kind(r, m))],  # #1022's review
+                               router.weights_now({model}))
 
 
 def work(row: dict) -> str | None:

@@ -30409,5 +30409,464 @@ class Writing(Base):
         self.assertEqual(len(recs[1][0.6]), 5)                             # prose still counts, at its own pace
 
 
+class ApiStats(Base):
+    """#1022: what an API task cost, recorded and shown beside the GPU-only savings score."""
+    USAGE = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
+             "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}   # weighted 56K
+    DIFF = {"files": 4, "added": 61, "removed": 1}                         # ~59K to write
+
+    def setUp(self):
+        super().setUp()
+        os.environ["WB_SAVINGS"] = str(Path(self.tmp.name) / "savings.json")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "claude")  # never the user's
+
+    def rows(self, *rows):
+        for r in rows:
+            store.append_jsonl(store.home() / "results.jsonl", r)
+
+    def gpu_row(self, **o):
+        return {"ts": store.now() - 3600, "outcome": "accepted", "task": "g", "model": "ollama/mimo",
+                "size": "trivial", "claude": self.USAGE, "diff": self.DIFF, "gpu_wh": 30.0, **o}
+
+    def api_row(self, cost=0.42, source="opencode", provider="deepseek", **o):
+        return {"ts": store.now() - 3600, "outcome": "accepted", "task": "a", "kind": "api",
+                "role": "trivial", "provider": provider, "model": f"{provider}/flash", "size": "trivial",
+                "claude": self.USAGE, "diff": self.DIFF, "api": {"cost": cost, "source": source}, **o}
+
+    def api_task(self, name, status=None, **spec) -> store.Task:
+        """A task as wb start --role would write it for an API route (#1016), never started."""
+        t = store.Task(name)
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": name, "model": "deepseek/deepseek-flash",
+                                               "model_label": "deepseek-flash", "via": "api",
+                                               "provider": "deepseek", "role": "trivial",
+                                               "created_at": store.now() - 60, **spec})
+        store.write_json(t.dir / "status.json", {"phase": "review", "round": 1, **(status or {})})
+        return t
+
+    def test_an_accepted_api_task_leaves_the_gpu_score_as_the_gpu_task_alone_and_gets_its_own_line(self):
+        from workbench import savings
+        self.rows(self.gpu_row())
+        alone = savings.totals(store.results(), since=store.now() - 7 * 86400)
+        gpu_line = run_wb("savings").splitlines()[0]
+        self.rows(self.api_row())
+        both = savings.totals(store.results(), since=store.now() - 7 * 86400)
+        self.assertEqual(both, alone)                    # of 1, claude and saved as the GPU task's
+        self.assertEqual(savings.score(both), savings.score(alone))
+        out = run_wb("savings").splitlines()
+        self.assertEqual(out[0], gpu_line)               # the GPU line's saved unchanged
+        self.assertEqual(out[1], "api: 1 task(s) · $0.42 (deepseek $0.42) · claude 56K · "
+                                 "writing it yourself ~59K (estimate)")
+        self.assertIsNone(savings.of_row(self.api_row()))
+
+    def test_an_api_task_with_no_price_counts_as_one_with_no_price_never_as_0_dollars(self):
+        from workbench import savings
+        self.rows(self.api_row(cost=None, source="unknown"))
+        a = savings.api_totals(store.results(trials=True))
+        self.assertEqual((a["tasks"], a["cost"], a["unknown"]), (1, 0.0, 1))
+        out = run_wb("savings") + run_wb("savings", "--api") + run_wb("stats")
+        self.assertIn("api: 1 task(s) · 1 with no price", out)
+        self.assertIn("1 with no price", run_wb("savings", "--api"))
+        self.assertNotIn("$0.00", out)
+        self.assertNotIn("$0 ", out)
+        self.assertEqual(savings.line(self.api_row(cost=None, source="unknown")),
+                         "claude: 56K · writing it yourself: ~59K (estimate) · paid: unknown (no price for this model)")
+        self.assertEqual(savings.line(self.api_row()), "claude: 56K · writing it yourself: ~59K (estimate) · "
+                                                      "paid deepseek $0.42 (deepseek/flash)")
+
+    def test_wb_savings_api_says_the_week_by_provider_and_day_with_trials_and_bench_replays_in(self):
+        from workbench import bench
+        now = store.now()
+        self.rows(self.api_row(cost=0.30, ts=now - 2 * 86400),
+                  self.api_row(cost=0.54, ts=now - 86400),
+                  self.api_row(cost=0.43, provider="anthropic", trial=True, outcome="discarded"),
+                  self.api_row(cost=9.0, ts=now - 20 * 86400))                       # before the week
+        store.append_jsonl(bench.runs_file(), {"ts": now, "outcome": "passed", "kind": "api",
+                                               "model": "deepseek/flash", "paid": {"cost": 0.3, "source": "opencode"}})
+        out = run_wb("savings", "--api", "--week").splitlines()
+        # the providers once, on their own line (#1022's review: the header said them too)
+        self.assertEqual(out[0], "api, the last 7 days: 3 task(s), $1.27 (incl. 1 trial)")
+        self.assertEqual(out[1], "  by provider: deepseek $0.84 (2) · anthropic $0.43 (1)")
+        self.assertTrue(out[2].startswith("  by day: "), out)
+        self.assertEqual(out[2].count("$"), 3)
+        self.assertEqual(out[3], "  bench replays: $0.30 (1)")
+        j = json.loads(run_wb("savings", "--api", "--week", "--json"))
+        self.assertEqual(j["by_provider"]["deepseek"], {"tasks": 2, "cost": 0.84, "unknown": 0})
+        self.assertEqual(round(sum(j["by_day"].values()), 2), 1.27)
+        self.assertEqual((j["trials"], j["bench"]["cost"]), (1, 0.3))
+        self.assertEqual(json.loads(run_wb("savings", "--json"))["api"]["tasks"], 3)
+
+    def test_wb_stats_shows_kind_paid_and_agent_tok_and_an_api_row_reads_its_mean_cost(self):
+        mimo = "ollama/mimo-v2.6:9b-q8_0"
+        self.rows(self.gpu_row(model=mimo), self.api_row(cost=0.10), self.api_row(cost=0.14),
+                  self.api_row(provider="zai", cost=None, source="unknown"),
+                  self.api_row(provider="zen", cost=0.2), self.api_row(provider="zen", cost=None, source="unknown"))
+        out = run_wb("stats", "--all")
+        head = next(x for x in out.splitlines() if x.startswith("model "))
+        for col in ("kind", "role", "paid", "agent tok"):
+            self.assertIn(col, head)
+        self.assertNotIn("local tok", out)
+        lines = {x.split()[0]: x.split() for x in out.splitlines() if x.split() and "/" in x.split()[0]}
+        self.assertEqual((lines[mimo][1], lines[mimo][-2]), ("gpu", "-"))
+        self.assertEqual((lines["deepseek/flash"][1], lines["deepseek/flash"][-2]), ("api", "$0.12"))
+        self.assertEqual(lines["zai/flash"][-2], "?")
+        self.assertEqual(lines["zen/flash"][-2], "~$0.20")
+        self.assertTrue(all(len(x) <= 120 for x in out.splitlines() if x.startswith(("model ", "ollama/"))))
+        self.assertIn("api this week: 5 task(s), $0.44 (deepseek $0.24, zen $0.20), 2 with no price", out)
+
+    def test_the_stats_feed_has_the_weeks_api_money_by_provider_and_energy_leaves_api_rows_out(self):
+        self.rows(self.gpu_row(gpu_wh=30.0), self.api_row(gpu_wh=500.0),   # a stray reading: not ours
+                  self.api_row(cost=0.1, trial=True))                     # money spent is spent
+        f = json.loads(run_wb("stats", "--json"))
+        week = f["periods"]["week"]
+        self.assertEqual(round(week["api"]["by_provider"]["deepseek"]["cost"], 2), 0.52)
+        self.assertEqual((week["api"]["tasks"], week["api"]["plan"]), (2, 0))
+        self.assertEqual(week["energy"]["wh"], 30.0)
+        self.assertEqual(week["savings"]["tasks"], 1)
+        line = next(m for m in f["model_lines"]["lines"] if m["model"] == "deepseek/flash")
+        self.assertEqual((line["kind"], line["paid"]), ("api", 0.42))    # the router's view: no trial
+
+    def test_a_gpu_models_router_score_ignores_an_api_row_under_the_same_id(self):
+        from workbench import models, router
+        m = models.discover()["ollama/mimo-v2.6:9b-q8_0"]
+        row = {"ts": store.now(), "outcome": "accepted", "model": m.id, "size": "trivial",
+               "claude": self.USAGE, "steps": [{"landed": True}], "minutes": 3, "active_minutes": 3}
+        self.rows(row, {**row, "kind": "api", "outcome": "discarded"}, {**row, "kind": "api"})
+        state = {"available": True, "resident": False, "fits": True}
+        s = router.score(m, "trivial", state)
+        self.assertEqual((s.tries, s.wins), (1, 1))
+        self.assertEqual(s.claude_n, 1)
+        self.assertEqual(router.expected(m.id, "trivial")[1], 1)
+
+    def test_an_api_tasks_row_keeps_claudes_spend_apart_from_the_providers_cost(self):
+        from workbench import results, savings, spend
+        os.environ["FAKE_COST"] = "0.42"
+        t = self.api_task("t-api", {"session": "ses_one"})
+        with mock.patch.object(spend, "usage_by_step", return_value=(self.USAGE, [])):
+            row = results.record(t, "accepted")
+        self.assertEqual(row["claude"], self.USAGE)                  # untouched by the dollars
+        self.assertEqual((row["kind"], row["role"], row["provider"]), ("api", "trivial", "deepseek"))
+        self.assertEqual((row["api"]["cost"], row["api"]["source"]), (0.42, "opencode"))
+        self.assertEqual(set(row["api"]["tokens"]), {"in", "out", "cache_read", "cache_write", "reasoning"})
+        a = savings.api_totals([row])
+        self.assertEqual((a["claude"], a["cost"]), (spend.weighted(self.USAGE), 0.42))
+        gpu = results.record(store.Task(self.api_task("t-gpu", via=None).name), "discarded")
+        self.assertEqual((gpu["kind"], "api" in gpu), ("gpu", False))
+
+    def test_a_task_with_two_sessions_records_the_sum_of_both_sessions_cost(self):
+        from workbench import results
+        os.environ["FAKE_COST"] = "0.21"
+        t = self.api_task("t-two", {"sessions": ["ses_first"], "session": "ses_second"})
+        self.assertEqual(results.api_usage(t)["cost"], 0.42)       # the handover's session counted too
+        os.environ["FAKE_COST"] = "0"                               # OpenCode said 0, no catalog price
+        t = self.api_task("t-zero", {"session": "ses_zero"})
+        self.assertEqual(results.api_usage(t), {"cost": None, "source": "unknown",
+                                                "tokens": dict.fromkeys(results.TOKEN_KEYS, 0)})
+        t.set_status(api={"usd": 0.05}, served={"model": "x", "by": "baseten"})  # the meter (#1019)
+        self.assertEqual({k: results.api_usage(t)[k] for k in ("cost", "source", "backend")},
+                         {"cost": 0.05, "source": "metered", "backend": "baseten"})
+        with mock.patch.object(results, "catalog_price", return_value=0.0):   # a free model
+            self.assertEqual(results.api_usage(self.api_task("t-free", {"session": "ses_f"}))["cost"], 0.0)
+
+    def test_an_api_tasks_round_samples_no_gpu_power_and_its_row_has_no_gpu_wh(self):
+        from workbench import results
+        gpu, api = self.api_task("t-g", via=None), self.api_task("t-a", {"gpu_wh": 12.0, "remote_gpu": True})
+        with mock.patch.object(runner.models, "_fake", return_value=False), \
+                mock.patch.dict(runner.CURRENT, {"remote": False}):
+            self.assertTrue(runner.measures_power(gpu))
+            self.assertFalse(runner.measures_power(api))
+        with mock.patch.object(results.spend, "usage_by_step", return_value=(None, [])):
+            row = results.record(api, "accepted")
+        self.assertNotIn("gpu_wh", row)
+        self.assertNotIn("remote_gpu", row)
+
+    def test_an_api_task_shows_under_running_with_its_spend_and_never_in_the_rack_or_queue(self):
+        from workbench import models, top
+        now = time.time()
+        mimo = "ollama/mimo-v2.6:9b-q8_0"
+        for name, spec, st in (
+                ("gpu-busy", {"model": mimo}, {"phase": "running", "round": 1, "updated_at": now}),
+                ("api-busy", {"model": "deepseek/deepseek-flash", "model_label": "deepseek-flash", "via": "api",
+                              "provider": "deepseek"}, {"phase": "running", "round": 2, "updated_at": now}),
+                ("api-meter", {"model": "deepseek/deepseek-flash", "via": "api", "provider": "deepseek"},
+                 {"phase": "running", "round": 1, "updated_at": now, "api_spend": {"cost": 0.2}}),
+                ("api-wait", {"model": "deepseek/deepseek-flash", "via": "api", "provider": "deepseek"},
+                 {"phase": "queued", "updated_at": now})):
+            d = store.tasks_dir() / name
+            d.mkdir(parents=True)
+            store.write_json(d / "task.json", {**spec, "created_at": now - 60})
+            store.write_json(d / "status.json", st)
+        for c in (0.05, 0.07):
+            for name in ("api-busy", "api-meter"):
+                store.append_jsonl(store.tasks_dir() / name / "events.jsonl",
+                                   {"ts": now - 5, "round": 2, "kind": "step", "in": 10, "out": 5, "cost": c})
+        waiter = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(waiter.wait)
+        self.addCleanup(waiter.kill)
+        store.write_json(store.home() / "gpu.json", {
+            str(os.getpid()): {"model": mimo, "task": "gpu-busy", "since": now - 60, "start": models._started(os.getpid())},
+            str(waiter.pid): {"model": mimo, "task": "later", "since": now - 5, "waiting": True,
+                              "start": models._started(waiter.pid)}})
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        with mock.patch.object(hardware, "system", lambda: "linux"), \
+                mock.patch.object(hardware, "smi_path", lambda: None), \
+                mock.patch.object(hardware, "_run", lambda *argv: ""):
+            snap = top.Top(2, drm=drm).tick()
+        run = {r["task"]: r for r in snap["running"]}
+        self.assertEqual({k: run["api-busy"].get(k) for k in ("via", "provider", "spend", "label")},
+                         {"via": "api", "provider": "deepseek", "spend": 0.12, "label": "deepseek-flash"})
+        self.assertEqual(run["api-meter"]["spend"], 0.2)              # the meter (#1019) before the steps
+        self.assertEqual(run["api-wait"]["waits"], "a deepseek slot")
+        self.assertNotIn("spend", run["api-wait"])                   # nothing known yet: never $0
+        self.assertNotIn("via", run["gpu-busy"])
+        self.assertFalse({r["model"] for r in snap["rack"]} & {"deepseek/deepseek-flash"})
+        self.assertFalse(any(str(t).startswith("api-") for r in snap["rack"] for t in r.get("tasks") or []))
+        self.assertEqual([q["task"] for q in snap["queue"]], ["later"])
+        self.assertIn("API deepseek · $0.12", top.render(snap, 200, color=False))
+
+    def test_a_bench_replay_on_an_api_model_writes_paid_and_the_table_shows_it(self):
+        from workbench import bench
+        os.environ["FAKE_COST"] = "0.3"
+        t = self.api_task("bench-x", {"session": "ses_b"}, bench={"case": "c"})
+        self.assertEqual(bench.paid(t), {"kind": "api", "paid": {"cost": 0.3, "source": "opencode"}})
+        self.assertEqual(bench.paid(self.api_task("bench-g", via=None)), {})
+        base = {"ts": store.now(), "run": "r1", "case": "c", "outcome": "passed", "rounds": 1, "minutes": 2,
+                "tok_in": 10, "tok_out": 5}
+        for r in ({**base, "model": "deepseek/flash", **bench.paid(t)}, {**base, "model": "ollama/mimo"}):
+            store.append_jsonl(bench.runs_file(), r)
+        out = bench.report("r1").splitlines()
+        self.assertIn("agent tok", out[0])
+        self.assertTrue(out[0].rstrip().endswith("paid"))
+        self.assertTrue(next(x for x in out if "deepseek/flash" in x).rstrip().endswith("$0.30"))
+        self.assertTrue(next(x for x in out if "ollama/mimo" in x).rstrip().endswith(" -"))
+
+    def test_the_round_report_says_agent_tokens_and_an_api_tasks_spend_so_far(self):
+        os.environ["FAKE_COST"] = "0.06"                            # each step's, as OpenCode prices it
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-rep", "ok", "--no-base-check")
+            self.start("t-rep-api", "ok", "--no-base-check")
+        t, a = store.Task("t-rep"), store.Task("t-rep-api")
+        store.write_json(a.dir / "task.json", {**a.spec, "via": "api", "provider": "deepseek"})
+        for task in (t, a):
+            runner.drive(store.Task(task.name))
+        first = lambda task: (task.dir / "rounds" / "1" / "summary.md").read_text().splitlines()[0]  # noqa: E731
+        self.assertRegex(first(t), r" · agent tokens \d+ in / \d+ out$")    # a GPU task: no money
+        self.assertRegex(first(a), r" · agent tokens \d+ in / \d+ out · \$0\.\d\d so far$")
+        (a.dir / "events.jsonl").write_text("")                     # no cost known, no price
+        self.assertEqual(runner._spend_part(store.Task(a.name)), " · cost unknown")
+        a.set_status(api_spend={"cost": 0.2})                       # the meter's key (#1019)
+        self.assertEqual(runner._spend_part(store.Task(a.name)), " · $0.20 so far")
+
+    def test_a_step_event_keeps_opencodes_cost_and_the_cache_read_and_write_apart(self):
+        from workbench import events
+        raw = {"type": "step_finish", "part": {"cost": 0.0011, "tokens": {"input": 5, "output": 2,
+                                                                          "cache": {"read": 300, "write": 7}}}}
+        row = events.normalize(raw, 1)
+        self.assertEqual({k: row[k] for k in ("cost", "cache", "cache_read", "cache_write")},
+                         {"cost": 0.0011, "cache": 307, "cache_read": 300, "cache_write": 7})
+        del raw["part"]["cost"]
+        self.assertNotIn("cost", events.normalize(raw, 1))          # missing is unknown, never 0
+
+    # --- #1022's review -----------------------------------------------------------------------
+
+    def test_wb_top_sums_a_long_api_tasks_spend_over_every_step_not_the_newest_64k(self):
+        # #1022's review: the spend was the step costs of events.jsonl's last 64 KB, $0.22 of $2.00
+        from workbench import results, top
+        t = self.api_task("api-long", {"phase": "running", "updated_at": time.time()})
+        now = time.time()
+        with open(t.dir / "events.jsonl", "w") as fh:
+            for _ in range(2000):
+                fh.write(json.dumps({"ts": now - 5, "round": 1, "kind": "tool", "tool": "read", "ok": True,
+                                     "brief": "x" * 60}) + "\n")
+                fh.write(json.dumps({"ts": now - 5, "round": 1, "kind": "step", "in": 10, "out": 5,
+                                     "cost": 0.001}) + "\n")
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        with mock.patch.object(hardware, "system", lambda: "linux"), \
+                mock.patch.object(hardware, "smi_path", lambda: None), \
+                mock.patch.object(hardware, "_run", lambda *argv: ""):
+            view = top.Top(2, drm=drm)
+            spend = lambda: next(r for r in view.tick()["running"] if r["task"] == "api-long")["spend"]  # noqa: E731
+            self.assertEqual(spend(), 2.0)
+            self.assertEqual(spend(), results.spend_so_far(t))           # the round report's figure
+            with open(t.dir / "events.jsonl", "a") as fh:                  # read on, not again
+                fh.write(json.dumps({"kind": "step", "cost": 0.5}) + "\n" + '{"kind": "step", "co')
+            self.assertEqual(spend(), 2.5)                                 # a half-written line waits
+            (t.dir / "events.jsonl").write_text(json.dumps({"kind": "step", "cost": 0.04}) + "\n")
+            self.assertEqual(spend(), 0.04)                                # a new file: summed afresh
+
+    def test_wb_stats_cuts_a_long_gpu_model_id_so_its_row_stays_in_its_columns(self):
+        # #1022's review: an ordinary 33-character Ollama id pushed `gpu` 3 columns right of `kind`
+        mid = "ollama/qwen3-coder:30b-a3b-q4_K_M"
+        self.rows(self.gpu_row(model=mid))
+        out = run_wb("stats", "--all").splitlines()
+        head = next(x for x in out if x.startswith("model "))
+        row = next(x for x in out if x.startswith(mid[:30]))
+        self.assertEqual(head.index("kind"), row.index("gpu"))
+        self.assertLessEqual(len(row), 120)
+
+    def test_one_id_run_as_a_gpu_model_and_then_an_api_one_keeps_two_records(self):
+        # #1022's review: an Ollama `:cloud` id's old GPU rows and its new API ones made one
+        # `api` line with their minutes averaged; the two records never mix
+        mid = "ollama/gpt-oss:120b-cloud"
+        self.rows(self.gpu_row(model=mid, remote_gpu=True, minutes=3),
+                  self.api_row(model=mid, provider="ollama", minutes=30, cost=1.0))
+        out = [x.split() for x in run_wb("stats", "--all").splitlines() if x.startswith(mid)]
+        self.assertEqual(sorted((x[1], x[8]) for x in out), [("api", "30.0"), ("gpu", "3.0")])
+        f = json.loads(run_wb("stats", "--json"))
+        lines = sorted((m["kind"], m["tasks"], m.get("paid")) for m in f["model_lines"]["lines"] if m["model"] == mid)
+        self.assertEqual(lines, [("api", 1, 1.0), ("gpu", 1, None)])
+
+    def test_plan_usage_is_counted_apart_and_never_reads_as_0_dollars(self):
+        # #1022's review: the feed dropped `plan`, so the pane read "API $0" for a plan-only week
+        from workbench import results, savings, stats
+        t = self.api_task("t-go", {"session": "ses_go"}, model="opencode-go/kimi", provider="opencode-go")
+        os.environ["FAKE_COST"] = "0.3"                             # a plan's quota: not dollars
+        u = results.api_usage(t)
+        self.assertEqual((u["cost"], u["source"], u["plan"]), (None, "plan", "opencode-go"))
+        self.rows(self.api_row(provider="opencode-go", cost=None, source="plan", api={"cost": None, "source": "plan",
+                                                                                     "plan": "opencode-go"}))
+        a = savings.api_totals(store.results(trials=True))
+        self.assertEqual((a["tasks"], a["plan"], a["unknown"], a["cost"]), (1, 1, 0, 0.0))
+        week = json.loads(run_wb("stats", "--json"))["periods"]["week"]["api"]
+        self.assertEqual((week["tasks"], week["plan"]), (1, 1))
+        self.assertEqual(stats.api_week_line(week), "api this week: 1 task(s), 1 on plan usage")
+        self.assertEqual(run_wb("savings", "--api").splitlines()[:2],
+                         ["api, the last 7 days: 1 task(s), 1 on plan usage",
+                          "  by provider: opencode-go plan usage (1)"])
+        self.assertIn("api: 1 task(s) · 1 on plan usage", run_wb("savings"))
+        self.assertTrue(savings.line(store.results()[0]).endswith("· plan usage (opencode-go)"))
+        self.assertNotIn("$0", run_wb("savings") + run_wb("savings", "--api") + run_wb("stats"))
+
+    def test_only_the_catalogs_cloud_flag_makes_an_ollama_model_plan_usage_never_a_cloud_suffix(self):
+        # #1022's review: any provider's `-cloud` model read as plan usage, its dollars uncounted
+        from workbench import models, results
+        ApiHarness.catalog(self, [api_entry("zai", "glm-cloud")], [key_row("zai", "Z", STORED)])
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama"]["models"]["gpt-oss:120b-cloud"] = {}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        hosted = models.hosted()
+        self.assertEqual((hosted["zai/glm-cloud"].cloud, hosted["ollama/gpt-oss:120b-cloud"].cloud), (False, True))
+        self.assertEqual(results._plan("ollama/gpt-oss:120b-cloud"), "ollama")
+        self.assertEqual(results._plan("opencode-go/kimi"), "opencode-go")
+        for mid in ("zai/glm-cloud", "openrouter/some-model-cloud"):  # one listed, one not
+            self.assertIsNone(results._plan(mid))
+        os.environ["FAKE_COST"] = "0.07"
+        u = results.api_usage(self.api_task("t-zai", {"session": "ses_z"}, model="zai/glm-cloud", provider="zai"))
+        self.assertEqual((u["cost"], u["source"]), (0.07, "opencode"))
+        # the engineer's call (#1022): an Ollama cloud model is plan usage with no dollars, as
+        # opencode-go is, whatever its session says it cost
+        u = results.api_usage(self.api_task("t-oc", {"session": "ses_oc"}, model="ollama/gpt-oss:120b-cloud",
+                                            provider="ollama"))
+        self.assertEqual((u["cost"], u["source"], u["plan"]), (None, "plan", "ollama"))
+
+    def test_the_catalog_prices_a_free_model_at_0_and_leaves_opencodes_0_for_a_priced_one_unknown(self):
+        # catalog_price unmocked (#1022's review): the `free` flag, the price walk, a tier's size
+        from workbench import models, results
+        ApiHarness.catalog(self, DISCOVERY_CATALOG + [api_entry("opencode", "quiet-free", cost=[])], DISCOVERY_AUTH)
+        models.hosted()
+        self.assertEqual(results.catalog_price("opencode/big-pickle-free"), 0.0)
+        self.assertEqual(results.catalog_price("opencode/quiet-free"), 0.0)   # free by its name, no prices
+        self.assertEqual(results.catalog_price("acme/coder-flash"), 1.0)
+        self.assertIsNone(results.catalog_price("nolisted/model"))
+        os.environ["FAKE_COST"] = "0"                               # OpenCode says 0 for both
+        free = results.api_usage(self.api_task("t-free0", {"session": "ses_f"}, model="opencode/big-pickle-free",
+                                               provider="opencode"))
+        self.assertEqual((free["cost"], free["source"]), (0.0, "opencode"))   # a true 0
+        priced = results.api_usage(self.api_task("t-priced0", {"session": "ses_p"}, model="acme/coder-flash",
+                                                 provider="acme"))
+        self.assertEqual((priced["cost"], priced["source"]), (None, "unknown"))  # never a false 0
+
+    def test_a_session_whose_export_fails_is_filled_from_the_meter_beside_the_ones_that_exported(self):
+        # #1022's review: one failed export dropped the whole sum, the sessions that exported
+        # theirs thrown away; the engineer's call: their sum, the rest filled from the meter (the
+        # runner's, else the step events'), "mixed". With no session exported it is the meter's
+        from workbench import results, transcript
+        os.environ["FAKE_COST"] = "0.21"
+        t = self.api_task("t-part", {"sessions": ["ses_ok"], "session": "ses_gone", "api_spend": {"cost": 0.5}})
+        for c in (0.01, 0.02):
+            store.append_jsonl(t.dir / "events.jsonl", {"kind": "step", "in": 1, "out": 1, "cost": c})
+        real = transcript.export
+
+        def export(sid, *a, **k):  # the handover's earlier session exports; the current one fails
+            if sid == "ses_gone":
+                raise RuntimeError("Session not found")
+            return real(sid, *a, **k)
+        with mock.patch.object(transcript, "export", export):
+            self.assertEqual(transcript.finished_export(t, "ses_ok")["info"]["cost"], 0.21)
+            u = results.api_usage(t)
+            self.assertEqual((u["cost"], u["source"]), (0.5, "mixed"))          # 0.21 + the meter's 0.29
+            t.set_status(api_spend=None)
+            u = results.api_usage(store.Task(t.name))
+            self.assertEqual((u["cost"], u["source"]), (0.21, "mixed"))         # the steps' 0.03: no remainder
+            t.set_status(sessions=[])                                            # none exported: the meter's
+            u = results.api_usage(store.Task(t.name))
+            self.assertEqual((u["cost"], u["source"]), (0.03, "metered"))
+            t.set_status(sessions=["ses_ok"])
+            (t.dir / "events.jsonl").write_text("")                              # no meter to fill from
+            u = results.api_usage(store.Task(t.name))
+            self.assertEqual((u["cost"], u["source"]), (None, "unknown"))       # never a false, low sum
+        self.assertEqual(results.api_usage(store.Task(t.name))["source"], "opencode")  # both exported
+
+    def test_a_sessions_info_cost_counts_before_its_messages_which_miss_the_title_request(self):
+        # the engineer's call (#1022's review): info.cost wins, it counts OpenCode's title request,
+        # real money no message carries; the fake's info.cost equals its messages' sum, so this
+        # export is made here
+        from workbench import results, transcript
+        t = self.api_task("t-info", {"session": "ses_i"})
+        both = {"info": {"cost": 0.5}, "messages": [{"type": "assistant", "cost": 0.3}]}
+        with mock.patch.object(transcript, "export", return_value=both):
+            self.assertEqual(results.api_usage(t)["cost"], 0.5)
+        with mock.patch.object(transcript, "export", return_value={"info": {}, "messages": both["messages"]}):
+            self.assertEqual(results.api_usage(t)["cost"], 0.3)
+
+    def test_a_gpu_models_slice_and_tuned_knobs_ignore_api_rows_under_the_same_id(self):
+        # #1022's review: same_kind was in score and expected only; the slice and the knobs are
+        # the model's record too
+        from workbench import models, router, tuning
+        m = models.discover()["ollama/mimo-v2.6:9b-q8_0"]
+        before = router.slice(m)
+        api = {"ts": store.now(), "outcome": "discarded", "model": m.id, "size": "trivial", "kind": "api",
+               "steps": [{"files": 1, "lines": 60, "landed": False, "went": "badly"}]}
+        self.rows(api, api, api, {**api, "kind": "gpu", "steps": []})
+        self.assertEqual(router.slice(m), before)
+        self.assertEqual([r.get("kind") for r in tuning._rows(m.id, None)], ["gpu"])
+
+    def test_a_cost_under_a_cent_is_written_out_never_in_scientific_notation(self):
+        # #1022's review: `:.2g` printed $4e-05; the pane and the chat say the same as this
+        from workbench.savings import usd
+        self.assertEqual([usd(x) for x in (4e-5, 4.1e-5, 0.0041, 0.009999, 0.01, 0.42, 0)],
+                         ["$0.00004", "$0.000041", "$0.0041", "$0.01", "$0.01", "$0.42", "$0"])
+        js = (ROOT / "workbench" / "chat_static" / "app.js").read_text()
+        tsx = (ROOT / "mod" / "hooks" / "register.tsx").read_text()
+        for src in (js, tsx):
+            self.assertNotIn("toPrecision(2)}", src)                # the old $0.000040 rule
+            self.assertIn("r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')", src)
+
+    def test_a_bench_replay_on_an_api_task_writes_its_paid_to_runs_jsonl(self):
+        # acceptance 11, driven through replay (#1022's review: dropping **paid(task) left it green).
+        # wb start --model <api id> waits for #1016: the task.json is made an API one after start
+        from workbench import bench
+        self.start("t-src", "ok", "--test", "sh tests/check.sh")    # as Bench.accepted, in this class
+        wait_phase("t-src", {"review"})
+        (store.Task("t-src").worktree / "tests").mkdir()
+        (store.Task("t-src").worktree / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        run_wb("accept", "t-src", "-m", "feat: the answer")
+        bench.add("t-src")
+        os.environ.update(FAKE_SCENARIO="ok", FAKE_COST="0.3")
+        real = bench._start_task
+
+        def start(case, model, name, *rest):
+            real(case, model, name, *rest)
+            t = store.Task(name)
+            store.write_json(t.dir / "task.json", {**t.spec, "via": "api", "provider": "deepseek"})
+        with mock.patch.object(bench, "_start_task", start):
+            row = bench.replay(bench.cases()["t-src"], "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual((row["kind"], row["paid"]), ("api", {"cost": 0.3, "source": "opencode"}))
+        gpu = bench.replay(bench.cases()["t-src"], "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertNotIn("paid", gpu)
+
+
 if __name__ == "__main__":
     unittest.main()

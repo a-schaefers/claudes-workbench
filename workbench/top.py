@@ -24,6 +24,7 @@ from pathlib import Path
 
 from . import hardware, models, router, stats, store
 from .transcript import plain
+from .savings import usd
 
 EVERY = 2          # seconds between ticks without stats.json `every`
 PROBE_EVERY = 5    # seconds between asks of the model servers (/api/ps, /api/tags, /v1/models, /metrics)
@@ -132,6 +133,7 @@ class _Files:
 
     def __init__(self):
         self.cache: dict[Path, tuple[tuple, object]] = {}
+        self.costs: dict[Path, tuple[int, int, float]] = {}  # step_cost's (inode, offset, sum)
 
     def json(self, path: Path, default=None):
         try:
@@ -159,6 +161,38 @@ class _Files:
         rows = store.read_jsonl_tail(path, EVENTS_TAIL)
         self.cache[path] = (key, rows)
         return rows
+
+    def step_cost(self, path: Path) -> float:
+        """The step events' summed `cost` over the whole events.jsonl (results.step_cost), read on
+        from where the last tick stopped: the EVENTS_TAIL that events() keeps for the newest steps
+        held a fraction of a long API task's spend (2000 steps: $0.22 of $2.00, #1022's review)."""
+        try:
+            st = path.stat()
+        except OSError:
+            self.costs.pop(path, None)
+            return 0.0
+        ino, off, total = self.costs.get(path, (st.st_ino, 0, 0.0))
+        if ino != st.st_ino or st.st_size < off:  # replaced or cut short: summed again
+            off, total = 0, 0.0
+        if st.st_size > off:
+            from . import results
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(off)
+                    chunk = fh.read()
+            except OSError:
+                return total
+            end = chunk.rfind(b"\n") + 1  # a line still being written waits for the next tick
+            rows = []
+            for line in chunk[:end].splitlines():
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    pass
+            total += results.step_cost(rows)
+            off += end
+        self.costs[path] = (st.st_ino, off, total)
+        return total
 
 
 def _median(xs: list) -> float | None:
@@ -383,7 +417,25 @@ class Top:
                     r["context_pct"] = round(100 * used["used"] / window)
             if st.get("last"):
                 r["last"] = str(st["last"])[:160]
+            r.update(self._api(d, spec, st))
             out.append(r)
+        return out
+
+    def _api(self, d: Path, spec: dict, st: dict) -> dict:
+        """An API task's part of its RUNNING row (#1022): `via`, its provider, `spend` (dollars so
+        far; absent when unknown, never 0 for a missing price) and, queued, the provider slot it
+        waits for. It takes no lease and no model of the rack: it is never in either."""
+        if spec.get("via") != "api":
+            return {}
+        from . import results
+        mid = str(spec.get("model") or "")
+        pid = spec.get("provider") or mid.split("/", 1)[0]
+        out = {"via": "api", "provider": pid}
+        spend = results.live_spend(mid, st, self.files.step_cost(d / "events.jsonl"))
+        if spend is not None:
+            out["spend"] = spend
+        if st.get("phase") == "queued":
+            out["waits"] = f"a {pid} slot"
         return out
 
     def _last_call(self, d: Path, st: dict) -> float | None:
@@ -671,6 +723,10 @@ def _lines(snap: dict, fold: int = 0) -> list[list[tuple[str, str]]]:
             if r.get("context_window"):
                 ctx += f"/{r['context_window'] // 1024}K {r['context_pct']}%"
             row.append(("", ctx))
+        if r.get("via") == "api":  # its provider and its spend (#1022): no GPU of ours
+            row.append(("", f"  API {p(r.get('provider') or '?')}"
+                        + (f" · {usd(r['spend'])}" if isinstance(r.get("spend"), (int, float)) else "")
+                        + (f" · waits for {p(r['waits'])}" if r.get("waits") else "")))
         out.append(row)
         if r.get("last"):
             out.append([("dim", f"    {p(r['last'])}")])

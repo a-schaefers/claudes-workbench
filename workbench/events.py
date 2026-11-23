@@ -135,13 +135,16 @@ def normalize(raw: dict, round_no: int):
         n = lambda v: v if isinstance(v, (int, float)) else 0  # noqa: E731
         # reasoning apart from output, as OpenCode counts it: its compaction check adds it in,
         # so the runner's handover check must too (#644)
+        # cache_read/cache_write apart beside the sum: an API's price differs for the two, and
+        # `cost` only when OpenCode gave a number: a missing price is unknown, never 0 (#1022)
+        cost = part.get("cost")
         return {"ts": ts, "round": round_no, "kind": "step",
                 "in": n(tok.get("input")), "out": n(tok.get("output")),
                 "cache": n(cache.get("read")) + n(cache.get("write")),
+                "cache_read": n(cache.get("read")), "cache_write": n(cache.get("write")),
                 **({"reasoning": n(tok.get("reasoning"))} if n(tok.get("reasoning")) else {}),
-                # OpenCode's own price of the step, from the catalog (the meter, #1019)
-                **({"cost": part["cost"]} if isinstance(part.get("cost"), (int, float))
-                   and not isinstance(part.get("cost"), bool) else {})}
+                **({"cost": cost} if isinstance(cost, (int, float))
+                   and not isinstance(cost, bool) else {})}
     if kind == "error":
         return {"ts": ts, "round": round_no, "kind": "error", "text": _message(raw.get("error"))}
     if kind == "retry":  # a request OpenCode gave up on and sends again: not the model's output

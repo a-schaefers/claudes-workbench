@@ -48,7 +48,18 @@ def of_row(row: dict) -> dict | None:
     Claude would spend on the same change; ``saved`` is their difference (positive:
     the agent saved that much); ``wh`` is the task's GPU energy when measured.
     A discarded task has no change to compare; it saved nothing on Claude's side
-    but its GPU energy was still spent, so it records a negative saving."""
+    but its GPU energy was still spent, so it records a negative saving.
+    An API task's row is None: the score answers QUESTION, the GPU's, and an API task's paid
+    tokens are on the other side, which it can't see ("saved 60%" for a task that cost $3,
+    #1022); api_totals and api_line say it apart."""
+    if row.get("kind") == "api":
+        return None
+    return _compare(row)
+
+
+def _compare(row: dict) -> dict | None:
+    """of_row's comparison, whatever the row's kind (api_totals sets Claude's two sides of an API
+    task side by side, never against its dollars)."""
     if row.get("outcome") == "discarded":
         u = row.get("claude")
         if not isinstance(u, dict):
@@ -124,7 +135,8 @@ def totals(rows: list[dict], since: float = 0) -> dict:
     cost = round(wh / 1000 * price(), 2) if parts and price() is not None else None
     return {"tasks": len(parts),
             # the coverage: every closed task of the period, compared or not (#101)
-            "of": sum(p is not None or r.get("outcome") in ("accepted", "discarded") for r, p in period),
+            "of": sum(p is not None or r.get("outcome") in ("accepted", "discarded") for r, p in period
+                      if r.get("kind") != "api"),  # an API task is no GPU task left uncompared
             "claude": sum(p["claude"] for p in parts),
             "self_est": sum(p["self_est"] for p in parts),
             "saved": sum(p["saved"] for p in parts),
@@ -218,6 +230,8 @@ def line(row: dict) -> str | None:
     """One row's savings, readable: claude: 56K · writing it yourself: ~59K
     (estimate) · saved ~3K · GPU 41 Wh; None when there is no comparison.
     A discarded row reads: claude: 21K · discarded, nothing saved · GPU 12 Wh."""
+    if row.get("kind") == "api":
+        return api_line(row)
     est = of_row(row)
     if est is None:
         return None
@@ -299,4 +313,172 @@ def share(rows: list[dict], period: str, since: float, gpus: list[dict],
     out.append(f"- GPU energy: {energy(t['wh'])}" if t["wh"] else "- GPU energy: not measured")
     if t["remote"]:
         out[-1] += f" ({t['remote']} task(s) on another machine's GPU, not measured)"
+    return "\n".join(out)
+
+
+# --- API tasks (#1022): their own line, beside the score, never in it ------------------------
+# Dollars are OpenCode's unit (Money.USD), so they carry a `$`; the electricity's cost doesn't
+# (the price is the user's own, #609, #845). Never netted against Claude's tokens.
+
+def usd(x: float) -> str:
+    """$0.42; a cent's fraction to two figures, written out ($0.0041, $0.00004: `:.2g` gave
+    $4e-05, #1022's review); a free model's $0. The pane's and the chat's `usd` say the same."""
+    from decimal import Decimal
+    if x == 0:
+        return "$0"
+    if abs(x) >= 0.01:
+        return f"${x:.2f}"
+    r = float(f"{x:.2g}")  # 0.009999 rounds to a cent: $0.01, not $0.010
+    return f"${r:.2f}" if abs(r) >= 0.01 else "$" + format(Decimal(repr(r)), "f")
+
+
+def provider_labels(pids) -> dict[str, str]:
+    """Providers as OpenCode names them (hosted.json, as it is, read once: no catalog read), else
+    their ids."""
+    from . import models
+    pids = list(pids)
+    doc = store.read_json(models.hosted_path(), {}) if pids else {}
+    provs = doc.get("providers") if isinstance(doc, dict) else None
+    provs = provs if isinstance(provs, dict) else {}
+    out = {}
+    for pid in pids:
+        name = provs[pid].get("name") if isinstance(provs.get(pid), dict) else None
+        out[pid] = name if isinstance(name, str) and name else pid
+    return out
+
+
+def provider_label(pid: str) -> str:
+    return provider_labels([pid])[pid]
+
+
+def _day(ts: float) -> str:
+    import time
+    return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+
+def api_totals(rows: list[dict], since: float = 0) -> dict:
+    """The API rows measured after ``since``, trials and discards included (money spent is money
+    spent): tasks, the known dollars (`cost`), how many had no price (`unknown`) or count against
+    a plan (`plan`), the trials among them, Claude's side (`claude`, `self_est`: weighted tokens,
+    side by side, never subtracted from the dollars), and the dollars by provider and local day."""
+    from .results import row_cost
+    out = {"tasks": 0, "cost": 0.0, "unknown": 0, "plan": 0, "trials": 0, "claude": 0,
+           "self_est": 0, "by_provider": {}, "by_day": {}}
+    for r in rows:
+        if r.get("kind") != "api" or (r.get("ts") or 0) < since:
+            continue
+        api = r.get("api") if isinstance(r.get("api"), dict) else {}
+        p = out["by_provider"].setdefault(str(r.get("provider") or "?"),
+                                          {"tasks": 0, "cost": 0.0, "unknown": 0})
+        out["tasks"] += 1
+        p["tasks"] += 1
+        out["trials"] += bool(r.get("trial"))
+        cost = row_cost(r)
+        if api.get("source") == "plan":
+            out["plan"] += 1
+            p["plan"] = p.get("plan", 0) + 1
+        elif cost is None:
+            out["unknown"] += 1
+            p["unknown"] += 1
+        else:
+            out["cost"] += cost
+            p["cost"] += cost
+            day = _day(r.get("ts") or 0)
+            out["by_day"][day] = out["by_day"].get(day, 0.0) + cost
+        if (c := _compare(r)) is not None:
+            out["claude"] += c["claude"]
+            out["self_est"] += c["self_est"]
+    out["cost"] = round(out["cost"], 6)
+    for p in out["by_provider"].values():
+        p["cost"] = round(p["cost"], 6)
+    out["by_day"] = {d: round(v, 6) for d, v in sorted(out["by_day"].items())}
+    return out
+
+
+def _paid(row: dict) -> str:
+    from .results import row_cost
+    api = row.get("api") if isinstance(row.get("api"), dict) else {}
+    pid = str(row.get("provider") or "?")
+    if api.get("source") == "plan":
+        return f"plan usage ({api.get('plan') or pid})"
+    cost = row_cost(row)
+    if cost is None:
+        return "paid: unknown (no price for this model)"
+    return f"paid {provider_label(pid)} {usd(cost)} ({row.get('model')})"
+
+
+def api_line(row: dict) -> str:
+    """An API task's line at its close (line() gives it for one): Claude's side as line() says it,
+    then what the provider was paid, apart: claude: 56K · writing it yourself: ~59K (estimate) ·
+    paid DeepSeek $0.12 (deepseek/deepseek-flash)."""
+    est = _compare(row)
+    k = lambda n: f"{n / 1000:.0f}K"  # noqa: E731
+    if est is None:
+        return _paid(row)
+    if row.get("outcome") == "discarded":
+        return f"claude: {k(est['claude'])} · discarded · {_paid(row)}"
+    return (f"claude: {k(est['claude'])} · writing it yourself: ~{k(est['self_est'])} (estimate) · "
+            f"{_paid(row)}")
+
+
+def _priced(v: dict) -> bool:
+    """Whether a provider's tasks include one with a known price."""
+    return v["tasks"] > v["unknown"] + v.get("plan", 0)
+
+
+def _by_provider(a: dict) -> str:
+    return ", ".join(f"{p} {usd(v['cost'])}" for p, v in
+                     sorted(a["by_provider"].items(), key=lambda kv: -kv[1]["cost"]) if _priced(v))
+
+
+def _money(a: dict) -> str:
+    """The period's dollars, the tasks with no price and on a plan said apart: never `$0.00`
+    for a task whose price is unknown."""
+    known = a["tasks"] - a["unknown"] - a["plan"]
+    parts = [f"{usd(a['cost'])}" + (f" ({by})" if (by := _by_provider(a)) else "")] if known else []
+    if a["unknown"]:
+        parts.append(f"{a['unknown']} with no price")
+    if a["plan"]:
+        parts.append(f"{a['plan']} on plan usage")
+    return " + ".join(parts)
+
+
+def _counts(a: dict) -> str:
+    """`--api`'s first line: the dollars and the tasks with no price or on a plan, without the
+    providers (its `by provider:` line says them, #1022's review)."""
+    known = a["tasks"] - a["unknown"] - a["plan"]
+    return ", ".join(([usd(a["cost"])] if known else [])
+                     + ([f"{a['unknown']} with no price"] if a["unknown"] else [])
+                     + ([f"{a['plan']} on plan usage"] if a["plan"] else []))
+
+
+def api_summary(a: dict) -> str | None:
+    """`wb savings`' line for the period's API tasks, after the GPU one; None with none."""
+    if not a["tasks"]:
+        return None
+    k = lambda n: f"{n / 1000:.0f}K"  # noqa: E731
+    return (f"api: {a['tasks']} task(s) · {_money(a)}"
+            + (f" · claude {k(a['claude'])} · writing it yourself ~{k(a['self_est'])} (estimate)"
+               if a["claude"] else ""))
+
+
+def api_report(a: dict, period: str, bench: dict | None = None) -> str:
+    """`wb savings --api`: the period's API money, by provider and by day, and the bench's replays
+    (their rows are bench/runs.jsonl's, not results')."""
+    when = {"week": "the last 7 days", "month": "the last 30 days", "all": "all time"}.get(period, period)
+    if not a["tasks"] and not (bench or {}).get("tasks"):
+        return f"api, {when}: no API task"
+    trial = f" (incl. {a['trials']} trial{'s' if a['trials'] > 1 else ''})" if a["trials"] else ""
+    out = [f"api, {when}: {a['tasks']} task(s)" + (f", {_counts(a)}" if a["tasks"] else "") + trial]
+    provs = sorted(a["by_provider"].items(), key=lambda kv: (-kv[1]["cost"], kv[0]))
+    if provs:
+        out.append("  by provider: " + " · ".join(
+            f"{p} " + (usd(v["cost"]) if _priced(v) else "plan usage" if v.get("plan") else "no price")
+            + f" ({v['tasks']})"
+            for p, v in provs))
+    if a["by_day"]:
+        out.append("  by day: " + " · ".join(f"{d[5:]} {usd(v)}" for d, v in a["by_day"].items()))
+    if bench and bench.get("tasks"):
+        out.append(f"  bench replays: {usd(bench['cost'])} ({bench['tasks']})"
+                   + (f" + {bench['unknown']} with no price" if bench.get("unknown") else ""))
     return "\n".join(out)

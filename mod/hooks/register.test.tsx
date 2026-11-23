@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, savedLine, spark, splashTarget, statsLines, wrapParts, wrapWords } from './register.js'
+import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, savedLine, spark, splashTarget, statsLines, usd, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
@@ -5242,4 +5242,31 @@ test('#1014: the mod\'s summary of the roles reads as routes.summary does', () =
     writing: { via: 'gpu', gpu: 'ollama/x', api: 'anthropic/claude-haiku-5-5', thinking: 'on' } } }))
     .toBe('significant GPU (the router picks); trivial API deepseek/deepseek-flash, thinking off; writing GPU ollama/x, ' +
       'API kept: anthropic/claude-haiku-5-5, thinking on')
+})
+
+test('an API task\'s dollars sit beside the saving, never in it, and an API-only week says there was no GPU task (#1022)', () => {
+  const api = { tasks: 6, cost: 1.27, unknown: 0, plan: 0, by_provider: { deepseek: { tasks: 4, cost: 0.84, unknown: 0 }, anthropic: { tasks: 2, cost: 0.43, unknown: 0 } } }
+  const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })
+  expect(savedLine(t({ api }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · API $1.27')
+  expect(savedLine(t({ tasks: 0, saved: 0, api }))).toBe('this week: API $1.27 on 6 tasks (no GPU task to compare)')
+  expect(savedLine(t({ tasks: 0, saved: 0, api: { tasks: 1, cost: 0, unknown: 1, plan: 0 } })))
+    .toBe('this week: 1 API task, no price (no GPU task to compare)')                    // never $0 for no price
+  expect(savedLine(t({ tasks: 0, saved: 0, api: { tasks: 2, cost: 0, unknown: 0, plan: 2 } })))
+    .toBe('this week: 2 API tasks, plan usage (no GPU task to compare)')                 // a quota, not $0
+  // the feed's plan count (stats._api_period) keeps a plan-only week from reading API $0 (#1022's review)
+  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, api: { tasks: 1, cost: 0, unknown: 0, plan: 1,
+    by_provider: { 'opencode-go': { tasks: 1, cost: 0, unknown: 0, plan: 1 } } } } } })[0].text).toContain('API plan usage')
+  // savings.usd's rule: a cent's fraction written out, never 4e-05 nor $0.010
+  expect([usd(4e-5), usd(4.1e-5), usd(0.0041), usd(0.009999), usd(0.42), usd(0)]).toEqual(['$0.00004', '$0.000041', '$0.0041', '$0.01', '$0.42', '$0'])
+  expect(savedLine(t({ api: { tasks: 0, cost: 0, unknown: 0, plan: 0 } }))).toBe('this week: saved ~30K Claude tokens (38%, estimate)')
+  const week = statsLines({ tasks: 6, periods: { week: { tasks: 6, landed: 6, api } } })[0].text
+  expect(week).toContain('API $1.27 (deepseek $0.84 · anthropic $0.43)')
+  const model = statsLines({ tasks: 2, model_lines: { lines: [{ model: 'deepseek/deepseek-flash', tasks: 2, accepted_pct: 100,
+    kind: 'api', paid: 0.12, speed: { write: 80 } }] } }).find(l => l.label === 'deepseek/deepseek-flash')!
+  expect(model.text).toContain('paid ~$0.12/task')
+  expect(model.text).not.toContain('writes ~')
+  const row = liveLines({ snap: { ts: 0, every: 2, gpus: [], rack: [], queue: [], running: [{ task: 'fix-auth',
+    model: 'deepseek/deepseek-flash', label: 'deepseek-flash', phase: 'running', round: 2, round_s: 190,
+    via: 'api', provider: 'deepseek', spend: 0.12 }] }, busy: {} } as any)[0].map(p => p.text).join('')
+  expect(row).toBe('▶ fix-auth deepseek-flash · running · round 2 · 3m10s · API deepseek · $0.12')
 })

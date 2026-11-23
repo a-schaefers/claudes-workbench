@@ -993,7 +993,7 @@ export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; 
   for (const r of (s.running ?? []) as Row[]) {
     const parts = [r.phase, r.round ? `round ${r.round}` : '', typeof r.round_s === 'number' ? secs(r.round_s) : '',
       typeof r.tok_s === 'number' ? `${Math.round(r.tok_s)} tok/s${r.tok_s_from === 'live' ? '' : ' (last call)'}` : '',
-      typeof r.context_pct === 'number' ? `context ${r.context_pct}%` : ''].filter(Boolean)
+      typeof r.context_pct === 'number' ? `context ${r.context_pct}%` : '', ...apiParts(r)].filter(Boolean)
     out.push([{ color: 'claude', text: '▶ ' }, { bold: true, text: `${r.task} ` }, { dim: true, text: `${r.label || r.model} · ${parts.join(' · ')}` }])
   }
   if (!(s.running ?? []).length) out.push([{ dim: true, text: 'Nothing running.' }])
@@ -1768,6 +1768,7 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
       // the period's own energy, every task's: the saving's counts only the tasks it compares (#568)
       p.energy?.wh ? `${p.energy.wh >= 1000 ? `${(p.energy.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.energy.wh)} Wh`}` +
         (p.energy.cost != null ? `, cost ${p.energy.cost.toFixed(2)}` : '') : '',
+      apiPeriod(p.api),
     ]
     out.push({ label, text: parts.filter(Boolean).join(' · ') })
   }
@@ -1798,7 +1799,8 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   const shown = all.slice(0, STATS_SHOWN), past = all.slice(STATS_SHOWN)
   for (const [model, m] of shown) {
     const trend = spark((m.write_trend ?? []).map((p: number[]) => p[1]))
-    const speed = m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''
+    const speed = m.kind === 'api' ? (typeof m.paid === 'number' ? ` · paid ~${usd(m.paid)}/task` : '')
+      : m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''
     const change = typeof m.write_change_pct === 'number' && m.write_change_pct
       ? ` (${m.write_change_pct > 0 ? '+' : ''}${m.write_change_pct}%)` : ''
     const windows = (m.windows ?? []).length > 1 ? ` (${m.windows.map((w: number) => `${Math.round(w / 1024)}K`).join(', ')})` : ''
@@ -2570,13 +2572,52 @@ const SCOUT_QUIET_MS = 60_000
 export function savedLine(out: string): string {
   let t: any
   try { t = JSON.parse(out) } catch { return '' }
-  if (!t || typeof t.tasks !== 'number' || !t.tasks || typeof t.saved !== 'number') return ''
+  const api = apiMoney(t?.api)
+  if (!t || typeof t.tasks !== 'number' || !t.tasks || typeof t.saved !== 'number') return api ? apiAlone(t.api, api) : ''
   const n = (x: number) => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : `${Math.round(x / 1e3)}K`)
   const pct = t.self_est > 0 ? ` (${Math.round((100 * t.saved) / t.self_est)}%, estimate)` : ' (estimate)'
   const what = t.saved >= 0 ? `saved ~${n(t.saved)} Claude tokens${pct}` : `cost ~${n(-t.saved)} more Claude tokens (estimate)`
   const cost = typeof t.cost === 'number' ? `, cost ${t.cost.toFixed(2)}` : ''
   const gpu = t.wh ? ` · ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${cost}` : ''
-  return `this week: ${what}${gpu}`
+  return `this week: ${what}${gpu}${api ? ` · API ${api}` : ''}`
+}
+
+// API dollars (#1022): OpenCode's unit, so a `$`, unlike the electricity's cost (the user's own
+// price, #609); a cent's fraction to two figures, written out ($0.00004), a free model's $0:
+// savings.usd's rule, so the CLI and the pane agree (toPrecision gave $0.000040 and $0.010)
+export function usd(x: number): string {
+  if (x === 0) return '$0'
+  if (Math.abs(x) >= 0.01) return `$${x.toFixed(2)}`
+  const r = Number(x.toPrecision(2))
+  return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
+}
+
+// A period's API money as the footer says it: never $0 for tasks with no price; '' with none
+export function apiMoney(a: any): string {
+  if (!a || !a.tasks) return ''
+  const known = a.tasks - (a.unknown ?? 0) - (a.plan ?? 0)
+  return known > 0 ? usd(a.cost ?? 0) : a.plan ? 'plan usage' : 'no price'
+}
+
+// An API-only week: API $1.27 on 6 tasks, or 1 API task, no price (no dollars to put "on")
+export function apiAlone(a: any, money: string): string {
+  const tasks = `task${a.tasks === 1 ? '' : 's'}`
+  return `this week: ${money.startsWith('$') ? `API ${money} on ${a.tasks} ${tasks}` : `${a.tasks} API ${tasks}, ${money}`} (no GPU task to compare)`
+}
+
+// A Stats period's API part (the feed's periods[*].api): API $1.27 (deepseek $0.84 · anthropic $0.43)
+export function apiPeriod(a: any): string {
+  const money = apiMoney(a)
+  if (!money) return ''
+  const provs = Object.entries(a.by_provider ?? {}).filter(([, v]: any) => v.tasks > (v.unknown ?? 0) + (v.plan ?? 0))
+    .sort((x: any, y: any) => y[1].cost - x[1].cost).map(([p, v]: any) => `${p} ${usd(v.cost)}`)
+  return `API ${money}${provs.length ? ` (${provs.join(' · ')})` : ''}${a.unknown && money !== 'no price' ? ` + ${a.unknown} with no price` : ''}`
+}
+
+// An API task's RUNNING row's parts (wb top's `via`, `provider`, `spend`): no GPU of ours
+export function apiParts(r: Row): string[] {
+  if (r.via !== 'api') return []
+  return [`API ${r.provider ?? '?'}`, typeof r.spend === 'number' ? usd(r.spend) : '', r.waits ? `waits for ${r.waits}` : '']
 }
 
 // The electricity price `wb savings --json` says is set (per kWh), or null

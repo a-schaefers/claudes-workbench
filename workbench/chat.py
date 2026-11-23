@@ -634,8 +634,16 @@ def patch(sent: dict, snap: dict) -> dict | None:
 
 def week_saved() -> dict:
     """The gear sheet's Savings: `wb savings` for the last 7 days (savings.totals)."""
-    t = savings.totals(store.results(), since=store.now() - savings.PERIODS["week"])
-    return {**t, "score": savings.score(t)}  # the badge (#101)
+    since = store.now() - savings.PERIODS["week"]
+    t = savings.totals(store.results(), since=since)
+    return {**t, "score": savings.score(t), "api": _week_api(since)}  # the badge (#101)
+
+
+def _week_api(since: float) -> dict:
+    """The week's API tasks for the gear (#1022): savings.api_totals, each provider's name as
+    OpenCode gives it in `names`; never part of the score."""
+    a = savings.api_totals(store.results(trials=True), since)
+    return {**a, "names": savings.provider_labels(a["by_provider"])}
 
 
 # ---- notifications: web push with no payload (webpush.py) ----

@@ -66,7 +66,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   `wb patch init` deletes the copy wb runs from.
 - `privacy.py`: where an API task's code goes (`where`, `PRIVACY_PAGES`, the first-task note),
   `local_only`, OpenRouter's routing, `holds_credential` (which token files an API lane hides) (ARCHITECTURE.md, *Privacy for API roles*).
-- `results.py`: results.jsonl rows; read them through `store.results()`, which leaves out trials.
+- `results.py`: results.jsonl rows (`kind`, `role`, `provider`; an API task's money, `api_usage`); read them through `store.results()`, which leaves out trials.
 - `router.py`: the model per size, slices, budgets. `tuning.py`: learned knobs (a new one goes in
   `KNOBS`, read with `tuning.value`). `models.py`: discovery (`discover`, GPU only; API models from
   OpenCode's catalog, `hosted`, `lookup`, `note_api`, `catalog_doc`), residency, `GpuLease`, and
@@ -77,9 +77,9 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
   notice).
-- `spend.py`, `savings.py`: a task's cost to Claude, and against writing it. `meter.py`: an API
+- `spend.py`, `savings.py`: a task's cost to Claude, and against writing it (the score GPU-only; API dollars apart, `api_totals`). `meter.py`: an API
   task's money (the ledger `spend-api.jsonl`, the day cap, the `spend` guard: *Spend*). `bench.py`,
-  `verify.py`, `optimize.py`, `top.py`, `images.py`, `audio.py` (`media.py`, what those two
+  `verify.py`, `optimize.py`, `top.py` (API tasks under RUNNING, never in rack or queue), `images.py`, `audio.py` (`media.py`, what those two
   share): their `wb` commands. `progress.py`, `stats.py`, `lessons.py`: progress checks, the Stats
   tab, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
   inotify and pidfd waits. `chat.py` + `chat_static/`, `webpush.py`: the web chat. `try/`:
