@@ -1024,6 +1024,17 @@ def active_so_far(task: store.Task, now: float | None = None) -> float:
         (max(0.0, now - running) if running else 0.0)
 
 
+def typical_now(task: store.Task) -> dict:
+    """Status `typical` {min, n} for a round's start: the step's typical active minutes on this
+    model and size (router.expected, the files alone, #819) and how many timed tasks back it, so
+    the pane can set its estimate against them with no read of its own (#1048); {} with none."""
+    from . import router  # router -> models; imported late, as checkin_text does
+    spec = task.spec
+    mins, n = router.expected(spec.get("model", ""), spec.get("size", "significant"),
+                              spec.get("weights_id"))
+    return {} if mins is None else {"typical": {"min": round(float(mins), 2), "n": n}}
+
+
 def checkin_text(task: store.Task, n: int, out: dict, since: float, active: float | None = None) -> str:
     """The digest a check-in wakes Claude with: what changed since the last one, and timing.
     ``active``: the round's own count of active work so far, when the round knows it."""
@@ -3557,7 +3568,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                             "text": "the model was measured slow here: " + ", ".join(
                                 f"{k} {v // 60} min" for k, v in raised.items())})
             task.set_status(phase="running", round=n, round_started_at=store.now(),
-                            last="agent started")  # not "starting…": the pane shows its progress
+                            last="agent started",  # not "starting…": the pane shows its progress
+                            **typical_now(task))
             task.event({"ts": store.now(), "round": n, "kind": "round", "text": "started"})
             began = time.time()
             try:
@@ -3654,7 +3666,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
                     auto_fix_prompt(tests, task.spec["test_cmd"]))
-                task.set_status(round=n + 1, auto_fixes=used + 1, tests=tests)
+                task.set_status(round=n + 1, auto_fixes=used + 1, tests=tests, round_for="fix")
                 task.event({"ts": store.now(), "round": n, "kind": "autofix",
                             "text": "tests failed; sent the output back to the agent"})
                 continue
@@ -3668,7 +3680,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
                     SELF_REVIEW.format(cmd=task.spec["test_cmd"]))
-                task.set_status(round=n + 1, self_reviewed=mark, tests=tests)
+                task.set_status(round=n + 1, self_reviewed=mark, tests=tests, round_for="self_review")
                 task.event({"ts": store.now(), "round": n, "kind": "self_review",
                             "text": "tests pass; the agent reviews its own change first"})
                 continue
@@ -3799,7 +3811,7 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
         asked=ASKED.format("\n\n".join(asks)) if asks else "",
         last="> " + last.replace("\n", "\n> ") if last else "(none)")
         + (f"\n\n{folded_notes(task, n + 1, notes)}" if notes else ""))
-    task.set_status(round=n + 1, context="full", full_pct=pct,
+    task.set_status(round=n + 1, context="full", full_pct=pct, round_for="fresh",
                     full_compacted=True if rnd.get("compacted") else None,  # #774: fresh_reason
                     full_compact_failed=True if failed else None,  # #969: and its reason
                     handovers=task.status.get("handovers", 0) + 1,
@@ -3836,7 +3848,8 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
         task.round_dir(n + 1).joinpath(NUDGED).touch()
         if theirs := [r for r in notes if r.get("by") != "workbench"]:  # ... Claude's notes are
             folded_notes(task, n + 1, theirs)
-    task.set_status(round=n + 1, steer_taken=task.status.get("steer_taken", 0) + len(notes))
+    task.set_status(round=n + 1, steer_taken=task.status.get("steer_taken", 0) + len(notes),
+                    round_for="steer")
 
 
 # What a task's children load from the clone afresh each round, beside this runner's code loaded
