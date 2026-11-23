@@ -2797,10 +2797,12 @@ export function askForArgs(o: AskFor): string[] {
   return [...(o.for ?? []).map(n => `--for=${n}`), ...(o.for?.length && o.here ? ['--here'] : [])]
 }
 
-// An ask on the page is withdrawn the moment its dialog is settled elsewhere: the hook's signal
-// aborts (the terminal answered, or Esc), or the engine's call goes on past its permission check
-// (askSettledHere). The page was left with a card the terminal had already answered, which the
-// user could still tap. Withdrawn is `expired` by `interrupted`: the page says "settled in the
+// An ask on the page is withdrawn once its dialog is settled elsewhere: the hook's signal aborts
+// (an interrupt), or the engine's call of it ends (askSettledHere, in tool.call's finally). The
+// page was left with a card the terminal had already answered, which the user could still tap.
+// A terminal answer doesn't abort the signal, and this engine has no event as the call starts
+// (`tool.run` came later; an unknown event stops the whole module loading), so a long command
+// allowed in the terminal keeps its card until it ends (the #1042 live check, 2026-11-23: 22 s). Withdrawn is `expired` by `interrupted`: the page says "settled in the
 // terminal". Returns the unwatch.
 type ChatAsk = { tool: string; agent: string; input: Record<string, unknown>; here: boolean; at: number }
 function watchAsk($: any, id: string, ask: ChatAsk, signal?: AbortSignal): () => void {
