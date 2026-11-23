@@ -61,20 +61,45 @@ only once committed, through `wb update` (it copies the clone's HEAD into the pl
    under its labels as `### ` headings, into `--body-file`.
 3. **Prepare the branch**: `wb patch upstream <commit> --name <slug>` makes branch `pr/<slug>`
    from fresh upstream main in its own worktree (`$WB_HOME/upstream/<slug>`), with only that
-   commit cherry-picked. It prints the next steps and runs none of them.
-4. **Test it there** (section 4), then, each outward step only on the user's yes:
+   commit cherry-picked, and copies `.github/pull_request_template.md` to
+   `$WB_HOME/upstream/<slug>.md`. It prints the tests, that file, the one `wb patch send` line and
+   gh's state, and runs none of them.
+4. **Test it there** (section 4), and fill in every section of the body file. Read it as the
+   public text it becomes: take out local paths, hostnames and project names.
+5. **Send it**:
    ```sh
-   gh repo fork a-schaefers/claudes-workbench --remote --remote-name fork    # in that worktree
-   git push -u fork pr/<slug>
-   gh pr create --repo a-schaefers/claudes-workbench --head <your login>:pr/<slug> --body-file <filled template>
+   wb patch send <slug> --title "<the commit's subject>" --body-file <the body file it printed>
    ```
-   The body is `.github/pull_request_template.md`, filled in. The commit message's body carries
-   `Closes #N`.
+   It forks the repository (unless it is yours), pushes `pr/<slug>` to the fork and opens the
+   pull request (`--draft` for a draft). It refuses, sending nothing, while the branch has
+   uncommitted changes, the body is empty or still the template, or a commit's trailer is
+   `Scope: me` (`--anyway` overrides that one). A failed step says what is done already; running
+   it again goes on from there. The commit message's body carries `Closes #N`. Once it merges,
+   the next `wb update` drops the local patch and removes `pr/<slug>`, its worktree and its body.
+
+**The consent dialog.** In Claude Code the workbench plugin holds every command that would send
+something to this repository (an issue, a comment, a fork, a push, a pull request, `wb patch
+send`) and asks you in a dialog, showing the command and, for `wb patch send`, the title and the
+body's start; the GitHub plugin's tools that write here ask the same. "Send it" lets that one
+command through; nothing is remembered. While you are away on the web chat it is refused, and
+waits for you. Inside Claude Code `wb patch send` itself refuses a send the dialog didn't approve
+(the plugin not loaded, say): then you run it in a terminal of your own. Working in your own clone
+of this repository (its `origin` this repository) isn't gated: that is a developer at work, not a
+user's Claude. Claude Code's own copy of the plugin (under `~/.claude/plugins/`) is no developer's
+clone, and is gated.
+
+**gh setup.** `wb patch send` sends through [gh](https://cli.github.com), GitHub's CLI. `wb
+doctor`, `wb patch upstream` and a refused send say its state and the next step: the install
+line for your system (GitHub's own instructions), then `gh auth login --hostname github.com
+--git-protocol ssh` (or `https`, then `gh auth setup-git`, which edits your global git config).
+A change to `.github/workflows/` over https needs `gh auth refresh -h github.com -s workflow`.
+Claude never handles your token: you run the login yourself (`! gh auth login …` in Claude
+Code). The GitHub plugin for Claude Code is optional and not needed for any of this.
 
 Never `scripts/ship.sh`: it is the owner's road to main, pushing to this repository and arming
 auto-merge, which only the owner can.
 With a developer's clone and no `wb patch`, the same steps by hand: fork, a branch from
-`origin/main`, the commit, the tests, the pull request.
+`origin/main`, the commit, the tests, `gh pr create` with the filled-in template as its body.
 
 ## 4. The project's rules
 

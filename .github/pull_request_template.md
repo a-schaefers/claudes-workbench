@@ -1,4 +1,5 @@
-<!-- Fill every section from real output. Delete these comments. See CONTRIBUTING.md. -->
+<!-- Fill every section from real output. Delete these comments. See CONTRIBUTING.md.
+     This page is public: no local paths, hostnames, usernames or project names. -->
 
 ## What and why
 
@@ -40,5 +41,5 @@ Skipped:
 
 - [ ] Runs on Python 3.11; no new dependency; no model name in code or the skill
 - Written by: <!-- the agent (and model) that wrote it, e.g. "Claude Code for its user", or "by hand" -->
-- [ ] Reviewed by the user it was written for, who opened this pull request
+- [ ] Read by the user it was written for, who said yes to sending it (`wb patch send`'s dialog, or by hand)
 - The local patch it replaces: <!-- its `wb patch list` line, or "none" -->

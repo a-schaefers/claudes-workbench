@@ -1034,6 +1034,12 @@ const PREFIXES: Record<string, [string[], number]> = {
   timeout: [['-s', '-k', '--signal', '--kill-after'], 1],
   nice: [['-n', '--adjustment'], 0], ionice: [['-c', '-n', '--class', '--classdata'], 0],
   stdbuf: [['-i', '-o', '-e', '--input', '--output', '--error'], 0],
+  // `sudo git push`, `xargs -I{} git push` hid the command from the consent gate (#1005)
+  sudo: [['-u', '-g', '-h', '-p', '-C', '-U', '-r', '-t', '-D', '-R', '-T', '--user', '--group', '--host',
+    '--prompt', '--close-from', '--other-user', '--role', '--type', '--chdir', '--chroot', '--command-timeout'], 0],
+  doas: [['-u', '-C'], 0],
+  xargs: [['-I', '-L', '-l', '-n', '-P', '-s', '-d', '-E', '-e', '-a', '--max-args', '--max-procs', '--max-lines',
+    '--max-chars', '--delimiter', '--arg-file', '--eof', '--replace', '--process-slot-var'], 0],
 }
 
 // Where the `(` at `open` closes, quotes skipped (the end when it never does)
@@ -1159,28 +1165,392 @@ function simpleCommands(src: string): string[][] {
   return out
 }
 
+// Where a simple command's own word is: past `VAR=x`, the reserved words and the wrappers
+function commandAt(words: string[]): number {
+  let i = 0
+  for (;;) {
+    const w = words[i] ?? ''
+    if (/^[A-Za-z_]\w*=/.test(w) || RESERVED.has(w)) { i++; continue }
+    const prefix = PREFIXES[w]
+    if (!prefix) break
+    i++
+    let positional = prefix[1]
+    while (i < words.length) {
+      const o = words[i]!
+      if (o === '--') { i++; break }
+      if (o.startsWith('-') && o.length > 1) { i += prefix[0].includes(o) ? 2 : 1; continue }
+      if (positional > 0) { positional--; i++; continue }
+      break
+    }
+  }
+  return i
+}
+
 export function delegates(command: string): boolean {
   for (const words of simpleCommands(command)) {
-    let i = 0
-    for (;;) {
-      const w = words[i] ?? ''
-      if (/^[A-Za-z_]\w*=/.test(w) || RESERVED.has(w)) { i++; continue }
-      const prefix = PREFIXES[w]
-      if (!prefix) break
-      i++
-      let positional = prefix[1]
-      while (i < words.length) {
-        const o = words[i]!
-        if (o === '--') { i++; break }
-        if (o.startsWith('-') && o.length > 1) { i += prefix[0].includes(o) ? 2 : 1; continue }
-        if (positional > 0) { positional--; i++; continue }
-        break
-      }
-    }
+    const i = commandAt(words)
     const cmd = words[i] ?? ''
     if ((cmd === 'wb' || cmd.endsWith('/wb')) && HANDS_OUT.has(words[i + 1] ?? '')) return true
   }
   return false
+}
+
+// The consent gate (#1005, 2026-11-22). The owner's rule, absolute: a user's Claude never forks,
+// pushes, opens or comments on an issue or pull request at workbench upstream without the user's
+// yes for that exact action. A rule in the skill is advice Claude may misread; this is the one
+// place every Bash and Monitor call (and the GitHub MCP tools' calls) passes, so the yes is the
+// user's own, in a dialog, each time (nothing is remembered: a yes to one pull request is no yes
+// to the next). What sends: these gh forms, a gh api call that writes, a git push, and wb patch
+// send (the turnkey path's one send, whose single dialog shows its title and body). Read as bash
+// reads it (simpleCommands, as `delegates`), so an echo's or a heredoc's text doesn't count, and
+// `bash -c '…'` and `eval` are read inside; text a shell or an interpreter runs from a heredoc,
+// a here-string, a pipe or -c is caught by its words (OUTWARD_TEXT): `bash <<EOF … git push` once
+// went through (the review of #1005).
+const UPSTREAM = 'a-schaefers/claudes-workbench' // the GitHub home; patches.json's upstream when it has one (Couplings)
+const GH_WRITES: Record<string, Set<string>> = {
+  pr: new Set(['create', 'comment', 'edit', 'merge', 'review', 'close', 'reopen', 'ready', 'update-branch', 'lock', 'unlock']),
+  issue: new Set(['create', 'comment', 'edit', 'close', 'reopen', 'delete', 'lock', 'unlock', 'transfer', 'pin', 'unpin', 'develop']),
+  repo: new Set(['fork', 'edit', 'delete', 'rename', 'archive', 'unarchive', 'sync']),
+  workflow: new Set(['run', 'enable', 'disable']),
+  run: new Set(['rerun', 'cancel', 'delete']),
+  release: new Set(['create', 'edit', 'delete', 'upload', 'delete-asset']),
+  label: new Set(['create', 'edit', 'delete', 'clone']),
+}
+const GIT_VALUED = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env'])
+const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash'])
+const PYTHON = /^python[\d.]*$/
+// what runs code it is handed as text (stdin, -c, -e): its text is read for an outward command
+const RUNS_CODE = /^(?:bash|sh|zsh|dash|ksh|ash|fish|python[\d.]*|node|perl|ruby|php|deno|bun)$/
+const SEND_TEXT = /(?:\bwb|-m\s*workbench[\w.]*)\s+patch\s+send\b/i
+const OUTWARD_TEXT = new RegExp(String.raw`\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr|issue|repo|api|release|workflow|run|label)\b|` +
+  SEND_TEXT.source, 'i')
+const SEND_ASK = 'Send it'
+// Said after a no: it once read "Show them exactly what it sends and ask", and Claude opened a
+// dialog of its own pleading for the yes the user had just refused (the review of #1005)
+const NOT_SENT = 'workbench: not sent: the user did not approve it in the dialog. Tell them it was not ' +
+  'sent; try again only if they ask for it.'
+const NOT_SENT_AWAY = 'workbench: not sent: the user is away: it waits until they are at the terminal. ' +
+  'Tell them in the web chat what it would send; they approve it in the dialog once back.'
+const NOT_SHOWN = (why: string) => `workbench: not sent: the dialog can't show what it sends (${why}). Run ` +
+  'wb patch send as a command of its own, its --title written out and --body-file naming the file, so the ' +
+  'user sees both.'
+
+// gh api writes with a method other than GET, or with fields (POST by default; with an explicit
+// GET gh sends them as the query)
+function apiWrites(args: string[]): boolean {
+  let method = '', fields = false
+  for (let j = 0; j < args.length; j++) {
+    const a = args[j]!
+    const m = /^(?:-X|--method(?==|$))=?(.*)$/.exec(a)
+    if (m) method = (m[1] || args[++j] || '').toUpperCase()
+    else if (/^-[fF]/.test(a) || /^--(?:field|raw-field|input)(?:=|$)/.test(a)) fields = true
+  }
+  return method ? method !== 'GET' && method !== 'HEAD' : fields
+}
+
+// A command word as the system finds it: its name, lowercased (macOS finds `GIT` as git)
+const wordOf = (w: string | undefined) => (w ?? '').split('/').pop()!.toLowerCase()
+
+// The words wb gets when this command runs it: `wb` or a path to it, or Python running a
+// `…/wb` or `-m workbench…` (`python3 <source>/bin/wb patch send` was no send, the review of #1005)
+function wbArgs(cmd: string, args: string[]): string[] | null {
+  if (cmd === 'wb') return args
+  if (!PYTHON.test(cmd)) return null
+  for (let j = 0; j < args.length; j++) {
+    const a = args[j]!
+    if (a.startsWith('-m')) {
+      const mod = a === '-m' ? args[j + 1] ?? '' : a.slice(2)
+      return mod.startsWith('workbench') ? args.slice(j + (a === '-m' ? 2 : 1)) : null
+    }
+    if (a === '-X' || a === '-W') j++
+    else if (!a.startsWith('-')) return wordOf(a) === 'wb' ? args.slice(j + 1) : null
+  }
+  return null
+}
+
+// What one simple command sends: 'send' (wb patch send), 'out' (another outward form), '' (none),
+// and the directories it names with git's -C
+function sendsOut(words: string[]): { kind: '' | 'send' | 'out'; dirs: string[] } {
+  const i = commandAt(words)
+  const cmd = wordOf(words[i])
+  const args = words.slice(i + 1)
+  if (cmd === 'gh') {
+    const pos: string[] = []
+    for (let j = 0; j < args.length && pos.length < 2; j++) {
+      const a = args[j]!
+      if (a === '-R' || a === '--repo') j++
+      else if (!a.startsWith('-')) pos.push(a.toLowerCase())
+    }
+    const [group = '', sub = ''] = pos
+    const out = group === 'api' ? apiWrites(args) : !!GH_WRITES[group]?.has(sub)
+    return { kind: out ? 'out' : '', dirs: [] }
+  }
+  if (cmd === 'git') {
+    const dirs: string[] = []
+    let j = 0
+    for (; j < args.length && args[j]!.startsWith('-'); j++) {
+      if (args[j] === '-C') dirs.push(args[j + 1] ?? '')
+      if (GIT_VALUED.has(args[j]!)) j++
+    }
+    return { kind: (args[j] ?? '').toLowerCase() === 'push' ? 'out' : '', dirs }
+  }
+  const wb = wbArgs(cmd, args)
+  if (wb && wb[0] === 'patch' && wb[1] === 'send') return { kind: 'send', dirs: [] }
+  return { kind: '', dirs: [] }
+}
+
+const inside = (p: string, dir: string) => !!dir && (p === dir || p.startsWith(`${dir}/`))
+
+// Whether the text names a directory: as written, through `~` or $HOME, or $WB_HOME for the state's
+export function mentions(text: string, dir: string, home: string, root = ''): boolean {
+  if (!dir) return false
+  const ways = [dir]
+  if (home && inside(dir, home) && dir !== home) {
+    const rest = dir.slice(home.length)
+    ways.push(`~${rest}`, `$HOME${rest}`, `\${HOME}${rest}`)
+  }
+  if (root && inside(dir, root) && dir !== root) {
+    const rest = dir.slice(root.length)
+    ways.push(`$WB_HOME${rest}`, `\${WB_HOME}${rest}`)
+  }
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return ways.some(w => new RegExp(`${esc(w)}(?=$|[/\\s'"\`;&|)])`).test(text))
+}
+
+// A git remote's URL is the upstream's (https, ssh or scp form, with or without .git)
+export function originIs(url: string, slug: string): boolean {
+  const u = url.trim().toLowerCase().replace(/\/+$/, '').replace(/\.git$/, '')
+  const s = slug.toLowerCase()
+  return u === s || u.endsWith(`/${s}`) || u.endsWith(`:${s}`)
+}
+
+// why: 'send' (wb patch send), 'dir' (it names, or runs in, a gated directory), 'plugin' (it runs
+// in Claude Code's plugins directory, `at`: gated when that checkout's origin is upstream), 'slug'
+// (the line names the upstream's owner/repo, run `at` that directory: a developer's own clone of
+// upstream there is no user's Claude). `named`: the line names the slug; `outAt`: every directory
+// an outward command in it runs in, for the hook to check by real path; `shown`: the outward text
+// when it isn't a command of its own (fed to a shell)
+export type Aim = { why: '' | 'send' | 'dir' | 'plugin' | 'slug'; at: string; words: string[]; named: boolean; outAt: string[]; shown?: string }
+
+// Whether a command line sends something to workbench upstream, and why. `dirs` are the gated
+// directories (the patch clone, `wb patch upstream`'s worktrees, Claude Code's workbench
+// marketplace clone and cache), `plugins` Claude Code's plugins directories. The slug is matched
+// in the whole line, whenever any command in it is outward: `export GH_REPO=<slug> && gh issue
+// create` or `gh repo set-default <slug> && …` named it outside the outward command and went
+// through (the review of #1005). `cd`, `cd --` and pushd are followed from `cwd`.
+export function upstreamAim(command: string, cwd: string, home: string, slug: string, dirs: string[], root = '',
+  plugins: string[] = []): Aim {
+  let here = cwd
+  const lines = (src: string): string[][] => simpleCommands(src).flatMap(words => {
+    const i = commandAt(words)
+    const cmd = wordOf(words[i])
+    const c = words.findIndex((w, j) => j > i && /^-[a-z]*c$/.test(w))
+    if (SHELLS.has(cmd) && c > 0 && words[c + 1] !== undefined) return [words, ...lines(words[c + 1]!)]
+    if (cmd === 'eval') return [words, ...lines(words.slice(i + 1).join(' '))]
+    return [words]
+  })
+  const textNames = dirs.some(d => mentions(command, d, home, root))
+  const named = command.toLowerCase().includes(slug.toLowerCase())
+  const outAt: string[] = []
+  const inPlugins = (ps: string[]) => ps.find(p => plugins.some(d => inside(p, d)))
+  let found: Aim | null = null
+  let runner = ''
+  for (const words of lines(command)) {
+    const i = commandAt(words)
+    const cmd = wordOf(words[i])
+    if (cmd === 'cd' || cmd === 'pushd') {
+      const rest = words.slice(i + 1)
+      const k = rest.indexOf('--')
+      const to = k >= 0 ? rest[k + 1] : rest.find(w => !/^-[LPe@]+$/.test(w))
+      if (to !== '-') here = absolutePath(to ?? (home || '/'), home, here)
+      continue
+    }
+    if (!runner && RUNS_CODE.test(cmd)) runner = here
+    const { kind, dirs: viaC } = sendsOut(words)
+    if (!kind) continue
+    if (kind === 'send') return { why: 'send', at: here, words, named, outAt }
+    const at = [here, ...viaC.map(d => absolutePath(d, home, here))]
+    outAt.push(...at)
+    if (textNames || at.some(p => dirs.some(d => inside(p, d)))) return { why: 'dir', at: here, words, named, outAt }
+    const plugin = inPlugins(at)
+    if (!found && plugin) found = { why: 'plugin', at: plugin, words, named, outAt }
+    if (!found && named) found = { why: 'slug', at: here, words, named, outAt }
+  }
+  if (found) return { ...found, outAt }
+  // the backstop: text a shell or an interpreter in the line runs, which isn't parsed as commands
+  if (runner && OUTWARD_TEXT.test(command)) {
+    outAt.push(runner)
+    const shown = command.split('\n').filter(l => OUTWARD_TEXT.test(l)).join('\n')
+    const aim = (why: Aim['why'], at = runner): Aim => ({ why, at, words: [], named, outAt, shown })
+    if (SEND_TEXT.test(command)) return aim('send')
+    if (textNames || dirs.some(d => inside(runner, d))) return aim('dir')
+    if (inPlugins([runner])) return aim('plugin')
+    if (named) return aim('slug')
+  }
+  return { why: '', at: '', words: [], named, outAt }
+}
+
+// wb patch send's own words: its slug, --title and --body-file (the last given, as argparse
+// takes them; wb refuses abbreviations, so only these spellings count), --draft, --anyway
+export function sendArgs(words: string[]) {
+  const i = commandAt(words)
+  const rest = (wbArgs(wordOf(words[i]), words.slice(i + 1)) ?? []).slice(2)
+  let slug: string | undefined, title: string | undefined, file: string | undefined
+  let draft = false, anyway = false
+  for (let j = 0; j < rest.length; j++) {
+    const a = rest[j]!
+    if (a === '--') { slug ??= rest[j + 1]; break }
+    if (a === '--title') title = rest[++j]
+    else if (a === '--body-file') file = rest[++j]
+    else if (a.startsWith('--title=')) title = a.slice('--title='.length)
+    else if (a.startsWith('--body-file=')) file = a.slice('--body-file='.length)
+    else if (a === '--draft') draft = true
+    else if (a === '--anyway') anyway = true
+    else if (!a.startsWith('-')) slug ??= a
+  }
+  return { slug, title, file, draft, anyway }
+}
+
+const SHOW_CHARS = 600
+const BODY_LINES = 20
+const MCP_CHARS = 4000
+const quoted = (w: string) => /^[\w@%+=:,./-]+$/.test(w) ? w : `'${w.replace(/'/g, `'\\''`)}'`
+
+// The command as the dialog shows it: the whole line when short; else the outward command in
+// full, then the line's start. Cut from the line's start, a long line hid the gh command and
+// its inline --body entirely (the review of #1005)
+export function shownCommand(command: string, aim: Aim): string {
+  if (command.length <= SHOW_CHARS) return command
+  const own = aim.shown ?? aim.words.map(quoted).join(' ')
+  return `${own}\n\n(in a longer line: ${command.slice(0, SHOW_CHARS)}…)`
+}
+
+type Sending = { question: string; approval?: Row } | { deny: string }
+
+// The question: what goes public, word for word. For wb patch send its title and the body's
+// start too, which the command line only names, and what the gate tells wb it approved; one
+// whose title or body it can't read is refused, never asked about (#1005)
+async function sendQuestion($: any, command: string, slug: string, aim: Aim, home: string): Promise<Sending> {
+  const head = `Claude wants to send this to GitHub (${slug}), publicly: ${shownCommand(command, aim)}`
+  if (aim.why !== 'send') return { question: `${head} — Send it?` }
+  const args = sendArgs(aim.words)
+  if (!aim.words.length) return { deny: NOT_SHOWN('it is inside text another program runs') }
+  if (!args.slug) return { deny: NOT_SHOWN('no slug') }
+  if (args.title === undefined) return { deny: NOT_SHOWN('no --title') }
+  if (args.file === undefined) return { deny: NOT_SHOWN('no --body-file') }
+  if (/[$`]/.test(args.title) || /[$`]/.test(args.file)) return { deny: NOT_SHOWN('a $ or a backtick in --title or --body-file, whose value only the shell knows') }
+  const path = absolutePath(args.file, home, aim.at)
+  const text: string | undefined = await $.fs.read(path).catch(() => undefined)
+  if (text === undefined) return { deny: NOT_SHOWN(`can't read ${path}`) }
+  const lines = text.split('\n')
+  const body = lines.slice(0, BODY_LINES).join('\n') + (lines.length > BODY_LINES ? '\n…' : '')
+  return {
+    question: `${head}\n\nTitle: ${args.title}\n\nBody:\n${body}\n\nSend it?`,
+    approval: { slug: args.slug, title: args.title, body_file: path, body: text, draft: args.draft, anyway: args.anyway },
+  }
+}
+
+async function originOf($: any, dir: string): Promise<string> {
+  try {
+    const r = await $.process.run(['git', '-C', dir, 'remote', 'get-url', 'origin'], { timeoutMs: 5000 })
+    return r.exitCode === 0 ? String(r.stdout ?? '') : ''
+  } catch {
+    return ''
+  }
+}
+
+// A developer's clone of upstream (its origin the upstream), not a gated directory and not
+// Claude Code's plugins directory: the marketplace install's own clone has that origin too, and
+// was exempted as a developer's (the review of #1005's blocker). Asked of git only once all
+// else matched.
+async function developerClone($: any, dir: string, slug: string, notIn: string[]): Promise<boolean> {
+  if (notIn.some(d => inside(dir, d))) return false
+  return originIs(await originOf($, dir), slug)
+}
+
+// What the gate reads each time: patches.json's clone and upstream, the gated directories
+type Gate = { home: string; cwd: string; slug: string; dirs: string[]; plugins: string[] }
+async function gateConf($: any): Promise<Gate> {
+  const conf = await readJson($, `${mem.root}/patches.json`)
+  const home = (await $.env.get('HOME').catch(() => '')) || mem.home
+  const cwd = (await $.session.cwd().catch(() => '')) || mem.cwd
+  // patches.json's, else where wb patch init would put it (patches.source_dir)
+  const given = typeof conf.source === 'string' && conf.source ? conf.source
+    : (await $.env.get('WB_SOURCE').catch(() => '')) || `${home}/.local/share/workbench/source`
+  const source = absolutePath(given, home, cwd)
+  const slug = typeof conf.upstream === 'string' && conf.upstream.trim() ? conf.upstream.trim() : UPSTREAM
+  // Claude Code's plugins: the marketplace clone (the README's install) and the cache
+  const cc = (await $.env.get('CLAUDE_CONFIG_DIR').catch(() => '')) || `${home}/.claude`
+  const cache = await $.env.get('CLAUDE_CODE_PLUGIN_CACHE_DIR').catch(() => '')
+  const plugins = [`${absolutePath(cc, home, cwd)}/plugins`, ...(cache ? [absolutePath(cache, home, cwd)] : [])]
+  const dirs = [source, `${mem.root}/upstream`, ...plugins.flatMap(p => [`${p}/marketplaces/workbench`, `${p}/cache/workbench`])]
+  return { home, cwd, slug, dirs, plugins }
+}
+
+// The dialog, or its refusal: '' lets the call through on exactly 'Send it'
+async function askToSend($: any, question: string): Promise<string> {
+  // the dialog would wait at an empty terminal
+  if (await away($, await read($, chat))) return NOT_SENT_AWAY
+  const said = await $.ui.ask(question, [SEND_ASK, "Don't send"]).catch(() => '')
+  return said === SEND_ASK ? '' : NOT_SENT
+}
+
+const realPath = async ($: any, p: string): Promise<string> =>
+  (await $.fs.stat(p, { resolve: true }).catch(() => undefined))?.realPath ?? p
+
+// The deny for a Bash or Monitor command that would send to upstream without the user's yes now, else ''
+async function upstreamRefusal($: any, command: string): Promise<string> {
+  if (!/\b(?:gh|git|wb|workbench)\b/i.test(command)) return '' // most calls: no parse
+  const g = await gateConf($)
+  let aim = upstreamAim(command, g.cwd, g.home, g.slug, g.dirs, mem.root, g.plugins)
+  if (!aim.why && aim.outAt.length) { // a symlinked spelling of a gated directory: by real path
+    const dirs = await Promise.all(g.dirs.map(d => realPath($, d)))
+    for (const p of aim.outAt) {
+      const real = await realPath($, p)
+      if (real !== p && dirs.some(d => inside(real, d))) { aim = { ...aim, why: 'dir', at: p }; break }
+    }
+  }
+  if (!aim.why) return ''
+  if (aim.why === 'plugin' && !aim.named && !originIs(await originOf($, aim.at), g.slug)) return ''
+  if (aim.why === 'slug' && await developerClone($, aim.at, g.slug, [...g.dirs, ...g.plugins])) return ''
+  const q = await sendQuestion($, command, g.slug, aim, g.home)
+  if ('deny' in q) return q.deny
+  const no = await askToSend($, q.question)
+  if (no || !q.approval) return no
+  // wb patch send checks this under Claude Code: without it nothing asked the user (patches._approved)
+  await $.fs.write(`${mem.root}/send-ok.json`, JSON.stringify({ ...q.approval, at: (await $.clock.now()) / 1000 })).catch(() => {})
+  return ''
+}
+
+// The GitHub MCP tools (the github plugin): a call that isn't a read and names the upstream, or a
+// repository of its name (a fork's), asks the same; Bash was the only gate, and patching.md
+// offers that plugin (the review of #1005)
+const GITHUB_MCP = /^mcp__.*github.*__(.+)$/i
+export function mcpAimsUpstream(tool: string, input: Row, slug: string): boolean {
+  const m = GITHUB_MCP.exec(tool)
+  if (!m || /^(?:get|list|search)_/i.test(m[1]!)) return false
+  const s = slug.toLowerCase()
+  const name = s.split('/')[1] ?? s
+  const repo = String(input.repo ?? input.repository ?? '').toLowerCase()
+  return repo === s || repo === name || repo.endsWith(`/${name}`) || JSON.stringify(input).toLowerCase().includes(s)
+}
+
+async function mcpRefusal($: any, tool: string, input: Row): Promise<string> {
+  const g = await gateConf($)
+  if (!mcpAimsUpstream(tool, input, g.slug)) return ''
+  if (await developerClone($, g.cwd, g.slug, [...g.dirs, ...g.plugins])) return ''
+  const text = JSON.stringify(input, null, 1)
+  const shown = text.length > MCP_CHARS ? `${text.slice(0, MCP_CHARS)}… (${text.length - MCP_CHARS} more characters not shown)` : text
+  return askToSend($, `Claude wants to send this to GitHub (${g.slug}), publicly: ${tool} ${shown} — Send it?`)
+}
+
+// Any tool call: Bash's and Monitor's command (Monitor runs its script in the same shell), a GitHub MCP tool's input
+async function sendRefusal($: any, e: Row): Promise<string> {
+  const tool = String(e.tool ?? '')
+  if (tool === 'Bash' || tool === 'Monitor') return typeof e.command === 'string' ? upstreamRefusal($, e.command) : ''
+  if (!GITHUB_MCP.test(tool)) return ''
+  const { tool: _t, agentId: _a, ...input } = e
+  return mcpRefusal($, tool, input)
 }
 
 const SPARKS = '▁▂▃▄▅▆▇█'
@@ -3042,6 +3412,11 @@ export const register: Register = (on, options) => {
       const why = await codingRefusal($, path)
       if (why) return { deny: why }
     }
+    // Nothing goes to workbench upstream without the user's yes to that very command (#1005,
+    // sendRefusal): Claude's, a subagent's or another plugin's call alike; Bash, Monitor and the
+    // GitHub MCP tools
+    const sending = await sendRefusal($, e as Row)
+    if (sending) return { deny: sending }
     if (next.origin.plugin !== 'engine') return next(e)
     // The engine's call settles its permission check, a dialog included, before it resolves: one
     // whose dialog came up at the terminal is over once it does, answered there (#959): the oldest

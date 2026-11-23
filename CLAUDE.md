@@ -53,6 +53,12 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   Neither imports the rest of the package: the lane runs as a file, the shim on every git call.
 - `gitops.py`: worktrees, the review diff, commits (no hooks); a call on a task's worktree is
   pinned to its git dir (`gitdir.json`).
+- `patches.py`: `wb patch`, the user's own fixes to workbench (ARCHITECTURE.md, *Local patches*):
+  commits on branch `local` of a clone they own, rebased by `wb update` in a scratch worktree,
+  never the live tree; a marketplace clone's changes saved before Claude Code's re-clone wipes
+  them; `wb patch send`, the one fork, push and pull request (through `gh`, never a token
+  printed; under Claude Code only on the mod's dialog's yes). Its git calls run without hooks or a terminal, and it imports everything up front:
+  `wb patch init` deletes the copy wb runs from.
 - `results.py`: results.jsonl rows; read them through `store.results()`, which leaves out trials.
 - `router.py`: the model per size, slices, budgets. `tuning.py`: learned knobs (a new one goes in
   `KNOBS`, read with `tuning.value`). `models.py`: discovery, residency, `GpuLease`.
@@ -66,9 +72,9 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   inotify and pidfd waits. `chat.py` + `chat_static/`, `webpush.py`: the web chat. `try/`:
   `wb try`'s sample.
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time).
-- `skill/workbench/`: the `/workbench` procedure. `mod/`: the plugin (`hooks/register.tsx`;
-  `plugin.json` has no version, so installs track main). `bin/`: the launchers. `tests/`:
-  ARCHITECTURE.md's *The tests*. `.github/`, `scripts/`: CI and `ship.sh` (*Shipping to main*).
+- `skill/workbench/`: the `/workbench` procedure. `mod/`: the plugin (`hooks/register.tsx`, with
+  the consent gate on sends to upstream; `plugin.json` has no version, so installs track main).
+  `bin/`: the launchers. `tests/`: ARCHITECTURE.md's *The tests*. `.github/`, `scripts/`: CI and `ship.sh` (*Shipping to main*).
   `systemd/`, `launchd/`: keep the chat up. `docs/`: images (a replaced one gets a new name, for
   GitHub's cache), the release checklist and notes.
 
@@ -105,7 +111,9 @@ Plain files under `$WB_HOME` (`~/.local/state/workbench`); config in `~/.config/
 skill library in `$WB_SKILLS` (`~/.local/share/workbench/skills`, its own git repo). Every file,
 key and format: ARCHITECTURE.md, *Files and formats*. Inside `$WB_HOME` the agent's lane
 writes only `tasks/<task>/worktree/` and `ask/` (the rest of its lane: *What the agent knows*); `rules/<task>/` and `locks/` (`store.task_lock`) stay outside
-it (an agent once held the runner's lock: the 0.90 review).
+it (an agent once held the runner's lock: the 0.90 review). `wb patch` keeps `patches.json` (the
+clone install and its upstream, which the mod reads), `send-ok.json` (the mod's yes to one send),
+`rescued/`, `upstream/` and `patches/` there.
 
 OpenCode's config is written only through `models.own_config`: one unlayered file without
 comments, and a refusal names the change, never the config (it can hold an `apiKey`). Requests to
@@ -115,10 +123,12 @@ ARCHITECTURE.md, *Models: found, loaded, chosen*.
 
 Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`,
 `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR`,
-`WB_OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR` (relative or `~` allowed: a new one joins
+`WB_OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`, `WB_SOURCE` (`wb patch init`'s clone, else
+`~/.local/share/workbench/source`) (relative or `~` allowed: a new one joins
 `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; the agent's `WB_TASK`, `WB_RUN`,
 `WB_USER_PYTHONPATH`; `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
-`CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is). Tests only: `WB_OPENCODE_BIN`,
+`CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), `CLAUDECODE` (under it `wb patch send`
+sends only what the mod's dialog approved: `send-ok.json`). Tests only: `WB_OPENCODE_BIN`,
 `WB_FAKE_MODELS`, `WB_FAKE_GPU_GB`, `WB_TEST_SHARD`, `WB_TEST_HANG_SECS`.
 
 ## Conventions

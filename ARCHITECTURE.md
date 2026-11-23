@@ -3562,7 +3562,53 @@ audio and image engines too, each licence checked and its `notes` kept true, #39
 **The weekly update check**: once a load, after the first main-loop turn once wb runs, beside the
 poll (a stalled fetch held every wake): `wb update --check --if-due` (origin fetched at most every `UPDATE_EVERY`, a
 week; in between counted locally, else `update.json`'s `behind`); `update available` becomes a toast naming `/workbench-update`, once a
-session until installed.
+session until installed, and so does `local changes in the marketplace clone` (`LOCAL_CHANGES`, `patches.CHECK_LINE`),
+which comes alone when nothing is new upstream (only `update available` was toasted, so the warning reached nobody,
+#1005).
+
+**The consent gate** (`sendRefusal`, in the `tool.call` hook every call passes, #1005). Nothing goes to workbench
+upstream without the user's yes to that very call, in a dialog: Claude's, a subagent's or another plugin's alike, from
+Bash, Monitor (its `command` runs in the same shell) or a GitHub MCP tool. A rule in the skill is advice Claude may
+misread; this is the one place every call passes. Outward (`sendsOut`):
+`gh pr create|comment|edit|merge|review|close|reopen|ready|update-branch|lock|unlock`,
+`gh issue create|comment|edit|close|reopen|delete|lock|unlock|transfer|pin|unpin|develop`,
+`gh repo fork|edit|delete|rename|archive|unarchive|sync`, `gh workflow run|enable|disable`, `gh run rerun|cancel|delete`,
+`gh release create|edit|delete|upload|delete-asset`, `gh label create|edit|delete|clone` (`GH_WRITES`, past
+`-R`/`--repo`), `gh api` with a method other than GET or HEAD, or with fields (`apiWrites`), `git push` (past git's own
+options, `GIT_VALUED`), and `wb patch send` (`wb` or a path to it, or Python running `…/wb` or `-m workbench`:
+`wbArgs`); command words lowercased (macOS finds `GIT` as git). Read as bash reads it (`simpleCommands`, `commandAt` as
+in `delegates`, past `sudo`, `doas`, `xargs` and the other `PREFIXES`): echo and heredoc text isn't a command, `$(…)`
+and backticks are, and `bash|sh|zsh|dash -c '…'` and `eval` are read inside; a line naming none of `gh`, `git`, `wb`,
+`workbench` isn't parsed. Text a shell or an interpreter in the line runs (`RUNS_CODE`: from a heredoc, a here-string,
+a pipe, `-c`) is matched by its words (`OUTWARD_TEXT`; `bash <<EOF … git push` once went through). Aimed at upstream
+(`upstreamAim`): `wb patch send` always; another outward command when the line names a gated directory (as written,
+through `~`, `$HOME` or `$WB_HOME`: `mentions`) or runs in one (`cd`, `cd --` and `pushd` followed from the session's
+directory, git's `-C`; by real path too, a symlinked spelling), or runs in Claude Code's plugins directory in a
+checkout whose origin is upstream (a marketplace renamed), or when the line anywhere names the upstream's owner/repo
+(`export GH_REPO=<slug> && gh issue create` named it outside the outward command), unless that runs in a developer's own
+clone of upstream (`developerClone`: `git -C <dir> remote get-url origin`, 5 s, `originIs`; never a gated directory or
+inside the plugins directory), which is no user's Claude. The gated directories (`gateConf`): the patch clone,
+`patches.json`'s `source`, else `WB_SOURCE`, else `~/.local/share/workbench/source`; `$WB_HOME/upstream/`; and Claude
+Code's own `<CLAUDE_CONFIG_DIR or ~/.claude>/plugins/` (and `CLAUDE_CODE_PLUGIN_CACHE_DIR`) `marketplaces/workbench` and
+`cache/workbench`: the marketplace install's clone has upstream as its origin, and was once exempted as a developer's
+(the review of #1005). The upstream: `patches.json`'s `upstream`, else `UPSTREAM` (`a-schaefers/claudes-workbench`).
+A GitHub MCP tool (`GITHUB_MCP`, `mcp__…github…__<name>`) not named `get_`/`list_`/`search_` whose input names the
+upstream, or a repository of its name (a fork), asks the same (`mcpAimsUpstream`), its input shown up to `MCP_CHARS`
+4000. With the user away on the web chat (`away`) it denies at once, as the dialog would wait at an empty terminal
+(`NOT_SENT_AWAY`: `workbench: not sent: the user is away: it waits until they are at the terminal. …`). Else `$.ui.ask`
+(`askToSend`): `Claude wants to send this to GitHub (<slug>), publicly: <the command>`, the whole line up to
+`SHOW_CHARS` 600, a longer one as the outward command in full, then the line's start (`shownCommand`: cut from the
+start, a long line hid the gh command and its body); for `wb patch send` its `--title` and the body file's first
+`BODY_LINES` 20 lines (`sendQuestion`, `sendArgs`: the last `--title`/`--body-file` given, as argparse takes them; wb
+refuses abbreviations). A send it can't show is refused without asking (`NOT_SHOWN`: no slug, `--title` or
+`--body-file`, a `$` or backtick in either, an unreadable body, or a send inside text another program runs). The
+options `Send it` and `Don't send`. `Send it` lets that one call through, and for `wb patch send` writes
+`$WB_HOME/send-ok.json` (what wb checks under Claude Code: *Sending a patch upstream*); nothing is remembered (a yes to
+one pull request is no yes to the next). Anything else, a failed dialog too, denies: `NOT_SENT`, `workbench: not
+sent: the user did not approve it in the dialog. Tell them it was not sent; try again only if they ask for it.` (it
+once said to show them and ask, and Claude opened a dialog of its own pleading for the yes just refused). A live check
+of the gate runs the real gh form with a fake gh on PATH: an `echo` of it is text, never asked about. No `$.state`
+atom.
 
 **Tests** (`register.test.tsx`: an in-memory filesystem, a fake `wb events`). Not covered: check-in
 wakes, the one-hour cutoff, scrolling, `WB_COMPACT_AT`.
@@ -3620,7 +3666,10 @@ on stderr. Exit codes: 1 an error; 2 a usage error, or `wait` on a closed task, 
 or at a timeout; 3 no model can run (`start`); 4 the GPU held by a task the new one can't run
 beside (`start` without `--queue`); 5 an accept whose merge failed; `scout --due` 0 when due, 1 when not;
 `doctor` 0/1. Errors wb raises (`RuntimeError`, a config that doesn't parse, an unreadable file:
-`wb: <path>: No such file or directory`) print as a message, never a traceback. cli writes
+`wb: <path>: No such file or directory`) print as a message, never a traceback. Any other exception is a bug:
+its traceback, then `wb crashed: a bug in workbench. Claude can fix it for you as a local patch (wb patch) and offer it
+upstream (<root>/CONTRIBUTING.md)`, exit 1 (*Local patches*); in-process (`main(argv)`, the tests) it propagates, as
+a crash caught as `SystemExit` passed ~160 refusal tests (#1005). `KeyboardInterrupt` and `SystemExit` pass through. cli writes
 notify.jsonl only in `reap` (`_restart_notice`) and `wb update --stop` (`_stop_for_update`); the
 runner writes the rest (#882). `wb --version`: `workbench.__version__`.
 
@@ -3711,8 +3760,13 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb try` | `--model <id or fragment>` | A sample trial (#112): `workbench/try/project/` copied to `~/.local/share/workbench/try/<n>` (not the state dir, hidden from the lane, #164), started as `try-<n>` on `workbench/try/spec.md`, `--size trivial --trial`, its test `sys.executable` (#530); Claude's hidden check `workbench/try/check.py <worktree>`; a refusal removes the copy (#161). |
 | `wb init <dir>` | | git, a first commit, AGENTS.md → CLAUDE.md (#931; nothing while `gitops.under_way`). Refuses home or above, inside another repo (but a home repo nests, #684), a repo git refuses (`gitops.NotARepo`), no git identity, likely secrets or uncovered installed directories. |
 | `wb setup` | `--force` (a link pointing elsewhere; never a file) | Links `~/.local/bin/wb` and `skills/workbench`, removes a dead `skills/delegate` link (the mod runs `wb setup` when it finds only that), exit 1 when something is in the way, PATH advice (`cli.path_advice`), the optimize when due, then `first run:` (`cli.first_run`); names no model (*Installing*). |
-| `wb update` | `--check` (`update available: …` or `up to date`, the mod toasts the first; also `cli._mod_behind`), `--if-due` (only with `--check`, #602: `UPDATE_EVERY`, `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`), `--stop` (`_stop_for_update`: `last` `UPDATE_STOP`, one `stuck` notice per `store.owner`, #694) | *Installing*: a clone `git pull --ff-only` (uncommitted tracked changes refused), then `claude plugin marketplace update workbench` and `claude plugin update workbench@workbench`, each step at most 300 s. Refuses while a runner lives (`_whose`); every refusing check runs before `--stop` stops anything (#775). The fetch (`_fetch_origin`, the upstream's remote `branch.<name>.remote`, #875) never prompts: `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, `FETCH_SECS` 60, the user's `GIT_SSH_COMMAND`/`GIT_SSH`/`core.sshCommand` kept, else `BatchMode`. |
-| `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models, `limit.context`, `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`lane.gaps`, `context.interop_gap`, `context.home_gap`, `context.listening_daemons`), commands.json, `context.TOOLCHAINS`, `wb` on PATH, `cli.logout_stops`, `cli.awake_line`, `webpush.has_cas`, the mod (`cli._mod_behind`), each experiment. |
+| `wb update` | `--check` (`update available: …` or `up to date`; on a marketplace clone with local changes also `patches.CHECK_LINE`, `local changes in the marketplace clone: wb update would refuse (Claude Code re-clones it); wb patch init keeps them`, alone when nothing is new; the mod toasts both; also `cli._mod_behind`), `--if-due` (only with `--check`, #602: `UPDATE_EVERY`, `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`), `--stop` (`_stop_for_update`: `last` `UPDATE_STOP`, one `stuck` notice per `store.owner`, #694) | *Installing*, *Local patches*. A marketplace install first looks for local changes in its clone (`patches.marketplace_refusal`) and, with any, saves them under `rescued/` and refuses before anything else: Claude Code's update re-clones it and would wipe them (#1005). A clone: `git pull --ff-only` (uncommitted tracked changes refused); on branch `local` diverged and behind, its patches rebased in a scratch worktree (`patches.rebase_patches`, `check_move`) before any task is stopped and the branch moved after (`move_branch`), the report `updated clone a..b (N commit(s))` (N: upstream's news only), then `landed upstream, dropped from local: <subject>` per patch upstream has, then `N local patch(es) on top of upstream (local)`; any other branch diverged is refused; on `local` (not `--check`) it writes `patches.json`. At the end, on any clone, each `pr/<slug>` of `wb patch upstream`'s (`patches.held`: its worktree under `upstream/`, or its body file there) that landed upstream (`_landed_pr`) goes, worktree, branch and body: `landed upstream, removed pr/<slug>, its worktree and its body file` (`retire_landed`; a worktree with changes of its own is kept, and said). Then `claude plugin marketplace update workbench` and `claude plugin update workbench@workbench`, each step at most 300 s. Refuses while a runner lives (`cli._running`, `_whose`); every refusing check, a patch's conflict too, runs before `--stop` stops anything (#775). The fetch (`_fetch_origin`, the upstream's remote `branch.<name>.remote`, #875) never prompts: `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, `FETCH_SECS` 60, the user's `GIT_SSH_COMMAND`/`GIT_SSH`/`core.sshCommand` kept, else `BatchMode`. |
+| `wb patch init` | `--dir DIR` (else `WB_SOURCE`, else `~/.local/share/workbench/source`: `patches.source_dir`) | *Local patches*. On a clone install a note (`patches.clone_note`), exit 0. Refuses, changing nothing: `claude` not on PATH, a running task (`cli._running`), DIR inside Claude Code's marketplaces directory, a non-empty DIR that isn't a clone of the same origin (or, without `local`, has uncommitted changes), carried changes with no git identity. Saves the marketplace clone's changes (`rescued/`), clones (or fetches into the reused DIR), makes `local` at the marketplace clone's merge-base with its upstream (the code doesn't change; `origin/<branch>` when the clone lacks it), tracking `origin/<that clone's branch>`, then `git am --3way` the commits and `git apply --index` the uncommitted diff, committed as `CARRIED` (`Local changes carried over from the marketplace clone`). A failure removes a DIR it cloned, puts a reused one back on its branch without `local`, and leaves the install as it was. A DIR with `local` already is kept and nothing carried (a rerun goes on from there). Then, from DIR: `claude plugin marketplace add DIR`, `DIR/bin/wb setup --force`, `claude plugin update workbench@workbench`, each failure saying what is done and how to finish; writes `patches.json`; `workbench runs from DIR now, branch local tracking origin/<b>; N patch(es) carried over …`, stashes and other branches named as kept only in `rescued/`, and `/reload-plugins`. |
+| `wb patch list` | | A clone: `<root>: branch B, tracking U` (warned off `local`), one row per patch oldest first `<short>  <subject>  [<Scope> \| no Scope trailer]`, `uncommitted: …`, `upstream branch pr/<slug>  <worktree \| (no worktree)>`. A marketplace install: why it can't keep patches, its local changes, `wb patch init`. |
+| `wb patch drop <commit>` | | A clone on `local`, tracked files clean, the commit one of `@{u}..HEAD`: `rebase --onto <c>^ <c>` in a scratch worktree (a later patch that no longer applies: `without <c>, the later patch <x> doesn't apply: nothing changed`), `check_move`, `move_branch`; `wb update refreshes the mod`. |
+| `wb patch upstream <commit> --name <slug>` | | A clone; the slug `[a-z0-9][a-z0-9-]*` (`patches.SLUG`); an existing `pr/<slug>` or worktree refused. Fetches the upstream's remote, `worktree add -b pr/<slug> $WB_HOME/upstream/<slug> <local@{u}>`, cherry-picks the commit (a conflict stays there for `git cherry-pick --continue`); a `Scope: me` commit is flagged. Writes `patches.json`. Prints, under `next (none of this has run):`, the tests (and the plugin's two when `mod/` changed), the body file to fill (`upstream/<slug>.md`, a copy of `.github/pull_request_template.md` when it exists), the one `wb patch send <slug> --title "<the commit's subject>" --body-file <it>`, `patches.gh_line`, and that send needs the user's yes; off GitHub, that send works only there. |
+| `wb patch send <slug> --title T --body-file F` | `--draft`, `--anyway` (sends a `Scope: me` commit) | *Sending a patch upstream*. Refuses before any network (`patches._refuse_send`): no `pr/<slug>` in its worktree, a cherry-pick under way, uncommitted changes there, no commits over the target, an empty body or the template unchanged, a `Scope: me` commit without `--anyway`; then a remote off GitHub, gh not `ready` (`gh_line`), a `.github/workflows/` change over https without the token's `workflow` scope. Under Claude Code (`CLAUDECODE=1`) it then refuses unless the mod's dialog approved exactly this send (`patches._approved`, `send-ok.json`), saying the user may run it in a terminal of their own. Then `gh repo fork` (not when the login owns upstream) and which repository the fork is (`_fork_of`), the push to it in gh's protocol, `gh pr create`; prints `pushed …` and `opened <url>` (`opened <url> (already open)` when a pull request for the branch is open already). A failed step says what is done already (a rerun goes on from there). No abbreviated flags (`allow_abbrev=False`: the dialog reads `--title` and `--body-file` as written). The mod asks the user first (*The consent gate*). |
+| `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models, `limit.context`, `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`lane.gaps`, `context.interop_gap`, `context.home_gap`, `context.listening_daemons`), commands.json, `context.TOOLCHAINS`, `wb` on PATH, `cli.logout_stops`, `cli.awake_line`, `webpush.has_cas`, the mod (`cli._mod_behind`), then `patches.doctor_lines`: `ok  install: marketplace at P`, `your own clone at P, branch B (wb patch init)` (on `local`, or patches.json's `source`) or `developer clone at P, branch B`; `--  local patches: N (scopes)` (a clone on `local`; a marketplace clone: its local changes and `wb patch init`); `gh: ready as L over P` (`ok`) or `--  gh: <state>: <hint>`, asked only with patches or a `wb patch upstream` branch that hasn't landed upstream (`held`, `_landed_pr`, by the local refs alone); none sets the exit code. Then each experiment. |
 
 ## Files and formats
 
@@ -3740,6 +3794,12 @@ $WB_HOME (~/.local/state/workbench)
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
   scout.json  watch.json         the weekly model check; the watch list
   update.json                    wb update's last check
+  patches.json                   {source (the clone install), upstream (owner/repo on GitHub, else null)}: patches.note_install, by wb patch init, upstream, send and wb update (not --check) on `local`; the mod's consent gate reads it
+  send-ok.json                   {slug, title, body_file (absolute), body (its text), draft, anyway, at}: the mod's "Send it" to one wb patch send; patches._approved consumes it (renamed away, then read), fresh for SEND_OK_SECS 120
+  rescued/<UTC %Y%m%d-%H%M%S>[-n]/   a marketplace clone's local changes, saved before a refusal or wb patch init: 0001-*.patch per commit, uncommitted.diff
+                                 (a scratch index's diff --binary against HEAD, untracked files in), stash-<n>.diff, branch-<name>/*.patch, base (the commit they apply to)
+  upstream/<slug>/  <slug>.md    wb patch upstream's worktree on branch pr/<slug>; its pull request's body (the template copied), outside the worktree so it isn't a change send refuses
+  patches/tree-*/                scratch worktrees the patch rebases run in (patches.scratch), removed after each, on a failure too
   boxes.json                     {root: {name: ts}}: what this machine loaded on each wb remote box (models.box_mine; not another client's unless seen in use)
   wsl-gpus.json                  WSL: {ts, gpus: [{name, vram}], tried?}, re-read hourly (hardware.WINDOWS_FOR); a failed read keeps the last, stamps tried (WINDOWS_RETRY)
   bench/cases/<case>/            case.json  spec.md  base.bundle  hidden/<path>…  reference.patch
@@ -3792,6 +3852,7 @@ $WB_HOME (~/.local/state/workbench)
     worktree/                    the agent's git worktree, branch delegate/<task>
 ~/.local/share/workbench/skills/ ($WB_SKILLS) the skill library, its own git repo; retired/
 ~/.local/share/workbench/try/<n>/ wb try's sample projects (task try-<n>; beside $WB_SKILLS)
+~/.local/share/workbench/source/ ($WB_SOURCE) wb patch init's clone: branch local, the patches; refs/workbench/before-update, the tip before wb moved it (its reflog: every earlier one)
 ~/.config/workbench/             writes to models.json, commands.json, savings.json, OpenCode's config (models.own_config): store.edit_config
   models.json ($WB_MODELS)       what OpenCode can't say about each model or provider
   images.json ($WB_IMAGES)  audio.json ($WB_AUDIO)   image engines; audio engines (speech, sfx, music, a listener)
@@ -3816,7 +3877,7 @@ entry); by real path, else git dir and the path inside the worktree; wb accept r
 
 **Store primitives** (`workbench/store.py`). `home()` is `$WB_HOME`, else `~/.local/state/workbench`. `PATH_VARS`
 (`WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
-`WB_OPENCODE_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR`, and the user's `OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`,
+`WB_OPENCODE_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR`, `WB_SOURCE`, and the user's `OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`,
 `OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`) take `~` and relative paths: `absolute_env()`, first in
 `cli.main` and the runner, makes them absolute against wb's cwd (not resolved), so every child sees one place (a
 relative one had wb and the runner, which runs from the package dir, disagree: the 2026-11-16 audit, #328, #650); the
@@ -3992,7 +4053,11 @@ then `/workbench`; `wb setup` ends with the `first run:` checklist. The plugin i
 cache; `marketplace add` keeps a full clone (`installLocation` in `known_marketplaces.json`, or under
 `CLAUDE_CODE_PLUGIN_CACHE_DIR`), from which `wb setup` links `wb` and the skill. `wb update` (`/workbench-update` also
 reloads plugins) runs `claude plugin marketplace update workbench` and `claude plugin update workbench@workbench`; the
-mod runs `wb update --check --if-due` once a session. `mod/.claude-plugin/plugin.json` has no `version`, on purpose:
+mod runs `wb update --check --if-due` once a session. Claude Code's marketplace update never pulls that clone: whenever
+its HEAD differs from the source's head it deletes it and clones again, one commit deep, so a commit, an edit, a stash
+or a branch there is gone with no backup, even with nothing new upstream (Claude Code 2.1.323, 2026-11-22). So `wb
+update` refuses over local changes there, saving them first, and a user who patches workbench moves to a clone of
+their own (*Local patches*). `mod/.claude-plugin/plugin.json` has no `version`, on purpose:
 Claude Code versions it by commit, so every merge to main is an update; a `version` froze installs until bumped
 (2026-11-18), which doesn't scale to contributors. `claude plugin validate`'s warning about it is expected. Main is the
 marketplace.
@@ -4007,6 +4072,88 @@ claude plugin marketplace add "$PWD" && claude plugin install workbench@workbenc
 ```
 (`bin/wb setup` makes the same links; `wb setup --force` repoints them from the copy you want.) `wb update` pulls
 `--ff-only`, refuses while tasks run, then runs the two `claude plugin` steps (a path marketplace is copied too).
+Claude Code never resets a directory marketplace, so a clone keeps its commits; on branch `local` they are patches.
+
+**Patched** (`wb patch init`): a user's own clone, by default `~/.local/share/workbench/source` (`WB_SOURCE`), added as a
+directory marketplace in place of the git one, `wb` and the skill relinked to it; it updates like a developer's
+clone, its patches rebased (*Local patches*). `wb doctor`'s `install:` line says which of the three this copy is.
+
+### Local patches
+
+`workbench/patches.py`, `wb patch` (#1005): a user's own fixes to workbench, kept across updates and offered upstream.
+Every git call in it runs with `gitops.PLAIN` and `NO_HOOKS` (a hook of the user's once ran from wb's own calls,
+2026-11-21), stdin closed, its own session; a fetch or clone never prompts (`_net_env`, `_fetch_origin`'s rule,
+`NET_SECS` 600). It imports everything at the top: `wb patch init`'s `marketplace add` deletes the copy wb runs from.
+
+- **The marketplace clone keeps nothing.** `local_changes` finds HEAD's commits over `@{u}` (with no upstream, what no
+  remote has), uncommitted changes (`--untracked-files=all`, never ignored files), stashes, and other local branches'
+  commits no remote has (Claude Code's re-clone drops those too). `rescue` saves them under `rescued/<UTC time>/`
+  (`DIFF_PLAIN`: the user's diff settings off, so another git applies them; uncommitted.diff from a copy of the index,
+  so the user's is never touched). `wb update` then refuses: `the marketplace clone <root> has N local commit(s)…:
+  Claude Code's update re-clones it and would wipe them, so nothing was updated. Saved in <dir>; wb patch init …` (it
+  once said `updated marketplace <patched>..<upstream>`, exit 0, having wiped the patch). `--check` says it as
+  `CHECK_LINE`, which the mod toasts.
+- **`wb patch init`** moves the install to a full clone the user owns: every refusal first, then the rescue, the clone,
+  branch `local` (`PATCH_BRANCH`) at the marketplace clone's base, the changes applied as the first patches, and the
+  switch (`marketplace add`, `wb setup --force`, `plugin update`), each later failure saying what is done and how to
+  finish (*Every `wb` command*). Stashes and other branches aren't applied: `rescued/` keeps them, and it says so.
+- **A patch is a commit on `local`**, tracking upstream, with a `Scope: me|everybody` trailer that `wb patch list`
+  reads (`%(trailers:key=Scope)`) and `upstream` and `send` check. `wb update` on `local`, diverged and behind:
+  `rebase_patches` rebases `@{u}..HEAD` onto the fetched upstream in a detached worktree under `patches/`
+  (`scratch`; `REBASE_PLAIN`: no `updateRefs`, `autoSquash` or `autoStash`), never the live tree (mid-conflict there,
+  every wb call from the clone died with a SyntaxError). A conflict refuses, nothing changed, naming the patch: `the
+  local patch <sha> <subject> no longer applies on upstream's <up>: nothing changed. Either rework it by hand (…) or drop
+  it (wb patch drop <sha>), then wb update`. `check_move` (a dry `read-tree -m -u -n`, the merge `reset --keep` does)
+  refuses an untracked file the rebased tip would overwrite (a failed `reset --keep` once came after the stop and said
+  "the pull is done"). Both run before any task is stopped. After it, `move_branch` refuses a HEAD that moved meanwhile,
+  runs `reset --keep`, then keeps the old tip at `refs/workbench/before-update` (`BEFORE`, its own reflog listing every
+  earlier tip). A patch upstream already has drops out of the rebase; `landed` finds it by author, date and subject.
+  Any other branch keeps the diverged refusal. `wb patch drop` is the same rebase, `--onto <c>^ <c>`.
+- **A crash** (*Every `wb` command*) points at `wb patch` and `CONTRIBUTING.md`: Claude fixes it locally, then offers it.
+
+### Sending a patch upstream
+
+`wb patch upstream <commit> --name <slug>` cuts `pr/<slug>` from fresh upstream in `upstream/<slug>/` with only that
+commit, copies the pull request template to `upstream/<slug>.md`, and prints the one `wb patch send`; it pushes
+nothing. `wb patch send` is the only command in wb that forks, pushes or opens anything, through gh (GitHub's CLI); in
+Claude Code the mod asks the user first (*The consent gate*) and wb itself refuses a send the mod's dialog didn't
+approve; outside it the user typing it is the yes. CONTRIBUTING.md is the contributor's side; the skill's
+`reference/patching.md`, Claude's.
+
+- **gh's state** (`gh_state`): `gh auth status --hostname github.com --json hosts` (`GH_SECS` 20; never plain `gh auth
+  status`, which prints a masked token, nor `--show-token` or `gh auth token`): `missing` (`install_hint`: one line for
+  this OS from `OS_RELEASE`, labelled official or community as GitHub's docs label it, `GH_DOCS`, `GH_RELEASES`; never
+  snap; the distro's own apt `gh` warned off; `the user runs: ! ` before a sudo or pamac (polkit) line, `the user
+  runs, as root:` before apk's, as Claude's Bash can't answer a password; brew offered with no sudo), `logged-out`
+  (also a 401: `! gh auth login --hostname github.com --git-protocol <p>`, `_guess_protocol`: an insteadOf rule by its
+  target, the `url.<base>` key (`GH_SSH`, `GH_HTTPS`: one rewriting `git@github.com:` to https forces https, and was once
+  read as ssh by its value), else ssh with a key, else the remote's URL; https adds `! gh auth setup-git`, an edit to
+  the user's global git config), `error` (unreachable, `NET_ERR`; a gh too old for `--json`), `ready` (login, git protocol, scopes, token
+  source; a `GH_TOKEN`/`GITHUB_TOKEN` overriding the stored login is said). `gh_line` prints it. Claude never handles a
+  token: the login is the user's own `! gh auth login`.
+- **The send**: `_refuse_send`'s checks, then gh `ready`, then, under Claude Code (`CLAUDECODE=1`, which its Bash
+  sets), the mod's approval (`_approved`): `send-ok.json`, written by the dialog's `Send it`, renamed away so one send
+  consumes it, matching or not, and taken only when fresh (`SEND_OK_SECS` 120) with this slug, title, absolute body
+  path, body text and flags. Without the mod (not installed, disabled, its hooks failing to load) nothing asked the
+  user, and Claude's Bash sent anyway; it refuses, naming the command for the user's own terminal. Then `gh repo fork
+  <owner/repo> --clone=false --remote=false` (`--remote` renames origin; skipped when the login owns upstream) and the
+  fork's real name (`_fork_of`: gh's `<owner/name> already exists`, else `gh api repos/<login>/<name>` whose `parent` is
+  upstream, else the newest of `gh api repos/<owner/repo>/forks` owned by the login; an unrelated repository of that
+  name is never pushed into, and a 404 is a fork not there yet), `git push` of `pr/<slug>` to the fork's URL in gh's
+  protocol (a new fork appears asynchronously: a push finding no repository is retried after `PUSH_WAITS` 2, 4, 8, 16
+  s; any other failure, and a push with no answer in `NET_SECS`, fails the step at once), `gh pr create -R <owner/repo>
+  --base <target> --head <the fork's owner>:pr/<slug> --title … --body-file … [--draft]`; a pull request for the branch
+  open already (an earlier send's answer lost) is `opened <url> (already open)`, exit 0. The
+  target is `_tracked`: the branch `local` tracks, else HEAD's, else origin's default. gh runs with no terminal,
+  `GH_PROMPT_DISABLED`, `GH_NO_UPDATE_NOTIFIER` (`_gh`); every message from gh or git passes `scrub` (`TOKEN`:
+  `gh[oprsu]_…`, `github_pat_…`), as a pushed URL or an error may carry one, and a remote's URL printed loses its
+  `user:password@` first (`_shown_url`: a GitLab token was printed whole).
+- **After the merge**: `wb update` drops the local patch (`landed`) and removes the `pr/<slug>` branch, its worktree
+  and its body file (`retire_landed`; `_landed_pr`: every commit since the cut, the branch's first reflog entry, is
+  upstream's, merged as is, by patch id, or by author, date and subject; nothing committed yet is never landed).
+- **`patches.json`** (`note_install`): the clone install and its upstream's owner/repo (`_owner_repo` of the tracked
+  remote's URL; null off GitHub), for the mod's gate.
+- The GitHub plugin for Claude Code is not needed for any of it; its tools that write to upstream pass the same gate.
 
 ## The tests
 
@@ -4210,8 +4357,20 @@ doc needs its own `!/` line).
   protocol's lane line, the handbook. What it leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`), what WSL's interop
   runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes* and *Reads*, `wb doctor`. A secret in a `TOOL_HOMES` entry → `SPLIT_MADE`; one a
   tool opens at every start (helm, k6) → its path in `agent_env`.
-- **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → register.tsx's `poll` (toasts only
-  `update available`) and `UPDATE` (reloads only after `updated`).
+- **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → register.tsx's `checkUpdate`
+  (toasts only `update available` and `LOCAL_CHANGES`, the opening of `patches.CHECK_LINE`) and `UPDATE` (reloads only
+  after `updated`).
+- **`patches.json`'s keys** (`source`, `upstream`) **and `patches.source_dir`'s default** → the mod's `upstreamRefusal`.
+  **Where workbench lives on GitHub** → the mod's `UPSTREAM` (patches.py keeps no constant: `note_install` reads the
+  remote's URL), CONTRIBUTING.md's `gh issue` lines. **What sends** (`wb patch send`'s name, the gh and git commands it
+  runs, any new outward command) → `sendsOut`, `GH_WRITES`, `OUTWARD_TEXT`, the gate's tests in `register.test.tsx`.
+  **`wb patch send`'s flags** → the mod's `sendArgs` (it reads `--title`, `--body-file`, `--draft`, `--anyway` as
+  written: keep `allow_abbrev=False`). **`send-ok.json`'s keys** (`slug`, `title`, `body_file`, `body`, `draft`,
+  `anyway`, `at`) → the mod's `upstreamRefusal` and `patches._approved`, together.
+- **`.github/pull_request_template.md`** → `wb patch upstream` (copies it to `upstream/<slug>.md`), `_refuse_send`
+  (refuses it unchanged). **The crash hint's `CONTRIBUTING.md`** → that file at the root. **`patches.CARRIED`, the
+  `Scope:` trailer** (`%(trailers:key=Scope)`, `me`) → `wb patch list`, `upstream`, `_refuse_send`, `doctor_lines`,
+  CONTRIBUTING.md, the skill's `reference/patching.md`. **`PATCH_BRANCH`** → `cmd_update`, `doctor_lines`, the docs.
 - **A file read from the task directory, or one the ask server writes** → the lane's part only `worktree/` and `ask/`,
   checked by the runner (`ask_mcp.relay`): nothing the agent writes steers code outside its lane.
 - **The layer's `permissions`** → the layer file alone, the project's config shut out (`rules_env`,

@@ -214,6 +214,7 @@ class Base(unittest.TestCase):
         # the suite may run in Claude Code's Bash: no task is a session's unless a test says so
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         os.environ.pop("CLAUDE_PID", None)
+        os.environ.pop("CLAUDECODE", None)  # wb patch send asks for the mod's yes under it (#1005)
         # the state directory before WB_HOME names it: a thread the last test left running (its
         # chat server) wrote there in between, and mkdir found it made (seen on WSL, 2026-11-20)
         (tmp / "state").mkdir()
@@ -17450,6 +17451,42 @@ class Update(Base):
         self.assertIn("the tasks were stopped for it: wb resume t continues them", out)
 
 
+# gh for LocalPatches (#1005): records argv and GH_PROMPT_DISABLED, answers auth status from
+# FAKE_GH_AUTH, makes the fork (a bare repo at FAKE_GH_FORK), prints a pull request's URL; FAKE_GH_FAIL
+# names a step that fails with a token in its message ("exists": the pull request is open already);
+# gh api answers from FAKE_GH_API ({endpoint: [exit, stdout]}), else someone's fork of upstream, else 404
+FAKE_GH = r"""import json, os, subprocess, sys
+a = sys.argv[1:]
+with open(os.environ["FAKE_GH_CALLS"], "a") as f:
+    f.write(json.dumps({"argv": a, "prompt": os.environ.get("GH_PROMPT_DISABLED")}) + "\n")
+fail = os.environ.get("FAKE_GH_FAIL")
+if a[:2] == ["auth", "status"]:
+    sys.stdout.write(open(os.environ["FAKE_GH_AUTH"]).read())
+elif a[0] == "api":
+    api = json.load(open(os.environ["FAKE_GH_API"])) if os.path.exists(os.environ["FAKE_GH_API"]) else {}
+    fork = {"full_name": "someone/claudes-workbench", "parent": {"full_name": "a-schaefers/claudes-workbench"}}
+    code, out = api.get(a[1], [0, json.dumps(fork)] if a[1] == "repos/someone/claudes-workbench" else
+                        [1, "gh: Not Found (HTTP 404)"])
+    (sys.stdout if code == 0 else sys.stderr).write(out + "\n")
+    sys.exit(code)
+elif a[:2] == ["repo", "fork"]:
+    if fail == "fork":
+        sys.exit("HTTP 403: Resource not accessible by personal access token ghp_abcDEF123456 (fork)")
+    if not os.path.exists(os.environ["FAKE_GH_FORK"]):
+        subprocess.run(["git", "init", "-q", "--bare", os.environ["FAKE_GH_FORK"]], check=True)
+    sys.stderr.write("Created fork\n")
+elif a[:2] == ["pr", "create"]:
+    if fail == "pr":
+        sys.exit("pull request create failed: GraphQL: github_pat_11ABCDEF_xyz789 lacks access")
+    if fail == "exists":
+        sys.exit('a pull request for branch "someone:pr/fix-thing" into branch "main" already exists:\n'
+                 "https://github.com/a-schaefers/claudes-workbench/pull/1")
+    print("https://github.com/a-schaefers/claudes-workbench/pull/7")
+else:
+    sys.exit("fake gh: " + " ".join(a))
+"""
+
+
 class LocalPatches(Base):
     """wb patch, and wb update with patches (#1005, 2026-11-22): Claude Code's marketplace update
     re-clones its clone whenever HEAD differs from upstream's, so a local commit or edit there was
@@ -17483,9 +17520,54 @@ class LocalPatches(Base):
             f'#!/bin/sh\necho "$*" >> {shlex.quote(str(self.calls))}\ncase "$*" in "plugin marketplace add"*)\n'
             f'  rm -rf {shlex.quote(str(self.market))};; esac\n')
         (bindir / "claude").chmod(0o755)
+        # a fake gh (#1005): it records each call and answers from the test's fixtures, so no
+        # test asks GitHub or acts there
+        self.gh_calls = tmp / "gh-calls"
+        (bindir / "gh").write_text(f"#!{sys.executable}\n" + FAKE_GH)
+        (bindir / "gh").chmod(0o755)
+        self.fork = tmp / "fork.git"
+        os.environ.update(FAKE_GH_CALLS=str(self.gh_calls), FAKE_GH_AUTH=str(tmp / "gh-auth.json"),
+                          FAKE_GH_FORK=str(self.fork), FAKE_GH_API=str(tmp / "gh-api.json"))
+        os.environ.pop("FAKE_GH_FAIL", None)
+        self.gh_auth()
+        # every github.com URL leads nowhere unless a test maps it (the longest insteadOf wins):
+        # a wrong push URL fails here, never reaching GitHub
+        nowhere = str(tmp / "nowhere") + "/"
+        os.environ.update(GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0=f"url.{nowhere}.insteadOf",
+                          GIT_CONFIG_VALUE_0="https://github.com/", GIT_CONFIG_KEY_1=f"url.{nowhere}.insteadOf",
+                          GIT_CONFIG_VALUE_1="git@github.com:")
         os.environ["PATH"] = f"{bindir}{os.pathsep}{os.environ['PATH']}"
         patcher = mock.patch.object(cli, "PKG_ROOT", self.copy)
         patcher.start(); self.addCleanup(patcher.stop)
+
+    def gh_auth(self, state="success", login="someone", protocol="https", scopes="gist, read:org, repo",
+                source="keyring", error=None, hosts=True):
+        """gh auth status --json hosts as gh prints it: one github.com account, or none."""
+        row = {"state": state, "active": True, "host": "github.com", "login": login, "tokenSource": source,
+               "scopes": scopes, "gitProtocol": protocol, **({"error": error} if error else {})}
+        Path(os.environ["FAKE_GH_AUTH"]).write_text(
+            json.dumps({"hosts": {"github.com": [row]} if hosts else {}}))
+
+    def gh_argv(self):
+        """Every gh call so far but the reads of gh's state."""
+        rows = [json.loads(r) for r in self.gh_calls.read_text().splitlines()] if self.gh_calls.exists() else []
+        self.assertTrue(all(r["prompt"] == "1" for r in rows))  # GH_PROMPT_DISABLED on every call
+        return [r["argv"] for r in rows if r["argv"][:2] != ["auth", "status"]]
+
+    def prepared(self, msg="fix the thing\n\nScope: everybody", slug="fix-thing"):
+        """A clone install whose origin is on GitHub (mapped to the stand-in), a patch on local, and
+        pr/<slug> from wb patch upstream, its body filled in."""
+        (self.origin / ".github").mkdir(exist_ok=True)
+        self.commit(self.origin, ".github/pull_request_template.md", "## What and why\n", "the template")
+        self.as_clone()
+        self.g(self.copy, "remote", "set-url", "origin", self.URL)
+        self.g(self.copy, "config", f"url.{self.origin}.insteadOf", self.URL)
+        fix = self.commit(self.copy, "mine.txt", "mine\n", msg)
+        self.wb("patch", "upstream", fix, "--name", slug)
+        wt, body = store.home() / "upstream" / slug, patches.body_path(slug)
+        body.write_text("## What and why\nIt fixes the thing.\n")
+        self.gh_calls.unlink(missing_ok=True)                   # upstream read gh's state: send's own calls next
+        return wt, body
 
     def g(self, d, *a):
         return subprocess.run(["git", "-C", str(d), *a], check=True, capture_output=True,
@@ -17783,12 +17865,19 @@ class LocalPatches(Base):
         self.assertEqual(self.g(wt, "log", "-1", "--format=%s"), "fix the thing")
         self.assertFalse((wt / "pref.txt").exists())            # only that patch
         self.assertIn(f"cd {wt} && python3 -m unittest\n", out)  # mod/ unchanged: no plugin test
-        self.assertIn("gh repo fork a-schaefers/claudes-workbench --remote --remote-name fork", out)
-        self.assertIn("git push -u fork pr/fix-thing", out)
-        self.assertIn("gh pr create --repo a-schaefers/claudes-workbench --head <your login>:pr/fix-thing", out)
-        self.assertIn("pull_request_template.md", out)
+        # #1005 (2026-11-22): the one next step is wb patch send, the command the user says yes
+        # to, not a fork, a push and a pr create for Claude to run (gh repo fork --remote renamed
+        # the user's origin)
+        body = patches.body_path("fix-thing")
+        self.assertIn(f'  wb patch send fix-thing --title "fix the thing" --body-file {body}\n', out)
+        self.assertNotIn("gh repo fork", out)
+        self.assertNotIn("git push", out)
+        self.assertIn("gh: ready as someone over https", out)
         self.assertIn("the next wb update drops the local patch", out)
+        self.assertEqual(self.gh_argv(), [])                    # gh's state read, nothing done
         self.assertEqual(self.g(self.origin, "branch", "--list", "pr/*"), "")   # nothing pushed
+        self.assertEqual(store.read_json(store.home() / "patches.json"),
+                         {"source": str(self.copy), "upstream": "a-schaefers/claudes-workbench"})
         self.assertIn("already prepared", self.wb("patch", "upstream", fix, "--name", "fix-thing"))
         self.assertIn("lowercase letters", self.wb("patch", "upstream", fix, "--name", "Fix_It"))
 
@@ -17799,9 +17888,10 @@ class LocalPatches(Base):
         fix = self.commit(self.copy, "mine.txt", "mine\n", "my modeline\n\nScope: me")
         out = self.wb("patch", "upstream", fix, "--name", "modeline")
         self.assertNotIn(f"gh repo fork {self.origin}", out)
-        self.assertIn("gh repo fork <owner/repo> --remote --remote-name fork", out)
-        self.assertIn("isn't on GitHub", out)
+        self.assertIn("isn't on GitHub, and wb patch send sends only there", out)
+        self.assertNotIn("wb patch send modeline", out)
         self.assertIn("a personal patch", out)
+        self.assertFalse(self.gh_calls.exists())                # off GitHub, gh isn't asked
 
     def test_patch_init_moves_a_marketplace_install_to_a_clone_with_its_changes_as_patches(self):
         # #1005: `claude plugin marketplace add <dir>` switches the install to a directory Claude
@@ -17835,6 +17925,8 @@ class LocalPatches(Base):
         self.assertEqual((dest / "notes.txt").read_text(), "untracked\n")
         self.assertEqual(self.g(dest, "status", "--porcelain"), "")
         self.assertTrue(list((store.home() / "rescued").iterdir()))       # and a copy kept
+        self.assertEqual(store.read_json(store.home() / "patches.json"),  # for the mod (#1005)
+                         {"source": str(dest), "upstream": None})
 
     def test_patch_init_refuses_a_directory_that_is_not_a_clone_of_the_same_origin(self):
         dest = Path(self.tmp.name) / "taken"
@@ -17891,6 +17983,431 @@ class LocalPatches(Base):
         self.assertIn("branch main-copy", out)
         self.assertIn("switch -c local", out)
         self.assertFalse(self.calls.exists())
+
+    def sent(self):
+        """Whether anything reached upstream or a fork: a pr/ branch on either."""
+        return bool(self.g(self.origin, "branch", "--list", "pr/*")) or self.fork.exists()
+
+    def test_patch_send_refuses_each_unready_branch_before_anything_is_written(self):
+        # #1005 (2026-11-22): the owner's rule, nothing at upstream without the user's yes, and
+        # nothing sent that isn't ready: every refusal comes before a fork, a push or a pr create
+        wt, body = self.prepared(msg="my modeline\n\nScope: me")
+        send = lambda *a: self.wb("patch", "send", "fix-thing", "--title", "Fix it", "--body-file", *a)  # noqa: E731
+        self.assertIn("no pr/other in", self.wb("patch", "send", "other", "--title", "x", "--body-file", str(body)))
+        (wt / "README.md").write_text("edited\n")
+        self.assertIn("has uncommitted changes (M README.md)", send(str(body)))
+        self.g(wt, "checkout", "-q", "README.md")
+        self.g(wt, "update-ref", "CHERRY_PICK_HEAD", "HEAD")
+        self.assertIn("a cherry-pick is in progress", send(str(body)))
+        self.g(wt, "update-ref", "-d", "CHERRY_PICK_HEAD")
+        self.assertIn("No such file", send(str(body) + ".missing"))
+        empty = body.with_name("empty.md"); empty.write_text(" \n")
+        self.assertIn("is empty", send(str(empty)))
+        self.assertIn("is the template as it came", send(str(wt / ".github/pull_request_template.md")))
+        out = send(str(body))
+        self.assertIn("its Scope trailer is me, a personal preference", out)
+        self.assertIn("--anyway sends it", out)
+        self.assertFalse(self.gh_calls.exists())                # none of these asked gh anything
+        self.gh_auth(hosts=False)                               # past Scope: me, gh's state refuses
+        out = send(str(body), "--anyway")
+        self.assertIn("gh can't send it yet, nothing was sent", out)
+        self.assertIn("! gh auth login --hostname github.com", out)
+        real = shutil.which
+        with mock.patch.object(patches.shutil, "which", lambda n: None if n == "gh" else real(n)):
+            self.assertIn("gh: missing: gh (GitHub's CLI) isn't installed", send(str(body), "--anyway"))
+        self.assertEqual(self.gh_argv(), [])
+        self.assertFalse(self.sent())
+
+    def test_patch_send_refuses_a_workflow_change_over_https_without_the_workflow_scope(self):
+        # #1005: GitHub refuses such a push over https unless the token has the workflow scope
+        wt, body = self.prepared()
+        (wt / ".github/workflows").mkdir(parents=True)
+        self.commit(wt, ".github/workflows/check.yml", "on: push\n", "ci too")
+        send = lambda: self.wb("patch", "send", "fix-thing", "--title", "Fix it", "--body-file", str(body))  # noqa: E731
+        out = send()
+        self.assertIn("changes .github/workflows/", out)
+        self.assertIn("! gh auth refresh -h github.com -s workflow", out)
+        self.assertEqual(self.gh_argv(), [])
+        self.assertFalse(self.sent())
+        self.gh_auth(protocol="ssh")                            # over ssh the scope isn't asked for
+        self.g(self.copy, "config", f"url.{self.fork}.insteadOf", "git@github.com:someone/claudes-workbench.git")
+        self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/7", send())
+
+    def test_patch_send_on_the_owners_own_repository_pushes_to_origin_and_forks_nothing(self):
+        wt, body = self.prepared()
+        self.gh_auth(login="a-schaefers")
+        out = self.wb("patch", "send", "fix-thing", "--title", "Fix the thing", "--body-file", str(body))
+        self.assertIn("pushed pr/fix-thing to a-schaefers/claudes-workbench\n", out)
+        self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/7", out)
+        self.assertIn("the next wb update drops the local patch", out)
+        self.assertEqual(self.g(self.origin, "rev-parse", "pr/fix-thing"), self.g(wt, "rev-parse", "HEAD"))
+        self.assertFalse(self.fork.exists())
+        self.assertEqual(self.gh_argv(), [["pr", "create", "-R", "a-schaefers/claudes-workbench", "--base", "main",
+                                           "--head", "a-schaefers:pr/fix-thing", "--title", "Fix the thing",
+                                           "--body-file", str(body)]])
+
+    def test_patch_send_forks_then_pushes_to_the_fork_in_the_users_protocol_and_opens_the_pr(self):
+        # #1005 (2026-11-22): never gh repo fork --remote, which renames the user's origin
+        for protocol, url in (("https", "https://github.com/someone/claudes-workbench.git"),
+                              ("ssh", "git@github.com:someone/claudes-workbench.git")):
+            with self.subTest(protocol):
+                slug = f"fix-{protocol}"
+                wt, body = self.prepared(slug=slug) if protocol == "https" else self.prepared_again(slug)
+                self.gh_auth(protocol=protocol)
+                self.g(self.copy, "config", "--replace-all", f"url.{self.fork}.insteadOf", url)  # only it reaches the fork
+                self.gh_calls.unlink(missing_ok=True)
+                out = self.wb("patch", "send", slug, "--title", "Fix the thing", "--body-file", str(body),
+                              *(["--draft"] if protocol == "ssh" else []))
+                self.assertIn(f"pushed pr/{slug} to someone/claudes-workbench (forked from "
+                              "a-schaefers/claudes-workbench)", out)
+                self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/7"
+                              + (" (a draft)" if protocol == "ssh" else ""), out)
+                self.assertEqual(self.g(self.fork, "rev-parse", f"pr/{slug}"), self.g(wt, "rev-parse", "HEAD"))
+                self.assertEqual(self.gh_argv(), [
+                    ["repo", "fork", "a-schaefers/claudes-workbench", "--clone=false", "--remote=false"],
+                    ["api", "repos/someone/claudes-workbench"],          # which repository the fork is
+                    ["pr", "create", "-R", "a-schaefers/claudes-workbench", "--base", "main", "--head",
+                     f"someone:pr/{slug}", "--title", "Fix the thing", "--body-file", str(body),
+                     *(["--draft"] if protocol == "ssh" else [])]])
+                self.assertEqual(self.g(self.copy, "remote"), "origin")          # the user's remotes as they were
+                self.assertEqual(self.g(self.copy, "config", "remote.origin.url"), self.URL)
+                self.assertEqual(self.g(self.origin, "branch", "--list", "pr/*"), "")
+        self.assertEqual(store.read_json(store.home() / "patches.json"),
+                         {"source": str(self.copy), "upstream": "a-schaefers/claudes-workbench"})
+
+    def prepared_again(self, slug):
+        """A second pr/<slug> from the same clone (prepared() already made it a clone install)."""
+        fix = self.commit(self.copy, f"{slug}.txt", "x\n", f"fix {slug}")
+        self.wb("patch", "upstream", fix, "--name", slug)
+        body = patches.body_path(slug)
+        body.write_text("## What and why\nIt fixes it.\n")
+        return store.home() / "upstream" / slug, body
+
+    def test_patch_send_waits_for_a_new_fork_that_is_not_there_yet(self):
+        # #1005: GitHub makes a fork asynchronously, so the first pushes can find no repository
+        wt, body = self.prepared()
+        self.g(self.copy, "config", f"url.{self.fork}.insteadOf", "https://github.com/someone/claudes-workbench.git")
+        real, tries = patches._git, []
+
+        def git(cwd, *args, **kw):
+            if "push" in args:
+                tries.append(args)
+                if len(tries) <= 2:
+                    return subprocess.CompletedProcess(args, 128, b"", b"remote: Repository not found.\n"
+                                                       b"fatal: repository 'https://github.com/someone/x/' not found")
+            return real(cwd, *args, **kw)
+        with mock.patch.object(patches, "_git", git), mock.patch.object(patches, "PUSH_WAITS", (0, 0, 0, 0)):
+            out = self.wb("patch", "send", "fix-thing", "--title", "Fix it", "--body-file", str(body))
+        self.assertEqual(len(tries), 3)
+        self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/7", out)
+        self.assertEqual(self.g(self.fork, "rev-parse", "pr/fix-thing"), self.g(wt, "rev-parse", "HEAD"))
+
+    def test_a_failing_gh_step_says_what_is_done_already_and_never_prints_a_token(self):
+        # #1005 (2026-11-22): gh's errors can carry a token; the user is told what is done
+        wt, body = self.prepared()
+        self.g(self.copy, "config", f"url.{self.fork}.insteadOf", "https://github.com/someone/claudes-workbench.git")
+        send = lambda: self.wb("patch", "send", "fix-thing", "--title", "Fix it", "--body-file", str(body))  # noqa: E731
+        os.environ["FAKE_GH_FAIL"] = "fork"
+        out = send()
+        self.assertIn("gh repo fork failed: HTTP 403: Resource not accessible by personal access token <token>", out)
+        self.assertIn("nothing was sent", out)
+        self.assertNotIn("ghp_", out)
+        self.assertFalse(self.sent())
+        os.environ["FAKE_GH_FAIL"] = "pr"
+        out = send()
+        self.assertIn("gh pr create failed: pull request create failed: GraphQL: <token> lacks access", out)
+        self.assertIn("done already: forked a-schaefers/claudes-workbench to someone/claudes-workbench, "
+                      "pushed pr/fix-thing to someone/claudes-workbench", out)
+        self.assertIn("wb patch send fix-thing again goes on from there", out)
+        self.assertNotIn("github_pat_", out)
+        self.assertEqual(patches.scrub("token gho_AbC123 and\nghs_x9 github_pat_11A_b"), "token <token> and <token> <token>")
+
+    def test_gh_state_reads_each_login_state_and_never_the_token(self):
+        # #1005: gh auth status --json, never plain (it prints a masked token) nor --show-token
+        os.environ["HOME"] = str(Path(self.tmp.name) / "home")  # no ssh key: the https login
+        cases = [
+            (dict(hosts=False), "logged-out", "--git-protocol https"),
+            (dict(state="error", error="HTTP 401: Bad credentials (https://api.github.com/)"), "logged-out",
+             "has expired or was revoked"),
+            (dict(state="error", error='Get "https://api.github.com/": dial tcp: lookup api.github.com: no such host'),
+             "error", "GitHub unreachable, try again"),
+            (dict(scopes="gist, repo, workflow"), "ready", ""),
+            (dict(source="GH_TOKEN"), "ready", "an environment token (GH_TOKEN) overrides the stored login"),
+        ]
+        for fixture, state, hint in cases:
+            with self.subTest(state=state, hint=hint):
+                self.gh_auth(**fixture)
+                st = patches.gh_state()
+                self.assertEqual(st["state"], state)
+                self.assertIn(hint, st["hint"])
+        self.assertEqual((st["login"], st["protocol"], st["source"]), ("someone", "https", "GH_TOKEN"))
+        self.assertEqual(patches.gh_state()["scopes"], ["gist", "read:org", "repo"])
+        self.gh_auth(hosts=False)
+        self.assertIn("! gh auth setup-git", patches.gh_state()["hint"])          # https: git's login too
+        (Path(os.environ["HOME"]) / ".ssh").mkdir(parents=True)
+        (Path(os.environ["HOME"]) / ".ssh/id_ed25519").write_text("key")
+        hint = patches.gh_state()["hint"]
+        self.assertIn("--git-protocol ssh", hint)
+        self.assertNotIn("setup-git", hint)
+        Path(os.environ["FAKE_GH_AUTH"]).write_text("unknown flag: --json\n")   # a gh before auth status --json
+        self.assertEqual(patches.gh_state()["state"], "error")
+        self.assertIn("too old for gh auth status --json", patches.gh_state()["hint"])
+        argv = {tuple(json.loads(r)["argv"]) for r in self.gh_calls.read_text().splitlines()}
+        self.assertEqual(argv, {("auth", "status", "--hostname", "github.com", "--json", "hosts")})
+
+    def test_gh_state_names_one_install_line_for_this_machine(self):
+        # #1005: the distro's line, labelled as GitHub's docs label it; never snap
+        real = shutil.which
+
+        def hint(osrel, system="Linux", have=()):
+            with mock.patch.object(patches, "_os_release", lambda: osrel), \
+                    mock.patch.object(patches.platform, "system", lambda: system), \
+                    mock.patch.object(patches.hardware, "system", lambda: "linux"), \
+                    mock.patch.object(patches.shutil, "which",
+                                      lambda n: f"/usr/bin/{n}" if n in have else None if n != "git" else real(n)):
+                st = patches.gh_state()
+            self.assertEqual(st["state"], "missing")
+            self.assertNotIn("snap", st["hint"])
+            self.assertIn("Claude asks first", st["hint"])
+            return st["hint"]
+        out = hint({"ID": "ubuntu", "ID_LIKE": "debian"})
+        self.assertIn("https://cli.github.com/packages stable main", out)
+        self.assertIn("official, GitHub's apt repository", out)
+        self.assertIn("its 2.45/2.46 builds are broken", out)
+        self.assertIn("! (type -p wget", out)                   # sudo: the user runs it
+        self.assertIn("sudo dnf install dnf5-plugins && sudo dnf config-manager addrepo "
+                      "--from-repofile=https://cli.github.com/packages/rpm/gh-cli.repo && sudo dnf install gh",
+                      hint({"ID": "fedora"}, have=("dnf5",)))
+        self.assertIn("sudo dnf install 'dnf-command(config-manager)' && sudo dnf config-manager --add-repo",
+                      hint({"ID": "rocky", "ID_LIKE": "rhel centos fedora"}))
+        out = hint({"ID": "arch"})
+        self.assertIn("sudo pacman -S github-cli", out)
+        self.assertIn("(community;", out)
+        # a root or polkit line is the user's too, not only a sudo one (#1005, 2026-11-22, the review)
+        self.assertIn("then the user runs: ! pamac install github-cli", hint({"ID": "manjaro", "ID_LIKE": "arch"}))
+        self.assertIn("then the user runs, as root: apk add github-cli", hint({"ID": "alpine"}))
+        self.assertIn("runs: brew install gh\n  (official;", hint({}, system="Darwin", have=("brew",)))
+        out = hint({}, system="Darwin")
+        self.assertIn("the macOS .pkg from https://github.com/cli/cli/releases/latest", out)
+        self.assertNotIn("brew", out)
+        self.assertIn("a precompiled binary from https://github.com/cli/cli/releases/latest",
+                      hint({"ID": "plan9"}))
+        self.assertIn("or, with no sudo: brew install gh (official)", hint({"ID": "arch"}, have=("brew",)))
+        with mock.patch.object(patches, "OS_RELEASE", (str(Path(self.tmp.name) / "os-release"),)):
+            (Path(self.tmp.name) / "os-release").write_text('NAME="Alpine Linux"\nID=alpine\n')
+            self.assertEqual(patches._os_release()["ID"], "alpine")
+
+    def test_doctor_says_the_install_its_local_patches_and_gh(self):
+        # #1005: which install runs (a marketplace clone re-clones away a patch), the patches it
+        # keeps, and gh only when something may go upstream
+        lines = patches.doctor_lines(self.copy, "marketplace")
+        self.assertEqual(lines, [f"ok  install: marketplace at {self.copy}"])
+        self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+        lines = patches.doctor_lines(self.copy, "marketplace")
+        self.assertIn("--  local patches: the marketplace clone has 1 local commit(s)", lines[1])
+        self.assertIn("wb patch init", lines[1])
+        self.assertIn("ok  gh: ready as someone over https", lines[2])
+        self.g(self.copy, "reset", "-q", "--hard", "HEAD^")
+        self.gh_calls.unlink()
+        self.as_clone("main-copy")
+        self.assertEqual(patches.doctor_lines(self.copy, "clone"),
+                         [f"ok  install: developer clone at {self.copy}, branch main-copy"])
+        self.assertFalse(self.gh_calls.exists())                # nothing to send: GitHub isn't asked
+        self.g(self.copy, "switch", "-q", "-c", "local", "--track", "origin/main")
+        self.commit(self.copy, "a.txt", "a\n", "fix a\n\nScope: everybody")
+        self.commit(self.copy, "b.txt", "b\n", "my preference")
+        self.gh_auth(hosts=False)
+        out = self.wb("doctor")
+        self.assertIn(f"ok  install: your own clone at {self.copy}, branch local (wb patch init)\n", out)
+        self.assertIn("--  local patches: 2 (everybody, no Scope)\n", out)
+        self.assertIn("--  gh: logged-out: the user runs: ! gh auth login --hostname github.com", out)
+
+    def test_update_on_a_clone_with_patches_records_where_they_are_for_the_mod(self):
+        # #1005: $WB_HOME/patches.json tells the mod which clone holds the patches
+        self.as_clone()
+        self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+        self.g(self.copy, "remote", "set-url", "origin", self.URL)
+        self.g(self.copy, "config", f"url.{self.origin}.insteadOf", self.URL)
+        self.wb("update")
+        self.assertEqual(store.read_json(store.home() / "patches.json"),
+                         {"source": str(self.copy), "upstream": "a-schaefers/claudes-workbench"})
+
+    def send(self, body, *more, slug="fix-thing", title="Fix it"):
+        return self.wb("patch", "send", slug, "--title", title, "--body-file", str(body), *more)
+
+    def to_fork(self, name="someone/claudes-workbench"):
+        """The fork's https URL leads to the stand-in fork (and only it)."""
+        self.g(self.copy, "config", "--replace-all", f"url.{self.fork}.insteadOf", f"https://github.com/{name}.git")
+
+    def test_patch_send_refuses_a_worktree_on_another_branch(self):
+        # #1005, 2026-11-22 (the review): a mutation dropping the branch check passed every test
+        wt, body = self.prepared()
+        self.g(wt, "switch", "-q", "-c", "elsewhere")
+        out = self.send(body)
+        self.assertIn(f"no pr/fix-thing in {wt}", out)
+        self.assertEqual(self.gh_argv(), [])
+        self.assertFalse(self.sent())
+
+    def test_a_push_git_refuses_is_tried_once_not_waited_for(self):
+        # #1005, 2026-11-22 (the review): only a fork not there yet is waited for; a mutation
+        # retrying every failure passed every test
+        wt, body = self.prepared()
+        real, tries = patches._git, []
+
+        def git(cwd, *args, **kw):
+            if "push" in args:
+                tries.append(args)
+                return subprocess.CompletedProcess(args, 128, b"", b"git@github.com: Permission denied (publickey).\n"
+                                                   b"fatal: Could not read from remote repository.")
+            return real(cwd, *args, **kw)
+        with mock.patch.object(patches, "_git", git), mock.patch.object(patches, "PUSH_WAITS", (0, 0, 0, 0)):
+            out = self.send(body)
+        self.assertEqual(len(tries), 1)
+        self.assertIn("git push to someone/claudes-workbench failed: git@github.com: Permission denied (publickey)", out)
+        self.assertIn("done already: forked a-schaefers/claudes-workbench to someone/claudes-workbench", out)
+
+    def test_a_push_with_no_answer_still_says_what_is_done_already(self):
+        # #1005, 2026-11-22 (the review): git's timeout raised past send's report of the steps done
+        wt, body = self.prepared()
+        real = patches._git
+
+        def git(cwd, *args, **kw):
+            if "push" in args:
+                raise gitops.GitError(f"git push: no answer in {kw.get('timeout')}s")
+            return real(cwd, *args, **kw)
+        with mock.patch.object(patches, "_git", git):
+            out = self.send(body)
+        self.assertIn("git push to someone/claudes-workbench failed: git push: no answer in 600s; done already: "
+                      "forked a-schaefers/claudes-workbench to someone/claudes-workbench", out)
+
+    def test_patch_send_pushes_to_the_users_fork_by_its_real_name_and_never_into_another_repository(self):
+        # #1005, 2026-11-22 (the review): a fork renamed, or one GitHub named <name>-1 beside an
+        # unrelated repository of the user's, was taken for <login>/<name>
+        wt, body = self.prepared()
+        api = Path(os.environ["FAKE_GH_API"])
+        mine = json.dumps({"full_name": "someone/claudes-workbench", "fork": False})
+        api.write_text(json.dumps({"repos/someone/claudes-workbench": [0, mine], "repos/a-schaefers/claudes-workbench"
+                                   "/forks?sort=newest&per_page=100": [0, json.dumps([
+                                       {"full_name": "other/claudes-workbench", "owner": {"login": "other"}},
+                                       {"full_name": "someone/claudes-workbench-1", "owner": {"login": "someone"}}])]}))
+        self.to_fork("someone/claudes-workbench-1")
+        out = self.send(body)
+        self.assertIn("pushed pr/fix-thing to someone/claudes-workbench-1 (forked from a-schaefers/claudes-workbench)", out)
+        self.assertEqual(self.g(self.fork, "rev-parse", "pr/fix-thing"), self.g(wt, "rev-parse", "HEAD"))
+        self.assertIn(["pr", "create", "-R", "a-schaefers/claudes-workbench", "--base", "main", "--head",
+                       "someone:pr/fix-thing", "--title", "Fix it", "--body-file", str(body)], self.gh_argv())
+        # no fork of theirs listed beside that unrelated repository: nothing pushed anywhere
+        wt2, body2 = self.prepared_again("fix-two")
+        api.write_text(json.dumps({"repos/someone/claudes-workbench": [0, mine]}))
+        self.gh_calls.unlink()
+        out = self.send(body2, slug="fix-two")
+        self.assertIn("finding the fork failed: someone/claudes-workbench isn't a fork of a-schaefers/claudes-workbench", out)
+        self.assertNotIn("pushed", out)
+        self.assertFalse([c for c in self.gh_argv() if c[:2] == ["pr", "create"]])
+        self.assertEqual(self.g(self.fork, "branch", "--list", "pr/fix-two"), "")
+
+    def test_a_send_again_after_the_pull_request_opened_finishes_instead_of_failing_forever(self):
+        # #1005, 2026-11-22 (the review): gh pr create opened it but its answer was lost; the rerun
+        # the failure promised failed on "already exists" every time
+        wt, body = self.prepared()
+        self.to_fork()
+        os.environ["FAKE_GH_FAIL"] = "exists"
+        out = self.send(body)
+        self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/1 (already open)", out)
+        self.assertNotIn("failed", out)
+
+    def test_a_remote_off_github_is_never_printed_with_its_credentials(self):
+        # #1005, 2026-11-22 (the review): its URL was printed whole, a GitLab token in it too
+        self.as_clone()
+        url = "https://oauth2:glpat-abcdef123456@gitlab.example.com/a/b.git"
+        self.g(self.copy, "remote", "set-url", "origin", url)
+        self.g(self.copy, "config", f"url.{self.origin}.insteadOf", url)
+        fix = self.commit(self.copy, "mine.txt", "mine\n", "fix it\n\nScope: everybody")
+        out = self.wb("patch", "upstream", fix, "--name", "off-github")
+        self.assertIn("origin (https://gitlab.example.com/a/b.git) isn't on GitHub", out)
+        body = patches.body_path("off-github"); body.write_text("filled in\n")
+        out = self.send(body, slug="off-github")
+        self.assertIn("origin (https://gitlab.example.com/a/b.git) isn't on GitHub: wb patch send sends only there", out)
+        self.assertNotIn("glpat", out + self.wb("patch", "upstream", fix, "--name", "off-github"))
+
+    def test_under_claude_code_patch_send_sends_only_what_the_mods_dialog_approved(self):
+        # #1005, 2026-11-22 (the review): with the mod missing, disabled or its hooks failing to
+        # load, Claude's Bash ran the fork, push and pull request with no dialog at all
+        wt, body = self.prepared()
+        self.to_fork()
+        os.environ["CLAUDECODE"] = "1"
+        ok = store.home() / "send-ok.json"
+        out = self.send(body)
+        self.assertIn("goes only through the workbench mod's dialog", out)
+        self.assertIn(f'outside Claude Code: wb patch send fix-thing --title "Fix it" --body-file {body}', out)
+        self.assertEqual(self.gh_argv(), [])
+        approve = lambda **kw: store.write_json(ok, {  # noqa: E731
+            "slug": "fix-thing", "title": "Fix it", "body_file": str(body), "body": body.read_text(),
+            "draft": False, "anyway": False, "at": time.time(), **kw})
+        for stale in (dict(title="Something else"), dict(body="what the user saw\n"), dict(draft=True),
+                      dict(at=time.time() - patches.SEND_OK_SECS - 1)):
+            with self.subTest(**{k: str(v) for k, v in stale.items()}):
+                approve(**stale)
+                self.assertIn("approved none for this send", self.send(body))
+                self.assertFalse(ok.exists())                   # consumed, matching or not
+        self.assertFalse(self.sent())
+        approve()
+        self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/7", self.send(body))
+        self.assertFalse(ok.exists())                           # one yes, one send
+        self.assertEqual(self.g(self.fork, "rev-parse", "pr/fix-thing"), self.g(wt, "rev-parse", "HEAD"))
+
+    def test_an_insteadof_rule_forcing_https_is_not_taken_for_ssh(self):
+        # #1005, 2026-11-22 (the review): the rule's value names git@github.com:, its target is
+        # https; the user, with no ssh key, was told to log gh in over ssh
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        os.environ["HOME"] = str(home)
+        for k in [k for k in os.environ if k.startswith("GIT_CONFIG_")]:
+            os.environ.pop(k)
+        cfg = home / ".gitconfig"
+        cfg.write_text('[url "https://github.com/"]\n\tinsteadOf = git@github.com:\n')
+        self.assertEqual(patches._guess_protocol(), "https")
+        self.gh_auth(hosts=False)
+        hint = patches.gh_state()["hint"]
+        self.assertIn("--git-protocol https", hint)
+        self.assertIn("! gh auth setup-git", hint)
+        (home / ".ssh").mkdir()
+        (home / ".ssh/id_ed25519").write_text("key")
+        self.assertEqual(patches._guess_protocol(), "https")      # a key, but git pushes GitHub over https
+        cfg.write_text('[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n')   # https rewritten to ssh
+        self.assertEqual(patches._guess_protocol(), "ssh")
+
+    def test_a_pull_request_that_landed_is_cleared_by_wb_update_and_doctor_stops_asking_gh(self):
+        # #1005, 2026-11-22 (the review): its branch, worktree and body stayed for good, and doctor
+        # asked GitHub for them on every run
+        wt, body = self.prepared()
+        self.g(self.origin, "fetch", "-q", str(self.copy), "pr/fix-thing")
+        self.g(self.origin, "cherry-pick", "FETCH_HEAD")        # upstream merged it
+        out = self.wb("update")
+        self.assertIn("landed upstream, dropped from local: fix the thing", out)
+        self.assertIn("landed upstream, removed pr/fix-thing, its worktree and its body file", out)
+        self.assertFalse(wt.exists())
+        self.assertFalse(body.exists())
+        self.assertEqual(self.g(self.copy, "branch", "--list", "pr/*"), "")
+        # one still open stays, and so does doctor's gh line for it; a landed one, only on disk
+        # until wb update, already stops it
+        wt2, body2 = self.prepared_again("fix-two")
+        self.gh_calls.unlink(missing_ok=True)
+        self.assertIn("ok  gh: ready as someone over https", "\n".join(patches.doctor_lines(self.copy, "clone")))
+        self.g(self.origin, "fetch", "-q", str(self.copy), "pr/fix-two")
+        self.g(self.origin, "merge", "-q", "--no-ff", "-m", "Merge fix-two", "FETCH_HEAD")
+        self.g(self.copy, "fetch", "-q", "origin")
+        self.g(self.copy, "reset", "-q", "--hard", "origin/main")          # no local patches left
+        self.gh_calls.unlink(missing_ok=True)
+        self.assertNotIn("gh:", "\n".join(patches.doctor_lines(self.copy, "clone")))
+        self.assertFalse(self.gh_calls.exists())
+        self.assertTrue(wt2.exists())                           # doctor only reads
+        self.assertEqual(patches.retire_landed(self.copy),
+                         ["landed upstream, removed pr/fix-two, its worktree and its body file"])
+        # a developer's own pr/ branch, not wb's, is never touched
+        self.g(self.copy, "branch", "pr/mine", "origin/main~1")
+        self.assertEqual(patches.retire_landed(self.copy), [])
+        self.assertIn("pr/mine", self.g(self.copy, "branch", "--list", "pr/*"))
 
     def test_a_crash_prints_its_traceback_then_how_to_get_it_fixed(self):
         # #1005: a bug's traceback alone left the user's Claude no path to a fix the user keeps

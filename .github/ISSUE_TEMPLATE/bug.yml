@@ -50,6 +50,7 @@ body:
     id: install
     attributes:
       label: Install
+      description: "`wb doctor`'s install: line says which."
       options:
         - marketplace (the README's quickstart)
         - own clone (wb patch init)
@@ -71,8 +72,8 @@ body:
     attributes:
       label: Local patches
       description: |
-        The output of `wb patch list`: a local patch can be the cause, so say whether there are any.
-        "none" if it lists none.
+        The output of `wb patch list`, whole: a local patch can be the cause, so say whether there
+        are any. "none" if it lists none.
       render: text
     validations:
       required: true
@@ -81,9 +82,9 @@ body:
     attributes:
       label: The local patch, if any
       description: |
-        The diff of your local patches against upstream:
+        The diff of any local patch that touches the code near the bug, against upstream:
         git -C "$(dirname "$(readlink -f "$(command -v wb)")")/.." diff @{u}
-        Leave empty when there is none.
+        Leave empty when there is none. Public: take out local paths and hostnames.
       render: diff
   - type: checkboxes
     id: checks

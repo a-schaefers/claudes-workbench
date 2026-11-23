@@ -44,8 +44,14 @@ An untracked file on a path the rebased patches add refuses too, before any task
 move it, then `wb update` again.
 
 ## Upstream ("want me to PR it upstream for everybody?")
-Only for a patch that is for everybody, and only on the user's yes; each outward step below
-(the issue, the fork, the push, the pull request) is its own yes.
+Only for a patch that is for everybody, and only on the user's yes. The mod holds every send to
+workbench upstream (an issue, a comment, a fork, a push, a pull request) until the user approves
+that one command in a dialog; a yes is never remembered. A pull request goes only through `wb
+patch send`, which refuses under Claude Code what the dialog didn't approve, so never send one
+with gh, git or a GitHub MCP tool yourself (those ask the same dialog). Show them what goes public
+first, so the dialog only confirms what they have read. A "Don't send" is a no: tell them it
+wasn't sent and leave it, unless they bring it up. If they are away on the web chat it is refused without a
+dialog: tell them there what it would send; it waits until they are back at the terminal.
 1. Search the issues (`gh issue list --repo <origin's owner/repo> --state all --search "<the error's
    words>"`); on a match, comment there instead. Otherwise draft the issue from the matching form
    (`.github/ISSUE_TEMPLATE/`): real output pasted, the commit, `wb doctor`, `wb patch list`.
@@ -54,14 +60,47 @@ Only for a patch that is for everybody, and only on the user's yes; each outward
    its order under its labels as `### ` headings.
 2. `wb patch upstream <commit> --name <slug>`: branch `pr/<slug>` from fresh upstream, in its own
    worktree under `$WB_HOME/upstream/`, the commit cherry-picked. On a conflict, resolve it there,
-   then `git cherry-pick --continue`. It prints the steps that follow and runs none.
+   then `git cherry-pick --continue`. It prints the tests, the body file
+   (`$WB_HOME/upstream/<slug>.md`, a copy of `.github/pull_request_template.md`), the one `wb patch
+   send` line and gh's state, and runs none of them.
 3. In that worktree, the tests it printed, on Python 3.11 too, each skip named (a skip is not a
-   pass). Then the fork, the push and `gh pr create` as printed, the body from
-   `.github/pull_request_template.md` filled in honestly (what you ran, what you didn't).
-   Never `scripts/ship.sh`: it is the owner's.
-4. Tell the user what happens next: CI waits for the owner to approve the run, the owner reviews
-   and merges, and the next `wb update` drops the local patch by itself. If the owner reworked it,
-   `wb patch list` may still show it: `wb patch drop` it then.
+   pass). Fill every section of the body file honestly (what you ran, what you didn't). Keep it
+   outside the worktree, where it is: a file left there is a change `wb patch send` refuses.
+4. Show the user the title and the whole body, word for word, and offer to redact what they may
+   not want public: local paths, hostnames, project names, usernames. Then run the printed
+   `wb patch send <slug> --title "…" --body-file <f>` (`--draft` if they want one); the mod's dialog
+   shows the title and the body's start, and the user approves it there. Run it as a command of
+   its own, the flags spelled out (`--title`, `--body-file`, never shortened, never a `$VAR`): the
+   dialog refuses what it can't show. If wb says the dialog approved none (the mod isn't loaded),
+   the user runs that command in a terminal of their own. `wb patch send` forks (unless the user
+   owns upstream), pushes to their fork and opens the pull request; a failed step says what is
+   done, and running it again goes on from there (a pull request already open is reported as
+   opened). A `Scope: me` commit is refused unless
+   `--anyway`: it is a sign the patch is theirs, not everybody's. Never `scripts/ship.sh`: it is
+   the owner's.
+5. Tell the user what happens next: CI waits for the owner to approve the run, the owner reviews
+   and merges, and the next `wb update` drops the local patch by itself, and its `pr/<slug>`
+   branch, worktree and body file. If the owner reworked it, `wb patch list` may still show it:
+   `wb patch drop` it then.
+
+## gh, GitHub's CLI
+`wb patch upstream`, `wb patch send` and `wb doctor` say gh's state (`gh: ready as <login> over
+<protocol>`, else the state and what to do).
+- **Missing**: wb prints the one install line for this machine. Ask before installing it; a line
+  wb marks `the user runs` (sudo, root, pamac) is theirs to run, as your Bash can't answer a
+  password prompt.
+- **Logged out or expired**: the login is the user's own: `! gh auth login --hostname github.com
+  --git-protocol <ssh|https>` as wb prints it (a browser or a one-time code). Never ask for, read
+  or print a token. Over https, `! gh auth setup-git` too, which edits their global git config:
+  ask first.
+- **A change under `.github/workflows/` over https** needs the token's workflow scope: `! gh auth
+  refresh -h github.com -s workflow`.
+- **The GitHub plugin for Claude Code is optional**, never needed for a pull request. If the user
+  wants it: `claude plugin install github@claude-plugins-official`; it needs a personal access
+  token the user creates on GitHub and sets as `GITHUB_PERSONAL_ACCESS_TOKEN` in their own shell
+  profile (never from `gh auth token` unless they ask for exactly that), then a restart of Claude
+  Code, and `claude mcp list` to check it connects. Its tools that write to upstream ask the
+  same dialog; a pull request still goes through `wb patch send`.
 
 ## When `wb update` refuses over the marketplace copy
 It found local changes in Claude Code's clone, which Claude Code's update would wipe (it

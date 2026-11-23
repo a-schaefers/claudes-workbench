@@ -4979,6 +4979,8 @@ def cmd_update(a):
     and a clone's patches on branch `local` rebased onto the news (#1005).
     --check only says whether there is news; --if-due asks the network at most weekly."""
     kind = _install_kind()
+    if kind == "clone" and not a.check and patches.branch(PKG_ROOT) == patches.PATCH_BRANCH:
+        patches.note_install(PKG_ROOT)  # the mod reads which clone holds the patches (#1005)
     path = store.home() / "update.json"
     last = store.read_json(path, {})
     if a.if_due and not a.check:  # it pulled and updated at once, weekly or not (#602)
@@ -5101,6 +5103,12 @@ def cmd_update(a):
               "the pane")
         if rebased:
             print("\n".join(patches.landed_lines(rebased)))
+    if kind == "clone":  # a pull request merged: its pr/ branch, worktree and body go (#1005)
+        try:
+            for line in patches.retire_landed(PKG_ROOT):
+                print(line)
+        except gitops.GitError as e:
+            print(f"couldn't check the upstream branches (wb patch list): {e}")
 
 
 def cmd_patch(a):
@@ -5122,6 +5130,8 @@ def cmd_patch(a):
         patches.list_patches(PKG_ROOT, kind)
     elif a.action == "drop":
         patches.drop(PKG_ROOT, kind, a.commit)
+    elif a.action == "send":  # the mod's consent gate asks the user about this command (#1005)
+        patches.send(PKG_ROOT, kind, a.slug, a.title, a.body_file, draft=a.draft, anyway=a.anyway)
     else:
         patches.upstream(PKG_ROOT, kind, a.commit, a.name)
 
@@ -5466,6 +5476,11 @@ def cmd_doctor(a):
           "ok  the Claude Code mod is installed (workbench@workbench)" if listed else
           "--  the Claude Code mod (the pane, the wake-ups) isn't among Claude Code's installed "
           "plugins: claude plugin install workbench@workbench, unless it loads another way")
+    try:  # how workbench is installed, its local patches, and gh when they need it (#1005)
+        for row in patches.doctor_lines(PKG_ROOT, _install_kind()):
+            print(row)
+    except (gitops.GitError, OSError) as e:
+        print(f"--  install: {PKG_ROOT}, which git can't read: {e}")
     for row in experiment_lines():
         print(f"--  experiment {row}")
     sys.exit(0 if ok else 1)
@@ -6065,7 +6080,7 @@ def parser() -> argparse.ArgumentParser:
                    "session is told to wb resume it")
     s.set_defaults(f=cmd_update)
     s = sub.add_parser("patch", help="your own fixes to workbench, kept across wb update: init, list, "
-                       "drop, upstream")
+                       "drop, upstream, send")
     ss = s.add_subparsers(dest="action", required=True)
     x = ss.add_parser("init", help="move a marketplace install to a clone of your own, its changes "
                       "carried over as patches")
@@ -6074,11 +6089,20 @@ def parser() -> argparse.ArgumentParser:
     ss.add_parser("list", help="the patches on branch local, uncommitted changes, prepared upstream branches")
     x = ss.add_parser("drop", help="remove one patch from branch local")
     x.add_argument("commit")
-    x = ss.add_parser("upstream", help="a branch from fresh upstream with one patch, and the commands "
-                      "that would open its pull request")
+    x = ss.add_parser("upstream", help="a branch from fresh upstream with one patch, gh's state, and "
+                      "the wb patch send that would open its pull request")
     x.add_argument("commit")
     x.add_argument("--name", required=True, help="the branch's slug: pr/<name> (lowercase letters, "
                    "digits, hyphens)")
+    # no abbreviations: `--tit T --body F` sent a title and body the mod's dialog, reading
+    # --title and --body-file, showed as missing (#1005, 2026-11-22)
+    x = ss.add_parser("send", help="fork, push and open the pull request for a branch wb patch upstream "
+                      "prepared (the user's yes first)", allow_abbrev=False)
+    x.add_argument("slug", help="the --name wb patch upstream was given")
+    x.add_argument("--title", required=True, help="the pull request's title")
+    x.add_argument("--body-file", required=True, help="its body: .github/pull_request_template.md, filled in")
+    x.add_argument("--draft", action="store_true", help="open it as a draft")
+    x.add_argument("--anyway", action="store_true", help="send a commit whose Scope trailer is me")
     s.set_defaults(f=cmd_patch)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
     return ap
