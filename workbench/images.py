@@ -22,7 +22,8 @@ An engine is whatever runs an image model on this machine, described in
                                    "unload": a URL that frees its GPU memory, "unload_body"
 plus optional "label", "notes" (licence, what it is good at: shown to Claude), "timeout" (s),
 "gpu" (false: not this machine's GPU; a url on another host is off it unless true).
-The first entry is the default. No model is named here: the user installs one and describes it.
+The first entry is the default, unless "default": "<engine name>" names another (#1047: the pane's
+Settings row, `wb image --default NAME`). No model is named here: the user installs one and describes it.
 What an engine writes must be a whole PNG, JPEG or WebP; a JPEG or WebP keeps its own suffix.
 
 A generation on the GPU holds the GPU lock and first unloads the coding models, as a task does;
@@ -87,10 +88,35 @@ def engine(name: str | None) -> tuple[str, dict]:
     if not have:
         raise KeyError(f"no image engine: describe one in {config_path()}")
     if name is None:
-        name = next(iter(have))
+        name = default_name(have)
     if name not in have:
         raise KeyError(f"no image engine {name!r} (have: {', '.join(have)})")
     return name, have[name]
+
+
+def default_name(have: dict[str, dict]) -> str | None:
+    """The engine `wb image` runs without --engine: the one images.json's "default" names, else
+    (no key, or a name that isn't an engine) the first entry, as before #1047."""
+    named = media.named_default(config_path(), "default")
+    return named if named in have else next(iter(have), None)
+
+
+def set_default(name: str) -> str:
+    """`wb image --default NAME` (#1047): images.json's "default", the line saying so."""
+    have = engines()
+    if name not in have:
+        raise KeyError(f"no image engine {name!r} (have: {', '.join(have)})" if have
+                       else f"no image engine: describe one in {config_path()}")
+    media.set_default(config_path(), "default", name)
+    return f"default image engine: {name}"
+
+
+def choices() -> dict:
+    """The pane's Images row (#1047, `wb models --json`'s media.image): the default and each
+    engine, with whether it needs this GPU (media.on_gpu)."""
+    have = engines()
+    return {"default": default_name(have),
+            "engines": [{"name": k, "gpu": media.on_gpu(e)} for k, e in have.items()]}
 
 
 def _argv(e: dict, values: dict, refs: list[Path]) -> list[str]:

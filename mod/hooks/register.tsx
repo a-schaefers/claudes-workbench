@@ -77,7 +77,7 @@ const SCOUT_NOTE =
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { WbChat, WbLine, WbLive, WbModels, WbPane, WbRoutes, WbSaid, WbStats, WbTask, WbTop } from '../types'
+import type { WbChat, WbLine, WbLive, WbMedia, WbModels, WbPane, WbRoutes, WbSaid, WbStats, WbTask, WbTop } from '../types'
 import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
 import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
@@ -773,7 +773,7 @@ function progressStops(after: number): [string, string, string][] {
   return [PROGRESS_OFF, ['on', `On, after ${after} min`,
     `A task past ${after} min of active work gets a check and one recommendation, waking Claude.`]]
 }
-const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress|splash|agents|busy|workflows|(?:role|gpu|api|think)-[a-z]+|size-[^:]+):/ // the rows whose ring the pane follows
+const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress|splash|agents|busy|workflows|(?:role|gpu|api|think|media)-[a-z]+|size-[^:]+):/ // the rows whose ring the pane follows
 
 // One settings row: a Button naming the choice, which opens its options under it, each a Button
 // (a click, or Enter on the ring), the chosen one marked. Under them the sentence of the option
@@ -2778,7 +2778,7 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
   const dim = (key: string, text: string) => <Text key={key} dimColor>{`  ${text}`}</Text>
   if (!r) {
     const line = dim('roles-why', role.why)
-    return { top: [line], cap: [], gpu: [line], api: [] }
+    return { top: [line], cap: [], gpu: [line, ...mediaRows(kit, $, view, m)], api: [] }
   }
   const roles = ROLES.map(name => ({ name, label: ROLE_LABELS[name]!, row: r.roles[name] }))
   const top = [
@@ -2813,6 +2813,7 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
         }} />
       </Box>)
   }
+  gpu.push(...mediaRows(kit, $, view, m)) // Images and Audio, after the models (#1047)
   const stored = Object.values(r.providers ?? {}).some(p => p.key === 'stored')
   const anyApi = roles.some(x => !!x.row.api)
   const api: any[] = []
@@ -2836,6 +2837,27 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
     api.push(dim('api-spend', spendLine(r)))
   }
   return { top, cap, gpu, api }
+}
+
+// The GPU group's Images and Audio rows (#1047): a row per media kind with a choice (two or more
+// engines, from `wb models --json`'s media), the engine wb image / wb audio use without --engine;
+// one off this GPU ("gpu": false, another host) says so. A pick runs `wb image|audio --default NAME`
+// (wb writes images.json's "default" or audio.json's "default_<kind>"); no dialog: nothing spends
+// and nothing leaves the machine. An older wb's models carry no media: no rows.
+const MEDIA_ROWS: [string, string, string][] = [['image', 'Images', 'image'], ['speech', 'Speech', 'audio'],
+  ['sfx', 'Sound effects', 'audio'], ['music', 'Music', 'audio']]
+export function mediaStops(cmd: string, kind: WbMedia): [string, string, string][] {
+  return kind.engines.map(e => [e.name, `${e.name}${e.gpu ? '' : ' · off this GPU'}`, `wb ${cmd} runs ${e.name} unless --engine names another.`])
+}
+function mediaRows(kit: Row, $: any, view: WbPane, m: WbModels | null) {
+  const out: any[] = []
+  for (const [kind, title, cmd] of MEDIA_ROWS) {
+    const k = m?.media?.[kind as keyof NonNullable<WbModels['media']>]
+    if (!k || k.engines.length < 2) continue
+    out.push(settingRow(kit, $, `media-${kind}`, title, mediaStops(cmd, k), k.default ?? k.engines[0]!.name, view,
+      v => runWb($, [cmd, '--default', v]).then(({ ok, out }) => { mem.roles = null; if (!ok) $.ui.toast(`workbench: ${brief(out)}`) })))
+  }
+  return out
 }
 
 async function poll($: any) {

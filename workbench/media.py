@@ -2,7 +2,8 @@
 in without a shell, the GPU to themselves, and candidates published under names nothing has.
 
 An engine file maps a name to an entry: {"command": "<argv template>"} or {"url": "…"}, plus
-whatever the kind of media adds. The first entry is the default; non-object values are ignored.
+whatever the kind of media adds. The first entry is the default, unless a top-level string key
+names another (`named_default`, #1047); non-object values are ignored.
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import models
+from . import models, store
 
 
 def run_group(argv: list[str], timeout: float, **kw) -> subprocess.CompletedProcess:
@@ -56,6 +57,36 @@ def load(path: Path) -> dict[str, dict]:
     except ValueError as e:
         raise RuntimeError(f"{path} doesn't parse ({e}); fix it by hand") from None
     return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
+
+
+def named_default(path: Path, key: str) -> str | None:
+    """The engine file's top-level string ``key`` (images.json's "default", audio.json's
+    "default_<kind>", #1047), or None; the caller ignores a name that isn't an engine of its kind.
+    A string, so load() skips it and a wb older than it reads the file unchanged."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):  # load() says so when the engines are read
+        return None
+    v = data.get(key) if isinstance(data, dict) else None
+    return v if isinstance(v, str) else None
+
+
+def set_default(path: Path, key: str, name: str) -> None:
+    """``key`` set to ``name`` in the engine file, under the config files' lock and written through
+    a link (store.edit_config), every other key and entry kept in its order; a key already there
+    keeps its place. Refused, nothing written, for an engine named ``key``: an entry, not a choice."""
+    def read():
+        try:
+            data = json.loads(path.read_text())
+        except ValueError as e:
+            raise RuntimeError(f"{path} doesn't parse ({e}); fix it by hand") from None
+        if not isinstance(data, dict):
+            raise RuntimeError(f"{path} isn't a JSON object; fix it by hand")
+        if isinstance(data.get(key), dict):
+            raise RuntimeError(f"an engine is named {key} in {path}: rename it, then set the default")
+        return data
+    with store.edit_config(path, read, f"the default engine ({key})") as data:
+        data[key] = name
 
 
 STRINGS = ("command", "url", "ref_arg", "model", "unload", "label", "notes", "key", "api", "beside")

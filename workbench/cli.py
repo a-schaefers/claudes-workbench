@@ -3932,7 +3932,8 @@ def _models_json() -> dict:
     cards the numbers of the cards its Ollama sees (models.card_numbers; None when unknown);
     `api`: the models of providers whose key wb can hold (stored by /connect), [{id, name,
     provider, provider_name, window, price {input, output} per million, free}]; `used`: the API
-    models tasks ran on, newest first; `optimize`: {done_at, models, running}."""
+    models tasks ran on, newest first; `optimize`: {done_at, models, running}; `media`: the image
+    and audio engines and their defaults (_media_json, #1047)."""
     seen: dict = {}
     gpu = [{"id": m.id, "label": m.label, "window": (m.config.get("limit") or {}).get("context"),
             "sizes": list(m.extra.get("sizes") or []),
@@ -3961,7 +3962,7 @@ def _models_json() -> dict:
     st = optimize.state()
     return {"gpu": gpu, "api": api, "used": used, "free_line": free_line or "free",
             "optimize": {"done_at": st.get("done"), "models": len(st.get("models") or {}),
-                         "running": bool(optimize.running(st))}}
+                         "running": bool(optimize.running(st))}, "media": _media_json()}
 
 
 def cmd_stats(a):
@@ -4665,10 +4666,11 @@ def cmd_lessons(a):
 
 
 def image_lines() -> list[str]:
-    out = []
-    for name, e in images.engines().items():
+    out, have = [], images.engines()
+    marked = media.named_default(images.config_path(), "default")  # the user's pick (#1047); none: as before
+    for name, e in have.items():
         why = images.ready(e)
-        out.append(f"  {name}{'' if media.on_gpu(e) else ' (off the GPU)'}: "
+        out.append(f"  {name}{' (default)' if name == marked else ''}{'' if media.on_gpu(e) else ' (off the GPU)'}: "
                    f"{str(e.get('label') or e.get('command') or e.get('url') or '')[:60]}"
                    f" · {'ready' if not why else why}"
                    + (" · a server: it holds its GPU memory while it runs"
@@ -4720,6 +4722,8 @@ def image_server_lines() -> list[str]:
 
 def cmd_image(a):
     """Local image generation: Claude writes the prompt, looks at the candidates, keeps one."""
+    if a.default is not None:  # "" too: it listed, exit 0, as if set (#1047 review, 2026-11-23)
+        return _media_default(images, a.default, a.prompt)
     # `wb image list`, like `wb skill list`, used to draw four pictures of "list" (the 2026-11-16 audit)
     if a.list or not a.prompt or a.prompt.strip().lower() in ("list", "ls"):
         print("\n".join(image_lines()) or f"no image engine: describe one in {images.config_path()}")
@@ -4744,6 +4748,8 @@ def cmd_image(a):
 def cmd_audio(a):
     """Local audio: Claude writes the brief, reads each candidate's checks (it can't hear them),
     keeps one or asks the user to listen."""
+    if a.default is not None:
+        return _media_default(audio, a.default, a.text)
     if a.list or not a.text or a.text.strip().lower() in ("list", "ls"):
         print("\n".join(audio.lines()) or f"no audio engine: describe one in {audio.config_path()}")
         return
@@ -4763,6 +4769,31 @@ def cmd_audio(a):
         die(str(e).strip("'\""))
     print(f"{len(made)} clip(s) in {out}: you can't hear them, so read each check line and look at "
           "each spectrogram; for music or a voice's character, ask the user to listen")
+
+
+def _media_default(mod, name: str, prompt: str | None) -> None:
+    """`wb image|audio --default NAME` (#1047; the pane's Images and Audio rows): the engine used
+    without --engine, written into images.json/audio.json. Only that: with a prompt it would read as
+    a run on NAME, which is --engine's."""
+    if prompt:
+        die("--default only sets the default engine; --engine picks one for a run")
+    try:
+        print(mod.set_default(name))
+    except (KeyError, RuntimeError, OSError) as e:
+        die(str(e).strip("'\""))
+
+
+def _media_json() -> dict:
+    """`wb models --json`'s media (#1047): {image|speech|sfx|music: {default, engines: [{name,
+    gpu}]}}, from images.choices and audio.choices; a file that doesn't parse leaves its kinds out
+    (wb image/audio --list says why), so the pane draws the rest."""
+    out: dict = {}
+    for read in (lambda: {"image": images.choices()}, audio.choices):
+        try:
+            out.update(read())
+        except (RuntimeError, OSError):
+            pass
+    return out
 
 
 API_SIZES = "sizes are for GPU models; API models run by role"
@@ -6556,18 +6587,20 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--size", default="1024x1024")
     s.add_argument("--seed", type=int)
     s.add_argument("--out", help="directory (default: a new one under $WB_HOME/images)")
-    s.add_argument("--engine", help="an engine from images.json (default: the first)")
+    s.add_argument("--engine", help="an engine from images.json (default: its \"default\", else the first)")
     s.add_argument("--ref", action="append", help="a reference image (repeatable), for engines "
                    "that take them")
     s.add_argument("--list", action="store_true", help="the configured engines")
+    s.add_argument("--default", metavar="NAME", help="make NAME the engine used without --engine "
+                   "(images.json's \"default\")")
     s.add_argument("--wait", action="store_true", help="wait for the tasks holding the GPU instead "
                    "of refusing (long: run it in the background)")
     s.set_defaults(f=cmd_image)
     s = sub.add_parser("audio", help="generate speech, sound effects or music with a local audio "
                        "model, each candidate checked for Claude, who can't hear it")
     s.add_argument("text", nargs="?", help="the script (speech) or the description (sfx, music)")
-    s.add_argument("--kind", choices=audio.KINDS, help="the first engine of this kind (default: "
-                   "the first engine)")
+    s.add_argument("--kind", choices=audio.KINDS, help="this kind's default engine, else its first "
+                   "(default: the first engine's kind)")
     s.add_argument("--n", type=_candidates, default=3, help="candidates (seeds SEED, SEED+1, ...)")
     s.add_argument("--seconds", type=float, help="the length, for engines that take one")
     s.add_argument("--voice", help="one of the engine's voices")
@@ -6579,6 +6612,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--out", help="directory (default: a new one under $WB_HOME/audio)")
     s.add_argument("--no-check", action="store_true", help="skip the listener and the spectrograms")
     s.add_argument("--list", action="store_true", help="the configured engines")
+    s.add_argument("--default", metavar="NAME", help="make NAME its kind's engine used without "
+                   "--engine (audio.json's \"default_<kind>\")")
     s.add_argument("--wait", action="store_true", help="wait for the tasks holding the GPU instead "
                    "of refusing (long: run it in the background)")
     s.set_defaults(f=cmd_audio)
