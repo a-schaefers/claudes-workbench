@@ -259,6 +259,27 @@ test('a task is late only from the progress checks\' own points, never from a sh
   expect(row(short(60, 0))[0]!.at(-1)).toEqual({ text: '60m', dim: true })
 })
 
+test('the elapsed time is late only while the estimate says over, never beside the time left', () => {
+  // the #1048 review, seen live: the user's --after 5 under a typical 20 drew 8m in warning beside
+  // "~12m left", the colour saying what no word did
+  const after5 = (mins: number, o: Partial<TaskFacts> = {}) =>
+    fact({ name: 't', ...timed(mins), lateMin: 5, last: 'edit a.py', ...o })
+  const row = (t: TaskFacts) => taskRows([t], { cols: 89, now: NOW, spin: '✻', followed: '', compact: false })
+  expect(etaOf(after5(8), NOW)).toEqual({ text: '~12m left' })
+  expect(row(after5(8))[0]!.at(-1)).toEqual({ text: '8m', dim: true })
+  // over the typical, and past both of the checks' points: the words and the colour agree
+  expect(etaOf(after5(25), NOW)).toEqual({ text: '5m over', color: 'error' })
+  expect(row(after5(25))[0]!.at(-1)).toEqual({ text: '25m', color: 'error' })
+  // with no estimate shown (fewer than three timed tasks) there is no word to repeat: no colour
+  expect(row(after5(25, { typicalN: 2 }))[0]!.at(-1)).toEqual({ text: '25m', dim: true })
+})
+
+test('a narrow group header gives up its task count before its stuck count', () => {
+  // the #1048 review, seen live at 53 columns: `· 1 stuck` was cut off while `· 3 tasks` stayed
+  expect(draw(G2, 53)[0]).toBe('▾ hiscore · 1 running · 1 review · 1 stuck   1/3 done')
+  for (let cols = 30; cols <= 120; cols++) expect([cols, draw(G2, cols)[0]!.length <= cols]).toEqual([cols, true])
+})
+
 test('an API task whose model wb could not time shows no estimate and is never late', () => {
   // step A's review: hosted.json lacks the model, so the runner wrote no typical and no late_min
   const t = fact({ name: 'port-parser', ...DEEPSEEK, role: 'significant', spend: 0.31, createdAt: NOW - 50 * MIN,
@@ -401,6 +422,8 @@ test('the API day cap shows on Tasks only while an API task works, in its colour
   expect(capRow(API, 5, 5, 71)!.at(-1)?.color).toBe('error')
   expect(capRow([one], 0.42, 5, 71)).toBe(null)
   expect(capRow(G2, 0.42, 5, 71)).toBe(null) // its API task is in review
+  // one waiting for its provider's slot isn't running yet (the owner: "only while an API task runs")
+  expect(capRow(QUEUED, 0.42, 5, 71)).toBe(null)
   expect(text(capRow(API, 0.42, null, 71)!)).toBe('API today $0.42')
 })
 

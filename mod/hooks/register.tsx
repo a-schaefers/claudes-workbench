@@ -83,7 +83,7 @@ import type { Pose } from './apprentice'
 import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
 import type { Plan, Target } from './splash'
 import { activity, loopLength, TICKER_MS, tickerCells } from './modeline'
-import { ago, bar, capRow, clip, compactWanted, taskLines } from './tasks'
+import { ago, apiWorking, bar, capRow, clip, compactWanted, taskLines } from './tasks'
 import type { Part as RowPart } from './tasks'
 
 const PANE = 'workbench'
@@ -2454,17 +2454,18 @@ function listRows(list: WbTask[], followed: string, now: number, spin: string, c
 }
 
 // The day cap's line's numbers on the Tasks tab (#1048): `wb route --json` as rolesNow last read it,
-// only while an API task is open (the owner, 2026-11-23); null otherwise, or before the first read
+// only while an API task works (the owner, 2026-11-23: "only while an API task runs"); null
+// otherwise, or before the first read
 function capOf(list: WbTask[]): { spent: number; cap: number | null } | null {
-  if (!list.some(t => t.via === 'api' && ACTIVE.has(t.phase))) return null
+  if (!apiWorking(list)) return null
   const r = mem.roles?.routes
   return r ? { spent: Number(r.spend_today?.usd ?? 0), cap: typeof r.day_usd === 'number' ? r.day_usd : null } : null
 }
 
-// Reads them again past ROLES_CACHE_MS while an API task is open, off the render's path (a
+// Reads them again past ROLES_CACHE_MS while an API task works, off the render's path (a
 // `wb route --json` there held the draw), then redraws
 async function capNow($: any, list: WbTask[]) {
-  if (mem.rolesReading || !list.some(t => t.via === 'api' && ACTIVE.has(t.phase))) return
+  if (mem.rolesReading || !apiWorking(list)) return
   if (mem.roles && (await $.clock.now()) - mem.roles.at < ROLES_CACHE_MS) return
   mem.rolesReading = true
   try {

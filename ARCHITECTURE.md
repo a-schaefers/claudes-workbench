@@ -4933,18 +4933,20 @@ session over `window`, `┊` at `tuned.fresh_at`), `~6m left` or `3m over` again
 (only with `TYPICAL_MIN` 3 timed tasks), the tool count and `3.9K out` (tokens written: the input
 re-reads the context each step). Late is coloured only from the progress checks' own points, 1× and
 2× status `late_min` (step A's review: a 4-minute median coloured a 5-minute task late, where no
-check comes before `progress.FLOOR_MIN`); an API task `hosted.json` doesn't list has no typical and
+check comes before `progress.FLOOR_MIN`), and only once the estimate says `over` (an `--after` under
+the typical length coloured it beside `~12m left`; no estimate shown, no colour); an API task `hosted.json` doesn't list has no typical and
 shows no estimate. A passing review, a parked task and a closed one have no line 2; closed ones fold
 into one dim line per block. Tasks of one `--group` (two or more) sit under a header (`▾ hiscore · 3
-tasks · 2 running · 1 testing   $0.04  ░░░░░░░░ 0/3 done`, done counting reviews and closed ones)
-joined by `├ │ └`; blocks and their tasks keep start order, so nothing jumps. Columns line up within
+tasks · 2 running · 1 testing   $0.04  ░░░░░░░░ 0/3 done`, done counting reviews and closed ones;
+narrow, it drops the bar, the spend, then `· 3 tasks`, so `· 1 stuck` stays) joined by `├ │ └`; blocks and their tasks keep start order, so nothing jumps. Columns line up within
 a block and drop for the whole block until the widest row fits: line 1 the role, the model, the long
 stage (`r2`), the long place (`API`), the place; line 2 the tokens, the bar to 5 cells, the tool
 count, the bar (`ctx 56%` stays), the estimate. One row a task (`compactWanted`) in a pane under 20
 rows (the 14-row box below a ~100-column terminal) or when two would leave the transcript, the
 apprentice, the tabs and the modeline under 12 rows. A press on a task's first row (a `plain` Button
 keyed `task-<name>`) follows it (`followTask`, `mem.picked`, which `focusOf` keeps while the task is
-listed). While an API task is open, `API today $0.42 of the $5 day cap  ▉░░░░░░░░░` sits above the
+listed). While an API task works (running, testing or asking: not one queued for its slot, the
+owner's "only while an API task runs"), `API today $0.42 of the $5 day cap  ▉░░░░░░░░░` sits above the
 saving (`capRow`: warning from `meter.CHECKIN_SHARE`, error at the cap), from `wb route --json` as
 `rolesNow` caches it, read again past `ROLES_CACHE_MS` off the render's path (`capNow`).
 
@@ -5504,7 +5506,7 @@ off), not `wb start`'s.
 | `round`, `round_started_at` | the round (every kind counts); its start |
 | `round_for` | why the round is (#1048, for the pane's stage words): `start` (`wb start`), `fix` (an auto-fix), `self_review`, `feedback` (`wb feedback`), `steer` (a steer round), `fresh` (a full window's fresh session, `_full_round`), `next` (`wb next`), `resume` (`wb resume`); set with each new round, never cleared; missing before #1048 |
 | `typical` | `{min, n}` at each round's start (`runner.typical_now`): the step's typical active minutes on this model and size (`router.expected`, the files alone; a writing task's on writing's record, `router.record_role`) and how many timed tasks back it; the pane shows an estimate only from `progress.TYPICAL_MIN` (3); missing when there is no timed task, or for an API model `hosted.json` doesn't list |
-| `late_min` | with `typical`: the progress checks' first point (`progress.typical`: the user's `--after`, else the typical length at least `FLOOR_MIN`), where the pane starts colouring a task late (2× it error); missing while that is only the size's default (#1048) |
+| `late_min` | with `typical`: the progress checks' first point (`progress.typical`: the user's `--after`, else the typical length at least `FLOOR_MIN`), where the pane starts colouring a task late once its estimate says `over` (2× it error); missing while that is only the size's default (#1048) |
 | `cards` | after the lease (`runner.cards_now`): the cards a local GPU model's Ollama sees (`models.card_numbers`), for the pane's `GPU 1`; only on a machine of two or more discrete cards; null when a later runner can't tell, missing otherwise (#1048) |
 | `limits` | `{think?, silence?, round?}`: unflagged limits raised for a model measured slower (`runner.stretch_limits`); null when none |
 | `api_entry` | an API task's capped `{limit, options: {max_tokens}}`, written as `drive` resolves its model (`runner.pin_api`), read every round instead of the catalog (#1017); null or absent on the GPU |
@@ -5914,7 +5916,8 @@ view (#1048): `cards` on one card of two (a runner driven in the test's process,
 `hardware.gpus` patched), none on one card nor for an API or remote model, cleared by a later runner; `late_min` at
 `FLOOR_MIN` over a 4-minute median and at the user's `--after`, and no `typical` for an API model `hosted.json` lacks
 (`Lifecycle`); tasks.test.ts: every mockup character for character, every width from 30 to 120, the drop order, the
-context bar, the estimate and lateness from `late_min`, an untimed API task with no estimate; register.test.tsx: three
+context bar, the estimate and lateness from `late_min` (and only beside `over`), a narrow header keeping `· 1 stuck`, an
+untimed API task with no estimate, no day-cap line for a queued API task; register.test.tsx: three
 tasks at once under one header with their cards and spend at 71 columns, two rows a task at 50, one in a 14-row box,
 the status line's `1 stuck` apart from review, a row's press following its task, the day-cap line only while an API
 task runs, and the splash's measured rows.

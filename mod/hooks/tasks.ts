@@ -34,7 +34,6 @@ export type TaskFacts = Pick<WbTask, 'name' | 'phase' | 'round' | 'model' | 'lab
   spend: number | 'plan' | 'none' | null   // null: no api record (a GPU task, or an older wb)
 }
 
-const ACTIVE = new Set(['queued', 'running', 'testing', 'asking'])
 const WORKING = new Set(['running', 'testing', 'asking']) // where the context and the estimate mean something
 const CLOSED = new Set(['accepted', 'discarded'])
 /** Each phase's colour; the glyph and the word say the same without it. */
@@ -145,10 +144,15 @@ const activeOf = (t: TaskFacts, now: number) =>
 const typicalOf = (t: TaskFacts) => (t.typicalN >= TYPICAL_MIN && t.typicalMin > 0 ? t.typicalMin * 60 : 0)
 // late from the progress checks' own points, 1x and 2x status `late_min`, never from a raw median:
 // a typical length of 4 minutes coloured a 5-minute task late, where no check comes before
-// progress.FLOOR_MIN (step A's review, #1048); '' before the first, or while it isn't working
+// progress.FLOOR_MIN (step A's review, #1048); '' before the first, or while it isn't working.
+// And only once the estimate says `over`: the user's --after of 5 under a typical 20 drew the
+// elapsed time late beside `~12m left`, the colour saying what no word did (the #1048 review, seen
+// live); with no estimate shown there is no word to repeat, so no colour either.
 const lateOf = (t: TaskFacts, now: number): '' | 'warning' | 'error' => {
-  if (!(t.lateMin > 0) || !WORKING.has(t.phase)) return ''
+  const typ = typicalOf(t)
+  if (!(t.lateMin > 0) || !typ || !WORKING.has(t.phase)) return ''
   const active = activeOf(t, now), at = t.lateMin * 60
+  if (active < typ) return ''
   return active >= 2 * at ? 'error' : active >= at ? 'warning' : ''
 }
 
@@ -424,6 +428,9 @@ function header(group: string, tasks: TaskFacts[], cols: number, compact: boolea
   const ll = textOf(left).length
   if (!compact && ll + 2 + textOf(right).length > cols) right = [...lead, tally]
   if (!compact && ll + 2 + textOf(right).length > cols) right = [tally]
+  // then `· 3 tasks` (the tally says it): at 53 columns a stuck group's header cut `· 1 stuck` off
+  // while the count of tasks stayed (the #1048 review, seen live)
+  if (!compact && ll + 2 + textOf(right).length > cols) left.splice(2, 1)
   const rl = textOf(right).length
   const cut = clipParts(left, cols - rl - 2)
   return clipParts([...cut, { text: ' '.repeat(Math.max(0, cols - textOf(cut).length - rl)) }, ...right], cols)
@@ -473,12 +480,17 @@ export function taskLines(list: TaskFacts[], o: { cols: number; now: number; spi
   return out
 }
 
+/** Whether an API task is working (running, testing, asking): the day cap's line shows only then.
+ * A queued one waiting for its provider's slot drew it too (the #1048 review, seen live): the owner
+ * chose "only while an API task runs". */
+export const apiWorking = (list: Pick<TaskFacts, 'via' | 'phase'>[]) => list.some(t => t.via === 'api' && WORKING.has(t.phase))
+
 /** The API day cap's line, only while an API task is working (the owner, 2026-11-23: on Tasks only
  * then; Settings has it always): `API today $0.42 of the $5 day cap  █▍░░░░░░░░`, warning from
  * CHECKIN_SHARE of the cap, error at it; without a cap, today's spend alone. */
 export function capRow(list: TaskFacts[], spent: number, cap: number | null, cols: number,
   usd: (x: number) => string = plainUsd): Part[] | null {
-  if (!list.some(t => t.via === 'api' && ACTIVE.has(t.phase))) return null
+  if (!apiWorking(list)) return null
   if (!(cap && cap > 0)) return clipParts([{ text: `API today ${usd(spent)}`, dim: true }], cols)
   const share = spent / cap
   const color = share >= 1 ? 'error' : share >= CHECKIN_SHARE ? 'warning' : 'success'

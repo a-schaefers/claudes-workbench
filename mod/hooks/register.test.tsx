@@ -6121,6 +6121,13 @@ test('#1048: the API day cap shows on the Tasks tab only while an API task runs'
   const reads = runs.filter(r => r[1] === 'route').length
   await clock.advance(5000)
   expect(runs.filter(r => r[1] === 'route').length).toBe(reads)   // read again only past ROLES_CACHE_MS
+  // queued again, for its provider's slot: not running, so no line (the #1048 review, seen live)
+  files['/wb/tasks/port-parser/status.json'] = JSON.stringify({ phase: 'queued', round: 2, updated_at: T0 + 5,
+    last: 'waiting for an API slot: 3 tasks run on deepseek', api: { usd: 0.31 } })
+  await clock.advance(31_000)
+  await ui.redraw()
+  expect(await ui.find({ type: 'Text', text: /^◌ port-parser +waits for a slot/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^API today/ })).toBeFalsy()
   files['/wb/tasks/port-parser/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: T0 + 10, tests: { ok: true },
     last: 'tests passed: Claude reviews next', api: { usd: 0.31 } })
   await clock.advance(31_000)
