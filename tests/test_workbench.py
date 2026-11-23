@@ -24777,6 +24777,15 @@ class RealOpenCodeSkillFiles(Base):
         self.assertIn("CANARY-REFERENCE", answers[1])                         # and readable from the worktree
 
 
+class _QuietUpstream(ThreadingHTTPServer):
+    """The test's provider: a request the keyhole drops on purpose (a handler that raises) breaks
+    its pipe, and socketserver's traceback on stderr read as the keyhole's (WSL2 nightly of
+    5678530, 2026-11-23). The keyhole's own errors are what the tests check."""
+
+    def handle_error(self, request, client_address):
+        pass
+
+
 class _Upstream(http.server.BaseHTTPRequestHandler):
     """A provider for the keyhole's tests: records each request (method, path, headers, body) on
     its server's `seen` and answers as its server's `mode` says: "ok" (an OpenAI SSE answer,
@@ -24872,7 +24881,7 @@ class _KeyholeTest(Base):
         super().setUp()
         from workbench import keyhole, models
         self.kh_mod, self.models = keyhole, models
-        self.up = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
+        self.up = _QuietUpstream(("127.0.0.1", 0), _Upstream)
         self.up.daemon_threads = True
         self.up.seen, self.up.mode, self.up.status, self.up.message = [], "ok", 200, ""
         self.up.retry_after, self.up.chunks, self.up.gap = None, 1, 0
