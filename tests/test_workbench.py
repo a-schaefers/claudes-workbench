@@ -427,6 +427,16 @@ class Lifecycle(Base):
             task.set_status(cards=[1])
             self.assertEqual(runner.cards_now(task, dataclasses.replace(m, kind="api")), {"cards": None})
 
+    def test_a_card_or_record_that_cant_be_read_still_runs_the_round(self):
+        # the #1048 merge review: the pane's label and estimate are read at the lease and the round's
+        # start, and a raise there failed the round for a fact only the pane shows
+        with mock.patch.object(runner.models, "card_numbers", side_effect=OSError("sysfs")), \
+                mock.patch("workbench.router.expected", side_effect=ValueError("bad row")):
+            st = self.drive_here("t-cardraise").status
+        self.assertEqual(st["phase"], "review")
+        self.assertNotIn("cards", st)
+        self.assertNotIn("typical", st)
+
     def test_start_refuses_when_opencode_isnt_on_path_and_leaves_nothing(self):
         # the 2026-11-16 audit: the runner emptied the GPU, then the round died as "opencode exited 1"
         os.environ["WB_OPENCODE_BIN"] = "wb-no-such-opencode run"

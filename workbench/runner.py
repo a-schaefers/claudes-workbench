@@ -1128,9 +1128,12 @@ def typical_now(task: store.Task) -> dict:
     a few minutes (step A's review); none while that is only the size's default."""
     from . import router  # router -> models; imported late, as checkin_text does
     spec = task.spec
-    mins, n = router.expected(spec.get("model", ""), spec.get("size", "significant"),
-                              spec.get("weights_id"), router.record_role(spec.get("role")))
-    late, source = progress.typical(spec)
+    try:  # the pane's estimate only: a record unreadable never stops the round it would time
+        mins, n = router.expected(spec.get("model", ""), spec.get("size", "significant"),
+                                  spec.get("weights_id"), router.record_role(spec.get("role")))
+        late, source = progress.typical(spec)
+    except Exception:
+        return {}
     return {**({"typical": {"min": round(float(mins), 2), "n": n}} if mins is not None else {}),
             **({"late_min": round(float(late), 2)} if source != "default" else {})}
 
@@ -1141,12 +1144,15 @@ def cards_now(task: store.Task, m: models.Model) -> dict:
     tasks apart; one card stays `GPU`, and an API or remote model has none. A runner after one
     that wrote cards clears them when it can't tell."""
     cards = None
-    if m.kind == "gpu" and m.engine == "ollama" and not m.remote:
-        cards = models.card_numbers(m.root)
-        if cards and len(cards) < 2:
-            devs = hardware.gpus(windows=False)
-            if len([g for g in devs if g.get("discrete")] or devs) < 2:
-                cards = None
+    try:  # the pane's label only: a server or sysfs that can't be read never stops the round
+        if m.kind == "gpu" and m.engine == "ollama" and not m.remote:
+            cards = models.card_numbers(m.root)
+            if cards and len(cards) < 2:
+                devs = hardware.gpus(windows=False)
+                if len([g for g in devs if g.get("discrete")] or devs) < 2:
+                    cards = None
+    except Exception:
+        cards = None
     return {"cards": cards} if cards or task.status.get("cards") else {}
 
 
