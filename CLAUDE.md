@@ -81,11 +81,11 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   inotify and pidfd waits. `chat.py` + `chat_static/`, `webpush.py`: the web chat. `try/`:
   `wb try`'s sample.
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time).
-- `skill/workbench/`: the `/workbench` procedure. `mod/`: the plugin (`hooks/register.tsx`, with
+- `skill/workbench/`: the `/workbench` procedure; `skill/agents/`: other agents' skill for the chat's API. `mod/`: the plugin (`hooks/register.tsx`, with
   the consent gates on sends to upstream and on the roles; `plugin.json` has no version, so installs track main).
   `bin/`: the launchers. `tests/`: ARCHITECTURE.md's *The tests*. `.github/`, `scripts/`: CI and `ship.sh` (*Shipping to main*).
   `systemd/`, `launchd/`: keep the chat up. `docs/`: images (a replaced one gets a new name, for
-  GitHub's cache), the release checklist and notes.
+  GitHub's cache), the release checklist and notes, `chat-api.md` (the chat's HTTP API).
 
 ## How a task runs
 Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change must not break:

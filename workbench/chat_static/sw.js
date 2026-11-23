@@ -32,9 +32,11 @@ async function what() {
   if (test && now - test < 120 && test >= newest) return { title: 'Notifications work', body: "You'll hear from Claude here while you're away." }
   const a = open.at(-1)
   if (a && !(last && last.ts > a.ts)) {
-    if (a.kind === 'plan') return { title: "Claude's plan is ready", body: 'Send it back with a note, or approve it in the terminal.' }
-    if (a.kind === 'question') return { title: 'Claude asks', body: cut(plain((a.detail?.questions || [])[0]?.question), 180) }
-    return { title: 'Claude wants to use ' + a.tool, body: cut(plain(a.text), 180) }
+    // for another agent's request (#1042): whose work it is, in the title
+    const whose = Array.isArray(a.for) && a.for.length ? ' (for ' + a.for.join(', ') + ')' : ''
+    if (a.kind === 'plan') return { title: "Claude's plan is ready" + whose, body: 'Send it back with a note, or approve it in the terminal.' }
+    if (a.kind === 'question') return { title: 'Claude asks' + whose, body: cut(plain((a.detail?.questions || [])[0]?.question), 180) }
+    return { title: 'Claude wants to use ' + a.tool + whose, body: cut(plain(a.text), 180) }
   }
   // the command as it is: plain() would drop the `*` of `rm -rf runs/*`
   if (last && last.from === 'notice') return { title: last.text,

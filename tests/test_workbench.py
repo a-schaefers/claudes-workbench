@@ -22902,6 +22902,401 @@ class WebChat(Base):
         self.assertEqual((reply["from"], reply["text"]), ("claude", "Step 2 is in review."))
         self.assertIn("Claude: Step 2 is in review.", run_wb("chat", "log"))
 
+    # ---- other agents (#1042): their own tokens, never the user's authority ----
+
+    def _agent(self, name="my-agent"):
+        with contextlib.redirect_stderr(io.StringIO()):
+            return run_wb("chat", "token", "add", name).strip()
+
+    def _listening(self):
+        from workbench import models
+        me = os.getpid()
+        store.write_json(self.chat.chat_dir() / "listener.json",
+                         {"session": "s1", "cwd": "/home/u/project", "pid": me, "start": models._started(me)})
+
+    def test_an_agent_token_sends_and_reads_but_never_answers_dialogs_or_marks_the_user_away(self):
+        tok = self._agent()
+        self.assertTrue(tok.startswith("wba-"))
+        kept = self.chat.agents_path()
+        self.assertEqual(oct(kept.stat().st_mode & 0o777), "0o600")
+        self.assertNotIn(tok, kept.read_text())                            # only its hash is kept
+        self.assertEqual(self.call("/api/health", token=tok), (200, {"api": 1, "listening": False}))
+        code, r = self.call("/api/send", {"text": "refactor the parser in ~/src/app"}, token=tok)
+        self.assertEqual(code, 200)
+        self.assertEqual((r["message"]["from"], r["message"]["role"]), ("my-agent", "agent"))
+        self.assertIsNone(r["listener"])                                  # nobody will read it yet
+        code, st = self.call("/api/state", token=tok)
+        self.assertEqual((code, st["api"]), (200, 1))
+        self.assertIsNone(st["messages"][-1]["received"])                 # read like the user's
+        pending = [json.loads(x) for x in run_wb("chat", "pending").splitlines()]
+        self.assertEqual([(m["from"], m["role"]) for m in pending], [("my-agent", "agent")])
+        self.assertIn("agent my-agent: refactor the parser", run_wb("chat", "log"))
+        asks = self.chat.ask("Bash", "git push origin main")
+        for path, body in (("/api/answer", {"id": asks["id"], "answer": "allow"}), ("/api/prefs", {"away": "allow"}),
+                           ("/api/push", {"test": True}), ("/api/active", {}), ("/api/seen", {"ids": ["x"]})):
+            code, r = self.call(path, body, token=tok)
+            self.assertEqual(code, 403, path)
+            self.assertTrue(r["error"].startswith("agent tokens can't "), r)
+        self.assertIsNone(self.chat.find_ask(asks["id"])["answer"])      # the dialog still waits
+        self.assertEqual(self.chat.prefs()["away"], "ask")
+        self.assertFalse((self.chat.chat_dir() / "away.json").exists())
+        self.assertEqual(self.call("/api/prefs", {"away": "ask"}, token=self.chat.token())[0], 200)  # the user's: all of it
+        self.assertIn("my-agent  since ", run_wb("chat", "token", "list"))
+
+    def test_a_revoked_agent_token_gets_401_and_names_are_checked(self):
+        tok = self._agent()
+        self.assertEqual(self.call("/api/state", token=tok)[0], 200)
+        self.assertIn("revoked my-agent", run_wb("chat", "token", "revoke", "my-agent"))
+        self.assertEqual(self.call("/api/state", token=tok)[0], 401)
+        self.assertEqual(self.call("/api/send", {"text": "hi"}, token=tok)[0], 401)
+        self.assertEqual(self.call("/api/state", token="wba-" + "x" * 40)[0], 401)
+        for bad in ("My Agent", "claude", "user", "a" * 33):
+            with self.assertRaises(ValueError):
+                self.chat.agent_add(bad)
+        self._agent("two")
+        with self.assertRaises(ValueError):                                # one token per name
+            self.chat.agent_add("two")
+        self.assertEqual(run_wb("chat", "token", "list").split()[0], "two")
+
+    def test_a_revoked_agent_tokens_open_stream_and_held_wait_read_nothing_more(self):
+        # the #1042 review: both went on reading Claude's replies to the agent after `wb chat token
+        # revoke` (and after a new token under its name), as nothing re-checked the token
+        tok = self._agent()
+        self._listening()
+        mid = self.call("/api/send", {"text": "hi"}, token=tok)[1]["message"]["id"]
+        stream = self._held_wait("/api/stream", tok)
+        wait = self._held_wait(f"/api/wait?after={mid}&timeout=20&until=reply", tok)
+        got = b""
+        while b"event: state" not in got:
+            got += stream.recv(1 << 20)
+        time.sleep(0.3)
+        run_wb("chat", "token", "revoke", "my-agent")
+        self._agent()                                                       # its name again, a new token
+        self.chat.reply("After the revoke.", [mid])
+
+        def rest(c):
+            out = b""
+            while chunk := c.recv(1 << 20):
+                out += chunk
+            c.close()
+            return out
+        got += rest(stream)                                                 # the stream ended
+        self.assertNotIn(b"After the revoke.", got)
+        answered = rest(wait)
+        self.assertTrue(answered.startswith(b"HTTP/1.0 401"), answered[:100])
+        self.assertNotIn(b"After the revoke.", answered)
+
+    def test_wait_returns_the_replies_to_that_message_and_done_after_the_turns_end(self):
+        tok, user = self._agent(), self.chat.token()
+        self._listening()
+        mid = self.call("/api/send", {"text": "add a --json flag to app"}, token=tok)[1]["message"]["id"]
+        run_wb("chat", "ack", mid, "--by", "s1")
+        uid = self.call("/api/send", {"text": "and the docs?"}, token=user)[1]["message"]["id"]
+        run_wb("chat", "ack", uid, "--by", "s1")
+        code, r = self.call(f"/api/wait?after={mid}&timeout=0", token=tok)
+        self.assertEqual((code, r["replies"], r["done"], r["listener"]["session"]), (200, [], False, "s1"))
+        run_wb("chat", "reply", "--to", uid, "--text", "Docs too, yes.")          # the user's alone
+        # no --to in a turn that took the user's message: the user's alone too. The agent's message
+        # came into the user's turn and read every plain reply to them (the #1042 review)
+        out = run_wb("chat", "reply", "--text", "My diary is in ~/private.")
+        self.assertEqual([(r["re"], r["to"]) for r in self.chat.thread() if r["text"] == "My diary is in ~/private."],
+                         [([uid], ["user"])], out)
+        run_wb("chat", "reply", "--to", mid, "--text", "On it: delegating two steps.")
+        _, r = self.call(f"/api/wait?after={mid}&timeout=0", token=tok)
+        self.assertEqual([x["text"] for x in r["replies"]], ["On it: delegating two steps."])
+        first = r["replies"][0]
+        self.assertEqual((first["re"], first["to"]), ([mid], ["my-agent"]))
+        self.assertNotIn("~/private", json.dumps(self.call("/api/state", token=tok)[1]))
+        _, mine = self.call(f"/api/wait?after={uid}&timeout=0", token=user)
+        self.assertEqual(len(mine["replies"]), 2)                         # the user sees theirs
+        got = {}
+        t = threading.Thread(target=lambda: got.update(r=self.call(f"/api/wait?after={first['id']}&timeout=20", token=tok)))
+        began = time.monotonic()
+        t.start()
+        time.sleep(0.5)
+        self.assertTrue(t.is_alive())                                     # held: the turn runs on
+        run_wb("chat", "ended", mid, uid, "--by", "s1")                   # the mod: the turn ended
+        t.join(10)
+        self.assertLess(time.monotonic() - began, 8)
+        self.assertEqual((got["r"][1]["replies"], got["r"][1]["done"]), ([], True))
+        self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["done"])
+        # a later report (Claude woken when its agents finish): until=reply holds for it
+        t = threading.Thread(target=lambda: got.update(r=self.call(
+            f"/api/wait?after={first['id']}&timeout=20&until=reply", token=tok)))
+        t.start()
+        time.sleep(0.5)
+        self.assertTrue(t.is_alive())
+        run_wb("chat", "reply", "--to", mid, "--text", "Done: branch json-flag, tests pass.")
+        t.join(10)
+        late = got["r"][1]["replies"]
+        self.assertEqual(([x["text"] for x in late], got["r"][1]["done"]), (["Done: branch json-flag, tests pass."], False))
+        run_wb("chat", "ended", "--by", "s1")                             # that turn took no message
+        news = self.chat.news(store.now() + 20)                           # the phone's pushes
+        self.assertNotIn(late[0]["id"], news)                             # a reply only to the agent
+        self.assertIn(next(m["id"] for m in self.chat.thread() if m["text"] == "Docs too, yes."), news)
+        self.assertTrue(self.call(f"/api/wait?after={late[0]['id']}&timeout=0", token=tok)[1]["done"])
+        # a message of its own this turn took: the default `re` once its turn ended leaves `mid` out
+        m2 = self.call("/api/send", {"text": "and a changelog line"}, token=tok)[1]["message"]["id"]
+        run_wb("chat", "ack", m2, "--by", "s1")
+        run_wb("chat", "reply", "--text", "Added.")
+        self.assertEqual(self.chat.thread()[-1]["re"], [m2])
+        self.assertEqual(self.call("/api/wait?after=nope&timeout=0", token=tok)[0], 404)
+        self.assertEqual(self.call(f"/api/wait?after={mid}&timeout=601", token=tok)[0], 400)
+        with self.assertRaises(SystemExit):
+            run_wb("chat", "reply", "--to", "nope", "--text", "x")       # no such message
+        (self.chat.chat_dir() / "listener.json").unlink()                 # nobody listens: at once
+        began = time.monotonic()
+        _, r = self.call(f"/api/wait?after={m2}&timeout=4", token=tok)
+        self.assertLess(time.monotonic() - began, 3)
+        self.assertIsNone(r["listener"])
+
+    def test_the_31st_send_in_a_minute_from_an_agent_gets_429(self):
+        tok = self._agent()
+        for i in range(self.chat.AGENT_SENDS_PER_MIN):
+            self.assertEqual(self.call("/api/send", {"text": f"n{i}"}, token=tok)[0], 200)
+        code, r = self.call("/api/send", {"text": "one more"}, token=tok)
+        self.assertEqual(code, 429)
+        self.assertTrue(1 <= r["retry_after"] <= 60)
+        self.assertEqual(self.call("/api/send", {"text": "mine"}, token=self.chat.token())[0], 200)  # not the user's
+        lim = self.chat.RateLimit(2)
+        self.assertEqual([lim.hit("a", 0), lim.hit("a", 10), lim.hit("a", 20), lim.hit("a", 61)], [0, 0, 40, 0])
+
+    def test_ask_claude_hands_a_request_over_and_exits_0_with_the_reply(self):
+        # the portable skill's client, standard library only, against this server and a listener
+        # played here: it takes the agent's message, replies to it, and ends its turn
+        script = Path(__file__).resolve().parent.parent / "skill/agents/claude-workbench/scripts/ask_claude.py"
+        tok = self._agent()
+        env = {**os.environ, "CLAUDE_WB_URL": f"http://localhost:{self.port}", "CLAUDE_WB_TOKEN": tok}
+        attach = Path(self.tmp.name) / "notes.txt"
+        attach.write_text("the parser's edge cases")
+        run = lambda *a, e=env: subprocess.run([sys.executable, "-I", str(script), *a], env=e,
+                                                capture_output=True, text=True, timeout=60)
+        r = run("fix it")
+        self.assertEqual(r.returncode, 2, r.stderr)                        # nobody listening
+        self.assertIn("Claude isn't listening", r.stderr)
+        self.assertEqual(self.chat.thread(), [])                          # health first: nothing sent
+        self.assertEqual(run("fix it", e={**env, "CLAUDE_WB_TOKEN": "wba-nope"}).returncode, 3)
+        self._listening()
+        stop = threading.Event()
+
+        def claude():
+            while not stop.is_set():
+                for m in self.chat.pending():
+                    self.chat.ack(m["id"], "s1")
+                    files = [f["name"] for f in m.get("files") or []]
+                    self.chat.reply(f"Done: {m['text']} ({', '.join(files)}).", [m["id"]])
+                    self.chat.turn_ended([m["id"]], "s1")
+                time.sleep(0.1)
+        t = threading.Thread(target=claude)
+        t.start()
+        try:
+            r = run("fix the parser in ~/src/app", "--file", str(attach), "--timeout", "30")
+        finally:
+            stop.set()
+            t.join()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "Done: fix the parser in ~/src/app (notes.txt).")
+        self.assertIn("[done: follow up with ask_claude.py --after ", r.stderr)
+
+    # ---- the #1042 review ----
+
+    def _held_wait(self, path, token):
+        """A wait sent on a raw socket, its client then gone without reading the answer."""
+        c = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        c.sendall(f"GET {path} HTTP/1.1\r\nHost: localhost:{self.port}\r\n"
+                  f"Authorization: Bearer {token}\r\n\r\n".encode())
+        return c
+
+    def test_a_wait_whose_client_hung_up_gives_its_place_back(self):
+        # an aborted wait held its slot to its timeout: 16 aborted curls, and every wait was 503
+        tok = self._agent()
+        self._listening()
+        mid = self.call("/api/send", {"text": "hi"}, token=tok)[1]["message"]["id"]
+        held = [self._held_wait(f"/api/wait?after={mid}&timeout=120", tok) for _ in range(self.chat.MAX_WAITS)]
+        time.sleep(0.5)
+        self.assertEqual(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[0], 503)  # all taken
+        for c in held:
+            c.close()
+        time.sleep(self.chat.WAIT_LOOK * 2 + 0.5)
+        self.assertEqual(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[0], 200)
+
+    def test_wait_says_when_claude_waits_on_the_user_and_returns_once_for_it(self):
+        tok = self._agent()
+        self._listening()
+        mid = self.call("/api/send", {"text": "push it when done"}, token=tok)[1]["message"]["id"]
+        _, r = self.call(f"/api/wait?after={mid}&timeout=0", token=tok)
+        self.assertFalse(r["waiting_on_user"])
+        got = {}
+        t = threading.Thread(target=lambda: got.update(r=self.call(f"/api/wait?after={mid}&timeout=20", token=tok)))
+        began = time.monotonic()
+        t.start()
+        time.sleep(0.5)
+        self.assertTrue(t.is_alive())
+        a = self.chat.ask("Bash", "git push origin main")                  # a dialog for the user
+        t.join(10)
+        self.assertLess(time.monotonic() - began, 8)
+        self.assertEqual((got["r"][1]["replies"], got["r"][1]["waiting_on_user"]), ([], True))
+        began = time.monotonic()                                          # still true: it holds
+        _, r = self.call(f"/api/wait?after={mid}&timeout=2", token=tok)
+        self.assertGreaterEqual(time.monotonic() - began, 1.5)
+        self.assertTrue(r["waiting_on_user"])
+        self.chat.answer(a["id"], "deny", "web")
+        self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
+        n = self.chat.notice("Bash", "rm -rf build")                       # one in the terminal, told
+        if n:
+            self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
+            self.chat.notice_done(n["id"])
+            self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
+
+    def test_a_message_with_no_reply_is_done_once_the_turn_that_took_it_ends(self):
+        tok = self._agent()
+        self._listening()
+        mid = self.call("/api/send", {"text": "look at the logs"}, token=tok)[1]["message"]["id"]
+        other = self.call("/api/send", {"text": "and later this"}, token=tok)[1]["message"]["id"]
+        run_wb("chat", "ack", mid, "--by", "s1")
+        run_wb("chat", "ended", "--by", "s1")                             # a turn that took other work
+        self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["done"])
+        run_wb("chat", "ended", mid, "--by", "s1")                        # the one that took it
+        _, r = self.call(f"/api/wait?after={mid}&timeout=0", token=tok)
+        self.assertEqual((r["replies"], r["done"]), ([], True))           # done, with nothing said
+        self.assertFalse(self.call(f"/api/wait?after={other}&timeout=0", token=tok)[1]["done"])
+
+    def test_a_cid_another_sender_used_is_409_and_never_their_message(self):
+        # an agent reads the user's cids in the state: sent again as its own, it got the user's
+        # message back as its send
+        tok, user = self._agent(), self.chat.token()
+        mine = self.call("/api/send", {"text": "mine", "cid": "c-1"}, token=user)[1]["message"]
+        code, r = self.call("/api/send", {"text": "theirs", "cid": "c-1"}, token=tok)
+        self.assertEqual((code, r), (409, {"error": "that cid is another sender's"}))
+        self.assertEqual(self.call("/api/send", {"text": "mine", "cid": "c-1"}, token=user)[1]["message"]["id"], mine["id"])
+        self.assertEqual([m["text"] for m in self.chat.thread()], ["mine"])
+
+    def test_a_consent_question_in_an_agents_turn_reaches_the_user_and_a_dead_sessions_turn_is_no_ones(self):
+        tok = self._agent()
+        self._listening()
+        mid = self.call("/api/send", {"text": "ship it"}, token=tok)[1]["message"]["id"]
+        run_wb("chat", "ack", mid, "--by", "s1")
+        run_wb("chat", "reply", "--to", "user", "--text", "my-agent asks to push to main: may I?")
+        q = self.chat.thread()[-1]
+        self.assertEqual((q.get("re"), q["to"]), (None, ["user"]))
+        self.assertIn(q["id"], self.chat.news(store.now() + 20))             # pushed to the phone
+        self.assertEqual(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["replies"], [])  # not the agent's
+        run_wb("chat", "reply", "--to", "user", "--to", mid, "--text", "Waiting on the user.")
+        self.assertEqual(self.chat.thread()[-1]["to"], ["user", "my-agent"])
+        run_wb("chat", "ended", mid, "--by", "s1")
+        # a session that died mid-turn never recorded its end: the next one's replies are the user's
+        m2 = self.call("/api/send", {"text": "and the docs"}, token=tok)[1]["message"]["id"]
+        run_wb("chat", "ack", m2, "--by", "s0")                            # not the listener's
+        run_wb("chat", "reply", "--text", "Your task is in review.")
+        self.assertNotIn("to", self.chat.thread()[-1])
+
+    def test_an_agents_stream_never_pushes_the_users_page_out(self):
+        tok, user = self._agent(), self.chat.token()
+        self.srv.RequestHandlerClass.streams = threading.BoundedSemaphore(1)
+        page = self._held_wait("/api/stream", user)
+        page.settimeout(5)
+
+        def until(text):
+            got = b""
+            while text not in got:
+                got += page.recv(1 << 20) or self.fail(f"the stream ended before {text}")
+            return got
+        until(b"event: state")
+        began = time.monotonic()
+        self.assertEqual(self.call("/api/stream", token=tok)[0], 503)
+        self.assertLess(time.monotonic() - began, 2)                       # at once, no 5 s wait
+        self.chat.send("still here", "claude")
+        until(b"still here")                                               # the page's stream lives
+        page.close()
+
+    def test_an_agent_reads_only_its_own_conversation(self):
+        # round one let an agent token read the whole state and stream: the user's messages,
+        # Claude's replies to them, Claude Code's dialogs, the settings
+        tok, other, user = self._agent(), self._agent("other"), self.chat.token()
+        self._listening()
+        uid = self.call("/api/send", {"text": "my own plans"}, token=user)[1]["message"]["id"]
+        mid = self.call("/api/send", {"text": "refactor the parser"}, token=tok)[1]["message"]["id"]
+        oid = self.call("/api/send", {"text": "their request"}, token=other)[1]["message"]["id"]
+        self.chat.reply("To the user.", [uid])
+        self.chat.reply("To my-agent.", [mid])
+        self.chat.reply("To both.", [mid, uid])
+        self.chat.reply("To other.", [oid])
+        a = self.chat.ask("Bash", "git push origin main")
+        code, st = self.call("/api/state", token=tok)
+        self.assertEqual(code, 200)
+        self.assertEqual([m["text"] for m in st["messages"]], ["refactor the parser", "To my-agent.", "To both."])
+        self.assertEqual(sorted(st), ["api", "expire", "listener", "messages", "now", "uploads"])  # no asks, prefs, savings, push
+        self.assertIsNone(st["messages"][0]["received"])
+        code, r = self.call("/api/send", {"text": "and the tests"}, token=tok)
+        self.assertEqual([m["text"] for m in r["state"]["messages"]][-1], "and the tests")
+        self.assertNotIn("asks", r["state"])
+        self.assertIn("asks", self.call("/api/state", token=user)[1])     # the user's: all of it
+        # its stream: the same view, and a patch carries none of the user's
+        c = self._held_wait("/api/stream", tok)
+        c.settimeout(5)
+        got = b""
+        while b"event: state" not in got or not got.endswith(b"\n\n"):
+            got += c.recv(1 << 20)
+        first = json.loads(got.split(b"data: ", 1)[1].split(b"\n", 1)[0])
+        self.assertEqual(first["messages"], self.call("/api/state", token=tok)[1]["messages"])
+        self.assertNotIn("asks", first)
+        self.call("/api/send", {"text": "a secret of the user's"}, token=user)
+        self.chat.reply("Again to my-agent.", [mid])
+        while b"Again to my-agent." not in got:
+            got += c.recv(1 << 20)
+        c.close()
+        self.assertNotIn(b"a secret of the user's", got)
+        self.assertNotIn(a["id"].encode(), got)
+        # what only the user may read: 403, and the user's own still reads them
+        for path in ("/api/latest", f"/api/ask/{a['id']}", "/api/shot?task=t&n=1&side=base", "/api/audio?batch=b&n=1"):
+            code, r = self.call(path, token=tok)
+            self.assertEqual(code, 403, path)
+            self.assertTrue(r["error"].startswith("agent tokens can't "), r)
+        self.assertEqual(self.call(f"/api/ask/{a['id']}", token=user)[0], 200)
+        self.assertEqual(self.call("/api/latest", token=user)[0], 200)
+        self.assertEqual(self.call("/api/latest")[0], 401)                 # no token: as before
+        # a wait on another's message is no message to it; on its own, as before
+        self.assertEqual(self.call(f"/api/wait?after={uid}&timeout=0", token=tok)[0], 404)
+        self.assertEqual(self.call(f"/api/wait?after={oid}&timeout=0", token=tok)[0], 404)
+        self.assertEqual(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[0], 200)
+        self.assertEqual(self.call(f"/api/wait?after={oid}&timeout=0", token=user)[0], 200)
+        self.assertEqual(self.call("/api/health", token=tok)[1], {"api": 1, "listening": True})
+
+    def test_an_agents_message_cant_carry_about(self):
+        # what a message answers (a pair of screenshots, a take) is the user's to say
+        tok = self._agent()
+        code, r = self.call("/api/send", {"text": "keep this one", "about": {"audio": "x", "n": 1}}, token=tok)
+        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about"}))
+        code, r = self.call("/api/send", {"text": "about step 1", "about": {"task": "t", "n": 1}}, token=tok)
+        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about"}))
+        self.assertEqual(self.chat.thread(), [])
+        code, r = self.call("/api/send", {"text": "about step 1", "about": {"task": "t", "n": 1}}, token=self.chat.token())
+        self.assertEqual((code, r["error"]), (400, "no such screenshots"))  # the user's is read as before
+
+    def test_a_dialog_in_an_agents_turn_is_for_that_agent_and_the_users_away_setting_answers_it_only_while_away(self):
+        tok = self._agent()
+        self._listening()
+        mid = self.call("/api/send", {"text": "ship it"}, token=tok)[1]["message"]["id"]
+        self.call("/api/prefs", {"away": "allow"}, token=self.chat.token())
+        out = run_wb("chat", "ask", "--tool", "Bash", "--text", "git push", "--for", "my-agent", "--here")
+        ask_id, state = out.split()
+        self.assertEqual(state, "open")                                   # at the terminal: the human decides
+        a = self.chat.find_ask(ask_id)
+        self.assertEqual(a["for"], ["my-agent"])
+        self.assertEqual([x["for"] for x in self.call("/api/state", token=self.chat.token())[1]["asks"]], [["my-agent"]])
+        self.assertEqual(self.chat.latest()["asks"][0]["for"], ["my-agent"])  # the push says whose
+        self.assertIn(ask_id, self.chat.news(store.now() + 20))            # and is pushed
+        self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
+        self.assertEqual(self.call("/api/answer", {"id": ask_id, "answer": "allow"}, token=tok)[0], 403)
+        run_wb("chat", "answer", ask_id, "expired", "--by", "interrupted")   # settled in the terminal
+        self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
+        self.assertEqual(self.call("/api/answer", {"id": ask_id, "answer": "allow"}, token=self.chat.token())[1]["ask"]["answer"],
+                         "expired")                                       # the page's tap changes nothing
+        out = run_wb("chat", "ask", "--tool", "Bash", "--text", "git push", "--for", "my-agent")
+        self.assertEqual(out.split()[1], "allow")                          # away: their setting stands
+        with self.assertRaises(ValueError):
+            self.chat.ask("Bash", "x", for_=["Not A Name"])
+
 
 FAKE_SMI = """import os, sys, time
 with open(os.environ["FAKE_SMI_LOG"], "a") as f:
@@ -22986,6 +23381,45 @@ class ChatUploads(Base):
 
     def uploads(self) -> Path:
         return self.chat.chat_dir() / "uploads"
+
+    def test_an_agent_reads_only_the_files_it_uploaded_or_that_reach_it(self):
+        # #1042: an agent token read any upload by its id, and the user's through a PUT of the
+        # same id or a send naming it
+        user = self.tok
+        mine = "aaaaaaaa-0000-4000-8000-000000000001"
+        self.assertEqual(self.put(mine, b"\xff\xd8 the user's photo")[0], 200)
+        with contextlib.redirect_stderr(io.StringIO()):
+            agent = run_wb("chat", "token", "add", "my-agent").strip()
+        self.tok = agent
+        theirs = "bbbbbbbb-0000-4000-8000-000000000002"
+        code, r = self.put(theirs, b"notes", name="notes.txt", ctype="text/plain")
+        self.assertEqual((code, r["new"]), (200, True))
+        self.assertEqual(self.chat.upload_meta(theirs)["by"], "my-agent")
+        self.assertNotIn("by", self.chat.upload_meta(mine))
+        code, r = self.put(mine, b"other bytes")                          # the user's id: not answered with it
+        self.assertEqual((code, r), (409, {"error": "that upload id is another sender's"}))
+
+        def get(path, tok):
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            c.request("GET", path, headers={"Host": f"localhost:{self.port}", "Authorization": f"Bearer {tok}"})
+            res = c.getresponse()
+            out = res.status, res.read()
+            c.close()
+            return out
+        self.assertEqual(get(f"/api/upload/{theirs}", agent)[0], 200)
+        self.assertEqual(get(f"/api/file/{theirs}", agent), (200, b"notes"))
+        self.assertEqual(get(f"/api/upload/{mine}", agent), (404, b'{"error": "no such upload"}'))
+        self.assertEqual(get(f"/api/file/{mine}", agent), (404, b'{"error": "no such file"}'))
+        self.assertEqual(get(f"/api/file/{mine}", user)[0], 200)            # the user's: everything
+        self.assertEqual(get(f"/api/file/{theirs}", user)[0], 200)
+        code, r = self.send({"text": "see this", "files": [mine]})       # another's upload: none to it
+        self.assertEqual((code, r["error"]), (400, f"no upload {mine}: it must be uploaded before the message"))
+        code, r = self.send({"text": "see this", "files": [theirs]})
+        self.assertEqual((code, [f["name"] for f in r["message"]["files"]]), (200, ["notes.txt"]))
+        # a file attached to a reply to it reaches it
+        self.chat.send("here it is", "claude", to=["my-agent"], files=[{"id": mine, "name": "photo.jpg"}])
+        self.assertEqual(get(f"/api/file/{mine}", agent)[0], 200)
+        self.tok = user
 
     def test_one_id_uploaded_twice_stores_one_file_and_answers_with_the_first(self):
         # the owner (2026-11-20): never a file uploaded twice by a refresh. A retry with the id the
