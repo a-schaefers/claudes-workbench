@@ -719,16 +719,18 @@ class Lifecycle(Base):
         store.write_json(Path(self.tmp.name) / "x.json", {"left_out": ["donn\udce9es"]})
         self.assertEqual(store.read_json(Path(self.tmp.name) / "x.json"), {"left_out": ["donn\udce9es"]})
 
-    def test_a_claude_md_of_claudes_that_isnt_utf8_starts_the_task_all_the_same(self):
+    def test_a_users_agents_md_that_isnt_utf8_starts_the_task_all_the_same(self):
         # #784: ~/.claude/CLAUDE.md edited from Windows (a CP1252 apostrophe, 0x92) failed every
-        # wb start with a traceback after the task was written, and every round's config layer
-        claude = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix="claude-"))
-        os.environ["CLAUDE_CONFIG_DIR"] = str(claude)
-        (claude / "CLAUDE.md").write_bytes(b"Don\x92t guess.\n")
+        # wb start with a traceback after the task was written, and every round's config layer;
+        # the user's file for agents is ~/.config/workbench/AGENTS.md now (#1061)
+        home = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix="home-"))
+        os.environ["HOME"] = str(home)
+        (home / ".config" / "workbench").mkdir(parents=True)
+        (home / ".config" / "workbench" / "AGENTS.md").write_bytes(b"Don\x92t guess.\n")
         self.start("t-784b", "ok")
         st = wait_phase("t-784b", {"review", "stuck", "failed"})
         self.assertEqual(st["phase"], "review", st.get("last"))
-        self.assertEqual((context.rules_dir(store.Task("t-784b")) / "CLAUDE.md").read_bytes(),
+        self.assertEqual((context.rules_dir(store.Task("t-784b")) / "AGENTS.md").read_bytes(),
                          b"Don\x92t guess.\n")
 
     def test_a_line_that_isnt_utf8_on_opencodes_output_loses_nothing(self):
@@ -7128,7 +7130,9 @@ class AgentContext(Base):
         personal = tmp / "home" / ".claude" / "skills" / "publishing-arm"   # the user's own work
         personal.mkdir(parents=True)
         (personal / "SKILL.md").write_text("---\nname: publishing-arm\n---\n")
-        (tmp / "home" / ".claude" / "CLAUDE.md").write_text("user rules\n")
+        (tmp / "home" / ".claude" / "CLAUDE.md").write_text("Claude's own\n")   # never an agent's (#1061)
+        (tmp / "home" / ".config" / "workbench").mkdir(parents=True)
+        (tmp / "home" / ".config" / "workbench" / "AGENTS.md").write_text("user rules\n")
         (self.repo / "CLAUDE.md").write_text("repo rules\n")
         (self.repo / "AGENTS.md").write_text("same as agents\n")
         (self.repo / "web").mkdir()
@@ -7149,9 +7153,10 @@ class AgentContext(Base):
         self.assertEqual(loaded[0], str(task.worktree / "AGENTS.md"))  # first, as OpenCode put it (#994)
         self.assertEqual(loaded[1], str(context.rules_dir(task) / "HANDBOOK.md"))  # a copy
         self.assertEqual(Path(loaded[1]).read_text(), context.HANDBOOK.read_text())
-        mine = context.rules_dir(task) / "CLAUDE.md"   # a copy: Claude's directory is unreadable
+        mine = context.rules_dir(task) / "AGENTS.md"   # a copy: the config directory is unreadable
         self.assertEqual(loaded[2], str(mine))
-        self.assertEqual(mine.read_text(), (tmp / "home" / ".claude" / "CLAUDE.md").read_text())
+        self.assertEqual(mine.read_text(), "user rules\n")
+        self.assertNotIn("Claude's own\n", [Path(p).read_text() for p in loaded])
         self.assertIn(str(task.worktree / "CLAUDE.md"), loaded)        # committed: worktree copy
         self.assertIn(str(task.worktree / ".claude" / "rules" / "style.md"), loaded)
         self.assertNotIn(str(self.repo / "CLAUDE.local.md"), loaded)   # same text as AGENTS.md
@@ -7162,53 +7167,69 @@ class AgentContext(Base):
                              ("skill", "publishing-arm")}, denied)
         self.assertNotIn(("skill", "add-level"), denied)
 
-    def test_the_users_personal_rules_reach_the_agent_after_their_claude_md(self):
-        # #673 (the 2026-11-21 audit): ~/.claude/rules/*.md, which Claude Code loads for every
-        # project, never reached the agent, and Claude reviewed against rules it was never told
+    def test_claudes_global_files_reach_no_agent_and_the_users_agents_md_takes_their_place(self):
+        # #1061 (2026-11-23): ~/.claude/CLAUDE.md, its imports and ~/.claude/rules/** went to every
+        # agent (#673, #513), and the owner's, which names a private tool's folder, left the
+        # machine with every API calibration task. The user's file for agents is now
+        # ~/.config/workbench/AGENTS.md, in the user CLAUDE.md's old place, its imports followed
         home = Path(self.tmp.name) / "home"
         os.environ["HOME"] = str(home)
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
-        rules = home / ".claude" / "rules"
-        (rules / "lang").mkdir(parents=True)
-        (home / ".claude" / "CLAUDE.md").write_text("user rules\n")
-        (rules / "testing.md").write_text("Test names read as sentences.\n@extra.md\n")
-        (rules / "extra.md").write_text("imported\n")
-        (rules / "lang" / "python.md").write_text("Type hints everywhere.\n")
-        (rules / ".draft.md").write_text("not yet\n")
-        (home / ".ssh").mkdir()
+        claude, config = home / ".claude", home / ".config" / "workbench"
+        for d in (claude / "rules" / "lang", config, home / ".ssh"):
+            d.mkdir(parents=True)
+        (claude / "CLAUDE.md").write_text("CANARY-CLAUDE\n@imported.md\n")
+        (claude / "imported.md").write_text("CANARY-CLAUDE-IMPORT\n")
+        (claude / "rules" / "x.md").write_text("CANARY-CLAUDE-RULE\n")
+        (claude / "rules" / "lang" / "python.md").write_text("CANARY-CLAUDE-RULE-2\n")
+        (home / "elsewhere.md").write_text("from anywhere\n")
         (home / ".ssh" / "notes.md").write_text("secret\n")
-        os.symlink(home / ".ssh" / "notes.md", rules / "leak.md")      # a link into a secret
-        self.start("t-urules", "ok")
-        wait_phase("t-urules", {"review"})
-        task = store.Task("t-urules")
+        (config / "python.md").write_text("Type hints everywhere.\n")
+        (config / ".draft.md").write_text("not yet\n")
+        (config / "AGENTS.md").write_text("Test names read as sentences.\n@python.md @~/elsewhere.md\n"
+                                          "@.draft.md @~/.ssh/notes.md @commands.json\n")
+        (config / "commands.json").write_text("{}\n")
+        task = store.Task("t-1061")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-1061", "repo": str(self.repo)}))
+        rules = context.rules_dir(task)
+        (rules / "user-rules").mkdir(parents=True)                  # an earlier wb's copies
+        (rules / "user-rules" / "x.md").write_text("CANARY-CLAUDE-RULE\n")
+        (rules / "CLAUDE.md").write_text("CANARY-CLAUDE\n")
         files, _ = context.instruction_files(task)
-        mine = context.rules_dir(task) / "user-rules"
-        names = [str(p.relative_to(mine)) for p in files if p.is_relative_to(mine)]
-        self.assertEqual(names, ["extra.md", "lang/python.md", "testing.md"])
-        self.assertEqual(files[1], context.rules_dir(task) / "CLAUDE.md")  # after the user's own
-        self.assertEqual((mine / "lang" / "python.md").read_text(), "Type hints everywhere.\n")
-        _, parts = context.fixed_prompt(task)
-        self.assertIn("~/.claude/rules/lang/python.md", dict(parts))
-        (rules / "lang" / "python.md").unlink()                         # removed: its copy too
-        context.instruction_files(task)
-        self.assertFalse((mine / "lang" / "python.md").exists())
+        texts = [p.read_text() for p in files]
+        self.assertEqual(files[1], rules / "AGENTS.md")              # after the handbook
+        self.assertEqual(texts[1:4], [(config / "AGENTS.md").read_text(), "Type hints everywhere.\n",
+                                      "from anywhere\n"])
+        self.assertTrue(all(p.is_relative_to(rules) for p in files[1:4]))   # copies: the lane reads them
+        self.assertFalse([t for t in texts if "CANARY-CLAUDE" in t or t in ("not yet\n", "secret\n", "{}\n")])
+        left = [p.relative_to(rules) for p in rules.rglob("*") if p.is_file()]
+        self.assertFalse([p for p in left if "CANARY-CLAUDE" in (rules / p).read_text()], left)
+        self.assertNotIn(Path("user-rules"), [p.parent for p in left])
+        parts = dict(context.fixed_prompt(task)[1])
+        self.assertIn("~/.config/workbench/AGENTS.md", parts)
+        self.assertIn("python.md", parts)                             # its import, counted too
+        (config / "AGENTS.md").unlink()                               # removed: its copy too
+        files, _ = context.instruction_files(task)
+        self.assertFalse((rules / "AGENTS.md").exists())
+        self.assertEqual(files[1:], [self.repo / "CLAUDE.md"])        # the project's alone
 
-    def test_rules_a_link_brings_into_claudes_or_the_projects_rules_reach_the_agent(self):
+    def test_rules_a_link_brings_into_the_projects_rules_reach_the_agent(self):
         # #828 (the second 2026-11-21 audit): Claude Code documents links in .claude/rules for
         # sharing rules, but rglob followed no directory link, a committed directory link listed
-        # no files, and a committed file link outside the repo was loaded where the lane can't read
+        # no files, and a committed file link outside the repo was loaded where the lane can't read.
+        # The user's ~/.claude/rules no longer go to agents at all (#1061)
         home = Path(self.tmp.name) / "home"
         os.environ["HOME"] = str(home)
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
         team, std = home / "team-rules", home / "company-standards"
-        for d in (home / ".claude" / "rules", team / "sub", team / ".git", std,
+        for d in (team / "sub", team / ".git", std,
                   self.repo / "docs" / "rules", self.repo / ".claude" / "rules", home / ".ssh"):
             d.mkdir(parents=True)
         (team / "a.md").write_text("team a\n")
         (team / "sub" / "b.md").write_text("team b\n")
         (team / ".git" / "x.md").write_text("not a rule\n")
         os.symlink(team, team / "sub" / "loop")                       # a loop ends
-        os.symlink(team, home / ".claude" / "rules" / "team")
         (std / "security.md").write_text("no secrets in logs\n")
         (std / "logging.md").write_text("structured logs\n")
         (self.repo / "docs" / "rules" / "style.md").write_text("in the repo\n")
@@ -7217,6 +7238,7 @@ class AgentContext(Base):
         os.symlink(std / "security.md", rules / "security.md")       # a file link outside
         os.symlink(std, rules / "standards")                         # a directory link outside
         os.symlink("../../docs/rules", rules / "docs")                 # one inside the repo
+        os.symlink(team, rules / "team")                               # a shared team checkout
         os.symlink(home / ".ssh" / "notes.md", rules / "leak.md")      # into a secret
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "rules"], check=True)
@@ -7224,11 +7246,9 @@ class AgentContext(Base):
         task.dir.mkdir(parents=True)
         (task.dir / "task.json").write_text(json.dumps({"name": "t-828", "repo": str(self.repo)}))
         files, _ = context.instruction_files(task)
-        mine, proj = context.rules_dir(task) / "user-rules", context.rules_dir(task) / "project-rules"
-        self.assertEqual([str(p.relative_to(mine)) for p in files if p.is_relative_to(mine)],
-                         ["team/a.md", "team/sub/b.md"])
+        proj = context.rules_dir(task) / "project-rules"
         self.assertEqual([str(p.relative_to(proj)) for p in files if p.is_relative_to(proj)],
-                         ["security.md", "standards/logging.md"])   # security.md once
+                         ["security.md", "standards/logging.md", "team/a.md", "team/sub/b.md"])
         self.assertEqual((proj / "standards" / "logging.md").read_text(), "structured logs\n")
         self.assertIn(rules / "docs" / "style.md", files)             # readable where it is
         self.assertNotIn("secret\n", [p.read_text() for p in files])
@@ -7628,14 +7648,22 @@ class RealOpenCode(Base):
     def test_claude_md_imports_reach_the_model_in_the_lane_and_secrets_stay_out(self):
         # #513 (the audit of 1.90): OpenCode reads an instruction file as a raw string, so
         # `See @docs/testing.md` reached the agent as that line, and an import into ~/.claude
-        # was unreadable in the lane
+        # was unreadable in the lane. The user's own file is ~/.config/workbench/AGENTS.md, and
+        # Claude's CLAUDE.md and rules reach no agent (#1061)
         from workbench import runner
-        claude = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-imports-test-"))
-        self.addCleanup(shutil.rmtree, claude, True)
-        os.environ["CLAUDE_CONFIG_DIR"] = str(claude)              # hidden from the lane (SECRETS)
-        (claude / "rules").mkdir()
-        (claude / "CLAUDE.md").write_text("Mine: @rules/python.md\n")
-        (claude / "rules" / "python.md").write_text("CANARY-USER-IMPORT\n")
+        home = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-imports-test-"))  # outside a temp root
+        self.addCleanup(shutil.rmtree, home, True)
+        os.environ["HOME"] = str(home)
+        for v in ("CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+            os.environ.pop(v, None)
+        claude, config = home / ".claude", home / ".config" / "workbench"   # both hidden from the lane
+        (claude / "rules").mkdir(parents=True)
+        config.mkdir(parents=True)
+        (claude / "CLAUDE.md").write_text("CANARY-CLAUDE-GLOBAL @rules/python.md\n")
+        (claude / "rules" / "python.md").write_text("CANARY-CLAUDE-IMPORT\n")
+        (claude / "rules" / "style.md").write_text("CANARY-CLAUDE-RULE\n")
+        (config / "AGENTS.md").write_text("CANARY-AGENTS-MD, then @python.md\n")
+        (config / "python.md").write_text("CANARY-USER-IMPORT\n")
         (claude / "notes.md").write_text("CANARY-CLAUDE-NOTES\n")
         (claude / ".credentials.json").write_text("CANARY-CREDENTIAL\n")
         outside = Path(self.tmp.name) / "elsewhere.md"
@@ -7682,10 +7710,57 @@ class RealOpenCode(Base):
         subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
         reqs = [json.loads(line) for line in out.read_text().splitlines()]
         text = json.dumps(max(reqs, key=lambda r: len(r.get("tools", [])))["messages"])
-        for seen in ("CANARY-IMPORTED", "CANARY-DEEPER", "CANARY-USER-IMPORT", "CANARY-CLAUDE-NOTES"):
+        for seen in ("CANARY-IMPORTED", "CANARY-DEEPER", "CANARY-AGENTS-MD", "CANARY-USER-IMPORT",
+                     "CANARY-CLAUDE-NOTES"):
             self.assertIn(seen, text)
-        for unseen in ("CANARY-SPAN", "CANARY-FENCED", "CANARY-CREDENTIAL", "CANARY-OUTSIDE"):
+        for unseen in ("CANARY-SPAN", "CANARY-FENCED", "CANARY-CREDENTIAL", "CANARY-OUTSIDE",
+                       "CANARY-CLAUDE-GLOBAL", "CANARY-CLAUDE-IMPORT", "CANARY-CLAUDE-RULE"):
             self.assertNotIn(unseen, text)
+
+    def test_opencode_without_the_lane_reads_no_claude_md_of_the_users(self):
+        # #1061 (2026-11-23): OpenCode 2.3 reads ~/.claude/CLAUDE.md itself as a global
+        # instruction, which only the lane's SECRETS kept from the agent: with no Landlock
+        # (macOS, an old kernel, "paths": ["*"]) the user's CLAUDE.md, written to Claude, reached
+        # every agent. runner.OPENCODE_ENV's switch keeps it out; without it, it is read, so the
+        # quirk the switch answers is still there
+        from workbench import runner
+        home = Path(self.tmp.name) / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / "CLAUDE.md").write_text("CANARY-CLAUDE-GLOBAL\n")
+        os.environ["HOME"] = str(home)
+        for v in ("CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+            os.environ.pop(v, None)
+        self.start("t-nolane", "ok")
+        wait_phase("t-nolane", {"review"})
+        task = store.Task("t-nolane")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = Path(self.tmp.name) / "nolane-requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
+                                   str(port), str(out)])
+        self.addCleanup(server.kill)
+        env = runner.opencode_env(task)
+        layer_path = Path(env["OPENCODE_CONFIG"])
+        layer = json.loads(layer_path.read_text())
+        layer["provider"] = {"cap": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+            "models": {"cap": {"name": "capture", "tool_call": True,
+                               "limit": {"context": 32768, "output": 1024}}}}}
+        layer_path.write_text(json.dumps(layer))
+        time.sleep(0.5)
+        seen = []
+        for switch in (True, False):
+            run_env = {k: v for k, v in env.items()
+                       if switch or k != "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT"}
+            out.unlink(missing_ok=True)
+            subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                            "say ok"], cwd=task.worktree, env=run_env, capture_output=True, timeout=180)
+            reqs = [json.loads(line) for line in out.read_text().splitlines()]
+            seen.append("CANARY-CLAUDE-GLOBAL" in json.dumps(
+                max(reqs, key=lambda r: len(r.get("tools", [])))["messages"]))
+        self.assertEqual(seen, [False, True])
 
     def test_wb_reads_the_config_files_opencode_reads_under_opencode_config_dir(self):
         # #370 (the audit of 1.6): OpenCode 2.3 takes its global directory from
@@ -17762,6 +17837,29 @@ class Setup(Base):
         os.environ.update(FAKE_VERSION="opencode v3.1.0")  # finding 26: past the tested range
         self.assertIn("--  OpenCode 3.1 is outside what workbench is tested with", self.setup(cmd="doctor")[1])
         self.assertIn("--  wb comes from /usr, not this copy", out)
+
+    def test_setup_and_doctor_say_where_the_rules_for_agents_go_until_the_user_has_moved_them(self):
+        # #1061 (2026-11-23): agents no longer get ~/.claude/CLAUDE.md or ~/.claude/rules (the
+        # owner's named a private tool's folder and went to API providers); what they followed
+        # from there goes in ~/.config/workbench/AGENTS.md, and setup and doctor say so meanwhile
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        os.environ.update(HOME=str(home), WB_HOME=str(home / ".local/state/workbench"),
+                          FAKE_VERSION="opencode v2.3.0",
+                          PATH=os.pathsep.join([str(home / ".local/bin"), os.environ["PATH"]]))
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        note = ("note: agents no longer get your ~/.claude/CLAUDE.md or ~/.claude/rules/: what they "
+                "should follow in every project goes in ~/.config/workbench/AGENTS.md\n")
+        said = lambda: [note in self.setup(cmd=c)[1] for c in ("setup", "doctor")]  # noqa: E731
+        self.assertEqual(said(), [False, False])                    # nothing of Claude's
+        (home / ".claude" / "rules").mkdir(parents=True)
+        self.assertEqual(said(), [True, True])                      # the rules alone
+        (home / ".claude" / "rules").rmdir()
+        (home / ".claude" / "CLAUDE.md").write_text("mine\n")
+        self.assertEqual(said(), [True, True])                      # the CLAUDE.md alone
+        (home / ".config" / "workbench").mkdir(parents=True)
+        (home / ".config" / "workbench" / "AGENTS.md").write_text("for agents\n")
+        self.assertEqual(said(), [False, False])                    # moved: no line
 
     def test_doctor_exit_code_does_not_follow_the_keep_awake_probe(self):
         # #653: `ok, said = awake_line()` reassigned doctor's verdict: a Mac (caffeinate) exited 0
@@ -30662,8 +30760,12 @@ class Privacy(_KeyholeTest):
         self.conf = Path(self.tmp.name) / "commands.json"
         self.routes = Path(self.tmp.name) / "routes.json"
         os.environ["WB_ROUTES"] = str(self.routes)
-        self.claude = Path(self.tmp.name) / "claude-home"   # no ~/.claude rules unless a test says
+        self.claude = Path(self.tmp.name) / "claude-home"   # no ~/.claude files unless a test says
         os.environ["CLAUDE_CONFIG_DIR"] = str(self.claude)
+        self.agents_md = Path(self.tmp.name) / "wb-config" / "AGENTS.md"   # never the user's own
+        patcher = mock.patch.object(context, "user_agents_md", lambda: self.agents_md)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def api_model(self, mid=FLASH, label="DeepInfra (API)", free=False):
         pid, name = mid.split("/", 1)
@@ -30853,15 +30955,19 @@ class Privacy(_KeyholeTest):
 
     def test_the_first_api_task_of_a_repo_and_provider_says_what_goes_where_and_later_ones_dont(self):
         self.claude.mkdir()
-        (self.claude / "CLAUDE.md").write_text("my rules\n")
+        (self.claude / "CLAUDE.md").write_text("my rules\n")             # Claude's: never sent (#1061)
+        (self.claude / "rules").mkdir()
         out = self.start_api("t-w1")
-        self.assertIn("note: this task sends the repo, its spec, CLAUDE.md files and your ~/.claude "
-                      "rules to DeepInfra (the trivial role's model; data policy: "
+        self.assertIn("note: this task sends the repo, its spec, CLAUDE.md files to DeepInfra (the "
+                      "trivial role's model; data policy: "
                       "https://docs.deepinfra.com/account/data-privacy)", out)  # whose choice: #1016's
         self.assertNotIn("this task sends", self.start_api("t-w2"))      # the same provider again
+        self.agents_md.parent.mkdir()
+        self.agents_md.write_text("my rules for agents\n")               # the user's own: named
         other = self.api_model("anthropic/claude-haiku-5-5", "Anthropic (API)")
-        self.assertIn("to Anthropic (the trivial role's model; data policy: https://www.anthropic.com/legal/privacy)",
-                      self.start_api("t-w3", other))
+        self.assertIn("note: this task sends the repo, its spec, CLAUDE.md files and your workbench "
+                      "AGENTS.md to Anthropic (the trivial role's model; data policy: "
+                      "https://www.anthropic.com/legal/privacy)", self.start_api("t-w3", other))
         # archived tasks count too, so wb gc can't bring the note back
         store.archive_dir().mkdir(parents=True, exist_ok=True)
         for n in ("t-w1", "t-w2", "t-w3"):

@@ -2803,6 +2803,19 @@ def claude_home() -> Path:
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 
 
+# The user's own instructions for agents, in every project, beside workbench's other config. The
+# user's ~/.claude/CLAUDE.md, its imports and ~/.claude/rules/** went to every agent (#673, #513)
+# until 2026-11-23, when the owner's global CLAUDE.md, written to Claude and naming a private
+# tool's folder, went to two API providers with every calibration task: those files are Claude's,
+# not the agents' (#1061). Relative to the home directory, read at each call.
+USER_AGENTS_MD = Path(".config") / "workbench" / "AGENTS.md"
+
+
+def user_agents_md() -> Path:
+    """The user's file for agents: ~/.config/workbench/AGENTS.md (USER_AGENTS_MD)."""
+    return Path.home() / USER_AGENTS_MD
+
+
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -2822,7 +2835,8 @@ def _tracked(worktree: Path, *patterns: str) -> list[str]:
 # is copied into rules/<task>/imports/, which the lane reads. Claude Code asks before a project's
 # file imports from outside the project; wb can't, so a project's imports reach only the repo and
 # the Markdown in Claude's directory (no dot-named entry there: .credentials.json), and the user's
-# own CLAUDE.md reaches anywhere but a secret or workbench's own files.
+# own AGENTS.md (USER_AGENTS_MD, #1061) reaches anywhere but a secret or workbench's own files,
+# the Markdown beside it in workbench's config directory among what it may (`@python.md`).
 IMPORT = re.compile(r"(?:^|\s)@((?:[^\s\\]|\\ )+)")
 IMPORT_HOPS = 5
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
@@ -2871,6 +2885,7 @@ def import_files(task: store.Task, roots: list[tuple[Path, Path, bool]]) -> list
     user's own), followed by what it imports, depth first: the paths OpenCode should load."""
     wt, repo = task.worktree, os.path.realpath(task.spec["repo"])
     claude = os.path.realpath(claude_home())
+    config = os.path.realpath(user_agents_md().parent)
     hidden = secret_paths() | private_paths()
     within = lambda p, d: p == d or _under(p, d)  # noqa: E731
     copies = rules_dir(task) / "imports"
@@ -2889,6 +2904,10 @@ def import_files(task: store.Task, roots: list[tuple[Path, Path, bool]]) -> list
             mine = real.endswith(".md") and not any(
                 part.startswith(".") for part in Path(os.path.relpath(real, claude)).parts)
             hidden_ = hidden - {claude}
+        elif users and within(real, config):  # the user's AGENTS.md split beside it (#1061)
+            mine = real.endswith(".md") and not any(
+                part.startswith(".") for part in Path(os.path.relpath(real, config)).parts)
+            hidden_ = hidden - {config}
         else:
             mine, hidden_ = users, hidden
         if not mine or any(within(real, h) for h in hidden_):
@@ -2930,7 +2949,7 @@ def import_files(task: store.Task, roots: list[tuple[Path, Path, bool]]) -> list
 def _md_under(src: Path) -> list[Path]:
     """The `.md` files under ``src``, through its directory links, each real directory once (a
     link loop ends), no dotted name (a shared rules checkout's .git): Path.rglob follows no
-    directory link, so a rules directory shared by `ln -s ~/team-rules ~/.claude/rules/team`,
+    directory link, so a rules directory shared by a link (`.claude/rules/team -> ~/team-rules`),
     as Claude Code documents, never reached the agent (#828)."""
     out, seen = [], set()
     for d, dirs, files in os.walk(src, followlinks=True):
@@ -2988,32 +3007,6 @@ def project_rules(task: store.Task, wt: Path) -> list[tuple[Path, Path, bool]]:
     return out
 
 
-def user_rules(task: store.Task) -> list[tuple[Path, Path]]:
-    """The user's personal rules (Claude's directory's `rules/**/*.md`, which Claude Code loads
-    for every project), copied into rules/<task>/user-rules/: (the copy, the file). Only
-    ~/.claude/CLAUDE.md was handed over, and Claude's directory is hidden from the lane, so the
-    agent never saw them, and Claude reviewed against conventions it was never told (#673). Not a
-    dotted name, nor a link into a secret; copies of rules removed since go too."""
-    src, out = claude_home() / "rules", rules_dir(task) / "user-rules"
-    claude = os.path.realpath(claude_home())
-    hidden = (secret_paths() | private_paths()) - {claude}
-    made: list[tuple[Path, Path]] = []
-    for f in _md_under(src) if src.is_dir() else ():  # through its directory links (#828)
-        rel = f.relative_to(src)
-        real = os.path.realpath(f)
-        if any(part.startswith(".") for part in rel.parts) or not os.path.isfile(real) or \
-                any(real == h or _under(real, h) for h in hidden):
-            continue
-        copy = out / rel
-        _copy_rule(real, copy)
-        made.append((copy, f))
-    kept = {c for c, _ in made}
-    for old in out.rglob("*.md") if out.is_dir() else ():
-        if old not in kept:
-            old.unlink(missing_ok=True)
-    return made
-
-
 def handbook_for(task: store.Task) -> Path:
     """The handbook this task's agent gets, as rules/<task>/HANDBOOK.md whichever it is (so the
     instruction path and fixed_prompt's "the handbook" hold): the writing role's prose rules
@@ -3033,12 +3026,17 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     handbook.write_text(handbook_for(task).read_text() + "".join(
         note for name, note in EXPERIMENT_NOTES.items() if experiment(task, name)))
     roots: list[tuple[Path, Path, bool]] = []  # (what OpenCode loads, read from, the user's own)
-    user = claude_home() / "CLAUDE.md"
-    if user.is_file():  # a copy too: the agent can't read Claude's directory (SECRETS)
-        mine = rules_dir(task) / "CLAUDE.md"
+    # the user's AGENTS.md, never Claude's CLAUDE.md or rules (#1061, USER_AGENTS_MD); a copy: the
+    # lane can't read workbench's config directory (private_paths)
+    user, mine = user_agents_md(), rules_dir(task) / "AGENTS.md"
+    if user.is_file():
         mine.write_bytes(user.read_bytes())  # as it is: a CP1252 byte failed every start (#784)
         roots.append((mine, user, True))
-    roots += [(copy, src, True) for copy, src in user_rules(task)]
+    else:
+        mine.unlink(missing_ok=True)
+    # the copies of Claude's that an earlier wb made for this task, which the lane could still read
+    (rules_dir(task) / "CLAUDE.md").unlink(missing_ok=True)
+    shutil.rmtree(rules_dir(task) / "user-rules", ignore_errors=True)
     load: list[Path] = []
     for rel in ROOT_FILES:
         # the worktree's copy when the file is committed; the repo's when it is local or uncommitted
@@ -3157,7 +3155,7 @@ def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
     rules = rules_dir(task)
     # at wb start the runner has yet to check the worktree out (#529): the checkout stands in
     wt = task.worktree if task.worktree.is_dir() else Path(task.spec["repo"])
-    named = {rules / "HANDBOOK.md": "the handbook", rules / "CLAUDE.md": "~/.claude/CLAUDE.md"}
+    named = {rules / "HANDBOOK.md": "the handbook", rules / "AGENTS.md": f"~/{USER_AGENTS_MD}"}
     paths = [*files, task.round_dir(1) / "prompt.md"]  # AGENTS.md among the files (#994)
     parts = [("OpenCode's own prompt and tools", OPENCODE_BASE_TOKENS)]
     for p in paths:
@@ -3165,9 +3163,6 @@ def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
             n = p.stat().st_size // CHARS_PER_TOKEN
         except OSError:
             continue
-        mine = rules / "user-rules"
-        if p.is_relative_to(mine):
-            named[p] = f"~/.claude/rules/{p.relative_to(mine)}"
         if p.is_relative_to(rules / "project-rules"):
             named[p] = f".claude/rules/{p.relative_to(rules / 'project-rules')}"
         label = named.get(p) or ("the spec" if p.name == "prompt.md" else

@@ -260,10 +260,10 @@ def _provider_of(row: dict) -> str:
 
 def where_note(info: dict, rules: bool, named: list[str], whose: str = "") -> str:
     """The start's note on a repo's first API task: what goes and to whom. ``rules``: the user
-    has ~/.claude rules the agent is handed; ``named``: the copies and siblings named on the
-    command line, which go too; ``whose``: whose choice the model is (`the trivial role's model`,
-    `asked for`, #1016)."""
-    what = "the repo, its spec, CLAUDE.md files" + (" and your ~/.claude rules" if rules else "")
+    has a ~/.config/workbench/AGENTS.md the agent is handed (never Claude's files, #1061);
+    ``named``: the copies and siblings named on the command line, which go too; ``whose``: whose
+    choice the model is (`the trivial role's model`, `asked for`, #1016)."""
+    what = "the repo, its spec, CLAUDE.md files" + (" and your workbench AGENTS.md" if rules else "")
     if named:
         what = what.replace(" and your", ", your") + " and " + ", ".join(named)
     policy = f"data policy: {info['policy']}" if info.get("policy") else f"see {info['name']}'s data policy"

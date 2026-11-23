@@ -552,7 +552,12 @@ def _own_pins(layer: dict) -> dict:
 # What OpenCode's own environment adds to the agent's: npx and `npm exec` run only what the
 # project installed, instead of fetching a package unasked (npm says yes by itself without a
 # terminal; the 2026-11-16 audit). Not the tests' environment: they run as they would for you.
-OPENCODE_ENV = {"npm_config_yes": "false"}
+# And OpenCode reads ~/.claude/CLAUDE.md itself as a global instruction (with the user's own
+# ~/.config/opencode/AGENTS.md), which only the lane's SECRETS kept out: with no Landlock (macOS,
+# an old kernel, `"paths": ["*"]`) the user's CLAUDE.md, written to Claude, reached every agent
+# whatever wb handed it (measured on OpenCode 2.3.2 with tests/capture_llm.py, #1061, 2026-11-23).
+# The switch drops only that file: the project's CLAUDE.md is wb's to hand (PROJECT_CONFIG_OFF).
+OPENCODE_ENV = {"npm_config_yes": "false", "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1"}
 
 
 # What the agent's environment leaves out of the runner's: credentials (API keys and tokens Claude
