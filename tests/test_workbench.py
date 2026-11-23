@@ -25377,5 +25377,492 @@ class ProbeWhereItHelps(Base):
             for word in ("spawn_runner", "opencode_bin", "OPENCODE_CONFIG", "EXPERIMENT", "probe_"):
                 self.assertNotIn(word, src, f"{mod}: {word}")
 
+
+# The two models the spike for #1009 ran (OpenCode 2.3.2's catalog; 2.3.0 bundles both alike),
+# trimmed to the fields `api model.list` prints that workbench reads
+API_CATALOG = [
+    {"id": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "providerID": "deepinfra", "family": "deepseek-flash",
+     "package": "@opencode/ai/providers/deepinfra",
+     "settings": {"baseURL": "https://api.deepinfra.com/v1/openai"},
+     "capabilities": {"tools": True, "input": ["text", "image"], "output": ["text"], "temperature": True},
+     "variants": [{"id": v, "settings": {"reasoningEffort": v}} for v in ("none", "low", "high", "max")],
+     "cost": [{"input": 0.2, "output": 0.6, "cache": {"read": 0.006, "write": 0}}],
+     "limit": {"context": 1048576, "output": 384000}, "status": "active"},
+    {"id": "claude-haiku-5-5", "providerID": "anthropic", "family": "claude-haiku",
+     "package": "@opencode/ai/providers/anthropic", "settings": {"baseURL": "https://api.anthropic.com/v1"},
+     "capabilities": {"tools": True, "input": ["text", "image", "pdf"], "output": ["text"],
+                      "temperature": False},
+     "variants": [{"id": "none", "settings": {"thinking": {"type": "disabled"}}}] + [
+         {"id": v, "settings": {"thinking": {"type": "adaptive", "display": "summarized"}, "effort": v}}
+         for v in ("low", "medium", "high", "xhigh", "max")],
+     "cost": [{"input": 0.1, "output": 0.5, "cache": {"read": 0.01, "write": 0.125}},
+              {"tier": {"type": "context", "size": 100000}, "input": 0.5, "output": 2.5,
+               "cache": {"read": 0.05, "write": 0.625}}],
+     "limit": {"context": 1000000, "output": 128000}, "status": "active"}]
+FLASH = "deepinfra/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+# the spike's picks; another of the provider's is taken when a newer OpenCode drops one
+SPIKE_IDS = {"deepinfra": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "anthropic": "claude-sonnet-5-5"}
+
+
+def priced(entry: dict, tok: dict) -> float:
+    """A step's cost as OpenCode 2.3 reckons it from the catalog (the spike for #1009): `input`
+    leaves out cache reads, reasoning is billed as output, a context tier applies past its size."""
+    used = tok["input"] + tok["cache"]["read"]
+    rate = [p for p in entry["cost"] if not p.get("tier") or used > p["tier"]["size"]][-1]
+    return (tok["input"] * rate["input"] + (tok["output"] + tok["reasoning"]) * rate["output"]
+            + tok["cache"]["read"] * rate["cache"]["read"]
+            + tok["cache"]["write"] * rate["cache"]["write"]) / 1e6
+
+
+class ApiHarness(Base):
+    """The test harness for 2.0's API routes (#1011): the fake OpenCode's catalog, keys, variants,
+    prices and provider errors; capture_llm's statuses, usage, reasoning and Anthropic endpoint;
+    and the OpenCode facts they copy, checked on the real one offline."""
+
+    def fake(self, *argv, **env):
+        """Run the fake OpenCode in a scratch directory: (exit code, JSON lines, stdout)."""
+        cwd = Path(self.tmp.name) / "fake-cwd"
+        cwd.mkdir(exist_ok=True)
+        p = subprocess.run([*shlex.split(FAKE), *argv], cwd=cwd, capture_output=True, text=True,
+                           env={**os.environ, "FAKE_NO_MCP": "1", **env}, timeout=60)
+        rows = [json.loads(x) for x in p.stdout.splitlines() if x.startswith("{")]
+        return p.returncode, rows, p.stdout
+
+    def catalog(self, entries=API_CATALOG, auth=None):
+        path = Path(self.tmp.name) / "catalog.json"
+        path.write_text(json.dumps(entries if auth is None else {"data": entries, "auth": auth}))
+        os.environ["WB_FAKE_CATALOG"] = str(path)
+
+    def capture(self, name, calls=(), **env):
+        """capture_llm on a free port with these CAPTURE_* settings: (port, bodies, headers)."""
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = Path(self.tmp.name) / f"{name}-requests.jsonl"
+        heads = Path(self.tmp.name) / f"{name}-headers.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(port),
+                                   str(out), json.dumps(list(calls))],
+                                  env={**os.environ, "CAPTURE_HEADERS": str(heads), **env})
+        self.addCleanup(server.wait)
+        self.addCleanup(server.kill)
+        deadline = time.time() + 20
+        while True:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=1).close()
+                break
+            except OSError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(POLL)
+        return port, out, heads
+
+    def post(self, port, path, body, headers=None):
+        """One POST: (status, headers, body text)."""
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        conn.request("POST", path, json.dumps(body), {"Content-Type": "application/json",
+                                                      **(headers or {})})
+        r = conn.getresponse()
+        text = r.read().decode()
+        conn.close()
+        return r.status, {k.lower(): v for k, v in r.getheaders()}, text
+
+    @staticmethod
+    def sse(text):
+        return [json.loads(x[6:]) for x in text.splitlines() if x.startswith("data: {")]
+
+    # the fake OpenCode
+
+    def test_the_fake_lists_the_catalog_and_its_keys_as_opencode_23_prints_them(self):
+        code, rows, _ = self.fake("api", "model.list")
+        self.assertEqual((code, rows[0]["data"]), (0, []))           # no catalog: an empty list
+        self.assertEqual(self.fake("auth", "list", "--format", "json")[2].strip(), "[]")
+        self.catalog()
+        code, rows, _ = self.fake("api", "model.list", "--standalone")
+        self.assertEqual(set(rows[0]), {"location", "data"})
+        self.assertEqual(rows[0]["data"], API_CATALOG)
+        self.assertEqual(self.fake("models")[2].split(),
+                         [FLASH, "anthropic/claude-haiku-5-5"])
+        code, _, _ = self.fake("models", "deepinfra")           # 2.3.2 takes no provider argument
+        self.assertEqual(code, 1)
+        auth = json.loads(self.fake("auth", "list", "--format", "json")[2])
+        self.assertEqual([(a["id"], [c["type"] for c in a["connections"]]) for a in auth],
+                         [("deepinfra", ["credential"]), ("anthropic", ["credential"])])
+        self.assertEqual(auth[0]["connections"][0]["method"], "key")
+        self.catalog(auth=[{"id": "xai", "name": "xAI", "connections": [{"type": "env",
+                                                                         "name": "XAI_API_KEY"}]}])
+        self.assertEqual(json.loads(self.fake("auth", "list", "--format", "json")[2])[0]["connections"],
+                         [{"type": "env", "name": "XAI_API_KEY"}])  # the test's own rows
+
+    def test_a_provider_without_a_key_drops_out_of_every_list_and_its_models_cant_run(self):
+        self.catalog()
+        os.environ["WB_FAKE_API"] = "anthropic=nokey"
+        self.assertEqual([e["providerID"] for e in self.fake("api", "model.list")[1][0]["data"]],
+                         ["deepinfra"])
+        self.assertEqual(self.fake("models")[2].split(), [FLASH])
+        self.assertEqual([a["id"] for a in json.loads(self.fake("auth", "list", "--format", "json")[2])],
+                         ["deepinfra"])
+        code, rows, _ = self.fake("run", "--standalone", "-m", "anthropic/claude-haiku-5-5",
+                                  "--format", "json", "--", "go")
+        self.assertEqual(code, 1)
+        self.assertEqual(rows, [{**rows[0], "type": "error", "error": {
+            "type": "provider.no-route", "message": "Model unavailable: anthropic/claude-haiku-5-5"}}])
+        code, rows, _ = self.fake("run", "--standalone", "-m", "deepinfra/deepseek-ai/Nope",
+                                  "--format", "json", "--", "go")
+        self.assertEqual((code, rows[-1]["error"]["message"]),
+                         (1, "Model unavailable: deepinfra/deepseek-ai/Nope"))
+        os.environ.pop("WB_FAKE_CATALOG")
+        code, rows, _ = self.fake("run", "--standalone", "-m", "ollama/mimo", "--format", "json",
+                                  "--", "go", FAKE_SCENARIO="nokey")      # by scenario, no catalog
+        self.assertEqual((code, rows[-1]["error"]["type"]), (1, "provider.no-route"))
+
+    def test_the_fake_splits_the_provider_at_the_first_slash_and_refuses_an_unknown_variant(self):
+        self.catalog()
+        go = ("--format", "json", "--", "go")
+        code, rows, _ = self.fake("run", "--standalone", "-m", f"{FLASH}#nosuch", *go)
+        self.assertEqual((code, [r["type"] for r in rows]), (1, ["error"]))   # no step: no request
+        self.assertEqual(rows[0]["error"], {"type": "provider.no-route",
+                                            "message": f"Variant unavailable for {FLASH}: nosuch"})
+        code, rows, _ = self.fake("run", "--standalone", "-m", f"{FLASH}#none", *go)
+        self.assertEqual((code, rows[-1]["type"]), (0, "step_finish"))       # the catalog's own
+        layer = {"provider": {"deepinfra": {"models": {"deepseek-ai/DeepSeek-V4.1-Flash-1017": {
+            "variants": {"wb-off": {"reasoningEffort": "none"}}}}}}}
+        self.assertEqual(self.fake("run", "--standalone", "-m", f"{FLASH}#wb-off", *go)[0], 1)
+        code, _, _ = self.fake("run", "--standalone", "-m", f"{FLASH}#wb-off", *go,
+                               OPENCODE_CONFIG_CONTENT=json.dumps(layer))
+        self.assertEqual(code, 0)                                              # the layer's (V1)
+        conf = Path(self.tmp.name) / "layer.json"
+        conf.write_text(json.dumps({"providers": {"deepinfra": {"models": {
+            "deepseek-ai/DeepSeek-V4.1-Flash-1017": {"variants": [{"id": "wb-kw", "body": {}}]}}}}}))
+        code, _, _ = self.fake("run", "--standalone", "-m", f"{FLASH}#wb-kw", *go,
+                               OPENCODE_CONFIG=str(conf))
+        self.assertEqual(code, 0)                                              # the layer file's (V2)
+        code, rows, _ = self.fake("run", "--standalone", "-m", "ollama/mimo#anything", *go)
+        self.assertEqual(code, 0)                         # a config model, not the catalog's: as before
+
+    def test_every_step_carries_its_price_from_the_catalog_and_the_export_its_sums(self):
+        self.catalog()
+        go = ("--format", "json", "--", "go")
+        _, rows, _ = self.fake("run", "--standalone", "-m", FLASH, *go)
+        step = [r["part"] for r in rows if r["type"] == "step_finish"][-1]
+        self.assertEqual(step["tokens"], {"input": 120, "output": 30, "reasoning": 0,
+                                          "cache": {"read": 0, "write": 0}})
+        self.assertAlmostEqual(step["cost"], priced(API_CATALOG[0], step["tokens"]), places=12)
+        self.assertGreater(step["cost"], 0)
+        # past a context tier's size its price applies: the fill scenario reads 25000 tokens
+        big = [{**API_CATALOG[1], "cost": [API_CATALOG[1]["cost"][0],
+                                           {**API_CATALOG[1]["cost"][1], "tier": {"type": "context",
+                                                                                  "size": 20000}}]}]
+        self.catalog(big)
+        code, rows, _ = self.fake("run", "--standalone", "-m", "anthropic/claude-haiku-5-5", *go,
+                                  FAKE_SCENARIO="read")
+        steps = [r["part"] for r in rows if r["type"] == "step_finish"]
+        self.assertEqual([s["cost"] for s in steps],
+                         [round(priced(big[0], s["tokens"]), 10) for s in steps])
+        self.assertGreater(steps[0]["cost"], priced(API_CATALOG[1], steps[0]["tokens"]))  # 24100 read
+        os.environ.pop("WB_FAKE_CATALOG")
+        _, rows, _ = self.fake("run", "--standalone", "-m", "ollama/mimo", *go)
+        self.assertEqual(rows[-1]["part"]["cost"], 0)                 # a config model: no price
+        _, rows, _ = self.fake("run", "--standalone", "-m", "ollama/mimo", *go, FAKE_COST="0.25")
+        self.assertEqual(rows[-1]["part"]["cost"], 0.25)
+        _, _, out = self.fake("session", "export", "ses_x", "--standalone", FAKE_COST="0.5")
+        exported = json.loads(out)
+        msg = exported["messages"][-1]
+        self.assertEqual((msg["cost"], exported["info"]["cost"]), (0.5, 0.5))
+        self.assertEqual(exported["info"]["tokens"], {"input": 1200, "output": 80, "reasoning": 0,
+                                                      "cache": {"read": 0, "write": 0}})
+
+    def test_a_429_retries_then_fails_and_a_401_or_402_fails_at_once_with_the_body_verbatim(self):
+        self.catalog()
+        os.environ.update(FAKE_RETRY_EVERY="0", FAKE_RETRIES="3")
+        go = ("run", "--standalone", "-m", FLASH, "--format", "json", "--", "go")
+        code, rows, _ = self.fake(*go, WB_FAKE_API=f"{FLASH}=ratelimit")
+        self.assertEqual(code, 1)
+        self.assertEqual([r["type"] for r in rows], ["step_start", "retry", "retry", "retry", "error"])
+        self.assertEqual([r["attempt"] for r in rows if r["type"] == "retry"], [2, 3, 4])
+        retry = rows[1]
+        self.assertTrue({"messageID", "nextRetryAt", "sessionID", "timestamp"} <= set(retry))
+        self.assertEqual({k: retry["error"][k] for k in ("type", "status")},
+                         {"type": "provider.rate-limit", "status": 429})
+        self.assertNotIn("retryAfterMs", retry["error"])          # only when Retry-After came
+        self.assertEqual(rows[-1]["error"]["type"], "provider.rate-limit")
+        _, rows, _ = self.fake(*go, WB_FAKE_API="deepinfra=ratelimit", FAKE_RETRY_AFTER="30")
+        self.assertEqual(rows[1]["error"]["retryAfterMs"], 30000)  # the provider's state, by name
+        _, rows, _ = self.fake(*go, FAKE_SCENARIO="down")
+        self.assertEqual([r["type"] for r in rows][-2:], ["retry", "error"])
+        self.assertEqual(rows[-1]["error"]["type"], "provider.transport")
+        for state, kind, status in (("auth", "provider.auth", 401), ("quota", "provider.quota", 402)):
+            for how in ({"WB_FAKE_API": f"deepinfra={state}"}, {"FAKE_SCENARIO": state}):
+                code, rows, _ = self.fake(*go, FAKE_ERROR_BODY="no: sk-test-0123456789abcdef", **how)
+                self.assertEqual((code, [r["type"] for r in rows]), (1, ["step_start", "error"]), how)
+                err = rows[-1]["error"]
+                self.assertEqual((err["type"], err["status"], err["message"]),
+                                 (kind, status, "no: sk-test-0123456789abcdef"))
+                self.assertIn("sk-test-0123456789abcdef", err["response"]["body"])
+        self.assertEqual(self.fake(*go, WB_FAKE_API=f"{FLASH}=ok,deepinfra=quota")[0], 0)  # its own first
+
+    def test_a_scripted_rate_limit_reaches_the_runners_events_as_retries_and_an_error(self):
+        os.environ.update(FAKE_RETRY_EVERY="0", FAKE_RETRIES="2")
+        for name, how in (("t-api-rl", {"FAKE_SCENARIO": "ratelimit"}),
+                          ("t-api-rl2", {"WB_FAKE_API": "ollama/mimo-v2.6:9b-q8_0=ratelimit"})):
+            os.environ.update(how)                    # by scenario; by a config model's state
+            run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo")
+            wait_phase(name, {"review", "stuck", "failed"})
+            rows, _ = store.read_jsonl(store.Task(name).dir / "events.jsonl")
+            self.assertEqual([r.get("attempt") for r in rows if r.get("kind") == "retry"], [2, 3], name)
+            self.assertIn("Rate limit", " ".join(r["text"] for r in rows if r.get("kind") == "error"))
+            os.environ.pop("FAKE_SCENARIO", None)
+
+    # capture_llm
+
+    def test_capture_answers_a_status_in_each_protocols_shape_with_retry_after_when_asked(self):
+        port, out, _ = self.capture("s429", CAPTURE_STATUS="429", CAPTURE_RETRY_AFTER="3")
+        code, heads, text = self.post(port, "/v1/openai/chat/completions", {"stream": True})
+        self.assertEqual((code, heads.get("retry-after")), (429, "3"))
+        self.assertEqual(json.loads(text), {"error": {"message": "capture status 429",
+                                                      "type": "capture", "code": 429}})
+        code, _, text = self.post(port, "/v1/messages?beta=true", {"stream": True})
+        self.assertEqual((code, json.loads(text)["type"], json.loads(text)["error"]["type"]),
+                         (429, "error", "rate_limit_error"))
+        self.assertEqual(len(out.read_text().splitlines()), 2)          # each one recorded
+        port, _, _ = self.capture("s429b", CAPTURE_STATUS="429", CAPTURE_STATUS_TIMES="1")
+        code, heads, _ = self.post(port, "/v1/chat/completions", {})
+        self.assertEqual((code, heads.get("retry-after")), (429, None))
+        self.assertEqual(self.post(port, "/v1/chat/completions", {})[0], 200)  # the limit lifted
+        port, _, _ = self.capture("s401", CAPTURE_STATUS="401",
+                                  CAPTURE_ERROR_BODY="Incorrect API key: sk-test-0123456789abcdef")
+        code, _, text = self.post(port, "/v1/chat/completions", {})
+        self.assertEqual(code, 401)
+        self.assertIn("sk-test-0123456789abcdef", text)
+        port, _, _ = self.capture("s402", CAPTURE_STATUS="402")
+        code, _, text = self.post(port, "/v1/messages", {})
+        self.assertEqual((code, json.loads(text)["error"]["type"]), (402, "billing_error"))
+
+    def test_capture_reports_usage_and_streams_reasoning_in_both_protocols(self):
+        usage = {"prompt_tokens": 1000, "completion_tokens": 20, "total_tokens": 1020,
+                 "prompt_tokens_details": {"cached_tokens": 300},
+                 "completion_tokens_details": {"reasoning_tokens": 7}}
+        port, _, _ = self.capture("use", CAPTURE_USAGE=json.dumps(usage), CAPTURE_REASONING="0.5")
+        _, heads, text = self.post(port, "/v1/chat/completions", {"stream": True, "messages": []})
+        self.assertEqual(heads["content-type"], "text/event-stream")
+        deltas = [c["choices"][0]["delta"] for c in self.sse(text)]
+        said = [next(iter(set(d) - {"role"}), None) for d in deltas]
+        self.assertEqual(said, ["reasoning_content", "reasoning_content", "content", None])
+        self.assertEqual(deltas[0]["role"], "assistant")
+        self.assertEqual(self.sse(text)[-1]["usage"], usage)
+        _, _, text = self.post(port, "/v1/chat/completions", {"messages": []})
+        self.assertEqual(json.loads(text)["usage"], usage)                  # not streamed
+        _, heads, text = self.post(port, "/v1/messages?beta=true", {"stream": True, "messages": []})
+        events = [x[7:] for x in text.splitlines() if x.startswith("event: ")]
+        self.assertEqual(events[:2], ["message_start", "content_block_start"])
+        datas = self.sse(text)
+        self.assertEqual(datas[1]["content_block"]["type"], "thinking")
+        self.assertIn("thinking_delta", [d.get("delta", {}).get("type") for d in datas])
+        self.assertEqual(datas[0]["message"]["usage"]["input_tokens"], 700)   # less the cached
+        self.assertEqual(datas[0]["message"]["usage"]["cache_read_input_tokens"], 300)
+        self.assertEqual([d for d in datas if d["type"] == "message_delta"][0]["usage"],
+                         {"output_tokens": 20})
+        self.assertEqual(events[-1], "message_stop")
+        _, _, text = self.post(port, "/v1/messages", {"messages": []})
+        reply = json.loads(text)
+        self.assertEqual((reply["type"], reply["content"], reply["usage"]["output_tokens"]),
+                         ("message", [{"type": "text", "text": "ok"}], 20))
+
+    def test_capture_records_each_requests_path_and_headers_beside_the_bodies(self):
+        port, out, heads = self.capture("hdr", calls=[WRITE_42])
+        self.post(port, "/v1/messages?beta=true", {"stream": True, "messages": [], "tools": [{}]},
+                  {"x-api-key": "dummy-key", "anthropic-version": "2023-06-01"})
+        self.post(port, "/v1/openai/chat/completions", {"messages": []},
+                  {"Authorization": "Bearer dummy-key"})
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        conn.request("GET", "/v1/models")
+        conn.getresponse().read()
+        conn.close()
+        seen = [json.loads(x) for x in heads.read_text().splitlines()]
+        self.assertEqual([(s["method"], s["path"]) for s in seen],
+                         [("POST", "/v1/messages?beta=true"), ("POST", "/v1/openai/chat/completions"),
+                          ("GET", "/v1/models")])
+        self.assertEqual(seen[0]["headers"]["x-api-key"], "dummy-key")
+        self.assertEqual(seen[1]["headers"]["authorization"], "Bearer dummy-key")
+        bodies = [json.loads(x) for x in out.read_text().splitlines()]
+        self.assertEqual([sorted(b) for b in bodies], [["messages", "stream", "tools"], ["messages"]])
+
+    def test_capture_answers_a_tool_call_on_anthropics_endpoint_as_a_tool_use_block(self):
+        port, _, _ = self.capture("tool", calls=[WRITE_42])
+        _, _, text = self.post(port, "/v1/messages", {"stream": True, "messages": [], "tools": [{}]})
+        datas = self.sse(text)
+        start = [d for d in datas if d["type"] == "content_block_start"][0]["content_block"]
+        self.assertEqual((start["type"], start["name"]), ("tool_use", "write"))
+        partial = [d["delta"]["partial_json"] for d in datas
+                   if d.get("delta", {}).get("type") == "input_json_delta"]
+        self.assertEqual(json.loads("".join(partial)), WRITE_42["arguments"])
+        self.assertEqual([d for d in datas if d["type"] == "message_delta"][0]["delta"]["stop_reason"],
+                         "tool_use")
+        _, _, text = self.post(port, "/v1/messages", {"stream": True, "messages": [], "tools": [{}]})
+        self.assertIn("text_delta", text)                                    # the calls ran out
+
+    # the facts, on the real OpenCode (offline: a scratch home, no catalog fetch, a dead proxy)
+
+    def real_env(self, layer: dict) -> dict:
+        home = Path(self.tmp.name) / "oc-home"
+        env = {k: v for k, v in os.environ.items()
+               if not k.endswith("_API_KEY") and not k.startswith("OPENCODE_")
+               and k.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+               and k not in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")}
+        for d in ("config", "data", "state", "cache"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+            env[f"XDG_{d.upper()}_HOME"] = str(home / d)    # no stored key, session or catalog
+        dead = "http://127.0.0.1:9"  # anything that would leave the machine fails at once
+        env.update(OPENCODE_DISABLE_MODELS_FETCH="1", OPENCODE_CONFIG_CONTENT=json.dumps(layer),
+                   HTTPS_PROXY=dead, HTTP_PROXY=dead, https_proxy=dead, http_proxy=dead,
+                   NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost",
+                   PWD=str(self.oc_cwd()))
+        return env
+
+    def oc_cwd(self) -> Path:
+        cwd = Path(self.tmp.name) / "oc-cwd"
+        cwd.mkdir(exist_ok=True)
+        return cwd
+
+    @staticmethod
+    def layer(port, *providers, **extra) -> dict:
+        return {**extra, "provider": {p: {"options": {"baseURL": f"http://127.0.0.1:{port}/v1",
+                                                      "apiKey": "dummy-key"}} for p in providers}}
+
+    def real_model(self, provider, ok=lambda e: True) -> dict:
+        """The spike's model of this provider from this OpenCode's bundled catalog, else another."""
+        out = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
+                             env=self.real_env(self.layer(1, provider)), capture_output=True,
+                             text=True, timeout=60).stdout
+        listed = [e for e in json.loads(out)["data"] if e["providerID"] == provider
+                  and e.get("capabilities", {}).get("tools") and ok(e)]
+        self.assertTrue(listed, f"no {provider} model in this OpenCode's catalog")
+        return next((e for e in listed if e["id"] == SPIKE_IDS[provider]), listed[0])
+
+    def real_run(self, model, layer, timeout=90):
+        p = subprocess.run(["opencode", "run", "--standalone", "-m", model, "--format", "json",
+                            "--", "say ok"], cwd=self.oc_cwd(), env=self.real_env(layer),
+                           capture_output=True, text=True, timeout=timeout)
+        return p.returncode, [json.loads(x) for x in p.stdout.splitlines() if x.startswith("{")]
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_posts_each_protocol_to_its_path_with_its_key_header_and_prices_it(self):
+        usage = {"prompt_tokens": 1000, "completion_tokens": 20, "total_tokens": 1020,
+                 "prompt_tokens_details": {"cached_tokens": 300},
+                 "completion_tokens_details": {"reasoning_tokens": 7}}
+        # OpenAI's reasoning tokens come out of output (billed alike); Anthropic's usage has none
+        for provider, path, key, written in (("deepinfra", "/v1/openai/chat/completions", "authorization", 13),
+                                         ("anthropic", "/v1/messages", "x-api-key", 20)):
+            entry = self.real_model(provider)
+            port, out, heads = self.capture(f"real-{provider}", CAPTURE_USAGE=json.dumps(usage))
+            code, rows = self.real_run(f"{provider}/{entry['id']}", self.layer(port, provider))
+            self.assertEqual(code, 0, rows)
+            seen = [json.loads(x) for x in heads.read_text().splitlines()]
+            self.assertTrue(seen, provider)
+            self.assertEqual({(s["method"], s["path"].split("?")[0]) for s in seen}, {("POST", path)})
+            want = "Bearer dummy-key" if key == "authorization" else "dummy-key"
+            self.assertEqual({s["headers"].get(key) for s in seen}, {want}, provider)
+            if provider == "anthropic":
+                self.assertEqual({s["path"] for s in seen}, {"/v1/messages?beta=true"})
+                self.assertEqual({s["headers"].get("anthropic-version") for s in seen}, {"2023-06-01"})
+                self.assertFalse(any("authorization" in s["headers"] for s in seen))
+            bodies = [json.loads(x) for x in out.read_text().splitlines()]
+            agent = [b for b in bodies if b.get("tools")][0]
+            self.assertEqual(agent["model"], entry["id"])   # the provider split at the first `/`
+            step = [r["part"] for r in rows if r["type"] == "step_finish"][-1]
+            self.assertEqual(step["tokens"], {"input": 700, "output": written, "reasoning": 20 - written,
+                                              "cache": {"read": 300, "write": 0}}, provider)
+            self.assertAlmostEqual(step["cost"], priced(entry, step["tokens"]), places=12)
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_sends_reasoning_effort_none_for_a_layer_variant_on_deepinfra(self):
+        entry = self.real_model("deepinfra")
+        port, out, _ = self.capture("real-off")
+        layer = self.layer(port, "deepinfra")
+        layer["provider"]["deepinfra"]["models"] = {entry["id"]: {"variants": {
+            "wb-off": {"reasoningEffort": "none"}}}}
+        model = f"deepinfra/{entry['id']}"
+        code, rows = self.real_run(f"{model}#wb-off", layer)
+        self.assertEqual(code, 0, rows)
+        bodies = [json.loads(x) for x in out.read_text().splitlines()]
+        self.assertEqual([b.get("reasoning_effort") for b in bodies if b.get("tools")], ["none"])
+        before = len(bodies)
+        code, rows = self.real_run(model, layer)             # no variant: no field
+        bodies = [json.loads(x) for x in out.read_text().splitlines()][before:]
+        self.assertEqual([b.get("reasoning_effort", "unset") for b in bodies if b.get("tools")], ["unset"])
+        code, rows = self.real_run(f"{model}#nosuch", layer)  # an unknown variant: no request
+        self.assertEqual(code, 1)
+        self.assertEqual(rows[-1]["error"], {"type": "provider.no-route",
+                                             "message": f"Variant unavailable for {model}: nosuch"})
+        self.assertEqual(len(out.read_text().splitlines()), before + len(bodies))
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_keeps_the_title_on_the_tasks_model_when_small_model_is_pinned(self):
+        entry = self.real_model("anthropic", lambda e: e.get("family") != "claude-haiku")
+        model = f"anthropic/{entry['id']}"
+        port, out, _ = self.capture("real-title")
+        code, rows = self.real_run(model, self.layer(port, "anthropic"))
+        self.assertEqual(code, 0, rows)
+        bodies = [json.loads(x) for x in out.read_text().splitlines()]
+        titles = {b["model"] for b in bodies if not b.get("tools")}
+        self.assertTrue(titles and entry["id"] not in titles, titles)  # unpinned: the small model
+        before = len(bodies)
+        code, rows = self.real_run(model, self.layer(port, "anthropic", small_model=model))
+        self.assertEqual(code, 0, rows)
+        bodies = [json.loads(x) for x in out.read_text().splitlines()][before:]
+        self.assertTrue([b for b in bodies if not b.get("tools")], "no title request")
+        self.assertEqual({b["model"] for b in bodies}, {entry["id"]})
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_prints_retry_events_for_a_429_and_fails_a_401_or_402_at_once(self):
+        entry = self.real_model("deepinfra")
+        model = f"deepinfra/{entry['id']}"
+        for after in ("2", None):
+            port, _, _ = self.capture(f"real-429-{after}", CAPTURE_STATUS="429",
+                                      **({"CAPTURE_RETRY_AFTER": after} if after else {}))
+            proc = subprocess.Popen(["opencode", "run", "--standalone", "-m", model, "--title", "t",
+                                     "--format", "json", "--", "say ok"], cwd=self.oc_cwd(),
+                                    env=self.real_env(self.layer(port, "deepinfra")),
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                    start_new_session=True)
+            retry = None
+            try:
+                deadline = time.time() + 60
+                while time.time() < deadline and not retry:
+                    line = proc.stdout.readline()       # the first retry comes at once
+                    if not line:
+                        break
+                    if line.startswith("{") and json.loads(line).get("type") == "retry":
+                        retry = json.loads(line)
+            finally:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                proc.stdout.close()
+            self.assertIsNotNone(retry, "no retry event")
+            self.assertEqual(retry["attempt"], 2)
+            self.assertTrue({"messageID", "nextRetryAt"} <= set(retry))
+            err = retry["error"]
+            self.assertEqual((err["type"], err["status"], err["message"]),
+                             ("provider.rate-limit", 429, "capture status 429"))
+            self.assertIn("capture status 429", err["response"]["body"])
+            if after:
+                self.assertEqual(err["retryAfterMs"], 2000)
+            else:
+                self.assertNotIn("retryAfterMs", err)
+        for status, kind in (("401", "provider.auth"), ("402", "provider.quota")):
+            port, out, _ = self.capture(f"real-{status}", CAPTURE_STATUS=status,
+                                        CAPTURE_ERROR_BODY="no: sk-test-0123456789abcdef")
+            p = subprocess.run(["opencode", "run", "--standalone", "-m", model, "--title", "t",
+                                "--format", "json", "--", "say ok"], cwd=self.oc_cwd(),
+                               env=self.real_env(self.layer(port, "deepinfra")),
+                               capture_output=True, text=True, timeout=60)
+            rows = [json.loads(x) for x in p.stdout.splitlines() if x.startswith("{")]
+            self.assertEqual((p.returncode, [r["type"] for r in rows]), (1, ["step_start", "error"]))
+            err = rows[-1]["error"]
+            self.assertEqual((err["type"], err["status"], err["message"]),
+                             (kind, int(status), "no: sk-test-0123456789abcdef"))  # verbatim
+            self.assertEqual(len(out.read_text().splitlines()), 1)              # no retry
+
+
 if __name__ == "__main__":
     unittest.main()
