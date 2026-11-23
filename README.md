@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/logo.jpg" alt="Claude's Workbench: a warm light directing three little robot craftsmen at a workbench" width="720"></p>
+<p align="center"><img src="docs/workbench-splash.gif" alt="Claude Code on the left; on the right, the Workbench pane opening after /workbench." width="900"></p>
 
 # Claude's Workbench
 
@@ -80,8 +80,6 @@ The first time, Claude finishes the setup and proves it on a tiny sample task.
 
 Then work as you always do. On the left is Claude, as usual; on the right, the local agents it's
 directing for you.
-
-<p align="center"><img src="docs/workbench-splash.gif" alt="Claude Code on the left; on the right, the Workbench pane opening after /workbench." width="900"></p>
 
 `/workbench-quit` stops the agents and keeps their work for later.
 `/workbench-quit-and-hand-back-claude` has Claude finish their tasks itself.
