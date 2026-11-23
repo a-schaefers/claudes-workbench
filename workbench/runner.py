@@ -279,7 +279,8 @@ def write_config_layer(task: store.Task) -> Path:
     buffer = compaction_buffer(cfg)
     store.write_json(path, {
         "$schema": "https://opencode.ai/config.json",
-        **models._merge(models.agent_providers(), provider_timeouts(task)),
+        **models._merge(models._merge(models.agent_providers(), provider_timeouts(task)),
+                        stored_key(task)),
         **mine,
         "share": "disabled",  # a user's `share: "auto"` would publish every agent session
         # the user's global small_model (titles, summaries) could be a cloud model whose key
@@ -305,6 +306,21 @@ def write_config_layer(task: store.Task) -> Path:
     })
     os.chmod(path, 0o600)  # a provider copied in may carry its apiKey
     return path
+
+
+def stored_key(task: store.Task) -> dict:
+    """The task's provider's key from OpenCode's own credential store, as a `provider` overlay
+    for the layer, or {}: the agent's OpenCode runs in the task's home, which holds no
+    credentials (#1010), so a local server's key kept by `opencode auth login` reaches it here,
+    in the 0600 layer, never in its environment (/proc/<pid>/environ is readable in the lane).
+    Only for a provider on this machine (or models.json `local: true`) with no options.apiKey of
+    its own (models.stored_key); a cloud provider's key never."""
+    try:
+        pid = models.resolve(task.spec["model"]).provider
+    except KeyError:
+        return {}
+    key = models.stored_key(pid)
+    return {"provider": {pid: {"options": {"apiKey": key}}}} if key else {}
 
 
 # One tool call's output, at most, with probe on (the config layer's `tool_output`): about a tenth
@@ -1097,6 +1113,16 @@ def _keep_warm(model_id) -> None:
         pass
 
 
+def opencode_env(task: store.Task, run: str = "") -> dict:
+    """OpenCode's own environment: the agent's (agent_env), OPENCODE_ENV, the task's OpenCode
+    home (context.opencode_home_env, made first: the lane holds only what exists) and the shell
+    shim as its SHELL, so its commands get the user's data directories back (#1010). Not in
+    agent_env: the tests' environment never has OpenCode's."""
+    context.make_opencode_home(task)
+    return {**agent_env(task, run), **OPENCODE_ENV, **context.opencode_home_env(task),
+            "SHELL": str(write_shell_shim(task))}
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -1120,7 +1146,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # front matter) as a flag, prints its usage and exits (the 2026-11-16 audit).
     cmd += ["--", note + prompt]
     CURRENT["run"] = run = _issue()
-    env = {**agent_env(task, run), **OPENCODE_ENV}
+    env = opencode_env(task, run)
+    if not task.status.get("opencode_home"):  # its sessions are in the task's home from now on
+        task.set_status(opencode_home=True)
     cmd = lane.wrap(context.writable(task), cmd,   # writes stay in the agent's lane (lane.py),
                     context.readable(task),       # and credentials out of its reach
                     context.unix_paths(task))
@@ -1552,6 +1580,42 @@ def test_shell() -> str:
     if os.path.isabs(sh) and os.access(sh, os.X_OK) and Path(sh).name not in NOT_POSIX:
         return sh
     return shutil.which("bash") or "/bin/sh"
+
+
+# The variables OpenCode's environment moves into the task's home (context.opencode_home_env),
+# which the shell shim gives back to the agent's commands as the user has them
+SHIM_RESTORES = ("XDG_DATA_HOME", "XDG_STATE_HOME", "OPENCODE_DB")
+# rules/<task>/shell/, out of the lane and off the agent's PATH. The shim is named after the
+# shell it runs: OpenCode picks its flags by $SHELL's name (zsh's `+o nomatch -c`, the PTY's
+# `-l`, the rc file, the tool's "Commands run … using <name>"), and a shim called opencode-shell
+# matched none, so under zsh `pip install -e .[dev]` failed "no matches found" (the #1010
+# review, 2026-11-22)
+SHELL_SHIM_DIR = "shell"
+
+
+def write_shell_shim(task: store.Task) -> Path:
+    """`rules/<task>/shell/<the shell's name>`, OpenCode's $SHELL: OpenCode runs each command as
+    `$SHELL -c`, and its own XDG_DATA_HOME and XDG_STATE_HOME (the task's home, #1010) would
+    move every other tool's data too (uv's Pythons, pipx, poetry, pnpm). POSIX sh, the user's
+    values baked in: each put back (or unset, where the user had none), SHELL back to the
+    user's, then the shell test_shell picks, as the tests run in, with OpenCode's arguments.
+    Paths, never a secret: the lane can read it."""
+    q = shlex.quote
+    shell = test_shell()
+    lines = ["#!/bin/sh", "# workbench: the agent's commands get the user's own data and state "
+             "directories back (#1010)"]
+    for name in (*SHIM_RESTORES, "SHELL"):
+        value = os.environ.get(name)
+        lines.append(f"{name}={q(value)}; export {name}" if value is not None else f"unset {name}")
+    lines.append(f'exec {q(shell)} "$@"')
+    folder = context.rules_dir(task) / SHELL_SHIM_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / Path(shell).name
+    tmp = folder / f".shim.{os.getpid()}"
+    tmp.write_text("\n".join(lines) + "\n")
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, path)
+    return path
 
 
 def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]:
@@ -2657,7 +2721,7 @@ def context_state(task: store.Task) -> dict:
     if not sid:
         return {}
     from .transcript import export  # transcript imports this module
-    got = export(sid, strict=True)
+    got = export(sid, strict=True, task=task)
     if got is None:
         # a timeout or a busy store read as an empty session: no usage, no compaction, so a full
         # or compacted one carried on, likeliest with several tasks sharing the store (#262, the
@@ -2686,6 +2750,19 @@ def context_state(task: store.Task) -> dict:
                                for m in msgs)}
 
 
+# A task started before v1.91.2 has its session in the user's own OpenCode store, which the
+# agent's OpenCode, in the task's home now, can't continue (#1010): its next round hands over
+# once, to a fresh session in the task's home, with the earlier one's last words (_start_fresh)
+OLD_STORE = ("its session is in OpenCode's shared store, which agents no longer reach "
+             "(v1.91.2)")
+
+
+def old_store(st: dict) -> bool:
+    """Whether the task's session began in the user's OpenCode store (status `session` with no
+    `opencode_home` mark, which run_round sets)."""
+    return bool(st.get("session")) and not st.get("opencode_home")
+
+
 def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
     """Why round n should start a fresh session, or None to continue the current one. ``st``: the
     status to judge by, when it isn't written yet (wb next, before its one status write)."""
@@ -2695,6 +2772,8 @@ def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
     if not st.get("session"):  # the step's first round, or one whose session never started
         first = (st.get("step_round") or 1) == st.get("round", 1)
         return None if first else "the last session ended before it began"
+    if old_store(st):  # even a kept one: the agent's OpenCode can't reach it any more
+        return OLD_STORE
     if st["session"] == st.get("compact_failed_session"):  # it can't go on, nor be kept (#969)
         return COMPACTION_FAILED
     if st.get("context") == "keep":
@@ -2760,7 +2839,23 @@ def answered(task: store.Task) -> str:
     return "\n\n".join(kept)
 
 
-def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
+LAST_WORDS_MAX = 2000  # characters of an earlier session's last words a fresh one carries
+
+
+def last_words(task: store.Task, sid: str) -> str:
+    """The session's last message to Claude (its last assistant text), exported by wb outside
+    the lane (the task's home, else the user's store), or ""."""
+    from .transcript import export  # transcript imports this module
+    for m in reversed(export(sid, task=task).get("messages") or []):
+        if isinstance(m, dict) and m.get("type") == "assistant":
+            text = "\n\n".join(str(p.get("text") or "").strip() for p in m.get("content") or []
+                               if isinstance(p, dict) and p.get("type") == "text").strip()
+            if text:
+                return text[-LAST_WORDS_MAX:]
+    return ""
+
+
+def handoff_prompt(task: store.Task, why: str, instructions: str, last: str = "") -> str:
     wt, spec = task.worktree, task.spec
     steps = gitops.git(wt, "log", "--oneline", f"{spec['base']}..HEAD").strip()
     room = min(int(HANDOFF_DIFF_SHARE * (task.status.get("window") or 32768) * 4), HANDOFF_DIFF_MAX)
@@ -2785,6 +2880,7 @@ def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
             + (f"\n\n## Claude's answers to your questions\n\nAn earlier session asked, and "
                f"Claude answered; follow these, and don't ask them again:\n\n{qa}"
                if (qa := answered(task)) else "")
+            + (f"\n\n## Your last words in the earlier session\n\n{last}" if last else "")
             + f"\n\n## Now\n\n{instructions}")
 
 
@@ -2853,7 +2949,9 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
                or (notes.is_file() and bool(notes.read_text().strip())))
         prior = asks[:-1] if own else asks
         now = raw if not prior else ASKED.format("\n\n".join(prior)).strip() + "\n\nNow:\n\n" + raw
-    path.write_text(handoff_prompt(task, why, now))
+    # a session from before the task's own OpenCode home: its last words, from the user's store
+    last = last_words(task, st["session"]) if why == OLD_STORE and st.get("session") else ""
+    path.write_text(handoff_prompt(task, why, now, last))
     task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]] * bool(st.get("session")),
                     context=None, skills_told=None)  # a new session hears the skills again
     if again and not st.get("session"):  # no session was replaced: the handover is counted once
@@ -2971,7 +3069,7 @@ def measure_speed(task: store.Task, since: float) -> None:
     if not sid:
         return
     try:
-        msgs = [m for m in export(sid).get("messages", [])
+        msgs = [m for m in export(sid, task=task).get("messages", [])
                 if ((m.get("time") or {}).get("created") or 0) >= since * 1000]
         got = router.record_speed(task.spec["model"], msgs)
         if any(got.values()) and stats.recording():
@@ -3256,7 +3354,7 @@ def drive(task: store.Task) -> None:
             first = False
             n = task.status["round"]
             _early_notes(task, n)
-            why = fresh_reason(task) if n > 1 else None
+            why = fresh_reason(task) if n > 1 or old_store(task.status) else None
             keep = task.status.get("context") == "keep"
             if why:
                 _start_fresh(task, n, why)

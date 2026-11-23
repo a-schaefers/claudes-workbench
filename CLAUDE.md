@@ -46,10 +46,11 @@ or comment without the user's yes for it.
 No dependencies, no packaging: it runs from the clone, on Linux, WSL2 and macOS (Landlock only on
 Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `store.py`: task files, atomic JSON, locked JSONL, `Task`. Every other part talks through them.
-- `cli.py`: `wb` and `PROTOCOL` (the agent's rules). `runner.py`: the detached per-task driver.
+- `cli.py`: `wb` and `PROTOCOL` (the agent's rules). `runner.py`: the detached per-task driver,
+  and OpenCode's environment (`opencode_env`: the task's home, the shell shim).
   `events.py`: OpenCode's events, the stuck detector. `ask_mcp.py`: `ask_reviewer`, both sides.
 - `context.py`: what the agent knows and may do (instructions, denies, the shell allowlist, the
-  lane's paths, grants). `lane.py`: the Landlock lane. `gitguard.py`: the agent's read-only `git`.
+  lane's paths: `writable`, the worktree, `ask/` and the task's `opencode/`, `opencode_home`; grants). `lane.py`: the Landlock lane. `gitguard.py`: the agent's read-only `git`.
   Neither imports the rest of the package: the lane runs as a file, the shim on every git call.
 - `gitops.py`: worktrees, the review diff, commits (no hooks); a call on a task's worktree is
   pinned to its git dir (`gitdir.json`).
@@ -110,8 +111,9 @@ Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change mus
 Plain files under `$WB_HOME` (`~/.local/state/workbench`); config in `~/.config/workbench/`; the
 skill library in `$WB_SKILLS` (`~/.local/share/workbench/skills`, its own git repo). Every file,
 key and format: ARCHITECTURE.md, *Files and formats*. Inside `$WB_HOME` the agent's lane
-writes only `tasks/<task>/worktree/` and `ask/` (the rest of its lane: *What the agent knows*); `rules/<task>/` and `locks/` (`store.task_lock`) stay outside
-it (an agent once held the runner's lock: the 0.90 review). `wb patch` keeps `patches.json` (the
+writes only `tasks/<task>/worktree/`, `ask/` and `opencode/` (its OpenCode's own home; the rest of
+its lane: *What the agent knows*); `rules/<task>/` (with the shell shim, `shell/<name>`) and
+`locks/` (`store.task_lock`) stay outside it (an agent once held the runner's lock: the 0.90 review). `wb patch` keeps `patches.json` (the
 clone install and its upstream, which the mod reads; the pull requests it sent), `send-ok.json` (the mod's yes to one send),
 `rescued/`, `upstream/` and `patches/` there.
 
@@ -164,5 +166,8 @@ what: ARCHITECTURE.md, *The tests*; the detail: *The runner, inside*, *What the 
   Denying `execute` makes the `opencode_*` tools direct: deny them too.
 - A session is bound to the directory it was made in: context carries over within a task's
   worktree, never to a new task.
+- `OPENCODE_DB` moves only the db (the data dir's `auth.json` is still imported into it);
+  `XDG_DATA_HOME` moves the whole data dir (`opencode debug paths`), so agents get the task's.
+  It picks a command's flags by `$SHELL`'s name (zsh's `+o nomatch`): the shim bears its shell's.
 - The user's global MCP servers start even when `"enabled": false`, and a provider's
   `headerTimeout`/`chunkTimeout` cut a slow request: the layer undoes both.

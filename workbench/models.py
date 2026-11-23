@@ -507,17 +507,42 @@ _DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 # an Ollama behind a key served the model, but the native /api probes sent none and it read as
 # unavailable (#256, the audit of 1.2). discover() fills it.
 _KEYS: dict[str, str] = {}
+# Each local provider with no apiKey of its own, by its server's root: a request that root
+# refuses (401, 403) without a key asks OpenCode's credential store once (auth_key) and goes
+# again with the key it keeps (#336). Asked up front instead, every discovery started an
+# OpenCode server against the user's store, the pane's `wb watch --json` on each refresh too,
+# about 0.9 s of a busy core for a stock Ollama that wants no key (the #1010 review, 2026-11-22).
+_STORED: dict[str, str] = {}
+
+
+def _under_root(url: str, roots) -> str | None:
+    return next((root for root in roots if url == root or url.startswith(root + "/")), None)
 
 
 def _open(target, timeout: float):
     url = target.full_url if isinstance(target, urllib.request.Request) else target
-    key = next((k for root, k in _KEYS.items() if url == root or url.startswith(root + "/")), "")
+    asked = isinstance(target, urllib.request.Request) and target.has_header("Authorization")
+    key = _KEYS.get(_under_root(url, _KEYS) or "", "")
     if key and not isinstance(target, urllib.request.Request):
         target = urllib.request.Request(url)
     if key and not target.has_header("Authorization"):
         target.add_header("Authorization", f"Bearer {key}")
     opener = _DIRECT.open if _this_host(urlparse(url).hostname) else urllib.request.urlopen
-    return opener(target, timeout=timeout)
+    try:
+        return opener(target, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        # not when the caller sent a key of its own (a provider's options.apiKey): that one is
+        # the key the agent sends, and it was refused
+        root = None if asked or e.code not in (401, 403) else _under_root(url, _STORED)
+        stored = auth_key(_STORED[root]) if root else ""
+        if not stored or stored == key:
+            raise
+        e.close()
+        _KEYS.setdefault(root, stored)  # later requests to that server send it at once
+        if not isinstance(target, urllib.request.Request):
+            target = urllib.request.Request(url)
+        target.add_header("Authorization", f"Bearer {stored}")
+        return opener(target, timeout=timeout)
 
 
 def _engine(url: str, over: dict, pid: str = "") -> str:
@@ -669,9 +694,10 @@ def _local_providers(cfg: dict, extra: dict, dirs: dict | None = None):
             # keyless probe with an error, was cached as a server, and its Ollama management
             # (load, unload, pull, the window check) was skipped (#337, the audit of 1.4)
             raw = str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "")
-            key = _expand(raw, base=(dirs or {}).get(pid)) if raw else auth_key(pid)  # #336
-            if key:
+            if raw and (key := _expand(raw, base=(dirs or {}).get(pid))):
                 _KEYS[server_root(url)] = key
+            elif not raw:  # OpenCode's stored key, asked only when the server wants one (#336)
+                _STORED.setdefault(server_root(url), pid)
             yield pid, prov, url, _engine(url, extra.get(pid) or {}, pid), remote
 
 
@@ -720,17 +746,87 @@ def cloud_allowed(model_id: str) -> bool:
     return (_overrides().get(model_id) or {}).get("local") is True
 
 
-def auth_key(pid: str) -> str:
-    """The key `opencode auth login` keeps for a provider, in OpenCode's auth.json: OpenCode's
-    docs set a custom provider's key there, with no options.apiKey, and the probes sent none, so
-    a model OpenCode would run read "it wants an API key" (#336, the audit of 1.4). The lane keeps
-    auth.json readable, so the agent's OpenCode sends the same key. Never printed."""
-    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+# What `opencode auth export <provider>` said, per process, a miss ("") included: each OpenCode
+# call starts a server (about 0.9 s on 2.3.2). Discovery asks only for a server that refused a
+# keyless request (_open); the layer (stored_key) and wb doctor, scout and model (providers) ask.
+_AUTH: dict[str, str] = {}
+_AUTH_SAID: set[str] = set()
+# key-like text in a failure's message: never printed (an error may echo what it read)
+_KEYLIKE = re.compile(r"\b(sk|pk|rk|ak)-[\w-]{6,}|[A-Za-z0-9_+/=.-]{20,}")
+
+
+def _auth_failed(why: str) -> None:
+    line = _KEYLIKE.sub("<redacted>", next(iter(why.strip().splitlines()), "") or "no output")[:200]
+    if line not in _AUTH_SAID:
+        _AUTH_SAID.add(line)
+        print(f"wb: opencode auth export failed: {line}", file=sys.stderr, flush=True)
+
+
+def _exported_key(pid: str) -> str:
+    """The provider's static API key from `opencode auth export <pid>` (OpenCode 2.x keeps
+    /connect and `opencode auth login` credentials in its database, opencode.db, and writes no
+    auth.json). Rows are {integrationID, active, value: {type, key}} (checked on 2.3.2,
+    2026-11-22); only `key` rows (V1's `api`), the active one first, never an OAuth token:
+    refreshing a copy would log the user's own OpenCode out. Run outside the lane, with the
+    user's environment, --standalone (the background service isn't needed, and one on another
+    home holds its port); parsed in memory, never printed."""
+    from .runner import opencode_bin  # runner imports this module
     try:
-        row = json.loads((Path(base) / "opencode" / "auth.json").read_text()).get(pid)
-    except (OSError, ValueError, AttributeError):
+        r = subprocess.run([*opencode_bin(), "auth", "export", pid, "--standalone"],
+                           capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        _auth_failed("timed out")
         return ""
-    return str(row.get("key") or "") if isinstance(row, dict) and row.get("type") == "api" else ""
+    except OSError:  # no OpenCode: wb doctor and wb start say so
+        return ""
+    if r.returncode:
+        if "not found" not in (r.stderr or "").lower():  # an integration OpenCode doesn't know
+            _auth_failed(r.stderr or f"exit {r.returncode}")
+        return ""
+    try:
+        rows = json.loads(r.stdout or "[]")
+    except ValueError:
+        _auth_failed("its output isn't JSON")
+        return ""
+    keys = [row for row in rows if isinstance(row, dict) and row.get("integrationID", pid) == pid
+            and isinstance(row.get("value"), dict) and row["value"].get("type") in ("key", "api")
+            and isinstance(row["value"].get("key"), str) and row["value"]["key"]] \
+        if isinstance(rows, list) else []
+    keys.sort(key=lambda row: row.get("active") is not True)
+    return keys[0]["value"]["key"] if keys else ""
+
+
+def auth_key(pid: str) -> str:
+    """The key `opencode auth login` (or /connect) keeps for a provider: OpenCode's docs set a
+    custom provider's key there, with no options.apiKey, and the probes sent none, so a model
+    OpenCode would run read "it wants an API key" (#336, the audit of 1.4). OpenCode 2.x keeps it
+    in its database (`opencode auth export`, _exported_key); else 1.x's auth.json. The agent's
+    OpenCode, in the task's own home, has none: the layer carries it (stored_key). Asked only
+    when wanted: each call starts OpenCode (_AUTH). Cached per process, a miss included. Never
+    printed."""
+    if pid in _AUTH:
+        return _AUTH[pid]
+    key = _exported_key(pid)
+    if not key:
+        base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+        try:
+            row = json.loads((Path(base) / "opencode" / "auth.json").read_text()).get(pid)
+        except (OSError, ValueError, AttributeError):
+            row = None
+        key = str(row.get("key") or "") if isinstance(row, dict) and row.get("type") == "api" else ""
+    _AUTH[pid] = key
+    return key
+
+
+def stored_key(pid: str) -> str:
+    """The key OpenCode's credential store holds for ``pid`` (auth_key) when wb would send it
+    itself: a provider discovery passes as this machine's (or models.json `local: true`) with no
+    options.apiKey of its own. "" for any other provider: a cloud key never goes in a layer."""
+    for p, prov, _url, why, _remote in _scan(read_config(), _overrides(), _provider_dirs()):
+        if p == pid:
+            raw = (prov.get("options") or prov.get("settings") or {}).get("apiKey")
+            return "" if why or raw else auth_key(pid)
+    return ""
 
 
 def discover() -> dict[str, Model]:
@@ -743,7 +839,7 @@ def discover() -> dict[str, Model]:
         # the key the agent's OpenCode will send: probed with wb's own, a key the agent never got
         # read as running and every request of the task was refused (the 0.90 review)
         raw_key = str(opts.get("apiKey") or "")
-        key = _expand(raw_key, base=dirs.get(pid)) or (auth_key(pid) if not raw_key else "")
+        key = _expand(raw_key, base=dirs.get(pid))  # else OpenCode's stored one, when asked (_open)
         hidden = [n.strip() for k, n in _TEMPLATE.findall(raw_key)
                   if k == "env" and n.strip() in os.environ and not _agent_sees(n.strip())]
         if hidden and not problem:
@@ -964,7 +1060,7 @@ def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
             # where else a key may be kept: opencode auth login's auth.json (#336, the audit of 1.4)
             return _no(f"the server refuses its API key (HTTP {code}): set the provider's "
                        f"options.apiKey, or `opencode auth login` for {m.provider}, to the key it "
-                       "wants" if m.api_key else
+                       "wants" if m.api_key or _AUTH.get(m.provider) else
                        f"the server answers, but it wants an API key (HTTP {code}): set the "
                        f"provider's options.apiKey, or `opencode auth login` for {m.provider}")
     if isinstance(body, dict):
@@ -2810,7 +2906,8 @@ def ollama_cap(entry: dict) -> int:
 
 def providers() -> dict[str, dict]:
     """OpenCode's local providers: id → {"root", "url", "engine", "engine_known", "start",
-    "problem", "key" (its apiKey, resolved, else auth.json's: never printed), "models"} (the config's model entries)."""
+    "problem", "key" (its apiKey, resolved, else OpenCode's stored one: auth_key; never printed),
+    "models"} (the config's model entries)."""
     extra, dirs = _overrides(), _provider_dirs()
     def key(pid, prov):
         raw = str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "")
