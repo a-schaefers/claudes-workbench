@@ -581,7 +581,7 @@ const AGAIN_NOTE = (skill: string) =>
 
 const MODE_NOTE = (skill: string) =>
   'Workbench mode is on in this session: the user ran /workbench, and it lasts until /workbench-quit. ' +
-  'Treat each request as the /workbench skill says: hand its coding to local agents with wb, ' +
+  'Treat each request as the /workbench skill says: hand its coding to agents with wb, ' +
   `then review and accept. Every plan you write, in plan mode or not, is a handoff plan: steps ` +
   `sized to the agents' slice, each with its files, exact interfaces and acceptance command (the ` +
   `skill's "Planning work you will hand off"). If that procedure is not in your context, read ` +
@@ -605,12 +605,12 @@ const HAND_BACK = 'workbench-quit-and-hand-back-claude'
 // Claude coding (#92), the user's choice (`wb coding`): when Claude may write code for a delegated
 // task. "decide" (no saved choice) adds nothing, so Claude works as before there was a choice.
 const CODING_RULES: Record<string, string> = {
-  ask: 'Claude coding is "Ask me first" (the user\'s choice; `wb coding` shows it). The local agent ' +
+  ask: 'Claude coding is "Ask me first" (the user\'s choice; `wb coding` shows it). The agent ' +
     'gets the first shot; review and advise as always. Before you write any of a task\'s code (an ' +
     'edit in its worktree, `wb takeover`), help the agent first (feedback, a smaller step). If it ' +
     'still falls short, ask the user for one specific edit, naming the task and the exact change, ' +
     'and wait: only their yes allows it. Record it with `wb coding allow <task> --edit "…" --said ' +
-    '"<their words>"`; it lasts until you hand the task back. Unanswered, the work stays local.',
+    '"<their words>"`; it lasts until you hand the task back. Unanswered, the work stays with the agent.',
   only: 'Claude coding is "Only when I say" (the user\'s choice; `wb coding` shows it). Never write ' +
     'a task\'s code yourself, not a one-line fix in review nor `wb takeover`: guide the agent, ' +
     'and when it stays stuck, report the blocker to the user and keep the work with the agent. ' +
@@ -643,7 +643,7 @@ async function workflowsMode($: any): Promise<string> {
 const CODING_STOPS: [string, string, string][] = [
   ['only', 'Only when I say', 'You tell Claude when to write code.'],
   ['ask', 'Ask me first', 'Claude can ask to make a specific fix and waits for your yes.'],
-  ['decide', 'Let Claude decide (default)', 'Claude uses its judgment to guide the local agent or make a fix itself.'],
+  ['decide', 'Let Claude decide (default)', 'Claude uses its judgment to guide the agent or make a fix itself.'],
 ]
 
 // The web chat's row: the choice is wb's (`wb chat on|off`, chat/switch.json), off by default
@@ -1956,7 +1956,7 @@ async function codingRefusal($: any, path: string): Promise<string> {
     }
     return ''
   }
-  return `workbench: not edited: ${task} is the local agent's. ${CODING_RULES[mode]}`
+  return `workbench: not edited: ${task} is the agent's. ${CODING_RULES[mode]}`
 }
 // Tasks of another session are listed as left alone: theirs to stop or finish.
 const QUIT_NOTE = (out: string, ok: boolean) =>
@@ -4134,7 +4134,7 @@ export const register: Register = (on, options) => {
     return {
       blocks: [...blocks, {
         name: 'workbench',
-        text: `Tasks delegated to local agents with wb (the /workbench skill) are open:\n${status}\n` +
+        text: `Tasks delegated to agents with wb (the /workbench skill) are open:\n${status}\n` +
           'Pick them up from here: `wb report <name>` for one, `wb watch <name>` to follow it.',
       }],
     }

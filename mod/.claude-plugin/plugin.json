@@ -1,6 +1,6 @@
 {
   "name": "workbench",
-  "description": "Live pane, status line and wake-ups for tasks Claude delegates to local OpenCode agents (wb).",
+  "description": "Live pane, status line and wake-ups for tasks Claude delegates to OpenCode agents (wb).",
   "author": {
     "name": "Adam Schaefers"
   },
