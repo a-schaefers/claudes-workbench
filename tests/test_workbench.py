@@ -29469,7 +29469,32 @@ class ApiThinking(Base):
         ]
         for m, want in cases:
             self.assertEqual(runner._thinking(m, "off"), want, m.config)
-            self.assertEqual(runner.thinking_variant(m, "on"), (None, "thinking on"))
+
+    def test_thinking_on_names_a_listed_effort_never_the_bare_id_beside_one(self):
+        # the API calibration, 2026-11-23: a DeepInfra model bare gave 0 reasoning
+        # tokens (it reasoned at #high), so a role set to thinking on ran without it while its
+        # start line said "thinking on"
+        M = lambda url="https://api.example.test/v1", package="", **cfg: self.models.Model(  # noqa: E731
+            id="p/m", provider="p", name="m", base_url=url, engine="api", label="P (API)", kind="api",
+            package=package, config=cfg)
+        on = lambda v: (v, f"thinking on (effort {v})")  # noqa: E731
+        cases = [
+            (M(reasoning=True, variants=[{"id": v} for v in ("none", "low", "high", "max")]), on("high")),
+            (M(variants=[{"id": v} for v in ("low", "medium", "high")]), on("medium")),   # OpenAI's default
+            (M(variants=[{"id": "low"}]), on("low")),                     # only under the default: still on
+            (M(url="https://api.deepseek.com/v1", variants=[{"id": v} for v in ("medium", "high", "max")]),
+             on("high")),
+            (M(url="https://openrouter.ai/api/v1", variants=[{"id": v, "settings": {"reasoning": {"effort": v}}}
+                                                         for v in ("high", "xhigh", "max")]), on("high")),
+            (M(package="@opencode/ai/providers/anthropic", variants=[
+                {"id": v, "settings": {"thinking": {"type": "enabled", "budgetTokens": n}}}
+                for v, n in (("high", 16000), ("max", 31999))]), on("high")),
+            (M(variants=[{"id": "quick", "settings": {"reasoningEffort": "none"}}]), (None, "thinking on")),
+            (M(reasoning=True), (None, "thinking on")),                # no variants: the bare id
+            (M(reasoning=False, variants=[{"id": "high"}]), (None, "thinking off (the model doesn't reason)")),
+        ]
+        for m, want in cases:
+            self.assertEqual(runner.thinking_variant(m, "on"), want, m.config)
 
     def test_a_keyhole_models_own_base_moves_to_v2_as_its_settings_base_url(self):
         # the wave 2 merge (#1015 with #1018): the keyhole overlay gives the model a V1
