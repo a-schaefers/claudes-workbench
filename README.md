@@ -2,7 +2,7 @@
 
 # Claude's Workbench
 
-**Claude orchestrates. An OpenCode local LLM on your GPU writes the code.** Workbench is a
+**Claude orchestrates. An OpenCode subagent via API or your GPU writes the code.** Workbench is a
 Claude Code plugin that connects the two inside your normal Claude Code session.
 
 <p align="center">
@@ -16,7 +16,7 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
 <a href="https://github.com/a-schaefers/claudes-workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/claudes-workbench"></a>
 </p>
 
-- **Claude is the lead, your local models are the crew:** Claude assigns each step to a model
+- **Claude is the lead, your subagents are the crew:** Claude assigns each step to a model
   sized for it, reviews what comes back, and returns it until it's right.
 - **Agents get Claude's know-how:** a library of skills Claude keeps and grows, handed out per
   task.
@@ -26,8 +26,8 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
 - **Beyond code: images and audio.** Optionally, Claude directs local image and audio models
   for a project's icons, illustrations, voice lines, sound effects and music.
 
-On bigger coding tasks, once the session is already open, handing the coding off to the local
-model typically costs Claude about half the tokens of writing the code itself.
+On bigger coding tasks, once the session is already open, handing the coding off to the
+subagent typically costs Claude about half the tokens of writing the code itself.
 
 ## Why small local models hold up
 
@@ -48,9 +48,10 @@ model typically costs Claude about half the tokens of writing the code itself.
 - [OpenCode](https://opencode.ai) 2.3 or newer: `curl -fsSL https://opencode.ai/v2/install | bash`
   (or `opencode upgrade --major` from 1.x; npm's `opencode-ai` and GitHub's Latest release are 1.x)
 - Git 2.34 and Python 3.11 or newer, on Linux, macOS, or Windows through WSL2
-- A local model. **Already run a server** that speaks the OpenAI API? Claude uses it (tool calls
-  and a 32K context window recommended, 16K at the least). **None yet?** Claude suggests one that fits your hardware and
-  asks before installing or downloading anything.
+- A model: one you connected in OpenCode (`/connect`), or a local one. **Already run a server**
+  that speaks the OpenAI API? Claude uses it (tool calls and a 32K context window recommended,
+  16K at the least). **None yet?** Claude suggests one that fits your hardware and asks before
+  installing or downloading anything.
 - (optional) An image or audio model, for pictures and sound. The first time a project needs one,
   Claude proposes a model that fits your machine and your use's licence, and asks before
   downloading it. Small speech models run on the CPU; music wants a GPU.
@@ -73,7 +74,7 @@ claude plugin install workbench@workbench
 
 The first time, Claude finishes the setup and proves it on a tiny sample task.
 
-Then work as you always do. On the left is Claude, as usual; on the right, the local agents it's
+Then work as you always do. On the left is Claude, as usual; on the right, the agents it's
 directing for you.
 
 `/workbench-quit` stops the agents and keeps their work for later.

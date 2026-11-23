@@ -150,5 +150,65 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertLess(len(CLAUDE), 25_000, "move detail to ARCHITECTURE.md")
 
 
+class DocsFor20(unittest.TestCase):
+    """#1027: since 2.0 an agent is a GPU model or an API model, and what people and Claude read
+    says so; an API-only user read "A local model" as "not for me"."""
+
+    def test_the_readme_pitch_names_the_api_and_the_gpu(self):
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn("**Claude orchestrates. An OpenCode subagent via API or your GPU writes the code.**", readme)
+        self.assertIn("**Claude is the lead, your subagents are the crew:**", readme)
+        self.assertIn("- A model: one you connected in OpenCode (`/connect`), or a local one.", readme)
+        self.assertNotIn("local LLM", readme)
+
+    def test_the_plugin_description_says_opencode_agents_not_local_ones(self):
+        import json
+        said = json.loads((ROOT / "mod/.claude-plugin/plugin.json").read_text())["description"]
+        self.assertIn("tasks Claude delegates to OpenCode agents (wb)", said)
+        self.assertNotIn("local", said)
+
+    def test_the_mods_claude_facing_strings_never_call_the_agent_local(self):
+        # the weekly model check's SCOUT_NOTE is the first-run issue's (#1024) and the image and
+        # audio texts stay local; comments aren't said to Claude
+        pane = (ROOT / "mod/hooks/register.tsx").read_text()
+        scout = pane.index("const SCOUT_NOTE")
+        pane = pane[:scout] + pane[pane.index("\nconst ", scout + 1):]
+        said = "\n".join(line for line in pane.splitlines() if not line.lstrip().startswith("//"))
+        for words in ("local agent", "work stays local"):
+            self.assertNotIn(words, said)
+        # "stays local" lost only its last word: the ask rule still says where the work stays, as
+        # wb takeover's refusal does (cli._coding_gate)
+        self.assertIn("Unanswered, the work stays with the agent.", said)
+
+    def test_wb_coding_and_the_pane_say_the_same_sentence_for_each_choice(self):
+        # *Couplings*: cli.CODING → the mod's CODING_STOPS (#1027 changed both in one word)
+        stops = (ROOT / "mod/hooks/register.tsx").read_text()
+        stops = stops[stops.index("const CODING_STOPS"):]
+        stops = stops[:stops.index("]\n")]
+        for mode, (_, sentence) in cli.CODING.items():
+            self.assertIn(f"'{sentence}'", stops, mode)
+            self.assertNotIn("local", sentence, mode)
+
+    def test_architecture_md_defines_the_agent_as_a_gpu_or_an_api_model(self):
+        opening = " ".join(ARCH[:ARCH.index("Contents:")].split())
+        self.assertIn('"the agent" is the model running in OpenCode on one task', opening)
+        self.assertIn("or an API model", opening)
+        pieces = section(ARCH, "## The pieces")
+        self.assertIn("an API task: no lease, its key in the keyhole", pieces)
+
+    def test_claude_md_says_an_unset_role_is_the_gpu_and_the_key_stays_outside_the_lane(self):
+        runs = " ".join(section(CLAUDE, "## How a task runs").split())
+        self.assertIn("unset: GPU", runs)
+        self.assertIn("the key stays there, outside the lane", runs)
+        self.assertNotIn("local models in OpenCode", CLAUDE)
+
+    def test_files_and_formats_says_a_task_from_before_roles_reads_as_gpu(self):
+        # #1027's edge case: a task.json from before 2.0 has no `via`, and every reader takes it
+        # as GPU (bench, runner, cli, chat: `!= "api"` or `or "gpu"`)
+        keys = " ".join(section(ARCH, "## Files and formats").split())
+        keys = keys[keys.index("**task.json**"):]
+        self.assertIn("a task from before it has neither, and reads as GPU", keys[:keys.index("`size`")])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3843,7 +3843,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label).filter((l: string) => / {2}[❯ ] /.test(l)))
     .toEqual(['    Only when I say', '    Ask me first', '  ❯ Let Claude decide (default)'])
   const says = async () => ((await ui.find({ key: 'coding-says' })) as any)?.children?.[0]?.children?.[0]?.trim()
-  expect(await says()).toBe('Claude uses its judgment to guide the local agent or make a fix itself.')  // the chosen one's
+  expect(await says()).toBe('Claude uses its judgment to guide the agent or make a fix itself.')  // the chosen one's
   await $.ui.focus({ component: 'Pane', requestId: 'workbench', element: 'coding:only', origin: { kind: 'person' } } as any)  // the person's Tab, as the engine raises it
   expect(await says()).toBe('You tell Claude when to write code.')                                         // the ring's
   await ui.press({ key: 'coding:ask' })

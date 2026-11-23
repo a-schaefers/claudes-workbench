@@ -1,6 +1,6 @@
 # Claude's Workbench
 
-Claude delegates coding tasks to local models in OpenCode and reviews the results. The short name
+Claude delegates coding tasks to models in OpenCode (GPU or API) and reviews the results. The short name
 `workbench` stays on the package, the plugin (`workbench@workbench`), the state and config
 directories and the clone path `~/repos/workbench` (which nothing needs).
 
@@ -90,13 +90,14 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 
 ## How a task runs
 Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change must not break:
-1. `wb start` resolves the role (`--role`, else from `--size`): GPU through the router, API to the
+1. `wb start` resolves the role (`--role`, else from `--size`; unset: GPU): GPU through the router, API to the
    role's model, never the other side (exit 3). It checks (a committed CLAUDE.md, the model, GPU room, or for an API model a free
    provider slot of `API_PARALLEL`: exit 4 unless `--queue`),
    writes round 1's prompt (spec plus `PROTOCOL`), spawns the runner and returns at once:
    anything slow (checkout, setup, base check) is the runner's, as Claude's Bash stops at 2 min.
 2. The runner holds the GPU (`GpuLease`) and loads the model before every round, or for an API
-   model holds a provider slot (`NoLease`, never in gpu.json) and starts the keyhole; it runs
+   model holds a provider slot (`NoLease`, never in gpu.json) and starts the keyhole (the key stays
+   there, outside the lane); it runs
    `opencode run … -- <prompt>` in the worktree through `lane.wrap`, with the layer
    `rules/<task>/opencode.json`. Guards stop a stuck agent; `wb steer` queues a note.
 3. `--test` runs in the agent's lane, environment and shell (its code gains no rights when
@@ -111,7 +112,7 @@ Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change mus
    row is what the router, slices, tuning and skill records learn from.
 
 ## Troubleshooting
-- `wb doctor` (the install), `wb models` (a model that can't run).
+- `wb doctor` (the install), `wb models` (a model that can't run), `wb route` (an API role's).
 - A task: `wb log <t> -v`, `wb watch <t> -v`, `tasks/<t>/runner.log` (OpenCode's stderr, lane refusals).
 - No `ask_reviewer`: `PWD=<worktree> OPENCODE_CONFIG=<state>/rules/<task>/opencode.json opencode
   mcp list --print-logs`.
@@ -158,7 +159,7 @@ sends and `wb route` changes the API side only on the mod's dialog's yes: `send-
 - State changes go through `Task.set_status` and `append_jsonl`; never write status.json directly.
 - Never name a model in code or the skill: models come from OpenCode's config, choices from the
   router and the weekly model check (only test fixtures and ARCHITECTURE.md's image and audio
-  setup name one).
+  setup name one); API ids from the user's roles and OpenCode's catalog, never from code.
 - `-I` drops `PYTHONPATH`: use it only where the path is inserted in code (the git shim) or
   nothing outside the standard library is imported (the lane).
 - Prompt openings are an API, matched by prefix (ARCHITECTURE.md, *The runner, inside*): reword
@@ -174,6 +175,10 @@ Checked against OpenCode 2.3 by the real-OpenCode tests (`tests/capture_llm.py`;
 what: ARCHITECTURE.md, *The tests*; the detail: *The runner, inside*, *What the agent knows*).
 - The project comes from `$PWD`, not the cwd. The prompt goes after `--` (one starting with `-`
   is read as a flag).
+- An API model's limits, cost and variants come from the catalog (`opencode api model.list`);
+  `OPENCODE_MODELS_PATH` replaces it: the agent's is the task's `catalog.json`, the fetch off.
+- Cost is OpenCode's estimate from the catalog's prices, not the bill: `step_finish.part.cost`
+  live, `info.cost` in the export (the title request included).
 - A project's config loads after the layer and could lift every deny, so
   `OPENCODE_DISABLE_PROJECT_CONFIG` is always on (both names: `PROJECT_CONFIG_OFF`); it drops the
   project's AGENTS.md, skills and `instructions` too, which wb hands back in the layer.

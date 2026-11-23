@@ -103,7 +103,7 @@ def need(name: str) -> store.Task:
 CODING = {"only": ("Only when I say", "You tell Claude when to write code."),
           "ask": ("Ask me first", "Claude can ask to make a specific fix and waits for your yes."),
           "decide": ("Let Claude decide",
-                     "Claude uses its judgment to guide the local agent or make a fix itself.")}
+                     "Claude uses its judgment to guide the agent or make a fix itself.")}
 
 
 def coding_mode() -> str:

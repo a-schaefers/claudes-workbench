@@ -7,7 +7,8 @@ A change that alters what this file says (a command, a flag, a default, a guard,
 updates it in the same commit.
 
 "The user" is the person running Claude Code; "Claude" is the Claude Code session driving the
-work; "the agent" is the local model running in OpenCode on one task.
+work; "the agent" is the model running in OpenCode on one task: on this machine's GPU, or an API
+model through a provider the user connected.
 
 Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-this-way) ·
 [A task, start to finish](#a-task-start-to-finish) · [The runner, inside](#the-runner-inside) ·
@@ -26,12 +27,12 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
           ▼
          wb ── writes ──▶ $WB_HOME: tasks/<name>/ rules/<name>/ notify.jsonl results.jsonl chat/ ◀── wb events
           │ spawns                ▲
-       runner (detached, per task)┘ status, events, reports, notices; GPU lease, loads the model
+       runner (detached, per task)┘ status, events, reports, notices; GPU lease and the model (an API task: no lease, its key in the keyhole)
           ▼
        lane.py (Landlock) ─▶ opencode run in tasks/<name>/worktree (branch delegate/<name>)
           │      └─ ask_reviewer (MCP, wb-ask-mcp): writes the question, blocks for the answer
           ▼
-       local model server (Ollama, or any OpenAI-compatible server on this machine)
+       local model server (Ollama, or any OpenAI-compatible server on this machine), or an API task's keyhole ─▶ its provider
 ```
 
 - **`/workbench`** (`skill/workbench/SKILL.md`): Claude's procedure (size, spec, dispatch, review
@@ -160,7 +161,7 @@ never tries its stored API model; an API role whose model can't run exits 3 with
 the role on the GPU (wb route trivial gpu)`, or `… set Agents to Both or GPU (wb route all
 both|gpu)` under Agents API) and never the GPU; Agents on API with a role that has no API model
 exits 3 too (`routes.no_api_model`). The choice is fixed in task.json (`via`, `role`, an API
-model's `provider`, `thinking`, `said`): feedback, next and resume never resolve again, so a role
+model's `provider`, `thinking`, `said`; a task from before #1016 has none, and reads as GPU): feedback, next and resume never resolve again, so a role
 changed mid-task applies to the next new task only. **A model gone from the catalog mid-task**:
 the runner fails an API task whose `models.resolve` raises (`runner._left_catalog`, `infra`
 "model", before any round) with `runner.left_catalog`'s line, `task <t>: <id> left OpenCode's
@@ -2473,7 +2474,7 @@ the GPU alone, `wb start` refuses meanwhile (exit 4, *Two projects, one GPU*) un
 (`models.busy`).
 
 **Which pool** (`models.pool`): `gpu` for local models and remote ones on this GPU
-(`models.same_gpu`); else `gpu-<host>-<port>.{lock,json,admit,load}`, one task at a time, never
+(`models.same_gpu`); None for an API model, which takes no GPU lease (#1015); else `gpu-<host>-<port>.{lock,json,admit,load}`, one task at a time, never
 waiting on this GPU (#116); exit 4, `--queue` and the bench's preemption apply per pool. `free_gpu`
 never touches another machine's models. A same-GPU remote model never shares, but `free_gpu`
 (`models.on_this_gpu`) unloads it, `make_resident` frees for it, `releasable` and `media.settle`
@@ -2901,7 +2902,7 @@ in `pick_model`): under Claude Code it needs `approved({start: {task, model}, ch
 (`cli.start_line`), else exit 3 with the same wording. A GPU `--model` and `wb
 model sizes` are as before: router-driven, and Claude says the model in its reply. The bench driver
 inherits `CLAUDECODE`, so a replay on an API model would meet this gate with no dialog; `wb bench
---model` refuses API models anyway until #1018 decides that path.
+--model` refuses API models anyway until #1026 decides that path.
 
 ## Bench: real tasks replayed
 
@@ -3256,7 +3257,9 @@ shipped with a model (ComfyUI's custom nodes do).
   ComfyUI keeps every model it loaded; `"unload": ""` opts out). With none, the listing
   says `(no unload URL)`: the server keeps its GPU memory while up.
 - Where it runs (`media.turns`, `media.on_gpu`): `"gpu": false`, or by default a url on another
-  host, is off this GPU: no lease, nothing freed, it runs beside tasks (#587). A url on a remote box
+  host, is off this GPU: no lease, nothing freed, it runs beside tasks (#587). An API task takes no
+  lease (#1015), so a job on this GPU runs beside it too (not beside its `--unload-for-tests`
+  tests, which hold this GPU alone). A url on a remote box
   the tasks use (`media.boxes`) takes that box's lease (`GpuLease(None, "wb image", on=…)`) and
   unloads its Ollama models (not `keep_loaded`), another client's only once `BOX_QUIET`
   (#750, #944); pools are taken in one order, this machine's first, then by pool name (#945: two jobs
@@ -3360,7 +3363,8 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   non-listener.
 - `generate` refuses before anything runs a voice not in `voices` and any option the engine has no
   slot for (refused, not dropped). Its lease is `media.turns("wb audio", …)`: none when both engine
-  and listener are off this GPU, pinned only when both are, `free_gpu` keeping either's own server.
+  and listener are off this GPU, pinned only when both are, `free_gpu` keeping either's own server. An API task takes no lease
+  (#1015), so audio runs beside it (not beside its `--unload-for-tests` tests).
   Each clip is made in `.wb-audio-*`, checked (`inspect`), then published with its sidecar and
   spectrogram as the first free `<slug>-<seed>.wav` (`media.free`). The `unload` URLs of engine and
   listener are each POSTed once at the batch's end (`_unload`, #594).
@@ -4789,7 +4793,7 @@ mod's `absolutePath` does the same for `WB_HOME`, `CLAUDE_CONFIG_DIR`, `WB_SAVIN
 the directory rule adopts the task), `claude_start` (`models._started`, against a recycled pid), `claude_machine` (a process on another
 machine is never gone here, `cli._gone`, nor checked by the mod's `noteClaude`: two machines adopted each other's tasks,
 #922), `base` (full sha), `base_ref`, `base_branch` (where `--merge` lands: `HEAD`'s branch, or `--base` naming a local one; null on a detached HEAD, tag or commit),
-`branch`, `model`, `model_label`, `opencode_model`, `weights_id` (`models.identity`), `route` (the router's why; an API task's routing line), `via` (`gpu`|`api`) and `role` (#1016, always),
+`branch`, `model`, `model_label`, `opencode_model`, `weights_id` (`models.identity`), `route` (the router's why; an API task's routing line), `via` (`gpu`|`api`) and `role` (#1016, always; a task from before it has neither, and reads as GPU),
 `provider`, `provider_name` (the catalog's), `thinking` (`off`|`on`, the role's; child 10 applies it), `said` (the role's `said`, or `asked for[, approved in the dialog]` for a `--model`) and `said_ts` (the role's `ts`) (API only, fixed at start as `model` is), `size`, `stack`, `trial`, `backlog`,
 `bench` (`{case, run, label}`), `test_cmd`, `no_base_check`, `unload_for_tests`, `sign` (false: `--no-sign`), `subdir` (a monorepo package), `setup`,
 `setup_timeout`, `copy`, `siblings`, `worktree` (when nested), `checkout` (`"runner"`; missing before #529),
@@ -4938,7 +4942,7 @@ lane, never a secret): `ok  API keys: deepseek (stored via /connect); no role us
 `trivial and significant use it`), a `--` line for a key wb can't hold (`xai's key is in XAI_API_KEY:
 wb can't hold it outside the lane yet; /connect stores one it can`, `anthropic is signed in with
 OAuth: …`), `NO_KEY` for none. With a stored key and no local model the GPU lines read as optional
-(`NO_SERVER_OPTIONAL`, `NO_LOCAL_OPTIONAL`). The plugin install copies only `mod/` into the plugin
+(`NO_SERVER_OPTIONAL`, `NO_LOCAL_OPTIONAL`). No GPU is needed for a role on API (*Roles*). The plugin install copies only `mod/` into the plugin
 cache; `marketplace add` keeps a full clone (`installLocation` in `known_marketplaces.json`, or under
 `CLAUDE_CODE_PLUGIN_CACHE_DIR`), from which `wb setup` links `wb` and the skill. `wb update` (`/workbench-update` also
 reloads plugins) runs `claude plugin marketplace update workbench` and `claude plugin update workbench@workbench`; the
@@ -5392,6 +5396,9 @@ doc needs its own `!/` line).
   provider). `note_api`'s states → the keyhole's mapping of provider answers → `_api_status`'s table, `remedy`,
   `may_come_up` (*API models*). A `hosted.json` key → `_build_hosted`, `_api_model`, *Files and formats*; what a
   catalog read depends on → `_stamp`.
+- **What the keyhole can hold** (`keyhole.load_key`'s refusals: an OAuth login, an external credential, request
+  signing, a key only in the environment or written in a config) → `Model.key`'s states, `models.status`'s and
+  `cli._route_api`'s `can't run: needs a key wb can hold outside the lane`, never "available".
 - **An OpenCode fact the API harness copies** (`api model.list`, `auth list`, `-m` ids and variants, `part.cost`,
   the `retry`/`error` shapes, each protocol's path and key header) → `tests/fake_opencode.py`, `tests/capture_llm.py`
   and `ApiHarness`'s `test_real_opencode_*` together (*The tests*).
