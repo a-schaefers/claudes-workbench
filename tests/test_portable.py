@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a scri
 from unittest import mock
 
 from workbench import context, images, media, models, results, router, store, watch
-from tests.test_workbench import Base, TEST_CMD, ThreadingHTTPServer, run_wb, wait_phase  # listens at once (#950)
+from tests.test_workbench import Base, FAKE, TEST_CMD, ThreadingHTTPServer, run_wb, wait_phase  # listens at once (#950)
 
 
 REAL_SLEPT = models.slept  # Real stands a machine that never sleeps in for it (#716)
@@ -143,11 +143,16 @@ class Real(unittest.TestCase):
         tmp = Path(self.tmp.name)
         os.environ.pop("WB_FAKE_MODELS", None)
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
-                          WB_MODELS=str(tmp / "models.json"), WB_COMMANDS=str(tmp / "commands.json"))
+                          WB_MODELS=str(tmp / "models.json"), WB_COMMANDS=str(tmp / "commands.json"),
+                          # OpenCode's credential store (models.auth_key): the fake's, never the
+                          # user's own, and no OpenCode server started for each provider (#1010)
+                          WB_OPENCODE_BIN=FAKE)
         models._ENGINES.clear()
+        models._AUTH.clear()
         models._EMULATORS.clear()
         models._DOWN.clear()
         models._KEYS.clear()
+        models._STORED.clear()
         models._FACTS.clear()
         models._STOP_STAYS.clear()
         self.servers = []
@@ -1244,6 +1249,31 @@ class Real(unittest.TestCase):
             # a key in the config is still the one probed
             self.assertIn("refuses its API key", models.status(found["wrong/a"])["why"])
         self.assertNotIn("authkey", repr(found["ak/a"]))
+
+    def test_a_local_server_that_wants_no_key_never_starts_opencode_to_ask_for_one(self):
+        # the #1010 review (2026-11-22): discovery asked OpenCode's credential store for every
+        # keyless local provider, an OpenCode server started against the user's store each time,
+        # about 0.9 s of a busy core in every process: the pane's wb watch --json on each refresh
+        # paid it for a stock Ollama, the cost #691 took off that path. Asked only when refused.
+        log = Path(self.tmp.name) / "auth.log"
+        os.environ.update(FAKE_AUTH_LOG=str(log), FAKE_AUTH_EXPORT=json.dumps([
+            {"id": "cred_1", "integrationID": "ak", "label": "ak", "active": True,
+             "value": {"type": "key", "key": "storedkey"}}]))
+        free = self.server({"/v1/models": lambda h: {"data": [{"id": "a"}]}})
+        keyed = self.server({"/v1/models": lambda h: {"data": [{"id": "a"}]}
+                             if h.get("Authorization") == "Bearer storedkey" else 401})
+        self.config({"free": {"options": {"baseURL": free + "/v1"}, "models": {"a": {}}}})
+        found = models.discover()
+        self.assertEqual(models.status(found["free/a"])["why"], "running")
+        self.assertFalse(log.exists(), "OpenCode was asked for a key no server wanted")
+        self.config({"free": {"options": {"baseURL": free + "/v1"}, "models": {"a": {}}},
+                     "ak": {"options": {"baseURL": keyed + "/v1"}, "models": {"a": {}}}})
+        found = models.discover()
+        self.assertFalse(log.exists(), "discovery itself asked")
+        self.assertEqual(models.status(found["ak/a"])["why"], "running")   # #336 still holds
+        self.assertEqual(models.status(found["ak/a"])["why"], "running")
+        self.assertEqual(log.read_text().split(), ["ak"])                 # once, the refused one
+        self.assertNotIn("storedkey", repr(found["ak/a"]))
 
     def test_a_start_command_that_exits_at_once_paces_its_readiness_probes(self):
         # the 2026-11-19 audit (finding 20): a start that daemonizes (systemctl, docker, cmd &)

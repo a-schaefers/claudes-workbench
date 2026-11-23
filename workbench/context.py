@@ -1328,8 +1328,6 @@ SPLIT_MADE = {".m2": ("repository/", "wrapper/")}
 # `poetry shell` or direnv), made first so the split grants them: Landlock can only allow, so a
 # split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825)
 CACHE_MADE = ("uv", "pip", "go-build", "pre-commit")
-# what OpenCode and the ask server write themselves, beside the task's directory
-OPENCODE_HOMES = (".local/share/opencode", ".local/state/opencode")
 # The device nodes builds use, not /dev: the user's terminals, input devices (/dev/uinput) and
 # security keys were open to the agent (the 2026-11-16 audit). /dev/shm stays, a trade-off:
 # multiprocessing's semaphores, Chromium and many test runners need it, and Landlock can't tell
@@ -1610,15 +1608,14 @@ def writable(task: store.Task) -> list[str] | None:
     # XDG_RUNTIME_DIR isn't here: it holds the user's bus, SSH and GPG agent sockets and their
     # runtime systemd units (the 2026-11-16 audit); the agent gets its own (runtime_dir)
     xdg = [os.environ.get("XDG_CACHE_HOME")]
-    xdg += [os.path.join(os.environ[v], "opencode") for v in ("XDG_DATA_HOME", "XDG_STATE_HOME")
-            if os.environ.get(v)]  # OpenCode's own data, when the user moved those
     xdg += tool_var_homes()
-    # OpenCode's own directories, made first: the lane writes only what exists, so a first task
-    # in a fresh profile failed opening OpenCode's log before any model request (#340, the audit
-    # of 1.4). One that can't be made is named in runner.log, the place a failed round points to.
+    # OpenCode's cache and config directories, made first: the lane writes only what exists, so
+    # a first task in a fresh profile failed opening OpenCode's log before any model request
+    # (#340, the audit of 1.4). One that can't be made is named in runner.log, the place a
+    # failed round points to. Not its data and state: the agent's OpenCode keeps those in the
+    # task's own home (opencode_home), and the user's are hidden (SECRETS, #1010)
     made = [Path(os.environ.get(v) or home / d) / "opencode"
-            for v, d in (("XDG_DATA_HOME", ".local/share"), ("XDG_STATE_HOME", ".local/state"),
-                         ("XDG_CACHE_HOME", ".cache"), ("XDG_CONFIG_HOME", ".config"))]
+            for v, d in (("XDG_CACHE_HOME", ".cache"), ("XDG_CONFIG_HOME", ".config"))]
     for d in made:
         try:
             d.mkdir(parents=True, exist_ok=True)
@@ -1626,7 +1623,7 @@ def writable(task: store.Task) -> list[str] | None:
             print(f"workbench: can't make OpenCode's directory {d} ({e.strerror}): "
                   f"its first run fails without it", file=sys.stderr)
     places = [tempfile.gettempdir(), *TEMP_ROOTS, *DEV_NODES, *gpu_nodes(task), "/proc",
-              *tool_homes(), *(home / h for h in OPENCODE_HOMES), *(x for x in xdg if x),
+              *tool_homes(), *(x for x in xdg if x),
               *flutter_caches(),
               *(Path(p).expanduser() for p in extra)]
     whole = {"/", os.path.realpath(home)}  # a GOPATH=~ must not hand over the home directory
@@ -1663,12 +1660,13 @@ def writable(task: store.Task) -> list[str] | None:
                 os.makedirs(os.path.join(cache, n), exist_ok=True)
             except OSError:  # a read-only home: the task starts all the same
                 pass
-    # Of the task's directory only its worktree and ask/, where the ask server writes its
-    # questions: the rest (task.json, status.json, steer.jsonl, the rounds, runner.log) steers
-    # the runner and wb, outside the lane, and notify.jsonl wakes Claude for every task (the
-    # 2026-11-16 audit: an agent could rewrite its own spec and guards, forge any task's
-    # notice, and plant a link the runner then wrote through)
-    kept = [str(task.worktree), str(ask_dir(task))]
+    # Of the task's directory only its worktree, ask/, where the ask server writes its
+    # questions, and opencode/, its OpenCode's data and state (#1010): the rest (task.json,
+    # status.json, steer.jsonl, the rounds, runner.log) steers the runner and wb, outside the
+    # lane, and notify.jsonl wakes Claude for every task (the 2026-11-16 audit: an agent could
+    # rewrite its own spec and guards, forge any task's notice, and plant a link the runner
+    # then wrote through)
+    kept = [str(task.worktree), str(ask_dir(task)), str(opencode_home(task))]
     for p in places:
         real = os.path.realpath(p)
         if not os.path.exists(p) or real in whole:
@@ -1820,6 +1818,76 @@ def ask_dir(task: store.Task) -> Path:
     return d
 
 
+# The agent's OpenCode keeps its data and state (the session database, snapshot/, tool-output/,
+# log/, the prompt history) in the task's own home, not the user's (#1010, 2026-11-22): OpenCode
+# V2 keeps every /connect credential, for every provider, in ~/.local/share/opencode/opencode.db,
+# with every project's sessions and snapshots, and the lane wrote that directory. OpenCode has no
+# switch of its own for these (checked on 2.3.2: OPENCODE_DB moves only the database, and the
+# data directory's auth.json is still imported into it), so XDG_DATA_HOME and XDG_STATE_HOME
+# move them, in OpenCode's environment alone: the agent's commands get the user's back from the
+# shell shim (runner.write_shell_shim), so uv, pipx, poetry and pnpm find their data.
+OPENCODE_HOME_PARTS = ("share", "state")
+# what nothing reads once the task is closed: OpenCode's snapshots of the worktree, the tool
+# output it saved and each shell command's (shell/<project>/sh_*.out, on 2.3: no session export
+# names them, the #1010 review); the database stays, for wb watch, the lessons and finished_export
+OPENCODE_SCRATCH = ("snapshot", "tool-output", "shell")
+
+
+def opencode_home(task: store.Task) -> Path:
+    """The task's own OpenCode home, `tasks/<task>/opencode/` (share/ and state/ inside), in the
+    agent's lane. Made by make_opencode_home."""
+    return task.dir / "opencode"
+
+
+def make_opencode_home(task: store.Task) -> Path:
+    """The task's OpenCode home, made private (0700) with share/ and state/: before each round.
+    A link the agent left in place of one of them is replaced by a directory, so OpenCode never
+    writes, nor wb reads, through it."""
+    home = opencode_home(task)
+    for d in (home, *(home / p for p in OPENCODE_HOME_PARTS)):
+        try:
+            if os.path.islink(d) or (os.path.lexists(d) and not os.path.isdir(d)):
+                os.unlink(d)
+            d.mkdir(mode=0o700, exist_ok=True)
+            os.chmod(d, 0o700)
+        except OSError as e:
+            print(f"workbench: can't make the task's OpenCode home {d} ({e.strerror})",
+                  file=sys.stderr)
+    return home
+
+
+def opencode_home_env(task: store.Task) -> dict:
+    """The environment that puts OpenCode in the task's own home, for OpenCode alone (the
+    runner's round and wb's session commands), never the agent's commands or the tests.
+    OPENCODE_DB always: a user's own, inherited, would point back at the user's database.
+    OPENCODE_DISABLE_MODELS_FETCH: each OpenCode server start fetches the models.dev catalog
+    and caches it in its database, 13.7 MB, so every task's home held one and every task fetched
+    it again (measured 2026-11-23: 14 MB with it, 320 KB without); the catalog bundled in the
+    binary serves instead (the #1010 review)."""
+    home = opencode_home(task)
+    return {"XDG_DATA_HOME": str(home / "share"), "XDG_STATE_HOME": str(home / "state"),
+            "OPENCODE_DB": str(home / "share" / "opencode" / "opencode.db"),
+            "OPENCODE_DISABLE_MODELS_FETCH": "1"}
+
+
+def opencode_db(task: store.Task) -> Path:
+    """The task's own OpenCode database (it may not exist yet)."""
+    return Path(opencode_home_env(task)["OPENCODE_DB"])
+
+
+def drop_opencode_scratch(task: store.Task) -> None:
+    """Remove OpenCode's snapshots and saved tool and shell output from the task's home once the
+    task is closed (accept, discard); never through a link the agent left in the lane, at any
+    step from the home down (rmtree itself never follows one)."""
+    home = opencode_home(task)
+    for name in OPENCODE_SCRATCH:
+        d = home / "share" / "opencode" / name
+        steps = [home, *(p for p in d.parents if home in p.parents), d]
+        if any(os.path.islink(p) for p in steps) or not os.path.isdir(d):
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _runtime_base() -> Path:
     return Path("/tmp") if os.path.isdir("/tmp") else Path(tempfile.gettempdir())
 
@@ -1910,8 +1978,13 @@ def drop_stale_runtime_dirs(tasks) -> int:
 # `python3` running gh inside the lane was logged in, and the SSH keys that push were readable.
 # The audit that day added the rest below `.claude.json` (OpenCode's service password among
 # them: its background service runs outside the lane). Left readable on purpose: `.npmrc` and
-# `.yarnrc.yml` (the package managers read them to install) and OpenCode's own `auth.json`
-# (OpenCode runs in the lane and needs it).
+# `.yarnrc.yml` (the package managers read them to install).
+# #1010 (2026-11-22) hid OpenCode's data and state directories whole: V2 keeps every /connect
+# credential there (opencode.db, its -wal and -shm, a release channel's db, the legacy
+# auth.json), with every project's sessions, snapshot/ (OpenCode's git snapshots of other
+# worktrees), tool-output/, worktree/, repos/ and the user's own TUI prompts
+# (prompt-history.jsonl), all of which the agent could read and write. The agent's OpenCode
+# keeps its own in the task's home (opencode_home).
 # #992 (2026-11-22) added the deploy and registry logins after `.android/adbkey`, each checked
 # against its tool's docs or source where they said. The same trade as `.npmrc` keeps these
 # readable, since an install reads them: Maven's `.m2/settings.xml` and Gradle's
@@ -1952,7 +2025,7 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            ".thunderbird", ".config/chromium", ".config/google-chrome", ".config/BraveSoftware",
            ".camoufox", ".irssi", ".bash_history", ".zsh_history",
            ".python_history", ".claude", ".claude.json",
-           ".config/opencode/service.json", ".local/state/opencode/service.json",
+           ".config/opencode/service.json", ".local/share/opencode", ".local/state/opencode",
            ".config/git/credentials", ".gcm", ".pgpass", ".my.cnf", ".vault-token", ".s3cfg",
            ".boto", ".config/glab-cli", ".config/github-copilot", ".config/op",
            ".config/Bitwarden CLI", ".config/doctl", ".config/sops", ".config/age", ".fly",
@@ -2333,6 +2406,8 @@ def secret_paths() -> set[str]:
             paths += [Path(os.environ[var]) / h[len(base):] for h in SECRETS if h.startswith(base)]
     paths += [Path(p).expanduser() for v in SECRET_VARS
               for p in (os.environ.get(v) or "").split(os.pathsep) if p]
+    if db := os.environ.get("OPENCODE_DB"):  # the user's own OpenCode database, moved (#1010)
+        paths += [Path(db + x).expanduser() for x in ("", "-wal", "-shm")]
     if os.environ.get("CARGO_HOME"):
         paths += [Path(os.environ["CARGO_HOME"]) / n for n in ("credentials", "credentials.toml")]
     try:  # .claude.json's backups and temporary copies

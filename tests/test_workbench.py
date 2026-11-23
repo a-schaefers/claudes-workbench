@@ -227,6 +227,9 @@ class Base(unittest.TestCase):
                           # the GPU lease in the test's own state, never a machine's shared one (#393)
                           WB_GPU_DIR=str(tmp / "state"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
+        runner.models._AUTH.clear()  # OpenCode's stored keys, per process (models.auth_key)
+        runner.models._STORED.clear()
+        runner.models._KEYS.clear()
         # the config files' locks are outside WB_HOME, shared by every profile (#939): in the
         # test's own state, or the suite left thousands in the user's $XDG_RUNTIME_DIR
         lock_dir = mock.patch.object(store, "config_lock_dir", lambda: tmp / "state" / "locks")
@@ -4111,7 +4114,7 @@ class Context(Base):
         task = store.Task("t-exp")
         self.assertEqual(st["live_used"], {"session": st["session"], "used": 150})  # the fake's step
         task.set_status(window=160, live_used={"session": st["session"], "used": 150})
-        with mock.patch.object(transcript, "export", side_effect=lambda sid, strict=False: None if strict else {}):
+        with mock.patch.object(transcript, "export", side_effect=lambda sid, strict=False, task=None: None if strict else {}):
             self.assertIn("full", runner.fresh_reason(task) or "")
             task.set_status(live_used={"session": "an-older-one", "used": 150})
             self.assertIsNone(runner.fresh_reason(task))                  # another session's count
@@ -5858,7 +5861,7 @@ class Watch(Base):
         store.write_json(t.dir / "task.json", {"name": "t-handed", "created_at": store.now()})
         t.set_status(phase="review", round=1, session="ses_new", sessions=["ses_old1", "ses_old2"])
         exported = []
-        fake = lambda sid, strict=False: exported.append(sid) or {"info": {"id": sid}, "messages": []}  # noqa: E731
+        fake = lambda sid, strict=False, task=None: exported.append(sid) or {"info": {"id": sid}, "messages": []}  # noqa: E731
         with mock.patch.object(transcript, "export", fake):
             for _ in range(3):
                 run_wb("watch", "t-handed", "--json")
@@ -5885,7 +5888,7 @@ class Watch(Base):
                                   "takeover", "tests"})
         for i, kind in enumerate(kinds):
             t.event({"ts": store.now() + i, "round": 1, "kind": kind, "text": f"TEXT-OF-{kind}"})
-        with mock.patch.object(transcript, "export", lambda sid, strict=False: {"info": {"id": sid}, "messages": []}):
+        with mock.patch.object(transcript, "export", lambda sid, strict=False, task=None: {"info": {"id": sid}, "messages": []}):
             out = run_wb("watch", "t-kinds", "--json")
         shown = "\n".join(json.loads(x)["t"] for x in out.splitlines())
         for kind in kinds:
@@ -6088,7 +6091,7 @@ class Watch(Base):
         full = [json.loads(x) for x in run_wb("watch", "t-last", "--json").splitlines()]
         exports = []
         real = transcript.export
-        with mock.patch.object(transcript, "export", lambda sid: exports.append(sid) or real(sid)):
+        with mock.patch.object(transcript, "export", lambda sid, task=None: exports.append(sid) or real(sid, task=task)):
             tail = [json.loads(x) for x in run_wb("watch", "t-last", "--json", "--last", "3").splitlines()]
         self.assertEqual(len(exports), 1)
         self.assertTrue(all(len(x["t"]) <= transcript.JSON_LINE_CHARS for x in full))
@@ -6118,7 +6121,7 @@ class Watch(Base):
             def isatty(self):
                 return True
         exports = []
-        with mock.patch.object(transcript, "export", lambda sid, strict=False: exports.append(sid) or {}):
+        with mock.patch.object(transcript, "export", lambda sid, strict=False, task=None: exports.append(sid) or {}):
             th = threading.Thread(target=transcript.follow, args=(store.Task("t-rev"),),
                                   kwargs={"out": Tty(), "poll": 0.05}, daemon=True)
             th.start()
@@ -6137,7 +6140,7 @@ class Watch(Base):
         store.write_json(d / "status.json", {"phase": "running", "round": 1, "pid": None,
                                              "updated_at": time.time() - cli.REAP_GRACE - 5})
         with mock.patch.object(transcript, "REAP_EVERY", 0), \
-                mock.patch.object(transcript, "export", lambda sid, strict=False: {}):
+                mock.patch.object(transcript, "export", lambda sid, strict=False, task=None: {}):
             th = threading.Thread(target=transcript.follow, args=(store.Task("t-gone"),),
                                   kwargs={"out": io.StringIO(), "reap": cli.reap}, daemon=True)
             th.start()
@@ -7417,7 +7420,8 @@ class RealOpenCode(Base):
         time.sleep(0.5)
         listed = ask_mcp.ask_dir(task) / ask_mcp.LISTED
         listed.unlink(missing_ok=True)                   # the fake's run listed it too
-        env = {**os.environ, "PWD": str(task.worktree), "OPENCODE_CONFIG": str(layer_path)}
+        env = {**os.environ, **context.opencode_home_env(task), "PWD": str(task.worktree),
+               "OPENCODE_CONFIG": str(layer_path)}             # the task's store, not the user's
         subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
                         "say ok"], cwd=task.worktree, env=env, capture_output=True, timeout=120)
         reqs = [json.loads(line) for line in out.read_text().splitlines()]
@@ -7480,7 +7484,7 @@ class RealOpenCode(Base):
         server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
                                    str(port), str(out)])
         self.addCleanup(server.kill)
-        env = runner.agent_env(task)
+        env = runner.opencode_env(task)
         layer_path = Path(env["OPENCODE_CONFIG"])
         layer = json.loads(layer_path.read_text())
         layer["provider"] = {"cap": {
@@ -7598,7 +7602,7 @@ class RealOpenCode(Base):
         server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
                                    str(port), str(out), json.dumps(calls)])
         self.addCleanup(server.kill)
-        env = runner.agent_env(task)
+        env = runner.opencode_env(task)
         layer_path = Path(env["OPENCODE_CONFIG"])
         layer = json.loads(layer_path.read_text())
         layer["provider"] = {"cap": {
@@ -8005,7 +8009,7 @@ class RealOpenCodeRun(Base):
         self.assertTrue(steps and all(r["in"] + r["cache"] > 0 and r["out"] > 0 for r in steps),
                         steps)                                     # step_finish: part.tokens
         self.assertIn("ok", [r["text"] for r in rows if r.get("kind") == "text"])
-        msgs = transcript.export(st["session"]).get("messages", [])
+        msgs = transcript.export(st["session"], task=task).get("messages", [])  # its home (#1010)
         self.assertEqual([m["type"] for m in msgs][:1], ["user"])
         self.assertTrue(runner.context_state(task)["used"])        # an assistant message's tokens
         self.assertEqual(transcript.find_session(task), st["session"])  # session list, by title
@@ -8025,6 +8029,71 @@ class RealOpenCodeRun(Base):
         text = json.dumps(agent["messages"])
         self.assertIn("Write the answer to answer.txt", text)
         self.assertIn("Now say done.", text)
+
+    def test_a_round_runs_in_its_own_opencode_home(self):
+        # #1010 (checked on OpenCode 2.3.2, 2026-11-22): OpenCode V2 keeps every /connect
+        # credential in the data directory's opencode.db, which every agent's lane read and
+        # wrote, with every project's sessions. A legacy auth.json there is imported into
+        # whichever database OpenCode opens (OPENCODE_DB alone doesn't keep it out)
+        users_data = Path(os.environ["XDG_DATA_HOME"]) / "opencode"
+        users_data.mkdir(parents=True, exist_ok=True)
+        (users_data / "auth.json").write_text(json.dumps({"cap": {"type": "api", "key": "CANARY-V1"}}))
+        def sessions(env):
+            out = subprocess.run(["opencode", "session", "list", "--standalone"], env=env,
+                                 cwd=self.repo, capture_output=True, text=True, timeout=60)
+            self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+            return [x for x in out.stdout.splitlines() if x.startswith("ses_")]
+        mine = {**os.environ, "PWD": str(self.repo)}
+        before = sessions(mine)
+        shown = 'printf "%s|%s" "${XDG_DATA_HOME:--}" "${OPENCODE_DB:--}" > seen.txt'
+        task, st = self.answered([{"name": "bash", "arguments": {"command": shown, "description": "x"}},
+                                  WRITE_42])
+        self.assertTrue(st["tests"]["ok"])
+        self.assertIs(st["opencode_home"], True)
+        self.assertTrue((task.dir / "opencode/share/opencode/opencode.db").is_file())
+        got = transcript.export(st["session"], task=task)
+        self.assertEqual([m["type"] for m in got.get("messages", [])][:1], ["user"])
+        self.assertTrue(runner.context_state(task)["used"])
+        task.set_status(session=None)
+        self.assertEqual(transcript.find_session(task), st["session"])  # by title, there
+        task.set_status(session=st["session"])
+        # its commands ran with the user's own data directory, not OpenCode's
+        self.assertEqual((task.worktree / "seen.txt").read_text(),
+                         f"{os.environ['XDG_DATA_HOME']}|{os.environ.get('OPENCODE_DB') or '-'}")
+        # no credential in the task's home: neither the user's store nor the legacy file
+        env = {**runner.agent_env(task), **context.opencode_home_env(task)}
+        out = subprocess.run(["opencode", "auth", "list", "--standalone", "--format", "json"],
+                             env=env, cwd="/", capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+        self.assertEqual(json.loads(out.stdout), [])
+        # and the user's store got no session from it
+        self.assertEqual(sessions(mine), before)
+        # a second round continues the session in the task's home
+        run_wb("feedback", "t-run", "--text", "Now say done.")
+        again = wait_phase("t-run", {"review", "stuck", "failed"}, timeout=180)
+        self.assertEqual((again["phase"], again["session"]), ("review", st["session"]))
+        self.assertEqual(sessions(mine), before)
+
+    def test_a_zsh_user_keeps_zshs_flags_through_the_shell_shim(self):
+        # the #1010 review (2026-11-22): OpenCode picks a command's flags by $SHELL's name
+        # (zsh's `+o nomatch -c`, checked on 2.3.2), and the shim, called opencode-shell,
+        # matched none: under zsh an unmatched glob (`pip install -e .[dev]`) failed "no matches
+        # found", and the model was told commands run "using opencode-shell"
+        tmp = Path(self.tmp.name)
+        log = tmp / "zsh-args.txt"
+        zsh = tmp / "shells" / "zsh"
+        zsh.parent.mkdir()
+        zsh.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {shlex.quote(str(log))}\n'
+                       'if [ "$1" = "+o" ]; then shift 2; fi\nexec /bin/sh "$@"\n')
+        zsh.chmod(0o755)
+        os.environ["SHELL"] = str(zsh)
+        task, st = self.answered([{"name": "bash", "arguments": {"command": "echo marker-zsh",
+                                                                 "description": "x"}}, WRITE_42])
+        self.assertTrue(st["tests"]["ok"], st)
+        self.assertIn("+o nomatch -c echo marker-zsh", log.read_text().splitlines())
+        sent = self.requests.read_text()
+        self.assertNotIn("opencode-shell", sent)
+        self.assertIn("using zsh", sent)
 
     def test_a_provider_only_in_wbs_config_file_runs_an_alias_by_its_id(self):
         # the 2026-11-19 audit (findings 13, 14): a provider in $WB_OPENCODE_CONFIG alone was
@@ -8071,7 +8140,7 @@ class RealOpenCodeRun(Base):
         self.server.kill()
         self.server.wait()
         self.serve([], read=31_000)                                # now every request fills it
-        env = {**runner.agent_env(task), "PWD": str(task.worktree)}
+        env = {**runner.opencode_env(task), "PWD": str(task.worktree)}
         def turn(text):
             subprocess.run(lane.wrap(context.writable(task), [
                 "opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
@@ -8092,7 +8161,7 @@ class RealOpenCodeRun(Base):
         self.server.kill()
         self.server.wait()
         self.serve([], read=18_000)                                # 55%: past 2.3.2's precompute
-        env = {**runner.agent_env(task), "PWD": str(task.worktree)}
+        env = {**runner.opencode_env(task), "PWD": str(task.worktree)}
         before = len(self.requests.read_text().splitlines())
         for text in ("Go on.", "Go on again."):
             subprocess.run(lane.wrap(context.writable(task), [
@@ -8118,7 +8187,7 @@ class RealOpenCodeRun(Base):
         self.server.kill()
         self.server.wait()
         self.serve([], read=31_000)                                # every request fills 32K
-        env = {**runner.agent_env(task), "PWD": str(task.worktree)}
+        env = {**runner.opencode_env(task), "PWD": str(task.worktree)}
         def turn(text, *session):
             subprocess.run(lane.wrap(context.writable(task), [
                 "opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
@@ -8131,6 +8200,123 @@ class RealOpenCodeRun(Base):
         sent = [json.loads(x).get("model") for x in self.requests.read_text().splitlines()[before:]]
         self.assertTrue(sent)
         self.assertEqual(set(sent), {"cap"})                       # not the project's small_model
+
+
+class OpenCodeHome(Base):
+    """The agent's OpenCode keeps its data and state in the task's own home, tasks/<t>/opencode
+    (#1010, 2026-11-22): the user's held every /connect credential and every project's sessions,
+    in the agent's lane. Its commands and the tests keep the user's XDG directories."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = Path(self.tmp.name)
+        self.runs_file = tmp / "runs.jsonl"
+        self.users = tmp / "users-data"               # the user's own OpenCode store
+        os.environ.update(FAKE_RUNS=str(self.runs_file), XDG_DATA_HOME=str(self.users),
+                          OPENCODE_DB=str(tmp / "users-own.db"))
+        os.environ.pop("XDG_STATE_HOME", None)
+
+    def runs(self):
+        return [json.loads(x) for x in self.runs_file.read_text().splitlines()]
+
+    def test_opencode_runs_in_the_tasks_home_and_commands_see_the_users_xdg(self):
+        seen = 'printf "%s|%s|%s" "${XDG_DATA_HOME:--}" "${XDG_STATE_HOME:--}" "${OPENCODE_DB:--}"'
+        self.start("t-och", "ok", "--test", f"{seen} > tests-env.txt && {TEST_CMD}")
+        st = wait_phase("t-och", {"review"})
+        task = store.Task("t-och")
+        self.assertTrue(st["tests"]["ok"], st)
+        self.assertIs(st["opencode_home"], True)
+        home = task.dir / "opencode"
+        row = self.runs()[-1]
+        self.assertEqual(row["opencode_db"], str(home / "share/opencode/opencode.db"))
+        self.assertEqual((row["xdg_data"], row["xdg_state"]), (str(home / "share"), str(home / "state")))
+        # no models.dev fetch, which cached 13.7 MB in every task's database (the #1010 review)
+        self.assertEqual(row["fetch_off"], "1")
+        # named as the shell it runs, whose name OpenCode picks its flags by (the #1010 review)
+        self.assertEqual(row["shell"], str(store.home() / "rules/t-och/shell" / Path(runner.test_shell()).name))
+        # a command the agent runs gets the user's own back, and the user's SHELL
+        users = f"{self.users}|-|{os.environ['OPENCODE_DB']}"
+        self.assertEqual(row["shell_sees"], f"{users}|{os.environ.get('SHELL') or '-'}")
+        # and the tests never had OpenCode's
+        self.assertEqual((task.worktree / "tests-env.txt").read_text(), users)
+        self.assertNotIn(str(home), json.dumps(runner.agent_env(task)))
+        self.assertFalse(self.users.exists())         # nothing went in the user's store
+
+    def test_wb_watch_finds_a_session_in_the_tasks_home_and_an_old_one_in_the_users(self):
+        self.start("t-ocw", "ok", "--test", TEST_CMD)
+        st = wait_phase("t-ocw", {"review"})
+        task = store.Task("t-ocw")
+        own = str(task.dir / "opencode/share/opencode/opencode.db")
+        self.assertEqual(transcript.export(st["session"], task=task)["info"]["home"], own)
+        # a session from before v1.91.2, in the user's store alone
+        db = self.users / "opencode/opencode.db"
+        db.parent.mkdir(parents=True)
+        Path(str(db) + ".sessions").write_text(json.dumps({"id": "ses_old", "title": "wb: t-ocw"}) + "\n")
+        os.environ.pop("OPENCODE_DB")                  # the user's store where XDG_DATA_HOME says
+        self.assertEqual(transcript.export("ses_old", task=task)["info"]["home"], str(db))
+        self.assertEqual(transcript.export("ses_nowhere", task=task), {})
+        self.assertIsNone(transcript.export("ses_nowhere", strict=True, task=task))
+        self.assertEqual(transcript.finished_export(task, "ses_old")["info"]["id"], "ses_old")
+        task.set_status(sessions=["ses_old"])
+        watched = run_wb("watch", "t-ocw", "--once", "--no-color")
+        self.assertEqual(watched.count("Wrote 42."), 2, watched)   # the old session's and this one's
+        task.set_status(session=None)                  # found by its title in the task's home first
+        self.assertEqual(transcript.find_session(task), st["session"])
+
+    def test_a_task_from_before_starts_a_fresh_session_once(self):
+        self.start("t-ocold", "ok", "--test", TEST_CMD)
+        st = wait_phase("t-ocold", {"review"})
+        task = store.Task("t-ocold")
+        old = st["session"]
+        # as a task started before v1.91.2 left it: its session in the user's store, no mark
+        held = Path(str(task.dir / "opencode/share/opencode/opencode.db") + ".sessions")
+        users = self.users / "opencode/opencode.db.sessions"
+        users.parent.mkdir(parents=True)
+        held.rename(users)
+        held.write_text("")
+        os.environ.pop("OPENCODE_DB")
+        task.set_status(opencode_home=None)
+        self.assertEqual(runner.fresh_reason(task), runner.OLD_STORE)
+        task.set_status(context="keep")                # even when Claude asked to keep it
+        self.assertEqual(runner.fresh_reason(task), runner.OLD_STORE)
+        task.set_status(context=None)
+        run_wb("feedback", "t-ocold", "--text", "Add a comment line.")
+        st = wait_phase("t-ocold", {"review"})
+        row = self.runs()[-1]
+        self.assertFalse(row["session"])               # no --session: it can't be reached
+        self.assertTrue(row["prompt"].startswith(
+            "You are picking this task up in a fresh session (its session is in OpenCode's shared "
+            "store, which agents no longer reach (v1.91.2))"), row["prompt"][:300])
+        self.assertIn("## Your last words in the earlier session\n\nWrote 42.", row["prompt"])
+        self.assertIn("Add a comment line.", row["prompt"])
+        self.assertIs(st["opencode_home"], True)
+        self.assertNotEqual(st["session"], old)
+        self.assertIn(old, st["sessions"])
+        self.assertIsNone(runner.fresh_reason(task))   # once: the next round continues
+        fresh = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0] if e.get("kind") == "fresh"]
+        self.assertEqual(len(fresh), 1, fresh)
+
+    def test_a_closed_task_drops_opencodes_snapshots_and_keeps_its_database(self):
+        # shell/: OpenCode 2.3's saved output of every shell command (sh_*.out), which nothing
+        # reads once the task is closed, was kept with it (the #1010 review, 2026-11-22)
+        self.start("t-ocdrop", "ok", "--test", TEST_CMD)
+        wait_phase("t-ocdrop", {"review"})
+        task = store.Task("t-ocdrop")
+        data = task.dir / "opencode/share/opencode"
+        for d in ("snapshot/ab", "tool-output", "shell/1d19b14"):
+            (data / d).mkdir(parents=True, exist_ok=True)
+            (data / d / "x").write_text("x")
+        outside = Path(self.tmp.name) / "users-snapshots"
+        outside.mkdir()
+        (outside / "keep").write_text("x")
+        (data / "tool-output").rename(data / "tool-output-real")
+        (data / "tool-output").symlink_to(outside)    # a link the agent left: never followed
+        run_wb("discard", "t-ocdrop")
+        self.assertFalse((data / "snapshot").exists())
+        self.assertFalse((data / "shell").exists())
+        self.assertTrue((outside / "keep").exists())
+        self.assertTrue(Path(str(data / "opencode.db") + ".sessions").is_file())
+        self.assertIn("Wrote 42.", run_wb("watch", "t-ocdrop", "--once", "--no-color"))
 
 
 class GitGuard(unittest.TestCase):
@@ -8355,12 +8541,18 @@ class Lane(Base):
                                                          "resource": "*", "effect": "allow"}])
         self.assertEqual(lane.wrap(None, ["opencode", "run"]), ["opencode", "run"])
 
-    def test_a_fresh_profile_gets_opencodes_directories_made_and_in_its_lane(self):
+    def test_a_fresh_profile_gets_the_tasks_opencode_home_made_and_in_its_lane(self):
         # #340, the audit of 1.4: the lane writes only what exists, so a first task in a fresh
-        # home failed opening ~/.local/share/opencode/log before any model request
+        # home failed opening ~/.local/share/opencode/log before any model request. Since #1010
+        # (2026-11-22) OpenCode's data and state are the task's own: the user's, which hold every
+        # /connect credential and every project's sessions, are neither made nor in the lane
         self.start("t-fresh", "ok")
         wait_phase("t-fresh", {"review"})
         task = store.Task("t-fresh")
+        home = task.dir / "opencode"
+        self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o700)
+        for d in ("share", "state"):
+            self.assertTrue((home / d).is_dir(), d)
         fresh = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-fresh-"))
         self.addCleanup(shutil.rmtree, fresh, True)
         env = {v: "" for v in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
@@ -8368,11 +8560,86 @@ class Lane(Base):
         with mock.patch.object(context.Path, "home", lambda: fresh), \
                 mock.patch.dict(os.environ, env):
             writable = context.writable(task)
-        for d in (".local/share/opencode", ".local/state/opencode", ".cache/opencode",
-                  ".config/opencode"):
+        for d in (".cache/opencode", ".config/opencode"):
             self.assertTrue((fresh / d).is_dir(), d)
-        for d in (".local/share/opencode", ".local/state/opencode", ".cache"):
-            self.assertIn(str(fresh / d), writable)
+        self.assertIn(str(home), writable)
+        self.assertIn(str(fresh / ".cache"), writable)
+        for d in (".local/share/opencode", ".local/state/opencode"):
+            self.assertFalse((fresh / d).exists(), d)
+            self.assertNotIn(str(fresh / d), writable)
+        (fresh / ".local/share/opencode").mkdir(parents=True)   # made by the user's own OpenCode
+        (fresh / ".local/state/opencode").mkdir(parents=True)
+        with mock.patch.object(context.Path, "home", lambda: fresh), \
+                mock.patch.dict(os.environ, env):
+            writable = context.writable(task)
+        for d in (".local/share/opencode", ".local/state/opencode"):
+            self.assertNotIn(str(fresh / d), writable)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    @home_outside_the_lane
+    def test_a_link_the_agent_plants_in_its_opencode_home_isnt_written_through_by_wb(self):
+        # the #1010 review (2026-11-22): wb's own session commands (wb watch, the runner's
+        # context check, the last words) ran OpenCode outside the lane with its data and state
+        # in the task's home, which the agent writes: its state/ and log/ swapped for links, the
+        # real OpenCode 2.3.2 made state/opencode/ and wrote opencode.log through them, outside
+        # the lane. Now the task's home is read in the task's own lane.
+        home = self.fake_home()
+        os.environ["WB_HOME"] = str(home / ".local" / "state" / "workbench")
+        os.environ.pop("WB_OPENCODE_BIN")
+        task = self.bare_task("t-plant", self.repo)
+        task.worktree.mkdir()
+        oc = context.make_opencode_home(task)
+        made = subprocess.run(["opencode", "session", "list", "--standalone"], cwd="/",
+                              env={**os.environ, **context.opencode_home_env(task)},
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(made.returncode, 0, made.stderr[-2000:])
+        self.assertTrue(context.opencode_db(task).is_file())
+        state, log = home / "target-state", home / "target-log"   # outside the lane
+        state.mkdir()
+        log.mkdir()
+        shutil.rmtree(oc / "state")
+        (oc / "state").symlink_to(state)
+        shutil.rmtree(oc / "share/opencode/log")
+        (oc / "share/opencode/log").symlink_to(log)
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(transcript.export("ses_nowhere", task=task), {})
+            self.assertIsNone(transcript.find_session(task))
+        self.assertEqual((sorted(os.listdir(state)), sorted(os.listdir(log))), ([], []))
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_the_users_opencode_store_is_unreadable_and_unwritable_in_the_lane(self):
+        # #1010 (2026-11-22): OpenCode V2 keeps every /connect credential in its database, with
+        # every project's sessions, snapshots and the user's prompts beside it, and the lane
+        # read and wrote that directory whole
+        home = self.fake_home()
+        data, state = home / ".xd", home / ".xs"           # dotfiles: readable, but for SECRETS
+        canaries = [data / "opencode/opencode.db", data / "opencode/opencode.db-wal",
+                    data / "opencode/snapshot/x", state / "opencode/prompt-history.jsonl"]
+        for f in canaries:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("CANARY-STORE")
+        os.environ.update(XDG_DATA_HOME=str(data), XDG_STATE_HOME=str(state))
+        task = self.bare_task("t-store", self.repo)
+        context.make_opencode_home(task)
+        script = ("import sys\nfor f in sys.argv[1:]:\n    for mode in ('r', 'a'):\n        try:\n"
+                  "            open(f, mode).close()\n            print(mode)\n"
+                  "        except PermissionError:\n            print('-')\n"
+                  "try:\n    open(sys.argv[1] + '.new', 'w').close()\n    print('made')\n"
+                  "except PermissionError:\n    print('-')\n")
+        out = subprocess.run(lane.wrap(context.writable(task),
+                                       [sys.executable, "-c", script, *map(str, canaries)],
+                                       context.readable(task)),
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split(), ["-"] * (2 * len(canaries) + 1), out.stderr)
+        for f in canaries:
+            self.assertEqual(f.read_text(), "CANARY-STORE")
+        own = context.opencode_home(task) / "share" / "x"           # the task's own: its to write
+        out = subprocess.run(lane.wrap(context.writable(task), [
+            sys.executable, "-c", "import sys; open(sys.argv[1], 'w').write('x')", str(own)],
+            context.readable(task)), capture_output=True, text=True, timeout=20)
+        self.assertEqual((out.returncode, own.read_text()), (0, "x"), out.stderr)
 
     def test_a_directory_request_is_answered_by_wb_allow_path(self):
         self.start("t-lp", "hang")
@@ -8961,20 +9228,22 @@ class Lane(Base):
                  ".claude.json.backup": "x", "moved-gpg/private.key": "k",
                  "xdg/gh/hosts.yml": "token",
                  ".config/opencode/opencode.json": "{}", ".local/state/opencode/model.json": "{}",
+                 ".local/share/opencode/opencode.db": "keys", "db/oc.db": "keys",
                  ".gem/specs/x": "fine", ".npmrc": "registry"}
         for rel, text in files.items():
             (home / rel).parent.mkdir(parents=True, exist_ok=True)
             (home / rel).write_text(text)
         os.environ["GNUPGHOME"] = str(home / "moved-gpg")
         os.environ["XDG_CONFIG_HOME"] = str(home / "xdg")
+        os.environ["OPENCODE_DB"] = str(home / "db/oc.db")          # the user's own, moved (#1010)
         task = self.bare_task("t-moved", self.repo)
         w = context.writable(task)
-        self.assertNotIn(str(home / ".local/state/opencode"), w)      # split around the secret
-        self.assertIn(str(home / ".local/state/opencode/model.json"), w)
+        # OpenCode's state is hidden whole since #1010: the agent's OpenCode has its own
+        self.assertNotIn(str(home / ".local/state/opencode"), w)
+        self.assertNotIn(str(home / ".local/state/opencode/model.json"), w)
         got = dict(zip(files, self.reads_in_lane(task, [home / f for f in files])))
         self.assertEqual({f for f, v in got.items() if v == "read"},
-                         {".config/opencode/opencode.json", ".local/state/opencode/model.json",
-                          ".gem/specs/x", ".npmrc"}, got)
+                         {".config/opencode/opencode.json", ".gem/specs/x", ".npmrc"}, got)
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     @home_outside_the_lane
@@ -12330,6 +12599,65 @@ class Discovery(Base):
         self.assertEqual(found["strata/strata"].start, "strata launch")
         self.assertEqual(models.resolve("mimo").id, "ollama/mimo-v2.6:9b-q8_0")
         self.assertEqual(models.resolve("strata").id, "strata/strata")
+
+    def test_auth_key_reads_opencode_v2s_export(self):
+        # #1010 (2026-11-22): OpenCode 2.x keeps `opencode auth login`'s keys in its database and
+        # writes no auth.json, so auth_key always read "" and a local server behind a key read
+        # "it wants an API key" (#336); and the agent's OpenCode, in the task's own home now,
+        # has no stored credentials: the layer carries a local provider's key, nothing else
+        from workbench import models
+        canary, cloud = f"CANARY-AUTH-{os.urandom(8).hex()}", f"CANARY-CLOUD-{os.urandom(8).hex()}"
+        heard = []
+
+        class Keyed(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                heard.append(self.headers.get("Authorization"))
+                ok = self.headers.get("Authorization") == f"Bearer {canary}"
+                body = json.dumps({"data": [{"id": "a"}]} if ok else {"error": "no key"}).encode()
+                self.send_response(200 if ok else 401)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Keyed)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({"provider": {
+            "ak": {"options": {"baseURL": url}, "models": {"a": {"limit": {"context": 32768}}}},
+            "cl": {"options": {"baseURL": "https://api.example.com/v1"}, "models": {"b": {}}}}}))
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": "cred_1", "integrationID": "ak", "label": "ak", "active": True,
+             "value": {"type": "key", "key": canary}},
+            {"id": "cred_2", "integrationID": "cl", "label": "cl", "active": True,
+             "value": {"type": "key", "key": cloud}}])
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": ""}), \
+                mock.patch.object(models.hardware, "gpus", lambda windows=True: []), \
+                redirect_stderr(err):
+            found = models.discover()
+            models.status(found["ak/a"])
+        self.assertIn(f"Bearer {canary}", heard)                 # the probe sent it
+        self.assertEqual(models.auth_key("ak"), canary)
+        self.assertEqual(models.stored_key("cl"), "")            # not this machine's: never
+        self.assertNotIn(canary, repr(found["ak/a"]) + err.getvalue())
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-authk", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "ak/a")
+        wait_phase("t-authk", {"review"}, timeout=60)
+        task = store.Task("t-authk")
+        layer = json.loads((store.home() / "rules/t-authk/opencode.json").read_text())
+        self.assertEqual(layer["provider"]["ak"]["options"]["apiKey"], canary)
+        self.assertNotIn("apiKey", layer["provider"]["cl"]["options"])  # copied in, keyless
+        self.assertNotIn(cloud, json.dumps(layer))
+        env = {k: v for k, v in runner.agent_env(task).items() if k != "FAKE_AUTH_EXPORT"}  # the fake's store
+        self.assertFalse(canary in json.dumps(env), "the key is in the agent's environment")
+        for f in [*task.dir.rglob("*"), store.home() / "notify.jsonl"]:
+            if f.is_file():
+                text = f.read_text(errors="replace")
+                self.assertFalse(canary in text or cloud in text, f"a key is in {f}")
 
     def test_ambiguous_and_unknown_names_are_refused(self):
         from workbench import models

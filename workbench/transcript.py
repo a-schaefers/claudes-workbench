@@ -70,18 +70,47 @@ def _complain(what: str, r: subprocess.CompletedProcess) -> None:
         print(f"opencode session {what} failed: {why[:200]}", file=sys.stderr, flush=True)
 
 
-def export(session: str, strict: bool = False) -> dict | None:
-    """The session as OpenCode exports it; {} when that fails, or None with ``strict``: the
-    runner tells a failure from an empty session (#262)."""
-    try:
-        r = subprocess.run(opencode_bin() + ["session", "export", session, "--standalone"],
-                           capture_output=True, text=True, timeout=30, cwd="/")
-        if r.returncode:
-            _complain("export", r)
-        if r.returncode == 0 and r.stdout.strip():
-            return store.loads(r.stdout)  # its strings written out again (#438)
-    except (OSError, subprocess.TimeoutExpired, ValueError):  # a busy or broken store: nothing known
-        pass
+def _same(cmd: list[str]) -> list[str]:
+    return cmd
+
+
+def stores(task: store.Task | None) -> list[tuple[dict | None, object]]:
+    """The OpenCode stores a task's sessions may be in, for wb's session commands, as (the
+    environment, None for the user's own; what wraps the command): the task's home (#1010) when
+    it has a database, then the user's, which holds the sessions of tasks started before
+    v1.91.2. Session ids are unique (`ses_` and random), so looking in both is safe. The task's
+    home is read in the task's own lane (lane.wrap): the agent writes it, and a link it planted
+    there (state/, log/, the database's -wal) had OpenCode, run by wb outside the lane, write
+    through it to any file of the user's (the #1010 review, 2026-11-22). The user's store is
+    out of every lane, and read outside it."""
+    from . import context, lane
+    if task is None or not context.opencode_db(task).is_file():
+        return [(None, _same)]
+    env = {**os.environ, **context.opencode_home_env(task)}
+    writable = context.writable(task)
+    if writable is None:  # no lane: the agent's commands reach every file of the user's anyway
+        return [(env, _same), (None, _same)]
+    readable, unix = context.readable(task), context.unix_paths(task)
+    return [(env, lambda cmd: lane.wrap(writable, cmd, readable, unix)), (None, _same)]
+
+
+def export(session: str, strict: bool = False, task: store.Task | None = None) -> dict | None:
+    """The session as OpenCode exports it, from the task's own home first (stores); {} when
+    that fails, or None with ``strict``: the runner tells a failure from an empty session
+    (#262)."""
+    failed = None  # the first failure that isn't "not found here", else the last
+    for env, wrap in stores(task):
+        try:
+            r = subprocess.run(wrap(opencode_bin() + ["session", "export", session, "--standalone"]),
+                               capture_output=True, text=True, timeout=30, cwd="/", env=env)
+            if r.returncode == 0 and r.stdout.strip():
+                return store.loads(r.stdout)  # its strings written out again (#438)
+            if failed is None or "not found" in (failed.stderr or "").lower():
+                failed = r
+        except (OSError, subprocess.TimeoutExpired, ValueError):  # a busy or broken store
+            pass
+    if failed is not None:
+        _complain("export", failed)
     return None if strict else {}
 
 
@@ -91,12 +120,12 @@ def finished_export(task: store.Task, sid: str) -> dict:
     and the pane's `wb watch --json`, run on every status write of the followed task, exported
     every one of them again each time, a core kept busy beside the model (#691)."""
     if not re.fullmatch(r"[\w-]{1,128}", sid or ""):
-        return export(sid) if sid else {}
+        return export(sid, task=task) if sid else {}
     path = task.dir / f".export-{sid}.json"
     kept = store.read_json(path, None)
     if isinstance(kept, dict) and kept:
         return kept
-    got = export(sid)
+    got = export(sid, task=task)
     if got:
         try:
             store.write_json(path, got)
@@ -106,22 +135,25 @@ def finished_export(task: store.Task, sid: str) -> dict:
 
 
 def find_session(task: store.Task) -> str | None:
-    """The task's OpenCode session: from its status, or by its title before the first event."""
+    """The task's OpenCode session: from its status, or by its title before the first event, in
+    the task's own home, else the user's store (stores)."""
     sid = task.status.get("session")
     if sid or not task.worktree.exists():
         return sid
-    try:
-        r = subprocess.run(opencode_bin() + ["session", "list", "--standalone"], capture_output=True,
-                           text=True, cwd=task.workdir, env={**os.environ, "PWD": str(task.workdir)},
-                           timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if r.returncode:
-        _complain("list", r)
-    for line in r.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) > 1 and parts[1] == f"wb: {task.name}":
-            return parts[0]
+    for env, wrap in stores(task):
+        try:
+            r = subprocess.run(wrap(opencode_bin() + ["session", "list", "--standalone"]),
+                               capture_output=True, text=True, cwd=task.workdir,
+                               env={**(os.environ if env is None else env), "PWD": str(task.workdir)},
+                               timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if r.returncode:
+            _complain("list", r)
+        for line in r.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) > 1 and parts[1] == f"wb: {task.name}":
+                return parts[0]
     return None
 
 
@@ -573,7 +605,7 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
         def emit(style, text):  # cleaned before the colours: those are ours
             print(clear + paint(style, plain(text)), file=out, flush=True)
     sid = first_sid = find_session(task)
-    first = export(sid) if sid else {}
+    first = export(sid, task=task) if sid else {}
     if as_json:
         emit("meta", model_line(task, first), keep=True)
     else:
@@ -597,7 +629,8 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
             sid = find_session(task)
             # the first pass reuses the export just made: every `wb watch --json` (the pane's, every
             # few seconds) ran two OpenCode exports where one does (the 2026-11-16 audit)
-            data = first if first is not None and sid == first_sid else export(sid) if sid else {}
+            data = first if first is not None and sid == first_sid else \
+                export(sid, task=task) if sid else {}
             first = None
             for old in st.get("sessions") or []:  # earlier sessions, before a fresh start
                 if old not in done:

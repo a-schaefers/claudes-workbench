@@ -593,7 +593,10 @@ Claude read the diff.
   macOS's `PermissionError` on an emptied group as gone (macOS nightly, 2026-11-22).
 - *Between rounds* (`fresh_reason`; `wb next` prints it), first match: `--fresh` or `wb resume`
   → fresh; no session → continue on the step's first round, else fresh ("the last session ended
-  before it began"); the `compact_failed_session` → fresh, `COMPACTION_FAILED`, even under `keep`;
+  before it began"); a session with no status `opencode_home` (begun in the user's OpenCode store
+  before v1.91.2, which the agent's OpenCode no longer reaches, #1010) → fresh, `OLD_STORE` ("its
+  session is in OpenCode's shared store, which agents no longer reach (v1.91.2)"), even under
+  `keep` and on round 1; the `compact_failed_session` → fresh, `COMPACTION_FAILED`, even under `keep`;
   `keep` → continue; `context: full` → fresh (`COMPACTED`/`COMPACTION_FAILED` per
   `full_compacted`/`full_compact_failed`); the export lists a completed compaction (a message `{type: "compaction", status: "completed", summary}`) → fresh; the
   last message with tokens (`context_state`, all-zero ones skipped, #481) at `fresh_at` or more →
@@ -616,7 +619,8 @@ its `--stat` and "read the changed files", read only that far, #474; the stat ca
 #863), `## Claude's answers to your questions` when any ("An earlier session asked, and Claude
 answered; follow these, and don't ask them again:", `Q:`/`A:` from the `ask`/`answer` events since
 `step_round`, `runner.answered`, never `NO_ANSWER`, latest first within `ANSWERS_MAX` 4000, #659),
-and `## Now`: "Start on the task above" on a step's first round; a `CARRY_ON`/`RESUME` round's own
+for `OLD_STORE` `## Your last words in the earlier session` (its last assistant text, `LAST_WORDS_MAX`
+2000 characters, `runner.last_words`, exported by wb from the user's store), and `## Now`: "Start on the task above" on a step's first round; a `CARRY_ON`/`RESUME` round's own
 text; else `round_asks` since the last review feedback under `ASKED` ("What you were asked to
 do…"), then "Now:" and the round's instructions (a fresh auto-fix round once lost the feedback).
 The old id moves to `sessions`; `session`, `skills_told` cleared; a `fresh` event. A mid-round
@@ -1009,7 +1013,8 @@ nothing refuses sudo.
 **Paths, a lane** (`context.writable`, `context.readable`, `context.external_rules`, `lane.py`).
 It keeps an agent's mistakes and its use of the user's credentials in; it is not a jail for a
 deliberately hostile process.
-- *Writes.* The task's worktree and `ask/`, not the rest of the task directory: `task.json`,
+- *Writes.* The task's worktree, `ask/` and `opencode/` (its OpenCode's own home, below), not
+  the rest of the task directory: `task.json`,
   `status.json`, `steer.jsonl`, the rounds and `runner.log` steer the runner, so writing them would
   lift its guards, and the runner would write through a planted link (the 2026-11-16 audit). Then:
   the temp directories (`gettempdir()`, `TEMP_ROOTS`), `DEV_NODES` (`/dev/null`, `/dev/zero`,
@@ -1024,10 +1029,24 @@ deliberately hostile process.
   (`flutter_caches`: every flutter command locks it), wherever `TOOL_HOME_VARS` moved them
   (`CARGO_HOME`, `GOPATH`'s first entry, `GOMODCACHE`, `CARGO_TARGET_DIR`, `JULIA_DEPOT_PATH`'s
   every entry (`ALL_ENTRIES`), `HF_HOME`…, absolute only; of `GOPATH` and `BUN_INSTALL` only
-  `VAR_CACHES`), OpenCode's own data and state, `$XDG_CACHE_HOME`, and the extra paths
+  `VAR_CACHES`), `$XDG_CACHE_HOME`, and the extra paths
   (`commands.json` `paths`, grants `paths`), each with its real path, only those that exist.
-  OpenCode's data, state, cache and config directories are made first (a fresh profile couldn't
-  open its log, #340).
+  OpenCode's cache and config directories are made first (a fresh profile couldn't open its log,
+  #340). The user's OpenCode data and state homes are not in it, made or not: OpenCode V2 keeps
+  every `/connect` credential in `~/.local/share/opencode/opencode.db`, beside every project's
+  sessions and snapshots, and the lane wrote that directory (#1010, 2026-11-22). The agent's
+  OpenCode keeps its own in the task's home, `tasks/<task>/opencode/` (`context.opencode_home`,
+  `share/` and `state/` inside, made 0700 before each round by `make_opencode_home`, a link the
+  agent left there replaced): its sessions, `snapshot/`, `tool-output/`, `shell/` (each shell
+  command's saved output) and log, no credentials. wb reads it only through `opencode session
+  export`/`list`, run in the task's own lane (`transcript.stores`): the agent writes the home, and
+  OpenCode run by wb outside the lane wrote through a link it planted there (`state/`, `log/`;
+  the #1010 review). `snapshot/`, `tool-output/` and `shell/` are dropped when the task closes
+  (`drop_opencode_scratch`, `OPENCODE_SCRATCH`, accept and discard; never through a link at any
+  step); the database stays for `wb watch`, the lessons and `finished_export`, and moves with the
+  task into `archive/`. OpenCode's `tmp`
+  (`/tmp/opencode`, shared by every task and the user's OpenCode) holds no session data, only
+  scratch (checked on 2.3.2: a whole round there left it empty; `TMPDIR` would move it): it stays.
   Left out, where a planted file runs later outside the lane: what's on the user's PATH or sourced
   by their shell, and the toolchains those run: `~/.local/lib` (user site-packages, whose `.pth`
   every python runs); `.local/share/uv` (uv's tools and Pythons; its cache is `~/.cache/uv`);
@@ -1070,7 +1089,11 @@ deliberately hostile process.
 - *Reads.* Everything but credentials and the user's records: `context.SECRETS` under `$HOME`
   (`.ssh`, `.gnupg`, `.netrc`, `.git-credentials`, `.config/gh`, keyrings, the cloud CLIs'
   (`.aws`, `.config/gcloud`, `.kube`, `.docker`…), `.android/adbkey`, registry and deploy logins
-  (#992, #999), OpenCode's `service.json` (its service runs outside the lane), password managers,
+  (#992, #999), OpenCode's `service.json` (its service runs outside the lane), OpenCode's data and
+  state homes whole (`.local/share/opencode`, `.local/state/opencode`: the database and its
+  `-wal`/`-shm`, a release channel's, the legacy `auth.json`, `snapshot/`, `tool-output/`,
+  `worktree/`, `repos/`, `prompt-history.jsonl`; and a user's own `OPENCODE_DB`, #1010: no file there
+  opens, though names stay listable, as under every secret, *Free* below), password managers,
   browser and mail profiles, shell history, `.claude`, `.claude.json`), the same under the XDG
   directories, wherever `SECRET_VARS` move
   them (`GNUPGHOME`, `DOCKER_CONFIG`, `KUBECONFIG`, `HISTFILE`, `SEMGREP_SETTINGS_FILE`…), and
@@ -1083,8 +1106,10 @@ deliberately hostile process.
   `.gradle/gradle.properties`, `NuGet.Config`, poetry's `auth.toml`, composer's `auth.json`, pub's
   `pub-tokens.json`, `.hex/hex.config`). Where a tool stops on a hidden file the agent gets its own
   (*Its environment*); Vercel's and the Firebase CLI don't run in the lane (Firebase's emulators do
-  with `XDG_CONFIG_HOME=$(mktemp -d)`). OpenCode's `auth.json`
-  and session database stay readable (it runs in the lane): keep cloud keys out of it.
+  with `XDG_CONFIG_HOME=$(mktemp -d)`). Without Landlock (macOS, older kernels) there is no lane,
+  and the user's OpenCode store stays readable to the agent's commands; the task's own home still
+  keeps the agent's OpenCode off the user's credentials and sessions. A literal `apiKey` in the
+  user's global `opencode.json` stays readable too: the agent's OpenCode loads that file itself.
   Of the home directory's own entries only dotfiles and `HOME_READABLE` (`bin`, `go`, `R`, `perl5`)
   are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`, `/media`, `/run/media`, `/run/user`, `/home`,
   WSL's drives) nothing, beyond: OpenCode's global directory (`OPENCODE_CONFIG_DIR`, #370), the
@@ -1200,8 +1225,34 @@ scratch repo failed and the base check blamed the project, #666); and the shim's
 variables (`gitops.REPO_ENV`: `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`…) reach neither the
 agent nor wb: `gitops.drop_repo_env` at `cli.main` and `runner.main`, and `gitops._env` per call
 (from a commit hook `worktree add` failed on `GIT_INDEX_FILE`; from vcsh `GIT_DIR` sent calls to
-another repo, #798). OpenCode's own environment adds `OPENCODE_ENV`; the tests' doesn't. The tests' environment is
-`agent_env` too, `METADATA_OFF` and `REMOTE_CACHES_OFF` included: they run the agent's code.
+another repo, #798). OpenCode's own environment (`runner.opencode_env`, the round's) adds
+`OPENCODE_ENV` and the task's OpenCode home (`context.opencode_home_env`: `XDG_DATA_HOME=<home>/share`,
+`XDG_STATE_HOME=<home>/state`, and always `OPENCODE_DB=<home>/share/opencode/opencode.db`, over a
+user's own, which would point back at the user's database, #1010; and
+`OPENCODE_DISABLE_MODELS_FETCH=1`: each server start fetched the models.dev catalog and cached
+it in the database, 13.7 MB in every task's home and one download per task, so the catalog bundled
+in the binary serves instead: 320 KB, measured 2026-11-23). OpenCode 2.3.2 has no switch of
+its own for these: `OPENCODE_DB` moves only the database (and the data directory's legacy
+`auth.json` is still imported into it), `OPENCODE_TEST_HOME` only `home`; `XDG_DATA_HOME` moves the
+data, log, repos and db together (`opencode debug paths`). Those would move every other tool's data
+too (uv's Pythons, pipx, poetry, pnpm), so `SHELL` is the shell shim, `rules/<task>/shell/<name>`
+(`runner.write_shell_shim`, rewritten each round; outside the lane and off the agent's `PATH`),
+named as the shell it runs: OpenCode picks a command's flags by `$SHELL`'s name (zsh's `+o nomatch
+-c`, the PTY's `-l`, the rc file, the tool's "Commands run … using <name>"), and a shim called
+`opencode-shell` matched none, so under zsh an unmatched glob failed "no matches found" (the #1010
+review):
+POSIX sh that puts back the user's `XDG_DATA_HOME`, `XDG_STATE_HOME`, `OPENCODE_DB` and `SHELL`
+(each unset where the user had none: `SHIM_RESTORES`, values baked in, paths only) and execs the
+shell `test_shell` picks, as OpenCode runs every command (`$SHELL -c`). Only what runs through
+`$SHELL` gets them back: the formatters and language servers OpenCode starts itself (with its own
+environment, `extendEnv`, checked on 2.3.2; formatters only when the user's global config sets
+`formatter`, a project's being shut out) see the task's home as their `XDG_DATA_HOME` and
+`XDG_STATE_HOME`, so one whose tool keeps its data there (mise, pnpm) looks in the task's home
+(the #1010 review; left so: the layer could only turn them off). The tests' doesn't get any
+of it. The tests' environment is `agent_env` too, `METADATA_OFF` and `REMOTE_CACHES_OFF` included:
+they run the agent's code. Nothing secret goes in OpenCode's environment (`/proc/<pid>/environ`
+is readable in the lane): a local server's stored key goes in the 0600 layer (*Found, loaded,
+chosen*).
 
 *The user's Python environment* (`context.python_env`, for the agent, setup, tests, base check and
 `wb verify`). The checkout's own active env made `import mypkg` load the checkout, so tests passed
@@ -1802,7 +1853,10 @@ N` when it doesn't say its window).
 - Tool calls: vLLM needs `--enable-auto-tool-choice --tool-call-parser <parser>`; llama.cpp may
   need `--chat-template-file`; LM Studio's untrained-for-tools model is `tool_call: false`.
 - An API key: the provider's `options.apiKey`; a `{env:NAME}` there needs `NAME` in commands.json
-  `env` (agents get no secrets by default); else OpenCode's `auth.json` (`opencode auth login`).
+  `env` (agents get no secrets by default); else the key `opencode auth login` (or `/connect`)
+  stored: OpenCode 2.x keeps it in its database (`opencode auth export`), 1.x in `auth.json`. The
+  task's config layer carries such a key for the task's provider (agents' OpenCode has no stored
+  credentials, #1010).
 
 #### A server on Windows, from WSL2
 WSL2's NAT forwards Windows to WSL's `localhost`, not back, so a server on Windows' 127.0.0.1
@@ -1900,10 +1954,27 @@ A disagreeing probe sets `providers()`'s `engine_note`, naming the `engine` over
 
 Requests to this machine (`_open`) bypass `http_proxy` (the 2026-11-16 audit); other hosts keep it.
 `options.apiKey`, resolved as the agent sees it, is a bearer token on every probe to its root
-(`_KEYS`, Ollama's endpoints too, #256), never printed or stored; else `auth.json`'s
-(`$XDG_DATA_HOME/opencode/auth.json` `{"type": "api", "key"}`, `auth_key`, #336), which the lane
-leaves readable. A `{env:NAME}` key the agent won't get makes the model unavailable ("… add NAME to
-commands.json env").
+(`_KEYS`, Ollama's endpoints too, #256), never printed or stored; else the key OpenCode stores
+(`auth_key`, #336): `opencode auth export <provider> --standalone`, run outside the lane with the
+user's environment and parsed in memory (OpenCode 2.x keeps `/connect` and `opencode auth login`
+keys in its database and writes no `auth.json`: on 2.3.2 the rows are `{id, integrationID, label,
+active, value: {type, key}}`; only `key` rows, the active first, never an OAuth token, whose
+refreshed copy would log the user's OpenCode out; an integration OpenCode doesn't know exits 1,
+"Integration not found", a miss), else 1.x's `$XDG_DATA_HOME/opencode/auth.json` `{"type": "api",
+"key"}`. Cached per process, a miss included (`_AUTH`: each call starts an OpenCode server, about
+0.9 s), asked only for a provider on this machine with no `options.apiKey`, and by discovery only
+when wanted: such a provider's root is in `_STORED`, and a request `_open` sends there without a
+key of the caller's that comes back 401 or 403 asks once and goes again with the stored key (kept
+in `_KEYS` for that root). Asked up front, every discovery started OpenCode, the pane's `wb watch
+--json` on each refresh too, for a stock Ollama that wants no key (the #1010 review). The layer
+(`runner.stored_key`) and `providers()` (`wb doctor`, `wb scout`, `wb model`) ask outright. A
+failure is said once
+on stderr, its first line, key-like text redacted (`_KEYLIKE`). The agent's OpenCode, in the task's
+own home, has no stored credentials (#1010), so the layer carries that key for the task's provider
+(`runner.stored_key`, `models.stored_key`: `provider.<pid>.options.apiKey`, the layer 0600 as for a
+key copied from the config), only for a provider discovery passes as this machine's or `local:
+true`; a cloud provider's key never reaches a layer. A `{env:NAME}` key the agent won't get makes
+the model unavailable ("… add NAME to commands.json env").
 
 **Ollama cloud models** (`:cloud`, `-cloud`, a tags row with `remote_host`/`remote_model`) run on
 ollama.com: not candidates, `weights` 0, refused by `wb model add`, listed apart by scout, unless
@@ -3926,6 +3997,7 @@ $WB_HOME (~/.local/state/workbench)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md, CLAUDE.md (the user's, copied),
                                  user-rules/<path> (their ~/.claude/rules: context.user_rules), project-rules/<path> (a rule a link takes outside the repo: context.project_rules),
                                  imports/<n>/<name> (an import from outside the repo: context.import_files), bin/git (the shim), grants.json (what Claude allowed: {"allow", "paths", "test_tools"}),
+                                 shell/<name> (OpenCode's $SHELL, named as the shell it runs: the user's XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL back, then that shell: runner.write_shell_shim, #1010),
                                  gitdir.json (the real git dir, the .git's text: {"gitdir", "dotgit"}), submodules.json ([{"path", "src" (the user's checkout), "sha", "index"}]), submodule-<n>.index;
                                  removed on close (cli._closed) and by gc for a closed or vanished task
   locks/<task>.runner.lock       the runner's for its life (its pid; touched every BEAT_SECS): one runner a task
@@ -3940,7 +4012,7 @@ $WB_HOME (~/.local/state/workbench)
   locks/skills.lock              one skill-library change at a time, add to commit (skills._library_lock)
   locks/config-<key>.lock        not here: store.config_lock_dir ($XDG_RUNTIME_DIR/workbench, else 0700 workbench-<uid> in the temp dir, else here),
                                  shared by every WB_HOME of the account (#939); never beside the file (a stray in the user's dotfiles, #495)
-  tasks/<task>/                  readable from the lane; only worktree/ and ask/ writable
+  tasks/<task>/                  readable from the lane; only worktree/, ask/ and opencode/ writable
     task.json status.json events.jsonl steer.jsonl acked noticed (newest notice's ts) context.md runner.log
     claude-sessions              "<ts> <session id>": Claude Code sessions a wb call naming the task ran in (spend.sessions)
     coding.json                  {allowed: [{edit, said, ts, used, when?, started?, did?}]} (*Claude coding*)
@@ -3957,6 +4029,8 @@ $WB_HOME (~/.local/state/workbench)
     rounds/<n>/                  prompt.md instructions.md (before a handover rewrote it) summary.md tests.txt
                                  notes.md (Claude's notes folded into prompt.md: runner.folded_notes) nudged (prompt.md is the think nudge; round_asks skips it)
     ask/<id>.json  <id>.answer   questions and permission requests; answers
+    opencode/{share,state}/      the agent's OpenCode's own data and state (0700, context.opencode_home, #1010): share/opencode/opencode.db
+                                 (its sessions, no credentials), log/, snapshot/, tool-output/ and shell/ (dropped at accept and discard: OPENCODE_SCRATCH)
     worktree/                    the agent's git worktree, branch delegate/<task>
 ~/.local/share/workbench/skills/ ($WB_SKILLS) the skill library, its own git repo; retired/
 ~/.local/share/workbench/try/<n>/ wb try's sample projects (task try-<n>; beside $WB_SKILLS)
@@ -4074,6 +4148,7 @@ off), not `wb start`'s.
 | `closing` | `wb accept` after its commit: `{commit, step, merge, merge_into, merge_as, sign, merge_from?, merged_head?}`, with `tip`; `sign` false keeps a retry's merge unsigned; a retry uses that object and destination (`gitops.squashed` from `merge_from`), a recovered refusal still exits 5 (#246, #432); while it stands, discard, feedback, next, resume, takeover refuse (`cli._accepting`) |
 | `grants_kept` | `{allow, paths}` at close, for `context.grants` afterwards (`wb bench add`) |
 | `session`, `sessions`, `session_mark`, `session_floor` | the session; earlier ones; `gitops.mark` at its start; context read at its first change |
+| `opencode_home` | `true` once a round ran in the task's own OpenCode home (`run_round`, #1010); a `session` without it began in the user's store, and the next round starts fresh (`fresh_reason`: `OLD_STORE`, the old session's last words exported from there) |
 | `context` | one-round instruction: `fresh`, `keep`, `full` |
 | `full_pct`, `handovers`, `full_compacted`, `full_compact_failed` | fill at the last mid-round handover; count; compacted first, or failed to |
 | `compact_failed_session` | while still `session`, `fresh_reason` hands the next round to a fresh one whatever `context` says (#969) |
@@ -4350,10 +4425,14 @@ sizes the fake GPU (unset: no sharing). A runner keeps its spawn env: a `FAKE_*`
 
 **The fake OpenCode** handles `--version` (`FAKE_VERSION`, else `opencode v2.3.0`), `run …` (prompt last, `--session`
 continues; starts the config's MCP server and lists its tools unless `FAKE_NO_MCP`; a `-` prompt without `--` prints
-usage, exit 1), `session export` (tokens `FAKE_FILL` or 1200, answer.txt 41 → 42; `FAKE_COMPACTED`), `session list`
-(empty); session commands fail without `--standalone`. It streams one JSON event per line (`step_start`, `tool_use`,
+usage, exit 1; with `OPENCODE_DB` set a new session is recorded in that home, `<db>.sessions`), `session export`
+(tokens `FAKE_FILL` or 1200, answer.txt 41 → 42; `FAKE_COMPACTED`; `info.home` the database read; in a home that
+records sessions one it doesn't hold is "Session not found", exit 1), `session list` (the home's recorded ones); session
+commands fail without `--standalone`; `auth export <provider>` prints `FAKE_AUTH_EXPORT`'s rows for it (2.3.2's shape),
+else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `text`, `step_finish` with tokens). Live tool names are 1.x-style (`bash`, `filePath`; 2.x `shell`,
-`path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS`; knobs `FAKE_LATE`, `FAKE_SLEEP`,
+`path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
+`pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
 `read`, `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`), `compactfail` (OpenCode
@@ -4409,8 +4488,9 @@ shell lines, rule order, git by path, the edit rule, PATH, the lane, `tool_outpu
 with it shut out (#994). `run_calls(name, calls, *start_flags)` runs `opencode run --auto` through `agent_env` and
 `lane.wrap`; refusals read `permission.rejected`, `external_directory` or `Permission denied`. `RealOpenCodeRun` is the
 runner on real OpenCode (`wb start --model cap`): argv, `run --format json` events, `session export`
-(`context_state`), `session list` (`find_session`), `--session`, a real compaction (CLAUDE.md's *OpenCode quirks*
-points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
+(`context_state`), `session list` (`find_session`), `--session`, a real compaction, the task's own OpenCode home
+(no credentials in it, the user's store given no session, its commands seeing the user's `XDG_DATA_HOME`, #1010)
+(CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
 
 **The browser test** (`e2e_chat.mjs`): the real `bin/wb chat serve` on 13371 (`WB_E2E_PORT`), WebKit as an iPhone 13
 and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7: sends land exactly once through
@@ -4551,8 +4631,15 @@ doc needs its own `!/` line).
   list`'s ` (no test)` and `NO_TEST_SEND` → `reference/patching.md`, CONTRIBUTING.md, the LocalPatches tests.
   **The ident `sent` matches by** (`_ident`, `_ident_row`: author, email, author date, subject) → `rebase_patches`'s
   `landed`, `_landed_pr`, which read the same fields.
-- **A file read from the task directory, or one the ask server writes** → the lane's part only `worktree/` and `ask/`,
-  checked by the runner (`ask_mcp.relay`): nothing the agent writes steers code outside its lane.
+- **A file read from the task directory, or one the ask server writes** → the lane's part only `worktree/`, `ask/` and
+  `opencode/` (OpenCode's own home, read by wb only through `opencode session export`/`list` run in the task's lane,
+  `transcript.stores`, parsed as data), checked by the runner (`ask_mcp.relay`): nothing the agent writes steers code
+  outside its lane.
+- **Where the agent's OpenCode keeps its sessions** (`context.opencode_home_env`) → `runner.opencode_env` (the round),
+  `transcript.stores` (`export`, `find_session`, and through them `finished_export`, `wb watch`, `context_state`,
+  `measure_speed`, `last_words`), the fake's `<db>.sessions`, `RealOpenCodeRun`. A variable it moves → `runner.SHIM_RESTORES`,
+  which the shell shim gives back; the shim's shell and its name ↔ `runner.test_shell` (the tests run where the agent's
+  commands do; OpenCode picks its flags by the name).
 - **The layer's `permissions`** → the layer file alone, the project's config shut out (`rules_env`,
   `PROJECT_CONFIG_OFF`, #994); never `OPENCODE_CONFIG_CONTENT` (`CONFIG_CONTENT_MAX`); the user's own (`USERS_RULES`)
   before them. A key a project config mustn't change → `RESTATED`.

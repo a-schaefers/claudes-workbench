@@ -2694,6 +2694,7 @@ def cmd_accept(a):
     if warn := gitops.remove_worktree(repo, task.worktree):  # committed: the rest is cleanup
         print(f"wb: {warn}", file=sys.stderr)
     context.drop_runtime_dir(task)
+    context.drop_opencode_scratch(task)  # its OpenCode's snapshots; the sessions stay (#1010)
     merged, refused = close.get("merged_head"), None
     if close.get("merge") and not merged:
         into = close.get("merge_into")
@@ -3265,6 +3266,7 @@ def cmd_discard(a):
     if warn := gitops.remove_worktree(repo, task.worktree):  # never stops a discard (the audit)
         print(f"wb: {warn}", file=sys.stderr)
     context.drop_runtime_dir(task)
+    context.drop_opencode_scratch(task)  # its OpenCode's snapshots; the sessions stay (#1010)
     branch, said = spec["branch"], ""
     if a.keep_branch:
         pass

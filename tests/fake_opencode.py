@@ -46,9 +46,17 @@ stays alive (a shutdown that hangs). FAKE_EXIT: after its last event a run exits
 FAKE_SURROGATE: a run first reads a file whose name and text end in half an emoji (an
 unpaired surrogate escaped, which is valid JSON).
 FAKE_LATIN1: a run first prints a line that isn't UTF-8 (`caf\xe9`, Latin-1).
-`session export` prints one finished step: FAKE_FILL sets the context it read, FAKE_COMPACTED
-adds a completed compaction. `session list` lists nothing. Either fails without `--standalone`,
-as the real one does when another service holds the managed port. `--version` says
+FAKE_RUNS rows also say what OpenCode's environment had (`opencode_db`, `xdg_data`, `xdg_state`,
+`shell`) and what a command the agent runs through `$SHELL -c` sees (`shell_sees`: its
+XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset).
+A run with OPENCODE_DB set records its new session in that home (`<db>.sessions`), as OpenCode
+keeps it in its database (#1010). `session export` prints one finished step, its `info.home` the
+database it read: FAKE_FILL sets the context it read, FAKE_COMPACTED adds a completed compaction;
+in a home that records sessions, one it doesn't hold is "Session not found" (exit 1). `session
+list` lists the home's recorded sessions. Either fails without `--standalone`, as the real one
+does when another service holds the managed port. `auth export <provider>` prints the rows of
+FAKE_AUTH_EXPORT (a JSON list, as OpenCode 2.3.2 prints them) for that provider, or `[]`, and
+appends the provider to FAKE_AUTH_LOG when set. `--version` says
 `FAKE_VERSION` (2.3.0). A `run` starts the config's workbench MCP server and lists its tools,
 as OpenCode does, unless FAKE_NO_MCP.
 
@@ -137,18 +145,46 @@ if args[:2] == ["auth", "list"]:
 if args == ["--version"]:  # wb doctor; FAKE_VERSION plays an older or odder build
     print(os.environ.get("FAKE_VERSION", "opencode v2.3.0"))
     sys.exit(0)
+if args[:2] == ["auth", "export"]:  # models.auth_key: OpenCode 2.x's credential store
+    pid = next((a for a in args[2:] if not a.startswith("-")), None)
+    if os.environ.get("FAKE_AUTH_LOG"):
+        with open(os.environ["FAKE_AUTH_LOG"], "a") as f:
+            f.write(f"{pid}\n")
+    rows = json.loads(os.environ.get("FAKE_AUTH_EXPORT") or "[]")
+    print(json.dumps([r for r in rows if pid is None or r.get("integrationID") == pid]))
+    sys.exit(0)
+
+
+def db_path():
+    """The database this OpenCode would use: OPENCODE_DB, else its data home's."""
+    return os.environ.get("OPENCODE_DB") or os.path.join(
+        os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "opencode", "opencode.db")
+
+
+def recorded():
+    """The sessions this home holds, by id (title), or None when it records none."""
+    try:
+        with open(db_path() + ".sessions") as fh:
+            return {r["id"]: r.get("title", "") for r in (json.loads(x) for x in fh if x.strip())}
+    except OSError:
+        return None
+
+
 if args[:1] == ["session"] and "--standalone" not in args:
     # As real OpenCode does when another service holds the managed port (the 2026-11-16 audit):
     # workbench's session commands must not depend on the background service.
     sys.exit("Managed service port 49374 on 127.0.0.1 is already in use by PID 1")
 if args[:2] == ["session", "export"]:  # `wb watch`: one finished step, as OpenCode exports it
     sid = args[2]
+    held = recorded()
+    if held is not None and sid not in held:  # another home's session (#1010)
+        sys.exit(f"Session not found: {sid}")
     # FAKE_FILL: the context the step read (the runner's fresh-session check); FAKE_COMPACTED:
     # OpenCode compacted the session first
     compacted = [{"type": "compaction", "id": f"{sid}-c", "status": "completed", "reason": "auto",
                   "summary": "Earlier: read answer.txt.", "time": {"created": 1500}}] \
         if os.environ.get("FAKE_COMPACTED") else []
-    exported = {"info": {"id": sid}, "messages": [
+    exported = {"info": {"id": sid, "home": db_path()}, "messages": [
         {"type": "user", "id": f"{sid}-m1", "time": {"created": 1000}, "text": "Write the answer."},
         *compacted,
         {"type": "assistant", "id": f"{sid}-m2", "finish": "stop",
@@ -167,7 +203,9 @@ if args[:2] == ["session", "export"]:  # `wb watch`: one finished step, as OpenC
         "cache": {k: sum(m["tokens"]["cache"][k] for m in done) for k in ("read", "write")}})
     print(json.dumps(exported))
     sys.exit(0)
-if args[:2] == ["session", "list"]:  # transcript.find_session before the first event: none yet
+if args[:2] == ["session", "list"]:  # transcript.find_session before the first event
+    for sid, title in (recorded() or {}).items():
+        print(f"{sid}\t{title}\t11/22/2026, 11:31:45 PM")
     sys.exit(0)
 session = args[args.index("--session") + 1] if "--session" in args else f"ses_{uuid.uuid4().hex[:12]}"
 scenario = os.environ.get("FAKE_SCENARIO", "ok")
@@ -249,10 +287,30 @@ if args and args[0] == "run" and args[-1].startswith("-") and args[-2:-1] != ["-
 if os.environ.get("FAKE_PROMPTS") and args and args[0] == "run":
     with open(os.environ["FAKE_PROMPTS"], "a") as fh:
         fh.write(json.dumps(args[-1]) + "\n")
+if os.environ.get("OPENCODE_DB") and args and args[0] == "run" and "--session" not in args:
+    title = args[args.index("--title") + 1] if "--title" in args else ""
+    os.makedirs(os.path.dirname(os.environ["OPENCODE_DB"]), exist_ok=True)
+    open(os.environ["OPENCODE_DB"], "a").close()  # OpenCode makes its database on first use
+    with open(os.environ["OPENCODE_DB"] + ".sessions", "a") as fh:
+        fh.write(json.dumps({"id": session, "title": title}) + "\n")
 if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs continued a session
+    import subprocess
+    try:  # a command the agent runs, as OpenCode runs it: `$SHELL -c`
+        sees = subprocess.run([os.environ.get("SHELL") or "sh", "-c",
+                               'printf "%s|%s|%s|%s" "${XDG_DATA_HOME:--}" "${XDG_STATE_HOME:--}" '
+                               '"${OPENCODE_DB:--}" "${SHELL:--}"'],
+                              capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        sees = None
     with open(os.environ["FAKE_RUNS"], "a") as fh:
         fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1],
-                             "cwd": os.getcwd(), "pwd": os.environ.get("PWD")}) + "\n")
+                             "cwd": os.getcwd(), "pwd": os.environ.get("PWD"),
+                             "opencode_db": os.environ.get("OPENCODE_DB"),
+                             "xdg_data": os.environ.get("XDG_DATA_HOME"),
+                             "xdg_state": os.environ.get("XDG_STATE_HOME"),
+                             "shell": os.environ.get("SHELL"),
+                             "fetch_off": os.environ.get("OPENCODE_DISABLE_MODELS_FETCH"),
+                             "shell_sees": sees}) + "\n")
 if args and args[0] == "run" and "-m" in args:  # the model: <provider>/<id>[#<variant>]
     ref = args[args.index("-m") + 1]
     provider, _, rest = ref.partition("/")
