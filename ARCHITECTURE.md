@@ -4361,11 +4361,50 @@ usage, exit 1), `session export` (tokens `FAKE_FILL` or 1200, answer.txt 41 → 
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
 `retry` (`FAKE_RETRY_EVERY`), `say`. A new fake behaviour is a new scenario.
 
-**Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`; skip without `opencode`, the
+**API models in the fake** (#1011, from the spike for #1009 on OpenCode 2.3.2; the real-OpenCode checks below hold on
+2.3.0 too). `WB_FAKE_CATALOG` names a JSON file of `api model.list` entries (a list, or `{"data", "auth"}` to give
+`auth list` its own rows; unset, empty). The fake prints `api model.list` as `{location, data}`; `models` as
+`<provider>/<id>` lines, refusing a provider argument as 2.3.2 does; `auth list --format json` as `[{id, name,
+connections: [{type: "credential", id, label, method: "key"}]}]` per catalog provider. `run -m <provider>/<id>#<variant>`
+splits at the first `/` and the first `#` after it: a catalog provider's unknown model is `{"type": "error", "error":
+{"type": "provider.no-route", "message": "Model unavailable: <id>"}}`, an unknown variant (neither the catalog's nor the
+config's `provider.<p>.models.<m>.variants`, V1 or V2, from `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT`) `Variant
+unavailable for <id>: <v>`, both exit 1 before any step; a config model passes as before. Every `step_finish` has
+`part.cost` (from the catalog's first price, its context tier past `size`: `input` without cache reads, reasoning at
+the output rate; `FAKE_COST` for an unpriced model, else 0) and `part.tokens{input, output, reasoning, cache{read,
+write}}`; `session export` gives the assistant message `cost` (`FAKE_COST`, else 0) and `info.cost`/`info.tokens`
+their sums. The API scenarios: `ratelimit` (`step_start`, then `retry` events, attempts 2 to `FAKE_RETRIES`+1, 10 by
+default, `FAKE_RETRY_EVERY` apart, each `{type: "retry", attempt, nextRetryAt, messageID, error: {type:
+"provider.rate-limit", message, status: 429, response: {body}, retryAfterMs}}`, `retryAfterMs` only with
+`FAKE_RETRY_AFTER`; then that error, exit 1), `down` (the same with `provider.transport` ECONNREFUSED, checked on
+2.3.2), `auth` (401, `provider.auth`) and `quota` (402, `provider.quota`), both at once with no retry, and `nokey`
+(the no-route error); the upstream message (`FAKE_ERROR_BODY`) comes through verbatim in `message` and
+`response.body`. `WB_FAKE_API=<provider>[/<id>]=<state>,…` gives a model (its own entry first; a config model too) or a provider one
+of those states (or `ok`): its runs play that scenario, and a `nokey` provider drops out of `api model.list`, `models`
+and `auth list`, as one OpenCode can't authenticate does. Only the fake reads `WB_FAKE_API` and `WB_FAKE_CATALOG`.
+
+**Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`, `ApiHarness`'s
+`test_real_opencode_*`; skip without `opencode`, the
 lane ones without `lane.abi()`). `capture_llm.py <port> <out.jsonl> [calls] [prompt tokens]` records every request,
 answers tool-offering ones with the next scripted `{"name", "arguments"}`, reports `prompt tokens` read (to fill the
 window), returns the compaction template's headings for a compaction request (else `compaction.failed`), and listens at
-once; `CAPTURE_HEADER_DELAY` tests `headerTimeout` (#491). The first two cover the MCP shape, skills, denials, compound
+once; `CAPTURE_HEADER_DELAY` tests `headerTimeout` (#491). A path ending `/messages` is answered as Anthropic's
+Messages API (SSE events, `tool_use` blocks), any other as OpenAI chat completions. For the API routes (#1011):
+`CAPTURE_HEADERS=<file>` records each request's `{method, path, headers}` (GETs too; the out file keeps bodies only);
+`CAPTURE_STATUS=<code>` answers with that status and the protocol's error body (`CAPTURE_STATUS_TIMES=<n>`: only the
+first n), `CAPTURE_RETRY_AFTER` adds `Retry-After`, `CAPTURE_ERROR_BODY` sets the message (a key-like string);
+`CAPTURE_USAGE` the usage, in OpenAI's shape, mapped to Anthropic's (`input_tokens` less the cached,
+`cache_read_input_tokens`); `CAPTURE_REASONING=<s>` streams `reasoning_content` deltas (Anthropic: a `thinking`
+block) that long first. `ApiHarness` checks the fake and the server, and on the real OpenCode, offline (scratch
+`XDG_DATA_HOME`/`XDG_STATE_HOME`/`XDG_CACHE_HOME`/`XDG_CONFIG_HOME`, `OPENCODE_DISABLE_MODELS_FETCH=1`, a dead
+`HTTPS_PROXY`, no `*_API_KEY`, the layer in `OPENCODE_CONFIG_CONTENT` pointing the built-in `deepinfra` and
+`anthropic` at the server with `dummy-key`): DeepInfra posts `/v1/openai/chat/completions` with `Authorization:
+Bearer`, Anthropic `/v1/messages?beta=true` with `x-api-key` and `anthropic-version`, no GET; the body's `model` is
+the id after the first `/`; a step's cost is the catalog price of its tokens; a layer variant `#wb-off`
+(`reasoningEffort: "none"`) sends `reasoning_effort: "none"`, no variant no field, an unknown one `provider.no-route`;
+a pinned `small_model` keeps the title request on the task's model (unpinned, it goes to the provider's small model);
+a 429 prints `retry` events (`retryAfterMs` only with `Retry-After`), a 401 or 402 one error at once, the body
+verbatim. It takes the spike's models from the bundled catalog, else another of the provider's. The first two cover the MCP shape, skills, denials, compound
 shell lines, rule order, git by path, the edit rule, PATH, the lane, `tool_output` (cuts the shell's output, not `read`'s; a project config can't lift it), and the project config handed back
 with it shut out (#994). `run_calls(name, calls, *start_flags)` runs `opencode run --auto` through `agent_env` and
 `lane.wrap`; refusals read `permission.rejected`, `external_directory` or `Permission denied`. `RealOpenCodeRun` is the
@@ -4477,6 +4516,9 @@ doc needs its own `!/` line).
 - **How OpenCode is invoked or read** (`run_round`'s argv, `normalize`'s fields, the export fields `context_state`,
   `measure_speed`, `transcript` read) → `tests/fake_opencode.py` in the same commit, `RealOpenCodeRun` for a new field,
   one real run (*The tests*).
+- **An OpenCode fact the API harness copies** (`api model.list`, `auth list`, `-m` ids and variants, `part.cost`,
+  the `retry`/`error` shapes, each protocol's path and key header) → `tests/fake_opencode.py`, `tests/capture_llm.py`
+  and `ApiHarness`'s `test_real_opencode_*` together (*The tests*).
 - **A model server's API fields** (`models.server_facts`, `ollama_served_context`, `weights`) → `test_portable.py`'s
   `Real` tests, *Running your own server*.
 - **What `wb top` reads** (`live_used`, `window`, `round`, `round_started_at`, `load_secs`, `last`; a `step` row's

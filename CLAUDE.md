@@ -129,7 +129,9 @@ Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`
 `WB_USER_PYTHONPATH`; `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), `CLAUDECODE` (under it `wb patch send`
 sends only what the mod's dialog approved: `send-ok.json`). Tests only: `WB_OPENCODE_BIN`,
-`WB_FAKE_MODELS`, `WB_FAKE_GPU_GB`, `WB_TEST_SHARD`, `WB_TEST_HANG_SECS`.
+`WB_FAKE_MODELS`, `WB_FAKE_GPU_GB`, `WB_FAKE_CATALOG` (the fake's OpenCode catalog), `WB_FAKE_API`
+(an API model's state in the fake: `nokey`, `auth`, `quota`, `ratelimit`, `down`), `WB_TEST_SHARD`,
+`WB_TEST_HANG_SECS`.
 
 ## Conventions
 - `wb` output is read by Claude, whose tokens are the scarce resource: short, plain, one report
