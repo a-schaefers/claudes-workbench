@@ -25706,6 +25706,8 @@ class RealOpenCodeAPI(_KeyholeTest):
             self.assertEqual(got["settings"].pop("apiKey"), kh.token)
             want = json.loads(json.dumps(want))
             want["settings"].pop("baseURL")
+            # the window and output as the task plans to them, not the catalog's (#1017)
+            want["limit"] = models.api_limits({"limit": want["limit"]})["limit"]
             self.assertEqual(got, want)                                    # field for field
         # a run of the model the binary lacks, through the keyhole, its variant applied
         m = found[f"{new['providerID']}/{new['id']}"]

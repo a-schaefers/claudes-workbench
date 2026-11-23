@@ -1460,7 +1460,8 @@ no variants of its own; the entry's variants go in the keyhole overlay as V1
 `providers.<pid>` beside the layer's V1 `provider.<pid>` would replace it whole, keyhole options
 and all (`normalize.ts` `mergeMaps`), and the request went out with no key. On OpenCode 2.3.0
 and 2.3.2, `api model.list` then prints the entry field for field as the user's OpenCode does
-(`RealOpenCodeAPI`), and a model the binary lacks runs. `catalog_doc` returns None, and the
+(`RealOpenCodeAPI`), but for its `limit`, which is the capped window and output the task plans to
+(`models.api_limits`, #1017), and a model the binary lacks runs. `catalog_doc` returns None, and the
 bundled catalog stays, for a model that isn't the catalog's (a config entry, an Ollama cloud
 model), an alias (its id isn't its provider's), or one with headers or a body of its own or a
 variant's, which the v2 file or a V1 variant can't carry. A model with no keyhole (a keyless free
@@ -5024,7 +5025,7 @@ an error body cut across the key, errors inside a 200 stream (`_Upstream`'s "raw
 the keyhole can't speak, DeepInfra's appended `/openai`, a key written as a header, a key in a
 model's own entry or the V2 form (#1015's review). Its
 `test_the_tasks_own_catalog_*` (#1015) takes real `api model.list` entries through `hosted()`,
-`catalog_doc` and the runner's overlay: real OpenCode reads them back field for field, and a model
+`catalog_doc` and the runner's overlay: real OpenCode reads them back field for field (the `limit` capped), and a model
 the binary lacks fails without the file and runs through the keyhole with it.
 
 **API tasks in the tests** (`ApiTasks` in test_workbench.py, `ApiLease` in test_gpu.py, sharing
