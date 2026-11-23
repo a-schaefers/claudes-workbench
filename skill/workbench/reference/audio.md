@@ -45,7 +45,8 @@ Never say a sound "sounds" good. Say what the checks show, and let the user's ea
    which engine, text and seed made it (the `.json` sidecar has them). Credit the model when its licence requires it (CC-BY).
 
 Mind each engine's `notes` in `wb audio --list`: an audio model's licence can forbid commercial
-use or require attribution. A `--ref` clip clones a voice: use only the user's own voice or one
+use or require attribution. Without `--engine` each kind runs the one listed `default` (the user's
+pick in the pane's Settings), else its first; `wb audio --default NAME` changes it, only when the user asks. A `--ref` clip clones a voice: use only the user's own voice or one
 they have the rights to, and never a real person's voice taken from a recording found online. A
 GPU engine needs the GPU to itself: while a task holds it, `wb audio` refuses and names the
 holder, and `--wait` (Bash `run_in_background: true`) queues behind it. A url engine without an

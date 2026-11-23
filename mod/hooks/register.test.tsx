@@ -5563,6 +5563,7 @@ function settingsWorld(on: any, files: Record<string, string>) {
         { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro', provider: 'deepseek', provider_name: 'DeepSeek', window: 131072, price: { input: 1, output: 3 }, free: false }],
       used: [] as string[], free_line: 'free: the provider may keep or train on your code',
       optimize: { done_at: null as number | null, models: 0, running: false },
+      media: undefined as any,
     },
     runs: [] as string[][], toasts: [] as string[], asked: 0, refuse: '', routeCode: 0, routeOut: '',
     approvals: [] as string[], unwritable: false,
@@ -5608,6 +5609,12 @@ function settingsWorld(on: any, files: Record<string, string>) {
       const g = w.models.gpu.find(m => m.id === a[2])!
       g.sizes = a.slice(3)
       return ok('')
+    }
+    if ((a[0] === 'image' || a[0] === 'audio') && a[1] === '--default') {   // #1047: the engine's kind picks the key
+      if (w.refuse) return no(w.refuse)
+      const kind = Object.entries(w.models.media ?? {}).find(([, k]: [string, any]) => k.engines.some((e: any) => e.name === a[2]))!
+      ;(kind[1] as any).default = a[2]
+      return ok(`default ${kind[0]} engine: ${a[2]}`)
     }
     if (a[0] === 'workflows' && a[1]) files['/wb/workflows.json'] = JSON.stringify({ mode: a[1] })
     if (a[0] === 'optimize') return ok('wb optimize started in the background (pid 9): it holds the GPU alone')
@@ -5802,4 +5809,45 @@ test('#1023: the busy opt-in is in the roles\' summary, so a change of it alone 
   expect(routesSummary({ busy: 'api' })).toBe('significant GPU (the router picks); trivial GPU (the router picks); ' +
     'writing GPU (the router picks); when the GPU is busy, a role with an API model runs on it')
   expect(routesSummary({ busy: 'wait' })).toBe(routesSummary({}))
+})
+
+// The GPU group's Images and Audio rows (#1047): one per media kind with a choice, from `wb models
+// --json`'s media; a pick runs `wb image|audio --default NAME`, with no dialog (no spend, nothing leaves)
+test('#1047: Images and each audio kind with two or more engines get a row after the GPU models, one off this GPU says so, and a pick runs wb image|audio --default', { timeoutMs: 20_000 }, async ($, on) => {
+  const { ui, w, label, options, ran, clock } = await settingsTab($, on)
+  const keys = ['media-image', 'media-speech', 'media-sfx', 'media-music']
+  for (const key of keys) expect(await ui.find({ key })).toBeUndefined()       // a wb without media: none
+  w.models.media = {
+    image: { default: 'flux', engines: [{ name: 'sd', gpu: true }, { name: 'flux', gpu: false }] },
+    speech: { default: 'kokoro', engines: [{ name: 'kokoro', gpu: true }] },   // no choice: no row
+    sfx: { default: 'fx1', engines: [{ name: 'fx1', gpu: true }, { name: 'fx2', gpu: true }] },
+    music: { default: null, engines: [] },
+  }
+  await clock.advance(11_000)                                                  // past the roles' cache
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  expect(await label('media-image')).toBe('▸ Images: flux · off this GPU')
+  expect(await label('media-sfx')).toBe('▸ Sound effects: fx1')
+  for (const key of ['media-speech', 'media-music']) expect(await ui.find({ key })).toBeUndefined()
+  const rows = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label))
+  const at = (start: string) => rows.findIndex(l => l.startsWith(start))
+  expect(at('▸ Images:')).toBeGreaterThan(at('▸ MiMo (Ollama):'))               // after the models
+  expect(at('▸ Sound effects:')).toBe(at('▸ Images:') + 1)
+  expect(at('▸ Sound effects:')).toBeLessThan(at('▸ Complex coding API model:')) // still in GPU
+  await ui.press({ key: 'media-image' })
+  expect(await options()).toEqual(['    sd', '  ❯ flux · off this GPU'])
+  await ui.press({ key: 'media-image:sd' })
+  expect(ran('wb image --default sd')).toBe(true)
+  expect(w.asked).toBe(0)
+  expect(await label('media-image')).toBe('▸ Images: sd')
+  await ui.press({ key: 'media-sfx' })
+  await ui.press({ key: 'media-sfx:fx2' })
+  expect(ran('wb audio --default fx2')).toBe(true)
+  expect(await label('media-sfx')).toBe('▸ Sound effects: fx2')
+  w.refuse = "wb: no audio engine 'fx1' (have: fx2 (sfx))"
+  await ui.press({ key: 'media-sfx' })
+  await ui.press({ key: 'media-sfx:fx1' })
+  expect(w.toasts.at(-1)).toBe("workbench: wb: no audio engine 'fx1' (have: fx2 (sfx))")
+  expect(await label('media-sfx')).toBe('▸ Sound effects: fx2')                 // as it was
+  await ui.unmount()
 })

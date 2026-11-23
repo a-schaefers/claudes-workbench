@@ -29812,5 +29812,148 @@ class BusyGpu(Base):
         self.assertIn(f"note: {why}{self.repo.name} is kept local", out)
 
 
+class MediaDefaults(Base):
+    """The default image and audio engines (#1047): images.json's "default" and audio.json's
+    "default_<kind>" name the engine wb image / wb audio use without --engine, picked in the pane's
+    Settings or by `wb image|audio --default NAME`. Before it the default was the first entry, and
+    changing it meant reordering the file by hand."""
+    wb = RoleResolution.wb
+
+    def setUp(self):
+        super().setUp()
+        tmp = Path(self.tmp.name)
+        self.images, self.audio = tmp / "images.json", tmp / "audio.json"
+        os.environ.update(WB_IMAGES=str(self.images), WB_AUDIO=str(self.audio))
+        self.paint = tmp / "paint.py"
+        self.paint.write_text("import sys\na = sys.argv[1:]\n"
+                              "open(a[a.index('-o') + 1], 'wb').write(" + repr(image_png(8, 8)) + ")\n")
+        self.tone = tmp / "tone.py"
+        self.tone.write_text(TONE)
+
+    def painter(self, **more):
+        return {"command": f"{sys.executable} {self.paint} -p {{prompt}} -o {{out}}", "gpu": False, **more}
+
+    def sound(self, kind, **more):
+        return {"command": f"{sys.executable} {self.tone} --text {{text}} --seed {{seed}} --out {{out}}",
+                "kind": kind, "gpu": False, **more}
+
+    def write(self, path, doc):
+        path.write_text(json.dumps(doc, indent=2) + "\n")
+
+    def made_by(self, *argv):
+        """The engine the sidecar of `wb <argv>`'s one candidate names."""
+        out = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "o"
+        code, said, err = self.wb(*argv, "--n", "1", "--out", str(out))
+        self.assertEqual(code, 0, err)
+        return json.loads(sorted(out.glob("*.json"))[0].read_text())["engine"]
+
+    def test_the_image_default_key_names_the_engine_and_one_naming_no_engine_falls_back_to_the_first(self):
+        self.write(self.images, {"sd": self.painter(), "flux": self.painter(), "default": "flux"})
+        self.assertEqual(list(cli.images.engines()), ["sd", "flux"])      # the key is no engine
+        self.assertEqual(cli.images.engine(None)[0], "flux")
+        self.assertEqual(self.made_by("image", "a fox"), "flux")
+        self.write(self.images, {"sd": self.painter(), "flux": self.painter(), "default": "gone"})
+        self.assertEqual(cli.images.engine(None)[0], "sd")                # as before #1047
+        self.write(self.images, {"sd": self.painter(), "flux": self.painter(), "default": ["flux"]})
+        self.assertEqual(cli.images.engine(None)[0], "sd")                # not a name: ignored
+
+    def test_each_audio_kinds_default_is_read_and_a_wrong_kind_or_the_listener_falls_back_to_the_first(self):
+        self.write(self.audio, {"s1": self.sound("speech"), "m1": self.sound("music"), "s2": self.sound("speech"),
+                                "m2": self.sound("music"), "ear": {"kind": "listen", "command": "true {in}", "gpu": False},
+                                "default_speech": "s2", "default_music": "s1"})
+        self.assertEqual(audio.engine(None, "speech")[0], "s2")
+        self.assertEqual(audio.engine(None, "music")[0], "m1")        # s1 makes speech: ignored
+        self.assertEqual(audio.engine(None, None)[0], "s2")           # the first engine's kind, its default
+        self.assertEqual(self.made_by("audio", "hello", "--kind", "speech", "--no-check"), "s2")
+        doc = json.loads(self.audio.read_text())
+        self.write(self.audio, {**doc, "default_speech": "ear"})
+        self.assertEqual(audio.engine(None, "speech")[0], "s1")       # the listener makes nothing
+
+    def test_engine_wins_over_the_default(self):
+        self.write(self.images, {"sd": self.painter(), "flux": self.painter(), "default": "flux"})
+        self.assertEqual(self.made_by("image", "a fox", "--engine", "sd"), "sd")
+        self.write(self.audio, {"s1": self.sound("speech"), "s2": self.sound("speech"), "default_speech": "s2"})
+        self.assertEqual(self.made_by("audio", "hello", "--engine", "s1", "--no-check"), "s1")
+
+    def test_default_writes_only_its_key_and_keeps_the_rest_of_the_file_in_order(self):
+        self.write(self.images, {"sd": self.painter(notes="licence: x"), "mine": "a note of the user's",
+                                 "flux": self.painter()})
+        before = json.loads(self.images.read_text())
+        code, out, err = self.wb("image", "--default", "flux")
+        self.assertEqual((code, out), (0, "default image engine: flux\n"), err)
+        after = json.loads(self.images.read_text())
+        self.assertEqual(list(after), ["sd", "mine", "flux", "default"])
+        self.assertEqual({k: v for k, v in after.items() if k != "default"}, before)
+        self.write(self.images, {"sd": self.painter(), "default": "sd", "flux": self.painter()})
+        self.assertEqual(self.wb("image", "--default", "flux")[0], 0)
+        self.assertEqual(list(json.loads(self.images.read_text()).items())[1], ("default", "flux"))  # in its place
+        self.write(self.audio, {"s1": self.sound("speech"), "x1": self.sound("sfx"), "x2": self.sound("sfx"),
+                                "default_speech": "s1"})
+        code, out, err = self.wb("audio", "--default", "x2")           # its kind picks the key
+        self.assertEqual((code, out), (0, "default sfx engine: x2\n"), err)
+        doc = json.loads(self.audio.read_text())
+        self.assertEqual(list(doc), ["s1", "x1", "x2", "default_speech", "default_sfx"])
+        self.assertEqual((doc["default_speech"], doc["default_sfx"]), ("s1", "x2"))
+        self.assertEqual(audio.engine(None, "sfx")[0], "x2")
+
+    def test_default_refuses_an_unknown_name_the_listener_and_a_prompt_leaving_the_file_as_it_was(self):
+        self.write(self.images, {"sd": self.painter(), "flux": self.painter()})
+        self.write(self.audio, {"s1": self.sound("speech"), "ear": {"kind": "listen", "command": "true {in}"}})
+        kept = (self.images.read_bytes(), self.audio.read_bytes())
+        code, _, err = self.wb("image", "--default", "nope")
+        self.assertEqual((code, err), (1, "wb: no image engine 'nope' (have: sd, flux)\n"))
+        code, _, err = self.wb("audio", "--default", "nope")
+        self.assertEqual((code, err), (1, "wb: no audio engine 'nope' (have: s1 (speech), ear (listen))\n"))
+        code, _, err = self.wb("image", "--default", "")                # empty: refused, not a listing
+        self.assertEqual((code, err), (1, "wb: no image engine '' (have: sd, flux)\n"))
+        code, _, err = self.wb("audio", "--default", "")
+        self.assertEqual(code, 1, err)
+        code, _, err = self.wb("audio", "--default", "ear")
+        self.assertEqual(code, 1)
+        self.assertIn("ear is the listener", err)
+        code, _, err = self.wb("image", "a fox", "--default", "flux")   # not a run with another engine
+        self.assertEqual(code, 1)
+        self.assertIn("--engine picks one for a run", err)
+        self.assertEqual((self.images.read_bytes(), self.audio.read_bytes()), kept)
+
+    def test_an_engine_named_like_the_key_is_never_overwritten_by_default(self):
+        self.write(self.images, {"default": self.painter(), "flux": self.painter()})
+        kept = self.images.read_bytes()
+        code, _, err = self.wb("image", "--default", "flux")
+        self.assertEqual(code, 1)
+        self.assertIn("an engine is named default", err)
+        self.assertEqual(self.images.read_bytes(), kept)
+
+    def test_list_marks_the_default_the_file_names_and_lists_as_before_without_one(self):
+        self.write(self.images, {"sd": self.painter(), "flux": self.painter(), "default": "flux"})
+        listed = run_wb("image", "--list")
+        self.assertIn("  flux (default) (off the GPU): ", listed)
+        self.assertIn("  sd (off the GPU): ", listed)
+        self.write(self.images, {"sd": self.painter(), "flux": self.painter(), "default": "gone"})
+        self.assertNotIn("(default)", run_wb("image", "--list"))      # the first runs, unmarked as before
+        self.write(self.audio, {"s1": self.sound("speech"), "s2": self.sound("speech"), "m1": self.sound("music"),
+                                "m2": self.sound("music"), "default_speech": "s2", "default_music": "s1"})
+        listed = run_wb("audio", "--list")
+        self.assertIn("  s2 (speech, CPU, default): ", listed)
+        self.assertIn("  s1 (speech, CPU): ", listed)                  # default_music names it: another kind
+        self.assertIn("  m1 (music, CPU): ", listed)
+
+    def test_wb_models_json_carries_each_kinds_engines_and_default_for_the_settings_rows(self):
+        self.write(self.images, {"sd": {"command": "sd -p {prompt} -o {out}"},
+                                 "far": {"url": "http://192.0.2.9:7860/sdapi/v1/txt2img"}, "default": "far"})
+        self.write(self.audio, {"s1": self.sound("speech", gpu=True), "s2": self.sound("speech"),
+                                "m1": self.sound("music"), "ear": {"kind": "listen", "command": "true {in}"}})
+        media = json.loads(self.wb("models", "--json")[1])["media"]
+        self.assertEqual(media["image"], {"default": "far", "engines": [{"name": "sd", "gpu": True},
+                                                                       {"name": "far", "gpu": False}]})
+        self.assertEqual(media["speech"], {"default": "s1", "engines": [{"name": "s1", "gpu": True},
+                                                                       {"name": "s2", "gpu": False}]})
+        self.assertEqual(media["music"], {"default": "m1", "engines": [{"name": "m1", "gpu": False}]})
+        self.assertEqual(media["sfx"], {"default": None, "engines": []})
+        self.audio.write_text("{ broken")                              # one file that doesn't parse
+        media = json.loads(self.wb("models", "--json")[1])["media"]
+        self.assertEqual(list(media), ["image"])                        # the pane draws the rest
+
+
 if __name__ == "__main__":
     unittest.main()

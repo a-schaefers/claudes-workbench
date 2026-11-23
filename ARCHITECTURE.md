@@ -1930,7 +1930,11 @@ user sees.
   its cards, `· GPU 2+3`; `wb route <role> --gpu <id|auto>`), a sizes row for at most `GPU_ROWS` 6
   models (pinned first, then by label; `SIZE_STOPS`, `size-<id>`: `wb model sizes <id> [size]`),
   then `+N more (wb models)`, and `Optimize: …` with a **Measure now** Button (`optimize`: `wb
-  optimize start`). API: with no provider whose key is stored and no role holding an API model, the
+  optimize start`); last **Images**, **Speech**, **Sound effects**, **Music** (#1047, `mediaRows`,
+  `MEDIA_ROWS`, `mediaStops`, keys `media-image|speech|sfx|music`), each only with two or more
+  engines of its kind in `wb models --json`'s `media`, every entry its engine's name (`· off this
+  GPU` for `gpu` false); a pick runs `wb image|audio --default <name>` with no dialog, and a refusal
+  toasts (*The default engines*). API: with no provider whose key is stored and no role holding an API model, the
   one line `No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.`
   (`NO_PROVIDER`); else `Connected: <provider> (stored) · <provider> (<why>)` (`connectedLine`), per
   role `<label> API model` (`apiStops`, `api-<role>`: the role's model, the other roles', those
@@ -3216,7 +3220,8 @@ curl -LO https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main
 curl -LO https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors
 ```
 
-`~/.config/workbench/images.json` (`$WB_IMAGES`) maps engine names to entries, the first the default:
+`~/.config/workbench/images.json` (`$WB_IMAGES`) maps engine names to entries, the first the default
+(unless `"default"` names another: *The default engines*):
 
 ```json
 {
@@ -3273,6 +3278,20 @@ shipped with a model (ComfyUI's custom nodes do).
   `models.server_devices`) pin it (`media.cards`, #752): it waits only for tasks on its card and
   unloads only there; unknown (no card named, not a local Ollama, `gpu_gb` set by hand) means every
   card.
+- **The default engines** (#1047): `images.json`'s top-level `"default": "<engine name>"` and
+  `audio.json`'s `"default_speech"`, `"default_sfx"`, `"default_music"` name the engine used without
+  `--engine` (`images.default_name`, `audio.default_of`; read by `media.named_default`). Strings, so
+  `media.load` skips them and an older wb reads the file unchanged. A name that isn't an engine (of
+  that kind; the listener makes nothing) is ignored: the first entry, as before. `--engine` always
+  wins. `wb image --default NAME` / `wb audio --default NAME` (`cli._media_default`,
+  `images.set_default`, `audio.set_default`: the engine's own kind picks the key) write it through
+  `media.set_default` (`store.edit_config`: locked, a link kept, every other key and entry in its
+  order, a key already there in its place); refused with the engines for an unknown name, for the
+  listener, for an engine named like the key, and with a prompt (that is `--engine`'s). No dialog:
+  nothing spends, nothing leaves the machine. `--list` marks a default the file names (`sd
+  (default) (off the GPU): …`, `s2 (speech, CPU, default): …`); without one it lists as before. `wb models --json`'s `media`
+  (`cli._media_json`, `images.choices`, `audio.choices`) feeds the pane's rows (*The roles in
+  Settings*).
 - Ready (`ready`; `wb image --list`, `wb scout`): `media.problem` finds no bad type or URL (else
   "not usable: <why>", refused before the lease, #596, #748); the workflow is API-format JSON with
   `{prompt}`; the command is on PATH or a file, or the url answers a GET within 2 s, 401/403 saying
@@ -3359,8 +3378,8 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   "wav"}`), a listener a command printing the transcript (plain, JSON `text`, or audio.cpp's
   `text_output=` line) or a `/v1/audio/transcriptions` server. `key` goes to the speech,
   transcription and unload URLs alike. The first listener checks every speech batch. `engine(name,
-  kind)`: the named one (refused when of another kind), else the first of `--kind`, else the first
-  non-listener.
+  kind)`: the named one (refused when of another kind), else `--kind`'s default (`default_of`:
+  `default_<kind>`, else its first; *The default engines*), else the first non-listener's kind's.
 - `generate` refuses before anything runs a voice not in `voices` and any option the engine has no
   slot for (refused, not dropped). Its lease is `media.turns("wb audio", …)`: none when both engine
   and listener are off this GPU, pinned only when both are, `free_gpu` keeping either's own server. An API task takes no lease
@@ -4575,7 +4594,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
 |---|---|---|
-| `wb models` | `--set-default`, `--json` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*). `--set-default`: `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, free}] (stored keys only), used (API models tasks ran on), free_line, optimize {done_at, models, running}}`. |
+| `wb models` | `--set-default`, `--json` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*). `--set-default`: `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, free}] (stored keys only), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider never touched, one for another baseURL refuses; off this machine needs `local: true`); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | *Optimize*; `start` detached, refused while a task holds the GPU, stopped by a task that wants it; `--bench` then runs `wb bench run`; `apply` adds the measured window as its own entry (`optimize.entry_name`; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>`, `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
@@ -4605,8 +4624,8 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Other
 | Command | Flags | What it does |
 |---|---|---|
-| `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | *Images*; refuses while the GPU is held (`--wait` queues), an engine off this GPU (`"gpu": false`, another host) runs beside tasks; a bare `list`/`ls` prompt is `--list`. |
-| `wb audio "<text>"` | `--kind speech\|sfx\|music`, `--n` (3), `--seconds S` (the entry's `seconds`, else `audio.DEFAULT_SECONDS`: 5 sfx, 30 music, 10 otherwise), `--voice NAME` (the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check`, `--list`, `--wait` | *Audio*; `--n` below 1 refused before any lease (exit 2, #592); a clip that isn't audio fails it; GPU as `wb image`; an option the engine lacks is refused. |
+| `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--default NAME`, `--wait` | *Images*; refuses while the GPU is held (`--wait` queues), an engine off this GPU (`"gpu": false`, another host) runs beside tasks; a bare `list`/`ls` prompt is `--list`. `--default NAME` (no prompt) sets images.json's `"default"` (*The default engines*). |
+| `wb audio "<text>"` | `--kind speech\|sfx\|music`, `--n` (3), `--seconds S` (the entry's `seconds`, else `audio.DEFAULT_SECONDS`: 5 sfx, 30 music, 10 otherwise), `--voice NAME` (the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check`, `--list`, `--default NAME`, `--wait` | *Audio*; `--n` below 1 refused before any lease (exit 2, #592); a clip that isn't audio fails it; GPU as `wb image`; an option the engine lacks is refused. `--default NAME` (no text) sets audio.json's `"default_<its kind>"`; never the listener (*The default engines*). |
 | `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|notice\|wait\|answer\|token\|ended]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo --pid --for <agent> --here` (last line `<id> open\|allow\|expired`, the mod parses it), `wait <id> --timeout` (30) `--json` (allow, deny, expired, or `open`), `answer <id> allow\|deny\|expired --by --note`, `notice --tool --kind --text` (its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end) | The web chat (*The web chat*); `on` refuses, switch off, when something else answers the port (#690); `off` stops only a server `on` started. |
 | `wb try` | `--model <id or fragment>` | A sample trial (#112): `workbench/try/project/` copied to `~/.local/share/workbench/try/<n>` (not the state dir, hidden from the lane, #164), started as `try-<n>` on `workbench/try/spec.md`, `--size trivial --trial` (so the trivial role's model, an API one when the user put it there, #1016), its test `sys.executable` (#530); Claude's hidden check `workbench/try/check.py <worktree>`; a refusal removes the copy (#161). An API `--model`: exit 3, `<id> is an API model: wb try runs on GPU models only`, before the copy (#1014). |
 | `wb init <dir>` | | git, a first commit, AGENTS.md → CLAUDE.md (#931; nothing while `gitops.under_way`). Refuses home or above, inside another repo (but a home repo nests, #684), a repo git refuses (`gitops.NotARepo`), no git identity, likely secrets or uncovered installed directories. |
@@ -4729,9 +4748,10 @@ $WB_HOME (~/.local/state/workbench)
 ~/.local/share/workbench/skills/ ($WB_SKILLS) the skill library, its own git repo; retired/
 ~/.local/share/workbench/try/<n>/ wb try's sample projects (task try-<n>; beside $WB_SKILLS)
 ~/.local/share/workbench/source/ ($WB_SOURCE) wb patch init's clone: branch local, the patches; refs/workbench/before-update, the tip before wb moved it (its reflog: every earlier one)
-~/.config/workbench/             writes to models.json, commands.json, savings.json, routes.json, OpenCode's config (models.own_config): store.edit_config
+~/.config/workbench/             writes to models.json, commands.json, savings.json, routes.json, images.json, audio.json, OpenCode's config (models.own_config): store.edit_config
   models.json ($WB_MODELS)       what OpenCode can't say about each model or provider
-  images.json ($WB_IMAGES)  audio.json ($WB_AUDIO)   image engines; audio engines (speech, sfx, music, a listener)
+  images.json ($WB_IMAGES)  audio.json ($WB_AUDIO)   image engines; audio engines (speech, sfx, music, a listener);
+                                 top-level strings "default" (images), "default_speech|sfx|music" (audio): the default engines (#1047)
   commands.json ($WB_COMMANDS)   {"allow": [patterns], "paths": [dirs], "env": [names]} (lists of strings, or refused: context.commands_conf),
                                  "repos": {"<repo path>": {"setup", "setup_timeout", "copy", "siblings", "merge": "merge|ff|squash"}}
   chat.json ($WB_CHAT_CONFIG)    {"bind": [...], "hosts": [...], "upload_mb": 25, "upload_message_mb": 50}
@@ -5456,9 +5476,9 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `route-ok.json`'s `approval` (`cli._route_argv`) ↔ `routes.approved`; **a `wb route` or `wb start` flag** →
   `routeCalls` (`--m` is `--model`'s only prefix among wb start's flags; a new `--m…` flag there breaks that).
   **The pane's stop tables** (#1023: `AGENTS_STOPS`, `BUSY_STOPS`, `roleStops`, `gpuStops`, `apiStops`, `THINK_STOPS`,
-  `SIZE_STOPS`) ↔ `wb route`'s and `wb model sizes`' choices (`routes.USES`, `routes.BUSY`, `VIAS`, `THINKING`, `AUTO`,
+  `SIZE_STOPS`; #1047's `mediaStops`) ↔ `wb route`'s and `wb model sizes`' choices (`routes.USES`, `routes.BUSY`, `VIAS`, `THINKING`, `AUTO`,
   `router.SIZES`); `parseUsd` ↔ `wb route cap`'s parser (the same forms); **`wb route --json`** and **`wb models --json`**
-  → the `WbRoutes`/`WbModels` types and `rolesNow`; `routes.BUSY`/`busy` → `routesValid`, `readRoutes`, `routesSummary`.
+  → the `WbRoutes`/`WbModels` types (`media`: `WbMedia`, #1047) and `rolesNow`; `routes.BUSY`/`busy` → `routesValid`, `readRoutes`, `routesSummary`.
 - **The first run for API roles** (#1024): **the router's refusal** (`router.choose`'s `no GPU model…`,
   `api_choice`) ↔ the skill's first-run trigger ("no role can run") and `wb setup`'s API keys line
   (`cli.api_key_lines`, `models.connected`); **SCOUT_NOTE's opening** (`[workbench] The weekly model check is

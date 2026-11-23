@@ -55,7 +55,8 @@ export type WbChat = { key: string; delegating: boolean; url: string; web: boole
 
 /** The pane's view: its tab ('tasks', 'stats' or 'settings'), the settings row open ('' none,
  * 'coding', 'chat', 'record', 'live', 'every', 'progress', 'splash', 'probe', and #1023's 'agents', 'busy',
- * 'workflows', 'role-<role>', 'gpu-<role>', 'size-<model id>', 'api-<role>', 'think-<role>'), the option the focus ring is on ('' none),
+ * 'workflows', 'role-<role>', 'gpu-<role>', 'size-<model id>', 'api-<role>', 'think-<role>'; #1047's
+ * 'media-image|speech|sfx|music'), the option the focus ring is on ('' none),
  * so its sentence shows, and whether the user closed it (a strip above the prompt stands in for it). */
 export type WbPane = { tab: string; open: string; focus: string; minimized: boolean }
 
@@ -82,7 +83,14 @@ export type WbModels = {
   used: string[]
   free_line: string
   optimize: { done_at: number | null; models: number; running: boolean }
+  /** #1047: each media kind's engines and the one used without --engine (absent from an older wb,
+   * and a kind whose file doesn't parse is left out) */
+  media?: Partial<Record<'image' | 'speech' | 'sfx' | 'music', WbMedia>>
 }
+
+/** One media kind in `wb models --json`'s media (#1047): its default (null with no engine) and its
+ * engines in file order, `gpu` false for one off this GPU (media.on_gpu). */
+export type WbMedia = { default: string | null; engines: { name: string; gpu: boolean }[] }
 
 /** The Stats tab's history: `wb stats --json` as last read (null before the first read), and the
  * key of the files it was read from (results.jsonl, stats.json, optimize.json, bench/runs.jsonl,
