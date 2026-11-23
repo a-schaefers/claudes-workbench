@@ -232,7 +232,7 @@ A newly added model has no record, so the router won't pick it over one with a g
 replay the bench on it first (`wb bench run --model <id>`, §6), then give it its first few
 real tasks with `--model` (ones you'd review closely anyway).
 **API models and privacy.** An API model sends the repo, its spec, the CLAUDE.md files and the
-user's `~/.claude` rules to its provider. When you propose an API role, say where the code goes
+user's `~/.config/workbench/AGENTS.md` to its provider (never their `~/.claude` files). When you propose an API role, say where the code goes
 (the provider, as `wb route --dry-run`'s line names it; its data-policy page comes in the note
 of the repo's first task there). Never remove a `local_only`
 from commands.json (a repo the user keeps off API models: `wb start` exits 3 with the choices;
@@ -286,10 +286,13 @@ and a gap that recurs belongs in this list.
 budget, the summary format), so don't repeat it. The agent also starts with what you would have:
 the repo's CLAUDE.md / AGENTS.md / CLAUDE.local.md / `.claude/rules`, a map of nested CLAUDE.md
 files, the workbench handbook (`agent/HANDBOOK.md`: read first, match the code, smallest diff,
-verify, honest summary) and the repo's own `.claude/skills` (never the user's personal skills
-in `~/.claude/skills`). So don't restate project conventions; spend the spec on what is specific
-to this task: the files to read first, the existing code to imitate, and the skills to hand it
-(below).
+verify, honest summary), the user's `~/.config/workbench/AGENTS.md` if they wrote one, and the
+repo's own `.claude/skills` (never the user's personal skills in `~/.claude/skills`). It never
+gets the user's `~/.claude/CLAUDE.md`, its imports or `~/.claude/rules`: those are yours. When you
+will review against one of those global rules, put the rule in the spec; when it bears on code in
+every project, offer to add it to `~/.config/workbench/AGENTS.md` (the user's file: ask first). So
+don't restate project conventions; spend the spec on what is specific to this task: the files to
+read first, the existing code to imitate, and the skills to hand it (below).
 
 **The web is yours**: research for a spec, a question or the model check uses this session's
 browsing tools; a 403, a CAPTCHA or an empty page is not checked: say so, never fill it from

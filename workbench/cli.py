@@ -1110,7 +1110,7 @@ def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> 
     if privacy.first_for(repo, m.provider, task_name):
         info = privacy.where(m, routed.get("order"))
         named = [f"{c} (--copy)" for c in a.copy or []] + [f"{x} (--sibling)" for x in a.sibling or []]
-        rules = (context.claude_home() / "CLAUDE.md").is_file() or (context.claude_home() / "rules").is_dir()
+        rules = context.user_agents_md().is_file()  # Claude's own files go to no agent (#1061)
         whose = ("asked for" if (routed.get("said") or "").startswith("asked for")
                  else f"the {routed.get('role') or _role(a)} role's model")
         notes.append(privacy.where_note(info, rules, named, whose))
@@ -5869,6 +5869,19 @@ def path_advice() -> str:
             "(the desktop app or an IDE too: each reads PATH only when it starts)")
 
 
+def agents_md_note() -> str:
+    """wb setup's and wb doctor's line while the user has Claude's global files and no
+    ~/.config/workbench/AGENTS.md: agents got ~/.claude/CLAUDE.md and ~/.claude/rules until
+    #1061 (2026-11-23), so what they followed from there needs its new place."""
+    claude = context.claude_home()
+    if context.user_agents_md().is_file() or not (
+            (claude / "CLAUDE.md").is_file() or (claude / "rules").is_dir()):
+        return ""
+    where = privacy.home_path(claude)
+    return (f"note: agents no longer get your {where}/CLAUDE.md or {where}/rules/: what they should "
+            f"follow in every project goes in {privacy.home_path(context.user_agents_md())}")
+
+
 def cmd_setup(a):
     """Link `wb` onto PATH and /workbench into Claude Code's skills, from wherever this copy lives:
     the marketplace's clone (~/.claude/plugins/marketplaces/workbench) for users, a git clone for
@@ -5906,6 +5919,8 @@ def cmd_setup(a):
     print("first run:")  # what a working setup still needs, each with its fix (#111)
     for line in first_run():
         print(line)
+    if note := agents_md_note():
+        print(note)
     print("next: wb doctor")
     sys.exit(1 if bad else 0)
 
@@ -6713,6 +6728,8 @@ def cmd_doctor(a):
     line(skill.exists(), f"/workbench skill at {skill.parent}" if skill.exists() else
          f"/workbench isn't in {skill.parent.parent}: wb setup links it")
     elsewhere("/workbench", skill.parent, PKG_ROOT / "skill/workbench")
+    if note := agents_md_note():
+        print(note)
     try:  # information only: a mod loaded another way (--plugin-dir, a dev mod) isn't listed here
         listed = any(k.startswith("workbench@") for k in json.loads(
             (context.claude_home() / "plugins/installed_plugins.json").read_text()).get("plugins", {}))

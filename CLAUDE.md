@@ -49,7 +49,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `cli.py`: `wb` and `PROTOCOL` (the agent's rules; `WRITING_PROTOCOL`, the writing role's, same fold). `runner.py`: the detached per-task driver,
   and OpenCode's environment (`opencode_env`: the task's home, the shell shim).
   `events.py`: OpenCode's events, the stuck detector. `ask_mcp.py`: `ask_reviewer`, both sides.
-- `context.py`: what the agent knows and may do (instructions, denies, the shell allowlist, the
+- `context.py`: what the agent knows and may do (instructions: the user's are `USER_AGENTS_MD`,
+  `~/.config/workbench/AGENTS.md`, never Claude's `~/.claude` files, #1061; denies, the shell allowlist, the
   lane's paths: `writable`, the worktree, `ask/` and the task's `opencode/`, `opencode_home`;
   `API_HIDDEN`, the token files an API task's lane hides too when they hold a credential; grants). `lane.py`: the Landlock lane. `gitguard.py`: the agent's read-only `git`.
   Neither imports the rest of the package: the lane runs as a file, the shim on every git call.
@@ -129,7 +130,8 @@ Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change mus
 - A test: `runner.log` is under its temp `WB_HOME`; an interrupted run can leave runners and fakes.
 
 ## State and config
-Plain files under `$WB_HOME` (`~/.local/state/workbench`); config in `~/.config/workbench/`; the
+Plain files under `$WB_HOME` (`~/.local/state/workbench`); config in `~/.config/workbench/` (its
+`AGENTS.md`: the user's instructions for every agent, copied to `rules/<task>/`); the
 skill library in `$WB_SKILLS` (`~/.local/share/workbench/skills`, its own git repo). Every file,
 key and format: ARCHITECTURE.md, *Files and formats*. commands.json `repos.<path>.local_only: true`
 keeps API models off a repo; only the user lifts it. Inside `$WB_HOME` the agent's lane
@@ -192,6 +194,9 @@ what: ARCHITECTURE.md, *The tests*; the detail: *The runner, inside*, *What the 
 - A project's config loads after the layer and could lift every deny, so
   `OPENCODE_DISABLE_PROJECT_CONFIG` is always on (both names: `PROJECT_CONFIG_OFF`); it drops the
   project's AGENTS.md, skills and `instructions` too, which wb hands back in the layer.
+- OpenCode 2.3.2 (not 2.3.0) reads `~/.claude/CLAUDE.md` itself unless
+  `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` (`runner.OPENCODE_ENV`): only the lane hid it, so with no
+  lane it reached agents (#1061).
 - Rules are `permissions: [{action, resource, effect}]` (`shell`: each simple command's raw text;
   `edit`: the file path; `external_directory`: `<dir>/*`), anchored, `*` matches spaces and `/`, the last match wins, no match is ask (`--auto`
   allows it); `shell` sees each simple command's raw text, wrappers not unwrapped (`DENIED_SHELL`).
