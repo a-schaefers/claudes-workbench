@@ -1,9 +1,12 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, agentOf, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, liveLines, modelOf, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, splashTarget, statsLines, usd, wrapParts, wrapWords } from './register.js'
+import { absolutePath, agentOf, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, splashTarget, statsLines, usd, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
 import type { WbTask } from '../types'
+
+// the no-break space the pane holds a unit whole with (`GPU 2+3`, `per M`, `61 tok/s`; #1048's review)
+const NB = '\u00a0'
 
 const PANE = {
   plugin: 'workbench',
@@ -3243,7 +3246,7 @@ test("the Stats tab's live rows wrap at spaces instead of losing their end to th
   expect(lines[1].find(p => p.text.includes('░░░░░░░░'))?.color).toBe('success')  // colours kept
   expect(wrapParts([{ text: 'Nothing running.' }], 70)).toEqual([[{ text: 'Nothing running.' }]])
   const model = [{ text: '○ ' }, { text: 'Qwen3.8 27B UD-Q3_K_XL (Ollama) (40K) ' }, { dim: true, text: 'idle' },
-    { dim: true, text: ' · writes ~35 · reads ~602 · loads ~12s' }]
+    { dim: true, text: ` · writes ~35${NB}tok/s · reads ~602${NB}tok/s · loads ~12s` }]
   expect(flat(wrapParts(model, 70))).toContain('loads ~12s')
 })
 
@@ -3904,7 +3907,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   await ui.press({ key: 'coding' })
   expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label).filter((l: string) => / {2}[❯ ] /.test(l)))
     .toEqual(['    Only when I say', '    Ask me first', '  ❯ Let Claude decide (default)'])
-  const says = async () => ((await ui.find({ key: 'coding-says' })) as any)?.children?.[0]?.children?.[0]?.trim()
+  const says = async () => ((await ui.find({ key: 'coding-says' })) as any)?.children?.[0]?.children?.[0]?.children?.[0]?.trim()
   expect(await says()).toBe('Claude uses its judgment to guide the agent or make a fix itself.')  // the chosen one's
   await $.ui.focus({ component: 'Pane', requestId: 'workbench', element: 'coding:only', origin: { kind: 'person' } } as any)  // the person's Tab, as the engine raises it
   expect(await says()).toBe('You tell Claude when to write code.')                                         // the ring's
@@ -3972,7 +3975,7 @@ test('the Stats tab draws the history, read from wb stats only while it is shown
   expect(texts).toContain('This week: score 62/100 · saved ~1.2M Claude tokens (estimate) · 4 tasks · 3 landed (75%) · 900 Wh')
   expect(texts).toContain('Streak: best: 3 days in a row with a task landed')          // a run that ended isn't said
   expect(texts.some(t => t.includes('the same call repeated 2 · silence 1'))).toBe(true)
-  expect(texts.some(t => t.includes('writes ~38 tok/s ▆█ (+12%)'))).toBe(true)
+  expect(texts.some(t => t.includes(`writes ~38${NB}tok/s ▆█ (+12%)`))).toBe(true)
   await clock.advance(31_000)
   expect(reads.length).toBe(1)                                           // nothing changed: not read again
   files['/wb/results.jsonl'] = '{}\n{}\n'                                // a task closed
@@ -4000,7 +4003,7 @@ test('the Stats tab names a spend stop in what stopped agents', async ($, on) =>
   await ui.press({ key: 'tab-stats' })
   await clock.advance(10)
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  expect(texts.some(t => t.includes("the day's API spend cap 2 · silence 1"))).toBe(true)
+  expect(texts.some(t => t.includes('the API day cap 2 · silence 1'))).toBe(true)
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })
@@ -4251,7 +4254,7 @@ test('the live view runs wb top only while the Stats tab is on screen with Live 
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts.some(t => t.startsWith('GPU 0 Radeon RX 9070 XT ██████░░░░░░ 8.0/16.0 GiB · busy ███▎░░░░ 40% · 120 W'))).toBe(true)
   expect(texts.some(t => t.includes('fix-it Model M · running · round 2 · 1m15s · 41 tok/s · context 31%'))).toBe(true)
-  expect(texts.some(t => t.includes('● Model M resident 8.0 GiB on the GPU · writes ~40 · reads ~900 · loads ~9s ← fix-it'))).toBe(true)
+  expect(texts.some(t => t.includes(`● Model M resident 8.0 GiB on the GPU · writes ~40${NB}tok/s · reads ~900${NB}tok/s · loads ~9s ← fix-it`))).toBe(true)
   expect(texts.some(t => t.includes('◌ later waits for the GPU (30s)'))).toBe(true)
   await clock.advance(31_000)
   expect(starts).toBe(1)                                                 // one child, not one a poll
@@ -5033,8 +5036,9 @@ test('a page that stops being measurable while the animation plays never gets a 
   // 2026-11-21, review of #963: an exact row found early was kept after a line that may wrap came,
   // so the embers landed on a row above the page's real modeline
   const wide = (files: Record<string, string>, dirs: string[]) => {
-    task(files, 'fix-it', 'accepted', { repo: '/home/u/project', cwd: '/home/u/project' })
-    files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'accepted', round: 1, updated_at: ts0, last: '完成した' })
+    // a review's second line is its last (#1048: a closed task's folds into one line without it)
+    task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project' })
+    files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts0, last: '完成した' })
     dirs.push('fix-it')
   }
   // before the words leave: they rise away, as forge drew it (56 frames after the first, no bar)
@@ -5064,8 +5068,8 @@ test('a page that grows past measuring after the words fell puts the bar no high
   await workbench($)
   const ui = await $.ui.mount(splashPane())
   await clock.advance(3900)                                              // the words are falling into row 10, the empty page's last
-  task(files, 'fix-it', 'accepted', { repo: '/home/u/project', cwd: '/home/u/project' })
-  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'accepted', round: 1, updated_at: ts0, last: '完成した' })
+  task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project' })
+  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts0, last: '完成した' })
   dirs.push('fix-it')
   await clock.advance(1500)
   expect(await splashing(ui)).toBe(false)
@@ -5084,18 +5088,23 @@ test('the words fall into the modeline\'s row: the page\'s last when it fits, th
   const empty = pageShape([], none, true, '', 0, 60)
   expect(empty).toEqual({ rows: 11, atLeast: 11, stage: 1, tail: 10 })
   expect(splashTarget(empty, 27)).toEqual({ stage: 1, bar: 10 })
-  // one closed task, out of the mode: its row, its last line, its margin, the stage's margin, a
-  // bubble of two lines beside the apprentice, the saving, the tabs' margin, the tabs, the modeline
+  // one closed task, out of the mode: its folded line (#1048), the list's margin, the stage's
+  // margin, a bubble of two lines beside the apprentice, the saving, the tabs' margin, the tabs,
+  // the modeline
   const one = pageShape([t('fix-it', 'accepted')], none, false, 'this week: saved ~1.2M Claude tokens', 0, 60)
-  expect(one).toEqual({ rows: 3 + 1 + 6 + 1 + 3, atLeast: 14, stage: 4, tail: 10 })
-  expect(splashTarget(one, 27)).toEqual({ stage: 4, bar: 13 })
-  // many: the page overflows, the pane follows its end, the modeline is its last row
-  const many = pageShape(Array.from({ length: 12 }, (_, i) => t(`task-${i}`, 'accepted')), none, false, '', 0, 60)
+  expect(one).toEqual({ rows: 2 + 1 + 6 + 1 + 3, atLeast: 13, stage: 3, tail: 10 })
+  expect(splashTarget(one, 27)).toEqual({ stage: 3, bar: 12 })
+  // a review waiting with its last line: its two rows, none wrapping, so the page is still exact
+  const review = pageShape([t('fix-it', 'review', { last: 'auto-fix skipped: the base fails the same test' })], none, false, '', 0, 60)
+  expect([review.rows, review.stage]).toEqual([3 + 1 + 6 + 1 + 2, 4])
+  // many: the page overflows, the pane follows its end, the modeline is its last row (closed
+  // tasks fold into one line, and so many open ones draw one row each: compactWanted)
+  const many = pageShape(Array.from({ length: 20 }, (_, i) => t(`task-${i}`, 'review')), none, false, '', 0, 60)
   expect(splashTarget(many, 27)).toEqual({ stage: 27 - many.tail!, bar: 26 })
   // a line wider than the pane, or one of wide characters: its height isn't known, so no bar row
   const wide = pageShape([t('fix-it', 'accepted', { last: 'x' })], { task: 'fix-it', lines: [{ s: 'out', t: 'y'.repeat(61) }] }, false, '', 0, 60)
   expect([wide.rows, splashTarget(wide, 27).bar]).toEqual([null, null])
-  const cjk = pageShape([t('fix-it', 'accepted', { last: '完成した' })], none, false, '', 0, 60)
+  const cjk = pageShape([t('fix-it', 'review', { last: '完成した' })], none, false, '', 0, 60)
   expect([cjk.rows, splashTarget(cjk, 27).bar]).toEqual([null, null])
   // ...unless the page surely overflows anyway
   const long = pageShape([t('fix-it', 'running')], { task: 'fix-it', lines: Array.from({ length: 40 }, () => ({ s: 'out', t: 'y'.repeat(70) })) }, false, '', 0, 60)
@@ -5485,6 +5494,7 @@ test('#1041: Dynamic workflows reach the conversation: a dynamic-workflows block
   const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'dynamic-workflows')
   expect(block?.text).toContain('you may split a request into several tasks that run at once')
   expect(block?.text).toContain('say the plan in one line before you start them')
+  expect(block?.text).toContain('pass it as `--group <prefix>` on each `wb start`')  // #1048: the pane's header
   expect(block?.text).toContain('merge logic first, then tests, then UI or docs')
   await clock.advance(31_000)
   const before = rows.length
@@ -5552,13 +5562,13 @@ test('an API task\'s dollars sit beside the saving, never in it, and an API-only
   const week = statsLines({ tasks: 6, periods: { week: { tasks: 6, landed: 6, api } } })[0].text
   expect(week).toContain('API $1.27 (deepseek $0.84 · anthropic $0.43)')
   const model = statsLines({ tasks: 2, model_lines: { lines: [{ model: 'deepseek/deepseek-flash', tasks: 2, accepted_pct: 100,
-    kind: 'api', paid: 0.12, speed: { write: 80 } }] } }).find(l => l.label === 'deepseek/deepseek-flash')!
+    kind: 'api', paid: 0.12, speed: { write: 80 } }] } }).find(l => l.label === 'API deepseek deepseek-flash')!
   expect(model.text).toContain('paid ~$0.12/task')
   expect(model.text).not.toContain('writes ~')
   const row = liveLines({ snap: { ts: 0, every: 2, gpus: [], rack: [], queue: [], running: [{ task: 'fix-auth',
     model: 'deepseek/deepseek-flash', label: 'deepseek-flash', phase: 'running', round: 2, round_s: 190,
     via: 'api', provider: 'deepseek', spend: 0.12 }] }, busy: {} } as any)[0].map(p => p.text).join('')
-  expect(row).toBe('▶ fix-auth deepseek-flash · running · round 2 · 3m10s · API deepseek · $0.12')
+  expect(row).toBe('▶ fix-auth API deepseek deepseek-flash · running · round 2 · 3m10s · $0.12')
 })
 
 test('#1016: the Agents switch: its change line is the dialog\'s text, and the roles\' summary says it', async ($, on) => {
@@ -5607,7 +5617,7 @@ test('#1016: Agents set in routes.json reaches the conversation, and a value wb 
   expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')
 })
 
-test('#1016: an API task\'s row shows its badge before the model, the live view its routed line, and tasks is tasks-9', async ($, on) => {
+test('#1016: an API task\'s row names API and its provider before the model, the live view its routed line, and tasks is tasks-10', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   task(files, 'fix-api', 'running', { model: 'deepseek/deepseek-flash', model_label: 'DeepSeek (API)', via: 'api',
@@ -5630,20 +5640,19 @@ test('#1016: an API task\'s row shows its badge before the model, the live view 
   await clock.advance(3000)
   const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 120 }, surface: 'terminal' })
   await clock.advance(1600)
-  expect(await ui.find({ type: 'Text', text: /round 1 · API · deepseek-flash/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /round 1 · Qwen 27B/ })).toBeTruthy()          // a GPU row as before
+  // #1048: the place column says API and the provider, the model its id's last part
+  expect(await ui.find({ type: 'Text', text: /fix-api +round 1 +API DeepSeek +deepseek-flash +trivial/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /fix-gpu +round 1 +GPU +Qwen 27B +complex/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^routed: API deepseek\/deepseek-flash \(DeepSeek\) · trivial role/ })).toBeTruthy()
   // the routed line is under the task line, never in the history
   expect((await ui.findAll({ type: 'Text' })).filter((t: any) => /^routed: /.test(String(t.text))).length).toBe(1)
   await ui.unmount()
   expect(sets.length).toBeGreaterThan(0)
   const last = sets.at(-1)
-  expect(last.shape).toBe('tasks-9')
+  expect(last.shape).toBe('tasks-10')
   const api = last.value.find((t: WbTask) => t.name === 'fix-api')
   expect([api.via, api.role, api.provider, api.routed]).toEqual(['api', 'trivial', 'DeepSeek',
     'API deepseek/deepseek-flash (DeepSeek) · trivial role, set by you 11-20 · thinking off'])
-  expect(modelOf({ via: 'api', model: 'openrouter/deepseek/deepseek-v4.1-flash', label: '' })).toBe('API · deepseek-v4.1-flash')
-  expect(modelOf({ via: 'gpu', model: 'ollama/q', label: '' })).toBe('ollama/q')
 })
 
 // The Settings tab's roles (#1023): Shared, GPU and API, read from `wb route --json` and `wb models
@@ -5751,17 +5760,17 @@ test('#1023: the Settings tab draws Shared, GPU, API and Experimental in order, 
   const heads = (await texts()).filter(t => ['Shared', 'GPU', 'API', 'Experimental'].includes(t))
   expect(heads).toEqual(['Shared', 'GPU', 'API', 'Experimental'])
   const rows = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => l.startsWith('▸ '))
-  expect(rows.slice(0, 7)).toEqual(['▸ Agents: Both (default)', '▸ When the GPU is busy: wait (default)', '▸ Complex coding: GPU',
+  expect(rows.slice(0, 7)).toEqual(['▸ Agents: Both (default)', '▸ When the GPU is busy: Wait (default)', '▸ Complex coding: GPU',
     '▸ Trivial coding: GPU', '▸ English writing: GPU', '▸ Claude coding: Let Claude decide (default)', '▸ Dynamic workflows: Off (default)'])
   for (const [key, was] of [['coding', '▸ Claude coding: Let Claude decide (default)'], ['record', '▸ Stats recording: On (default)'],
     ['live', '▸ Live view: On (default)'], ['every', '▸ Live refresh: 2 s (default)'], ['progress', '▸ Progress checks: Off (default)'],
     ['splash', '▸ Opening animation: Enabled (default)'], ['chat', '▸ Web chat: Off (default)'], ['probe', '▸ Agent code navigation: Off (default)']])
     expect([key, await label(key)]).toEqual([key, was])
   expect(rows.slice(-2)).toEqual(['▸ Web chat: Off (default)', '▸ Agent code navigation: Off (default)'])  // Experimental last
-  expect((await ui.find({ key: 'price' }))?.props.label).toBe('▸ Electricity price per kWh: ')
+  expect((await ui.find({ key: 'price' }))?.props.label).toBe('▸ Electricity price per kWh')
   expect((await ui.find({ key: 'cap' }))?.props.value).toBe('5')
   // wake: the plugin option's value, read-only
-  expect(await texts()).toContain('  Wake Claude: on · change it in /plugin → workbench → options')
+  expect(await texts()).toContain('Wake Claude: on · change it in /plugin → workbench → options')
   expect((await ui.findAll({ type: 'Button' })).some(b => /Wake/.test(String(b.props.label)))).toBe(false)
   await ui.unmount()
 })
@@ -5774,12 +5783,12 @@ test('#1023: a role\'s press writes the one-shot approval for exactly that chang
   expect(ran('wb route trivial api')).toBe(true)
   expect(w.asked).toBe(0)                                                // the press is the yes: no dialog
   expect(w.toasts).toEqual([])
-  expect(await label('role-trivial')).toBe('▸ Trivial coding: API: deepseek/deepseek-flash')
+  expect(await label('role-trivial')).toBe('▸ Trivial coding: API (DeepSeek Flash)')
   w.unwritable = true                                                   // no approval reaches wb
   await ui.press({ key: 'role-trivial' })
   await ui.press({ key: 'role-trivial:gpu' })
   expect(w.toasts.at(-1)).toContain("in Claude Code a role changes only through the workbench mod's dialog")
-  expect(await label('role-trivial')).toBe('▸ Trivial coding: API: deepseek/deepseek-flash')  // as it was
+  expect(await label('role-trivial')).toBe('▸ Trivial coding: API (DeepSeek Flash)')  // as it was
   await ui.unmount()
 })
 
@@ -5796,7 +5805,7 @@ test('#1023: the Agents switch, the busy row and Dynamic workflows pick through 
   await ui.press({ key: 'busy' })
   await ui.press({ key: 'busy:api' })
   expect(ran('wb route busy api')).toBe(true)
-  expect(await label('busy')).toBe("▸ When the GPU is busy: use the role's API model")
+  expect(await label('busy')).toBe("▸ When the GPU is busy: Use the role's API model")
   await ui.press({ key: 'workflows' })
   await ui.press({ key: 'workflows:on' })
   expect(ran('wb workflows on')).toBe(true)
@@ -5807,22 +5816,22 @@ test('#1023: the Agents switch, the busy row and Dynamic workflows pick through 
 
 test('#1023: a role\'s API model is a dropdown of the models wb can run, with Other model… a typed id wb checks; an env key\'s provider is listed with why, never offered', { timeoutMs: 20_000 }, async ($, on) => {
   const { ui, w, label, options, texts, ran, clock } = await settingsTab($, on)
-  expect(await texts()).toContain("  Connected: DeepSeek (stored) · xAI (can't run: needs a key wb can hold outside the lane (key in XAI_API_KEY))")
-  expect(await label('api-trivial')).toBe('▸ Trivial coding API model: DeepSeek Flash · DeepSeek (128K) · $0.2/$0.6 per M')
+  expect(await texts()).toContain("Connected: DeepSeek (key stored) · xAI (can't run: needs a key wb can hold outside the lane (key in XAI_API_KEY))")
+  expect(await label('api-trivial')).toBe(`▸ Trivial coding API model: DeepSeek Flash · DeepSeek (128K) · $0.2/$0.6 per${NB}M`)
   expect(await label('api-writing')).toBe('▸ English writing API model: (none)')
   await ui.press({ key: 'api-trivial' })
-  expect(await options()).toEqual(['  ❯ DeepSeek Flash · DeepSeek (128K) · $0.2/$0.6 per M', '    DeepSeek V4 Pro · DeepSeek (128K) · $1/$3 per M', '    Other model…'])
+  expect(await options()).toEqual([`  ❯ DeepSeek Flash · DeepSeek (128K) · $0.2/$0.6 per${NB}M`, `    DeepSeek V4 Pro · DeepSeek (128K) · $1/$3 per${NB}M`, '    Other model…'])
   expect((await options()).some(o => /xAI/.test(o))).toBe(false)
   await ui.press({ key: 'api-trivial:deepseek/deepseek-v4-pro' })
   expect(ran('wb route trivial --api deepseek/deepseek-v4-pro')).toBe(true)
-  expect(await label('api-trivial')).toBe('▸ Trivial coding API model: DeepSeek V4 Pro · DeepSeek (128K) · $1/$3 per M')
+  expect(await label('api-trivial')).toBe(`▸ Trivial coding API model: DeepSeek V4 Pro · DeepSeek (128K) · $1/$3 per${NB}M`)
   await ui.press({ key: 'api-trivial' })
   await ui.press({ key: 'api-trivial:other' })
   w.refuse = "wb: acme/cod not in OpenCode's catalog: wb models lists the API models"
   await ui.input({ key: 'api-trivial-other', text: 'acme/cod' })
   expect(ran('wb route trivial --api acme/cod')).toBe(true)
   expect(w.toasts.at(-1)).toBe("workbench: wb: acme/cod not in OpenCode's catalog: wb models lists the API models")
-  expect(await label('api-trivial')).toBe('▸ Trivial coding API model: DeepSeek V4 Pro · DeepSeek (128K) · $1/$3 per M')  // kept
+  expect(await label('api-trivial')).toBe(`▸ Trivial coding API model: DeepSeek V4 Pro · DeepSeek (128K) · $1/$3 per${NB}M`)  // kept
   expect(await ui.find({ key: 'api-trivial-other' })).toBeUndefined()
   // a long catalog: only the models in use, then Other model…
   w.refuse = ''
@@ -5834,14 +5843,14 @@ test('#1023: a role\'s API model is a dropdown of the models wb can run, with Ot
   await ui.press({ key: 'tab-tasks' })
   await ui.press({ key: 'tab-settings' })
   await ui.press({ key: 'api-significant' })
-  expect(await options()).toEqual(['  ❯ (none)', '    M 7 · OpenRouter (128K) · $1/$2 per M',
-    '    M 3 · OpenRouter (128K) · $1/$2 per M · free: the provider may keep or train on your code', '    Other model…'])
+  expect(await options()).toEqual(['  ❯ (none)', `    M 7 · OpenRouter (128K) · $1/$2 per${NB}M`,
+    `    M 3 · OpenRouter (128K) · $1/$2 per${NB}M · free: the provider may keep or train on your code`, '    Other model…'])
   await ui.unmount()
 })
 
 test('#1023: thinking runs wb route <role> --thinking, the day cap takes $5, 5,00 and 5 USD as 5 and empty as off, and spend today reads from wb route --json', { timeoutMs: 20_000 }, async ($, on) => {
   const { ui, w, texts, ran } = await settingsTab($, on)
-  expect(await texts()).toContain('  Spend today: $0.42 of $5 (deepseek $0.42)')
+  expect(await texts()).toContain('Spend today: $0.42 of $5 (DeepSeek $0.42)')
   await ui.press({ key: 'think-writing' })
   expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('for tasks started after this')
   await ui.press({ key: 'think-writing:on' })
@@ -5858,7 +5867,7 @@ test('#1023: thinking runs wb route <role> --thinking, the day cap takes $5, 5,0
   await ui.input({ key: 'cap', text: '' })
   expect(ran('wb route cap off')).toBe(true)
   expect((await ui.find({ key: 'cap' }))?.props.value).toBe('')
-  expect(await texts()).toContain('  Spend today: $0.42 (no day cap) (deepseek $0.42)')
+  expect(await texts()).toContain('Spend today: $0.42 (DeepSeek $0.42) · no day cap')
   await ui.unmount()
 })
 
@@ -5868,12 +5877,12 @@ test('#1023: the GPU group: each role picks Auto or a GPU model with its window 
   expect([...new Set(draws)]).toEqual(['route --json', 'models --json'])    // no status, no probe
   expect(await label('gpu-significant')).toBe('▸ Complex coding GPU model: Auto (the router picks)')
   await ui.press({ key: 'gpu-significant' })
-  expect(await options()).toEqual(['  ❯ Auto (the router picks)', '    Qwen Big (Ollama) (40K) · GPU 2+3', '    MiMo (Ollama)'])
+  expect(await options()).toEqual(['  ❯ Auto (the router picks)', `    Qwen Big (Ollama) (40K) · GPU${NB}2+3`, '    MiMo (Ollama)'])
   await ui.press({ key: 'gpu-significant:ollama/qwen-big' })
   expect(ran('wb route significant --gpu ollama/qwen-big')).toBe(true)
   expect(w.asked).toBe(0)
-  expect(await label('gpu-significant')).toBe('▸ Complex coding GPU model: Qwen Big (Ollama) (40K) · GPU 2+3')
-  expect(await label('size-ollama/mimo')).toBe('▸ MiMo (Ollama): trivial only')
+  expect(await label('gpu-significant')).toBe(`▸ Complex coding GPU model: Qwen Big (Ollama) (40K) · GPU${NB}2+3`)
+  expect(await label('size-ollama/mimo')).toBe('▸ MiMo (Ollama) tasks: Trivial only')
   await ui.press({ key: 'size-ollama/mimo' })
   await ui.press({ key: 'size-ollama/mimo:significant' })
   expect(ran('wb model sizes ollama/mimo significant')).toBe(true)
@@ -5886,10 +5895,10 @@ test('#1023: the GPU group: each role picks Auto or a GPU model with its window 
   await clock.advance(11_000)
   await ui.press({ key: 'tab-tasks' })
   await ui.press({ key: 'tab-settings' })
-  const sized = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => /^▸ M\d: /.test(l))
-  expect(sized).toEqual(['▸ M0: any size (default)', '▸ M1: any size (default)', '▸ M2: any size (default)',
-    '▸ M3: any size (default)', '▸ M4: any size (default)', '▸ M5: any size (default)'])  // GPU_ROWS, then counted
-  expect(await texts()).toContain('  +3 more (wb models)')
+  const sized = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => /^▸ M\d tasks: /.test(l))
+  expect(sized).toEqual(['▸ M0 tasks: Any size (default)', '▸ M1 tasks: Any size (default)', '▸ M2 tasks: Any size (default)',
+    '▸ M3 tasks: Any size (default)', '▸ M4 tasks: Any size (default)', '▸ M5 tasks: Any size (default)'])  // GPU_ROWS, then counted
+  expect(await texts()).toContain('+3 more (wb models)')
   await ui.unmount()
 })
 
@@ -5900,14 +5909,14 @@ test('#1023: with no provider connected and no API role the API group is one lin
   await clock.advance(11_000)
   await ui.press({ key: 'tab-tasks' })
   await ui.press({ key: 'tab-settings' })
-  expect(await texts()).toContain('  No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.')
+  expect(await texts()).toContain('No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.')
   for (const key of ['api-trivial', 'think-trivial', 'api-connected']) expect(await ui.find({ key })).toBeUndefined()
   w.routeCode = 2
   w.routeOut = "wb: error: argument command: invalid choice: 'route'"
   await clock.advance(11_000)
   await ui.press({ key: 'tab-tasks' })
   await ui.press({ key: 'tab-settings' })
-  expect((await texts()).filter(t => t === '  wb is older than the mod: wb update').length).toBeGreaterThan(0)
+  expect((await texts()).filter(t => t === 'wb is older than the mod: wb update').length).toBeGreaterThan(0)
   for (const key of ['agents', 'busy', 'role-trivial', 'api-trivial', 'cap']) expect(await ui.find({ key })).toBeUndefined()
   expect(await ui.find({ key: 'coding' })).toBeDefined()                   // the rest as always
   await ui.unmount()
@@ -5934,28 +5943,294 @@ test('#1047: Images and each audio kind with two or more engines get a row after
   await clock.advance(11_000)                                                  // past the roles' cache
   await ui.press({ key: 'tab-tasks' })
   await ui.press({ key: 'tab-settings' })
-  expect(await label('media-image')).toBe('▸ Images: flux · off this GPU')
-  expect(await label('media-sfx')).toBe('▸ Sound effects: fx1')
+  expect(await label('media-image')).toBe('▸ Image engine: flux · off this GPU')
+  expect(await label('media-sfx')).toBe('▸ Sound effects engine: fx1')
   for (const key of ['media-speech', 'media-music']) expect(await ui.find({ key })).toBeUndefined()
   const rows = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label))
   const at = (start: string) => rows.findIndex(l => l.startsWith(start))
-  expect(at('▸ Images:')).toBeGreaterThan(at('▸ MiMo (Ollama):'))               // after the models
-  expect(at('▸ Sound effects:')).toBe(at('▸ Images:') + 1)
-  expect(at('▸ Sound effects:')).toBeLessThan(at('▸ Complex coding API model:')) // still in GPU
+  expect(at('▸ Image engine:')).toBeGreaterThan(at('▸ MiMo (Ollama) tasks:'))               // after the models
+  expect(at('▸ Sound effects engine:')).toBe(at('▸ Image engine:') + 1)
+  expect(at('▸ Sound effects engine:')).toBeLessThan(at('▸ Complex coding API model:')) // still in GPU
   await ui.press({ key: 'media-image' })
   expect(await options()).toEqual(['    sd', '  ❯ flux · off this GPU'])
   await ui.press({ key: 'media-image:sd' })
   expect(ran('wb image --default sd')).toBe(true)
   expect(w.asked).toBe(0)
-  expect(await label('media-image')).toBe('▸ Images: sd')
+  expect(await label('media-image')).toBe('▸ Image engine: sd')
   await ui.press({ key: 'media-sfx' })
   await ui.press({ key: 'media-sfx:fx2' })
   expect(ran('wb audio --default fx2')).toBe(true)
-  expect(await label('media-sfx')).toBe('▸ Sound effects: fx2')
+  expect(await label('media-sfx')).toBe('▸ Sound effects engine: fx2')
   w.refuse = "wb: no audio engine 'fx1' (have: fx2 (sfx))"
   await ui.press({ key: 'media-sfx' })
   await ui.press({ key: 'media-sfx:fx1' })
   expect(w.toasts.at(-1)).toBe("workbench: wb: no audio engine 'fx1' (have: fx2 (sfx))")
-  expect(await label('media-sfx')).toBe('▸ Sound effects: fx2')                 // as it was
+  expect(await label('media-sfx')).toBe('▸ Sound effects engine: fx2')                 // as it was
+  await ui.unmount()
+})
+
+// ---------------------------------------------------------------- the Tasks view (#1048)
+// Task files as the runner writes them: three tasks of one request on GPU 0, GPU 1 and DeepSeek
+const T0 = 1_800_000_000 // seconds, the clock's start
+function viewTask(files: Record<string, string>, name: string, spec: Record<string, any>, status: Record<string, any>) {
+  files[`/wb/tasks/${name}/task.json`] = JSON.stringify({ name, created_at: T0 - 600, repo: '/home/u/a', cwd: '/home/u/a',
+    session: 'sess-new', auto_fix: 2, ...spec })
+  files[`/wb/tasks/${name}/status.json`] = JSON.stringify({ round: 1, updated_at: T0, ...status })
+}
+const QWEN30 = { model: 'ollama/qwen3-coder:30b', model_label: 'qwen3-coder 30B', via: 'gpu', role: 'significant' }
+function hiscore(files: Record<string, string>) {
+  const timed = (mins: number, used: number, session: string) => ({ round_started_at: T0 - mins * 60, session,
+    live_used: { session, used }, window: 1000, tuned: { fresh_at: 0.6 }, typical: { min: 20, n: 3 }, late_min: 20 })
+  viewTask(files, 'hiscore-store', { ...QWEN30, group: 'hiscore', created_at: T0 - 14 * 60 },
+    { phase: 'running', round: 2, round_for: 'fix', auto_fixes: 1, cards: [0], last: 'edit src/score_store.py', tools: 17,
+      tok_out: 3900, ...timed(14, 560, 's1') })
+  viewTask(files, 'hiscore-screen', { model: 'ollama/devstral:24b', model_label: 'devstral 24B', via: 'gpu', role: 'significant',
+    group: 'hiscore', created_at: T0 - 9 * 60 },
+    { phase: 'running', round_for: 'start', cards: [1], last: 'write src/ui/hiscore.py', tools: 9, tok_out: 2100,
+      ...timed(9, 710, 's2') })
+  viewTask(files, 'hiscore-docs', { model: 'deepseek/deepseek-v4.1-flash', via: 'api', role: 'writing', provider: 'deepseek',
+    provider_name: 'DeepSeek', group: 'hiscore', created_at: T0 - 6 * 60 },
+    { phase: 'testing', last: 'tests: python3 -m unittest tests.test_docs', tools: 6, tok_out: 1200,
+      api: { usd: 0.04, metered: 0.04, source: 'keyhole', tok: {} }, session: 's3', live_used: { session: 's3', used: 220 },
+      window: 1000, tuned: { fresh_at: 0.6 } })
+  return ['hiscore-store', 'hiscore-screen', 'hiscore-docs']
+}
+// each row of the task list as drawn: the Texts that hold a whole row (truncate-end; its runs are
+// Texts of their own, without it)
+const ROW = /^(▾ |[├│└ ] |[✻✳✶✢·◌◐?◆▲✗✓–] )/
+async function listRows(ui: any): Promise<string[]> {
+  return (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props?.wrap === 'truncate-end')
+    .map((t: any) => String(t.text)).filter((t: string) => ROW.test(t))
+}
+function viewWorld(on: any, files: Record<string, string>, dirs: string[], runs: string[][] = [], route?: () => any) {
+  const ui: string[] = []
+  fakeTasks(on, files, dirs, true, ui)
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    if (e.argv[1] === 'route' && route) return { value: { exitCode: 0, stdout: JSON.stringify(route()), stderr: '' } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  return ui
+}
+
+test('#1048: three tasks running at once draw under one group header with their cards and spend', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  viewWorld(on, files, hiscore(files))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 71, scroll: { offset: 0, bodyRows: 40 } } })
+  await clock.advance(1600)
+  const rows = await listRows(ui)
+  expect(rows.slice(0, 7).map(r => r.replace(/[✻✳✶✢·] hiscore-s/, '✻ hiscore-s').replace(/\d+m$/, 'Nm'))).toEqual([
+    '▾ hiscore · 3 tasks · 2 running · 1 testing    $0.04  ░░░░░░░░ 0/3 done',
+    '├ ✻ hiscore-store  round 2 · fix 1/2           GPU 0                Nm',
+    '│   ⎿ edit src/score_store.py    ctx ████▌┊░░ 56% · ~6m left · 17 tools',
+    '├ ✻ hiscore-screen round 1                     GPU 1                 Nm',
+    '│   ⎿ write src/ui/hiscore.py    ctx █████▋░░ 71% · ~11m left · 9 tools',
+    '└ ◐ hiscore-docs   testing                     API DeepSeek  $0.04   Nm',
+    '    ⎿ tests: python3 -m unitte…              ctx █▊░░░┊░░ 22% · 6 tools',
+  ])
+  // the running cards' last events are gone from the list: the followed task's transcript has them
+  expect(rows.every(r => r.length <= 71)).toBe(true)
+  await ui.unmount()
+})
+
+test('#1048: a 50-column pane keeps each task to two rows', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  viewWorld(on, files, hiscore(files))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 50, scroll: { offset: 0, bodyRows: 40 } } })
+  await clock.advance(1600)
+  const rows = (await listRows(ui)).slice(0, 7)
+  expect(rows.map(r => r.slice(0, 4).replace(/[✻✳✶✢·]/, '✻'))).toEqual(['▾ hi', '├ ✻ ', '│   ', '├ ✻ ', '│   ', '└ ◐ ', '    '])
+  expect(rows.every(r => r.length <= 50)).toBe(true)
+  expect(rows[5]).toMatch(/^└ ◐ hiscore-docs +testing +API +\$0\.04 +\d+m$/)   // the short place; spend and elapsed stay
+  await ui.unmount()
+})
+
+test('#1048: a 14-row box draws one line a task', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  viewWorld(on, files, hiscore(files))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 76, scroll: { offset: 0, bodyRows: 14 } } })
+  await clock.advance(1600)
+  const rows = await listRows(ui)
+  expect(rows[0]).toMatch(/^▾ hiscore · 2 running · 1 testing +0\/3 done$/)
+  expect(rows.slice(1, 4).map(r => r.slice(0, 2))).toEqual(['├ ', '├ ', '└ '])
+  expect(rows.some(r => r.includes('⎿'))).toBe(false)
+  await ui.unmount()
+})
+
+test('#1048: the status line counts a stuck task as stuck, not as awaiting review', async ($, on) => {
+  // seen live: "2 awaiting review" for one review and one stuck task
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  viewTask(files, 'menu-tweak', QWEN30, { phase: 'review', tests: { ok: true }, last: 'tests passed: Claude reviews next' })
+  viewTask(files, 'fix-crash', QWEN30, { phase: 'stuck', last: 'silent for 10 min: stopped' })
+  viewTask(files, 'fix-boot', QWEN30, { phase: 'failed', last: 'opencode exited 1' })
+  const ui = viewWorld(on, files, ['menu-tweak', 'fix-crash', 'fix-boot'])
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(ui.filter(l => l.startsWith('status')).at(-1)).toBe('status ⚒ wb · 1 awaiting review · 1 stuck · 1 failed')
+})
+
+test('#1048: a press on a task\'s row follows it, and its name is underlined', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  const runs: string[][] = []
+  viewWorld(on, files, hiscore(files), runs)
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 71, scroll: { offset: 0, bodyRows: 40 } } })
+  await clock.advance(1600)
+  const watched = () => runs.filter(r => r[1] === 'watch').map(r => r[2])
+  expect(watched().at(-1)).toBe('hiscore-docs')                  // the newest running one, by itself
+  const underlined = async () => (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props?.underline).map((t: any) => t.text)
+  expect(await underlined()).toEqual(['hiscore-docs'])
+  await ui.press({ key: 'task-hiscore-store' })
+  await clock.advance(100)
+  expect(watched().at(-1)).toBe('hiscore-store')
+  await clock.advance(3000)
+  expect(watched().at(-1)).toBe('hiscore-store')                 // it stays followed
+  await ui.redraw()
+  expect(await underlined()).toEqual(['hiscore-store'])
+  await ui.unmount()
+})
+
+test('#1048: the API day cap shows on the Tasks tab only while an API task runs', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  const runs: string[][] = []
+  const route = () => ({ v: 1, use: 'both', busy: 'wait', day_usd: 5, roles: { significant: { via: 'gpu', gpu: 'auto', thinking: 'off', label: 'Complex coding' } },
+    spend_today: { usd: 0.42, by_provider: { deepseek: 0.42 } }, providers: {} })
+  viewTask(files, 'port-parser', { model: 'deepseek/deepseek-v4.1-flash', via: 'api', role: 'significant', provider: 'deepseek',
+    provider_name: 'DeepSeek' }, { phase: 'running', last: 'edit src/parser/lexer.ts', api: { usd: 0.31 } })
+  viewWorld(on, files, ['port-parser'], runs, route)
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 71, scroll: { offset: 0, bodyRows: 40 } } })
+  await clock.advance(1600)
+  await ui.redraw()
+  expect(await ui.find({ type: 'Text', text: /^API today \$0\.42 of the \$5 day cap  ▉░░░░░░░░░$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^[✻✳✶✢·] port-parser round 1 +API DeepSeek +deepseek-v4\.1-flash +\$0\.31 +\d+m$/ })).toBeTruthy()
+  const reads = runs.filter(r => r[1] === 'route').length
+  await clock.advance(5000)
+  expect(runs.filter(r => r[1] === 'route').length).toBe(reads)   // read again only past ROLES_CACHE_MS
+  // queued again, for its provider's slot: not running, so no line (the #1048 review, seen live)
+  files['/wb/tasks/port-parser/status.json'] = JSON.stringify({ phase: 'queued', round: 2, updated_at: T0 + 5,
+    last: 'waiting for an API slot: 3 tasks run on deepseek', api: { usd: 0.31 } })
+  await clock.advance(31_000)
+  await ui.redraw()
+  expect(await ui.find({ type: 'Text', text: /^◌ port-parser +waits for a slot/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^API today/ })).toBeFalsy()
+  files['/wb/tasks/port-parser/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: T0 + 10, tests: { ok: true },
+    last: 'tests passed: Claude reviews next', api: { usd: 0.31 } })
+  await clock.advance(31_000)
+  await ui.redraw()
+  expect(await ui.find({ type: 'Text', text: /^API today/ })).toBeFalsy()
+  await ui.unmount()
+})
+
+// #1048, part 2: one design review of Stats and Settings, seen live at 200, 160, 120 and 80 columns
+test('#1048: the Stats tab names models and providers as the Tasks view does, a size in the roles\' words, the cap as Settings says it', () => {
+  const names = { models: { 'ollama/qwen3-coder:30b': 'qwen3-coder 30B' }, providers: { deepseek: 'DeepSeek', anthropic: 'Anthropic' } }
+  const f = {
+    tasks: 30,
+    periods: { week: { tasks: 6, landed: 6, api: { tasks: 6, cost: 1.27, unknown: 0, plan: 0,
+      by_provider: { deepseek: { tasks: 4, cost: 0.84, unknown: 0 }, anthropic: { tasks: 2, cost: 0.43, unknown: 0 } } } } },
+    model_lines: { lines: [{ model: 'ollama/qwen3-coder:30b', kind: 'gpu', tasks: 24, accepted_pct: 83, speed: { write: 61 } },
+      { model: 'deepseek/deepseek-v4.1-flash', kind: 'api', tasks: 4, accepted_pct: 100, paid: 0.21 }] },
+    sizes: { trivial: { tasks: 17, accepted_pct: 94 }, significant: { tasks: 24, accepted_pct: 71 } },
+    milestones: [{ kind: 'saved', n: 5_000_000, day: '2026-11-20' }],
+    guards: { spend: 1 },
+    helps: { 'ollama/qwen3-coder:30b': { hint: [3, 5] } },
+    bench: { 'ollama/qwen3-coder:30b': { run: 'r7', day: '2026-11-19', passed: 17, of: 20 } },
+    optimized: { 'ollama/qwen3-coder:30b': { window: 65536, spill: 0 } },
+  }
+  const said = statsLines(f, '', names).map(l => `${l.label}: ${l.text}`)
+  expect(said[0]).toContain('API $1.27 (DeepSeek $0.84 · Anthropic $0.43)')        // names, not ids
+  expect(said).toContain(`qwen3-coder 30B: 24 tasks · 83% landed · writes ~61${NB}tok/s`)  // Now's label, not ollama/…
+  expect(said).toContain('API DeepSeek deepseek-v4.1-flash: 4 tasks · 100% landed · paid ~$0.21/task')  // the Tasks view's place and model
+  expect(said).toContain('By size: trivial 17 (94%) · complex 24 (71%)')             // "Complex coding", not significant
+  expect(said).toContain('Milestone: ~5.0M Claude tokens saved (estimate, 2026-11-20)')
+  expect(said).toContain('What stopped agents: the API day cap 1')                  // Settings' "API day cap"
+  expect(said).toContain('What helps (qwen3-coder 30B): a hint helped 3 of 5')
+  expect(said).toContain('Bench: qwen3-coder 30B 17/20 (2026-11-19)')
+  expect(said).toContain('Optimized: qwen3-coder 30B 64K all on the GPU')
+  // nothing named them yet: the id, and an API model still says API
+  const bare = statsLines(f).map(l => l.label)
+  expect(bare).toContain('ollama/qwen3-coder:30b')
+  expect(bare).toContain('API deepseek deepseek-v4.1-flash')
+  // Now's API row leads with its place and model, as the Tasks row; a rack speed has its unit
+  const top = { busy: {}, snap: { ts: 0, every: 2, gpus: [], queue: [], running: [{ task: 'fix-auth', model: 'deepseek/deepseek-flash',
+    label: 'deepseek/deepseek-flash', phase: 'running', round: 2, round_s: 190, via: 'api', provider: 'deepseek', spend: 0.12 }],
+    rack: [{ model: 'ollama/m', label: 'M', state: 'resident', gpu_bytes: 2 ** 33, write_tok_s: 61 }] } } as any
+  const rows = liveLines(top, '', names).map(r => r.map(p => p.text).join(''))
+  expect(rows[0]).toBe('▶ fix-auth API DeepSeek deepseek-flash · running · round 2 · 3m10s · $0.12')
+  expect(rows[1]).toBe(`● M resident 8.0 GiB on the GPU · writes ~61${NB}tok/s`)
+})
+
+test('#1048: a long Stats line goes on indented, as Now\'s rows, and a no-break space holds a unit whole', () => {
+  expect(hangWords('Label: one two three four', 12)).toEqual(['Label: one', '  two three', '  four'])
+  expect(hangWords('    a b c d', 7, 4)).toEqual(['    a b', '    c d'])                // its own lead kept on the first line
+  expect(hangWords('short', 12)).toEqual(['short'])
+  expect(wrapWords(`speed: writes ~61${NB}tok/s`, 12)).toEqual(['speed:', 'writes', `~61${NB}tok/s`])
+  expect(wrapParts([{ text: `GPU ~61${NB}tok/s` }], 10).map(l => l.map(p => p.text).join(''))).toEqual(['GPU', `  ~61${NB}tok/s`])
+})
+
+test('#1048: Settings in a narrow pane: headings as Stats\' Now, read-only lines and long rows go on under their words, one colon before a typed value', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = settingsWorld(on, files)
+  w.models.optimize = { done_at: 1_799_740_800, models: 2, running: false }
+  w.models.media = { image: { default: 'flux', engines: [{ name: 'flux', gpu: true }, { name: 'sd', gpu: true }] } }
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 52 } })
+  await ui.press({ key: 'tab-settings' })
+  const heads = (await ui.findAll({ type: 'Text' })).filter(t => ['Shared', 'GPU', 'API', 'Experimental'].includes(String(t.text)))
+  expect(heads.map(t => [t.text, t.props.bold, t.props.color])).toEqual([['Shared', true, 'claude'], ['GPU', true, 'claude'],
+    ['API', true, 'claude'], ['Experimental', true, 'claude']])
+  await ui.press({ key: 'tab-stats' })
+  expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'Now' && t.props.bold && t.props.color === 'claude')).toBe(true)
+  await ui.press({ key: 'tab-settings' })
+  // a row wider than the pane: its words in lines that fit, each after the first under the words
+  const row = (await ui.find({ key: 'api-trivial' })) as any
+  expect(row.props.label).toBe(`▸ Trivial coding API model: DeepSeek Flash · DeepSeek (128K) · $0.2/$0.6 per${NB}M`)
+  const lines = String(row.text).split('\n')
+  expect(lines.length).toBe(2)
+  expect(lines.every(l => l.length <= 52)).toBe(true)
+  expect(lines[1]!.startsWith('  ') && !lines[1]!.startsWith('   ')).toBe(true)
+  expect(((await ui.find({ key: 'agents' })) as any).children ?? []).toEqual([])  // one that fits: the label alone
+  // a read-only line is in by the rows' mark, its wrapped lines too
+  const connected = (await ui.find({ key: 'api-connected' })) as any
+  expect([connected.type, connected.props.paddingLeft]).toEqual(['Box', 2])
+  expect(String(connected.text).startsWith('Connected: DeepSeek (key stored)')).toBe(true)
+  expect(((await ui.find({ key: 'wake' })) as any).props.paddingLeft).toBe(2)
+  // the engine draws the colon of a typed value: the label has none (`API day cap: : 5`)
+  expect(((await ui.find({ key: 'cap' })) as any).props.label).toBe('▸ API day cap')
+  // the date as the Stats tab writes one; the Measure now button drops under it rather than split it
+  expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'Optimize: measured 2 models on 2027-01-12 ·')).toBe(true)
+  expect(((await ui.find({ key: 'optimize-row' })) as any).props.flexWrap).toBe('wrap')
+  // a row says what it sets: the engine, the sizes a model takes
+  expect(((await ui.find({ key: 'media-image' })) as any).props.label).toBe('▸ Image engine: flux')
+  expect(((await ui.find({ key: 'size-ollama/qwen-big' })) as any).props.label).toBe('▸ Qwen Big (Ollama) tasks: Any size (default)')
+  await ui.press({ key: 'size-ollama/qwen-big' })
+  expect((await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => / {2}[❯ ] /.test(l)))
+    .toEqual(['  ❯ Any size (default)', '    Trivial only', '    Complex only'])
+  // an option's sentence in from the edge as the options, its wrapped lines too
+  const says = (await ui.find({ key: 'size-ollama/qwen-big-says' })) as any
+  expect(says.props.paddingLeft).toBe(4)
+  await ui.press({ key: 'chat' })
+  expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('No web server: Claude is reached in this terminal only.')
   await ui.unmount()
 })

@@ -83,6 +83,8 @@ import type { Pose } from './apprentice'
 import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
 import type { Plan, Target } from './splash'
 import { activity, loopLength, TICKER_MS, tickerCells } from './modeline'
+import { ago, apiWorking, bar, capRow, clip, compactWanted, ROLE_WORDS, taskLines } from './tasks'
+import type { Part as RowPart } from './tasks'
 
 const PANE = 'workbench'
 // Nothing waits on a timer for news: `wb events` (inotify) prints a line the moment a task, a
@@ -95,7 +97,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-9',
+  shape: 'tasks-10',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -287,11 +289,6 @@ const LINE_STYLE: Record<string, Row> = {
   head: { bold: true }, activity: { color: 'claude' }, clock: { dimColor: true },
 }
 const SPIN = ['✻', '✳', '✶', '✢', '·', '✢', '✶', '✳']
-// Each phase's mark in the task list; a running task's is the spinner.
-const MARK: Record<string, string> = {
-  queued: '◌', testing: '◐', asking: '?', review: '◆', stuck: '▲', failed: '✗',
-  accepted: '✓', discarded: '–',
-}
 
 // The apprentice (apprentice.ts) at the foot of the pane: how it stands and what it says about
 // the followed task. A timer (FRAME_MS) swings the wrench now and then while it works and blinks
@@ -324,12 +321,6 @@ const speechOf = (focus: WbTask | undefined, doing: string, list: WbTask[], on: 
   return { pose: working ? 'work' : 'think', say: doing || focus.last || `${focus.phase}…`, more: '', color: COLOR[focus.phase] ?? 'claude' }
 }
 
-// A task's model as its row shows it: an API task's with its badge, `API · <model>` (the
-// provider's own id cut off, as the GPU's label is short), a GPU task's label (#1016)
-export function modelOf(t: Pick<WbTask, 'via' | 'model' | 'label'>): string {
-  return t.via === 'api' ? `API · ${t.model.split('/').pop()}` : t.label || t.model
-}
-
 // The frame a pose shows at a tick: a stroke of the wrench now and then while working, else a
 // blink now and then.
 const frameOf = (pose: Pose, tick: number): Pose => {
@@ -341,9 +332,9 @@ const frameOf = (pose: Pose, tick: number): Pose => {
 // What the Tasks page is made of, apart from its drawing: the render draws it and pageShape
 // measures it, so the two can't disagree (#963).
 function pageParts(list: WbTask[], watched: WbLive, delegating: boolean, now: number, spin: string, cols: number,
-  pixels: boolean) {
-  const when = (t: WbTask) =>
-    ACTIVE.has(t.phase) || NEEDS.has(t.phase) ? `for ${ago(now - t.createdAt)}` : `${ago(now - t.updatedAt)} ago`
+  pixels: boolean, bodyRows = 24, cap: { spent: number; cap: number | null } | null = null) {
+  const rows = listRows(list, watched.task, now, spin, cols, bodyRows)
+  const capLine = cap ? capRow(list, cap.spent, cap.cap, cols, usd) : null
   // The history is drawn, newest within HISTORY_CHARS: the engine scrolls the pane (arrows,
   // while focused) and follows the end as lines arrive. What the agent is doing now is the
   // apprentice's to say.
@@ -360,7 +351,7 @@ function pageParts(list: WbTask[], watched: WbLive, delegating: boolean, now: nu
   const sp = speechOf(focus, doing?.t ?? '', list, delegating)
   const busy = sp.pose === 'work' || sp.pose === 'think'
   return {
-    when, from, history, meta, routed, focus, sp, busy,
+    rows, capLine, from, history, meta, routed, focus, sp, busy,
     // The bubble's inner width beside the apprentice (its columns, the mouth's, the border and
     // padding), or beside the face on one line; each line drawn whole, never squeezed.
     room: Math.max(10, pixels ? cols - COLUMNS - 1 - 4 : cols - 4),
@@ -384,23 +375,18 @@ const NARROW = /^[\x20-\x7e -¬®-˿Ͱ-ԯ‐-‧‰- ⁰-⌙⌜-⌨⌫-⏨⏭
  * the row the apprentice's Raster starts on, `tail` the rows from there to the end.
  */
 export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, saved: string, now: number,
-  cols: number): { rows: number | null; atLeast: number; stage: number; tail: number | null } {
+  cols: number, bodyRows = 24): { rows: number | null; atLeast: number; stage: number; tail: number | null } {
   const spin = SPIN[0] ?? '✻'
-  const page = pageParts(list, watched, delegating, now, spin, cols, true)
+  const page = pageParts(list, watched, delegating, now, spin, cols, true, bodyRows, capOf(list))
   let exact = true
   const line = (text: string) => { // a Text that wraps: one row when it fits
     if (!NARROW.test(text) || text.length > cols) exact = false
     return 1
   }
+  // the task list: one row each, none wider than the pane (taskLines), and the closing gap
   let rows = 0
-  for (const t of list) {
-    rows += line(`${t.phase === 'running' ? spin : MARK[t.phase] ?? '•'} ${t.name} ${t.phase} · round ${t.round} · ` +
-      `${modelOf(t)}${t.tests ? ` · tests ${t.tests}` : ''} · ${page.when(t)}`)
-    for (const l of t.name === watched.task ? [] : t.recent) rows += line(`  ${clip(l, cols - 2)}`)
-    if (t.allowed) for (const l of wrapWords(t.allowed, cols - 2)) rows += line(`  ${l}`)
-    if (t.name !== watched.task && t.recent.length === 0) rows += line(`  ${clip(t.last, cols - 2)}`)
-    rows += 1 // its marginBottom
-  }
+  for (const r of page.rows) rows += line(r.parts.map(p => p.text).join(''))
+  if (page.rows.length) rows += 1
   if (watched.task) {
     rows += line(clip(`── ${watched.task} · ↑↓ scrolls ` + '─'.repeat(cols), cols))
     if (page.meta) rows += line(page.meta.t)
@@ -414,7 +400,7 @@ export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, 
   // the stage's height (the apprentice, the mouth, the bubble below its marginTop), the saving's
   // line, the tabs' marginTop, the tabs, the modeline
   const savedFits = !saved || (NARROW.test(saved) && saved.length <= cols)
-  const tail = Math.max(ROWS, MOUTH + 1, MOUTH - 1 + 2 + said) + (saved ? 1 : 0) + 3
+  const tail = Math.max(ROWS, MOUTH + 1, MOUTH - 1 + 2 + said) + (page.capLine ? 1 : 0) + (saved ? 1 : 0) + 3
   return { rows: exact && savedFits ? stage + tail : null, atLeast: stage + tail, stage, tail: savedFits ? tail : null }
 }
 
@@ -442,20 +428,13 @@ const parseLines = (text: string): Row[] =>
 const readJson = async ($: any, path: string): Promise<Row> =>
   $.fs.read(path).then((t: string) => JSON.parse(t)).catch(() => ({}))
 
-const ago = (ms: number) => {
-  const s = Math.max(0, Math.round(ms / 1000))
-  return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`
-}
-
-const clip = (text: string, n: number) => (text.length <= n ? text : text.slice(0, n - 1) + '…')
-
 // Words broken into lines of at most n characters (a longer word is cut across lines). The
 // bubble wraps with this, not with Text's own wrapping: in a row that shares its width, that
 // laid out the rows and drew them empty (seen 2026-11-16).
 export const wrapWords = (text: string, n: number): string[] => {
   const lines: string[] = []
   let line = ''
-  for (let word of text.split(/\s+/).filter(Boolean)) {
+  for (let word of text.split(/[^\S\u00a0]+/).filter(Boolean)) { // a no-break space (NB) holds a unit whole
     if (line && line.length + 1 + word.length > n) {
       lines.push(line)
       line = ''
@@ -486,8 +465,8 @@ export const wrapParts = (parts: Part[], n: number, indent = 2): Part[][] => {
     width += text.length
   }
   for (const p of parts) {
-    for (const tok of p.text.split(/(\s+)/).filter(Boolean)) {
-      if (/^\s/.test(tok)) {
+    for (const tok of p.text.split(/([^\S\u00a0]+)/).filter(Boolean)) { // NB holds a unit whole
+      if (/^[^\S\u00a0]/.test(tok)) {
         if (width > (lines.length ? indent : 0)) add(p, tok)
         continue
       }
@@ -627,7 +606,8 @@ const CODING_RULES: Record<string, string> = {
 const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb workflows` shows it): you may split a ' +
   'request into several tasks that run at once, mixing roles and the GPU and API sides; each runs on its own ' +
   'role\'s model, never one you pick. Plan the fan-out as a handoff plan (each task its own spec, size, role and ' +
-  'acceptance command), name its tasks with one shared prefix, and say the plan in one line before you start them. ' +
+  'acceptance command), name its tasks with one shared prefix and pass it as `--group <prefix>` on each `wb start` ' +
+  '(the pane draws them under one header), and say the plan in one line before you start them. ' +
   'The GPU lease and the provider slots decide what runs together (`--queue` the rest). Review each result on its ' +
   'own merits; merge logic first, then tests, then UI or docs.'
 const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb workflows` shows it): run one task ' +
@@ -652,7 +632,7 @@ const CODING_STOPS: [string, string, string][] = [
 
 // The web chat's row: the choice is wb's (`wb chat on|off`, chat/switch.json), off by default
 const CHAT_STOPS: [string, string, string][] = [
-  ['off', 'Off (default)', 'A localhost web server to interact with Claude.'],
+  ['off', 'Off (default)', 'No web server: Claude is reached in this terminal only.'],
   ['on', 'On', 'A localhost web server to interact with Claude.'],
 ]
 
@@ -788,29 +768,61 @@ const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress|splash|agen
 function settingRow(kit: Row, $: any, name: string, title: string, stops: [string, string, string][],
   value: string, view: WbPane, pick: (value: string) => Promise<unknown>) {
   const { Box, Text, Button } = kit
+  // a row longer than the pane goes on under its words, not under its mark (hangWords): wrapped by
+  // the pane, `▸ Complex coding API model: Claude Haiku 5.5 ·` went on with "Anthropic (195K) · …"
+  // at the left edge, read as a row of its own (#1048's review at 120 columns); the label stays the
+  // control's name
+  const row = (props: Row, label: string, indent: number) => mem.settingsCols && label.length > mem.settingsCols
+    ? <Button {...props} label={label} plain><Text>{hangWords(label, mem.settingsCols, indent).join('\n')}</Text></Button>
+    : <Button {...props} label={label} plain />
   const chosen = stops.find(s => s[0] === value) ?? stops[stops.length - 1]
   if (view.open !== name)
-    return <Button key={name} label={`▸ ${title}: ${chosen[1]}`} plain onPress={() => { void update($, pane, p => ({ ...p, open: name, focus: '' })) }} />
+    return row({ key: name, onPress: () => { void update($, pane, p => ({ ...p, open: name, focus: '' })) } }, `▸ ${title}: ${chosen[1]}`, 2)
   const ringed = stops.find(s => `${name}:${s[0]}` === view.focus) ?? chosen
   const width = Math.max(...stops.map(s => s[2].length))
   return (
     <Box flexDirection="column">
-      <Button key={name} label={`▾ ${title}: ${chosen[1]}`} plain onPress={() => { void update($, pane, p => ({ ...p, open: '', focus: '' })) }} />
-      {stops.map(([v, label]) => (
-        <Button key={`${name}:${v}`} label={`  ${v === chosen[0] ? '❯' : ' '} ${label}`} plain dimColor={v !== chosen[0]}
-          hover={{ scope: `wb-${name}-${v}` }}
-          onPress={() => { void (v === chosen?.[0] ? Promise.resolve() : pick(v)).then(() => update($, pane, p => ({ ...p, open: '', focus: '' }))) }} />
-      ))}
-      <Box key={`${name}-says`}>
-        <Text dimColor>{`    ${ringed[2].padEnd(width)}`}</Text>
-        {stops.map(([v, , said]) => (
-          <Box position="absolute" top={0} left={0} display="none" hover={{ display: 'flex', scope: `wb-${name}-${v}` }}>
-            <Text dimColor>{`    ${said.padEnd(width)}`}</Text>
-          </Box>
-        ))}
+      {row({ key: name, onPress: () => { void update($, pane, p => ({ ...p, open: '', focus: '' })) } }, `▾ ${title}: ${chosen[1]}`, 2)}
+      {stops.map(([v, label]) => row({ key: `${name}:${v}`, dimColor: v !== chosen[0], hover: { scope: `wb-${name}-${v}` },
+        onPress: () => { void (v === chosen?.[0] ? Promise.resolve() : pick(v)).then(() => update($, pane, p => ({ ...p, open: '', focus: '' }))) } },
+        `  ${v === chosen[0] ? '❯' : ' '} ${label}`, 4))}
+      {/* in from the edge as the options, its wrapped lines too (#1048's review) */}
+      <Box key={`${name}-says`} paddingLeft={4}>
+        <Box>
+          <Text dimColor>{ringed[2].padEnd(width)}</Text>
+          {stops.map(([v, , said]) => (
+            <Box position="absolute" top={0} left={0} display="none" hover={{ display: 'flex', scope: `wb-${name}-${v}` }}>
+              <Text dimColor>{said.padEnd(width)}</Text>
+            </Box>
+          ))}
+        </Box>
       </Box>
     </Box>
   )
+}
+
+// A read-only line among the settings rows: dim, in from the edge by the `▸ ` of the rows, its
+// wrapped lines too (a hanging indent: "  Connected: …" went on at the pane's left edge, under the
+// rows' marks, #1048's review at 120 columns)
+function infoLine(kit: Row, key: string, text: string) {
+  const { Box, Text } = kit
+  return <Box key={key} paddingLeft={2}><Text dimColor>{text}</Text></Box>
+}
+
+// A section's heading, on both tabs as Stats' Now: bold, in the theme's claude colour; `note` dim after it
+function heading(kit: Row, text: string, note = '') {
+  const { Text } = kit
+  return note ? <Text><Text bold color="claude">{text}</Text><Text dimColor>{note}</Text></Text> : <Text bold color="claude">{text}</Text>
+}
+
+// A line in lines of at most `n`, each after the first indented `indent`, as Now's rows (wrapParts)
+// wrap: the Stats history's `Label: text`, whose label then stands alone at the left edge, and a
+// long settings row (settingRow). The text's own leading spaces stay on its first line.
+export function hangWords(text: string, n: number, indent = 2): string[] {
+  const lead = /^ */.exec(text)![0]
+  const [first, ...rest] = wrapWords(text.slice(lead.length), n - lead.length)
+  const head = lead + first!
+  return rest.length ? [head, ...wrapWords(rest.join(' '), n - indent).map(l => ' '.repeat(indent) + l)] : [head]
 }
 
 // Turns the web chat on or off through wb, which keeps the choice (and starts a server for on),
@@ -885,6 +897,9 @@ async function refreshStats($: any, force = false) {
     if (!feed || typeof feed !== 'object') return failed('not a feed')
     mem.statsWhy = ''
     mem.statsBackoff = mem.statsRetryAt = 0
+    // the models' labels and the providers' names the tab says them by (namesNow), when not read
+    // in the last ROLES_CACHE_MS: a read of the feed only, never a poll's
+    await rolesNow($).catch(() => null)
     await update($, statsFeed, () => ({ key, feed }))
     mem.statsLoaded = true
   } catch (err) {
@@ -986,15 +1001,6 @@ async function pumpTop($: any, child: any) {
   }
 }
 
-const BLOCKS = '▏▎▍▌▋▊▉█'
-// ``frac`` (0..1) of ``width`` cells, in eighths, the rest light shade
-export function bar(frac: number, width: number): string {
-  const eighths = Math.round(Math.max(0, Math.min(1, frac)) * width * 8)
-  const full = Math.floor(eighths / 8), part = eighths % 8
-  const drawn = '█'.repeat(full) + (part ? BLOCKS[part - 1] : '')
-  return drawn + '░'.repeat(Math.max(0, width - drawn.length))
-}
-
 const gib = (n: number) => (n / 2 ** 30).toFixed(1)
 const secs = (s: number) => (s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, '0')}s`
   : `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`)
@@ -1020,7 +1026,7 @@ const RACK_FOLD_MIN = 2
 // sparkline), what runs now, the rack (every model resident or with a task: where it is, its
 // speeds, its load time, the task on it; the idle, can't-run and remote ones on one line past
 // RACK_FOLD_MIN) and the queue. Nothing is said for what a platform can't tell.
-export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; bold?: boolean; text: string }[][] {
+export function liveLines(t: WbTop, why = '', names: Names = NO_NAMES): { color?: string; dim?: boolean; bold?: boolean; text: string }[][] {
   const s = t.snap
   // `why`: what `wb top` said as it ended, once it has failed twice: "Reading…" was all ever said (#553)
   if (!s) return [[{ dim: true, text: why ? `This machine can't be read: ${why} (wb top --json)` : 'Reading this machine…' }]]
@@ -1048,7 +1054,9 @@ export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; 
     const parts = [r.phase, r.round ? `round ${r.round}` : '', typeof r.round_s === 'number' ? secs(r.round_s) : '',
       typeof r.tok_s === 'number' ? `${Math.round(r.tok_s)} tok/s${r.tok_s_from === 'live' ? '' : ' (last call)'}` : '',
       typeof r.context_pct === 'number' ? `context ${r.context_pct}%` : '', ...apiParts(r)].filter(Boolean)
-    out.push([{ color: 'claude', text: '▶ ' }, { bold: true, text: `${r.task} ` }, { dim: true, text: `${r.label || r.model} · ${parts.join(' · ')}` }])
+    // an API task's model as the Tasks view says it, its place first: wb top's label is the bare id
+    const model = r.via === 'api' ? modelWord(String(r.model ?? ''), true, names) : r.label || r.model
+    out.push([{ color: 'claude', text: '▶ ' }, { bold: true, text: `${r.task} ` }, { dim: true, text: `${model} · ${parts.join(' · ')}` }])
   }
   if (!(s.running ?? []).length) out.push([{ dim: true, text: 'Nothing running.' }])
   const rack = (s.rack ?? []) as Row[]
@@ -1058,7 +1066,8 @@ export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; 
     const where = m.state === 'cpu' && typeof m.cpu_bytes === 'number' ? ` ${gib(m.cpu_bytes)} GiB in RAM`
       : typeof m.gpu_bytes === 'number'
         ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
-    const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}` : '',
+    // with its unit, as the history's `writes ~61 tok/s`: "writes ~61" said 61 of nothing (#1048's review)
+    const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}${NB}tok/s` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}${NB}tok/s` : '',
       m.load_s ? `loads ~${secs(m.load_s)}` : '', m.state === 'remote' ? 'another machine: no telemetry' : m.why ?? ''].filter(Boolean)
     out.push([{ color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${RACK_MARK[m.state] ?? '•'} ` },
       { text: `${m.label || m.model} ` }, { color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${m.state}${where}` },
@@ -1794,7 +1803,7 @@ const GUARD_WORDS: Record<string, string> = {
   repeat: 'the same call repeated', errors: 'tool errors in a row', no_edit: 'no file changed',
   round: 'the round time limit', silence: 'silence', think: 'thinking with no tool call',
   handovers: 'handovers without finishing',
-  spend: "the day's API spend cap",
+  spend: 'the API day cap', // Settings' and the Tasks view's words for it
 }
 
 // stats.STATS_MODEL_LINES, kept here too: the mod tracks main while wb runs from the user's clone,
@@ -1805,10 +1814,10 @@ const STATS_SHOWN = 3
 // The Stats tab's history as lines (a label in bold, then the text): what the feed holds, each
 // section left out when it has nothing, estimates said as such. A run of days that ended isn't
 // mentioned, only the best (the plan's rule: show what went right, never nag).
-export function statsLines(f: Record<string, any> | null, why = ''): { label: string; text: string }[] {
+export function statsLines(f: Record<string, any> | null, why = '', names: Names = NO_NAMES): { label: string; text: string }[] {
   // `why`: the last `wb stats --json` failed, said (#553): with no feed yet "Reading…" never ended
   if (!f) return [{ label: '', text: why ? `History unavailable: ${why} (wb stats --json)` : 'Reading the history…' }]
-  if (why) return [{ label: '', text: `Not updated: ${why} (wb stats --json)` }, ...statsLines(f)]
+  if (why) return [{ label: '', text: `Not updated: ${why} (wb stats --json)` }, ...statsLines(f, '', names)]
   // only when the feed has no section at all: with no judged task, a period of spec-gap
   // discards (#569), the optimized windows and the bench results still have something to say (#549)
   if (!f.tasks && !Object.keys(f).some(k => !['ts', 'until', 'settings', 'tasks'].includes(k)))
@@ -1829,7 +1838,7 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
       // the period's own energy, every task's: the saving's counts only the tasks it compares (#568)
       p.energy?.wh ? `${p.energy.wh >= 1000 ? `${(p.energy.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.energy.wh)} Wh`}` +
         (p.energy.cost != null ? `, cost ${p.energy.cost.toFixed(2)}` : '') : '',
-      apiPeriod(p.api),
+      apiPeriod(p.api, names),
     ]
     out.push({ label, text: parts.filter(Boolean).join(' · ') })
   }
@@ -1858,14 +1867,17 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
     ? (f.model_lines.lines ?? []).map((m: any) => [String(m.model), m])
     : Object.entries(f.models ?? {})
   const shown = all.slice(0, STATS_SHOWN), past = all.slice(STATS_SHOWN)
+  // a model as Now and the Tasks view name it (modelWord); Bench, Optimized and What helps by the same
+  const apiIds = new Set(all.filter(([, m]) => m.kind === 'api').map(([model]) => model))
+  const word = (model: string) => modelWord(model, apiIds.has(model), names)
   for (const [model, m] of shown) {
     const trend = spark((m.write_trend ?? []).map((p: number[]) => p[1]))
     const speed = m.kind === 'api' ? (typeof m.paid === 'number' ? ` · paid ~${usd(m.paid)}/task` : '')
-      : m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''
+      : m.speed?.write ? ` · writes ~${Math.round(m.speed.write)}${NB}tok/s` : ''
     const change = typeof m.write_change_pct === 'number' && m.write_change_pct
       ? ` (${m.write_change_pct > 0 ? '+' : ''}${m.write_change_pct}%)` : ''
     const windows = (m.windows ?? []).length > 1 ? ` (${m.windows.map((w: number) => `${Math.round(w / 1024)}K`).join(', ')})` : ''
-    out.push({ label: model + windows, text: `${m.tasks} task${m.tasks === 1 ? '' : 's'} · ${m.accepted_pct}% landed` +
+    out.push({ label: word(model) + windows, text: `${m.tasks} task${m.tasks === 1 ? '' : 's'} · ${m.accepted_pct}% landed` +
       (m.rounds != null ? ` · ${m.rounds} rounds` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
       speed + (trend ? ` ${trend}` : '') + change + (m.claude ? ` · Claude ~${kilo(m.claude)}/task` : '') })
   }
@@ -1890,7 +1902,7 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   const counted = (kept: string[], rest: number, report: string) => kept.length
     ? kept.join(' · ') + (rest ? ` · ${rest} more (${report})` : '') : `${rest} model${rest === 1 ? '' : 's'} (${report})`
   const sized = Object.entries(f.sizes ?? {}) as [string, any][]
-  if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
+  if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${ROLE_WORDS[k] ?? k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
   if (f.days?.length) {
     const line = spark(f.days.map((d: any) => d.tasks))
     if (line) out.push({ label: 'Last 30 days', text: `${line}  tasks per day` })
@@ -1903,7 +1915,8 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   const last = (f.milestones ?? []).at(-1)
   if (last) out.push({ label: 'Milestone', text: last.kind === 'landed'
     ? `${last.n} task${last.n === 1 ? '' : 's'} landed${last.day ? ` (${last.day})` : ''}`
-    : `${kilo(last.n)} Claude tokens saved, estimated${last.day ? ` (${last.day})` : ''}` })
+    // "(estimate)", as each period and the footer say it ("saved, estimated" said it a second way)
+    : `~${kilo(last.n)} Claude tokens saved (estimate${last.day ? `, ${last.day}` : ''})` })
   const guards = Object.entries(f.guards ?? {}) as [string, number][]
   if (guards.length) out.push({ label: 'What stopped agents', text: guards.sort((a, b) => b[1] - a[1])
     .map(([g, n]) => `${GUARD_WORDS[g] ?? g} ${n}`).join(' · ') })
@@ -1911,7 +1924,7 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   const helped = helps.map(([model, h]) => [model, Object.entries(h).filter(([, v]: any) => v[1])
     .map(([k, v]: any) => `a ${k === 'smaller' ? 'smaller step' : k} helped ${v[0]} of ${v[1]}`)] as [string, string[]])
     .filter(([, said]) => said.length)
-  helped.forEach(([model, said]) => out.push({ label: `What helps (${model})`, text: said.join(' · ') }))
+  helped.forEach(([model, said]) => out.push({ label: `What helps (${word(model)})`, text: said.join(' · ') }))
   // the rest on a row of their own, not on the last model's, where it read as that model's (2026-11-21);
   // no text command prints them, the feed does
   if (helpsRest) out.push({ label: 'What helps', text: `${helped.length ? `${helpsRest} more` : helpsRest} model${helpsRest === 1 ? '' : 's'} (wb stats --json)` })
@@ -1919,11 +1932,11 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   // the newest finished run, and a newer one beside it, never in its place (#570)
   const sofar = (p: any) => `${p.of} of ${p.planned} ${p.running ? 'so far' : 'before it stopped'}` +
     (p.of ? `, ${p.passed} passed` : '')
-  if (bench.length || benchRest) out.push({ label: 'Bench', text: counted(bench.map(([m, b]) => `${m} ` +
+  if (bench.length || benchRest) out.push({ label: 'Bench', text: counted(bench.map(([m, b]) => `${word(m)} ` +
     [b.run !== undefined ? `${b.passed}/${b.of} (${b.day})` : '', b.partial ? `newer run ${sofar(b.partial)}` : '']
       .filter(Boolean).join(', ')), benchRest, 'wb bench report') })
   const [opt, optRest] = pick(Object.entries(f.optimized ?? {}) as [string, any][])
-  if (opt.length || optRest) out.push({ label: 'Optimized', text: counted(opt.map(([m, o]) => `${m} ${Math.round(o.window / 1024)}K` +
+  if (opt.length || optRest) out.push({ label: 'Optimized', text: counted(opt.map(([m, o]) => `${word(m)} ${Math.round(o.window / 1024)}K` +
     (o.spill ? ` (${o.spill}% on the CPU)` : ' all on the GPU')), optRest, 'wb optimize report') })
   return out
 }
@@ -2116,6 +2129,8 @@ const mem = {
   paneOpened: false,
   polling: false,
   watching: false,
+  picked: '', // the task whose row the user pressed: followed while listed (#1048)
+  rolesReading: false, // a rolesNow for the Tasks tab's day-cap line under way (capNow)
   wb: 'wb',
   liveKey: '', // the followed task and its updated_at when last read
   liveAt: 0, // when its transcript was last read
@@ -2133,6 +2148,8 @@ const mem = {
   topRetryAt: 0, // not before then, after one ended by itself
   price: null as number | null, // the electricity price wb says is set (`wb savings --json`)
   roles: null as null | PaneRoles, // the Settings tab's roles and models, as wb last said them (rolesNow, #1023)
+  settingsCols: 0, // the Settings tab's body width at this draw (0 unknown): settingRow folds a long row to it
+  provNames: new Map<string, string>(), // each API provider's id → its name, from the tasks' task.json (namesNow)
   apiOther: '', // the role whose API row's Other model… box is open (#1023)
   cwd: '', // the session's directory, resolved: which old tasks are this session's (mine)
   home: '', // the home directory, resolved: a session there claims no task by directory
@@ -2415,6 +2432,8 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       sp = await claim($, ent.name, sp)
       recent = await recentEvents($, ent.name, `${base}/events.jsonl`)
     }
+    if (typeof sp.provider === 'string' && typeof sp.provider_name === 'string' && sp.provider_name)
+      mem.provNames.set(sp.provider, sp.provider_name)
     list.push({
       name: sp.name, phase, round: Number(st.round ?? 1), model: String(sp.model ?? ''),
       label: String(sp.model_label ?? ''),
@@ -2430,12 +2449,87 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       backlog: String(sp.backlog ?? ''),
       parked: ['review', 'stuck', 'failed'].includes(phase) && !!st.parked, // as store.parked (#698)
       allowed: allowedLine((await readJson($, `${base}/coding.json`)).allowed),
+      ...viewFacts(sp, st),
     })
   }
   for (const name of mem.gone) if (!names.has(name)) mem.gone.delete(name) // removed by hand
   for (const name of mem.recent.keys()) if (!names.has(name) || mem.gone.has(name)) mem.recent.delete(name)
 
   return list.sort((a, b) => a.createdAt - b.createdAt)
+}
+
+// The Tasks view's facts of a task (#1048, tasks.ts), from the task.json and status.json scan
+// already read: nothing new is read for them
+export function viewFacts(sp: Row, st: Row) {
+  const num = (x: unknown) => (Number.isFinite(Number(x)) ? Number(x) : 0)
+  const live = st.live_used && typeof st.live_used === 'object' ? st.live_used : {}
+  const api = st.api && typeof st.api === 'object' ? st.api : null
+  const typical = st.typical && typeof st.typical === 'object' ? st.typical : {}
+  const fresh = Number((st.tuned ?? {}).fresh_at)
+  return {
+    group: typeof sp.group === 'string' ? sp.group : '',
+    cards: Array.isArray(st.cards) ? st.cards.filter((c: unknown) => Number.isInteger(c)) as number[] : [],
+    tools: num(st.tools), tokOut: num(st.tok_out),
+    // the window's fill only while it is this session's: a fresh session's first step reads 0 (#262)
+    ctxUsed: live.session && live.session === st.session ? num(live.used) : 0,
+    window: num(st.window), freshAt: Number.isFinite(fresh) && fresh > 0 ? fresh : null,
+    autoFixes: num(st.auto_fixes), autoFixMax: num(sp.auto_fix), roundFor: String(st.round_for ?? ''),
+    reviews: num(st.reviews), steps: num(st.steps),
+    // runner.active_so_far's parts: the step's rounds so far, and the one under way from its start
+    activeS: Math.max(0, num(st.active_s) - num(st.step_active_s)), roundStartedAt: num(st.round_started_at) * 1000,
+    typicalMin: num(typical.min), typicalN: num(typical.n), lateMin: num(st.late_min),
+    spend: !api ? null : api.plan ? 'plan' as const : typeof api.usd === 'number' ? api.usd as number : 'none' as const,
+  }
+}
+
+// The Tasks list's rows (#1048, tasks.ts): one or two a task, one when the pane can't hold two
+// (compactWanted), each with its task; the user's allowance for a task (`wb coding allow`) after
+// its rows. The render draws them and pageShape counts them, one row each: none wraps.
+type ListRow = { parts: RowPart[]; task: string; first: boolean }
+function listRows(list: WbTask[], followed: string, now: number, spin: string, cols: number, bodyRows: number): ListRow[] {
+  const open = list.filter(t => t.phase !== 'accepted' && t.phase !== 'discarded')
+  const headers = new Set(open.map(t => t.group).filter(g => g && open.filter(t => t.group === g).length >= 2)).size
+  const lines = taskLines(list, { cols, now, spin, followed, compact: compactWanted(open.length, headers, bodyRows), usd })
+  const out: ListRow[] = []
+  lines.forEach((l, i) => {
+    out.push(l)
+    const t = l.task && lines[i + 1]?.task !== l.task ? list.find(x => x.name === l.task) : undefined
+    if (t?.allowed) for (const w of wrapWords(t.allowed, cols - 4)) out.push({ parts: [{ text: `    ${w}`, color: 'claude' }], task: '', first: false })
+  })
+  return out
+}
+
+// The day cap's line's numbers on the Tasks tab (#1048): `wb route --json` as rolesNow last read it,
+// only while an API task works (the owner, 2026-11-23: "only while an API task runs"); null
+// otherwise, or before the first read
+function capOf(list: WbTask[]): { spent: number; cap: number | null } | null {
+  if (!apiWorking(list)) return null
+  const r = mem.roles?.routes
+  return r ? { spent: Number(r.spend_today?.usd ?? 0), cap: typeof r.day_usd === 'number' ? r.day_usd : null } : null
+}
+
+// Reads them again past ROLES_CACHE_MS while an API task works, off the render's path (a
+// `wb route --json` there held the draw), then redraws
+async function capNow($: any, list: WbTask[]) {
+  if (mem.rolesReading || !apiWorking(list)) return
+  if (mem.roles && (await $.clock.now()) - mem.roles.at < ROLES_CACHE_MS) return
+  mem.rolesReading = true
+  try {
+    await rolesNow($)
+  } catch {
+    return
+  } finally {
+    mem.rolesReading = false
+  }
+  $.ui.invalidate('ui.render')
+}
+
+// A press on a task's row follows it (the owner, 2026-11-23): its transcript below, read at once
+async function followTask($: any, name: string) {
+  mem.picked = name
+  mem.liveKey = ''
+  await refreshLive($, await read($, tasks), await $.clock.now())
+  $.ui.invalidate('ui.render')
 }
 
 // The user's unspent allowance for a task (`wb coding allow`), for its line in the pane: what
@@ -2511,8 +2605,11 @@ async function scope($: any): Promise<string[]> {
 // The task worth watching. The one followed stays while it runs: with two running, choosing by
 // the latest status write swapped the pane between them on every tool call (the 2026-11-16
 // audit). Else the newest started that runs (running, testing, asking before queued: a queued one
-// shows nothing yet), else the newest waiting for Claude.
-const focusOf = (list: WbTask[], followed: string): WbTask | undefined => {
+// shows nothing yet), else the newest waiting for Claude. A task the user pressed (mem.picked,
+// #1048) is followed while it is listed, whatever its phase.
+const focusOf = (list: WbTask[], followed: string, picked = mem.picked): WbTask | undefined => {
+  const chosen = picked ? list.find(t => t.name === picked) : undefined
+  if (chosen) return chosen
   const kept = list.find(t => t.name === followed && ACTIVE.has(t.phase))
   if (kept) return kept
   const by = (ts: WbTask[], k: 'createdAt' | 'updatedAt') => [...ts].sort((a, b) => b[k] - a[k])[0]
@@ -2663,6 +2760,30 @@ export function usd(x: number): string {
   return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
 }
 
+// The words one model or provider goes by on every tab (#1048's review, seen live): a GPU model by
+// its label (`qwen3-coder 30B`, as the Tasks view and Now say it), not its id in the history under
+// Now; an API model as the Tasks view's place and model (`API DeepSeek deepseek-v4.1-flash`, the
+// id's last part, tasks.ts); a provider by its name (`DeepSeek`), never its id on one tab and its
+// name on the next. From what the pane has read already (wb models --json, wb route --json's
+// providers, the tasks' task.json, wb top's rack): an id nothing named stays the id.
+export type Names = { models: Record<string, string>; providers: Record<string, string> }
+export const NO_NAMES: Names = { models: {}, providers: {} }
+export const providerWord = (id: string, n: Names) => n.providers[id] || id
+export function modelWord(id: string, api: boolean, n: Names): string {
+  if (!api) return n.models[id] || id
+  const cut = id.indexOf('/') // the provider ends at the first /
+  return cut > 0 ? `API ${providerWord(id.slice(0, cut), n)} ${id.split('/').pop()}` : `API ${id}`
+}
+function namesNow(list: WbTask[], top: WbTop | null): Names {
+  const n: Names = { models: {}, providers: {} }
+  for (const g of mem.roles?.models?.gpu ?? []) if (g.label) n.models[g.id] = g.label
+  for (const m of (top?.snap?.rack ?? []) as Row[]) if (m.label && !n.models[m.model]) n.models[m.model] = m.label
+  for (const t of list) if (t.via !== 'api' && t.label && !n.models[t.model]) n.models[t.model] = t.label
+  for (const [id, p] of Object.entries(mem.roles?.routes?.providers ?? {})) if (p.name) n.providers[id] = p.name
+  for (const [id, name] of mem.provNames) if (!n.providers[id]) n.providers[id] = name
+  return n
+}
+
 // A period's API money as the footer says it: never $0 for tasks with no price; '' with none
 export function apiMoney(a: any): string {
   if (!a || !a.tasks) return ''
@@ -2676,19 +2797,20 @@ export function apiAlone(a: any, money: string): string {
   return `this week: ${money.startsWith('$') ? `API ${money} on ${a.tasks} ${tasks}` : `${a.tasks} API ${tasks}, ${money}`} (no GPU task to compare)`
 }
 
-// A Stats period's API part (the feed's periods[*].api): API $1.27 (deepseek $0.84 · anthropic $0.43)
-export function apiPeriod(a: any): string {
+// A Stats period's API part (the feed's periods[*].api): API $1.27 (DeepSeek $0.84 · Anthropic $0.43)
+export function apiPeriod(a: any, names: Names = NO_NAMES): string {
   const money = apiMoney(a)
   if (!money) return ''
   const provs = Object.entries(a.by_provider ?? {}).filter(([, v]: any) => v.tasks > (v.unknown ?? 0) + (v.plan ?? 0))
-    .sort((x: any, y: any) => y[1].cost - x[1].cost).map(([p, v]: any) => `${p} ${usd(v.cost)}`)
+    .sort((x: any, y: any) => y[1].cost - x[1].cost).map(([p, v]: any) => `${providerWord(p, names)} ${usd(v.cost)}`)
   return `API ${money}${provs.length ? ` (${provs.join(' · ')})` : ''}${a.unknown && money !== 'no price' ? ` + ${a.unknown} with no price` : ''}`
 }
 
-// An API task's RUNNING row's parts (wb top's `via`, `provider`, `spend`): no GPU of ours
+// An API task's RUNNING row's parts after its phase (wb top's `spend`, `waits`); its place and model
+// lead the row, as on the Tasks view (`API DeepSeek deepseek-flash`, modelWord)
 export function apiParts(r: Row): string[] {
   if (r.via !== 'api') return []
-  return [`API ${r.provider ?? '?'}`, typeof r.spend === 'number' ? usd(r.spend) : '', r.waits ? `waits for ${r.waits}` : '']
+  return [typeof r.spend === 'number' ? usd(r.spend) : '', r.waits ? `waits for ${r.waits}` : '']
 }
 
 // The electricity price `wb savings --json` says is set (per kWh), or null
@@ -2741,6 +2863,10 @@ async function setPrice($: any, text: string) {
 // --dry-run --json` gives it, then runs it, under the same gate Claude meets; nothing is a flag on
 // the command line, which Claude could pass. A GPU pin or a size takes no yes (dry run: no gate).
 const ROLES_CACHE_MS = 10_000
+const upper = (w: string) => w.charAt(0).toUpperCase() + w.slice(1)
+// a no-break space inside a unit the pane's edge must not split: `GPU 0+1` wrapped as "GPU" and
+// "0+1", `per M` as "per" and "M" (#1048's review, seen at 120 and 80 columns)
+const NB = '\u00a0'
 const GPU_ROWS = 6 // GPU models with a sizes row; the rest are counted (wb models), as STATS_SHOWN
 const API_MENU = 12 // an API dropdown lists every runnable model up to this; past it, the ones in use
 const ROLE_LABELS: Record<string, string> = { significant: 'Complex coding', trivial: 'Trivial coding', writing: 'English writing' }
@@ -2751,9 +2877,10 @@ const AGENTS_STOPS: [string, string, string][] = [
   ['api', 'API', 'Every role runs on its API model; a role with none can\'t start.'],
   ['both', 'Both (default)', 'Each role runs where its own row says.'],
 ]
+// every value capitalized, as every other row's (#1048's review: "wait (default)" beside "Both (default)")
 const BUSY_STOPS: [string, string, string][] = [
-  ['wait', 'wait (default)', 'A task waits for the GPU, as before.'],
-  ['api', 'use the role\'s API model', 'A task whose role has an API model starts on it while the GPU is busy; a running task never moves.'],
+  ['wait', 'Wait (default)', 'A task waits until the GPU is free.'],
+  ['api', 'Use the role\'s API model', 'A task whose role has an API model starts on it while the GPU is busy; a running task never moves.'],
 ]
 const WORKFLOWS_STOPS: [string, string, string][] = [
   ['off', 'Off (default)', 'Claude runs one task at a time.'],
@@ -2763,14 +2890,17 @@ const THINK_STOPS: [string, string, string][] = [
   ['off', 'Off (default)', 'Faster and cheaper; for tasks started after this.'],
   ['on', 'On', 'Better on hard steps, slower and costs more; for tasks started after this.'],
 ]
+// a size in the roles' words (tasks.ts ROLE_WORDS): `significant only` sat under "Complex coding"
 const SIZE_STOPS: [string, string, string][] = [
-  ['all', 'any size (default)', 'The router may give it any task.'],
-  ['trivial', 'trivial only', 'The router gives it trivial tasks only.'],
-  ['significant', 'significant only', 'The router gives it significant tasks only.'],
+  ['all', 'Any size (default)', 'The router may give it any task.'],
+  ['trivial', `${upper(ROLE_WORDS.trivial!)} only`, 'The router gives it trivial coding tasks only.'],
+  ['significant', `${upper(ROLE_WORDS.significant!)} only`, 'The router gives it complex coding tasks only.'],
 ]
-function roleStops(label: string, api: string | undefined): [string, string, string][] {
+// A role's GPU | API row. `name`: its API model as the API group's row names it (the catalog's name),
+// so one model isn't `deepseek/deepseek-flash` here and `DeepSeek Flash` three rows down
+export function roleStops(label: string, api: string | undefined, name = api): [string, string, string][] {
   return [['gpu', 'GPU', `${label} runs on this machine's GPU.`],
-    ['api', api ? `API: ${api}` : 'API (set its model under API first)', api ? `${label} runs on ${api}; your code goes to its provider.` : 'Pick its API model under API first.']]
+    ['api', api ? `API (${name})` : 'API (set its model under API first)', api ? `${label} runs on ${api}; your code goes to its provider.` : 'Pick its API model under API first.']]
 }
 
 // A model's window as the pane says it: 40K
@@ -2781,7 +2911,7 @@ const windowK = (n: unknown) => typeof n === 'number' && n > 0 ? ` (${Math.round
 export function gpuStops(label: string, gpu: WbModels['gpu'], pinned: string): [string, string, string][] {
   const out: [string, string, string][] = [['auto', 'Auto (the router picks)', `The router picks ${label}'s GPU model for each task.`]]
   for (const g of gpu)
-    out.push([g.id, `${g.label}${windowK(g.window)}${g.cards?.length ? ` · GPU ${g.cards.join('+')}` : ''}`, `Pins ${label} to ${g.id}: the router doesn't pick for it.`])
+    out.push([g.id, `${g.label}${windowK(g.window)}${g.cards?.length ? ` · GPU${NB}${g.cards.join('+')}` : ''}`, `Pins ${label} to ${g.id}: the router doesn't pick for it.`])
   if (pinned !== 'auto' && !gpu.some(g => g.id === pinned)) out.push([pinned, `${pinned} (not found: wb models)`, 'A task of this role exits 3 until it is found again or another is picked.'])
   return out
 }
@@ -2793,7 +2923,7 @@ export function gpuStops(label: string, gpu: WbModels['gpu'], pinned: string): [
 export function apiStops(label: string, m: WbModels | null, current: string, others: string[]): [string, string, string][] {
   const listed = new Map((m?.api ?? []).map(x => [x.id, x]))
   const price = (p: WbModels['api'][number]['price']) => p && typeof p.input === 'number' && typeof p.output === 'number'
-    ? ` · $${p.input}/$${p.output} per M` : ''
+    ? ` · $${p.input}/$${p.output} per${NB}M` : ''
   const line = (id: string): [string, string, string] => {
     const x = listed.get(id)
     if (!x) return [id, id, `${label} uses ${id}.`]
@@ -2859,17 +2989,20 @@ async function setCap($: any, text: string) {
   $.ui.invalidate('ui.render')
 }
 
-// Spend today, from `wb route --json`: `$0.42 of $5 (deepseek $0.42)`; the dollars by `usd`, the
-// Stats tab's (#1022), so the two never say one sum two ways (wave 2's merge)
+// Spend today, from `wb route --json`: `$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14)`; the dollars by
+// `usd`, the Stats tab's (#1022), so the two never say one sum two ways (wave 2's merge), and each
+// provider by its name and the Stats tab's ` · ` (#1048's review: `deepseek $0.28, anthropic`)
 export function spendLine(r: WbRoutes): string {
   const s = r.spend_today ?? { usd: 0, by_provider: {} }
-  const by = Object.entries(s.by_provider ?? {}).filter(([, v]) => v > 0).map(([p, v]) => `${p} ${usd(v)}`)
-  return `Spend today: ${usd(s.usd ?? 0)}${r.day_usd != null ? ` of ${money(r.day_usd)}` : ' (no day cap)'}${by.length ? ` (${by.join(', ')})` : ''}`
+  const by = Object.entries(s.by_provider ?? {}).filter(([, v]) => v > 0).map(([p, v]) => `${r.providers?.[p]?.name || p} ${usd(v)}`)
+  const each = by.length ? ` (${by.join(' · ')})` : ''
+  return `Spend today: ${usd(s.usd ?? 0)}${r.day_usd != null ? ` of ${money(r.day_usd)}${each}` : `${each} · no day cap`}`
 }
 
-// The Connected line: each provider, a stored key as working, the rest with why they can't run
+// The Connected line: each provider, a stored key as working ("key stored": "stored" alone said
+// nothing of what), the rest with why they can't run
 export function connectedLine(r: WbRoutes): string {
-  return 'Connected: ' + Object.values(r.providers ?? {}).map(p => p.key === 'stored' ? `${p.name} (stored)` : `${p.name} (${p.why ?? p.key})`).join(' · ')
+  return 'Connected: ' + Object.values(r.providers ?? {}).map(p => p.key === 'stored' ? `${p.name} (key stored)` : `${p.name} (${p.why ?? p.key})`).join(' · ')
 }
 
 // The rows of the Settings tab's three groups (#1023), as elements: Shared's first part (above Claude
@@ -2877,7 +3010,7 @@ export function connectedLine(r: WbRoutes): string {
 async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
   const { Box, Text, Button } = kit
   const r = role.routes, m = role.models
-  const dim = (key: string, text: string) => <Text key={key} dimColor>{`  ${text}`}</Text>
+  const dim = (key: string, text: string) => infoLine(kit, key, text)
   if (!r) {
     const line = dim('roles-why', role.why)
     return { top: [line], cap: [], gpu: [line, ...mediaRows(kit, $, view, m)], api: [] }
@@ -2886,10 +3019,11 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
   const top = [
     settingRow(kit, $, 'agents', 'Agents', AGENTS_STOPS, r.use, view, v => paneRoute($, ['all', v])),
     settingRow(kit, $, 'busy', 'When the GPU is busy', BUSY_STOPS, r.busy ?? 'wait', view, v => paneRoute($, ['busy', v])),
-    ...roles.map(({ name, label, row }) => settingRow(kit, $, `role-${name}`, label, roleStops(label, row.api), row.via, view, v => paneRoute($, [name, v]))),
+    ...roles.map(({ name, label, row }) => settingRow(kit, $, `role-${name}`, label,
+      roleStops(label, row.api, m?.api.find(x => x.id === row.api)?.name), row.via, view, v => paneRoute($, [name, v]))),
   ]
   const cap = [
-    <kit.Input key="cap" label="▸ API day cap: " value={r.day_usd != null ? String(r.day_usd) : ''}
+    <kit.Input key="cap" label="▸ API day cap" value={r.day_usd != null ? String(r.day_usd) : ''}
       placeholder="not set (needed before an API role; $5 suggested)" submitLabel="set" onSubmit={(v: string) => { void setCap($, v) }} />,
   ]
   const gpu: any[] = []
@@ -2902,14 +3036,16 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
     const shown = [...m.gpu].sort((a, b) => Number(pinned.has(b.id)) - Number(pinned.has(a.id)) || a.label.localeCompare(b.label)).slice(0, GPU_ROWS)
     for (const g of shown) {
       const size = g.sizes.length === 1 ? g.sizes[0]! : 'all'
-      gpu.push(settingRow(kit, $, `size-${g.id}`, g.label, SIZE_STOPS, size, view,
+      // "<model> tasks": the model's name alone (`devstral 24B: trivial only`) didn't say what the row sets
+      gpu.push(settingRow(kit, $, `size-${g.id}`, `${g.label} tasks`, SIZE_STOPS, size, view,
         v => runWb($, ['model', 'sizes', g.id, ...(v === 'all' ? [] : [v])]).then(({ ok, out }) => { mem.roles = null; if (!ok) $.ui.toast(`workbench: ${brief(out)}`) })))
     }
     if (m.gpu.length > GPU_ROWS) gpu.push(dim('gpu-more', `+${m.gpu.length - GPU_ROWS} more (wb models)`))
     const o = m.optimize
     gpu.push(
-      <Box key="optimize-row" flexDirection="row" columnGap={1}>
-        <Text dimColor>{`  Optimize: ${o.running ? 'measuring now' : o.models ? `measured ${o.models} model${o.models === 1 ? '' : 's'}${o.done_at ? `, ${new Date(o.done_at * 1000).toISOString().slice(5, 10)}` : ''}` : 'not run yet'} ·`}</Text>
+      // the date as the Stats tab's (2026-11-20), not 11-20 (#1048's review)
+      <Box key="optimize-row" flexDirection="row" flexWrap="wrap" columnGap={1} paddingLeft={2}>
+        <Text dimColor>{`Optimize: ${o.running ? 'measuring now' : o.models ? `measured ${o.models} model${o.models === 1 ? '' : 's'}${o.done_at ? ` on ${new Date(o.done_at * 1000).toISOString().slice(0, 10)}` : ''}` : 'not run yet'} ·`}</Text>
         <Button key="optimize" label="▸ Measure now" plain onPress={() => {
           void runWb($, ['optimize', 'start']).then(({ out }) => { mem.roles = null; $.ui.toast(`workbench: ${brief(out)}`) })
         }} />
@@ -2946,8 +3082,9 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
 // one off this GPU ("gpu": false, another host) says so. A pick runs `wb image|audio --default NAME`
 // (wb writes images.json's "default" or audio.json's "default_<kind>"); no dialog: nothing spends
 // and nothing leaves the machine. An older wb's models carry no media: no rows.
-const MEDIA_ROWS: [string, string, string][] = [['image', 'Images', 'image'], ['speech', 'Speech', 'audio'],
-  ['sfx', 'Sound effects', 'audio'], ['music', 'Music', 'audio']]
+// each titled as what it picks: "Images: flux" read as images on or off (#1048's review)
+const MEDIA_ROWS: [string, string, string][] = [['image', 'Image engine', 'image'], ['speech', 'Speech engine', 'audio'],
+  ['sfx', 'Sound effects engine', 'audio'], ['music', 'Music engine', 'audio']]
 export function mediaStops(cmd: string, kind: WbMedia): [string, string, string][] {
   return kind.engines.map(e => [e.name, `${e.name}${e.gpu ? '' : ' · off this GPU'}`, `wb ${cmd} runs ${e.name} unless --engine names another.`])
 }
@@ -3961,10 +4098,16 @@ function taskParts(list: WbTask[], on: boolean) {
   // counted in this one's "N awaiting review", as if this Claude had them to do (#693)
   const asking = shown.filter(t => t.phase === 'asking' && mine(t))
   const waiting = shown.filter(t => waitsOnClaude(t) && t.phase !== 'asking' && mine(t))
+  // a stuck or failed task is counted as such: "2 awaiting review" said so for one review and one
+  // stuck task (seen live, #1048)
+  const count = (phase: string, word: string) => {
+    const n = waiting.filter(t => t.phase === phase).length
+    return n ? [`${n} ${word}`] : []
+  }
   return { live, parts: [
     ...live.map(t => `${t.name} ${t.phase} r${t.round}`),
     ...asking.map(t => `${t.name} asks`),
-    ...(waiting.length ? [`${waiting.length} awaiting review`] : []),
+    ...count('review', 'awaiting review'), ...count('stuck', 'stuck'), ...count('failed', 'failed'),
   ] }
 }
 
@@ -4430,19 +4573,20 @@ export const register: Register = (on, options) => {
       const probeAt = await probeMode($)
       const prog = await progressSettings($)
       const picked = (args: string[]) => runWb($, args).then(() => { void refreshStats($, true); void syncTop($) })
+      mem.settingsCols = Number(((e.props ?? {}) as Row).bodyColumns ?? 0) // settingRow folds to it
       const roles = await roleRows(kit, $, view, await rolesNow($)) // Shared, GPU and API (#1023)
       return (
         <Box flexDirection="column">
           <Text dimColor>{SETTINGS_HINT}</Text>
           <Box flexDirection="column" marginTop={1}>
-            <Text bold>Shared</Text>
+            {heading(kit, 'Shared')}
             {roles.top}
             {settingRow(kit, $, 'coding', 'Claude coding', CODING_STOPS, await codingMode($), view,
               v => runWb($, ['coding', v]))}
             {settingRow(kit, $, 'workflows', 'Dynamic workflows', WORKFLOWS_STOPS, await workflowsMode($), view,
               v => runWb($, ['workflows', v]))}
             {roles.cap}
-            <Text key="wake" dimColor>{`  Wake Claude: ${mem.wake ? 'on' : 'off'} · change it in /plugin → workbench → options`}</Text>
+            {infoLine(kit, 'wake', `Wake Claude: ${mem.wake ? 'on' : 'off'} · change it in /plugin → workbench → options`)}
             {settingRow(kit, $, 'record', 'Stats recording', RECORD_STOPS, st.recording ? 'on' : 'off', view,
               v => picked(['stats', 'set', 'recording', v]))}
             {settingRow(kit, $, 'live', 'Live view', LIVE_STOPS, st.live ? 'on' : 'off', view,
@@ -4453,21 +4597,21 @@ export const register: Register = (on, options) => {
               v => runWb($, ['progress', v]))}
             {settingRow(kit, $, 'splash', 'Opening animation', SPLASH_STOPS, (await splashOn($)) ? 'on' : 'off', view,
               v => runWb($, ['splash', v]).then(({ ok, out }) => { if (!ok) $.ui.toast(`workbench: ${brief(out)}`) }))}
-            <kit.Input key="price" label="▸ Electricity price per kWh: " value={mem.price ? String(mem.price) : ''}
+            <kit.Input key="price" label="▸ Electricity price per kWh" value={mem.price ? String(mem.price) : ''}
               placeholder="not set (energy shows in Wh)" submitLabel="set" onSubmit={(v: string) => { void setPrice($, v) }} />
           </Box>
           <Box flexDirection="column" marginTop={1}>
-            <Text bold>GPU</Text>
+            {heading(kit, 'GPU')}
             {roles.gpu}
           </Box>
           {roles.api.length ? (
             <Box flexDirection="column" marginTop={1}>
-              <Text bold>API</Text>
+              {heading(kit, 'API')}
               {roles.api}
             </Box>
           ) : null}
           <Box flexDirection="column" marginTop={1}>
-            <Text><Text bold>Experimental</Text><Text dimColor> · may change or go away</Text></Text>
+            {heading(kit, 'Experimental', ' · may change or go away')}
             {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
             {settingRow(kit, $, 'probe', 'Agent code navigation', probeStops(probe, probeAt), probeAt, view,
               v => setProbe($, v))}
@@ -4485,21 +4629,23 @@ export const register: Register = (on, options) => {
       if (!mem.top && !mem.topKids.size) void syncTop($)
       const { feed } = await read($, statsFeed)
       const cols = Math.max(30, Number(((e.props ?? {}) as Row).bodyColumns ?? e.viewport?.columns ?? 60))
-      const now = (await statsSettings($)).live ? liveLines(await read($, topNow), mem.topFails >= 2 ? mem.topWhy : '') : []
+      const top = await read($, topNow)
+      const names = namesNow(list, top)
+      const now = (await statsSettings($)).live ? liveLines(top, mem.topFails >= 2 ? mem.topWhy : '', names) : []
       return (
         <Box flexDirection="column">
           {now.length ? (
             <Box flexDirection="column" marginBottom={1}>
-              <Text bold color="claude">Now</Text>
+              {heading(kit, 'Now')}
               {now.flatMap(parts => wrapParts(parts, cols)).map(parts => (
                 <Text wrap="truncate-end">{parts.map(p => <Text color={p.color} dimColor={p.dim} bold={p.bold}>{p.text}</Text>)}</Text>
               ))}
             </Box>
           ) : null}
-          {statsLines(feed, mem.statsWhy).map(({ label, text }) => (
+          {statsLines(feed, mem.statsWhy, names).map(({ label, text }) => (
             <Box flexDirection="column" marginBottom={label ? 0 : 1}>
               {label
-                ? wrapWords(`${label}: ${text}`, cols).map((l, i) => i === 0 && l.startsWith(label)
+                ? hangWords(`${label}: ${text}`, cols).map((l, i) => i === 0 && l.startsWith(label)
                   ? <Text><Text bold>{label}</Text><Text dimColor>{l.slice(label.length)}</Text></Text>
                   : <Text dimColor>{l}</Text>)
                 : <Text dimColor>{text}</Text>}
@@ -4514,15 +4660,15 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const spin = SPIN[Math.floor(now / 500) % SPIN.length] ?? '✻'
 
-    // the followed task's own recent lines are in its transcript below, in full
-    const recentOf = (t: WbTask) => (t.name === watched.task ? [] : t.recent)
     // The apprentice, in pixels where the pane has the rows for it (it takes six), else its face
     // on the line. Drawing it in pixels arms the timer that animates it. The stage keeps its
     // height beside a long history, and the bubble wraps its words onto more rows rather than
     // cutting them off: the pane can't be made wider.
     const pixels = (e as Row).surface === 'terminal' && Number(props.scroll?.bodyRows ?? 24) >= 20 && cols >= 40
-    const page = pageParts(list, watched, delegating, now, spin, cols, pixels)
-    const { when, from, history, meta, routed, focus, sp, busy } = page
+    const bodyRows = Number(props.scroll?.bodyRows ?? 24)
+    void capNow($, list)
+    const page = pageParts(list, watched, delegating, now, spin, cols, pixels, bodyRows, capOf(list))
+    const { from, history, meta, routed, sp, busy } = page
     const lines = (text: string, props: Record<string, unknown>) =>
       wrapWords(text, page.room).map(l => <Text {...props} wrap="truncate-end">{l}</Text>)
     const said = [
@@ -4564,28 +4710,20 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
-        {list.map(t => (
+        {page.rows.length ? (
+          // every task at a glance (#1048): one or two rows each, none wider than the pane; a press
+          // on a task's first row follows it
           <Box flexDirection="column" marginBottom={1}>
-            <Text>
-              <Text color={COLOR[t.phase] ?? 'text'}>
-                {t.phase === 'running' ? spin : MARK[t.phase] ?? '•'}{' '}
-              </Text>
-              <Text bold>{t.name}</Text>
-              <Text color={COLOR[t.phase] ?? 'text'}> {t.phase}</Text>
-              <Text dimColor>
-                {' '}· round {t.round} · {modelOf(t)}
-                {t.tests ? ` · tests ${t.tests}` : ''} · {when(t)}
-              </Text>
-            </Text>
-            {recentOf(t).map(line => (
-              <Text dimColor>  {clip(line, cols - 2)}</Text>
-            ))}
-            {t.allowed && wrapWords(t.allowed, cols - 2).map(l => <Text color="claude">  {l}</Text>)}
-            {t.name !== watched.task && t.recent.length === 0 && (
-              <Text dimColor>  {clip(t.last, cols - 2)}</Text>
-            )}
+            {page.rows.map(r => {
+              const runs = r.parts.length
+                ? r.parts.map(p => <Text color={p.color} dimColor={p.dim} bold={p.bold} underline={p.underline}>{p.text}</Text>)
+                : [<Text> </Text>]
+              return r.first
+                ? <Button key={`task-${r.task}`} plain onPress={() => { void followTask($, r.task) }}><Text wrap="truncate-end">{runs}</Text></Button>
+                : <Text wrap="truncate-end">{runs}</Text>
+            })}
           </Box>
-        ))}
+        ) : null}
         {watched.task && (
           <Box flexDirection="column">
             <Text dimColor>{clip(`── ${watched.task} · ↑↓ scrolls ` + '─'.repeat(cols), cols)}</Text>
@@ -4598,6 +4736,7 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         {stage}
+        {page.capLine && <Text wrap="truncate-end">{page.capLine.map(p => <Text color={p.color} dimColor={p.dim}>{p.text}</Text>)}</Text>}
         {saved && <Text dimColor>{saved}</Text>}
         {tabs}
       </Box>
