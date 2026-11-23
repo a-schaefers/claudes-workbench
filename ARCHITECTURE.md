@@ -2218,6 +2218,108 @@ engine with no `notes` says "licence: not noted"; `audio.coverage`, #398). Claud
 sources, recommends keep / add / retire and changes nothing without the user's yes; `wb scout --done
 --notes "…"` records it (`scout.json` `done_at`); `--due` says whether one is due.
 
+### API models through OpenCode (checked 2026-11-23, OpenCode 2.3.2)
+What 2.0 (#1008) builds on, from the spike (#1009). Checked against a recording model server (a
+scratch variant of `tests/capture_llm.py`: path, header names, body; modes for reasoning and error
+statuses) through the layer, a logging proxy (`HTTPS_PROXY`), the v2.3.2 source (tag `v2.3.2` of
+OpenCode's repo; files named below are under its `packages/`), and six paid one-line runs on
+DeepInfra. Scratch homes (`XDG_DATA_HOME`/`XDG_STATE_HOME`/`XDG_CACHE_HOME`) wherever credentials
+weren't needed. CI pins 2.3.0: not checked there.
+- **Catalog source.** models.dev v2 from `https://models.opencode.ai/experimental/v2.0/api.json`,
+  fetched by every server start (`run --standalone`, `models`, `api`: the proxy saw `CONNECT
+  models.opencode.ai:443` twice each, a retry), then on a TTL. It is cached in `opencode.db`, table
+  `kv`, key `models-dev:v2:catalog` (13.7 MB here; key checked, not read), with a bundled snapshot when
+  there's neither (`core/src/models-dev.ts`). A failed fetch doesn't slow a start (0.86 s). No file
+  under `~/.cache/opencode` (only `bin/`).
+- **Reading it.** `opencode api model.list` prints JSON `{location, data: [...]}`, each entry with
+  `providerID`, `id`, `family`, `package`, `settings.baseURL` (never the key), `capabilities{tools,
+  input, output, temperature}`, `variants[{id, settings | body}]`, `cost[{input, output,
+  cache{read, write}, tier?}]` (USD per million tokens; `tier: {type: "context", size}` prices past a
+  size), `limit{context, output}` and `status`. It lists only providers that can authenticate (a stored
+  key, an env key, a layer `apiKey`) plus OpenCode's free models. It takes 0.3 s through the service
+  and 0.8 s with `--standalone`. `opencode models` prints ids only and takes no flags. A reasoning
+  switch shows as the variants; there is no `reasoning` flag.
+- **The two models.** `deepinfra/deepseek-ai/DeepSeek-V4.1-Flash-1017`: package
+  `@opencode/ai/providers/deepinfra`, base `https://api.deepinfra.com/v1/openai`, context 1048576,
+  output 384000, $0.20 in / $0.60 out / $0.006 cache read, variants `none low high max`
+  (`reasoningEffort`). `anthropic/claude-haiku-5-5` (`opencode models` lists it): context 1000000,
+  output 128000, $0.10 / $0.50 / $0.01 read / $0.125 write, and $0.50 / $2.50 past 100K. Its variants
+  are `none` (`thinking: {type: disabled}`) and `low medium high xhigh max` (adaptive thinking plus
+  `effort`).
+- **Network.** `OPENCODE_DISABLE_MODELS_FETCH=1` stops the fetch (the proxy saw nothing), and the
+  bundled snapshot serves the catalog. `OPENCODE_MODELS_PATH=<file>` replaces the catalog (`{}` left
+  only config models), but the fetch still runs unless disabled. So real-OpenCode tests offline set
+  the first.
+- **Ids.** `Model.Ref.parse` (`schema/src/model.ts`): the provider is everything before the first `/`,
+  and the variant is everything after the first `#` past it. `-m deepinfra/deepseek-ai/…` exports
+  `model: {providerID: "deepinfra", id: "deepseek-ai/…", variant}`, with variant `"default"` when none
+  is given. An unknown variant sends no request and exits 1 with
+  `{"type":"error","error":{"type":"provider.no-route","message":"Variant unavailable for <id>: <v>"}}`.
+- **A layer over a catalog provider.** V1 `provider.<p>.options.{baseURL, apiKey}` keeps the catalog
+  model (its cost and variants). DeepInfra's package posts to `<baseURL>/openai/chat/completions`, so
+  the override is the root without `/openai`, with the key as `Authorization: Bearer`. Anthropic's
+  posts to `<baseURL>/messages?beta=true` with `x-api-key`, `anthropic-version: 2023-06-01` and
+  `anthropic-beta`. Neither sends a GET. With no stored key and no layer key, the run exits 1 with
+  `provider.no-route` "Model unavailable: <id>".
+- **Variants in the layer.** V1 `provider.<p>.models.<m>.variants.<name>: {reasoningEffort: "none"}`
+  merges into the catalog model, and `-m <id>#<name>` selects it. A V1 variant key the package has no
+  setting for (`chat_template_kwargs`) is dropped silently (`core/src/v1/config/migrate.ts`). V2
+  `providers.<p>.models.<m>.variants: [{id, settings, body}]` sends `body` verbatim:
+  `chat_template_kwargs: {thinking: false}` reached the request. The request fields recorded: DeepInfra
+  `#none`/`#high`/`#max` give `reasoning_effort` with that value; no variant sends no field.
+- **DeepInfra thinking off (paid).** On the same reasoning prompt, `#max` thought (110 reasoning
+  tokens, `content: [reasoning, text]`) and `#none` didn't (0 reasoning, 2 output). With no variant,
+  with `#high`, and with a V2 `chat_template_kwargs: {thinking: true}` variant, one-line prompts got
+  0 reasoning: the model thinks only when it judges it needs to. So DeepInfra's off switch is
+  `reasoning_effort: "none"` (the catalog's `#none`). `#none` read 8832 cached tokens right after
+  `#max`: in this one sample, DeepInfra kept the prompt cache across efforts.
+- **Output cap.** `max_tokens` is `min(limit.output, 256000)` (`OUTPUT_TOKEN_MAX`,
+  `core/src/session/model-request.ts`): 256000 for the DeepInfra model, 128000 for Sonnet 5.5.
+- **Data home.** There is no OpenCode-only switch for the data directory: `util/src/global-roots.ts`
+  takes data, cache, config and state from `XDG_*`, tmp from `os.tmpdir()` (`TMPDIR` moves
+  `/tmp/opencode`), and home from `OPENCODE_TEST_HOME`. OpenCode's built-in instructions point the
+  agent at that shared tmp. `OPENCODE_DB=<file>` moves only the db. Under `--standalone`, `run`, `run
+  --session <id>`, `session list` and `session export` all used a scratch DB, and the service's
+  export said `Session not found: <id>`. Without `--standalone` a command goes to the background
+  service, whose own environment wins: `auth list` with `OPENCODE_DB` set still listed the user's
+  keys. With `OPENCODE_DB` alone, `snapshot/<project>/<hash>` and `log/opencode.log` still landed in
+  `~/.local/share/opencode`, and the source writes `tool-output/`, `shell/`, `worktree/`, `repos/`,
+  `artifacts/` and blobs there too. A fresh DB file imports `<data>/auth.json` (migration
+  `20260805200742_import_legacy_credentials`) and `<data>/opencode-next.db`, so `OPENCODE_DB` alone
+  would copy a user's legacy V1 keys into the task's DB. `XDG_DATA_HOME` moved all of it.
+- **Credentials.** They live in `opencode.db` (table `credential`). A scratch data home or DB has none:
+  `auth list` showed only env keys, and `/connect` models were absent and unrunnable (above). `auth
+  list --format json`: `[{id, name, connections: [{type: "credential", id, label, method: "key"} |
+  {type: "env", name: "<VAR>"}]}]`. `auth export <p>`: `[{id, integrationID, label, active, value:
+  {type: "key", key}}]` (checked by key names and types only). Each takes 0.13–0.24 s and needs no
+  `--standalone`. An env key (`XAI_API_KEY` here) lists its provider's models even in a scratch home.
+- **Cost.** Live: `step_finish.part.cost` (USD) and `part.tokens{input, output, reasoning,
+  cache{read, write}}`. Export: `info.cost`/`info.tokens` for the session, and on each assistant
+  message `cost`, `tokens`, `model{id, providerID, variant}`. OpenCode prices the usage itself from the
+  catalog (`SessionUsage.record(usage, model.cost)`): a capture-server reply got a cost too, so it is an
+  estimate, not the provider's bill. `input` excludes cache reads, and reasoning is billed at the output
+  rate (the `#max` run: 5233×0.20 + 3712×0.006 + 113×0.60 per million = $0.001137, as reported).
+  `info.cost` includes the title request, which no message carries (two turns plus a title = 3×
+  $0.000212). `run --title <t>` skips the title request.
+- **Errors.** A 429 prints `{"type":"retry","attempt":N,"nextRetryAt":<ms>,"error":{"type":
+  "provider.rate-limit","message","status":429,"response":{"body"},"retryAfterMs"}}`, with
+  `retryAfterMs` only when `Retry-After` was sent. There are 10 retries, exponential from 2 s capped at
+  10 s, jittered, with `Retry-After` as a floor (capped at 15 min; `core/src/model-retry.ts`). Then
+  `{"type":"error","error":{"type":"provider.rate-limit",…}}` and exit 1: 86 s and 13 requests here.
+  401 and 403 give `provider.auth`, and 402 `provider.quota`: no retry, exit 1 at once. The upstream
+  body comes through verbatim (a key-like string in a 401 body reached stdout).
+- **Reasoning is silent.** While the model streamed `reasoning_content` for 6 s, `run --format json`
+  printed `step_start` (0.8 s) and then nothing until `text` (6.8 s). With `--thinking`, one
+  `reasoning` line with the whole block arrives, but only when it ends. The silence and think clocks
+  hear a reasoning model only at its step's start and end.
+- **Titles.** V1 `small_model` is migrated to V2 `agents.title.model`, and either one pins the title
+  model, at its lowest variant (`none`/`minimal`/`low`; Sonnet got `effort: low`). With neither, the
+  title goes to the provider's small model, the first of the families `gpt-luna`, `gemini-flash-lite`,
+  `gemini-flash`, `claude-haiku` (a Sonnet task's title went to `claude-haiku-5-5`). A provider with
+  none of those falls back to the task's model at its lowest variant (DeepInfra: the same model,
+  `reasoning_effort: none`). A failed title is tried once more on the task's model
+  (`core/src/session/title.ts`, `context.ts` `selectTitle`).
+
 ## Bench: real tasks replayed
 
 `wb bench` (`workbench/bench.py`) compares two models, or workbench before and after a change, on
