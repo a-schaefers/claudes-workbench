@@ -258,16 +258,17 @@ def _provider_of(row: dict) -> str:
     return str(row.get("provider") or str(row.get("model") or "").split("/", 1)[0])
 
 
-def where_note(info: dict, rules: bool, named: list[str]) -> str:
+def where_note(info: dict, rules: bool, named: list[str], whose: str = "") -> str:
     """The start's note on a repo's first API task: what goes and to whom. ``rules``: the user
     has ~/.claude rules the agent is handed; ``named``: the copies and siblings named on the
-    command line, which go too."""
+    command line, which go too; ``whose``: whose choice the model is (`the trivial role's model`,
+    `asked for`, #1016)."""
     what = "the repo, its spec, CLAUDE.md files" + (" and your ~/.claude rules" if rules else "")
     if named:
         what = what.replace(" and your", ", your") + " and " + ", ".join(named)
     policy = f"data policy: {info['policy']}" if info.get("policy") else f"see {info['name']}'s data policy"
     extra = "".join(f"; {p}" for p in info["line"].split(" · ")[1:] if not p.startswith("see "))
-    return f"this task sends {what} to {info['name']} ({policy}){extra}"
+    return f"this task sends {what} to {info['name']} ({whose + '; ' if whose else ''}{policy}){extra}"
 
 
 def standing_refusal(kind: str, entry: str, name: str) -> str:
@@ -278,17 +279,3 @@ def standing_refusal(kind: str, entry: str, name: str) -> str:
                 f"({name}): name it (--copy {entry}) to send it, or put the role on the GPU")
     return (f'commands.json "repos" links {entry} beside every task, and this one is on API '
             f"({name}): name it (--sibling {entry}) to send it, or put the role on the GPU")
-
-
-
-def free_note() -> str:
-    """wb doctor's one line while OpenCode's catalog (hosted.json as cached: no OpenCode call)
-    lists free models, else ''. OpenCode's own switch hides them."""
-    if os.environ.get("OPENCODE_DISABLE_FREE_MODELS"):
-        return ""
-    from . import models
-    free = sorted(mid for mid, m in models._models_of(models._read_hosted()).items() if m.free)
-    if not free:
-        return ""
-    return (f"OpenCode lists {len(free)} free model(s) ({', '.join(free[:3])}{', …' if len(free) > 3 else ''}): "
-            f"{FREE_LINE}; wb never suggests one; OPENCODE_DISABLE_FREE_MODELS=1 hides them")

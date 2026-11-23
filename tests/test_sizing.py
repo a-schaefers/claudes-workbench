@@ -386,7 +386,8 @@ class ApiSizing(Base):
         wait_phase("t-gpu", {"review"})
         state = {"available": True, "resident": True, "why": "API (DeepInfra)"}
         for name, extra, want in (("t-api", (), 1), ("t-api3", ("--auto-fix", "3"), 3)):
-            with mock.patch.object(tw.cli, "pick_model", lambda *a, **k: (self.m, state, "asked for")), \
+            routed = {"via": "api", "role": "significant", "provider": "deepinfra", "said": "asked for"}
+            with mock.patch.object(tw.cli, "pick_model", lambda *a, **k: (self.m, state, "asked for", routed)), \
                     mock.patch.object(tw.cli, "spawn_runner", lambda t: None), \
                     mock.patch.object(tw.cli, "_gpu_wait", lambda *a: ({}, False)):
                 out = run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo),
@@ -482,7 +483,8 @@ class ApiSizing(Base):
             runner.drive(store.Task("t-gpu"))
         st = store.Task("t-gpu").status
         self.assertEqual((st["phase"], st.get("session")), ("failed", None))  # no round unpinned
-        self.assertIn("unknown model", st["last"])
+        # a catalog that can't be read is never said as the model gone (#1016's left_catalog)
+        self.assertIn("can't be checked: OpenCode's catalog can't be read now", st["last"])
 
     def test_an_api_models_silence_stops_at_the_gpus_longest(self):
         # cap / write had no ceiling: at 2 tok/s, 16448 s, a hung request holding the round and a

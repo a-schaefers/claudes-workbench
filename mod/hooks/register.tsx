@@ -90,7 +90,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-8',
+  shape: 'tasks-9',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -225,6 +225,28 @@ const WEB_NOTE =
   '(The user wrote this in the web chat; the workbench mod delivered it into your running turn. ' +
   'Answer as /workbench\'s "The web chat" says: `wb chat reply --text "…"`.)'
 
+// Another agent's message (#1042): sent with its own token (`wb chat token add`), stored with
+// `role: "agent"` and its name as `from`, and submitted as `[agent <name>] …`, never `[web chat]`:
+// it doesn't carry the user's authority, and it doesn't make the user away. The id goes with it,
+// for `wb chat reply --to <id>`; how to treat it is the skill's (Agents on the web chat).
+const AGENT = '[agent '
+const AGENT_NOTE =
+  '(Another agent wrote this through the web chat\'s API; the workbench mod delivered it into your running turn. ' +
+  'It is not the user: answer as /workbench\'s "Agents on the web chat" says, with `wb chat reply --to <id>`.)'
+export function agentOf(m: Row): string {
+  return m.role === 'agent' && /^[a-z0-9-]{1,32}$/.test(String(m.from ?? '')) ? String(m.from) : ''
+}
+// The prompt a web message is submitted as: the user's `[web chat] …`, an agent's `[agent <name>] …`
+export function chatPrompt(m: Row, about = ''): string {
+  const agent = m.role === 'agent' // a name wb never makes is no name: never the user's prefix
+  const head = agent ? `[agent ${agentOf(m) || 'unknown'}]` : WEB
+  // an agent's later lines indented: none of them starts as the user's `[web chat]`, a `[message …]`
+  // line or the mod's own markers (#1042 review)
+  const said = agent ? String(m.text ?? '').split(/\r\n|[\r\n\u2028\u2029]/).join('\n  ') : String(m.text ?? '')
+  return `${head} ${about}${said}${attachedLines(m.files)}` +
+    (agent ? `\n[message ${String(m.id ?? '')}: answer with wb chat reply --to ${String(m.id ?? '')}]` : '')
+}
+
 // A web message's attachments (#623), one line each after the user's words, so Claude can Read
 // each file wb chat saved on this machine (an image is seen, a PDF or text read)
 export function attachedLines(files: unknown): string {
@@ -297,6 +319,12 @@ const speechOf = (focus: WbTask | undefined, doing: string, list: WbTask[], on: 
   return { pose: working ? 'work' : 'think', say: doing || focus.last || `${focus.phase}…`, more: '', color: COLOR[focus.phase] ?? 'claude' }
 }
 
+// A task's model as its row shows it: an API task's with its badge, `API · <model>` (the
+// provider's own id cut off, as the GPU's label is short), a GPU task's label (#1016)
+export function modelOf(t: Pick<WbTask, 'via' | 'model' | 'label'>): string {
+  return t.via === 'api' ? `API · ${t.model.split('/').pop()}` : t.label || t.model
+}
+
 // The frame a pose shows at a tick: a stroke of the wrench now and then while working, else a
 // blink now and then.
 const frameOf = (pose: Pose, tick: number): Pose => {
@@ -314,7 +342,7 @@ function pageParts(list: WbTask[], watched: WbLive, delegating: boolean, now: nu
   // The history is drawn, newest within HISTORY_CHARS: the engine scrolls the pane (arrows,
   // while focused) and follows the end as lines arrive. What the agent is doing now is the
   // apprentice's to say.
-  const all = watched.lines.filter(l => !['activity', 'clock', 'meta'].includes(l.s))
+  const all = watched.lines.filter(l => !['activity', 'clock', 'meta', 'routed'].includes(l.s))
   let from = all.length // (each line was cut to LINE_CHARS when read)
   for (let used = 0; from > 0 && used + (all[from - 1].t?.length ?? 0) + 1 <= HISTORY_CHARS; from--)
     used += (all[from - 1].t?.length ?? 0) + 1
@@ -322,11 +350,12 @@ function pageParts(list: WbTask[], watched: WbLive, delegating: boolean, now: nu
   const doing = watched.lines.find(l => l.s === 'activity')
   const clock = watched.lines.find(l => l.s === 'clock')
   const meta = watched.lines.find(l => l.s === 'meta')
+  const routed = watched.lines.find(l => l.s === 'routed') // how its model was chosen (#1016)
   const focus = focusOf(list, watched.task)
   const sp = speechOf(focus, doing?.t ?? '', list, delegating)
   const busy = sp.pose === 'work' || sp.pose === 'think'
   return {
-    when, from, history, meta, focus, sp, busy,
+    when, from, history, meta, routed, focus, sp, busy,
     // The bubble's inner width beside the apprentice (its columns, the mouth's, the border and
     // padding), or beside the face on one line; each line drawn whole, never squeezed.
     room: Math.max(10, pixels ? cols - COLUMNS - 1 - 4 : cols - 4),
@@ -361,7 +390,7 @@ export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, 
   let rows = 0
   for (const t of list) {
     rows += line(`${t.phase === 'running' ? spin : MARK[t.phase] ?? '•'} ${t.name} ${t.phase} · round ${t.round} · ` +
-      `${t.label || t.model}${t.tests ? ` · tests ${t.tests}` : ''} · ${page.when(t)}`)
+      `${modelOf(t)}${t.tests ? ` · tests ${t.tests}` : ''} · ${page.when(t)}`)
     for (const l of t.name === watched.task ? [] : t.recent) rows += line(`  ${clip(l, cols - 2)}`)
     if (t.allowed) for (const l of wrapWords(t.allowed, cols - 2)) rows += line(`  ${l}`)
     if (t.name !== watched.task && t.recent.length === 0) rows += line(`  ${clip(t.last, cols - 2)}`)
@@ -370,6 +399,7 @@ export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, 
   if (watched.task) {
     rows += line(clip(`── ${watched.task} · ↑↓ scrolls ` + '─'.repeat(cols), cols))
     if (page.meta) rows += line(page.meta.t)
+    if (page.routed) rows += line(page.routed.t)
     if (page.from > 0) rows += line(`… ${page.from} earlier lines: \`wb watch ${watched.task}\` has them all`)
     for (const l of page.history) rows += line(l.t || ' ')
   }
@@ -585,6 +615,25 @@ const CODING_RULES: Record<string, string> = {
     'and when it stays stuck, report the blocker to the user and keep the work with the agent. ' +
     'They say when you write code; then record their words with `wb coding allow <task> --edit ' +
     '"…" --said "<their words>"`.',
+}
+
+// Dynamic workflows (#1041), the user's choice (`wb workflows`): whether Claude may run several
+// tasks at once for one request. Off (the default) adds nothing: the skill says one at a time.
+const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb workflows` shows it): you may split a ' +
+  'request into several tasks that run at once, mixing roles and the GPU and API sides; each runs on its own ' +
+  'role\'s model, never one you pick. Plan the fan-out as a handoff plan (each task its own spec, size, role and ' +
+  'acceptance command), name its tasks with one shared prefix, and say the plan in one line before you start them. ' +
+  'The GPU lease and the provider slots decide what runs together (`--queue` the rest). Review each result on its ' +
+  'own merits; merge logic first, then tests, then UI or docs.'
+const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb workflows` shows it): run one task ' +
+  'at a time again, as the /workbench skill says.'
+
+async function workflowsMode($: any): Promise<string> {
+  try {
+    return JSON.parse(await $.fs.read(`${mem.root}/workflows.json`)).mode === 'on' ? 'on' : 'off'
+  } catch {
+    return 'off'
+  }
 }
 
 // The pane's Claude coding row (#93), in order; the choice is wb's (`wb coding`), the sentence is
@@ -1628,9 +1677,9 @@ const money = (v: number) => Number.isInteger(v) ? `$${v}` : `$${v.toFixed(2)}`
 
 // The roles in one line, as routes.summary says it (Couplings: the two read alike)
 export function routesSummary(doc: Row): string {
-  const roles = (doc.roles ?? {}) as Record<string, Row>
-  return ROLES.map(r => {
-    const row = roles[r] ?? {}
+  const rows = (doc.roles ?? {}) as Record<string, Row>
+  const roles = ROLES.map(r => {
+    const row = rows[r] ?? {}
     const gpu = typeof row.gpu === 'string' && row.gpu ? row.gpu : 'auto'
     const thinking = row.thinking === 'on' ? 'on' : 'off'
     if (row.via === 'api') return `${r} API ${row.api}, thinking ${thinking}`
@@ -1638,7 +1687,10 @@ export function routesSummary(doc: Row): string {
     if (row.api) text += `, API kept: ${row.api}`
     if (thinking === 'on') text += ', thinking on'
     return text
-  }).join('; ')
+  })
+  // the Agents switch (#1016): routes.json `use`, over each role's own while it isn't Both
+  const use = doc.use === 'gpu' ? 'GPU' : doc.use === 'api' ? 'API' : ''
+  return (use ? `Agents ${use}, over each role's own: ` : '') + roles.join('; ')
 }
 
 // A document wb would read (routes.normalize's checks, in short): else it can't be read
@@ -1646,6 +1698,7 @@ function routesValid(doc: unknown): doc is Row {
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return false
   const d = doc as Row
   if (d.day_usd != null && !(typeof d.day_usd === 'number' && d.day_usd > 0)) return false
+  if (![undefined, 'gpu', 'api', 'both'].includes(d.use)) return false
   if (d.roles === undefined) return true
   if (!d.roles || typeof d.roles !== 'object' || Array.isArray(d.roles)) return false
   return Object.entries(d.roles as Row).every(([r, row]: [string, any]) => (ROLES as readonly string[]).includes(r) &&
@@ -1670,7 +1723,7 @@ async function readRoutes($: any): Promise<Routes> {
   if (!routesValid(doc)) return { said: 'routes.json can\'t be read (wb route says why)', api: false, cap: null }
   const rows = Object.values((doc.roles ?? {}) as Record<string, Row>)
   const cap = typeof doc.day_usd === 'number' ? doc.day_usd : null
-  const plain = cap === null && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
+  const plain = cap === null && (doc.use ?? 'both') === 'both' && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
     !r.api && (r.thinking ?? 'off') === 'off')
   return { said: plain ? '' : routesSummary(doc) + (cap !== null ? `. Day cap ${money(cap)}` : ''), api: rows.some(r => !!r.api), cap }
 }
@@ -1999,7 +2052,7 @@ type Said = WbSaid
 // again in that conversation, sayRules waited for it for good: turning wakes off mid-session
 // never said WAKE_OFF_NOTE, and Claude ended its turn waiting for a wake that would not come.
 // A conversation's first context block (a /clear's, a compaction's) sets it again.
-const saidState = atom({ plugin: 'workbench', key: 'said' } as const, null as WbSaid | null, { shape: 'said-2' })
+const saidState = atom({ plugin: 'workbench', key: 'said' } as const, null as WbSaid | null, { shape: 'said-3' })
 async function setSaid($: any, said: Said) {
   mem.said = said
   await update($, saidState, () => said).catch(() => {}) // mem has it for this load either way
@@ -2009,7 +2062,7 @@ async function wanted($: any, delegating: boolean, notesToo = true): Promise<Sai
   const notes = delegating && notesToo ? (await $.fs.read(`${mem.root}/notes.md`).catch(() => '')).trim() : ''
   const any = delegating || mem.open.size > 0
   return { notes, wakeOff: !mem.wake && any, coding: any ? await codingMode($) : 'decide',
-    routes: any ? (await readRoutes($)).said : '' }
+    routes: any ? (await readRoutes($)).said : '', workflows: any ? await workflowsMode($) : 'off' }
 }
 
 // The rules this conversation lacks now, as text, counted as said. Notes come once (Claude adds
@@ -2017,7 +2070,7 @@ async function wanted($: any, delegating: boolean, notesToo = true): Promise<Sai
 // answered in this load (a reload), nothing is known of what it holds: it is all still to say.
 async function unsaid($: any, delegating: boolean): Promise<string[]> {
   const want = await wanted($, delegating, !mem.said?.notes) // said once: not read at every poll
-  const was = mem.said ?? { notes: '', wakeOff: false, coding: 'decide', routes: '' } // after the await: no other caller in between
+  const was = mem.said ?? { notes: '', wakeOff: false, coding: 'decide', routes: '', workflows: 'off' } // after the await: no other caller in between
   const out: string[] = []
   if (want.notes && !was.notes) out.push(NOTES_NOTE(want.notes))
   if (want.wakeOff && !was.wakeOff) out.push(WAKE_OFF_NOTE)
@@ -2025,8 +2078,9 @@ async function unsaid($: any, delegating: boolean): Promise<string[]> {
   if (any && want.coding !== was.coding) out.push(want.coding === 'decide' ? CODING_DECIDE : CODING_RULES[want.coding])
   // the roles (#1014): any change, however made (the dialog, the pane, a terminal, a hand edit)
   if (any && want.routes !== was.routes) out.push(was.routes ? ROUTES_CHANGED(want.routes) : ROUTES_NOTE(await readRoutes($)))
+  if (any && want.workflows !== was.workflows) out.push(want.workflows === 'on' ? WORKFLOWS_RULE : WORKFLOWS_OFF) // #1041
   await setSaid($, { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding,
-    routes: any ? want.routes : was.routes })
+    routes: any ? want.routes : was.routes, workflows: any ? want.workflows : was.workflows })
   return out
 }
 
@@ -2102,6 +2156,10 @@ const mem = {
   chatExpired: new Set<string>(), // web messages wb said are too old to pass on (#536): not asked again
   chatQueued: new Map<string, string>(), // web messages whose receipt says queued (id → by): read once a turn ends
   chatOwed: new Map<string, Owed>(), // web messages passed to Claude with no reply in the chat yet (#767)
+  chatTurn: new Map<string, number>(), // web messages given to Claude: turn ends to skip before theirs (#1042)
+  chatTurnSize: -1, // messages.jsonl's size when the turn started: grown, it may hold a reply (#1042)
+  agentTurn: new Map<string, string>(), // an agent's message given to Claude (id → its name): its turn's dialogs go to the page (#1042)
+  chatAsks: new Map<string, ChatAsk>(), // dialogs on the page this session waits on: whose call (#1042)
   listenerAt: new Map<string, number>(), // another session's chat listener (pid@start), when last seen alive (#839)
   submitted: false, // this mod submitted a prompt while Claude was idle, and no turn has started since (#837)
   chatUrlAt: 0, // when the web chat's link was last looked up
@@ -2350,6 +2408,9 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
     list.push({
       name: sp.name, phase, round: Number(st.round ?? 1), model: String(sp.model ?? ''),
       label: String(sp.model_label ?? ''),
+      // how it was routed (#1016): task.json's via, role and provider, and its routing line
+      via: sp.via === 'api' ? 'api' : 'gpu', role: String(sp.role ?? ''), provider: String(sp.provider_name ?? sp.provider ?? ''),
+      routed: String(sp.route ?? ''),
       tests: st.tests ? (st.tests.ok ? 'pass' : 'fail') : null,
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
       tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
@@ -2780,7 +2841,7 @@ export function askQuestions(questions: unknown): unknown {
 }
 
 // The PermissionRequest answer from the user's answer in the chat, else undefined (the dialog)
-async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSignal) {
+async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSignal, o: AskFor = {}) {
   const kind = KIND[tool] ?? 'permission'
   const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
   // `--opt=value`: a value starting with `-` was read as a flag (#535)
@@ -2788,6 +2849,7 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
   // this session's `wb events` process: once it's gone wb expires the ask, so a card left by a
   // crashed or closed session doesn't stay open for good, and pushes don't show it (#538)
   if (mem.eventsPid) args.push(`--pid=${mem.eventsPid}`)
+  args.push(...askForArgs(o))
   if (kind === 'question') args.push(`--detail=${JSON.stringify({ questions: askQuestions(i.questions) })}`)
   // what the call is for, as Claude described it (Bash's description): the card leads with it
   if (kind === 'permission' && typeof i.description === 'string' && i.description.trim())
@@ -2805,18 +2867,86 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
   const [id, state] = (posted.out.split('\n').pop() || '').split(' ')
   if (!posted.ok || !id?.startsWith('ask-')) { // the away user is told where it waits, not left guessing (#535)
     const what = kind === 'plan' ? 'a plan' : kind === 'question' ? 'a question' : 'a permission'
-    await runWb($, ['chat', 'reply', `--text=Claude is waiting on ${what} in the terminal: it couldn't be shown here.`], 15_000)
+    await runWb($, ['chat', 'reply', `--text=Claude is waiting on ${what} in the terminal: it couldn't be shown here.`, '--to=user'], 15_000)
     $.ui.toast(`workbench: ${what} couldn't go to the web chat (${brief(posted.out)}): answer it here`)
     return undefined
   }
   if (state === 'allow') return { behavior: 'allow' as const }  // their setting: go ahead while away
   if (state === 'expired') return undefined  // a plan wb can't show: the dialog, in the terminal
   mem.asksOpen.add(id)
+  const unwatch = watchAsk($, id, { tool, agent: o.agent ?? '', input: i, here: !!o.here, at: await $.clock.now() }, signal)
   try {
-    return await waitOnChat($, id, kind, i, signal)
+    return await waitOnChat($, id, kind, i, signal, o)
   } finally {
     mem.asksOpen.delete(id)
+    unwatch()
   }
+}
+
+// Dialogs while Claude works on another agent's request (#1042, the owner's rule): from an
+// `[agent <name>]` prompt until that turn ends, Claude Code's dialogs go to the human on the web
+// page, with a push, as they do while the user is away, even when the user is at the terminal;
+// the terminal's dialog stands too, and whichever answers first settles it. An agent's token
+// can't answer them (wb chat serve's 403), and the page says whose request it is ("for <name>").
+// At the terminal the user's away setting ("Let Claude go ahead") doesn't answer it (`--here`).
+type AskFor = { for?: string[]; here?: boolean; agent?: string }
+
+// The agents whose message the running turn took: given now (grace 0), their turn not yet ended
+export function agentsFor(turn: Map<string, number>, agents: Map<string, string>): string[] {
+  return [...new Set([...agents].filter(([id]) => turn.get(id) === 0).map(([, name]) => name))]
+}
+
+export function askForArgs(o: AskFor): string[] {
+  return [...(o.for ?? []).map(n => `--for=${n}`), ...(o.for?.length && o.here ? ['--here'] : [])]
+}
+
+// An ask on the page is withdrawn the moment its dialog is settled elsewhere: the hook's signal
+// aborts (the terminal answered, or Esc), or the engine's call goes on past its permission check
+// (askSettledHere). The page was left with a card the terminal had already answered, which the
+// user could still tap. Withdrawn is `expired` by `interrupted`: the page says "settled in the
+// terminal". Returns the unwatch.
+type ChatAsk = { tool: string; agent: string; input: Record<string, unknown>; here: boolean; at: number }
+function watchAsk($: any, id: string, ask: ChatAsk, signal?: AbortSignal): () => void {
+  mem.chatAsks.set(id, ask)
+  const stop = () => { void withdrawAsk($, id) }
+  signal?.addEventListener?.('abort', stop, { once: true })
+  return () => {
+    mem.chatAsks.delete(id)
+    signal?.removeEventListener?.('abort', stop)
+  }
+}
+
+// One asked with the user at the terminal (`here`) and settled there counts as using the terminal,
+// as termDialogDone: the push it sent, tapped, made the user away, and the answer here submitted
+// no prompt, so later dialogs went to the phone, or "Let Claude go ahead", with them at the terminal.
+async function withdrawAsk($: any, id: string) {
+  if (!mem.asksOpen.has(id)) return // answered on the page, or expired already
+  const ask = mem.chatAsks.get(id)
+  mem.asksOpen.delete(id)
+  mem.chatAsks.delete(id)
+  await runWb($, ['chat', 'answer', id, 'expired', '--by', 'interrupted'], 15_000)
+  if (ask?.here && await webAt($) >= ask.at) await back($)
+}
+
+// The engine's call `e` went on past its permission check: its dialog, still open on the page, was
+// answered in the terminal. Its own dialog only, matched by its input too (sameCall): by tool and
+// loop alone, a Read allowed by a rule finishing beside one asking withdrew that one's card, and a
+// user away was left with the dialog in a terminal nobody watched (the #1042 review).
+async function askSettledHere($: any, e: Row) {
+  const agent = String(e.agentId ?? '')
+  const id = [...mem.chatAsks].find(([k, a]) => a.tool === e.tool && a.agent === agent && mem.asksOpen.has(k)
+    && sameCall(a.input, e))?.[0]
+  if (id) await withdrawAsk($, id)
+}
+
+// Whether the tool.call input `e` is the call the dialog's `input` asked about: every argument both
+// carry is the same, and they share one unless the call has none of its own (the engine adds some
+// to the dialog's: ExitPlanMode's model input is empty, its dialog's carries the plan and its file)
+const CALL_KEYS = new Set(['tool', 'tool_use_id', 'agentId', 'consent', 'requestMeta'])
+export function sameCall(input: Record<string, unknown>, e: Record<string, unknown>): boolean {
+  const keys = Object.keys(input).filter(k => k in e)
+  return (keys.length > 0 || !Object.keys(e).some(k => !CALL_KEYS.has(k)))
+    && keys.every(k => JSON.stringify(input[k]) === JSON.stringify(e[k]))
 }
 
 // A dialog while the user is at the terminal stays there, and the phone is told one waits (#959):
@@ -2868,8 +2998,11 @@ async function termDialogDone($: any, d: TermDialog) {
   if (!d.sending) void noticeDone($, d)
 }
 
-async function waitOnChat($: any, id: string, kind: string, i: Record<string, unknown>, signal?: AbortSignal) {
-  $.ui.toast(`workbench: ${kind === 'plan' ? 'the plan' : kind === 'question' ? "Claude's question" : 'a permission prompt'} is waiting for you in the web chat`)
+async function waitOnChat($: any, id: string, kind: string, i: Record<string, unknown>, signal?: AbortSignal, o: AskFor = {}) {
+  const what = kind === 'plan' ? 'the plan' : kind === 'question' ? "Claude's question" : 'a permission prompt'
+  $.ui.toast(o.here && o.for?.length ? `workbench: ${what} for agent ${o.for.join(', ')} is in the web chat too: answer it here or there`
+    : `workbench: ${what} is waiting for you in the web chat`)
+  const ask = o.for?.length ? 'wb chat reply --to user' : 'wb chat reply' // in an agent's turn, the user's thread (#1042)
   const deadline = (await $.clock.now()) + ASK_WAIT_MS
   while (!signal?.aborted) {
     const left = deadline - (await $.clock.now())
@@ -2888,8 +3021,8 @@ async function waitOnChat($: any, id: string, kind: string, i: Record<string, un
       return { behavior: 'deny' as const, message: kind === 'plan'
         ? `The user wants changes to the plan before you go ahead (from the web chat).${note} Revise the plan, then present it again.`
         : kind === 'question'
-          ? `The user didn't pick an answer in the web chat.${note} Ask them there (wb chat reply) instead.`
-          : `The user said no in the web chat.${note} Ask them there (wb chat reply) what to do instead.` }
+          ? `The user didn't pick an answer in the web chat.${note} Ask them there (${ask}) instead.`
+          : `The user said no in the web chat.${note} Ask them there (${ask}) what to do instead.` }
     }
     if (a.answer) break  // expired elsewhere
   }
@@ -3021,7 +3154,7 @@ async function listen($: any, now: number) {
   }
   for (const m of await unread($, dir)) {
     const id = String(m.id ?? '')
-    if (m.from !== 'user' || !id || mem.chatSent.has(id) || mem.chatExpired.has(id)) continue
+    if ((m.from !== 'user' && !agentOf(m)) || !id || mem.chatSent.has(id) || mem.chatExpired.has(id)) continue
     if ((mem.chatRetry.get(id) ?? 0) > now) continue // its prompt was dropped: again in a minute
     // Claimed under wb's lock: two sessions starting together both took the chat and both
     // submitted it, each guard knowing only its own sends (#84). Refused: another session's, or
@@ -3043,11 +3176,11 @@ async function listen($: any, now: number) {
     const about = !a ? ''
       : a.audio ? `(keeps take ${Number(a.n)} of the shortlist: ${String(a.path ?? a.name ?? '')}) `
       : `(about ${String(a.task)}, step ${Number(a.step)}, screenshots ${Number(a.n)}) `
-    const text = `${WEB} ${about}${String(m.text ?? '')}${attachedLines(m.files)}`
+    const text = chatPrompt(m, about)
     // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is
     // refused, as a prompt of its own (which waits for the turn to end).
     if (mem.busy) {
-      const r = await $.session.send({ to: { sessionId: await $.session.id() }, text: `${text}\n\n${WEB_NOTE}` })
+      const r = await $.session.send({ to: { sessionId: await $.session.id() }, text: `${text}\n\n${agentOf(m) ? AGENT_NOTE : WEB_NOTE}` })
         .catch(() => ({ isDelivered: false }))
       if (r.isDelivered) await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', 'now'])
       else void sendWeb($, id, text, 'queued', st.key)
@@ -3059,6 +3192,8 @@ async function listen($: any, now: number) {
       mem.chatOwed.set(id, { at: now, grace: mem.submitted ? 1 : 0, nudged: false })
       void sendWeb($, id, text, 'now', st.key)
     }
+    mem.chatTurn.set(id, mem.chatOwed.get(id)?.grace ?? 0) // its turn's end goes to turns.jsonl (#1042)
+    if (agentOf(m)) { mem.agentTurn.set(id, agentOf(m)); $.ui.toast(`workbench: a message from agent ${agentOf(m)}`); continue } // never the user away
     await $.fs.write(awayFile(), JSON.stringify({ at: now / 1000, by: st.key })).catch(() => {})
     $.ui.toast('workbench: a message from the web chat')
   }
@@ -3098,6 +3233,7 @@ async function sendWeb($: any, id: string, text: string, how: string, by: string
     mem.submitted = false
     mem.chatSent.delete(id)
     mem.chatOwed.delete(id) // not given to Claude: nothing owed yet
+    mem.chatTurn.delete(id)
     mem.chatRetry.set(id, (await $.clock.now()) + REWAKE_MS)
     return
   }
@@ -3138,10 +3274,34 @@ async function owedAtTurnEnd($: any) {
     if (o.grace > 0) { o.grace--; continue }
     if (!o.nudged) { o.nudged = true; nudge = true; continue }
     mem.chatOwed.delete(id)
-    await runWb($, ['chat', 'reply', `--text=${OWED_POSTED}`], 15_000)
+    await runWb($, ['chat', 'reply', `--text=${OWED_POSTED}`, `--to=${id}`], 15_000)
   }
   if (nudge && !mem.queued.includes(OWED_NOTE)) mem.queued.push(OWED_NOTE)
   owedSettled()
+}
+
+// The turn-end record (#1042): `wb chat ended <ids>` once a main-loop turn ends, the ids the web
+// messages that turn took (a queued one, `grace`, only the turn after), so an agent's GET /api/wait
+// knows Claude is done with its message; with none, when messages.jsonl grew in the turn (a reply
+// Claude wrote, maybe a later report), so a wait on that reply ends too. Nothing while the chat is off.
+async function chatTurnStart($: any) {
+  mem.chatTurnSize = (await read($, chat)).web
+    ? (await $.fs.stat(`${mem.root}/chat/messages.jsonl`).catch(() => undefined))?.size ?? 0 : -1
+}
+async function chatTurnEnd($: any) {
+  const ids: string[] = []
+  for (const [id, grace] of [...mem.chatTurn]) {
+    if (grace > 0) mem.chatTurn.set(id, grace - 1)
+    else { mem.chatTurn.delete(id); ids.push(id) }
+  }
+  for (const id of [...mem.agentTurn.keys()]) if (!mem.chatTurn.has(id)) mem.agentTurn.delete(id) // their turn is over
+  for (const id of [...mem.chatAsks.keys()]) if (!mem.asksOpen.has(id)) mem.chatAsks.delete(id) // a hook dropped outright
+  const was = mem.chatTurnSize
+  mem.chatTurnSize = -1
+  const grew = was >= 0 && ((await $.fs.stat(`${mem.root}/chat/messages.jsonl`).catch(() => undefined))?.size ?? 0) > was
+  if (!ids.length && !grew) return
+  const { ok, out } = await runWb($, ['chat', 'ended', ...ids, '--by', (await read($, chat)).key], 15_000)
+  if (!ok) warnOnce($, 'chat-ended', `wb chat ended failed: ${brief(out)}`)
 }
 
 // A queued web message enters at the running turn's next step or as the next turn, so once that
@@ -3706,6 +3866,7 @@ export const register: Register = (on, options) => {
       const agent = e.agentId ?? ''
       const d = mem.termDialogs.find(d => d.tool === e.tool && d.agent === agent)
       if (d) await termDialogDone($, d)
+      await askSettledHere($, e as Row) // its card on the page too (#1042)
     }
   })
 
@@ -3719,13 +3880,14 @@ export const register: Register = (on, options) => {
     if (r.decision) return r
     const st = await read($, chat)
     if (!st.delegating || !st.web) return r
-    if (!(await away($, st))) {
+    const isAway = await away($, st), forAgents = agentsFor(mem.chatTurn, mem.agentTurn) // an agent's turn: the page too (#1042)
+    if (!isAway && !forAgents.length) {
       const kind = KIND[e.tool_name] ?? 'permission'
       mem.termDialogs.push({ tool: e.tool_name, agent: (e as any).agent_id ?? '', at: await $.clock.now(), kind,
         text: kind === 'permission' ? askText(e.tool_input) : '', id: '', sending: false, done: false })
       return r
     }
-    const decision = await askOnChat($, e.tool_name, e.tool_input, next.signal)
+    const decision = await askOnChat($, e.tool_name, e.tool_input, next.signal, { for: forAgents, here: !isAway, agent: (e as any).agent_id ?? '' })
     return decision ? { ...r, decision } : r
   })
 
@@ -3767,7 +3929,7 @@ export const register: Register = (on, options) => {
 
   // Typed in the terminal: the user is back, so answers go here again
   on('prompt.submit', async ($, e, next) => {
-    if (byUser(e) && !e.text.startsWith(WEB) && !e.text.startsWith('[workbench]')) {
+    if (byUser(e) && !e.text.startsWith(WEB) && !e.text.startsWith(AGENT) && !e.text.startsWith('[workbench]')) {
       await back($)
       mem.chatOwed.clear() // back at the terminal: an answer there reaches them (#767)
       owedSettled()
@@ -3845,6 +4007,7 @@ export const register: Register = (on, options) => {
     await setSaid($, want)
     if (want.coding !== 'decide' && had?.coding !== want.coding) blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
     if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
+    if (want.workflows === 'on' && had?.workflows !== 'on') blocks.push({ name: 'dynamic-workflows', text: WORKFLOWS_RULE })
     if (isAway) blocks.push({ name: 'web-chat', text: AWAY_NOTE })
     if (want.wakeOff && !had?.wakeOff) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
     if (want.routes && had?.routes !== want.routes) { // read while delegating or with a task open, as `wanted` does
@@ -3868,6 +4031,7 @@ export const register: Register = (on, options) => {
     if (!e.agentId) {
       mem.busy = true
       mem.submitted = false
+      void chatTurnStart($)
       void poll($) // the chat page shows "working" now
     }
     return next(e)
@@ -3884,6 +4048,7 @@ export const register: Register = (on, options) => {
       mem.busy = false
       mem.skillTurn = false
       if (mem.chatQueued.size) void readQueued($)
+      void chatTurnEnd($)
       await owedAtTurnEnd($)
       mem.sawTurn = true
       mem.turnEndedAt = await $.clock.now()
@@ -4096,7 +4261,7 @@ export const register: Register = (on, options) => {
     // cutting them off: the pane can't be made wider.
     const pixels = (e as Row).surface === 'terminal' && Number(props.scroll?.bodyRows ?? 24) >= 20 && cols >= 40
     const page = pageParts(list, watched, delegating, now, spin, cols, pixels)
-    const { when, from, history, meta, focus, sp, busy } = page
+    const { when, from, history, meta, routed, focus, sp, busy } = page
     const lines = (text: string, props: Record<string, unknown>) =>
       wrapWords(text, page.room).map(l => <Text {...props} wrap="truncate-end">{l}</Text>)
     const said = [
@@ -4147,7 +4312,7 @@ export const register: Register = (on, options) => {
               <Text bold>{t.name}</Text>
               <Text color={COLOR[t.phase] ?? 'text'}> {t.phase}</Text>
               <Text dimColor>
-                {' '}· round {t.round} · {t.label || t.model}
+                {' '}· round {t.round} · {modelOf(t)}
                 {t.tests ? ` · tests ${t.tests}` : ''} · {when(t)}
               </Text>
             </Text>
@@ -4164,6 +4329,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column">
             <Text dimColor>{clip(`── ${watched.task} · ↑↓ scrolls ` + '─'.repeat(cols), cols)}</Text>
             {meta && <Text dimColor>{meta.t}</Text>}
+            {routed && <Text dimColor>{routed.t}</Text>}
             {from > 0 && <Text dimColor>… {from} earlier lines: `wb watch {watched.task}` has them all</Text>}
             {history.map(l => (
               <Text {...(LINE_STYLE[l.s] ?? {})}>{l.t || ' '}</Text>

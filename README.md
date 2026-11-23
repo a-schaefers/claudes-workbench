@@ -79,6 +79,7 @@ directing for you.
 `/workbench-quit` stops the agents and keeps their work for later.
 `/workbench-quit-and-hand-back-claude` has Claude finish their tasks itself.
 `/workbench-update` installs the latest workbench (Claude Code tells you when there's one).
+Another agent can hand Claude work over the web chat's API: [docs/chat-api.md](docs/chat-api.md).
 
 ## License
 

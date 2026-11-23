@@ -202,6 +202,14 @@ def weights_changed(m: models.Model) -> bool:
     return bool(now and seen and now not in seen)
 
 
+def record_role(role: str | None) -> str | None:
+    """The role whose record ranks and times a task, given task.json's or wb start's `role`:
+    writing's own (#1025), else None, its size's, as before roles. #1016 writes a role for every
+    task, and a coding one read as its role timed a `--size` other than its role's on the wrong
+    record (wave 2's merge)."""
+    return role if role == "writing" else None
+
+
 def of_role(row: dict, role: str) -> bool:
     """Whether a results row is a record of ``role``'s work: its `role`, else its `size` (a row
     from before the roles). Writing slices like significant work (decision 1 of #1008), but a

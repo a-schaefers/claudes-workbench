@@ -471,6 +471,22 @@ async function run(engine, device) {
       await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('After the update.'))
     } finally { utimesSync(css, was.atime, was.mtime) }
   })
+  await check('the strip over the thread names each open task\'s model, GPU or API and whose (#1016)', async () => {
+    const t = join(home, 'state/tasks/fix-auth')
+    mkdirSync(t, { recursive: true })
+    writeFileSync(join(t, 'task.json'), JSON.stringify({ name: 'fix-auth', model: 'deepseek/deepseek-flash', via: 'api',
+      provider_name: 'DeepSeek', created_at: Date.now() / 1000 }))
+    writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'running', round: 1, updated_at: Date.now() / 1000 }))
+    try {
+      wb('chat', 'reply', '--text', 'Started fix-auth.')  // a chat change wakes the stream
+      await until(async () => (await page.textContent('#tasks')) === 'Running: fix-auth · API deepseek-flash (DeepSeek)')
+      if (await page.locator('#tasks').isHidden()) throw new Error('the strip is hidden')
+      const width = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)
+      if (!width) throw new Error('the page scrolls sideways')
+    } finally { rmSync(t, { recursive: true, force: true }) }
+    wb('chat', 'reply', '--text', 'Done with fix-auth.')
+    await until(async () => await page.locator('#tasks').isHidden())
+  })
   await check("wb shot's pair: both images labelled, one above the other on a phone, a reply tied to their step", async () => {
     const d = join(home, 'state/tasks/fix-nav/shots/1')
     mkdirSync(d, { recursive: true })
@@ -1010,6 +1026,37 @@ async function run(engine, device) {
       await page.click('#tray .att .x')
       await until(async () => await page.locator('#tray').isHidden())
     } finally { await page.unroute('**/api/upload/*') }
+  })
+  await check("another agent's message shows with its name, and Claude's reply to it comes back through /api/wait (#1042)", async () => {
+    const agent = wb('chat', 'token', 'add', `e2e-${engine}`).trim()
+    const api = (path, body) => fetch(base + path.slice(1), { method: body ? 'POST' : 'GET',
+      headers: { Authorization: `Bearer ${agent}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined }).then(async r => [r.status, await r.json()])
+    const [code, sent] = await api('/api/send', { text: 'review the parser change' })
+    if (code !== 200 || sent.message.role !== 'agent') throw new Error(`send: ${code} ${JSON.stringify(sent)}`)
+    const row = page.locator('.row.agent').last()
+    await until(async () => (await row.locator('.bubble').textContent()) === 'review the parser change')
+    await until(async () => (await row.locator('.meta .agent-name').textContent()) === `e2e-${engine}`)
+    if ((await row.locator('.meta').textContent()).includes('send again')) throw new Error('offered to the user to send')
+    wb('chat', 'reply', '--to', sent.message.id, '--text', 'Reviewed: two nits.')
+    const [, got] = await api(`/api/wait?after=${sent.message.id}&timeout=5`)
+    if (got.replies.map(r => r.text).join() !== 'Reviewed: two nits.') throw new Error(JSON.stringify(got))
+    if ((await api('/api/prefs', { away: 'allow' }))[0] !== 403) throw new Error('an agent changed the settings')
+    // its view is its own conversation: none of the user's messages, no dialogs, no settings
+    const [, st] = await api('/api/state')
+    if (st.asks || st.prefs || st.push || st.savings) throw new Error('an agent read the user\'s state: ' + Object.keys(st))
+    if (st.messages.some(m => m.from === 'user')) throw new Error('an agent read the user\'s messages')
+  })
+  await check("a dialog while Claude works on an agent's request says whose it is, on the page and in the push (#1042)", async () => {
+    const id = wb('chat', 'ask', '--tool', 'Bash', '--text', 'git push origin fix', '--for', `e2e-${engine}`, '--here').split(' ')[0]
+    const card = page.locator('.row.ask').last()
+    await until(async () => (await card.locator('.choices button').count()) === 2)
+    if ((await card.locator('.ask-for').textContent()) !== `for e2e-${engine}`) throw new Error(await card.textContent())
+    const said = await swSays({ now: Date.now() / 1000, asks: [{ id, ts: Date.now() / 1000, tool: 'Bash', text: 'git push origin fix', kind: 'permission', answer: null, for: [`e2e-${engine}`] }], messages: [] })
+    if (said.title !== `Claude wants to use Bash (for e2e-${engine})`) throw new Error(JSON.stringify(said))
+    wb('chat', 'answer', id, 'expired', '--by', 'interrupted')        // answered in the terminal first
+    await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('settled in the terminal'))
+    if (await page.locator('.row.ask').last().locator('.choices').count()) throw new Error('the buttons are still there')
   })
   await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
   await browser.close()

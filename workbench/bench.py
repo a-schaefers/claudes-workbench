@@ -1033,14 +1033,18 @@ def report(run: str | None = None, label: str | None = None) -> str:
     by: dict = {}
     for r in rs:
         by.setdefault((r.get("label") or "-", r["model"]), []).append(r)
+    # `agent tok` and `paid` (#1022) only with an API replay shown: a GPU-only report reads as
+    # before, `local tok` (wave 2's review)
+    api = any(results.api_row(r) for r in rs)
     out = head + [f"{'label':12} {'model':34} {'cases':>5} {'passed':>6} {'rounds':>6} "
-                  f"{'autofix':>7} {'min':>6} {'agent tok':>10} {'paid':>7}"]
+                  f"{'autofix':>7} {'min':>6} {'agent tok' if api else 'local tok':>10}"
+                  + (f" {'paid':>7}" if api else "")]
     for (lab, model), g in sorted(by.items()):
         n = len(g)
         avg = lambda k: sum(r.get(k) or 0 for r in g) / n  # noqa: E731
         out.append(f"{lab[:12]:12} {model[:34]:34} {n:>5} {sum(r['outcome'] == 'passed' for r in g) / n:>6.0%} "
                    f"{avg('rounds'):>6.1f} {avg('auto_fixes'):>7.1f} {avg('minutes'):>6.1f} "
-                   f"{int(avg('tok_in') + avg('tok_out')):>10} {results.paid_cell(g):>7}")
+                   f"{int(avg('tok_in') + avg('tok_out')):>10}" + (f" {results.paid_cell(g):>7}" if api else ""))
     out += use_lines(by)
     have = cases()
     out.append("")

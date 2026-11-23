@@ -2942,8 +2942,11 @@ def _spend_part(task: store.Task) -> str:
 def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     """The compact report Claude reads; kept short on purpose, the diff is fetched separately."""
     spec, st = task.spec, task.status
+    # `agent`, not `local`, for an API task's tokens alone (#1022): a GPU task's line is as it was
+    # (wave 2's review)
+    who = "agent" if spec.get("via") == "api" else "local"
     lines = [f"task {task.name} · {spec['model_label']} · round {n} · {rnd['secs'] / 60:.1f} min"
-             f" · agent tokens {rnd['tok_in']} in / {rnd['tok_out']} out" + _spend_part(task)]
+             f" · {who} tokens {rnd['tok_in']} in / {rnd['tok_out']} out" + _spend_part(task)]
     c = context_state(task)
     if c.get("used") and c.get("window"):
         after = {**st, "round": n + 1}  # judged as the step's next round is (#781)
@@ -3503,6 +3506,29 @@ def _repo_gone(task: store.Task) -> None:
     task.notify("failed", f"task {task.name}: {text}")
 
 
+def left_catalog(task: store.Task) -> str:
+    """The line for an API task whose model OpenCode's catalog no longer lists (#1016): the
+    runner fails the task with it, and wb feedback, next and resume refuse with it. A catalog
+    whose read failed lists nothing (models.hosted is {}): that says so, never that the model
+    left, which would send the user to discard a task a working read would run (#1016's review)."""
+    if why := models.hosted_error():
+        return (f"task {task.name}: {task.spec.get('model')} can't be checked: OpenCode's catalog can't be "
+                f"read now ({why}). Try again once it reads (a failed task: wb resume {task.name})")
+    return (f"task {task.name}: {task.spec.get('model')} left OpenCode's catalog: workbench never "
+            f"switches a task's model. wb takeover {task.name} to finish it, or wb discard {task.name}")
+
+
+def _left_catalog(task: store.Task) -> None:
+    """drive's end for an API task whose model left the catalog: failed, the machine's doing
+    (infra model), before any round: a bare KeyError said `could not load <id>: '<id>'`
+    (robustness minor 5). Never run: a discard records nothing of the model, as _load_failed."""
+    from .results import ran  # results imports this module
+    text = left_catalog(task)
+    task.set_status(phase="failed", last=text[:200], infra="model",
+                    **({} if ran(task) else {"failed_before": "load"}))
+    task.notify("failed", text)
+
+
 def _load_failed(task: store.Task, e: Exception, api: bool = False) -> None:
     """The task failed before its model could run. ``api``: an API model's keyhole couldn't
     start (keyhole_failure), which loads nothing."""
@@ -3870,6 +3896,8 @@ def drive(task: store.Task) -> None:
     try:
         m = models.resolve(task.spec["model"])
     except KeyError as e:
+        if task.spec.get("via") == "api":  # never another model in its place (#1016)
+            return _left_catalog(task)
         return _load_failed(task, e)
     api = m.kind == "api"
     # an API task waits for no GPU (#1015): its first line says so

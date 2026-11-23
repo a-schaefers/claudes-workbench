@@ -30,17 +30,20 @@ import threading
 import time
 from pathlib import Path
 
-from . import models, routes, store
+from . import keyhole, models, routes, store
 
 CHECKIN_SHARE = 0.5      # past this share of the day cap, one check-in a day, across all tasks
 PLAN_PROVIDERS = ("opencode-go",)   # a plan's quota, not dollars (and m.cloud: Ollama cloud)
 EPS = 1e-9               # less than this between two figures is the same figure
-STOP = "the day's API spend cap is reached"
-REFUSED = f"workbench: {STOP}"   # the keyhole's answer to OpenCode: a 400, which it doesn't retry
+STOP = keyhole.SPEND_REFUSED   # the keyhole's answer to OpenCode (a 400, which it doesn't retry) says it
 NO_PRICE = "OpenCode's catalog gives no price for it, so the day cap can't be kept"
 # routes.json without day_usd: #1014 refuses an API role without one, so only a hand-edited file
 # gets here, and an API task then spends nothing rather than without a limit
 NO_CAP = "there is no API day cap (routes.json day_usd): ask the user for one (wb route cap <usd>)"
+# routes.json that can't be read (a hand edit, a value routes.normalize refuses): no cap is known,
+# so the task stops as for NO_CAP, but saying so: NO_CAP's advice there brought up the dialog
+# "every role starts over on the GPU" for a cap that was set (wave 2's review)
+UNREADABLE = "routes.json can't be read ({why}), so the day cap can't be kept: wb route shows it"
 
 
 def ledger_path() -> Path:
@@ -56,20 +59,13 @@ def _routes_path() -> Path:
     return routes.path()
 
 
-def _routes() -> dict:
-    """routes.json (#1014's routes.read). One that can't be read gives no cap, so an API task
-    spends nothing (NO_CAP) rather than without a limit."""
-    try:
-        return routes.read()
-    except routes.RoutesError:
-        return {}
-
-
 _CAP: dict = {}  # routes.json's day_usd by the file's (path, mtime, size): the guard asks per tick
 
 
 def cap() -> float | None:
-    """The day cap in USD (routes.json `day_usd`), or None when the user set none."""
+    """The day cap in USD (routes.json `day_usd`), or None when the user set none or the file
+    can't be read (`no_cap`'s line says which): an API task then spends nothing rather than
+    without a limit."""
     path = _routes_path()
     try:
         st = os.stat(path)
@@ -77,9 +73,18 @@ def cap() -> float | None:
     except OSError:
         at = (str(path), None, None)
     if _CAP.get("at") != at:
-        v = _routes().get("day_usd")
-        _CAP.update(at=at, cap=float(v) if _num(v) and v >= 0 else None)
+        try:
+            v, err = routes.read().get("day_usd"), None
+        except routes.RoutesError as e:
+            v, err = None, str(e)
+        _CAP.update(at=at, cap=float(v) if _num(v) and v >= 0 else None, error=err)
     return _CAP["cap"]
+
+
+def no_cap() -> str:
+    """Why there is no cap: routes.json can't be read (UNREADABLE, with why), else NO_CAP."""
+    cap()
+    return UNREADABLE.format(why=_CAP["error"]) if _CAP.get("error") else NO_CAP
 
 
 def _num(v) -> bool:
@@ -323,8 +328,10 @@ def stop_reason(task) -> str | None:
     stop = task.status.get("api_stop")
     if isinstance(stop, dict) and stop.get("guard") == "spend" and stop.get("text"):
         return str(stop["text"])
+    if not mt.prices:  # however it started (refusal is wb start's): no cap can be kept for it
+        return f"{mt.m.id}: {NO_PRICE}"
     if (c := cap()) is None:
-        return NO_CAP
+        return no_cap()
     if (t := today()["usd"]) >= c:
         return f"{STOP}: {usd(t)} of {usd(c)} today"
     return None
@@ -334,7 +341,7 @@ def stop_text(task) -> str:
     """The `stuck` notice's lead for a spend stop."""
     c, t = cap(), today()["usd"]
     if c is None:
-        return (f"{task.name} stopped: {NO_CAP}. Its work so far is in the worktree; then wb resume "
+        return (f"{task.name} stopped: {no_cap()}. Its work so far is in the worktree; then wb resume "
                 f"{task.name}.")
     return (f"{task.name} stopped: {STOP} ({usd(t)} of {usd(c)} today). Its work so far is in the "
             f"worktree. Ask the user: a higher cap (wb route cap <usd>), the role on the GPU, or "
@@ -483,14 +490,19 @@ class Meter:
         """The keyhole's check before each request: the cap less today less this request at its
         worst (its body's length / 4 at the input price, its max output at the output price).
         Negative: refused, and status `api_stop` (guard `spend`) stops the round on the next
-        tick. None: nothing to keep (a plan, a free model, an unpriced one, which can't start); no
-        cap at all is no room."""
+        tick. None: nothing to keep (a plan, a free model). No cap at all is no room, and so is an
+        unpriced model: wb start refuses one (refusal), and whichever path started it anyway, it
+        ran with no cap at all once #1016's path skipped that check (wave 2's review)."""
         c = cap()
-        if self.plan or self.free or not self.prices:
+        if self.plan or self.free:
             return None
+        if not self.prices:
+            if not self.task.status.get("api_stop"):
+                self.task.set_status(api_stop={"guard": "spend", "text": f"{self.m.id}: {NO_PRICE}"})
+            return -1.0
         if c is None:
             if not self.task.status.get("api_stop"):
-                self.task.set_status(api_stop={"guard": "spend", "text": NO_CAP})
+                self.task.set_status(api_stop={"guard": "spend", "text": no_cap()})
             return -1.0
         top = self.prices[-1]  # the dearest tier: the worst case
         out = next((body.get(k) for k in ("max_tokens", "max_completion_tokens", "max_output_tokens")

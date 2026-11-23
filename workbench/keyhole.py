@@ -119,7 +119,7 @@ KEY_CHARS = re.compile(r"[\x21-\x7e]+")
 CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]{1,8}")
 LINE_CAP = 64 << 10     # a chunk-size or trailer line
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
-SPEND_REFUSED = "the day's API spend cap is reached"  # meter.STOP: a refusal OpenCode doesn't retry
+SPEND_REFUSED = "the day's API spend cap is reached"  # meter.STOP too: a refusal OpenCode doesn't retry
 
 
 class KeyholeError(Exception):
@@ -760,7 +760,7 @@ def _handler(kh: Keyhole):
                 return self.send_json(403, f"keyhole: this task may use only {kh.model.id}")
             if why := kh.refusal(body, len(raw)):  # a 400: OpenCode doesn't retry it (#1019)
                 return self.send_json(400, f"workbench: {_printable(why)}")
-            self.forward(kh.route_body(body, raw))
+            self.forward(kh.route_body(body, raw), body, len(raw))
 
         def do_PUT(self):
             self.refuse_path()
@@ -802,7 +802,11 @@ def _handler(kh: Keyhole):
                 return None
             return self.rfile.read(n)
 
-        def forward(self, raw: bytes):
+        def forward(self, raw: bytes, body: dict | None = None, size: int = 0):
+            """Send ``raw`` on, holding through rate limits and outages (#1020). ``body``, ``size``:
+            the request as asked, whose spend room (kh.refusal, #1019) is asked again before each
+            pass after the first: a hold once sent a request on after another task, or the wait,
+            had used the day's room up (wave 2's review)."""
             heads = {}
             named = {h.strip().lower() for h in (self.headers.get("Connection") or "").split(",")}
             for k, v in self.headers.items():
@@ -820,7 +824,11 @@ def _handler(kh: Keyhole):
             target = urllib.parse.urlsplit(self.path).path + (f"?{query}" if query else "")
             deadline = time.monotonic() + kh.hold
             backoff = BACKOFF[0]
+            first = True
             while True:
+                if not first and body is not None and (why := kh.refusal(body, size)):
+                    return self.send_json(400, f"workbench: {_printable(why)}")  # as do_POST's
+                first = False
                 # another task's 429 on this provider (api-health.json): wait it out first, within
                 # this request's hold
                 cool = kh.cooldown() - time.time()

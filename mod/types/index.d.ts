@@ -5,6 +5,13 @@ export type WbTask = {
   round: number
   model: string
   label: string
+  /** task.json's via (#1016): 'api' for a task on an API model (its row's badge), else 'gpu' */
+  via: 'gpu' | 'api'
+  /** task.json's role ('' before roles) and its provider's name ('' for a GPU task) */
+  role: string
+  provider: string
+  /** task.json's route: how its model was chosen, the routing line ('' for none) */
+  routed: string
   tests: 'pass' | 'fail' | null
   last: string
   createdAt: number
@@ -62,9 +69,9 @@ export type WbTop = { snap: Record<string, any> | null; busy: Record<string, num
 
 /** What this conversation was told of the rules that depend on the state (#540): the user's
  * notes, that wakes are off, the Claude-coding rule, the roles (#1014: routes.summary and
- * `. Day cap $N`, '' while every role is the default and no cap is set); null before its first
- * context block. */
-export type WbSaid = { notes: string; wakeOff: boolean; coding: string; routes: string }
+ * `. Day cap $N`, '' while every role is the default and no cap is set), Dynamic workflows (#1041:
+ * `on` or `off`); null before its first context block. */
+export type WbSaid = { notes: string; wakeOff: boolean; coding: string; routes: string; workflows: string }
 
 declare module 'claude-code' {
   interface PluginState {

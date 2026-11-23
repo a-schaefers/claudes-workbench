@@ -226,6 +226,7 @@
       meta.append(span('', clock(m.ts) + (m.answered ? ' · answered in the terminal ' + clock(m.answered) : ' · answer it in the terminal')))
       return meta
     }
+    if (m.role === 'agent') return agentMeta(meta, m)
     if (m.from === 'claude') {
       meta.append(span('', 'Claude · ' + clock(m.ts) + ' · '))
       const c = document.createElement('button'); c.textContent = 'copy'
@@ -274,8 +275,34 @@
     return meta
   }
 
+  // another agent's message (#1042): its name, then Claude's receipt; never the user's to send again
+  function agentMeta(meta, m) {
+    meta.append(span('agent-name', m.from), span('', ' · ' + (m.received
+      ? (m.received.how === 'queued' ? 'Queued for Claude · ' : 'Read by Claude · ') + clock(m.received.ts)
+      : m.expired ? 'Not passed to Claude · ' + clock(m.ts)
+      : (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ') + clock(m.ts))))
+    return meta
+  }
+
   for (const chip of document.querySelectorAll('.chip')) {
     chip.addEventListener('click', () => { input.value = chip.textContent; grow(); armSend(); input.focus() })
+  }
+
+  // The open tasks in one line over the thread (chat.open_tasks, #1016): which model each runs on,
+  // GPU or API and whose, as the pane's row says it. A server without `tasks` (an older wb): none
+  const ACTIVE = ['queued', 'running', 'testing', 'asking']
+  function tasksLine(tasks) {
+    if (!Array.isArray(tasks) || !tasks.length) return ''
+    return 'Running: ' + tasks.map(t => {
+      const short = String(t.model || '').split('/').pop()
+      const on = t.via === 'api' ? `API ${short}${t.provider_name ? ` (${t.provider_name})` : ''}` : `GPU ${short}`
+      return `${t.name}${ACTIVE.includes(t.phase) ? '' : ` (${t.phase})`} · ${on}`
+    }).join('; ')
+  }
+  function drawTasks() {
+    const el = $('tasks'), text = tasksLine(state.tasks)
+    el.textContent = text
+    el.hidden = !text
   }
 
   function render() {
@@ -301,7 +328,7 @@
         nodes.set(w.key, el)
       }
       if (w.m) {
-        el.className = `row ${w.m.from}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}${w.m.ask && w.m.ask.answer ? ' done' : ''}`
+        el.className = `row ${w.m.role === 'agent' ? 'agent' : w.m.from}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}${w.m.ask && w.m.ask.answer ? ' done' : ''}`
         el.querySelector('.meta').replaceWith(metaFor(w.m))
       }
       if (anchor.nextSibling !== el) anchor.after(el)
@@ -329,6 +356,8 @@
         + (open ? '?' : '') + ' (' + a.tool + ')'
       : (open ? 'Claude wants to use ' : 'Claude asked to use ') + a.tool
     card.append(head)
+    // Claude is working on another agent's request (#1042): the human answers, never the agent
+    if (Array.isArray(a.for) && a.for.length) card.append(span('ask-for', 'for ' + a.for.join(', ')))
     if (a.kind === 'plan') {
       const body = document.createElement('div'); body.className = 'plan bubble-text'
       // a plan wb couldn't read is named by its project, never shown as another one (#253)
@@ -529,7 +558,7 @@
     const b = document.createElement('div'); b.className = 'bubble'
     if (m.about) row.append(span('about-tag', aboutTag(m.about)))
     if (m.files && m.files.length) row.append(makeFiles(m.files))
-    if (m.from === 'user') b.textContent = m.text
+    if (m.from === 'user' || m.role === 'agent') b.textContent = m.text
     else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) {
       if (!seen.has(m.id) && !firstVisit && document.hidden) { unread++; document.title = `(${unread}) Workbench` }
       rich(b, m.text); seen.add(m.id); save(K.seen, [...seen].slice(-500))
@@ -537,7 +566,7 @@
       b.classList.add('flowing'); flows.set(m.id, { text: m.text, shown: 0, el: b })
       if (!flowTimer) flowTimer = setInterval(flowTick, FLOW_MS)
     }
-    if (m.from !== 'user' || m.text) row.append(b)
+    if ((m.from !== 'user' && m.role !== 'agent') || m.text) row.append(b)
     if (m.shots) row.append(makeShots(m.shots))
     if (m.audio) row.append(makeListen(m.audio))
     row.append(document.createElement('div'))
@@ -549,7 +578,7 @@
   let working = null, workTimer = 0
   function drawWorking(list, anchor) {
     const last = [...list].reverse().find(m => !m.local)
-    const on = last && last.from === 'user' && last.received && state.listener && state.listener.busy
+    const on = last && (last.from === 'user' || last.role === 'agent') && last.received && state.listener && state.listener.busy
     if (!on) { if (working) { working.remove(); working = null; clearInterval(workTimer); workTimer = 0 } return }
     if (!working) {
       working = document.createElement('div'); working.className = 'working'
@@ -591,7 +620,8 @@
     if (s.build) build = s.build
     live = true
     if (!quiet) save(K.thread, (s.messages || []).slice(-50))  // a patch without messages: no rewrite (#755)
-    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null }
+    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [] }
+    drawTasks()
     if (!sheet.hidden) drawSettings()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()

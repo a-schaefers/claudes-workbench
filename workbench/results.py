@@ -230,12 +230,9 @@ def _plan(model_id: str) -> str | None:
 
 
 def metered(st: dict) -> float | None:
-    """The runner's live meter in status (#1019's `api.usd`, else `api_spend.cost`), or None."""
-    for key, field in (("api", "usd"), ("api_spend", "cost")):
-        v = st.get(key)
-        if isinstance(v, dict) and _num(v.get(field)):
-            return float(v[field])
-    return None
+    """The runner's live meter in status (#1019's `api.usd`), or None."""
+    v = st.get("api")
+    return float(v["usd"]) if isinstance(v, dict) and _num(v.get("usd")) else None
 
 
 def _step_rows(task: store.Task) -> list[dict]:
@@ -282,7 +279,8 @@ def api_usage(task: store.Task) -> dict | None:
     Summed over every session it had (status `sessions` and `session`: handovers, revives and wb
     next each start one), and `backend`, OpenRouter's served provider (status `served.by`, the
     keyhole's), when known. `source`: "opencode" (OpenCode's own cost, from every session's
-    export), "mixed" (the sessions that exported, the rest filled from the meter), "metered"
+    export, or the runner's meter when it counted more: the day cap's figure, #1019), "mixed" (the
+    sessions that exported, the rest filled from the meter), "metered"
     (the runner's meter, else the step events' cost: a floor, both miss OpenCode's title and
     compaction requests), "plan" (a quota: no dollars), "unknown" (no price anywhere). `cost` is
     None unless known, never 0 for a missing price: a 0 from OpenCode for a model the catalog
@@ -320,6 +318,11 @@ def api_usage(task: store.Task) -> dict | None:
         costs.append(_session_cost(data) if isinstance(data, dict) else None)
     said = [c for c in costs if c is not None]
     if said and len(said) == len(costs) and (sum(said) > 0 or price == 0):
+        # never below the runner's meter, the ledger the day cap counted: it adds the provider's
+        # own usage.cost and answers a steer or stop cut short, which OpenCode doesn't bill, and the
+        # row once said $0.30 where the ledger and the round report said $0.50 (wave 2's review)
+        if (live := metered(st)) is not None and live > sum(said):
+            return {**out, "cost": round(live, 6), "source": "metered"}
         return {**out, "cost": round(sum(said), 6), "source": "opencode"}
     # the meter: the runner's, else the step events' cost (OpenCode's per step, but no step
     # carries its title or compaction requests, so a floor like the meter and labelled as one,
@@ -438,18 +441,26 @@ def table(only: set | None = None) -> str:
         # a GPU model and then an API one (an Ollama `:cloud` id, #1013) keeps two records
         by[(r["model"], "api" if api_row(r) else "gpu", r.get("role") or r.get("size") or "?")].append(r)
     claude = any("claude" in r for r in rows)
-    # 120 columns with claude's: kind and paid (#1022) came out of the model's and agent tok's
-    out = [f"{'model':30} {'kind':4} {'role':11} {'tasks':>5} {'accepted':>8} {'rounds':>6} "
-           f"{'autofix':>7} {'reviews':>7} {'min':>6} {'agent tok':>9} {'paid':>7}"
+    # `kind`, `paid` and `agent tok` (#1022) only with an API row shown: a GPU-only table reads as
+    # before (`size`, `local tok`), and no id is cut, so two long ones never read alike (wave 2's
+    # review: two qwen3-coder quantizations both read `ollama/qwen3-coder:30b-a3b-ins`)
+    api = any(kind == "api" for _, kind, _ in by)
+    width = max([30 if api else 34] + [len(model) for model, _, _ in by])
+    work = "role" if api or any(w not in ("trivial", "significant", "?") for _, _, w in by) else "size"
+    ww = 11 if work == "role" else 12
+    out = [f"{'model':{width}} " + (f"{'kind':4} " if api else "") + f"{work:{ww}} {'tasks':>5} "
+           f"{'accepted':>8} {'rounds':>6} {'autofix':>7} {'reviews':>7} {'min':>6} "
+           + (f"{'agent tok':>9} {'paid':>7}" if api else f"{'local tok':>10}")
            + (f" {'claude':>9}" if claude else "")]
     for (model, kind, role), rs in sorted(by.items()):
         n = len(rs)
         acc = sum(r["outcome"] == "accepted" for r in rs)
         avg = lambda k: sum(r.get(k) or 0 for r in rs) / n  # noqa: E731
-        out.append(f"{model[:30]:30} {kind:4} {role[:11]:11} {n:>5} "  # cut, as bench.report's
+        tok = int(avg('tok_in') + avg('tok_out'))
+        out.append(f"{model:{width}} " + (f"{kind:4} " if api else "") + f"{role[:ww]:{ww}} {n:>5} "
                    f"{acc / n:>7.0%} {avg('rounds'):>6.1f} "
                    f"{avg('auto_fixes'):>7.1f} {avg('reviews'):>7.1f} {avg('minutes'):>6.1f} "
-                   f"{int(avg('tok_in') + avg('tok_out')):>9} {paid_cell(rs):>7}"
+                   + (f"{tok:>9} {paid_cell(rs):>7}" if api else f"{tok:>10}")
                    + (f" {_claude_avg(rs):>9}" if claude else ""))
     if claude:
         unknown = sum("claude" not in r for r in rows)
