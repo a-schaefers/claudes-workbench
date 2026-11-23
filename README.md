@@ -16,7 +16,7 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
 <a href="https://github.com/a-schaefers/claudes-workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/claudes-workbench"></a>
 </p>
 
-- **Claude is the lead, your agents are the crew:** Claude assigns each step to a model
+- **Claude is the lead, your OpenCode agents are the crew:** Claude assigns each step to a model
   sized for it, reviews what comes back, and returns it until it's right.
 - **Agents get Claude's know-how:** a library of skills Claude keeps and grows, handed out per
   task.
