@@ -19,6 +19,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,11 @@ ROLES = ("significant", "trivial", "writing")
 # how the pane names them (#1023); files and commands keep the role names
 LABELS = {"significant": "Complex coding", "trivial": "Trivial coding", "writing": "English writing"}
 VIAS = ("gpu", "api")
+# the Agents switch (#1016, #1023): routes.json `use`, over every role's own `via`; missing is
+# "both", each role as set. `wb route all gpu|api|both` sets it, never a role's via, so going
+# back to Both restores the per-role mix
+USES = ("gpu", "api", "both")
+USE_NAMES = {"gpu": "GPU", "api": "API", "both": "Both"}  # as the dialog and the pane say it
 THINKING = ("off", "on")
 AUTO = "auto"  # the GPU model the router picks: today's behaviour, the default
 BY = ("dialog", "pane", "terminal", "claude")  # who made a role's last change (`by`, `gpu_by`)
@@ -98,7 +104,17 @@ def normalize(doc) -> dict:
             if key in e:
                 row[key] = e[key]
         out[r] = row
-    return {"v": 1, "day_usd": _cap(doc.get("day_usd")), "roles": out}
+    use = doc.get("use", "both")
+    if use not in USES:
+        raise RoutesError(f"use is {use!r}, not {', '.join(USES[:-1])} or {USES[-1]}")
+    return {"v": 1, "use": use, "day_usd": _cap(doc.get("day_usd")), "roles": out}
+
+
+def effective_via(doc: dict, role: str) -> str:
+    """Where ``role``'s tasks run: the Agents switch (`use`) unless it is Both, else the role's own
+    `via`. Everything that decides GPU or API for a role asks this, never `via` (#1016)."""
+    use = doc.get("use", "both")
+    return use if use != "both" else doc["roles"][role]["via"]
 
 
 def read() -> dict:
@@ -199,18 +215,58 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str]) -> 
     return clauses, gated
 
 
+def _goes_to(roles: list, doc: dict, who: Callable[[str], str]) -> str:
+    """`your code goes to DeepSeek (trivial), Anthropic (significant, writing)`: by provider."""
+    by: dict[str, list] = {}
+    for r in roles:
+        by.setdefault(who(doc["roles"][r]["api"]), []).append(r)
+    return "your code goes to " + ", ".join(f"{p} ({', '.join(rs)})" for p, rs in by.items())
+
+
+def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str]) -> tuple[str, bool, list]:
+    """The Agents switch's part of the change line (#1016): ('', False, []) when `use` is as it
+    was; else the clause, whether it takes the user's yes (to API, or to Both when that puts a
+    role back on its API model; never to GPU) and the roles whose side it moves."""
+    was, use = doc.get("use", "both"), new["use"]
+    if was == use:
+        return "", False, []
+    moved = [r for r in ROLES if effective_via(doc, r) != effective_via(new, r)]
+    to_api = [r for r in moved if effective_via(new, r) == "api" and new["roles"][r].get("api")]
+    if use == "gpu":
+        what = ["every role on the GPU; each role's own choice is kept for Both"]
+    elif use == "api":
+        what = ["every role on its API model"]
+        if none := [r for r in ROLES if not new["roles"][r].get("api")]:
+            what.append(f"{', '.join(none)} {'has' if len(none) == 1 else 'have'} no API model and "
+                        "can't start")
+    else:
+        what = ["each role as set: " + ", ".join(f"{r} {_side(new['roles'][r])}" for r in ROLES)]
+    if to_api:
+        what.append(_goes_to(to_api, new, who))
+        if cap is not None:
+            what.append(f"cap {money(cap)}/day")
+    # to Both only when it newly puts a role on API (from GPU): from API it sends nothing new
+    gated = use == "api" or bool(to_api)
+    return f"Agents: {USE_NAMES[was]} → {USE_NAMES[use]} ({'; '.join(what)})", gated, moved
+
+
 def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None = None,
            api: str | None = None, thinking: str | None = None, day_usd=None,
-           who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0]) -> Change:
-    """What a `wb route` does to ``doc``: ``role`` one of ROLES, "all" (``via`` and ``thinking``
-    only) or None (the cap alone). ``who``: an API id's provider, as the user knows it (the
-    catalog's name). Never writes. RoutesError for a change that can't be made: `api` with no
-    API model kept, and the first API role with no cap (NO_CAP)."""
+           who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0], use: str | None = None) -> Change:
+    """What a `wb route` does to ``doc``: ``role`` one of ROLES, "all" (``use``, the Agents
+    switch, and ``thinking`` only) or None (the cap alone). ``who``: an API id's provider, as the
+    user knows it (the catalog's name). Never writes. RoutesError for a change that can't be
+    made: `api` with no API model kept, and the first API role with no cap (NO_CAP)."""
     new = copy.deepcopy(doc)
+    new.setdefault("use", "both")
     if day_usd is not None:
         new["day_usd"] = _cap(day_usd)
+    if use is not None:
+        if use not in USES:
+            raise RoutesError(f"Agents is gpu, api or both, not {use!r}")
+        new["use"] = use
     cap = new["day_usd"]
-    parts, gated, changed, to_api = [], False, [], False
+    parts, gated, changed = [], False, []
     for r in (ROLES if role == "all" else (role,) if role else ()):
         old = doc["roles"][r]
         row = dict(old)
@@ -221,20 +277,30 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
         if thinking is not None:
             row["thinking"] = thinking
         if via == "api" and not row.get("api"):
-            if role != "all":
-                raise RoutesError(f"{r} has no API model yet: wb route {r} <provider/model>")
-            parts.append(f"{r}: stays GPU (no API model set)")
-            row["via"] = old["via"]
-        elif via is not None:
+            raise RoutesError(f"{r} has no API model yet: wb route {r} <provider/model>")
+        if via is not None:
             row["via"] = via
         clauses, g = _role_part(r, old, row, cap, who)
         if not clauses:
             continue
-        to_api |= row["via"] == "api" and (old["via"] != "api" or old.get("api") != row.get("api"))
         parts.append(f"{r}: " + " · ".join(clauses))
         gated |= g
         changed.append(r)
         new["roles"][r] = row  # its stamps kept: stamp() renews the side this change touched
+    held = new["use"]
+    if changed and role != "all" and held != "both" and (
+            via is not None or held == "gpu" and api is not None):
+        # the role's own choice, which the Agents switch holds over for now: never read as moved
+        parts.append(f"Agents is {USE_NAMES[held]}, so this applies once Agents is Both (wb route all both)")
+    agents, g, moved = _agents_part(doc, new, cap, who)
+    if agents:
+        parts.insert(0, agents)
+        gated |= g
+        changed += [r for r in moved if r not in changed]
+    # a role newly sent to an API model, by its own change or the switch
+    to_api = any(effective_via(new, r) == "api" and new["roles"][r].get("api")
+                 and (effective_via(doc, r) != "api" or doc["roles"][r].get("api") != new["roles"][r].get("api"))
+                 for r in ROLES)
     if to_api and cap is None:
         raise RoutesError(NO_CAP)
     if cap != doc["day_usd"]:
@@ -242,7 +308,7 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
         if doc["day_usd"] is not None or not to_api:  # else the role's "cap $N/day" said it
             parts.append(f"day cap {money(doc['day_usd']) if doc['day_usd'] is not None else 'none'}"
                          f" → {money(cap)}/day")
-    if not changed and cap == doc["day_usd"]:  # a "stays GPU" alone changes nothing
+    if not changed and not agents and cap == doc["day_usd"]:
         return Change(new, "", False, [])
     return Change(new, "; ".join(parts), gated, changed)
 
@@ -273,7 +339,9 @@ def summary(doc: dict) -> str:
         if row["thinking"] == "on":
             text += ", thinking on"
         out.append(text)
-    return "; ".join(out)
+    use = doc.get("use", "both")
+    head = f"Agents {USE_NAMES[use]}, over each role's own: " if use != "both" else ""
+    return head + "; ".join(out)
 
 
 def any_api(doc: dict) -> bool:
@@ -289,3 +357,119 @@ def approved(expect: dict) -> dict | None:
     if ok is None or any(ok.get(k) != v for k, v in expect.items()):
         return None
     return ok
+
+
+# wb start --role (#1016): a task's role resolved to its model, GPU or API, never the other side
+class Refused(RoutesError):
+    """wb start can't run the task as asked: the one line, and its exit code (3; 1 for a
+    `--model` that names no model, as before roles)."""
+
+    def __init__(self, msg: str, code: int = 3):
+        super().__init__(msg)
+        self.code = code
+
+
+def role_and_size(role: str | None, size: str | None) -> tuple[str, str]:
+    """wb start's role and size, either given alone: no --role, the size's name (trivial, else
+    significant); no --size, trivial for the trivial role, else significant (writing slices like
+    significant). Both given: the role picks the model, the size the slice and the GPU router's
+    size."""
+    if role is None:
+        role = "trivial" if size == "trivial" else "significant"
+    if size is None:
+        size = "trivial" if role == "trivial" else "significant"
+    return role, size
+
+
+def no_api_model(role: str) -> str:
+    return (f"{role} role has no API model, and Agents is set to API: ask the user to pick one (wb route "
+            f"{role} --api <id>) or set Agents to Both or GPU (wb route all both|gpu)")
+
+
+def cant_run(role: str, mid: str, why: str, fix: str, doc: dict) -> str:
+    """The one line for a role whose API model can't run: never another model (#1016)."""
+    other = ("set Agents to Both or GPU (wb route all both|gpu)" if doc.get("use") == "api"
+             else f"put the role on the GPU (wb route {role} gpu)")
+    said = fix and (fix in why or any(w in why for w in ("/connect", "top it up")))  # its own remedy
+    return (f"{role} role: {mid} can't run: {why}" + (f" ({fix})" if fix and not said else "")
+            + f". Ask the user: fix that, or {other}")
+
+
+def said_part(routed: dict) -> str:
+    """Why an API task runs where it does, as the start line and `routed` say it: `trivial role,
+    set by you 11-20` (only the user sets a role: the dialog, the pane or a terminal), or `asked
+    for, approved in the dialog` for a gated --model."""
+    said = routed.get("said") or ""
+    if said.startswith("asked for"):
+        return said
+    out = f"{routed.get('role')} role"
+    if isinstance(ts := routed.get("said_ts"), (int, float)):
+        out += f", set by you {time.strftime('%m-%d', time.localtime(ts))}"
+    return out
+
+
+def routed_line(model_id: str, routed: dict) -> str:
+    """An API task's routing in one line (task.json's keys): `API <id> (<provider>) · <why> ·
+    thinking off`. The start line, task.json `route` and wb watch's `routed` say it."""
+    return (f"API {model_id} ({routed.get('provider_name') or routed.get('provider')}) · "
+            f"{said_part(routed)} · thinking {routed.get('thinking') or 'off'}")
+
+
+def model_line(model_id: str, routed: dict) -> str:
+    """wb start's model line for an API task: `model: <id> · API (<provider>) · trivial role, set by
+    you 11-20 · thinking off`. Child 11 adds spend today; a GPU task's line is as before roles."""
+    return (f"model: {model_id} · API ({routed.get('provider_name') or routed.get('provider')}) · "
+            f"{said_part(routed)} · thinking {routed.get('thinking') or 'off'}")
+
+
+def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None = None,
+            gate: Callable | None = None) -> tuple:
+    """wb start's model: (model, state, why, routed), `routed` the task.json keys (`via`, `role`;
+    for API `provider`, `provider_name`, `thinking`, `said`, `said_ts`). Refused, with the one
+    line, for what can't run as asked. In order: routes.json must read (never as all GPU); a
+    `--model` is taken as asked (an API one through ``gate``, the user's yes); the role's side
+    (effective_via): the GPU, its pin or the router's pick (router.choose as before roles), or
+    the role's API model by its exact id. No fallback in either direction: a GPU role with no
+    GPU model never tries its stored API model, and an API role that can't run never the GPU."""
+    from . import models, router  # they import more than routes needs at its import
+    try:
+        doc = read()
+    except RoutesError as e:
+        raise Refused(unreadable(e)) from None
+    if wanted:
+        try:
+            m = models.resolve(wanted)
+        except KeyError as e:
+            raise Refused(str(e).strip('"'), 1) from None
+        if m.kind != "api":
+            return m, models.status(m), "asked for", {"via": "gpu", "role": role}
+        if gate is not None:
+            gate(m)
+        approved = os.environ.get("CLAUDECODE") == "1"
+        return m, models.status(m), "asked for", {
+            "via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
+            "thinking": "off", "said": "asked for" + (", approved in the dialog" if approved else "")}
+    row = doc["roles"][role]
+    if effective_via(doc, role) == "gpu":
+        if row["gpu"] != AUTO:  # the user's pin: that model, never the router's other pick
+            try:
+                m = models.resolve(row["gpu"])
+            except KeyError as e:
+                raise Refused(f"{role} role: its GPU model {row['gpu']} isn't found ({str(e).strip(chr(34))}). "
+                              f"Ask the user: fix that, or let the router pick (wb route {role} --gpu auto)") from None
+            return m, models.status(m), f"the {role} role's GPU model (wb route)", {"via": "gpu", "role": role}
+        top, why = router.choose(size, stack, name)
+        if top is None:
+            raise Refused(why)
+        return top.model, top.state, why, {"via": "gpu", "role": role}
+    mid = row.get("api")
+    if not mid:  # only with Agents on API: a role on API of its own has one (normalize)
+        raise Refused(no_api_model(role))
+    m = models.lookup(mid)
+    if m is None or m.kind != "api":
+        failed = models.hosted_error()
+        raise Refused(cant_run(role, mid, "not in OpenCode's catalog now" + (
+            f" (its read failed: {failed})" if failed else ""), "", doc))
+    routed = {"via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
+              "thinking": row["thinking"], "said": row.get("said") or "", "said_ts": row.get("ts")}
+    return m, models.status(m), routed_line(m.id, routed), routed

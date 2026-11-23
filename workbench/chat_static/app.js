@@ -278,6 +278,23 @@
     chip.addEventListener('click', () => { input.value = chip.textContent; grow(); armSend(); input.focus() })
   }
 
+  // The open tasks in one line over the thread (chat.open_tasks, #1016): which model each runs on,
+  // GPU or API and whose, as the pane's row says it. A server without `tasks` (an older wb): none
+  const ACTIVE = ['queued', 'running', 'testing', 'asking']
+  function tasksLine(tasks) {
+    if (!Array.isArray(tasks) || !tasks.length) return ''
+    return 'Running: ' + tasks.map(t => {
+      const short = String(t.model || '').split('/').pop()
+      const on = t.via === 'api' ? `API ${short}${t.provider_name ? ` (${t.provider_name})` : ''}` : `GPU ${short}`
+      return `${t.name}${ACTIVE.includes(t.phase) ? '' : ` (${t.phase})`} · ${on}`
+    }).join('; ')
+  }
+  function drawTasks() {
+    const el = $('tasks'), text = tasksLine(state.tasks)
+    el.textContent = text
+    el.hidden = !text
+  }
+
   function render() {
     const list = items()
     $('intro').hidden = list.length > 0
@@ -591,7 +608,8 @@
     if (s.build) build = s.build
     live = true
     if (!quiet) save(K.thread, (s.messages || []).slice(-50))  // a patch without messages: no rewrite (#755)
-    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null }
+    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [] }
+    drawTasks()
     if (!sheet.hidden) drawSettings()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()

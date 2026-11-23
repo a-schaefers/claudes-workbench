@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, savedLine, spark, splashTarget, statsLines, wrapParts, wrapWords } from './register.js'
+import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, modelOf, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, savedLine, spark, splashTarget, statsLines, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
@@ -4977,9 +4977,9 @@ test('#1014: a GPU-only change, a show and a dry run pass without a dialog; a re
 
 test('#1014: wb start --model on an API model asks first once wb gates it; refused by wb, a GPU --model and a start without one ask nothing', async ($, on) => {
   const { clock, bash, w } = await routeProbe($, on)
-  w.code = 3                                                     // until #1016 wb's dry run refuses an API start
+  w.code = 3                                                     // wb's dry run refuses an API start (cli.API_RUNS off)
   expect((await bash('wb start fix --spec s.md --model acme/coder-flash'))).toEqual(expect.objectContaining({ deny: undefined, asked: 0 }))
-  w.code = 0                                                     // the gate #1016 turns on (cli.API_RUNS)
+  w.code = 0                                                     // the gate, on since #1016 (cli.API_RUNS)
   const line = "start fix on API acme/coder-flash (not a role's choice) · your code goes to Acme · thinking off"
   w.reply = { change: line, gate: true, approval: { start: { task: 'fix', model: 'acme/coder-flash' }, change: line } }
   const r = await bash('wb start fix --spec s.md --mod acme/coder-flash')
@@ -5161,4 +5161,89 @@ test('#1014: the mod\'s summary of the roles reads as routes.summary does', () =
     writing: { via: 'gpu', gpu: 'ollama/x', api: 'anthropic/claude-haiku-5-5', thinking: 'on' } } }))
     .toBe('significant GPU (the router picks); trivial API deepseek/deepseek-flash, thinking off; writing GPU ollama/x, ' +
       'API kept: anthropic/claude-haiku-5-5, thinking on')
+})
+
+test('#1016: the Agents switch: its change line is the dialog\'s text, and the roles\' summary says it', async ($, on) => {
+  // wb route all gpu|api|both sets routes.json `use`; the dialog shows wb's own line, as for a role
+  const { clock, bash, files, w } = await routeProbe($, on)
+  const line = "Agents: Both → API (every role on its API model; writing has no API model and can't start; your code goes " +
+    'to DeepSeek (trivial); cap $5/day)'
+  w.reply = { change: line, gate: true, approval: { argv: ['route', 'all', 'api'], change: line } }
+  w.answer = 'Allow'
+  const r = await bash('wb route all api')
+  expect([r.asked, r.question, r.deny, r.dry]).toEqual([1, line, undefined, [['route', '--dry-run', '--json', 'all', 'api']]])
+  expect(JSON.parse(files['/wb/route-ok.json']!)).toEqual({ argv: ['route', 'all', 'api'], change: line, at: expect.any(Number) })
+  // to the GPU: wb's dry run says no yes is needed, and no dialog comes
+  w.reply = { change: "Agents: API → GPU (every role on the GPU; each role's own choice is kept for Both)", gate: false }
+  expect(await bash('wb route all gpu')).toEqual({ deny: undefined, asked: 0, question: '',
+    dry: [['route', '--dry-run', '--json', 'all', 'gpu']] })
+  expect(routesSummary({ use: 'gpu', roles: { trivial: { via: 'api', api: 'deepseek/deepseek-flash' } } }))
+    .toBe('Agents GPU, over each role\'s own: significant GPU (the router picks); trivial API deepseek/deepseek-flash, ' +
+      'thinking off; writing GPU (the router picks)')
+  expect(routesSummary({ use: 'both' })).toBe(routesSummary({}))
+  await clock.advance(1000)
+})
+
+test('#1016: Agents set in routes.json reaches the conversation, and a value wb refuses reads as unreadable', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const at = '/home/u/.config/workbench/routes.json'
+  const role = { trivial: { via: 'api', api: 'deepseek/deepseek-flash', thinking: 'off' } }
+  const files: Record<string, string> = { [at]: JSON.stringify({ v: 1, use: 'both', day_usd: 5, roles: role }) }
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(31_000)
+  files[at] = JSON.stringify({ v: 1, use: 'gpu', day_usd: 5, roles: role })
+  await clock.advance(31_000)
+  expect(rows.filter(r => r.includes('The roles changed')).at(-1)).toContain('The roles changed: Agents GPU, over each ' +
+    'role\'s own: significant GPU (the router picks); trivial API deepseek/deepseek-flash, thinking off')
+  files[at] = JSON.stringify({ v: 1, use: 'sometimes', day_usd: 5, roles: role })
+  await clock.advance(31_000)
+  expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')
+})
+
+test('#1016: an API task\'s row shows its badge before the model, the live view its routed line, and tasks is tasks-9', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-api', 'running', { model: 'deepseek/deepseek-flash', model_label: 'DeepSeek (API)', via: 'api',
+    role: 'trivial', provider: 'deepseek', provider_name: 'DeepSeek',
+    route: 'API deepseek/deepseek-flash (DeepSeek) · trivial role, set by you 11-20 · thinking off' })
+  task(files, 'fix-gpu', 'running', { model: 'ollama/qwen3.8-27b', model_label: 'Qwen 27B', via: 'gpu', role: 'significant' })
+  fakeTasks(on, files, ['fix-api', 'fix-gpu'])
+  const sets: any[] = []
+  on('state.set', (_: any, e: any, next: any) => { if (e.plugin === 'workbench' && e.key === 'tasks') sets.push(e.value); return next(e) })
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] !== 'watch') return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    const lines = [
+      { s: 'meta', t: 'deepseek/deepseek-flash · API' },
+      { s: 'routed', t: 'routed: API deepseek/deepseek-flash (DeepSeek) · trivial role, set by you 11-20 · thinking off' },
+      { s: 'claude', t: 'Claude → agent · spec' },
+    ]
+    return { value: { exitCode: 0, stdout: lines.map(l => JSON.stringify(l)).join('\n'), stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 120 }, surface: 'terminal' })
+  await clock.advance(1600)
+  expect(await ui.find({ type: 'Text', text: /round 1 · API · deepseek-flash/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /round 1 · Qwen 27B/ })).toBeTruthy()          // a GPU row as before
+  expect(await ui.find({ type: 'Text', text: /^routed: API deepseek\/deepseek-flash \(DeepSeek\) · trivial role/ })).toBeTruthy()
+  // the routed line is under the task line, never in the history
+  expect((await ui.findAll({ type: 'Text' })).filter((t: any) => /^routed: /.test(String(t.text))).length).toBe(1)
+  await ui.unmount()
+  expect(sets.length).toBeGreaterThan(0)
+  const last = sets.at(-1)
+  expect(last.shape).toBe('tasks-9')
+  const api = last.value.find((t: WbTask) => t.name === 'fix-api')
+  expect([api.via, api.role, api.provider, api.routed]).toEqual(['api', 'trivial', 'DeepSeek',
+    'API deepseek/deepseek-flash (DeepSeek) · trivial role, set by you 11-20 · thinking off'])
+  expect(modelOf({ via: 'api', model: 'openrouter/deepseek/deepseek-v4.1-flash', label: '' })).toBe('API · deepseek-v4.1-flash')
+  expect(modelOf({ via: 'gpu', model: 'ollama/q', label: '' })).toBe('ollama/q')
 })
