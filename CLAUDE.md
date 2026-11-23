@@ -194,8 +194,9 @@ what: ARCHITECTURE.md, *The tests*; the detail: *The runner, inside*, *What the 
 - A project's config loads after the layer and could lift every deny, so
   `OPENCODE_DISABLE_PROJECT_CONFIG` is always on (both names: `PROJECT_CONFIG_OFF`); it drops the
   project's AGENTS.md, skills and `instructions` too, which wb hands back in the layer.
-- OpenCode reads `~/.claude/CLAUDE.md` itself unless `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`
-  (`runner.OPENCODE_ENV`): only the lane hid it, so with no lane it reached agents (#1061).
+- OpenCode 2.3.2 (not 2.3.0) reads `~/.claude/CLAUDE.md` itself unless
+  `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` (`runner.OPENCODE_ENV`): only the lane hid it, so with no
+  lane it reached agents (#1061).
 - Rules are `permissions: [{action, resource, effect}]` (`shell`: each simple command's raw text;
   `edit`: the file path; `external_directory`: `<dir>/*`), anchored, `*` matches spaces and `/`, the last match wins, no match is ask (`--auto`
   allows it); `shell` sees each simple command's raw text, wrappers not unwrapped (`DENIED_SHELL`).

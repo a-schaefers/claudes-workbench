@@ -7721,8 +7721,9 @@ class RealOpenCode(Base):
         # #1061 (2026-11-23): OpenCode 2.3 reads ~/.claude/CLAUDE.md itself as a global
         # instruction, which only the lane's SECRETS kept from the agent: with no Landlock
         # (macOS, an old kernel, "paths": ["*"]) the user's CLAUDE.md, written to Claude, reached
-        # every agent. runner.OPENCODE_ENV's switch keeps it out; without it, it is read, so the
-        # quirk the switch answers is still there
+        # every agent. runner.OPENCODE_ENV's switch keeps it out; without it, 2.3.2 reads it, so
+        # the quirk the switch answers is still there. 2.3.0 (CI's pin) doesn't read it at all:
+        # the half without the switch failed CI on #1065 (2026-11-23)
         from workbench import runner
         home = Path(self.tmp.name) / "home"
         (home / ".claude").mkdir(parents=True)
@@ -7760,7 +7761,11 @@ class RealOpenCode(Base):
             reqs = [json.loads(line) for line in out.read_text().splitlines()]
             seen.append("CANARY-CLAUDE-GLOBAL" in json.dumps(
                 max(reqs, key=lambda r: len(r.get("tools", [])))["messages"]))
-        self.assertEqual(seen, [False, True])
+        self.assertFalse(seen[0])
+        ver = subprocess.run(["opencode", "--version"], capture_output=True, text=True).stdout
+        nums = tuple(int(n) for n in re.findall(r"\d+", ver)[:3])
+        if nums >= (2, 3, 2):
+            self.assertTrue(seen[1], f"OpenCode {ver.strip()} no longer reads ~/.claude/CLAUDE.md")
 
     def test_wb_reads_the_config_files_opencode_reads_under_opencode_config_dir(self):
         # #370 (the audit of 1.6): OpenCode 2.3 takes its global directory from
