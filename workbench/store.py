@@ -82,6 +82,8 @@ PATH_VARS = ("WB_HOME", "WB_MODELS", "WB_SKILLS", "WB_IMAGES", "WB_AUDIO", "WB_C
              "CLAUDE_CONFIG_DIR", "WB_GPU_DIR",
              # wb patch init's clone (#1005)
              "WB_SOURCE",
+             # the roles (#1014)
+             "WB_ROUTES",
              # where OpenCode's global config (and, XDG_DATA_HOME, its sessions) are: relative,
              # wb start found the model and the runner, which runs elsewhere, didn't (#650)
              "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME")
@@ -687,6 +689,30 @@ def edit_config(path: Path, read, change: str = ""):
             raise RuntimeError(f"{path} changed while wb was editing it; nothing was written: "
                                "run the command again")
         write_through(path, data, change)
+
+
+def take_approval(name: str, secs: float) -> dict | None:
+    """$WB_HOME/<name>, the mod's dialog's one-shot yes (send-ok.json #1005, route-ok.json
+    #1014), consumed: renamed away first, then read, so one call takes it whether it matches or
+    not and two calls can't both read it. None when missing, unreadable, or not written within
+    ``secs`` (its `at`); the caller compares the rest."""
+    path = home() / name
+    claim = path.with_name(f".{name}.{os.getpid()}")
+    try:
+        os.replace(path, claim)
+    except OSError:
+        return None
+    try:
+        ok = read_json(claim, {})
+    except OSError:
+        return None
+    finally:
+        claim.unlink(missing_ok=True)
+    try:
+        fresh = isinstance(ok, dict) and 0 <= time.time() - float(ok.get("at", 0)) < secs
+    except (TypeError, ValueError):
+        return None
+    return ok if fresh else None
 
 
 def read_json(path: Path, default=None):

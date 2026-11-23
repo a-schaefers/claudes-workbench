@@ -1553,6 +1553,170 @@ async function sendRefusal($: any, e: Row): Promise<string> {
   return mcpRefusal($, tool, input)
 }
 
+// The roles' consent gate (#1014): which model a kind of work goes to is the user's choice, and
+// Claude never changes the API side of it (a role's selector, its API model, thinking on API,
+// the day cap) without the user's yes in this dialog, nor starts a task on an API model it
+// picked (`wb start --model <API id>`). The dialog's text is what `wb route --dry-run --json`
+// prints for that very command, so the user sees the change wb will make, word for word; on
+// Allow the mod writes $WB_HOME/route-ok.json, the approval wb checks under Claude Code
+// (routes.approved: one-shot, fresh for 120 s, bound to the canonical command and the line). A GPU
+// model pin needs no dialog (wb's dry run says so); every change reaches the conversation as a
+// [workbench] row (unsaid). As #1005's gate, read as bash reads it, `bash -c` and `eval` inside.
+const ROUTE_OK = 'route-ok.json'
+const ROUTE_ALLOW = 'Allow'
+const ROLES = ['significant', 'trivial', 'writing'] as const
+const NOT_CHANGED = 'workbench: not changed: the user did not approve it in the dialog. Tell them it was not ' +
+  'changed; ask again only if they ask for it.'
+const NOT_CHANGED_AWAY = 'workbench: not changed: the user is away: say in the web chat what you\'d change; ' +
+  'they approve it in the dialog once back.'
+const ROUTE_OWN = 'workbench: not changed: run wb route (or wb start --model) as a command of its own, one ' +
+  'to a call, so the dialog shows exactly what changes.'
+const ROUTE_OK_OWN = `workbench: not run: ${ROUTE_OK} is the mod's dialog's to write, on the user's yes; ` +
+  'no command writes it.'
+const ROUTES_EDIT = 'workbench: not edited: the roles change only through wb route, on the user\'s yes in the ' +
+  'mod\'s dialog (wb route shows them).'
+// text a shell or an interpreter runs, not parsed as commands: a route change hidden in it is refused
+const ROUTE_TEXT = /(?:\bwb|-m\s*workbench[\w.]*)\s+(?:route\b|start\b[^\n]*\s--m)/i
+const ROUTES_RULE = 'Never pass --model for an API model or change a role without the user\'s yes (the mod ' +
+  'asks them in a dialog); recommend only.'
+
+// The simple commands a line runs, `bash -c '…'` and `eval`'s inside, as upstreamAim reads them
+function runsIn(src: string): string[][] {
+  return simpleCommands(src).flatMap(words => {
+    const i = commandAt(words)
+    const cmd = wordOf(words[i])
+    const c = words.findIndex((w, j) => j > i && /^-[a-z]*c$/.test(w))
+    if (SHELLS.has(cmd) && c > 0 && words[c + 1] !== undefined) return [words, ...runsIn(words[c + 1]!)]
+    if (cmd === 'eval') return [words, ...runsIn(words.slice(i + 1).join(' '))]
+    return [words]
+  })
+}
+
+// Each wb route and each wb start with a --model (any abbreviation: --m…) in a command line, as
+// the arguments `wb route --dry-run --json` takes for it: a route's own, or `--start` and the
+// start's (parsed there by wb start's own parser). `hidden`: a route or such a start inside text
+// another program runs, which can't be shown
+export function routeCalls(command: string): { calls: string[][]; hidden: boolean } {
+  const calls: string[][] = []
+  let runner = false
+  for (const words of runsIn(command)) {
+    const i = commandAt(words)
+    const cmd = wordOf(words[i])
+    if (RUNS_CODE.test(cmd)) runner = true
+    const wb = wbArgs(cmd, words.slice(i + 1))
+    if (wb?.[0] === 'route') calls.push(wb.slice(1))
+    else if (wb?.[0] === 'start' && wb.some(w => /^--m/.test(w))) calls.push(['--start', ...wb.slice(1)])
+  }
+  return { calls, hidden: !calls.length && runner && ROUTE_TEXT.test(command) }
+}
+
+const routesHome = async ($: any) => (await $.env.get('HOME').catch(() => '')) || mem.home
+
+// routes.json: $WB_ROUTES, else ~/.config/workbench/routes.json (routes.path)
+async function routesPath($: any): Promise<string> {
+  const home = await routesHome($)
+  const cwd = (await $.session.cwd().catch(() => '')) || mem.cwd
+  const given = await $.env.get('WB_ROUTES').catch(() => '')
+  return given ? absolutePath(given, home, cwd) : `${home}/.config/workbench/routes.json`
+}
+
+const money = (v: number) => Number.isInteger(v) ? `$${v}` : `$${v.toFixed(2)}`
+
+// The roles in one line, as routes.summary says it (Couplings: the two read alike)
+export function routesSummary(doc: Row): string {
+  const roles = (doc.roles ?? {}) as Record<string, Row>
+  return ROLES.map(r => {
+    const row = roles[r] ?? {}
+    const gpu = typeof row.gpu === 'string' && row.gpu ? row.gpu : 'auto'
+    const thinking = row.thinking === 'on' ? 'on' : 'off'
+    if (row.via === 'api') return `${r} API ${row.api}, thinking ${thinking}`
+    let text = `${r} GPU ${gpu === 'auto' ? '(the router picks)' : gpu}`
+    if (row.api) text += `, API kept: ${row.api}`
+    if (thinking === 'on') text += ', thinking on'
+    return text
+  }).join('; ')
+}
+
+// A document wb would read (routes.normalize's checks, in short): else it can't be read
+function routesValid(doc: unknown): doc is Row {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return false
+  const d = doc as Row
+  if (d.day_usd != null && !(typeof d.day_usd === 'number' && d.day_usd > 0)) return false
+  if (d.roles === undefined) return true
+  if (!d.roles || typeof d.roles !== 'object' || Array.isArray(d.roles)) return false
+  return Object.entries(d.roles as Row).every(([r, row]: [string, any]) => (ROLES as readonly string[]).includes(r) &&
+    row && typeof row === 'object' && [undefined, 'gpu', 'api'].includes(row.via) &&
+    [undefined, 'off', 'on'].includes(row.thinking) && (row.via !== 'api' || (typeof row.api === 'string' && !!row.api)))
+}
+
+// What the conversation is told of the roles: `said`, their summary and the day cap ('. Day cap
+// $N'), '' while every role is the default and no cap is set (nothing to tell); `api`, whether any
+// role has an API model. The cap is in `said`, which is what a change is found by: a cap changed
+// alone (a terminal's wb route cap, the pane, a hand edit) never reached the conversation (2026-11-23)
+type Routes = { said: string; api: boolean; cap: number | null }
+async function readRoutes($: any): Promise<Routes> {
+  const text: string | undefined = await $.fs.read(await routesPath($)).catch(() => undefined)
+  if (text === undefined) return { said: '', api: false, cap: null }
+  let doc: unknown
+  try {
+    doc = JSON.parse(text)
+  } catch {
+    doc = null
+  }
+  if (!routesValid(doc)) return { said: 'routes.json can\'t be read (wb route says why)', api: false, cap: null }
+  const rows = Object.values((doc.roles ?? {}) as Record<string, Row>)
+  const cap = typeof doc.day_usd === 'number' ? doc.day_usd : null
+  const plain = cap === null && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
+    !r.api && (r.thinking ?? 'off') === 'off')
+  return { said: plain ? '' : routesSummary(doc) + (cap !== null ? `. Day cap ${money(cap)}` : ''), api: rows.some(r => !!r.api), cap }
+}
+const DEFAULT_ROUTES = routesSummary({})
+const ROUTES_NOTE = (r: Routes) => `Roles (the user's, wb route): ${r.said}. ` + (r.cap !== null ? '' : 'No day cap yet. ') +
+  ROUTES_RULE
+const ROUTES_CHANGED = (said: string) => `The roles changed: ${said || DEFAULT_ROUTES}. ${ROUTES_RULE}`
+
+// The deny for an edit of routes.json or route-ok.json with the file tools, else ''
+async function routesFileRefusal($: any, path: string): Promise<string> {
+  const home = await routesHome($)
+  const cwd = (await $.session.cwd().catch(() => '')) || mem.cwd
+  const abs = absolutePath(path, home, cwd)
+  const gated = [await routesPath($), `${mem.root}/${ROUTE_OK}`]
+  if (gated.includes(abs)) return ROUTES_EDIT
+  const real = await realPath($, abs)
+  return real !== abs && (await Promise.all(gated.map(g => realPath($, g)))).includes(real) ? ROUTES_EDIT : ''
+}
+
+// The deny for a Bash or Monitor command that changes a role, or starts a task on an API model,
+// without the user's yes in the dialog now, else ''
+async function routeRefusal($: any, e: Row): Promise<string> {
+  const tool = String(e.tool ?? '')
+  if ((tool !== 'Bash' && tool !== 'Monitor') || typeof e.command !== 'string') return ''
+  const command = e.command
+  if (!/\b(?:route|start)\b|route-ok\.json/i.test(command)) return '' // most calls: no parse
+  if (command.includes(ROUTE_OK) && (mentions(command, mem.root, await routesHome($)) ||
+    /\$\{?WB_HOME\b/.test(command))) return ROUTE_OK_OWN
+  const { calls, hidden } = routeCalls(command)
+  if (hidden) return ROUTE_OWN
+  // a show (`wb route`, `--json`) and a dry run change nothing
+  const live = calls.filter(c => !c.includes('--dry-run') && (c[0] === '--start' || c.some(a => a !== '--json')))
+  if (!live.length) return ''
+  if (live.length > 1) return ROUTE_OWN
+  let q: Row
+  try {
+    const r = await $.process.run([mem.wb, 'route', '--dry-run', '--json', ...live[0]!], { timeoutMs: 60_000 })
+    if (r.exitCode !== 0) return '' // wb refuses it itself, saying why
+    q = JSON.parse(String(r.stdout ?? ''))
+  } catch {
+    return '' // no dry run: wb itself refuses the change under Claude Code without route-ok.json
+  }
+  if (!q?.gate || typeof q.change !== 'string' || !q.change) return '' // a GPU model pin, or nothing
+  if (await away($, await read($, chat))) return NOT_CHANGED_AWAY // the dialog would wait at an empty terminal
+  const said = await $.ui.ask(q.change, [ROUTE_ALLOW, "Don't"]).catch(() => '')
+  if (said !== ROUTE_ALLOW) return NOT_CHANGED
+  await $.fs.write(`${mem.root}/${ROUTE_OK}`, JSON.stringify({ ...q.approval, at: (await $.clock.now()) / 1000 })).catch(() => {})
+  return ''
+}
+
 const SPARKS = '▁▂▃▄▅▆▇█'
 // Values as one character each, the highest the full block; none for all zero
 export function spark(values: number[]): string {
@@ -1772,7 +1936,7 @@ type Said = WbSaid
 // again in that conversation, sayRules waited for it for good: turning wakes off mid-session
 // never said WAKE_OFF_NOTE, and Claude ended its turn waiting for a wake that would not come.
 // A conversation's first context block (a /clear's, a compaction's) sets it again.
-const saidState = atom({ plugin: 'workbench', key: 'said' } as const, null as WbSaid | null, { shape: 'said-1' })
+const saidState = atom({ plugin: 'workbench', key: 'said' } as const, null as WbSaid | null, { shape: 'said-2' })
 async function setSaid($: any, said: Said) {
   mem.said = said
   await update($, saidState, () => said).catch(() => {}) // mem has it for this load either way
@@ -1781,7 +1945,8 @@ async function setSaid($: any, said: Said) {
 async function wanted($: any, delegating: boolean, notesToo = true): Promise<Said> {
   const notes = delegating && notesToo ? (await $.fs.read(`${mem.root}/notes.md`).catch(() => '')).trim() : ''
   const any = delegating || mem.open.size > 0
-  return { notes, wakeOff: !mem.wake && any, coding: any ? await codingMode($) : 'decide' }
+  return { notes, wakeOff: !mem.wake && any, coding: any ? await codingMode($) : 'decide',
+    routes: any ? (await readRoutes($)).said : '' }
 }
 
 // The rules this conversation lacks now, as text, counted as said. Notes come once (Claude adds
@@ -1789,13 +1954,16 @@ async function wanted($: any, delegating: boolean, notesToo = true): Promise<Sai
 // answered in this load (a reload), nothing is known of what it holds: it is all still to say.
 async function unsaid($: any, delegating: boolean): Promise<string[]> {
   const want = await wanted($, delegating, !mem.said?.notes) // said once: not read at every poll
-  const was = mem.said ?? { notes: '', wakeOff: false, coding: 'decide' } // after the await: no other caller in between
+  const was = mem.said ?? { notes: '', wakeOff: false, coding: 'decide', routes: '' } // after the await: no other caller in between
   const out: string[] = []
   if (want.notes && !was.notes) out.push(NOTES_NOTE(want.notes))
   if (want.wakeOff && !was.wakeOff) out.push(WAKE_OFF_NOTE)
   const any = delegating || mem.open.size > 0 // out of the mode with nothing open: nothing changes
   if (any && want.coding !== was.coding) out.push(want.coding === 'decide' ? CODING_DECIDE : CODING_RULES[want.coding])
-  await setSaid($, { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding })
+  // the roles (#1014): any change, however made (the dialog, the pane, a terminal, a hand edit)
+  if (any && want.routes !== was.routes) out.push(was.routes ? ROUTES_CHANGED(want.routes) : ROUTES_NOTE(await readRoutes($)))
+  await setSaid($, { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding,
+    routes: any ? want.routes : was.routes })
   return out
 }
 
@@ -3409,7 +3577,7 @@ export const register: Register = (on, options) => {
     const field = EDIT_TOOLS[e.tool]
     const path = field ? (e as any)[field] : undefined
     if (typeof path === 'string') {
-      const why = await codingRefusal($, path)
+      const why = (await codingRefusal($, path)) || (await routesFileRefusal($, path))
       if (why) return { deny: why }
     }
     // Nothing goes to workbench upstream without the user's yes to that very command (#1005,
@@ -3417,6 +3585,10 @@ export const register: Register = (on, options) => {
     // GitHub MCP tools
     const sending = await sendRefusal($, e as Row)
     if (sending) return { deny: sending }
+    // No role's API side changes, and no task starts on an API model, without the user's yes in
+    // the dialog (#1014, routeRefusal): anyone's call alike
+    const routing = await routeRefusal($, e as Row)
+    if (routing) return { deny: routing }
     if (next.origin.plugin !== 'engine') return next(e)
     // The engine's call settles its permission check, a dialog included, before it resolves: one
     // whose dialog came up at the terminal is over once it does, answered there (#959): the oldest
@@ -3568,6 +3740,10 @@ export const register: Register = (on, options) => {
     if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
     if (isAway) blocks.push({ name: 'web-chat', text: AWAY_NOTE })
     if (want.wakeOff && !had?.wakeOff) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
+    if (want.routes && had?.routes !== want.routes) { // read while delegating or with a task open, as `wanted` does
+      const routes = await readRoutes($) // once any role has an API model (#1014)
+      if (routes.api) blocks.push({ name: 'workbench-routes', text: ROUTES_NOTE(routes) })
+    }
     const { ok, out: status } = await runWb($, ['status', ...(await scope($))])
     if (!ok) warnOnce($, 'status', `wb status failed: ${brief(status)}; wb doctor`)
     if (!ok || status.startsWith('no open tasks')) return { blocks }

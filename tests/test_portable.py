@@ -146,6 +146,7 @@ class Real(unittest.TestCase):
         # (models.hosted, #1013), never the user's own OpenCode, its catalog and its keys
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
                           WB_MODELS=str(tmp / "models.json"), WB_COMMANDS=str(tmp / "commands.json"),
+                          WB_ROUTES=str(tmp / "routes.json"),  # the test's own roles (#1014)
                           # OpenCode's credential store (models.auth_key): the fake's, never the
                           # user's own, and no OpenCode server started for each provider (#1010)
                           WB_OPENCODE_BIN=FAKE)

@@ -172,7 +172,18 @@ been measured to cost you less a task (once each has three with your spend recor
 model, unloading whatever is there. Old results weigh less, and one task in ten goes to a model
 the record left out on fewer than three tasks ("exploring: …"): review it as any other. `wb
 models` shows the ranking per size. Pass
-`--model <id or fragment>` only if the user names one, or when the record argues against the guess.
+`--model <id or fragment>` only if the user names one, or when the record argues against the guess,
+and say the model in your reply.
+
+**Roles are the user's** (`wb route`): which model each kind of work goes to (`significant`,
+`trivial`, `writing`: GPU or API, each side's model, thinking, one day cap). Never pass `--model`
+for an API model or change a role without the user's yes; recommend only. When they ask for a
+change, run it as a command of its own (`wb route trivial <exact provider/model id>`, `wb route
+all gpu|api`, `wb route <role> --gpu <id|auto>`): the mod shows them the change in a dialog, and a
+"not changed" means they said no, so say it wasn't changed and don't ask again. The first API role
+needs a day cap: ask them for one (suggest $5), then add `--day-usd N`. Exit 3 names the fix (a
+key to add with /connect, an exact id). `wb start` doesn't follow the roles yet: every task still
+runs on the GPU, the router choosing.
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
 add a model you judge fit only for small work, and otherwise change it only when the user asks.
 A newly added model has no record, so the router won't pick it over one with a good record:

@@ -987,25 +987,15 @@ def _approved(slug, title, body_file, draft, anyway) -> bool:
     regardless (#1005, 2026-11-22). The gate writes $WB_HOME/send-ok.json on "Send it": the
     slug, title, body file and its text, the flags and when. One send consumes it, matching or
     not: renamed away first, so two sends can't both read it."""
-    path = store.home() / SEND_OK
-    claim = path.with_name(f".{SEND_OK}.{os.getpid()}")
-    try:
-        os.replace(path, claim)
-    except OSError:
+    ok = store.take_approval(SEND_OK, SEND_OK_SECS)
+    if ok is None:
         return False
     try:
-        ok = store.read_json(claim, {})
         text = Path(body_file).read_text(encoding="utf-8", errors="replace")
     except (OSError, ValueError):
         return False
-    finally:
-        claim.unlink(missing_ok=True)
-    try:
-        fresh = 0 <= time.time() - float(ok.get("at", 0)) < SEND_OK_SECS
-    except (TypeError, ValueError, AttributeError):
-        return False
-    return fresh and isinstance(ok, dict) and (ok.get("slug"), ok.get("title"), ok.get("body_file"), ok.get("body"),
-                                               bool(ok.get("draft")), bool(ok.get("anyway"))) == (
+    return (ok.get("slug"), ok.get("title"), ok.get("body_file"), ok.get("body"),
+            bool(ok.get("draft")), bool(ok.get("anyway"))) == (
         slug, title, os.path.abspath(body_file), text, draft, anyway)
 
 
