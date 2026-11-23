@@ -504,9 +504,9 @@ No model name, repo, task name or price.
 `workbench/meter.py` (#1019). Nothing recorded money for the agent's model, so an API task could
 spend without limit unseen, and a cap cut mid-stream became OpenCode's retry loop until the silence
 limit (robustness M1). Now every API task is metered live into one ledger, and one day cap covers
-every API provider together: routes.json `day_usd` (the user's, #1014; read by `meter._routes`,
-`$WB_ROUTES`, the one call to swap for `routes.load()`), for the local calendar day, reset at local
-midnight. A GPU task writes nothing here and costs nothing: `meter.for_task` is None for it (a
+every API provider together: routes.json `day_usd` (the user's, #1014; read by `meter.cap`
+through `routes.read()`, `$WB_ROUTES`, again only when the file's mtime or size changes), for the
+local calendar day, reset at local midnight. A GPU task writes nothing here and costs nothing: `meter.for_task` is None for it (a
 task.json without `via` reads as GPU, as every task before #1016 does; drive hands it the model,
 else the cached catalog's, `models.lookup(cached=True)`).
 
@@ -549,8 +549,8 @@ is what went out, so the ledger is the higher of the two. **Never a false 0:** a
 0 for tokens whose price isn't 0 is not trusted (the step keeps the metered figure, `source:
 "metered (opencode said 0)"`; an export saying 0 reconciles nothing), and an export that failed
 reconciles nothing. What isn't counted: a response cut before its usage arrived, by either view.
-Without the keyhole's view (before #1015 wires `Meter.hooks()` into `keyhole.start`), OpenCode's
-compaction requests count only as far as its `info.cost` does. A catalog price below a backend's
+Without the keyhole's view (a model `runner.needs_keyhole` starts none for: an Ollama cloud
+model, a keyless free one), OpenCode's compaction requests count only as far as its `info.cost` does. A catalog price below a backend's
 (an OpenRouter endpoint priced over its listing, without `usage.cost`) meters under.
 
 **The ledger**, `$WB_HOME/spend-api.jsonl` (`store.append_jsonl`, locked; *Files and formats*):
@@ -560,7 +560,8 @@ plan_tok: {provider: n}, checkin}` from today's rows, read on from the last offs
 inode and size tell a new or rewritten one), so the 5 s tick never re-reads it whole. Status `api`
 (`{usd, metered, source, tok}`, per row through `Task.set_status`, under the meter's lock: the
 keyhole's thread and the runner's book at once, and a total written after a newer one would leave
-it under the ledger) is the task's own; #1022's results rows and stats come later.
+it under the ledger) is the task's own; its results row's `api` reads it at the close
+(`results.metered`, *What an API task cost*).
 
 **The cap at start** (`meter.refusal(m, role=None, advice=True)`, exit 3; `routes.resolve` on both API paths:
 a `--model` before the dialog, and `cli._route_start`'s dry run too, a role's API model before it starts): an API model that isn't a plan or free is refused with no
@@ -577,9 +578,9 @@ waits). `meter.tail(m)` is the start line's part, ` · today $0.42 of $5`, or a 
 usage (OpenCode Go): 1.2M tokens today`, which wb start's model line ends with (`cli.cmd_start`).
 
 **The guard `spend`, inside a round** (`runner._spend_guard`, each tick after the stuck checks, an
-API task only): status `api_stop` (`{guard, text}`, written by the keyhole's side; #1020's issue
-has its `quota` stop write the same key, so its guard is taken as written: an interface the
-integrator reconciles with #1020, as is its clearing at each round's start, below) or `meter.stop_reason(task)`, today's spend at the cap (`the day's API spend
+API task only): status `api_stop` (`{guard, text}`, written by the keyhole's side: the room's
+`spend`, or its `quota` stop, #1020's, the guard taken as written; `_ProviderWait.stop`, earlier in
+the tick, consumes it first; cleared at each round's start, below) or `meter.stop_reason(task)`, today's spend at the cap (`the day's API spend
 cap is reached: $5.02 of $5 today`, or no cap at all, `meter.no_cap()`: `NO_CAP`, or `UNREADABLE`
 for a routes.json that can't be read; or no price, `<id>: NO_PRICE`). It calls `CURRENT["keyhole"].close(why)` first, so every
 request from then on gets a 400 with `{"error": {"message": "workbench: <why>"}}`, nothing sent
@@ -923,8 +924,8 @@ stays the larger of 900 s and silence + 60 s. All of it is decided from the task
 catalog rebuild that failed mid-task (it keeps no models) took them all away: the next round
 compacted at 1M, asked 256K out, waited on headers unbounded and wrote its speeds as this
 machine's. A later runner resolves the model again and, on a catalog that lost it, fails the load
-(`_load_failed`) rather than run a round unpinned. Not here yet: the spend cap checked before each
-of `drive`'s `continue`s is #1019's.
+(`_load_failed`) rather than run a round unpinned. The spend cap is checked before each of
+`drive`'s `continue`s too (`runner._go_on`, *Spend*).
 
 **Notes, nudges and interrupts.** `steer.jsonl` (`{ts, text, now}`) holds notes from `wb steer`,
 `wb allow` (to restart the agent under its rule) and the nudge (`by: workbench`);
@@ -1949,7 +1950,7 @@ guides, release notes, stories, copy) runs under its own rules, not the coding o
 - **`--test` optional**: none, and the round goes straight to review (no base check, no
   auto-fix), as for any task without one. With the project's own offline prose check (a docs
   build, a spell or style lint) it runs as any task's test: base check, auto-fix, in the lane. A
-  checker that needs the network fails there. wb looks for none: Claude picks it (SKILL.md says so once `--role` parses, #1016).
+  checker that needs the network fails there. wb looks for none: Claude picks it (SKILL.md doesn't say so yet).
 - **The record apart**: results rows carry `role`; `router.score`, `rank`, `choose` and
   `expected` count a model's rows of the task's role (`router.of_role`: `role`, else `size`), so
   prose results never move a coding rank or the other way round. Only a writing task asks by its
@@ -3484,21 +3485,21 @@ the ones OpenCode lists (a line on every run for models wb never uses: wave 2's 
 CLAUDE.md files and your ~/.claude rules to <name> (data policy: <url>)`, the named copies and siblings added (`… and
 local.cfg (--copy), ../shared (--sibling)`), and the line's OpenRouter and free parts (`cli._api_notes`,
 `privacy.where_note`). "First" (`privacy.first_for`): no other API task (task.json `via: api`) in `tasks/` or the archive
-(else `wb gc` would bring it back) has that repo and provider; not results.jsonl, whose rows don't say a task was on API,
-and every closed task's directory stays, archived. A role's stored
-OpenRouter `order` gives the backends. The token files the lane hides (each that holds a credential) are a note on
+(else `wb gc` would bring it back) has that repo and provider; not results.jsonl, whose rows before #1022 don't say a
+task was on API, and every closed task's directory stays, archived. Task.json's
+`order` (the role's, `cli._routed_keys`), the one the keyhole routes by, gives the backends. The token files the lane hides (each that holds a credential) are a note on
 every API start (*What the agent knows*, `API_HIDDEN`).
 
 **local_only.** commands.json `repos.<path>.local_only: true` (a bool, else `commands_conf` refuses it), read by the
 nearest entry that states it (*Files and formats*), or `wb start --local-only` (task.json `local_only`) for one task.
 `wb start` refuses an API model there before any model is picked (`cli._local_only_check`, its line from
-`cli.local_only_refusal`: a `--model` resolving to `kind: api`, else the role's `via: api` in routes.json, read by
-`cli._routes` until #1014's `routes.load`), so before `pick_model`'s `--model` gate, exit 3, never the GPU instead: `wb: ~/src/client is local-only (commands.json "repos"): the trivial role is
+`cli.local_only_refusal`: a `--model` resolving to `kind: api`, else the role's side as it runs, `routes.effective_via`
+over `routes.read()`), so before `pick_model`'s `--model` gate, exit 3, never the GPU instead: `wb: ~/src/client is local-only (commands.json "repos"): the trivial role is
 on API (deepseek/deepseek-flash). Choices: put trivial on the GPU (wb route trivial gpu, the user's yes), or the user
 lifts local_only for this repo.` (with `--local-only`: `… or the user drops --local-only for this task`; for a `--model`:
 `the task's model is API (<id>, --model). Choices: a GPU model, …`). The mod's dialog for `wb start --model` (#1014's)
-asks before `wb start` runs, from `wb route --dry-run --model <id>`, which knows no repo: merged with #1014, that dry-run
-takes the start's `--repo` (else the command's cwd) and `--local-only`, and prints `cli.local_only_refusal`'s line in
+asks before `wb start` runs, from `wb route --dry-run --start <its args>` (`cli._route_start`), which parses the start's
+`--repo` (else the command's cwd) and `--local-only`, and exits 3 with `cli.local_only_refusal`'s line in
 place of a dialog line, so the user is never asked to approve a start that would be refused. A linked worktree of a local-only repo is that repo
 (the git-dir match). `wb next`, `wb feedback` and `wb resume` on an API task whose repo became local-only since it started
 exit 3 (`cli._local_only_since`, `_local_only_now`): `this repo is local-only now; the task's model is API (<provider>):
@@ -5862,8 +5863,8 @@ naming its role and model (the runners are the test's: the leases taken as a run
 `/workbench`'s text), one row per change, nothing without the file, a stored `said-2` declined.
 
 **The spend cap's tests** (#1019): `ApiSpend` writes a task the way `wb start` will (#1016: started on a GPU model with
-`spawn_runner` patched, task.json then naming the API model) and runs `runner.drive` in the test's process, a stub in
-`CURRENT["keyhole"]` recording `close`; `ApiSpendKeyhole` drives the keyhole's `close(reason)`, `room` and one usage per
+`spawn_runner` patched, task.json then naming the API model) and runs `runner.drive` in the test's process, the keyhole `drive`
+starts (#1015) recording each `close` told a reason (`record_closes`); `ApiSpendKeyhole` drives the keyhole's `close(reason)`, `room` and one usage per
 response against `_KeyholeTest`'s upstream, and its `test_real_opencode_*` runs the real OpenCode through a closed
 keyhole (the 400, not retried).
 
@@ -5918,7 +5919,7 @@ test carries its control (the pause patched off, the queue mark off, the cause a
 standing copies and siblings, the API lane on Landlock and the split homes (moved ones too), the start's note naming
 the tools that stop, OpenRouter's routing through the keyhole to `capture_llm.py` and in the written layer, a backend
 outside the order (its report line, `wb watch`'s entry, the names that don't fold), `wb resume` and `--all` past a
-local-only task, the where-line, `wb doctor`'s free-model line.
+local-only task, the where-line, `wb doctor` saying nothing of free models.
 
 **The keyhole's tests** (`Keyhole`, `RealOpenCodeAPI`, sharing `_KeyholeTest`): canary keys only
 (`CANARY`), never a real one, and no network: `_Upstream`, a provider in the test, records each
@@ -6246,4 +6247,4 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.
 - **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → the mod's `GUARD_WORDS`, *Stats recording*'s list.
-- **The spend stop** (#1019): `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which #1015's `keyhole.start` call takes) ↔ status `api_stop` (#1020's issue has its `quota` write it too; `Meter.begin` clears it at each round's start, whatever its guard: the integrator reconciles both with #1020). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`.
+- **The spend stop** (#1019): `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`.
