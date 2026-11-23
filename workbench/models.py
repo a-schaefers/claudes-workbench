@@ -52,7 +52,7 @@ import urllib.request
 import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -240,6 +240,24 @@ def users_config_content() -> dict:
     except ValueError:
         return {}
     return cfg if isinstance(cfg, dict) else {}
+
+
+def has_model_entry(provider: str, name: str) -> bool:
+    """Whether a config file OpenCode layers, or the user's own OPENCODE_CONFIG_CONTENT, has an
+    entry for ``provider``'s model ``name``, in the V1 form (`provider.<p>.models`) or the V2
+    (`providers.<p>.models`): the keyhole says its base again there (runner.keyhole_overlay)."""
+    try:
+        docs = [layer for _, layer in _layers()]
+    except RuntimeError:  # a file that doesn't parse: OpenCode won't start either
+        docs = []
+    for doc in [*docs, users_config_content()]:
+        for form in ("provider", "providers"):
+            prov = doc.get(form) if isinstance(doc, dict) else None
+            prov = prov.get(provider) if isinstance(prov, dict) else None
+            found = prov.get("models") if isinstance(prov, dict) else None
+            if isinstance(found, dict) and name in found:
+                return True
+    return False
 
 
 def read_config() -> dict:
@@ -1158,7 +1176,17 @@ def _build_hosted() -> dict:
                       "cost": e.get("cost") if isinstance(e.get("cost"), list) else [],
                       "variants": variants, "capabilities": caps,
                       "reasoning": bool(variants) or None, "tool_call": caps.get("tools"),
-                      "family": e.get("family"), "status": e.get("status"), "free": free}
+                      "family": e.get("family"), "status": e.get("status"), "free": free,
+                      # what catalog_doc needs to hand the task this entry (#1015): the agent's
+                      # OpenCode doesn't fetch the catalog, and its bundled one may lack the model.
+                      # Never `headers` or `body`, which a config may fill with a key: only whether
+                      # there are any (`overlay`), and such an entry gets no catalog of its own
+                      "catalog": True, "type": e.get("type") if isinstance(e.get("type"), str) else "chat",
+                      "title": e.get("name") if isinstance(e.get("name"), str) else None,
+                      "released": _dict(e.get("time")).get("released"),
+                      "compatibility": _dict(e.get("compatibility")),
+                      "package": e.get("package") if isinstance(e.get("package"), str) else "",
+                      "api": api, "overlay": bool(e.get("headers") or e.get("body"))}
     for pid, (prov, url) in off.items():  # its own entries, which the catalog may not list
         if not loads(pid):
             continue
@@ -1250,6 +1278,91 @@ def _models_of(doc: dict, only: str | None = None) -> dict[str, Model]:
     return {mid: _api_model(mid, e, _dict(provs.get(mid.split("/", 1)[0])), extra)
             for mid, e in _dict(doc.get("models")).items()
             if isinstance(e, dict) and (only is None or mid == only)}
+
+
+def catalog_doc(m: Model) -> dict | None:
+    """A models.dev v2 catalog holding ``m`` alone, as OPENCODE_MODELS_PATH reads it (OpenCode
+    2.3.2's core/src/models-dev.ts: `{<provider>: {id, name, env, models: {<id>: SourceModel}}}`),
+    rebuilt from the catalog entry discovery read: the agent's OpenCode runs with the catalog
+    fetch off (#1010), so it has only the catalog bundled in its binary, which may lack a model
+    the user's OpenCode lists (#1015). `reasoning` is left unsupported, so the file makes no
+    variants of its own: the entry's variants go in the layer (catalog_variants), as V1
+    `provider.<p>.models.<m>.variants`, which OpenCode 2.3.0 and 2.3.2 read back into exactly
+    what `api model.list` printed (RealOpenCodeAPI). A V2 `providers.<p>` beside the layer's V1
+    `provider.<p>` would replace it whole, the keyhole's options with it (normalize.ts
+    `mergeMaps`), and a request went out with no key. None for a model that isn't the
+    catalog's (a config entry, an Ollama cloud model) or can't be rebuilt: headers or a body of
+    its own, or a variant's (V1 variants carry settings only), an alias."""
+    c = m.config
+    if m.kind != "api" or not c.get("catalog") or c.get("overlay") or m.cloud \
+            or m.id.split("/", 1)[-1] != m.name:  # a catalog mode: its id isn't the provider's
+        return None
+    if any(not isinstance(v, dict) or set(v) - {"id", "settings"}
+           or not isinstance(v.get("settings", {}), dict) for v in c.get("variants") or []):
+        return None
+    released = c.get("released")
+    try:
+        date = datetime.fromtimestamp(float(released) / 1000, timezone.utc).strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OverflowError, OSError):
+        date = "1970-01-01"
+    caps = _dict(c.get("capabilities"))
+    tools = {"supported": bool(caps.get("tools"))}
+    api = {"base_url": str(c.get("api") or m.base_url),
+           "sdk": {"opencodeai": str(c.get("package") or m.package)}}
+    if isinstance(caps.get("freeform"), list):
+        api["capabilities"] = {"tools": {"freeform": caps["freeform"]}}
+    compat = _dict(c.get("compatibility"))
+    named = {"reasoningField": "reasoning_field", "maxTokensField": "max_tokens_field",
+             "mediaInput": "media_input"}
+    if fields := {named[k]: v for k, v in compat.items() if k in named and isinstance(v, str)}:
+        api["compatibility"] = fields
+    source = {"id": m.name, "type": str(c.get("type") or "chat"),
+              "name": str(c.get("title") or m.name), "release_date": date,
+              "status": str(c.get("status") or "active"),
+              "modalities": {"input": [str(x) for x in caps.get("input") or ["text"]],
+                             "output": [str(x) for x in caps.get("output") or ["text"]]},
+              "capabilities": {"tools": tools, "reasoning": {"supported": False},
+                               **({"temperature": caps["temperature"]}
+                                  if isinstance(caps.get("temperature"), bool) else {})},
+              "limit": {k: v for k, v in _dict(c.get("limit")).items()
+                        if k in ("context", "input", "output") and isinstance(v, (int, float))},
+              "api": {"chat-completions": api}}
+    if isinstance(c.get("family"), str):
+        source["family"] = c["family"]
+    if cost := _source_cost(c.get("cost")):
+        source["cost"] = cost
+    return {m.provider: {"id": m.provider, "name": provider_name(m), "env": [],
+                         "models": {m.name: source}}}
+
+
+def _source_cost(cost) -> dict | None:
+    """`api model.list`'s prices (a base row, then one per context tier) in models.dev v2's
+    shape, which OpenCode turns back into the same rows (models-dev.ts `cost`)."""
+    rows = [r for r in cost if isinstance(r, dict)] if isinstance(cost, list) else []
+    base = next((r for r in rows if not r.get("tier")), None)
+    if not base:
+        return None
+
+    def cache(r):
+        return {k: v for k, v in _dict(r.get("cache")).items()
+                if k in ("read", "write") and isinstance(v, (int, float))}
+
+    inp = {"price": base.get("input", 0), "cache": cache(base)}
+    out = {"price": base.get("output", 0)}
+    tiers = [r for r in rows if isinstance(_dict(r.get("tier")).get("size"), (int, float))]
+    if tiers:
+        inp["overrides"] = [{"when": {"context": {"gt": t["tier"]["size"]}},
+                             "price": t.get("input", inp["price"]), "cache": cache(t)} for t in tiers]
+        out["overrides"] = [{"when": {"context": {"gt": t["tier"]["size"]}},
+                             "price": t.get("output", out["price"])} for t in tiers]
+    return {"text": {"input": inp, "output": out}}
+
+
+def catalog_variants(m: Model) -> dict:
+    """The catalog entry's variants (`api model.list`'s `[{id, settings}]`) as the layer's V1
+    `provider.<p>.models.<m>.variants` ({id: settings}), beside catalog_doc's file."""
+    return {str(v["id"]): dict(v.get("settings") or {}) for v in m.config.get("variants") or []
+            if isinstance(v, dict) and v.get("id")}
 
 
 def provider_name(m: Model) -> str:
@@ -2974,10 +3087,13 @@ def admits(m: Model | None, held: dict, cards: frozenset | None = None) -> bool:
     return not running or can_share(m, running, gpu_budget(m.root))
 
 
-def holders(home: Path | None = None, pool: str = "gpu") -> dict:
+def holders(home: Path | None = None, pool: str | None = "gpu") -> dict:
     """gpu.json's live entries (a remote server's: ``pool`` gpu-<host>): pid → {model, task,
     start, uid, user, waiting?, tests? (tests that use the GPU hold it: GpuLease.step_aside)}.
-    ``home``: the lease's directory (lease_dir)."""
+    ``home``: the lease's directory (lease_dir). ``pool`` None (an API model's, #1015): none,
+    rather than a `None.json` read (the review of #1015, 2026-11-23)."""
+    if pool is None:
+        return {}
     held = store.read_json((home or lease_dir()) / f"{pool}.json", {}) or {}
     return {p: h for p, h in held.items()
             if p.isdigit() and _alive(int(p), h.get("start"), h.get("uid"))}
@@ -3269,6 +3385,160 @@ class GpuLease:
         self._leave()
 
 
+# API tasks (#1015): no GPU, so no GpuLease. A provider's account takes at most API_PARALLEL
+# tasks at once: a constant, not a setting (the plan's decision 10), enough to keep a reviewer
+# busy and few enough that one provider's rate limit isn't shared by a crowd. The slots are flocks
+# under the account's own state ($WB_HOME/api/), not lease_dir(): the provider account is the
+# user's, not the machine's GPU. A dead runner's slot frees itself with its file descriptor.
+API_PARALLEL = 3
+API_WAIT = (2.0, 30.0)  # a queued API task looks again after 2 s, backing off to 30 s
+
+
+def api_dir() -> Path:
+    return store.home() / "api"
+
+
+def _slot_name(provider: str) -> str:
+    """A provider id in file-name characters, as pool() makes a host's."""
+    return re.sub(r"[^a-z0-9]+", "-", (provider or "provider").lower()).strip("-") or "provider"
+
+
+def _slot_paths(provider: str) -> list[Path]:
+    return [api_dir() / f"{_slot_name(provider)}.{i}.lock" for i in range(API_PARALLEL)]
+
+
+def _slot_fd(path: Path) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+
+
+def _slots(provider: str) -> list[tuple[Path, bool, str]]:
+    """Each slot of ``provider``: (path, held, the holder's task as its file says). A free slot
+    is tried and let go at once, shared: holders take theirs exclusive, so a held slot still
+    refuses the probe, but two probes at once (two wb starts, a start and a feedback's note)
+    don't read each other as holders, which made a start see every slot taken and exit 4 with
+    one free (the review of #1015, 2026-11-23)."""
+    out = []
+    for path in _slot_paths(provider):
+        try:
+            fd = _slot_fd(path)
+        except OSError:
+            out.append((path, False, ""))
+            continue
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                out.append((path, True, os.pread(fd, 200, 0).decode("utf-8", "replace").strip()))
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                out.append((path, False, ""))
+        finally:
+            os.close(fd)
+    return out
+
+
+def api_slots_free(provider: str) -> int:
+    """How many of ``provider``'s API_PARALLEL slots no runner holds now."""
+    return sum(not held for _, held, _ in _slots(provider))
+
+
+def api_holders(provider: str) -> list[str]:
+    """The tasks that hold ``provider``'s slots now (each slot file names its holder), for wb
+    start's refusal and notes. Only live runners hold one: a dead runner's flock went with it."""
+    return sorted(name or "?" for _, held, name in _slots(provider) if held)
+
+
+def api_provider(m: Model) -> str:
+    """The provider an API model's slots count under: its id before the first `/`."""
+    return m.provider or m.id.split("/", 1)[0]
+
+
+class NoLease:
+    """What an API task holds in place of the GPU lease (#1015): one of its provider's
+    API_PARALLEL slots, and nothing of the GPU. The interface drive and _tests_gpu use:
+    load() loads nothing, step_aside and rejoin do nothing, `aside` False, `pool` None (so
+    _tests_gpu takes this machine's pool for --unload-for-tests, where the tests run), `loaded`
+    True. Past the limit it waits as queued, looking again after API_WAIT's backoff (a slot let
+    go touches its file, which wakes it sooner)."""
+
+    def __init__(self, m: Model, task: str, say=print):
+        self.m, self.task, self.say = m, task, say
+        self.pool = None
+        self.aside = False
+        self.loaded = True
+        self.fd: int | None = None
+        self.path: Path | None = None
+
+    def _try(self, fds: dict) -> bool:
+        for path, fd in fds.items():
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            self.fd, self.path = fd, path
+            try:  # who holds it, for api_holders
+                os.ftruncate(fd, 0)
+                os.pwrite(fd, f"{self.task}\n".encode(), 0)
+            except OSError:
+                pass
+            return True
+        return False
+
+    def __enter__(self):
+        provider = api_provider(self.m)
+        # every slot open for the whole wait: a file opened for writing and closed fires the
+        # watcher of every other waiter, which would then try and close theirs (a busy loop)
+        fds = {p: _slot_fd(p) for p in _slot_paths(provider)}
+        try:
+            if not self._try(fds):
+                msg = f"waiting for an API slot: {API_PARALLEL} tasks run on {provider}"
+                task = store.Task(self.task) if self.task else None
+                if task is not None and task.exists:
+                    task.set_status(phase="queued", last=msg)
+                else:
+                    self.say(msg)
+                pause = API_WAIT[0]
+                with Watcher(api_dir()) as w:
+                    while not self._try(fds):
+                        w.wait(pause)
+                        pause = min(pause * 2, API_WAIT[1])
+        finally:
+            for fd in fds.values():
+                if fd != self.fd:
+                    os.close(fd)
+        return self
+
+    def load(self) -> float:
+        return 0.0
+
+    def step_aside(self, unload: bool = False) -> None:
+        pass
+
+    def rejoin(self) -> None:
+        pass
+
+    def __exit__(self, *exc):
+        if self.fd is None:
+            return
+        try:
+            os.ftruncate(self.fd, 0)
+        except OSError:
+            pass
+        os.close(self.fd)  # releases the slot
+        self.fd = None
+        try:
+            os.utime(self.path)  # a waiter's watcher wakes now, not at its next look
+        except OSError:
+            pass
+
+
+def lease_for(m: Model, task: str, say=print):
+    """The lease a task's model takes: the GPU's (GpuLease) for a GPU model, a provider slot
+    (NoLease) for an API one, which never waits for, nor holds, the GPU."""
+    return NoLease(m, task, say) if m.kind == "api" else GpuLease(m, task, say)
+
+
 def busy(held: dict, why: str) -> str:
     """Who holds the GPU, for a refusal: each holder's task, its repo and model, and its phase."""
     def one(h):
@@ -3290,10 +3560,14 @@ def _user() -> str:
         return str(os.getuid())
 
 
-def pool(m: Model | None) -> str:
+def pool(m: Model | None) -> str | None:
     """The lease files a model takes turns under: gpu.* for this machine's GPU, gpu-<host>.* for
     a remote server's (its host and port in file-name characters), but gpu.* for one on this GPU
-    after all (same_gpu: WSL2's Windows host)."""
+    after all (same_gpu: WSL2's Windows host). None for an API model, which takes no GPU lease
+    (NoLease, #1015): so _gpu_holders never counts one, nor refuses a GPU task for it. No model
+    (an image's lease) is still gpu.*: the kind is asked first."""
+    if m is not None and m.kind == "api":
+        return None
     if not (m and m.remote) or same_gpu(m):
         return "gpu"
     u = urlparse(m.root)
@@ -3791,7 +4065,10 @@ def served_window(m: Model) -> int | None:
 def short_window(m: Model) -> str | None:
     """Why ``m`` can't run as OpenCode is told: the server serves less than its limit.context,
     so it would cut prompts off silently while OpenCode, thinking there is room, never compacts
-    (#248, the audit of 1.2). None when it serves enough, or doesn't say."""
+    (#248, the audit of 1.2). None when it serves enough, or doesn't say; and for an API model,
+    whose window is its catalog's, with no server here to ask (#1015)."""
+    if m.kind == "api":
+        return None
     said = (m.config.get("limit") or {}).get("context")
     served = served_window(m)
     if not said or not served or served >= said:

@@ -221,6 +221,13 @@ Then:
   pool (`models.pool`, #750). Known limit, by choice: no lock, so two starts at once can both
   pass; the second waits, saying so (`GpuLease._take_alone`). `feedback`/`next`/`resume` always
   queue, printing the holders (`cli._gpu_note`).
+- **An API model's provider slots** (#1015): an API task needs no GPU, so none of that applies
+  (`models.pool` is None for it, `_gpu_holders` never counts it). Its provider runs at most
+  `models.API_PARALLEL` (3) of workbench's tasks at once; a fourth exits 4, "<n> tasks already
+  run on <provider>'s API (<holders>): workbench runs at most 3 at once per provider. --queue
+  starts it anyway, to wait for a slot; or do this step yourself" (`cli._slots_full`), and with
+  `--queue` prints `note: 3 tasks run on <provider>'s API; this task waits as queued for a slot`
+  (`_slot_note`, also `feedback`/`next`/`resume`'s note through `_gpu_note`).
 - **The limits**: unset (or 0) `--round-timeout`, `--silence-timeout`, unset `--think-timeout`
   take `router.budgets`; those no flag gave (task.json `timeouts_given`) stretch before each round
   (`runner.stretch_limits`, *Budgets and speed*, #814). `--checkin` 0 is off.
@@ -261,7 +268,24 @@ Ollama models (not those of tasks beside it), stops servers with a stop command,
 again before each round; the lease is held until exit. A served window
 (`models.served_window`) below `limit.context` fails the task (`short_window`; #248: Ollama
 restarted without `OLLAMA_CONTEXT_LENGTH` trimmed prompts silently). A server that doesn't say
-passes.
+passes. An API task takes no GPU lease (`models.lease_for`: `NoLease` for `Model.kind == "api"`,
+else `GpuLease`): it holds one of its provider's slots, `$WB_HOME/api/<provider>.<i>.lock` (an
+`flock` on each of `API_PARALLEL` files, the holder's name written in it; the kernel drops the
+lock when the runner dies, SIGKILL too), waiting as `phase: queued`, `last: waiting for an API
+slot: 3 tasks run on <provider>` on a watch of the slot files when all are held, and looking
+again after `models.API_WAIT` (2 s, doubling to 30 s) when no file event comes. The provider is
+`api_provider(m)`: the model's provider, else its id before the first `/`. `api_slots_free` and
+`api_holders` read the slots for `wb start`'s refusal and the notes; their probe takes a free
+slot `LOCK_SH|LOCK_NB` and lets go, so two probes at once don't read each other as holders (with
+`LOCK_EX`, a start beside another start's probe saw every slot taken and exited 4, the review of
+#1015), while a holder's `LOCK_EX` still refuses it. It never
+appears in gpu.json, loads and unloads nothing, has no `short_window` check and no server-down
+wait (`runner._down` is False), runs no `_Power` sampler and no keep-warm thread, and its first
+status says `last: starting`, not `waiting for the GPU` (`runner._gpu_side`: from the config
+alone, in `drive`'s first write, before `models.resolve` may read the catalog; a GPU task showed
+the last run's line meanwhile, the review of #1015). Its tests run under
+this machine's pool as any task's (`_tests_gpu`, `--unload-for-tests`). The bench counts it as
+no GPU work (`bench._idle`, `bench.api_task`).
 
 **4. The agent works a round**: `opencode run --standalone -m <model> --auto --format json
 --title "wb: <task>" [--session <id>] -- <prompt>` in the worktree, in the lane, `$PWD` the
@@ -1231,7 +1255,9 @@ another repo, #798). OpenCode's own environment (`runner.opencode_env`, the roun
 user's own, which would point back at the user's database, #1010; and
 `OPENCODE_DISABLE_MODELS_FETCH=1`: each server start fetched the models.dev catalog and cached
 it in the database, 13.7 MB in every task's home and one download per task, so the catalog bundled
-in the binary serves instead: 320 KB, measured 2026-11-23). OpenCode 2.3.2 has no switch of
+in the binary serves instead: 320 KB, measured 2026-11-23; an API task's own model comes from
+`OPENCODE_MODELS_PATH`, `rules/<task>/catalog.json` (`runner.catalog_path`, when `keyhole_of(task)`
+has one: *The task's own catalog*). OpenCode 2.3.2 has no switch of
 its own for these: `OPENCODE_DB` moves only the database (and the data directory's legacy
 `auth.json` is still imported into it), `OPENCODE_TEST_HOME` only `home`; `XDG_DATA_HOME` moves the
 data, log, repos and db together (`opencode debug paths`). Those would move every other tool's data
@@ -1288,9 +1314,12 @@ an API key with /connect in OpenCode") an OAuth login (its tokens rotate: a copy
 the user out), an external credential, request signing (SigV4, Vertex: a header swap can't work),
 a key only in the environment (`{env:VAR}`, or `auth list` naming a variable: `SECRET_ENV` drops it
 from the agent anyway), and a key written in the user's `opencode.json` or `OPENCODE_CONFIG_CONTENT`
-as `options.apiKey` or as a header (`options.headers`: a name with `auth`, `key` or `token` in it,
-or a value shaped like a key or `Bearer …`) ("its key is written in <file>, which agents can read:
-store it with /connect instead"). A stored key is trimmed (a paste's newline: OpenCode trims only on
+anywhere in the provider's entry, V1 `provider.<pid>` or V2 `providers.<pid>` (`_keys_in`: the
+provider's, a model's own, a V2 `settings`, a variant's), as an `apiKey` or as a header (any
+`headers`: a name with `auth`, `key` or `token` in it, or a value shaped like a key or `Bearer …`)
+("its key is written in <file>, which agents can read: store it with /connect instead"). A model's
+own key counts because OpenCode 2.3.2 sends a model's settings over its provider's (the review of
+#1015: one in the content went unseen, in the agent's environment). A stored key is trimmed (a paste's newline: OpenCode trims only on
 `/connect`) and must then be printable ASCII (`KEY_CHARS`), else "can't use <provider>'s stored key:
 it holds a character an HTTP header can't carry" (http.client's refusal quoted the header, key and
 all, the 2026-11-23 review). The protocol comes from the catalog's provider package (`protocol_of`,
@@ -1357,11 +1386,61 @@ request failed (<type>)` (`_Server.handle_error`), never socketserver's tracebac
 <provider> on 127.0.0.1:<port> for <id>`, the refusals and that failure line are all it logs (the runner's stdout,
 runner.log); no request is logged, and no line holds the key or the token. Accepted: the agent's
 shell can reach the keyhole too, holding the token (the layer is readable), and spend on the task's
-model only, while the runner lives. Not yet wired: the runner's start of it in `drive` for an API
-model, the layer's provider overlay and `rules_env`'s restatement of it, `NO_PROXY` for the agent,
-and status `served` reaching the results come with API models (#1013); without Landlock the user's
-OpenCode store is readable anyway, and whether API roles then refuse or start saying so is the
-owner's call, still open.
+model only, while the runner lives. Without Landlock the user's OpenCode store is readable
+anyway; API tasks run there all the same, with no warning (the owner's call on #1008 and #1012:
+it just works). Not yet wired: status `served` reaching the results.
+
+*How the runner uses it* (#1015). `drive` resolves the model and, for an API one that needs a
+key (`runner.needs_keyhole`: not an Ollama cloud model, whose `key` is `ollama`, nor a free
+model whose `key` is `none`), starts it before the first round as `CURRENT["keyhole"]`
+(`start_keyhole`: `on_health` is `models.note_api(provider, state, why, until)`, the model's
+health record; `on_usage` is `api_usage`, a no-op the spend cap fills, #1019) and closes it when
+the drive ends. A `KeyholeError` fails the task through `_load_failed` (`<model> can't run:
+<why>`, a `failed` notice) with `keyhole.REMEDY` appended unless the text already gives the
+remedy (`keyhole_failure`). The layer's provider entry gets `keyhole_overlay(task)`:
+`provider.<pid>.options` from `layer_options`, and the same base and token as the task model's
+own `provider.api` and `options` (`models.<id>`, with the variants, below) where the model has an
+entry anyway: the task's catalog file, or one in a config file or the user's content, V1 or V2
+(`models.has_model_entry`); an entry of wb's alone made OpenCode a model its catalog lacks, with
+none of its limits, where it should be "Model unavailable". Merged last over
+`agent_providers`, the timeouts and a stored key; `rules_env(layer, keyhole_over)` says it again
+in `OPENCODE_CONFIG_CONTENT`'s provider overlay, which loads after the user's own content, so a
+`baseURL` there can't send the task's requests elsewhere. The model's own entry matters because
+OpenCode 2.3.2 sends a model's base over its provider's (`v1/config/migrate.ts` `migrateModel`:
+`provider.api`, `options.baseURL`); restating only the provider's, a model entry in the user's
+global file or content sent the token to that base (the review of #1015); the keyhole forwards
+to the base the user's `api model.list` gave the model, theirs included. And where the user's
+content has a V2 `providers.<pid>` for the keyhole's provider, which replaces the V1 entry beside
+it in one document (`normalize.ts` `mergeMaps`), `keyhole_v2` puts the same base and token in it
+(`settings`, the model's `settings`). `RealOpenCodeAPI` runs each form (content and global file,
+V1 model entry, V2 provider and model) against a decoy that must see nothing. `agent_env` adds `127.0.0.1` to
+both `NO_PROXY` and `no_proxy`, each set to the union of the two as the user had them (Python
+and curl read `no_proxy` first, Go `NO_PROXY`, so one extended alone dropped the user's hosts from
+the other), so a proxy in the agent's environment never catches the keyhole. `small_model` is the task's model, as for every task, and `run --title`
+skips the title request: OpenCode sends nothing to another model. An upstream error reaches
+`events.jsonl` only as the keyhole redacted it, and a round that died on one says it in status
+`last` (`opencode exited 1: <error>`, API tasks only).
+
+*The task's own catalog* (`rules/<task>/catalog.json`, #1013's comment, #1015). The agent's
+OpenCode fetches no catalog (#1010), so a model newer than its binary's bundled snapshot was
+unknown to it. `write_catalog` writes `models.catalog_doc(m)`, the model's entry from the user's
+`api model.list` (hosted.json) rebuilt as a models.dev v2 catalog of one provider and one model,
+outside the lane's writes, and `opencode_env` points `OPENCODE_MODELS_PATH` at it (the fetch
+still off). OpenCode reads that file in place of its bundled catalog (`models-dev.ts`: the file
+first, the snapshot never) and stores none of it: the database stays about 300 KB, as with the bundled catalog's 320 KB
+(the 13.7 MB was the fetched catalog, off for every task). The file leaves `reasoning` unsupported, so it makes
+no variants of its own; the entry's variants go in the keyhole overlay as V1
+`provider.<pid>.models.<id>.variants` (`catalog_variants`: `{id: settings}`). A V2
+`providers.<pid>` beside the layer's V1 `provider.<pid>` would replace it whole, keyhole options
+and all (`normalize.ts` `mergeMaps`), and the request went out with no key. On OpenCode 2.3.0
+and 2.3.2, `api model.list` then prints the entry field for field as the user's OpenCode does
+(`RealOpenCodeAPI`), and a model the binary lacks runs. `catalog_doc` returns None, and the
+bundled catalog stays, for a model that isn't the catalog's (a config entry, an Ollama cloud
+model), an alias (its id isn't its provider's), or one with headers or a body of its own or a
+variant's, which the v2 file or a V1 variant can't carry. A model with no keyhole (a keyless free
+one, `key: none`, or an Ollama cloud model) gets no file either: `write_catalog` and
+`OPENCODE_MODELS_PATH` go with `keyhole_of(task)`, and the variants with the keyhole overlay, so
+such a model newer than the binary is still "Model unavailable" to the agent.
 
 **Project config can't lift the rules.** OpenCode loads a project's `opencode.json` (worktree,
 `.opencode/`, any directory above) after `OPENCODE_CONFIG` and appends its permissions, so an
@@ -4191,7 +4270,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders), `--trial`, `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), an unreadable routes.json (exit 3, *Roles*), a `--model` naming an API model (exit 3, before any dialog until #1016 turns `cli.API_RUNS` on: `<id> is an API model, and this workbench doesn't start tasks on API models yet: …`, #1013, #1014), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why, `next: wb wait <task>`. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders, or for an API provider's slot), `--trial`, `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), an unreadable routes.json (exit 3, *Roles*), a `--model` naming an API model (exit 3, before any dialog until #1016 turns `cli.API_RUNS` on: `<id> is an API model, and this workbench doesn't start tasks on API models yet: …`, #1013, #1014), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4), an API model's provider already running `API_PARALLEL` (3) tasks (exit 4, `cli._slots_full`; `--queue` waits for a slot, #1015). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why, `next: wb wait <task>`. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps first. Review/stuck/failed with no live runner; refuses a moved repo (`wb relocate`), OpenCode 1.x (exit 3, `_opencode_again`, #866), empty text. Prompt: `FEEDBACK_HEAD` + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (re-run only with a test) + text; reviews+1. Warns past three reviews. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--include` (bulk additions, large binaries, ignored files the agent wrote), `--no-sign`, `--test` (replaces it, granted to the shell too), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Review only. Commits the step (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`; an empty step advances uncommitted, #507); prompt "Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL; advances round, steps, step_round, `reviews` reset, `step_base` the worktree's HEAD (#652), phase queued in one status write right before the spawn (#191: written earlier, an interrupt left the step under review with no runner). A retry after its commit landed (`cli._step_landed`) measures from `HEAD~1` (#85). Says `runner.fresh_reason`'s verdict. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` | `ask/<id>.answer` via `ask_mcp.write_answer`; the id into status `answered`. Refuses empty, over `ask_mcp.FILE_MAX` 256 KiB (`too_long`: never read, the agent waited out its timeout, #605), or closed, racing too (`answer_once`, #938). |
@@ -4302,10 +4381,14 @@ $WB_HOME (~/.local/state/workbench)
                                  configs: [[path, mtime_ns]…], content: crc32}, error ("" or the failed read's first line),
                                  providers: {<pid>: {name, key (its source: stored|oauth|env:<NAME>|config|signing|ollama|""),
                                  package, api (its base URL)}}, models: {<id>: {name (at the provider: modelID), limit, cost, variants,
-                                 capabilities, reasoning, tool_call, family, status, free, cloud?}}}; fresh HOSTED_TTL 600 s
+                                 capabilities, reasoning, tool_call, family, status, free, cloud?, and from the catalog (catalog: true)
+                                 type, title, released (ms), compatibility, package, api, overlay (bool: headers or a body of its own,
+                                 never their values): what models.catalog_doc rebuilds the task's catalog from, #1015}}}; fresh HOSTED_TTL 600 s
                                  (an error DOWN_SECS), rebuilt on a changed stamp; never holds a key
   api-health.json  .lock         each API provider's last bad answer (models.note_api): {<pid>: {state: no_credit|rate_limited|
                                  unreachable, until (epoch or null), why (redacted), ts}}; ok removes it; past until reads as ok
+  api/<provider>.<i>.lock        an API provider's task slots (models.NoLease, #1015): API_PARALLEL (3) files, each flocked by the
+                                 runner holding it, its task's name inside (models.api_holders); never in gpu.json
   update.json                    wb update's last check
   patches.json                   {source (the clone install), upstream (owner/repo on GitHub, else null)}: patches.note_install, by wb patch init, upstream, send and wb update (not --check) on `local`; the mod's consent gate reads it.
                                  prepared {<slug>: {author, email, date (unix), subject}}: the local commit wb patch upstream picked;
@@ -4338,7 +4421,8 @@ $WB_HOME (~/.local/state/workbench)
                                  user-rules/<path> (their ~/.claude/rules: context.user_rules), project-rules/<path> (a rule a link takes outside the repo: context.project_rules),
                                  imports/<n>/<name> (an import from outside the repo: context.import_files), bin/git (the shim), grants.json (what Claude allowed: {"allow", "paths", "test_tools"}),
                                  shell/<name> (OpenCode's $SHELL, named as the shell it runs: the user's XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL back, then that shell: runner.write_shell_shim, #1010),
-                                 gitdir.json (the real git dir, the .git's text: {"gitdir", "dotgit"}), submodules.json ([{"path", "src" (the user's checkout), "sha", "index"}]), submodule-<n>.index;
+                                 gitdir.json (the real git dir, the .git's text: {"gitdir", "dotgit"}), submodules.json ([{"path", "src" (the user's checkout), "sha", "index"}]), submodule-<n>.index,
+                                 catalog.json (an API task's own models.dev v2 catalog: runner.write_catalog, models.catalog_doc; OPENCODE_MODELS_PATH, #1015);
                                  removed on close (cli._closed) and by gc for a closed or vanished task
   locks/<task>.runner.lock       the runner's for its life (its pid; touched every BEAT_SECS): one runner a task
   locks/<task>.cmd.lock          one wb command on the task at a time
@@ -4778,7 +4862,7 @@ commands fail without `--standalone`; `auth export <provider>` prints `FAKE_AUTH
 else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `text`, `step_finish` with tokens). Live tool names are 1.x-style (`bash`, `filePath`; 2.x `shell`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
-`pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
+`pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
 `read`, `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`), `compactfail` (OpenCode
@@ -4804,7 +4888,12 @@ default, `FAKE_RETRY_EVERY` apart, each `{type: "retry", attempt, nextRetryAt, m
 `FAKE_RETRY_AFTER`; then that error, exit 1), `down` (the same with `provider.transport` ECONNREFUSED, checked on
 2.3.2), `auth` (401, `provider.auth`) and `quota` (402, `provider.quota`), both at once with no retry, and `nokey`
 (the no-route error); the upstream message (`FAKE_ERROR_BODY`) comes through verbatim in `message` and
-`response.body`. `WB_FAKE_API=<provider>[/<id>]=<state>,…` gives a model (its own entry first; a config model too) or a provider one
+`response.body`. `http` (#1015) makes the request for real: the provider's `options` from `OPENCODE_CONFIG`, then
+`OPENCODE_CONFIG_CONTENT` over them, a POST to `<baseURL>/chat/completions` with `Authorization: Bearer <apiKey>`
+(`/messages?beta=true` with `x-api-key` for `anthropic`) through urllib, so the agent's proxies apply; each request
+in `FAKE_HTTP_LOG`; a 2xx plays `ok`, an HTTP error the matching error event with the body's `error.message`, an
+unreachable base `provider.transport`. With `OPENCODE_MODELS_PATH` the fake lists that file's models in place of
+`WB_FAKE_CATALOG`'s (as 2.3.2 does), their variants the config's only. `WB_FAKE_API=<provider>[/<id>]=<state>,…` gives a model (its own entry first; a config model too) or a provider one
 of those states (or `ok`): its runs play that scenario, and a `nokey` provider drops out of `api model.list`, `models`
 and `auth list`, as one OpenCode can't authenticate does. `FAKE_CALLS` (a file) logs each `api`, `models` and `auth`
 call's argv (`ApiDiscovery` counts catalog reads); `FAKE_CATALOG_FAIL` makes `api model.list` and `models` fail (stderr,
@@ -4866,7 +4955,21 @@ canary, OpenCode's own with only the token, at the path OpenCode would have used
 2026-11-23 reviews' findings each have a `Keyhole` test: bodies other JSON parsers route elsewhere,
 a key with a newline, bad queries and chunk sizes (`raw_request`, for what http.client won't send),
 an error body cut across the key, errors inside a 200 stream (`_Upstream`'s "raw" mode), packages
-the keyhole can't speak, DeepInfra's appended `/openai`, a key written as a header.
+the keyhole can't speak, DeepInfra's appended `/openai`, a key written as a header, a key in a
+model's own entry or the V2 form (#1015's review). Its
+`test_the_tasks_own_catalog_*` (#1015) takes real `api model.list` entries through `hosted()`,
+`catalog_doc` and the runner's overlay: real OpenCode reads them back field for field, and a model
+the binary lacks fails without the file and runs through the keyhole with it.
+
+**API tasks in the tests** (`ApiTasks` in test_workbench.py, `ApiLease` in test_gpu.py, sharing
+`_ApiTask`, #1015). `wb start` routes an API model only through a role (#1016), and refuses one
+by `--model` (exit 3), so the test-only route is `_ApiTask.start_api`: `run_wb("start", …)` in
+process with `cli.pick_model` patched to return the API model (`FLASH`, from `API_CATALOG` in
+`WB_FAKE_CATALOG`, its key a canary row of `FAKE_AUTH_EXPORT`). With `spawn=False` the runner is
+not spawned and `drive_here` runs `runner.drive` in this process, for a test that patches
+`models` (a counted `make_resident`, a `models.resolve` returning an API model on a local
+`_Upstream`, since `_build_hosted` leaves out loopback bases). The fake's `http` scenario then
+sends the agent's real request to that upstream through the keyhole.
 
 **Conventions for a new test.** Names read as sentences; one class per feature, a one-line docstring; end to end through
 `self.start`/`wait_phase`/`run_wb`, asserting the phrases Claude reads and the state files; real processes and servers
@@ -4931,6 +5034,18 @@ doc needs its own `!/` line).
   `mirror_path`) and **its packages** (`keyhole.PACKAGES`) → what OpenCode posts for each package and how it sends the
   key (*API models through OpenCode*; packages/ai/src/providers): re-check with `RealOpenCodeAPI` and the source on
   each OpenCode bump. `keyhole.redact` → any new place an upstream error is shown.
+- **The keyhole overlay** (`runner.keyhole_overlay`) → `write_config_layer`'s provider merge and `rules_env`'s
+  restatement in `OPENCODE_CONFIG_CONTENT` (`agent_env` passes it): one without the other lets the user's content
+  point the provider elsewhere; its V1 `provider.<pid>` must not meet a V2 `providers.<pid>` (*The keyhole*), and
+  where the user's content has one, `keyhole_v2` says the base and token there too. It restates the task model's own
+  `provider.api` and `options` as well as the provider's; a new field through which OpenCode sets a base or a key
+  (re-check `migrateModel` on each OpenCode bump) → this overlay, `keyhole._keys_in`, and
+  `RealOpenCodeAPI.test_no_base_of_the_users_takes_the_token_past_the_keyhole`.
+- **`models.catalog_doc`** → OpenCode's models.dev v2 schema (packages/core/src/models-dev.ts: `SourceModel`,
+  `SourceCost`, `api.<protocol>`) and the hosted.json fields it reads; re-check
+  `RealOpenCodeAPI.test_the_tasks_own_catalog_*` on each OpenCode bump, and the fake's `OPENCODE_MODELS_PATH` listing.
+- **`models.API_PARALLEL`** → `cli._slots_full` and `_slot_note`'s text, `NoLease`'s queued `last`, SKILL.md's
+  dispatch line.
 - **What a handoff costs Claude, measured** → the README's sentence.
 - **Anything a reader looks up** → this file, CLAUDE.md if it names it, the skill if Claude uses it; README only for the
   quickstart (CLAUDE.md's *Keeping the docs true*).
@@ -4970,7 +5085,11 @@ doc needs its own `!/` line).
 - **How OpenCode is invoked or read** (`run_round`'s argv, `normalize`'s fields, the export fields `context_state`,
   `measure_speed`, `transcript` read) → `tests/fake_opencode.py` in the same commit, `RealOpenCodeRun` for a new field,
   one real run (*The tests*).
-- **`Model.kind`** (#1013) → `pool()` (an API model's lease, until the child that makes `pool(api)` None), the
+- **`Model.kind`** (#1013) → `pool()` (None for an API model, #1015: `models.holders(pool=None)` is empty,
+  `cli._gpu_holders` counts no API task, as `discover()` lists none, `_gpu_note` says the provider's slots
+  instead, and `runner._tests_gpu` takes None as "not this GPU's pool" and holds this machine's GPU alone
+  through `verify.gpu`), `models.lease_for` and `NoLease`, `runner.CURRENT["api"]` (no
+  `_Power`, no keep-warm, no `_down`, no `short_window`), `bench.api_task`, the
   router reading `discover()` only (never an API model, so exploring and `_cheaper` can't reach one),
   `cli.pick_model`'s refusal and `API_SIZES`, `bench`'s refusal, `identity`/`weights`/`keep_warm` (never a probe of a
   provider). `note_api`'s states → the keyhole's mapping of provider answers → `_api_status`'s table, `remedy`,

@@ -32,8 +32,8 @@ import zlib
 from collections import deque
 from pathlib import Path
 
-from . import (ask_mcp, context, gitguard, gitops, hardware, lane, lessons, models, progress, skills,
-               stats, store, tuning)
+from . import (ask_mcp, context, gitguard, gitops, hardware, keyhole, lane, lessons, models, progress,
+               skills, stats, store, tuning)
 from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize
 from .watch import Watcher
 
@@ -279,8 +279,9 @@ def write_config_layer(task: store.Task) -> Path:
     buffer = compaction_buffer(cfg)
     store.write_json(path, {
         "$schema": "https://opencode.ai/config.json",
-        **models._merge(models._merge(models.agent_providers(), provider_timeouts(task)),
-                        stored_key(task)),
+        # the keyhole's base and token last: they are the provider's way out (#1012)
+        **models._merge(models._merge(models._merge(models.agent_providers(), provider_timeouts(task)),
+                                      stored_key(task)), keyhole_overlay(task)),
         **mine,
         "share": "disabled",  # a user's `share: "auto"` would publish every agent session
         # the user's global small_model (titles, summaries) could be a cloud model whose key
@@ -424,7 +425,13 @@ def model_pins(model_id) -> dict:
 USERS_RULES = ("permissions", "permission")
 
 
-def rules_env(layer: dict) -> dict:
+def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
+    """OpenCode's environment for its config: the project's config off, and
+    OPENCODE_CONFIG_CONTENT (above). ``keyhole_over``: the task's keyhole overlay
+    (keyhole_overlay), said again in the content's `provider`, on top of the user's own: loaded
+    last, a user's `provider.<pid>.options.baseURL` there pointed the agent's OpenCode back at the
+    provider's real endpoint, past the keyhole (#1012). A V2 `providers.<pid>` of theirs gets it
+    too (keyhole_v2), since it replaces the V1 entry beside it."""
     users = models.users_config_content()
     users = {k: v for k, v in users.items()
              if (k == "provider" or k not in layer) and k not in ("mcp", *USERS_RULES)}
@@ -433,11 +440,16 @@ def rules_env(layer: dict) -> dict:
                 if isinstance(v, dict) and isinstance(v.get("options"), dict)
                 and any(k in v["options"] for k in PROVIDER_TIMEOUTS)}
     ours = {"share": "disabled", **{k: layer[k] for k in RESTATED if k in layer}}
-    if over := models._merge(timeouts, model_pins(layer.get("small_model")).get("provider") or {}):
+    over = models._merge(timeouts, model_pins(layer.get("small_model")).get("provider") or {})
+    if over := models._merge(over, (keyhole_over or {}).get("provider") or {}):
         ours["provider"] = over
     content = {**users, **ours}
     if over and isinstance(users.get("provider"), dict):
         content["provider"] = models._merge(users["provider"], over)
+    if keyhole_over and isinstance(theirs := users.get("providers"), dict):
+        content["providers"] = {**theirs, **{
+            pid: models._merge(theirs[pid] if isinstance(theirs[pid], dict) else {}, v2)
+            for pid, v2 in keyhole_v2(keyhole_over).items() if pid in theirs}}
     text = json.dumps(content, separators=(",", ":"))
     if len(text.encode()) > CONFIG_CONTENT_MAX:  # the user's own, too long to add to: wb's alone
         text = json.dumps(ours, separators=(",", ":"))
@@ -581,11 +593,19 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     keep = {k: v for k, v in os.environ.items() if env_kept(k, v, through) and k not in CLAUDE_CODE_OFF}
     layer = write_config_layer(task)
     env = {**keep, "PWD": str(task.workdir),  # opencode finds the project from $PWD
-           "OPENCODE_CONFIG": str(layer), **rules_env(json.loads(layer.read_text())),
+           "OPENCODE_CONFIG": str(layer),
+           **rules_env(json.loads(layer.read_text()), keyhole_overlay(task)),
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV, **METADATA_OFF,
            **REMOTE_CACHES_OFF, **({"WB_RUN": run} if run else {})}
     env.update(git_config_env(env))
     env["PATH"] = env.get("PATH") or os.defpath
+    if keyhole_of(task):  # an http_proxy kept for the agent must not carry the keyhole's
+        # loopback URL away (#1012). Both spellings get the union of both: Python and curl read
+        # no_proxy first, Go NO_PROXY, and each extended alone, the one the user hadn't set
+        # held 127.0.0.1 only, which dropped their own hosts (the review of #1015, 2026-11-23)
+        hosts = [h.strip() for name in ("NO_PROXY", "no_proxy")
+                 for h in (env.get(name) or "").split(",") if h.strip()]
+        env["NO_PROXY"] = env["no_proxy"] = ",".join(dict.fromkeys([*hosts, "127.0.0.1"]))
     places = context.writable(task)
     if places is not None:  # its own: the user's holds their bus and agents
         env["XDG_RUNTIME_DIR"] = str(context.runtime_dir(task))
@@ -1119,7 +1139,10 @@ def opencode_env(task: store.Task, run: str = "") -> dict:
     shim as its SHELL, so its commands get the user's data directories back (#1010). Not in
     agent_env: the tests' environment never has OpenCode's."""
     context.make_opencode_home(task)
-    return {**agent_env(task, run), **OPENCODE_ENV, **context.opencode_home_env(task),
+    # an API task's own catalog, with the fetch still off (write_catalog, #1015)
+    catalog = {"OPENCODE_MODELS_PATH": str(catalog_path(task))} \
+        if keyhole_of(task) and catalog_path(task).is_file() else {}
+    return {**agent_env(task, run), **OPENCODE_ENV, **context.opencode_home_env(task), **catalog,
             "SHELL": str(write_shell_shim(task))}
 
 
@@ -1169,7 +1192,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     threading.Thread(target=_reader, args=(proc.stdout, q), daemon=True).start()
     threading.Thread(target=_steer_bell, args=(task, proc, q), daemon=True).start()
     power = None
-    if not CURRENT.get("remote") and not models._fake():  # the suite's fakes: the GPU isn't theirs
+    # the suite's fakes: the GPU isn't theirs; an API model's isn't this machine's (#1015)
+    if not CURRENT.get("remote") and not CURRENT.get("api") and not models._fake():
         power = _Power()
         power.start()
 
@@ -1407,7 +1431,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         if out["full"]:
             _stop(proc)
             break
-        if (waiting_bg or asking) and mono - warmed >= KEEP_WARM_S:
+        # an API model has no keep-alive of ours to renew (#1015)
+        if (waiting_bg or asking) and mono - warmed >= KEEP_WARM_S and not CURRENT.get("api"):
             warmed = mono  # off the loop: a server slow to answer holds no clock or steer up
             threading.Thread(target=_keep_warm, args=(task.spec.get("model"),), daemon=True).start()
         every = float(spec.get("checkin") or 0) * 60
@@ -3157,7 +3182,9 @@ def _repo_gone(task: store.Task) -> None:
     task.notify("failed", f"task {task.name}: {text}")
 
 
-def _load_failed(task: store.Task, e: Exception) -> None:
+def _load_failed(task: store.Task, e: Exception, api: bool = False) -> None:
+    """The task failed before its model could run. ``api``: an API model's keyhole couldn't
+    start (keyhole_failure), which loads nothing."""
     if isinstance(e, store.Damaged):  # no model to name: task.json lost its contents (#475)
         task.set_status(phase="failed", last=str(e))
         return task.notify("failed", str(e))
@@ -3166,9 +3193,114 @@ def _load_failed(task: store.Task, e: Exception) -> None:
     task.set_status(phase="failed", last=f"model: {e}", infra="model",
                     **({"failed_before": "load"} if never else {}))
     # the agent never ran: resuming loses nothing, and a discard records nothing of the model
-    task.notify("failed", f"task {task.name}: could not load {task.spec['model']}: {e}"
+    task.notify("failed", f"task {task.name}: "
+                + (f"{task.spec['model']} can't run: {e}" if api else
+                   f"could not load {task.spec['model']}: {e}")
                 + (f"\nthe agent never ran: once the model can, wb resume {task.name} starts it"
                    if never else ""))
+
+
+# The keyhole (#1012): an API model's key stays in the runner, and OpenCode gets the keyhole's
+# base and token instead. Started by drive before the first round; CURRENT["keyhole"] while it
+# serves. Its provider's options go in the layer (write_config_layer) and again in
+# OPENCODE_CONFIG_CONTENT (rules_env), loaded last, so a user's own content can't point the
+# provider back at its real endpoint; the agent's NO_PROXY covers 127.0.0.1 (agent_env).
+def needs_keyhole(m: models.Model) -> bool:
+    """Whether an API model's requests need the keyhole: not an Ollama cloud model (this
+    machine's Ollama holds that login, and OpenCode sends no key), nor a keyless free one."""
+    return m.kind == "api" and not m.cloud and m.key != "none"
+
+
+def start_keyhole(task: store.Task, m: models.Model) -> keyhole.Keyhole:
+    """The task's keyhole, its answers recorded as the provider's health (api-health.json, which
+    status reads) and its usage handed to api_usage."""
+    return keyhole.start(task, m,
+                         on_health=lambda state, why, until: models.note_api(m.provider, state, why, until),
+                         on_usage=lambda usage: api_usage(task, usage))
+
+
+def api_usage(task: store.Task, usage: dict) -> None:
+    """Each API response's usage, as the keyhole read it. Nothing yet: the spend meter is #1019's."""
+
+
+def keyhole_failure(e: Exception) -> str:
+    """A KeyholeError's text with its remedy, when one is a key /connect can store (OAuth, a key
+    only in the environment, none stored, one OpenCode can't export) and the text doesn't name one
+    already. A provider that signs requests, or speaks a way the keyhole can't, has none."""
+    text = str(e)
+    if "/connect" in text or "signs each request" in text or "doesn't speak" in text \
+            or "API base" in text:
+        return text
+    return f"{text}: {keyhole.REMEDY}"
+
+
+def keyhole_of(task: store.Task) -> keyhole.Keyhole | None:
+    """The keyhole this runner serves for ``task``, if any."""
+    kh = CURRENT.get("keyhole")
+    return kh if kh is not None and getattr(kh.task, "name", None) == task.name else None
+
+
+def keyhole_overlay(task: store.Task) -> dict:
+    """The layer's `provider` overlay for the task's keyhole: its base and token (never the key,
+    keyhole.layer_options) as provider.<pid>.options; with the task's own catalog file
+    (catalog_path) the model's variants, which the file makes none of (models.catalog_doc); and
+    the base and token as the model's own wherever the model has an entry; {} with no keyhole."""
+    kh = keyhole_of(task)
+    if not kh:
+        return {}
+    opts = keyhole.layer_options(kh)
+    entry, own = {"options": opts}, {}
+    if catalog_path(task).is_file() and (variants := models.catalog_variants(kh.model)):
+        own["variants"] = variants
+    # the model's own base and key too: OpenCode 2.3.2 sends a model's `provider.api` or
+    # `options.baseURL` over its provider's (v1/config/migrate.ts migrateModel), and one in the
+    # user's global file or content sent the token to that base instead (the review of #1015,
+    # 2026-11-23). Only where the model has an entry anyway (the file's, or the user's config):
+    # an entry of wb's alone makes OpenCode a model its catalog lacks, with none of its limits
+    if own or models.has_model_entry(kh.model.provider, kh.model.name):
+        entry["models"] = {kh.model.name: {"provider": {"api": kh.base}, "options": dict(opts),
+                                           **own}}
+    return {"provider": {kh.model.provider: entry}}
+
+
+def keyhole_v2(over: dict) -> dict:
+    """keyhole_overlay's base and token in OpenCode's V2 form (`providers.<pid>.settings`, a
+    model's `settings`), for a document that has a `providers.<pid>` of its own: within one
+    document, V2's entry replaces V1's whole (normalize.ts mergeMaps), and a user's content in
+    the V2 form pointed the provider past the keyhole (the review of #1015, 2026-11-23)."""
+    out = {}
+    for pid, entry in (over.get("provider") or {}).items():
+        opts = entry.get("options") or {}
+        out[pid] = {"settings": dict(opts), "models": {
+            name: {"settings": dict(m.get("options") or opts)}
+            for name, m in (entry.get("models") or {}).items()}}
+    return out
+
+
+CATALOG_FILE = "catalog.json"
+
+
+def catalog_path(task: store.Task) -> Path:
+    """The task's own catalog for OPENCODE_MODELS_PATH: in its rules directory, readable in the
+    lane and never writable from it."""
+    return context.rules_dir(task) / CATALOG_FILE
+
+
+def write_catalog(task: store.Task) -> Path | None:
+    """The catalog the agent's OpenCode reads, holding the task's API model alone
+    (models.catalog_doc), or None (and no file) when it can't be rebuilt: the bundled catalog then
+    serves, as before. The agent's OpenCode fetches no catalog (#1010), and the one in its binary
+    may lack a model the user's OpenCode lists. Only a task with a keyhole gets one (a keyless
+    free model or an Ollama cloud one has the bundled catalog, ARCHITECTURE.md *The task's own
+    catalog*)."""
+    path = catalog_path(task)
+    kh = keyhole_of(task)
+    doc = models.catalog_doc(kh.model) if kh else None
+    if doc is None:
+        path.unlink(missing_ok=True)
+        return None
+    store.write_json(path, doc)
+    return path
 
 
 # A model whose server is only down (models.may_come_up: Ollama not answering, a server with no
@@ -3182,6 +3314,8 @@ DOWN_PAUSES = (2, 60)
 
 
 def _down(m: models.Model) -> bool:
+    if m.kind == "api":  # no server of the user's to wait for, nor to revive (#1015)
+        return False
     try:
         return models.may_come_up(models.status(m))
     except Exception:  # the config can't be read: not a server that is down
@@ -3237,7 +3371,7 @@ def _load(task: store.Task, lease, m: models.Model) -> float:
         _wait_up(task, m)
         _rejoin(task, lease)
         secs = lease.load()
-    if why := models.short_window(m):
+    if m.kind != "api" and (why := models.short_window(m)):  # an API model: no server to ask
         raise RuntimeError(why)
     return secs
 
@@ -3283,9 +3417,20 @@ def _rejoin(task: store.Task, lease) -> None:
         lease.rejoin()
 
 
+def _gpu_side(task: store.Task) -> bool:
+    try:
+        return models.gpu_side(task.spec["model"])
+    except Exception:  # a config that doesn't parse: resolve's to report
+        return True
+
+
 def drive(task: store.Task) -> None:
-    # infra: why the machine, not the agent, failed the task's last run (wb bench grades none of it)
-    task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid(), infra=None,
+    # infra: why the machine, not the agent, failed the task's last run (wb bench grades none of it).
+    # `last` at once, from the config alone (gpu_side): left to after resolve, which may read the
+    # catalog, a GPU task showed the last run's line ("Claude reviews next") as queued (the
+    # review of #1015, 2026-11-23)
+    task.set_status(phase="queued", pid=os.getpid(), infra=None,
+                    last="waiting for the GPU" if _gpu_side(task) else "starting",
                     boot=store.boot_id(),  # a later boot reaps it as a restart's (cli.reap)
                     machine=store.machine(), host=store.host(),  # whose pid it is (#849)
                     beat=BEAT_SECS)  # and that its lock file beats (#872)
@@ -3294,9 +3439,30 @@ def drive(task: store.Task) -> None:
         m = models.resolve(task.spec["model"])
     except KeyError as e:
         return _load_failed(task, e)
-    CURRENT["remote"] = m.remote  # the GPU is not ours to measure when the model is remote
-    if m.remote:
+    api = m.kind == "api"
+    # an API task waits for no GPU (#1015): its first line says so
+    task.set_status(last="starting" if api else "waiting for the GPU")
+    CURRENT["api"] = api  # no GPU power to sample, no keep-alive to renew (run_round)
+    # the GPU is not ours to measure when the model is remote; an API model's isn't a GPU's at
+    # all, and its savings line is its own (#1015)
+    CURRENT["remote"] = m.remote and not api
+    if CURRENT["remote"]:
         task.set_status(remote_gpu=True)  # so its savings say the energy wasn't measured (#117)
+    if api and needs_keyhole(m):
+        try:
+            CURRENT["keyhole"] = start_keyhole(task, m)
+        except keyhole.KeyholeError as e:
+            return _load_failed(task, RuntimeError(keyhole_failure(e)), api=True)
+        write_catalog(task)
+    try:
+        _drive(task, m, say)
+    finally:
+        if kh := CURRENT.pop("keyhole", None):  # a runner's own: it dies with it; closed for a
+            kh.close()                          # runner driven in-process (the tests)
+
+
+def _drive(task: store.Task, m: models.Model, say) -> None:
+    """drive, once the model is known (and an API model's keyhole is serving)."""
     if not gitops.repo_of(task.spec).is_dir():  # moved, renamed, or its git dir removed (#776)
         return _repo_gone(task)
     if not checkout(task):  # the worktree itself, out of wb start's foreground (#529)
@@ -3316,8 +3482,9 @@ def drive(task: store.Task) -> None:
         # before the lease: it needs no GPU, and a probe that hangs (20 s a file) held it from the
         # other tasks, the model already loaded (review, 2026-11-21)
         add_outline(task)
-    # beside the running tasks' models when all fit the GPU, else alone once they finish
-    with models.GpuLease(m, task.name, say) as lease:
+    # beside the running tasks' models when all fit the GPU, else alone once they finish; an API
+    # model takes one of its provider's slots instead, and nothing of the GPU (#1015)
+    with models.lease_for(m, task.name, say) as lease:
         # this runner reached the lease: from now on gpu.json says whether it holds the GPU, so
         # wb start no longer counts it as a holder while it steps aside for its tests (#805)
         task.set_status(leased=os.getpid())
@@ -3426,8 +3593,13 @@ def drive(task: store.Task) -> None:
                 # its server gone again after the round's one revive: the machine's, not the
                 # step's, so the model's slice isn't shrunk for it (#657)
                 server = (crashed or hushed) and revived == n and (_down(m) or _stopped(m))
-                task.set_status(phase=phase, last=rnd["stuck"] or f"opencode exited {rnd['exit']}",
-                                **({"infra": "model"} if server else {}))
+                last = rnd["stuck"] or f"opencode exited {rnd['exit']}"
+                said = [e[len("opencode: "):] for e in rnd["errors"] if e.startswith("opencode: ")]
+                if not rnd["stuck"] and CURRENT.get("api") and said:
+                    # the provider's error, as the keyhole redacted it (an auth or quota error
+                    # ends the run at once): what Claude needs to know, not only the exit (#1012)
+                    last = f"{last}: {said[-1]}"[:200]
+                task.set_status(phase=phase, last=last, **({"infra": "model"} if server else {}))
                 # what stopped it, for results.step: a guard or the agent's own exit (#582)
                 task.notify(phase, text, round=n,
                             cause="server" if server else "guard" if rnd["stuck"] else "agent")

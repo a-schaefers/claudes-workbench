@@ -87,6 +87,19 @@ unavailable for <id>: <v>`, exit 1. Every `step_finish` carries `part.cost` (USD
 catalog's first price, its context tier past `size`; FAKE_COST for a model with none, else 0) and
 `part.tokens{input, output, reasoning, cache{read, write}}`; `session export` gives each assistant
 message `cost` (FAKE_COST, else 0) and `tokens`, and `info.cost`, `info.tokens` their sums.
+With OPENCODE_MODELS_PATH (a models.dev v2 catalog, as 2.3.2 reads it in place of its own), a
+`run -m` of a provider the file lists finds the model there or not at all (`nokey`'s error), its
+variants the config's only (the file makes none: wb leaves `reasoning` unsupported); FAKE_RUNS
+rows record it as `models_path`, and OPENCODE_CONFIG_CONTENT as `content`.
+  http   a model request as OpenCode makes one, through its config (#1015): the run's provider's
+         options from OPENCODE_CONFIG, then OPENCODE_CONFIG_CONTENT over them; POST
+         <baseURL>/chat/completions with `Authorization: Bearer <apiKey>` (an `anthropic`
+         provider: <baseURL>/messages?beta=true with `x-api-key`), through urllib, so the
+         environment's http_proxy and no_proxy apply as they do to OpenCode's fetch. A 2xx is
+         `ok` (it writes 42); another status is OpenCode's error for it, the upstream's message
+         verbatim (`provider.auth` for 401/403, `provider.quota` 402, `provider.rate-limit` 429,
+         else `provider.http`), exit 1; no connection is `provider.transport`, exit 1. FAKE_HTTP_LOG,
+         a file: each request's URL and status (or error) appended.
 """
 import json
 import os
@@ -318,12 +331,20 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                              "xdg_state": os.environ.get("XDG_STATE_HOME"),
                              "shell": os.environ.get("SHELL"),
                              "fetch_off": os.environ.get("OPENCODE_DISABLE_MODELS_FETCH"),
+                             "models_path": os.environ.get("OPENCODE_MODELS_PATH"),
+                             "content": os.environ.get("OPENCODE_CONFIG_CONTENT"),
                              "shell_sees": sees}) + "\n")
 if args and args[0] == "run" and "-m" in args:  # the model: <provider>/<id>[#<variant>]
     ref = args[args.index("-m") + 1]
     provider, _, rest = ref.partition("/")
     mid, _, variant = rest.partition("#")
     listed = [e for e in catalog_file()["data"] if e["providerID"] == provider]
+    if os.environ.get("OPENCODE_MODELS_PATH"):  # wb's file replaces the catalog (#1015)
+        with open(os.environ["OPENCODE_MODELS_PATH"]) as fh:
+            own = (json.load(fh).get(provider) or {}).get("models") or {}
+        priced_as = {e["id"]: e.get("cost") for e in listed}
+        listed = [{"providerID": provider, "id": k, "variants": [], "cost": priced_as.get(k)}
+                  for k in own]
     entry = next((e for e in listed if e["id"] == mid), None)
     state = api_state(provider, mid)  # any model's, in the catalog or not
     if state in API_SCENARIOS:
@@ -338,6 +359,56 @@ if args and args[0] == "run" and "-m" in args:  # the model: <provider>/<id>[#<v
             PRICE = entry.get("cost") or None
     if scenario == "nokey":
         fail("provider.no-route", f"Model unavailable: {provider}/{mid}")
+if scenario == "http" and args and args[0] == "run":  # a model request through the config
+    import urllib.error
+    import urllib.request
+    ref = args[args.index("-m") + 1] if "-m" in args else ""
+    pid, _, rest = ref.partition("/")
+    opts = {}
+    docs = []
+    try:
+        with open(os.environ.get("OPENCODE_CONFIG") or "") as fh:
+            docs.append(json.load(fh))
+    except (OSError, ValueError):
+        pass
+    try:
+        docs.append(json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}"))
+    except ValueError:
+        pass
+    for doc in docs:  # each loaded after the last, its options over theirs
+        opts.update(((doc.get("provider") or {}).get(pid) or {}).get("options") or {})
+    base = str(opts.get("baseURL") or "").rstrip("/")
+    key = str(opts.get("apiKey") or "")
+    if pid == "anthropic":
+        url, heads = f"{base}/messages?beta=true", {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    else:
+        url, heads = f"{base}/chat/completions", {"Authorization": f"Bearer {key}"}
+    body = json.dumps({"model": rest.partition("#")[0], "stream": True,
+                       "messages": [{"role": "user", "content": args[-1][:200]}]}).encode()
+    req = urllib.request.Request(url, data=body, method="POST",
+                                 headers={**heads, "Content-Type": "application/json"})
+
+    def logged(what):
+        if os.environ.get("FAKE_HTTP_LOG"):
+            with open(os.environ["FAKE_HTTP_LOG"], "a") as fh:
+                fh.write(json.dumps({"url": url, "result": what}) + "\n")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+            logged(r.status)
+    except urllib.error.HTTPError as e:
+        text = e.read().decode("utf-8", "replace")
+        logged(e.code)
+        try:
+            message = json.loads(text)["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            message = text
+        fail({401: "provider.auth", 403: "provider.auth", 402: "provider.quota",
+              429: "provider.rate-limit"}.get(e.code, "provider.http"), message, e.code)
+    except (urllib.error.URLError, OSError) as e:
+        logged(f"error: {e}")
+        fail("provider.transport", f"Unable to connect: {e}")
+    scenario = "ok"
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
 if (scenario in ("fill", "compact") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
