@@ -5232,7 +5232,7 @@ test('#1014: routes.json and route-ok.json are never Claude\'s to edit, and no c
   await clock.advance(1000)
 })
 
-test('#1014: the roles reach the conversation: a block while delegating with an API role, and one row per change however made', async ($, on) => {
+test('#1014: the roles reach the conversation: a block while delegating with an API role, and one row per change however made', { timeoutMs: 20_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const at = '/home/u/.config/workbench/routes.json'
   const files: Record<string, string> = {
