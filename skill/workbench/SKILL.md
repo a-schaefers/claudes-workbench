@@ -326,6 +326,9 @@ runner how slowly the model reads: a new `wb start` on it waits longer (the stop
 **Exit 4: the GPU is taken** by another task (often another session's project) or `wb image`,
 which the model can't run beside. Don't wait silently: tell the user who holds it, then either
 do the step yourself or `--queue` it to start when the GPU is free (it may be hours).
+An API model's task needs no GPU and never waits for one; its exit 4 is "3 tasks already run on
+<provider>'s API": workbench runs at most three at once per provider. Do the step yourself, or
+`--queue` it to start when one of those finishes.
 
 ## Driving a running task
 You are the driver, not a spectator: when a check-in, its log or the user says the agent is

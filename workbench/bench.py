@@ -645,8 +645,22 @@ def done_keys() -> set[tuple]:
 
 
 def _idle() -> bool:
+    """No real task runs that the GPU's replays would wait for: an API task takes no GPU, so an
+    overnight run doesn't wait for one (#1015)."""
     return not any(t.status.get("phase") in store.ACTIVE and not t.spec.get("bench")
-                   for t in store.all_tasks())
+                   and not api_task(t) for t in store.all_tasks())
+
+
+def api_task(t: store.Task) -> bool:
+    """Whether a task runs an API model: task.json `via` "api" (how wb start records a role's
+    route, #1016), else its model as discovery has it (hosted.json as it is, never read again)."""
+    if t.spec.get("via"):
+        return t.spec["via"] == "api"
+    mid = t.spec.get("model") or ""
+    if models.gpu_side(mid):
+        return False
+    m = models.lookup(mid, cached=True)
+    return bool(m and m.kind == "api")
 
 
 CURRENT: dict = {}

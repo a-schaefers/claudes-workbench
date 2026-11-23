@@ -53,7 +53,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   lane's paths: `writable`, the worktree, `ask/` and the task's `opencode/`, `opencode_home`; grants). `lane.py`: the Landlock lane. `gitguard.py`: the agent's read-only `git`.
   Neither imports the rest of the package: the lane runs as a file, the shim on every git call.
 - `keyhole.py`: the per-task key proxy, outside the lane: only the task's model, the key swapped
-  in, errors redacted (ARCHITECTURE.md, *The keyhole*; the runner starts it with #1013).
+  in, errors redacted (ARCHITECTURE.md, *The keyhole*); `runner.drive` starts it for an API task,
+  and `keyhole_overlay` goes in both the layer and `rules_env`'s restatement.
 - `gitops.py`: worktrees, the review diff, commits (no hooks); a call on a task's worktree is
   pinned to its git dir (`gitdir.json`).
 - `patches.py`: `wb patch`, the user's own fixes to workbench (ARCHITECTURE.md, *Local patches*):
@@ -65,7 +66,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `results.py`: results.jsonl rows; read them through `store.results()`, which leaves out trials.
 - `router.py`: the model per size, slices, budgets. `tuning.py`: learned knobs (a new one goes in
   `KNOBS`, read with `tuning.value`). `models.py`: discovery (`discover`, GPU only; API models from
-  OpenCode's catalog, `hosted`, `lookup`, `note_api`), residency, `GpuLease`. `routes.py`: the
+  OpenCode's catalog, `hosted`, `lookup`, `note_api`, `catalog_doc`), residency, `GpuLease`, and
+  `lease_for`: an API task's `NoLease` (provider slots, never the GPU). `routes.py`: the
   roles (`significant`, `trivial`, `writing`: GPU or API, each side's model, thinking; the day cap)
   in routes.json, the change line `wb route` prints and the mod's dialog shows, and the dialog's
   one-shot approval (`approved`). `wb start` follows them only with `--role` (#1016).
@@ -87,10 +89,12 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 
 ## How a task runs
 Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change must not break:
-1. `wb start` checks (a committed CLAUDE.md, the model, GPU room: exit 4 unless `--queue`),
+1. `wb start` checks (a committed CLAUDE.md, the model, GPU room, or for an API model a free
+   provider slot of `API_PARALLEL`: exit 4 unless `--queue`),
    writes round 1's prompt (spec plus `PROTOCOL`), spawns the runner and returns at once:
    anything slow (checkout, setup, base check) is the runner's, as Claude's Bash stops at 2 min.
-2. The runner holds the GPU (`GpuLease`), loads the model before every round, and runs
+2. The runner holds the GPU (`GpuLease`) and loads the model before every round, or for an API
+   model holds a provider slot (`NoLease`, never in gpu.json) and starts the keyhole; it runs
    `opencode run … -- <prompt>` in the worktree through `lane.wrap`, with the layer
    `rules/<task>/opencode.json`. Guards stop a stuck agent; `wb steer` queues a note.
 3. `--test` runs in the agent's lane, environment and shell (its code gains no rights when
@@ -118,7 +122,8 @@ Plain files under `$WB_HOME` (`~/.local/state/workbench`); config in `~/.config/
 skill library in `$WB_SKILLS` (`~/.local/share/workbench/skills`, its own git repo). Every file,
 key and format: ARCHITECTURE.md, *Files and formats*. Inside `$WB_HOME` the agent's lane
 writes only `tasks/<task>/worktree/`, `ask/` and `opencode/` (its OpenCode's own home; the rest of
-its lane: *What the agent knows*); `rules/<task>/` (with the shell shim, `shell/<name>`) and
+its lane: *What the agent knows*); `rules/<task>/` (with the shell shim, `shell/<name>`, and an
+API task's `catalog.json`, its `OPENCODE_MODELS_PATH`), `api/` (the provider slots) and
 `locks/` (`store.task_lock`) stay outside it (an agent once held the runner's lock: the 0.90 review). `wb patch` keeps `patches.json` (the
 clone install and its upstream, which the mod reads; the pull requests it sent), `send-ok.json` (the mod's yes to one send),
 `rescued/`, `upstream/` and `patches/` there; `route-ok.json` is the dialog's yes to one role change

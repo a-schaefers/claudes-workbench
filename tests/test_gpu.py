@@ -1,5 +1,6 @@
 """Sharing the GPU: tasks run side by side when their models fit it together, else one at a time."""
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -17,8 +18,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script too
 
-from workbench import cli, hardware, images, models, store, transcript
-from tests.test_workbench import Base, IMAGE_PNG, TEST_CMD, run_wb, wait_phase
+from workbench import bench, cli, hardware, images, models, runner, store, transcript
+from tests.test_workbench import (Base, FLASH, IMAGE_PNG, TEST_CMD, _ApiTask, run_wb, wait_gone,
+                                  wait_phase)
 
 BIG, SMALL = "ollama/qwen3.8-27b", "ollama/mimo-v2.6:9b-q8_0"
 
@@ -1288,6 +1290,163 @@ class KeepWarm(unittest.TestCase):
                 mock.patch.object(models, "_post", side_effect=RuntimeError("HTTP 500")):
             self.assertFalse(models.keep_warm(self.model()))
 
+
+
+class ApiLease(_ApiTask, Base):
+    """API tasks take no GPU lease (#1015): a slot of their provider's (models.API_PARALLEL) in
+    its place, never in gpu.json, and never refused for, nor refusing, a GPU task."""
+
+    def setUp(self):
+        super().setUp()
+        self.api_setup()
+
+    def refused(self, *argv) -> tuple[int, str]:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err):
+            run_wb(*argv)
+        return e.exception.code, err.getvalue()
+
+    def refused_api(self, name, *extra) -> tuple[int, str]:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err):
+            self.start_api(name, "ok", *extra)
+        return e.exception.code, err.getvalue()
+
+    def no_api_lease_files(self):
+        """Only the GPU's own lease files: no pool of an API model's."""
+        return sorted(p.name for p in Path(os.environ["WB_GPU_DIR"]).glob("gpu*.json")
+                      if p.name != "gpu.json")
+
+    def three_running(self):
+        for name in ("api-1", "api-2", "api-3"):
+            self.start_api(name, "hang")
+        for name in ("api-1", "api-2", "api-3"):
+            wait_running(name)
+        self.assertEqual(models.api_slots_free("deepinfra"), 0)
+        self.assertEqual(models.api_holders("deepinfra"), ["api-1", "api-2", "api-3"])
+
+    def test_two_api_tasks_run_while_a_gpu_task_holds_the_gpu_and_load_nothing(self):
+        self.start("t-gpu", "hang", "--model", BIG)
+        wait_running("t-gpu")
+        loads = []
+        real = models.make_resident
+        with mock.patch.object(models, "make_resident",
+                               lambda m, *a, **k: loads.append(m.id) or real(m, *a, **k)):
+            for name in ("api-a", "api-b"):
+                out = self.start_api(name, "ok", "--test", TEST_CMD, spawn=False)  # no exit 4
+                self.assertNotIn("the GPU", out)                 # none of the GPU's notes
+                self.assertNotIn("onto the GPU", out)
+                self.drive_here(name)
+                self.assertEqual(store.Task(name).status["phase"], "review", store.Task(name).status)
+        self.assertEqual(loads, [])
+        self.assertEqual(store.Task("t-gpu").status["phase"], "running")  # nothing of its own lost
+        self.assertEqual([h["task"] for h in models.holders().values()], ["t-gpu"])
+        self.assertEqual(self.no_api_lease_files(), [])
+
+    def test_a_gpu_task_starts_beside_three_api_tasks_as_if_alone(self):
+        self.three_running()
+        out = self.start("t-gpu", "ok", "--model", BIG, "--test", TEST_CMD)   # not refused
+        self.assertNotIn("busy", out)
+        self.assertNotIn("runs beside", out)
+        wait_phase("t-gpu", {"review"})
+        self.assertEqual(self.no_api_lease_files(), [])         # the API tasks held no GPU pool
+        self.assertFalse(cli._gpu_holders("t-x"))               # and count as no holder of it
+        # an API model's pool None reads no `None.json` (the review of #1015)
+        store.write_json(models.lease_dir() / "None.json", {str(os.getpid()): {"task": "x"}})
+        self.assertEqual(models.holders(pool=None), {})
+        self.assertFalse(cli._gpu_holders("t-x", of=models.resolve(FLASH)))
+        self.assertIsNone(models.pool(models.resolve(FLASH)))
+        self.assertEqual(models.pool(None), "gpu")              # an image's lease is still the GPU's
+
+    def test_a_fourth_api_task_on_one_provider_exits_4_and_queued_runs_when_a_slot_frees(self):
+        self.three_running()
+        code, err = self.refused_api("api-4")
+        self.assertEqual(code, 4)
+        self.assertIn("3 tasks already run on deepinfra's API (api-1, api-2, api-3): workbench runs "
+                      "at most 3 at once per provider. --queue starts it anyway, to wait for a "
+                      "slot; or do this step yourself", err)
+        self.assertFalse(store.Task("api-4").exists)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = self.start_api("api-4", "ok", "--queue", "--test", TEST_CMD)
+        self.assertIn("note: 3 tasks run on deepinfra's API; this task waits as queued for a slot", out)
+        deadline = time.time() + 30
+        while store.Task("api-4").status.get("last") != "waiting for an API slot: 3 tasks run on deepinfra":
+            self.assertLess(time.time(), deadline, store.Task("api-4").status)
+            time.sleep(0.1)
+        self.assertEqual(store.Task("api-4").status["phase"], "queued")
+        # another provider's slots are its own
+        self.assertEqual(models.api_slots_free("anthropic"), models.API_PARALLEL)
+        run_wb("stop", "api-2")
+        wait_phase("api-4", {"review"})
+        self.assertEqual(store.Task("api-4").status["tests"]["ok"], True)
+
+    def test_a_probe_reads_a_slot_another_probe_is_checking_as_free(self):
+        # the review of #1015 (2026-11-23): a probe took each free slot LOCK_EX before letting go,
+        # so a second probe at that moment (two wb starts, or a start and a feedback's note) read
+        # it as held: with two real holders, api_slots_free said 0 and wb start exited 4
+        paths = models._slot_paths("deepinfra")
+        fds = [models._slot_fd(p) for p in paths]
+        self.addCleanup(lambda: [os.close(fd) for fd in fds])
+        for fd, name in zip(fds[:2], ("a", "b")):
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.pwrite(fd, f"{name}\n".encode(), 0)
+        fcntl.flock(fds[2], fcntl.LOCK_SH | fcntl.LOCK_NB)      # the other probe, mid-check
+        self.assertEqual(models.api_slots_free("deepinfra"), 1)
+        self.assertEqual(models.api_holders("deepinfra"), ["a", "b"])
+        fcntl.flock(fds[2], fcntl.LOCK_UN)
+        fcntl.flock(fds[2], fcntl.LOCK_EX)                      # a holder still reads as one
+        self.assertEqual(models.api_slots_free("deepinfra"), 0)
+
+    def test_feedback_on_an_api_task_says_it_waits_for_a_slot(self):
+        self.start_api("api-r", "ok", spawn=False)
+        self.drive_here("api-r")
+        self.assertEqual(store.Task("api-r").status["phase"], "review")
+        self.three_running()
+        with mock.patch.object(cli, "spawn_runner", lambda task: 0):
+            out = run_wb("feedback", "api-r", "--text", "1. Again.")
+        self.assertIn("note: 3 tasks run on deepinfra's API; api-r waits as queued for a slot", out)
+        self.assertNotIn("GPU", out)
+
+    def test_a_runner_killed_with_sigkill_frees_its_slot(self):
+        self.start_api("api-k", "hang")
+        wait_running("api-k")
+        self.assertEqual(models.api_slots_free("deepinfra"), models.API_PARALLEL - 1)
+        st = store.Task("api-k").status
+        self.addCleanup(lambda: os.killpg(st["agent_pid"], 9) if st.get("agent_pid") else None)
+        os.kill(st["pid"], 9)
+        try:  # wb start's child here: reaped, or kill -0 still finds it
+            os.waitpid(st["pid"], 0)
+        except ChildProcessError:
+            self.assertTrue(wait_gone(st["pid"]))
+        self.assertEqual(models.api_slots_free("deepinfra"), models.API_PARALLEL)
+        self.assertEqual(models.api_holders("deepinfra"), [])
+
+    def test_an_image_runs_on_this_gpu_while_an_api_task_runs(self):
+        tmp = Path(self.tmp.name)
+        engine = tmp / "engine.py"
+        engine.write_text("import sys\nopen(sys.argv[1], 'wb').write(" + repr(IMAGE_PNG) + ")\n")
+        (tmp / "images.json").write_text(json.dumps({"e": {"command": f"{sys.executable} {engine} {{out}}"}}))
+        os.environ["WB_IMAGES"] = str(tmp / "images.json")
+        self.start_api("api-i", "hang")
+        wait_running("api-i")
+        made = images.generate("a fox", tmp / "o", n=1, say=lambda *_: None, wait=False)
+        self.assertEqual(len(made), 1)
+        self.assertEqual(store.Task("api-i").status["phase"], "running")
+        self.assertEqual(self.no_api_lease_files(), [])
+
+    def test_the_bench_is_idle_while_only_api_tasks_run(self):
+        models.hosted()                                         # hosted.json, as wb start leaves it
+        for name, spec in (("api-x", {"model": FLASH}), ("api-y", {"model": "acme/x", "via": "api"})):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, **spec})
+            t.set_status(phase="running")
+        self.assertTrue(bench._idle())
+        t = store.Task("gpu-x")
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": "gpu-x", "model": SMALL})
+        t.set_status(phase="running")
+        self.assertFalse(bench._idle())
 
 if __name__ == "__main__":
     unittest.main()

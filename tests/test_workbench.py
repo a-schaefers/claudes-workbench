@@ -30,6 +30,7 @@ import time
 import unittest
 import urllib.error
 import urllib.parse
+import urllib.request
 from unittest import mock
 import warnings
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
@@ -25484,6 +25485,33 @@ class Keyhole(_KeyholeTest):
             self.assert_no_canary(str(e.exception))
         self.assertEqual(self.kh_mod.load_key("plain").value, self.CANARY)
 
+    def test_a_key_in_a_models_own_entry_or_the_v2_form_cant_run(self):
+        # the review of #1015 (2026-11-23): only provider.<pid>.options was read, so a model's
+        # own options.apiKey or headers (OpenCode 2.3.2 sends a model's over its provider's), a
+        # V2 `providers.<pid>.settings.apiKey` or a variant's key went unseen, and the keyhole
+        # started while the key sat in OPENCODE_CONFIG_CONTENT, the agent's environment
+        names = ("m-opt", "m-head", "m-opthead", "v2", "v2-model", "variant", "clean")
+        self.fake_auth({p: {"export": [self.key_row(p, {"type": "key", "key": self.CANARY})]}
+                        for p in names})
+        bearer = f"Bearer {self.CANARY}"
+        os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps({
+            "provider": {
+                "m-opt": {"models": {"a/b": {"options": {"apiKey": self.CANARY}}}},
+                "m-head": {"models": {"a/b": {"headers": {"Authorization": bearer}}}},
+                "m-opthead": {"models": {"a/b": {"options": {"headers": {"x-api-key": self.CANARY}}}}},
+                "variant": {"models": {"a/b": {"variants": {"high": {"apiKey": self.CANARY}}}}},
+                "clean": {"models": {"a/b": {"options": {"reasoningEffort": "high"},
+                                             "headers": {"X-Title": "my app"}}}}},
+            "providers": {
+                "v2": {"settings": {"apiKey": self.CANARY}},
+                "v2-model": {"models": {"a/b": {"headers": {"Authorization": bearer}}}}}})
+        for provider in names[:-1]:
+            with self.assertRaises(self.kh_mod.KeyholeError, msg=provider) as e:
+                self.kh_mod.load_key(provider)
+            self.assertIn("its key is written in OPENCODE_CONFIG_CONTENT", str(e.exception))
+            self.assert_no_canary(str(e.exception))
+        self.assertEqual(self.kh_mod.load_key("clean").value, self.CANARY)
+
 
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
 class RealOpenCodeAPI(_KeyholeTest):
@@ -25505,6 +25533,78 @@ class RealOpenCodeAPI(_KeyholeTest):
                            capture_output=True, text=True, timeout=180)
         self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
         self.assert_no_canary(layer.read_text(), json.dumps(env))
+
+    def test_no_base_of_the_users_takes_the_token_past_the_keyhole(self):
+        # the review of #1015 (2026-11-23): the restatement said provider.<pid>.options again,
+        # but OpenCode 2.3.2 sends a model's own base over its provider's (migrateModel), and a
+        # V2 `providers.<pid>` replaces the V1 entry beside it in one document: the user's content
+        # or global file sent the token to a decoy, the keyhole seeing nothing
+        decoy = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
+        decoy.daemon_threads = True
+        decoy.seen, decoy.mode, decoy.status, decoy.message = [], "ok", 200, ""
+        decoy.retry_after, decoy.chunks, decoy.gap = None, 1, 0
+        decoy.served, decoy.by = "served-model", None
+        decoy.ctype, decoy.pieces = "application/json", []
+        threading.Thread(target=decoy.serve_forever, daemon=True).start()
+        self.addCleanup(decoy.server_close)
+        self.addCleanup(decoy.shutdown)
+        base = f"http://127.0.0.1:{decoy.server_port}/v1/openai"
+        m = self.model()
+        kh = self.keyhole(m)
+        runner.CURRENT["keyhole"] = kh
+        self.addCleanup(runner.CURRENT.clear)
+        tmp = Path(self.tmp.name)
+        os.environ.pop("WB_OPENCODE_CONFIG", None)  # the user's content counts only without it
+        (tmp / "etc").mkdir()                       # no system file of this machine's
+        p = mock.patch.object(self.models, "_system_dir", return_value=tmp / "etc")
+        p.start()
+        self.addCleanup(p.stop)
+        theirs = {
+            "model provider.api": {"provider": {"deepinfra": {"models": {m.name: {
+                "provider": {"api": base}}}}}},
+            "model options.baseURL": {"provider": {"deepinfra": {"models": {m.name: {
+                "options": {"baseURL": base}}}}}},
+            "V2 provider settings": {"providers": {"deepinfra": {"settings": {"baseURL": base}}}},
+            "V2 model settings": {"providers": {"deepinfra": {"models": {m.name: {
+                "settings": {"baseURL": base}}}}}},
+        }
+        got = []
+        for i, (case, mine) in enumerate([*((c, (v, None)) for c, v in theirs.items()),
+                                          ("global file, model provider.api",
+                                           (None, theirs["model provider.api"])),
+                                          ("global file, V2 model settings",
+                                           (None, theirs["V2 model settings"]))]):
+            content, global_file = mine
+            self.up.seen.clear()
+            decoy.seen.clear()
+            if content:
+                os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps(content)
+            else:
+                os.environ.pop("OPENCODE_CONFIG_CONTENT", None)
+            glob_dir = tmp / f"base-{i}" / "config" / "opencode"   # the user's global directory
+            glob_dir.mkdir(parents=True)
+            if global_file:
+                (glob_dir / "opencode.json").write_text(json.dumps(global_file))
+            os.environ["OPENCODE_CONFIG_DIR"] = str(glob_dir)     # where wb reads it too
+            over = runner.keyhole_overlay(self.task)               # as the runner writes them
+            layer = {"disabled_providers": ["ollama"], **over}
+            (tmp / "layer.json").write_text(json.dumps(layer))
+            env = {**self.scratch_env(tmp / "layer.json", f"base-{i}"),
+                   "OPENCODE_CONFIG_DIR": str(glob_dir),
+                   "OPENCODE_CONFIG_CONTENT": runner.rules_env(layer, over)["OPENCODE_CONFIG_CONTENT"]}
+            r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", m.id,
+                                "--format", "json", "say ok"], cwd=self.repo, env=env,
+                               capture_output=True, text=True, timeout=180)
+            self.assertEqual(r.returncode, 0, f"{case}: {r.stdout[-2000:]}{r.stderr[-2000:]}")
+            got.append((case, len(decoy.seen), len(self.up.seen)))
+            self.assertTrue(all(s["headers"]["Authorization"] == f"Bearer {self.CANARY}"
+                                for s in self.up.seen), case)
+        self.assertEqual(got, [(case, 0, 1) for case, _, _ in got])        # the keyhole's way
+        # and no entry of wb's own where the user has none: it would make OpenCode a model its
+        # catalog lacks (the own-catalog test's "Model unavailable")
+        os.environ.pop("OPENCODE_CONFIG_CONTENT", None)
+        os.environ["OPENCODE_CONFIG_DIR"] = str(tmp / "etc")
+        self.assertNotIn("models", runner.keyhole_overlay(self.task)["provider"]["deepinfra"])
 
     def test_the_keyhole_carries_the_key(self):
         from workbench import keyhole
@@ -25536,6 +25636,109 @@ class RealOpenCodeAPI(_KeyholeTest):
             [sent] = asked
             self.assertIn(kh.token, sent[header])                          # OpenCode had the token
             self.assert_no_canary(json.dumps(sent))                        # and never the key
+
+    def scratch_env(self, layer, name, models_path=None):
+        """Real OpenCode's environment with nothing of the user's: scratch homes, no catalog
+        fetch, the layer, and the task's catalog file when given."""
+        tmp = Path(self.tmp.name)
+        return {"PATH": os.environ["PATH"], "HOME": str(tmp / "home"), "PWD": str(self.repo),
+                "OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_CONFIG": str(layer),
+                # as wb runs it: the test's opencode.json, above the repo, is no project config
+                "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+                **({"OPENCODE_MODELS_PATH": str(models_path)} if models_path else {}),
+                **{f"XDG_{d.upper()}_HOME": str(tmp / name / d)
+                   for d in ("config", "data", "state", "cache")}}
+
+    def listed(self, layer, name, models_path=None):
+        r = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.repo,
+                           env=self.scratch_env(layer, name, models_path), capture_output=True,
+                           text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        rows = json.loads(r.stdout)["data"]
+        for row in rows:
+            (row.get("settings") or {}).pop("apiKey", None)        # the layer's dummy, given back
+        return rows
+
+    def test_the_tasks_own_catalog_is_read_as_the_bundled_one_and_carries_a_model_it_lacks(self):
+        # #1015: the agent's OpenCode fetches no catalog (#1010), so wb hands it the model in a
+        # file of its own (OPENCODE_MODELS_PATH), rebuilt from `api model.list` (catalog_doc),
+        # its variants in the layer (catalog_variants)
+        tmp = Path(self.tmp.name)
+        keys = {"disabled_providers": ["ollama"],  # this machine's own Ollama is never asked
+                "provider": {p: {"options": {"apiKey": "dummy-not-a-key"}} for p in SPIKE_IDS}}
+        (tmp / "keys.json").write_text(json.dumps(keys))
+        bundled = self.listed(tmp / "keys.json", "bundled")
+        picked = []
+        for pid in SPIKE_IDS:  # the spike's model, else another of the provider's with variants
+            rows = [r for r in bundled if r["providerID"] == pid]
+            picked.append(next((r for r in rows if r["id"] == SPIKE_IDS[pid]), None)
+                          or next(r for r in rows if r.get("variants")))
+        new = json.loads(json.dumps(picked[0]))
+        new["id"] = new["modelID"] = "test-org/Not-Bundled-Coder-1"   # newer than the binary
+        self.assertNotIn(new["id"], {r["id"] for r in bundled})
+        ApiHarness.catalog(self, [*picked, new])
+        from workbench import keyhole, models
+        found = models.hosted(fresh=True)
+        self.addCleanup(runner.CURRENT.clear)
+
+        def config(m):
+            """The task's catalog file and the agent's config as the runner writes them for m:
+            the layer's provider overlay (runner.keyhole_overlay), said again in the content."""
+            kh = keyhole.Keyhole(self.task, m, keyhole.Key(m.provider, self.CANARY), m.base_url,
+                                 keyhole.protocol_of(m.package), log=self.lines.append)
+            self.addCleanup(kh.close)
+            runner.CURRENT["keyhole"] = kh
+            self.assertIsNotNone(runner.write_catalog(self.task))
+            over = runner.keyhole_overlay(self.task)
+            layer = {"disabled_providers": ["ollama"], **over}
+            (tmp / "layer.json").write_text(json.dumps(layer))
+            return kh, runner.rules_env(layer, over)["OPENCODE_CONFIG_CONTENT"]
+        for want in [*picked, new]:
+            kh, content = config(found[f"{want['providerID']}/{want['id']}"])
+            env = self.scratch_env(tmp / "layer.json", f"file-{len(want['id'])}",
+                                   runner.catalog_path(self.task))
+            r = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.repo,
+                               env={**env, "OPENCODE_CONFIG_CONTENT": content}, capture_output=True,
+                               text=True, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+            [got] = json.loads(r.stdout)["data"]
+            self.assertEqual(got["settings"].pop("baseURL"), kh.base)       # the keyhole's
+            self.assertEqual(got["settings"].pop("apiKey"), kh.token)
+            want = json.loads(json.dumps(want))
+            want["settings"].pop("baseURL")
+            self.assertEqual(got, want)                                    # field for field
+        # a run of the model the binary lacks, through the keyhole, its variant applied
+        m = found[f"{new['providerID']}/{new['id']}"]
+        m.base_url = f"http://127.0.0.1:{self.up.server_port}{urllib.parse.urlsplit(m.base_url).path}"
+        kh, content = config(m)
+        variant = m.config["variants"][0]["id"]
+
+        def run(models_path, content, variant=variant):
+            env = self.scratch_env(tmp / "layer.json", "run", models_path)
+            return subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m",
+                                   f"{m.id}#{variant}" if variant else m.id, "--format", "json",
+                                   "say ok"], cwd=self.repo,
+                                  env={**env, "OPENCODE_CONFIG_CONTENT": content},
+                                  capture_output=True, text=True, timeout=180)
+        runner.catalog_path(self.task).unlink()                            # the bundled catalog:
+        over = runner.keyhole_overlay(self.task)                           # as the runner has it
+        self.assertNotIn("models", over["provider"][m.provider])           # then, no variants
+        (tmp / "layer.json").write_text(json.dumps({"disabled_providers": ["ollama"], **over}))
+        r = run(None, runner.rules_env(over, over)["OPENCODE_CONFIG_CONTENT"], variant=None)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Model unavailable", r.stdout + r.stderr)
+        self.assertEqual(self.up.seen, [])
+        kh, content = config(m)
+        r = run(runner.catalog_path(self.task), content)
+        self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
+        [req] = self.up.seen
+        self.assertEqual(req["body"]["model"], new["id"])
+        self.assertEqual(req["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        effort = (m.config["variants"][0].get("settings") or {}).get("reasoningEffort")
+        if effort:
+            self.assertEqual(req["body"].get("reasoning_effort"), effort)
+        db = tmp / "run" / "data" / "opencode" / "opencode.db"
+        self.assertLess(db.stat().st_size, 2 << 20)                       # no fetched catalog in it
 
 
 class Drift(unittest.TestCase):
@@ -27799,6 +28002,362 @@ class Routes(Base):
         self.assertTrue(self.path.is_symlink())
         self.assertEqual(json.loads(target.read_text())["day_usd"], 5)
 
+
+class _ApiTask:
+    """Starting an API task before roles land (#1016), whose `wb start --model` refuses an API
+    model: the test-only route. The test's catalog (WB_FAKE_CATALOG: the spike's DeepInfra and
+    Anthropic models, a key stored for each in `auth list`), the key the keyhole loads
+    (FAKE_AUTH_EXPORT: the canary), and cli.pick_model patched for the start alone to take the
+    API model as asked for. The runner is wb start's own (a process, `spawn=True`) or, for a test
+    that patches what it calls, drive run here (drive_here) after a start that spawns none."""
+    CANARY = "sk-canary-" + "K7q2" * 10 + "wxyz"
+    catalog = ApiHarness.catalog
+
+    def api_setup(self):
+        self.catalog(API_CATALOG)
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": f"cred_{p}", "integrationID": p, "label": "main", "active": True,
+             "value": {"type": "key", "key": self.CANARY}} for p in ("deepinfra", "anthropic")])
+
+    def start_api(self, name, scenario, *extra, model=FLASH, spawn=True):
+        os.environ["FAKE_SCENARIO"] = scenario
+        from workbench import models
+
+        def pick(size, wanted, stack=(), name=None):  # what #1016's route will do
+            m = models.resolve(wanted)
+            return m, models.status(m), "asked for"
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(cli, "pick_model", pick))
+            if not spawn:
+                stack.enter_context(mock.patch.object(cli, "spawn_runner", lambda task: 0))
+            return run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo),
+                          "--model", model, *extra)
+
+    def drive_here(self, name) -> str:
+        """runner.drive in this process (its runner.log lines returned); its pid let go after,
+        so no cleanup takes this process for a runner."""
+        t = store.Task(name)
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                runner.drive(t)
+        finally:
+            runner._end_agent(t)
+            t.set_status(pid=None)
+            runner.CURRENT.clear()
+        return out.getvalue()
+
+
+class ApiTasks(_ApiTask, _KeyholeTest):
+    """An API task's runner (#1015, #1012's deferred half): no GPU on any path, the keyhole
+    started before the first round and wired into the agent's config, the task's own catalog."""
+
+    def setUp(self):
+        super().setUp()
+        self.api_setup()
+        from workbench import models
+        self.models = models
+
+    def counting(self, *targets):
+        """Patch each (object, name) to count its calls, still calling it; the counts by name."""
+        calls = {}
+        for obj, name in targets:
+            real = getattr(obj, name)
+
+            def counted(*a, _real=real, _name=name, **k):
+                calls[_name] = calls.get(_name, 0) + 1
+                return _real(*a, **k)
+            p = mock.patch.object(obj, name, counted)
+            p.start()
+            self.addCleanup(p.stop)
+            calls[name] = 0
+        return calls
+
+    def local_api_model(self):
+        """The spike's DeepInfra model as an API model, its upstream this test's (_Upstream):
+        discovery never lists one on this machine, so models.resolve is patched to give it."""
+        m = self.model()
+        m.kind, m.key, m.remote = "api", "stored", True
+        m.config = {"limit": {"context": 200000, "output": 8192}}
+        real = self.models.resolve
+        p = mock.patch.object(self.models, "resolve", lambda w: m if w == m.id else real(w))
+        p.start()
+        self.addCleanup(p.stop)
+        return m
+
+    def test_a_runners_first_line_says_what_it_waits_for_before_the_model_is_looked_up(self):
+        # the review of #1015 (2026-11-23): `last` came only after models.resolve, which may read
+        # the catalog, and a GPU task sent back by wb feedback showed "Claude reviews next" as
+        # queued meanwhile
+        said = {}
+        real = self.models.resolve
+
+        def resolve(mid, *a, **k):
+            said[mid] = store.Task(name).status.get("last")
+            return real(mid, *a, **k)
+        self.start("gpu-first", "ok")
+        wait_phase("gpu-first", {"review"})
+        self.start_api("api-first", "ok", spawn=False)
+        for name in ("gpu-first", "api-first"):
+            store.Task(name).set_status(last="tests passed: Claude reviews next")
+            with mock.patch.object(self.models, "resolve", resolve), \
+                    mock.patch.object(runner, "_drive", lambda *a: None):
+                self.drive_here(name)
+        self.assertEqual(said, {store.Task("gpu-first").spec["model"]: "waiting for the GPU",
+                                FLASH: "starting"})
+
+    def test_an_api_tasks_runner_takes_no_gpu_path(self):
+        # #1015: no wait for a server, no window check, no load, no keep-alive, no power samples
+        os.environ["FAKE_BGWAIT"] = "1"
+        calls = self.counting((runner, "_wait_up"), (self.models, "short_window"),
+                              (self.models.GpuLease, "load"), (self.models, "make_resident"),
+                              (runner, "_keep_warm"))
+        sampled = []
+
+        class Power:  # what the GPU's sampler records, were it started
+            wh, w_sum, n, peak = 1.5, 30.0, 3, 12.0
+
+            def __init__(self):
+                sampled.append(1)
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def join(self, timeout=None):
+                pass
+
+        def refuse(*a, **k):  # the GPU's sampler would be on: no probe of this machine's servers
+            raise urllib.error.URLError("offline")
+        # a server "down" that may come up (Ollama's, one with no start command): an API model
+        # has none, so _down's guard is all that keeps _wait_up off (the review of #1015); no
+        # wait for it, so a missing guard fails the task at once rather than hanging the test
+        with mock.patch.object(runner, "_Power", Power), mock.patch.object(runner, "KEEP_WARM_S", 0), \
+                mock.patch.object(self.models, "_open", refuse), \
+                mock.patch.object(self.models, "may_come_up", lambda *a, **k: True), \
+                mock.patch.object(runner, "DOWN_WAIT", 0):
+            self.start_api("api-paths", "bgwait", "--test", TEST_CMD, spawn=False)
+            with mock.patch.object(self.models, "_fake", lambda: False):
+                log = self.drive_here("api-paths")
+        st = store.Task("api-paths").status
+        self.assertEqual(st["phase"], "review", st)
+        self.assertEqual(calls, dict.fromkeys(calls, 0))
+        self.assertEqual(sampled, [])
+        self.assertNotIn("gpu_wh", st)
+        self.assertNotIn("remote_gpu", st)
+        self.assertIn(f"keyhole: deepinfra on 127.0.0.1:", log)
+        self.assertEqual(self.models.holders(), {})                  # never in gpu.json
+        self.assertEqual(sorted(p.name for p in Path(os.environ["WB_GPU_DIR"]).glob("gpu*.json")
+                                if p.name != "gpu.json"), [])
+
+    def test_an_api_tasks_first_status_is_starting_and_it_holds_a_slot_while_it_runs(self):
+        seen = []
+        real = runner.run_round
+
+        def peek(task, n, keep=False):
+            seen.append((self.models.api_slots_free("deepinfra"),
+                         self.models.api_holders("deepinfra")))
+            return real(task, n, keep)
+        self.start_api("api-first", "ok", spawn=False)
+        firsts = []
+        real_set = store.Task.set_status
+
+        def watch(task, **kw):
+            if "last" in kw and task.name == "api-first" and not firsts:
+                firsts.append(kw["last"])
+            return real_set(task, **kw)
+        with mock.patch.object(runner, "run_round", peek), mock.patch.object(store.Task, "set_status", watch):
+            self.drive_here("api-first")
+        self.assertEqual(firsts, ["starting"])
+        self.assertEqual(seen, [(self.models.API_PARALLEL - 1, ["api-first"])])
+        self.assertEqual(self.models.api_slots_free("deepinfra"), self.models.API_PARALLEL)
+
+    def test_with_unload_for_tests_an_api_tasks_tests_run_under_this_machines_pool(self):
+        from workbench import verify
+        used = []
+
+        @contextlib.contextmanager
+        def gpu(task, say):
+            used.append(task.name)
+            yield
+        self.start_api("api-unload", "ok", "--test", TEST_CMD, "--unload-for-tests",
+                       "--no-base-check", spawn=False)
+        with mock.patch.object(verify, "gpu", gpu):
+            self.drive_here("api-unload")
+        st = store.Task("api-unload").status
+        self.assertEqual((st["phase"], st["tests"]["ok"]), ("review", True))
+        self.assertEqual(used, ["api-unload"])
+
+    def test_the_agents_opencode_gets_the_keyhole_and_the_tasks_own_catalog(self):
+        os.environ["FAKE_RUNS"] = runs = str(Path(self.tmp.name) / "runs.jsonl")
+        self.start_api("api-cat", "ok", "--test", TEST_CMD)
+        wait_phase("api-cat", {"review"})
+        task = store.Task("api-cat")
+        rules = context.rules_dir(task)
+        [row] = [json.loads(x) for x in Path(runs).read_text().splitlines()]
+        self.assertEqual((row["models_path"], row["fetch_off"]), (str(rules / "catalog.json"), "1"))
+        doc = json.loads((rules / "catalog.json").read_text())
+        name = API_CATALOG[0]["id"]
+        self.assertEqual(list(doc), ["deepinfra"])                   # the task's model alone
+        self.assertEqual(list(doc["deepinfra"]["models"]), [name])
+        src = doc["deepinfra"]["models"][name]
+        self.assertEqual(src["api"], {"chat-completions": {
+            "base_url": "https://api.deepinfra.com/v1/openai",
+            "sdk": {"opencodeai": "@opencode/ai/providers/deepinfra"}}})
+        self.assertEqual(src["capabilities"]["reasoning"], {"supported": False})
+        self.assertEqual(src["cost"]["text"]["input"]["price"], 0.2)
+        layer = json.loads((rules / "opencode.json").read_text())
+        self.assertNotIn("providers", layer)       # V2 beside V1 would replace the keyhole's options
+        self.assertEqual(layer["provider"]["deepinfra"]["models"][name]["variants"],
+                         {v["id"]: v["settings"] for v in API_CATALOG[0]["variants"]})
+        # the content the run itself had (not rules_env asked here, which only echoed what it
+        # was given: the review of #1015): the keyhole's base, token and the variants said again
+        content = json.loads(row["content"])["provider"]["deepinfra"]
+        self.assertEqual(content["models"][name]["variants"],
+                         layer["provider"]["deepinfra"]["models"][name]["variants"])
+        self.assertEqual(content["options"], layer["provider"]["deepinfra"]["options"])
+        self.assertEqual(content["models"][name]["provider"]["api"],
+                         layer["provider"]["deepinfra"]["options"]["baseURL"])
+        opts = layer["provider"]["deepinfra"]["options"]
+        self.assertTrue(opts["baseURL"].startswith("http://127.0.0.1:"), opts)
+        self.assertTrue(opts["baseURL"].endswith("/v1/openai"))
+        self.assertEqual(layer["small_model"], FLASH)                # titles on the task's model
+        self.assert_no_canary(json.dumps(layer), (rules / "catalog.json").read_text(),
+                              self.all_files(task.dir))
+        self.assertNotIn("listed-key", (rules / "catalog.json").read_text())
+        self.assertIn("keyhole: deepinfra on 127.0.0.1:", (task.dir / "runner.log").read_text())
+        os.environ["FAKE_SCENARIO"] = "ok"                           # a GPU task: none of it
+        Path(runs).unlink()
+        self.start("gpu-cat", "ok", "--test", TEST_CMD)
+        wait_phase("gpu-cat", {"review"})
+        [row] = [json.loads(x) for x in Path(runs).read_text().splitlines()]
+        self.assertIsNone(row["models_path"])
+        layer = json.loads((context.rules_dir(store.Task("gpu-cat")) / "opencode.json").read_text())
+        self.assertNotIn("providers", layer)
+        self.assertNotIn("keyhole", (store.Task("gpu-cat").dir / "runner.log").read_text())
+
+    def test_a_model_the_catalog_file_cant_hold_gets_none(self):
+        m = self.models.hosted()[FLASH]
+        self.assertIsNotNone(self.models.catalog_doc(m))
+        for change in ({"overlay": True}, {"catalog": None},
+                       {"variants": [{"id": "none", "body": {"thinking": {"type": "disabled"}}}]}):
+            self.assertIsNone(self.models.catalog_doc(
+                self.models.Model(**{**m.__dict__, "config": {**m.config, **change}})))
+        self.assertIsNone(self.models.catalog_doc(self.models.Model(**{**m.__dict__, "cloud": True})))
+        self.assertIsNone(self.models.catalog_doc(self.models.discover()["ollama/mimo-v2.6:9b-q8_0"]))
+
+    def test_an_error_reaches_events_redacted(self):
+        # #1012's deferred half: the upstream's 401 echoes the key; the fake prints the body as
+        # OpenCode does, and what the runner records of it says [key redacted]
+        self.local_api_model()
+        self.up.mode, self.up.status = "status", 401
+        self.up.message = f"Incorrect API key provided: {self.CANARY[:8]}...{self.CANARY[-4:]}"
+        self.start_api("api-err", "http", spawn=False)
+        self.drive_here("api-err")
+        task = store.Task("api-err")
+        self.assertEqual(len(self.up.seen), 1)                       # it went through the keyhole
+        self.assertEqual(self.up.seen[0]["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        events = store.read_jsonl(task.dir / "events.jsonl")[0]
+        errors = [e for e in events if e.get("kind") == "error"]
+        self.assertTrue(errors, events)
+        self.assertIn("Incorrect API key provided: [key redacted]", json.dumps(errors))
+        self.assertIn("[key redacted]", task.status["last"])
+        self.assert_no_canary(self.all_files(task.dir), json.dumps(task.status))
+
+    def test_a_proxy_in_the_agents_env_doesnt_catch_the_keyhole(self):
+        self.local_api_model()
+        os.environ["http_proxy"] = "http://127.0.0.1:9"              # nothing listens there
+        os.environ["NO_PROXY"] = "example.internal"                  # the user's own, kept
+        self.start_api("api-proxy", "http", "--test", TEST_CMD, spawn=False)
+        self.drive_here("api-proxy")
+        st = store.Task("api-proxy").status
+        self.assertEqual(st["phase"], "review", st)
+        self.assertEqual(len(self.up.seen), 1)
+        self.assertEqual(self.up.seen[0]["path"], "/v1/openai/chat/completions")
+        env = runner.agent_env(store.Task("api-proxy"))             # no keyhole now: as it was
+        self.assertEqual(env.get("NO_PROXY"), "example.internal")
+        kh = self.keyhole()
+        runner.CURRENT["keyhole"] = kh
+        kh.task = store.Task("api-proxy")
+        self.addCleanup(runner.CURRENT.clear)
+        env = runner.agent_env(store.Task("api-proxy"))
+        # both spellings hold both lists: Python and curl read no_proxy first, so a no_proxy of
+        # 127.0.0.1 alone sent example.internal through the proxy (the review of #1015)
+        self.assertEqual((env["NO_PROXY"], env["no_proxy"]), ("example.internal,127.0.0.1",) * 2)
+        self.assertTrue(urllib.request.proxy_bypass_environment(
+            "example.internal", {"no": env["no_proxy"]}))
+        os.environ["no_proxy"] = "lower.internal, 127.0.0.1"
+        env = runner.agent_env(store.Task("api-proxy"))
+        self.assertEqual((env["NO_PROXY"], env["no_proxy"]),
+                         ("example.internal,lower.internal,127.0.0.1",) * 2)
+        self.assertEqual(env["http_proxy"], "http://127.0.0.1:9")
+
+    def test_the_users_config_content_cant_point_the_provider_elsewhere(self):
+        m = self.local_api_model()
+        tmp = Path(self.tmp.name)  # the user's own content counts only without WB_OPENCODE_CONFIG
+        (tmp / "mine").mkdir()
+        (tmp / "etc").mkdir()
+        (tmp / "mine" / "opencode.json").write_text(Path(os.environ.pop("WB_OPENCODE_CONFIG")).read_text())
+        os.environ["OPENCODE_CONFIG_DIR"] = str(tmp / "mine")
+        p = mock.patch.object(self.models, "_system_dir", return_value=tmp / "etc")
+        p.start()
+        self.addCleanup(p.stop)
+        os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps({"provider": {"deepinfra": {"options": {
+            "baseURL": "http://127.0.0.1:9/v1/openai", "headerTimeout": 5}}}, "theme": "x"})
+        self.start_api("api-content", "http", "--test", TEST_CMD, spawn=False)
+        self.drive_here("api-content")
+        st = store.Task("api-content").status
+        self.assertEqual(st["phase"], "review", st)
+        self.assertEqual(len(self.up.seen), 1)                       # the keyhole, not port 9
+        kh = self.keyhole(m)
+        kh.task = store.Task("api-content")
+        runner.CURRENT["keyhole"] = kh
+        self.addCleanup(runner.CURRENT.clear)
+        layer = json.loads(runner.write_config_layer(kh.task).read_text())
+        content = json.loads(runner.rules_env(layer, runner.keyhole_overlay(kh.task))["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(content["provider"]["deepinfra"]["options"]["baseURL"], kh.base)
+        self.assertEqual(content["provider"]["deepinfra"]["options"]["apiKey"], kh.token)
+        self.assertEqual(layer["provider"]["deepinfra"]["options"]["baseURL"], kh.base)
+        self.assertEqual(content["theme"], "x")                      # the rest of theirs stays
+        self.assert_no_canary(json.dumps(content), json.dumps(layer))
+
+    def test_oauth_and_env_keys_fail_the_task_with_the_connect_remedy(self):
+        # the /connect half of Keyhole.test_oauth_and_env_keys_cant_run, through the runner
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([self.key_row("deepinfra", {
+            "type": "oauth", "methodID": "m", "refresh": self.CANARY, "access": self.CANARY,
+            "expires": 1})])
+        self.start_api("api-oauth", "ok")
+        wait_phase("api-oauth", {"failed"})
+        task = store.Task("api-oauth")
+        last = task.status["last"]
+        self.assertIn("needs a key wb can hold outside the lane: deepinfra is signed in with OAuth", last)
+        self.assertIn("store an API key with /connect in OpenCode", last)
+        self.assertEqual(task.status.get("failed_before"), "load")
+        note = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                if r.get("task") == "api-oauth"][-1]
+        self.assertIn(f"{FLASH} can't run: needs a key wb can hold outside the lane", note["text"])
+        self.assertIn("/connect", note["text"])
+        self.assertIn("wb resume api-oauth", note["text"])
+        self.assertNotIn("could not load", note["text"])
+        self.assert_no_canary(self.all_files(task.dir), json.dumps(task.status))
+        # a key only in the environment (auth list names the variable; nothing to export)
+        os.environ["FAKE_AUTH_EXPORT"] = "[]"
+        self.catalog(API_CATALOG, [key_row("deepinfra", "DeepInfra", {"type": "env", "name": "DEEPINFRA_API_KEY"})])
+        self.start_api("api-env", "ok", "--force")
+        wait_phase("api-env", {"failed"})
+        last = store.Task("api-env").status["last"]
+        self.assertIn("deepinfra's key is only in the environment ($DEEPINFRA_API_KEY)", last)
+        self.assertIn("store an API key with /connect in OpenCode", last)
+
+    def test_the_keyholes_answers_set_the_providers_health(self):
+        self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.start_api("api-health", "http", spawn=False)
+        self.drive_here("api-health")
+        health = self.models.api_health("deepinfra")
+        self.assertEqual((health or {}).get("state"), "no_credit", health)
 
 if __name__ == "__main__":
     unittest.main()

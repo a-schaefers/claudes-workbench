@@ -190,20 +190,38 @@ def _configured_key(provider: str) -> str | None:
             pass
     found = None
     for name, layer in layers:
-        prov = models._providers_of(layer if isinstance(layer, dict) else {}).get(provider)
-        opts = (prov or {}).get("options") if isinstance(prov, dict) else None
-        opts = opts if isinstance(opts, dict) else {}
-        vals = [opts.get("apiKey")]
-        # a key written as a header (the leak review, 2026-11-23): the agent can read it, and
-        # OpenCode would send it in place of the token
-        heads = opts.get("headers") if isinstance(opts.get("headers"), dict) else {}
-        vals += [v for k, v in heads.items() if isinstance(v, str) and (
-            _AUTH_HEADER.search(str(k)) or re.search("|".join(KEYLIKE[:2]), v))]
-        for val in vals:
-            if isinstance(val, str) and val.strip():
+        layer = layer if isinstance(layer, dict) else {}
+        # both forms, V1 `provider` and V2 `providers`, and the whole entry: a model's own
+        # options, headers, V2 settings and variants carry a key as well as the provider's, and
+        # OpenCode 2.3.2 sends a model's over its provider's (v1/config/migrate.ts migrateModel;
+        # the review of #1015, 2026-11-23)
+        for prov in (layer.get(form, {}).get(provider) if isinstance(layer.get(form), dict) else None
+                     for form in ("provider", "providers")):
+            for val in _keys_in(prov):
                 env = re.search(r"\{env:([^}]+)\}", val)
                 found = f"env:{env.group(1)}" if env else name
     return found
+
+
+def _keys_in(entry) -> list[str]:
+    """Every key a provider's config entry holds, at any depth: an `apiKey`, and a key written
+    as a header (the leak review, 2026-11-23: the agent can read it, and OpenCode would send it
+    in place of the token)."""
+    out = []
+    if isinstance(entry, list):
+        for v in entry:
+            out += _keys_in(v)
+    if not isinstance(entry, dict):
+        return out
+    for k, v in entry.items():
+        if k == "apiKey" and isinstance(v, str) and v.strip():
+            out.append(v)
+        elif k == "headers" and isinstance(v, dict):
+            out += [h for hk, h in v.items() if isinstance(h, str) and h.strip() and (
+                _AUTH_HEADER.search(str(hk)) or re.search("|".join(KEYLIKE[:2]), h))]
+        else:
+            out += _keys_in(v)
+    return out
 
 
 # A header the user's config may carry a key in: Authorization, x-api-key, api-key, x-goog-api-key,

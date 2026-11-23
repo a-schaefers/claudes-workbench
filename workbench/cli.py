@@ -607,6 +607,9 @@ def pick_model(size: str, wanted: str | None, stack=(), name: str | None = None)
 
 
 def _gpu_holders(me: str | None = None, of: models.Model | None = None) -> dict:
+    # An API task is never one (#1015), twice over: discover() is GPU-only, so `m` below is None
+    # for one, and models.pool() of an API model is None, never ``of``'s pool. Neither direction
+    # refuses: an API task never waits for the GPU, nor does a GPU task for an API one.
     """Who holds or waits for the GPU (``of``'s: a remote model's server, else this machine's),
     but ``me``: its gpu.json's live entries, plus each task whose runner is alive but hasn't
     reached the lease yet (one just started), as an entry of its own. A runner that has (status
@@ -680,9 +683,27 @@ def _fixed_line(task: store.Task, m: models.Model) -> str:
             "over to fresh sessions early and often; trim the largest, or --model one with a bigger window")
 
 
+def _slots_full(m: models.Model) -> str:
+    """wb start's refusal (exit 4) when every one of an API provider's slots is held."""
+    p, held = models.api_provider(m), models.api_holders(models.api_provider(m))
+    return (f"{len(held) or models.API_PARALLEL} tasks already run on {p}'s API"
+            + (f" ({', '.join(held)})" if held else "")
+            + f": workbench runs at most {models.API_PARALLEL} at once per provider. --queue starts "
+            "it anyway, to wait for a slot; or do this step yourself")
+
+
+def _slot_note(m: models.Model, me: str | None = None) -> str:
+    """An API task sent on past its provider's limit: it waits as queued for a slot."""
+    return (f"{models.API_PARALLEL} tasks run on {models.api_provider(m)}'s API; "
+            f"{me or 'this task'} waits as queued for a slot")
+
+
 def _gpu_note(task: store.Task) -> str:
-    """For wb feedback/next/resume, which queue the task anyway: who it will wait for."""
-    m = models.discover().get(task.spec.get("model") or "")
+    """For wb feedback/next/resume, which queue the task anyway: who it will wait for. An API
+    task's: its provider's slots (#1015)."""
+    m = models.lookup(task.spec.get("model") or "", cached=True)
+    if m and m.kind == "api":
+        return "" if models.api_slots_free(models.api_provider(m)) else f"note: {_slot_note(m, task.name)}"
     if m and not task.spec.get("bench"):
         _say(_preempt_bench(m, task.name))
     held, waits = _gpu_wait(m, task.name) if m else ({}, False)
@@ -1070,9 +1091,18 @@ def cmd_start(a):
     checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
-    if not getattr(a, "bench", None):
-        _say(_preempt_bench(m, a.name))
-    held, waits = _gpu_wait(m, a.name)
+    # An API model takes no GPU (#1015): no bench to stop, no holders to wait for, but one of its
+    # provider's slots (models.API_PARALLEL), whose limit is exit 4's other cause.
+    api = m.kind == "api"
+    slots_full = api and not models.api_slots_free(models.api_provider(m))
+    if api:
+        held, waits = {}, False
+        if slots_full and not a.queue:
+            die(_slots_full(m), 4)
+    else:
+        if not getattr(a, "bench", None):
+            _say(_preempt_bench(m, a.name))
+        held, waits = _gpu_wait(m, a.name)
     if waits and not a.queue:
         die(models.busy(held, f"{m.id} can't run beside {'it' if len(held) == 1 else 'them'}. "
                         "--queue starts it anyway, to wait behind; or do this step yourself"), 4)
@@ -1241,17 +1271,20 @@ def cmd_start(a):
     holding = ", ".join(sorted({h["task"] for h in held.values()}))
     if not state["available"]:
         print(f"note: queued although {state['why']}")
+    elif api:  # none of the GPU's notes: it takes no GPU
+        if slots_full:
+            print(f"note: {_slot_note(m)}")
     elif waits:
         print(f"note: the GPU is busy with {holding}; this task waits as queued until it's free")
     elif held:
         print(f"note: it runs beside {holding} on the GPU (their models fit together)")
     elif not state["resident"]:
         print("note: the runner loads it onto the GPU first, unloading what is there")
-    if state["available"] and (others := models.box_others(m)):  # another machine's task on the same box (#812)
+    if state["available"] and not api and (others := models.box_others(m)):  # another machine's task on the same box (#812)
         print(f"note: {urlparse(m.root).hostname} has {', '.join(others)} loaded, which no task here "
               f"runs: the runner loads {m.name} once it has gone {models.BOX_QUIET} s without a "
               f"request (up to {models.BOX_WAIT // 60} min); {models.BOX_SHARED}")
-    measured = (optimize.state().get("models") or {}).get(m.id)
+    measured = None if api else (optimize.state().get("models") or {}).get(m.id)
     if measured and (fit := optimize.advice(m.id, measured)):
         print(f"note: {fit} (ask the user first: it adds to their OpenCode config)")
     if gap := runner.handover_warning(m.config):  # #595
