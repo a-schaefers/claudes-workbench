@@ -118,6 +118,23 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn("`wb route all gpu\\|api\\|both`", ref)
         self.assertIn("--role", (ROOT / "skill/workbench/SKILL.md").read_text())
 
+    def test_the_skills_first_run_sets_api_roles_in_one_route_and_never_picks_an_api_model(self):
+        # #1024: the API-only first run is one question and one wb route with its cap; an API
+        # model is the user's choice, never Claude's
+        skill = (ROOT / "skill/workbench/SKILL.md").read_text()
+        first = skill[skill.index("- **First run**"):skill.index("- **Claude coding**")]
+        self.assertIn("wb route", first)
+        self.assertIn("--day-usd", first)
+        self.assertIn("no role can run", first)
+        self.assertNotIn("no model can run yet", first)
+        # how Claude sees that no role can run: wb start's exit 3 with the router's refusal (the
+        # Couplings pair); `wb route` shows the roles, never whether one can run (#1024's review)
+        self.assertIn("`no GPU model…`", first)
+        self.assertIn('"no GPU model', (ROOT / "workbench/router.py").read_text())
+        self.assertNotIn("`wb route` and `wb setup` say so", first)
+        choosing = section(skill, "## 1. Pick the role; the user's roles pick the model")
+        self.assertIn("never pass `--model <api id>`", " ".join(choosing.split()))
+
     def test_every_web_chat_api_path_is_in_the_api_reference(self):
         # #1042: docs/chat-api.md is the page another agent is handed; a path the server answers
         # that it doesn't name is one nobody can find

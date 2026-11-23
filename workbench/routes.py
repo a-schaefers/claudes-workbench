@@ -393,6 +393,47 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
     return Change(new, "; ".join(parts), gated, changed)
 
 
+def change_pairs(doc: dict, pairs: list, day_usd=None,
+                 who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0]) -> Change:
+    """Several roles in one change, one line and one yes (#1024: the first run's question):
+    ``pairs`` [(role, via, api)] each as change() takes them, ``day_usd`` the cap for all. All or
+    nothing: RoutesError for any pair change() refuses. The line: each role's move, then where
+    the code goes once per provider, thinking and the cap once: `trivial: GPU → API a ·
+    significant: GPU → API b · your code goes to DeepSeek · thinking off · cap $5/day`."""
+    new, roles, gated = doc, [], False
+    for i, (r, via, api) in enumerate(pairs):
+        ch = change(new, r, via=via, api=api, day_usd=day_usd if i == 0 else None, who=who)
+        new, gated = ch.doc, gated or ch.gated
+        roles += [x for x in ch.roles if x not in roles]
+    cap = new["day_usd"]
+    if not roles and cap == doc["day_usd"]:
+        return Change(new, "", False, [])
+    parts, sent = [], []
+    for r in roles:
+        old, row = doc["roles"][r], new["roles"][r]
+        clauses, _ = _role_part(r, old, row, cap, who)
+        if row["via"] == "api" and (old["via"] != "api" or old.get("api") != row.get("api")):
+            sent.append(r)  # said once for all below, not per role
+            once = {f"your code goes to {who(row['api'])}", f"thinking {row['thinking']}"}
+            clauses = [c for c in clauses if c not in once and c != f"cap {money(cap)}/day"]
+        parts.append(f"{r}: " + " · ".join(clauses))
+    if sent:
+        by: dict[str, list] = {}
+        for r in sent:
+            by.setdefault(who(new["roles"][r]["api"]), []).append(r)
+        parts.append(f"your code goes to {next(iter(by))}" if len(by) == 1 else _goes_to(sent, new, who))
+        think = {new["roles"][r]["thinking"] for r in sent}
+        parts.append(f"thinking {think.pop()}" if len(think) == 1 else
+                     "thinking " + ", ".join(f"{new['roles'][r]['thinking']} ({r})" for r in sent))
+        if cap is not None:
+            parts.append(f"cap {money(cap)}/day")
+    if cap != doc["day_usd"] and (doc["day_usd"] is not None or not sent):
+        parts.append(f"day cap {money(doc['day_usd']) if doc['day_usd'] is not None else 'none'} → {money(cap)}/day")
+    if roles and new.get("use", "both") != "both":
+        parts.append(f"Agents is {USE_NAMES[new['use']]}, so this applies once Agents is Both (wb route all both)")
+    return Change(new, " · ".join(parts), gated, roles)
+
+
 def stamp(ch: Change, by: str, now: float | None = None) -> dict:
     """ch.doc with each changed role's record: a gated change's `said` (the line), `by` and `ts`;
     one that needed no yes (a GPU pin, thinking on the GPU) only `gpu_by` and `gpu_ts`. Claude's
@@ -539,7 +580,7 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
                 raise Refused(f"{role} role: its GPU model {row['gpu']} isn't found ({str(e).strip(chr(34))}). "
                               f"Ask the user: fix that, or let the router pick (wb route {role} --gpu auto)") from None
             return m, models.status(m), f"the {role} role's GPU model (wb route)", {"via": "gpu", "role": role}
-        top, why = router.choose(size, stack, name)
+        top, why = router.choose(size, stack, name, role=role)
         if top is None:
             raise Refused(why)
         return top.model, top.state, why, {"via": "gpu", "role": role}

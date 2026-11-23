@@ -373,11 +373,34 @@ def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = No
     return close + rest + blocked
 
 
+def api_choice(role: str) -> str:
+    """The refusal's other choice when a provider has a key wb can hold (#1024): the user may put
+    the role on an API model, on their yes; '' with none (decision 2: no fallback, Claude asks),
+    and '' while the user's Agents switch holds every role on the GPU: a role's own API model
+    would only apply once Agents is Both, so the line led round a dialog that changed nothing
+    that runs (#1024's review)."""
+    from . import routes  # it imports this module lazily too
+    try:
+        if routes.read().get("use") == "gpu":
+            return ""
+    except routes.RoutesError:  # wb start refuses that before the router (routes.resolve)
+        pass
+    try:
+        keys = models.connected() or {}
+    except (RuntimeError, OSError):
+        keys = {}
+    if not any(k["key"] == "stored" for k in keys.values()):
+        return ""
+    return (f"; or put {role} on an API model you connected (the user's yes): wb route {role} <id>, "
+            "wb models lists them")
+
+
 def choose(size: str, stack=(), task_name: str | None = None, down: set | None = None,
-           catalog: dict | None = None) -> tuple[Score | None, str]:
+           catalog: dict | None = None, role: str | None = None) -> tuple[Score | None, str]:
     """The model for a task of this size (in a repo of this stack) and one line on why. With
     ``task_name``, one task in EXPLORE_ONE_IN explores a model outside the band (unproven);
-    ``down``, ``catalog``: rank's."""
+    ``down``, ``catalog``: rank's. None and the refusal when no GPU model can take it, which names
+    the API choice for ``role`` (the size's name when not given) when a key is stored (#1024)."""
     ranked = rank(size, stack, down, catalog)
     if explores(task_name) and (new := unproven(ranked)):
         new[0].explored = True
@@ -385,13 +408,14 @@ def choose(size: str, stack=(), task_name: str | None = None, down: set | None =
     top = ranked[0] if ranked and ranked[0].state["available"] else None
     if top is None:
         if ranked:
-            return None, "no local model can run: " + "; ".join(
+            return None, "no GPU model can run: " + "; ".join(
                 f"{s.model.id}: {s.state['why']}" + (f" ({fix})" if (fix := models.remedy(s.model, s.state)) else "")
-                for s in ranked)
+                for s in ranked) + api_choice(role or size)
         if found := models.discover():  # all held back by the size policy, not missing (the 2026-11-16 audit)
-            return None, (f"no local model takes {size} tasks ({', '.join(found)}: limited by wb model "
-                          f"sizes; wb model sizes <id> trivial significant allows one, or pass --model)")
-        return None, "no local models: " + models.why_none()
+            return None, (f"no GPU model takes {size} tasks ({', '.join(found)}: limited by wb model "
+                          f"sizes; wb model sizes <id> trivial significant allows one, or pass --model)"
+                          + api_choice(role or size))
+        return None, "no GPU models: " + models.why_none() + api_choice(role or size)
     usable = [s for s in ranked if s.state["available"]]
     sizes = [s.weights for s in usable if s.fits is not False or top.fits is False]
     unknown = [s.model.id for s in usable if not s.weights]

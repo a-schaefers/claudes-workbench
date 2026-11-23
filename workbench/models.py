@@ -1093,6 +1093,28 @@ def _key_source(pid: str, auth: dict, prov: dict | None) -> str:
     return source
 
 
+def connected() -> dict[str, dict] | None:
+    """The API providers OpenCode holds a key for, read fresh from `auth list` (never a secret):
+    {provider id: {"name", "key"}}, `key` as Model.key says it (_key_source: "stored" is the only
+    one the keyhole can hold; "oauth", "env:<NAME>", "config", "signing" can't run). Providers
+    configured on this machine (the GPU side) are left out. None when `auth list` can't be read
+    (OpenCode missing, or its error): wb setup and the router then say nothing of keys (#1024)."""
+    auth, _ = _auth_rows()
+    if auth is None:
+        return None
+    try:
+        cfg = read_config()
+        configured, (gpu, _) = _providers_of(cfg), _sides(cfg, _overrides(), _provider_dirs())
+    except (RuntimeError, OSError):  # a config that doesn't parse: wb doctor says which
+        configured, gpu = {}, set()
+    out = {}
+    for pid, row in auth.items():
+        key = "" if pid in gpu else _key_source(pid, auth, configured.get(pid))
+        if key:
+            out[pid] = {"name": row["name"], "key": key}
+    return out
+
+
 def _is_free(pid: str, entry: dict) -> bool:
     """An OpenCode free model: `opencode/*-free`, or every price 0 (marked only; child 13 warns
     of its data use)."""
