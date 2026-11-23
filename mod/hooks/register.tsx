@@ -83,7 +83,7 @@ import type { Pose } from './apprentice'
 import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
 import type { Plan, Target } from './splash'
 import { activity, loopLength, TICKER_MS, tickerCells } from './modeline'
-import { ago, apiWorking, bar, capRow, clip, compactWanted, taskLines } from './tasks'
+import { ago, apiWorking, bar, capRow, clip, compactWanted, ROLE_WORDS, taskLines } from './tasks'
 import type { Part as RowPart } from './tasks'
 
 const PANE = 'workbench'
@@ -434,7 +434,7 @@ const readJson = async ($: any, path: string): Promise<Row> =>
 export const wrapWords = (text: string, n: number): string[] => {
   const lines: string[] = []
   let line = ''
-  for (let word of text.split(/\s+/).filter(Boolean)) {
+  for (let word of text.split(/[^\S\u00a0]+/).filter(Boolean)) { // a no-break space (NB) holds a unit whole
     if (line && line.length + 1 + word.length > n) {
       lines.push(line)
       line = ''
@@ -465,8 +465,8 @@ export const wrapParts = (parts: Part[], n: number, indent = 2): Part[][] => {
     width += text.length
   }
   for (const p of parts) {
-    for (const tok of p.text.split(/(\s+)/).filter(Boolean)) {
-      if (/^\s/.test(tok)) {
+    for (const tok of p.text.split(/([^\S\u00a0]+)/).filter(Boolean)) { // NB holds a unit whole
+      if (/^[^\S\u00a0]/.test(tok)) {
         if (width > (lines.length ? indent : 0)) add(p, tok)
         continue
       }
@@ -632,7 +632,7 @@ const CODING_STOPS: [string, string, string][] = [
 
 // The web chat's row: the choice is wb's (`wb chat on|off`, chat/switch.json), off by default
 const CHAT_STOPS: [string, string, string][] = [
-  ['off', 'Off (default)', 'A localhost web server to interact with Claude.'],
+  ['off', 'Off (default)', 'No web server: Claude is reached in this terminal only.'],
   ['on', 'On', 'A localhost web server to interact with Claude.'],
 ]
 
@@ -768,29 +768,61 @@ const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress|splash|agen
 function settingRow(kit: Row, $: any, name: string, title: string, stops: [string, string, string][],
   value: string, view: WbPane, pick: (value: string) => Promise<unknown>) {
   const { Box, Text, Button } = kit
+  // a row longer than the pane goes on under its words, not under its mark (hangWords): wrapped by
+  // the pane, `▸ Complex coding API model: Claude Haiku 5.5 ·` went on with "Anthropic (195K) · …"
+  // at the left edge, read as a row of its own (#1048's review at 120 columns); the label stays the
+  // control's name
+  const row = (props: Row, label: string, indent: number) => mem.settingsCols && label.length > mem.settingsCols
+    ? <Button {...props} label={label} plain><Text>{hangWords(label, mem.settingsCols, indent).join('\n')}</Text></Button>
+    : <Button {...props} label={label} plain />
   const chosen = stops.find(s => s[0] === value) ?? stops[stops.length - 1]
   if (view.open !== name)
-    return <Button key={name} label={`▸ ${title}: ${chosen[1]}`} plain onPress={() => { void update($, pane, p => ({ ...p, open: name, focus: '' })) }} />
+    return row({ key: name, onPress: () => { void update($, pane, p => ({ ...p, open: name, focus: '' })) } }, `▸ ${title}: ${chosen[1]}`, 2)
   const ringed = stops.find(s => `${name}:${s[0]}` === view.focus) ?? chosen
   const width = Math.max(...stops.map(s => s[2].length))
   return (
     <Box flexDirection="column">
-      <Button key={name} label={`▾ ${title}: ${chosen[1]}`} plain onPress={() => { void update($, pane, p => ({ ...p, open: '', focus: '' })) }} />
-      {stops.map(([v, label]) => (
-        <Button key={`${name}:${v}`} label={`  ${v === chosen[0] ? '❯' : ' '} ${label}`} plain dimColor={v !== chosen[0]}
-          hover={{ scope: `wb-${name}-${v}` }}
-          onPress={() => { void (v === chosen?.[0] ? Promise.resolve() : pick(v)).then(() => update($, pane, p => ({ ...p, open: '', focus: '' }))) }} />
-      ))}
-      <Box key={`${name}-says`}>
-        <Text dimColor>{`    ${ringed[2].padEnd(width)}`}</Text>
-        {stops.map(([v, , said]) => (
-          <Box position="absolute" top={0} left={0} display="none" hover={{ display: 'flex', scope: `wb-${name}-${v}` }}>
-            <Text dimColor>{`    ${said.padEnd(width)}`}</Text>
-          </Box>
-        ))}
+      {row({ key: name, onPress: () => { void update($, pane, p => ({ ...p, open: '', focus: '' })) } }, `▾ ${title}: ${chosen[1]}`, 2)}
+      {stops.map(([v, label]) => row({ key: `${name}:${v}`, dimColor: v !== chosen[0], hover: { scope: `wb-${name}-${v}` },
+        onPress: () => { void (v === chosen?.[0] ? Promise.resolve() : pick(v)).then(() => update($, pane, p => ({ ...p, open: '', focus: '' }))) } },
+        `  ${v === chosen[0] ? '❯' : ' '} ${label}`, 4))}
+      {/* in from the edge as the options, its wrapped lines too (#1048's review) */}
+      <Box key={`${name}-says`} paddingLeft={4}>
+        <Box>
+          <Text dimColor>{ringed[2].padEnd(width)}</Text>
+          {stops.map(([v, , said]) => (
+            <Box position="absolute" top={0} left={0} display="none" hover={{ display: 'flex', scope: `wb-${name}-${v}` }}>
+              <Text dimColor>{said.padEnd(width)}</Text>
+            </Box>
+          ))}
+        </Box>
       </Box>
     </Box>
   )
+}
+
+// A read-only line among the settings rows: dim, in from the edge by the `▸ ` of the rows, its
+// wrapped lines too (a hanging indent: "  Connected: …" went on at the pane's left edge, under the
+// rows' marks, #1048's review at 120 columns)
+function infoLine(kit: Row, key: string, text: string) {
+  const { Box, Text } = kit
+  return <Box key={key} paddingLeft={2}><Text dimColor>{text}</Text></Box>
+}
+
+// A section's heading, on both tabs as Stats' Now: bold, in the theme's claude colour; `note` dim after it
+function heading(kit: Row, text: string, note = '') {
+  const { Text } = kit
+  return note ? <Text><Text bold color="claude">{text}</Text><Text dimColor>{note}</Text></Text> : <Text bold color="claude">{text}</Text>
+}
+
+// A line in lines of at most `n`, each after the first indented `indent`, as Now's rows (wrapParts)
+// wrap: the Stats history's `Label: text`, whose label then stands alone at the left edge, and a
+// long settings row (settingRow). The text's own leading spaces stay on its first line.
+export function hangWords(text: string, n: number, indent = 2): string[] {
+  const lead = /^ */.exec(text)![0]
+  const [first, ...rest] = wrapWords(text.slice(lead.length), n - lead.length)
+  const head = lead + first!
+  return rest.length ? [head, ...wrapWords(rest.join(' '), n - indent).map(l => ' '.repeat(indent) + l)] : [head]
 }
 
 // Turns the web chat on or off through wb, which keeps the choice (and starts a server for on),
@@ -865,6 +897,9 @@ async function refreshStats($: any, force = false) {
     if (!feed || typeof feed !== 'object') return failed('not a feed')
     mem.statsWhy = ''
     mem.statsBackoff = mem.statsRetryAt = 0
+    // the models' labels and the providers' names the tab says them by (namesNow), when not read
+    // in the last ROLES_CACHE_MS: a read of the feed only, never a poll's
+    await rolesNow($).catch(() => null)
     await update($, statsFeed, () => ({ key, feed }))
     mem.statsLoaded = true
   } catch (err) {
@@ -991,7 +1026,7 @@ const RACK_FOLD_MIN = 2
 // sparkline), what runs now, the rack (every model resident or with a task: where it is, its
 // speeds, its load time, the task on it; the idle, can't-run and remote ones on one line past
 // RACK_FOLD_MIN) and the queue. Nothing is said for what a platform can't tell.
-export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; bold?: boolean; text: string }[][] {
+export function liveLines(t: WbTop, why = '', names: Names = NO_NAMES): { color?: string; dim?: boolean; bold?: boolean; text: string }[][] {
   const s = t.snap
   // `why`: what `wb top` said as it ended, once it has failed twice: "Reading…" was all ever said (#553)
   if (!s) return [[{ dim: true, text: why ? `This machine can't be read: ${why} (wb top --json)` : 'Reading this machine…' }]]
@@ -1019,7 +1054,9 @@ export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; 
     const parts = [r.phase, r.round ? `round ${r.round}` : '', typeof r.round_s === 'number' ? secs(r.round_s) : '',
       typeof r.tok_s === 'number' ? `${Math.round(r.tok_s)} tok/s${r.tok_s_from === 'live' ? '' : ' (last call)'}` : '',
       typeof r.context_pct === 'number' ? `context ${r.context_pct}%` : '', ...apiParts(r)].filter(Boolean)
-    out.push([{ color: 'claude', text: '▶ ' }, { bold: true, text: `${r.task} ` }, { dim: true, text: `${r.label || r.model} · ${parts.join(' · ')}` }])
+    // an API task's model as the Tasks view says it, its place first: wb top's label is the bare id
+    const model = r.via === 'api' ? modelWord(String(r.model ?? ''), true, names) : r.label || r.model
+    out.push([{ color: 'claude', text: '▶ ' }, { bold: true, text: `${r.task} ` }, { dim: true, text: `${model} · ${parts.join(' · ')}` }])
   }
   if (!(s.running ?? []).length) out.push([{ dim: true, text: 'Nothing running.' }])
   const rack = (s.rack ?? []) as Row[]
@@ -1029,7 +1066,8 @@ export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; 
     const where = m.state === 'cpu' && typeof m.cpu_bytes === 'number' ? ` ${gib(m.cpu_bytes)} GiB in RAM`
       : typeof m.gpu_bytes === 'number'
         ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
-    const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}` : '',
+    // with its unit, as the history's `writes ~61 tok/s`: "writes ~61" said 61 of nothing (#1048's review)
+    const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}${NB}tok/s` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}${NB}tok/s` : '',
       m.load_s ? `loads ~${secs(m.load_s)}` : '', m.state === 'remote' ? 'another machine: no telemetry' : m.why ?? ''].filter(Boolean)
     out.push([{ color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${RACK_MARK[m.state] ?? '•'} ` },
       { text: `${m.label || m.model} ` }, { color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${m.state}${where}` },
@@ -1765,7 +1803,7 @@ const GUARD_WORDS: Record<string, string> = {
   repeat: 'the same call repeated', errors: 'tool errors in a row', no_edit: 'no file changed',
   round: 'the round time limit', silence: 'silence', think: 'thinking with no tool call',
   handovers: 'handovers without finishing',
-  spend: "the day's API spend cap",
+  spend: 'the API day cap', // Settings' and the Tasks view's words for it
 }
 
 // stats.STATS_MODEL_LINES, kept here too: the mod tracks main while wb runs from the user's clone,
@@ -1776,10 +1814,10 @@ const STATS_SHOWN = 3
 // The Stats tab's history as lines (a label in bold, then the text): what the feed holds, each
 // section left out when it has nothing, estimates said as such. A run of days that ended isn't
 // mentioned, only the best (the plan's rule: show what went right, never nag).
-export function statsLines(f: Record<string, any> | null, why = ''): { label: string; text: string }[] {
+export function statsLines(f: Record<string, any> | null, why = '', names: Names = NO_NAMES): { label: string; text: string }[] {
   // `why`: the last `wb stats --json` failed, said (#553): with no feed yet "Reading…" never ended
   if (!f) return [{ label: '', text: why ? `History unavailable: ${why} (wb stats --json)` : 'Reading the history…' }]
-  if (why) return [{ label: '', text: `Not updated: ${why} (wb stats --json)` }, ...statsLines(f)]
+  if (why) return [{ label: '', text: `Not updated: ${why} (wb stats --json)` }, ...statsLines(f, '', names)]
   // only when the feed has no section at all: with no judged task, a period of spec-gap
   // discards (#569), the optimized windows and the bench results still have something to say (#549)
   if (!f.tasks && !Object.keys(f).some(k => !['ts', 'until', 'settings', 'tasks'].includes(k)))
@@ -1800,7 +1838,7 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
       // the period's own energy, every task's: the saving's counts only the tasks it compares (#568)
       p.energy?.wh ? `${p.energy.wh >= 1000 ? `${(p.energy.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.energy.wh)} Wh`}` +
         (p.energy.cost != null ? `, cost ${p.energy.cost.toFixed(2)}` : '') : '',
-      apiPeriod(p.api),
+      apiPeriod(p.api, names),
     ]
     out.push({ label, text: parts.filter(Boolean).join(' · ') })
   }
@@ -1829,14 +1867,17 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
     ? (f.model_lines.lines ?? []).map((m: any) => [String(m.model), m])
     : Object.entries(f.models ?? {})
   const shown = all.slice(0, STATS_SHOWN), past = all.slice(STATS_SHOWN)
+  // a model as Now and the Tasks view name it (modelWord); Bench, Optimized and What helps by the same
+  const apiIds = new Set(all.filter(([, m]) => m.kind === 'api').map(([model]) => model))
+  const word = (model: string) => modelWord(model, apiIds.has(model), names)
   for (const [model, m] of shown) {
     const trend = spark((m.write_trend ?? []).map((p: number[]) => p[1]))
     const speed = m.kind === 'api' ? (typeof m.paid === 'number' ? ` · paid ~${usd(m.paid)}/task` : '')
-      : m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''
+      : m.speed?.write ? ` · writes ~${Math.round(m.speed.write)}${NB}tok/s` : ''
     const change = typeof m.write_change_pct === 'number' && m.write_change_pct
       ? ` (${m.write_change_pct > 0 ? '+' : ''}${m.write_change_pct}%)` : ''
     const windows = (m.windows ?? []).length > 1 ? ` (${m.windows.map((w: number) => `${Math.round(w / 1024)}K`).join(', ')})` : ''
-    out.push({ label: model + windows, text: `${m.tasks} task${m.tasks === 1 ? '' : 's'} · ${m.accepted_pct}% landed` +
+    out.push({ label: word(model) + windows, text: `${m.tasks} task${m.tasks === 1 ? '' : 's'} · ${m.accepted_pct}% landed` +
       (m.rounds != null ? ` · ${m.rounds} rounds` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
       speed + (trend ? ` ${trend}` : '') + change + (m.claude ? ` · Claude ~${kilo(m.claude)}/task` : '') })
   }
@@ -1861,7 +1902,7 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   const counted = (kept: string[], rest: number, report: string) => kept.length
     ? kept.join(' · ') + (rest ? ` · ${rest} more (${report})` : '') : `${rest} model${rest === 1 ? '' : 's'} (${report})`
   const sized = Object.entries(f.sizes ?? {}) as [string, any][]
-  if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
+  if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${ROLE_WORDS[k] ?? k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
   if (f.days?.length) {
     const line = spark(f.days.map((d: any) => d.tasks))
     if (line) out.push({ label: 'Last 30 days', text: `${line}  tasks per day` })
@@ -1874,7 +1915,8 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   const last = (f.milestones ?? []).at(-1)
   if (last) out.push({ label: 'Milestone', text: last.kind === 'landed'
     ? `${last.n} task${last.n === 1 ? '' : 's'} landed${last.day ? ` (${last.day})` : ''}`
-    : `${kilo(last.n)} Claude tokens saved, estimated${last.day ? ` (${last.day})` : ''}` })
+    // "(estimate)", as each period and the footer say it ("saved, estimated" said it a second way)
+    : `~${kilo(last.n)} Claude tokens saved (estimate${last.day ? `, ${last.day}` : ''})` })
   const guards = Object.entries(f.guards ?? {}) as [string, number][]
   if (guards.length) out.push({ label: 'What stopped agents', text: guards.sort((a, b) => b[1] - a[1])
     .map(([g, n]) => `${GUARD_WORDS[g] ?? g} ${n}`).join(' · ') })
@@ -1882,7 +1924,7 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   const helped = helps.map(([model, h]) => [model, Object.entries(h).filter(([, v]: any) => v[1])
     .map(([k, v]: any) => `a ${k === 'smaller' ? 'smaller step' : k} helped ${v[0]} of ${v[1]}`)] as [string, string[]])
     .filter(([, said]) => said.length)
-  helped.forEach(([model, said]) => out.push({ label: `What helps (${model})`, text: said.join(' · ') }))
+  helped.forEach(([model, said]) => out.push({ label: `What helps (${word(model)})`, text: said.join(' · ') }))
   // the rest on a row of their own, not on the last model's, where it read as that model's (2026-11-21);
   // no text command prints them, the feed does
   if (helpsRest) out.push({ label: 'What helps', text: `${helped.length ? `${helpsRest} more` : helpsRest} model${helpsRest === 1 ? '' : 's'} (wb stats --json)` })
@@ -1890,11 +1932,11 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   // the newest finished run, and a newer one beside it, never in its place (#570)
   const sofar = (p: any) => `${p.of} of ${p.planned} ${p.running ? 'so far' : 'before it stopped'}` +
     (p.of ? `, ${p.passed} passed` : '')
-  if (bench.length || benchRest) out.push({ label: 'Bench', text: counted(bench.map(([m, b]) => `${m} ` +
+  if (bench.length || benchRest) out.push({ label: 'Bench', text: counted(bench.map(([m, b]) => `${word(m)} ` +
     [b.run !== undefined ? `${b.passed}/${b.of} (${b.day})` : '', b.partial ? `newer run ${sofar(b.partial)}` : '']
       .filter(Boolean).join(', ')), benchRest, 'wb bench report') })
   const [opt, optRest] = pick(Object.entries(f.optimized ?? {}) as [string, any][])
-  if (opt.length || optRest) out.push({ label: 'Optimized', text: counted(opt.map(([m, o]) => `${m} ${Math.round(o.window / 1024)}K` +
+  if (opt.length || optRest) out.push({ label: 'Optimized', text: counted(opt.map(([m, o]) => `${word(m)} ${Math.round(o.window / 1024)}K` +
     (o.spill ? ` (${o.spill}% on the CPU)` : ' all on the GPU')), optRest, 'wb optimize report') })
   return out
 }
@@ -2106,6 +2148,8 @@ const mem = {
   topRetryAt: 0, // not before then, after one ended by itself
   price: null as number | null, // the electricity price wb says is set (`wb savings --json`)
   roles: null as null | PaneRoles, // the Settings tab's roles and models, as wb last said them (rolesNow, #1023)
+  settingsCols: 0, // the Settings tab's body width at this draw (0 unknown): settingRow folds a long row to it
+  provNames: new Map<string, string>(), // each API provider's id → its name, from the tasks' task.json (namesNow)
   apiOther: '', // the role whose API row's Other model… box is open (#1023)
   cwd: '', // the session's directory, resolved: which old tasks are this session's (mine)
   home: '', // the home directory, resolved: a session there claims no task by directory
@@ -2388,6 +2432,8 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       sp = await claim($, ent.name, sp)
       recent = await recentEvents($, ent.name, `${base}/events.jsonl`)
     }
+    if (typeof sp.provider === 'string' && typeof sp.provider_name === 'string' && sp.provider_name)
+      mem.provNames.set(sp.provider, sp.provider_name)
     list.push({
       name: sp.name, phase, round: Number(st.round ?? 1), model: String(sp.model ?? ''),
       label: String(sp.model_label ?? ''),
@@ -2714,6 +2760,30 @@ export function usd(x: number): string {
   return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
 }
 
+// The words one model or provider goes by on every tab (#1048's review, seen live): a GPU model by
+// its label (`qwen3-coder 30B`, as the Tasks view and Now say it), not its id in the history under
+// Now; an API model as the Tasks view's place and model (`API DeepSeek deepseek-v4.1-flash`, the
+// id's last part, tasks.ts); a provider by its name (`DeepSeek`), never its id on one tab and its
+// name on the next. From what the pane has read already (wb models --json, wb route --json's
+// providers, the tasks' task.json, wb top's rack): an id nothing named stays the id.
+export type Names = { models: Record<string, string>; providers: Record<string, string> }
+export const NO_NAMES: Names = { models: {}, providers: {} }
+export const providerWord = (id: string, n: Names) => n.providers[id] || id
+export function modelWord(id: string, api: boolean, n: Names): string {
+  if (!api) return n.models[id] || id
+  const cut = id.indexOf('/') // the provider ends at the first /
+  return cut > 0 ? `API ${providerWord(id.slice(0, cut), n)} ${id.split('/').pop()}` : `API ${id}`
+}
+function namesNow(list: WbTask[], top: WbTop | null): Names {
+  const n: Names = { models: {}, providers: {} }
+  for (const g of mem.roles?.models?.gpu ?? []) if (g.label) n.models[g.id] = g.label
+  for (const m of (top?.snap?.rack ?? []) as Row[]) if (m.label && !n.models[m.model]) n.models[m.model] = m.label
+  for (const t of list) if (t.via !== 'api' && t.label && !n.models[t.model]) n.models[t.model] = t.label
+  for (const [id, p] of Object.entries(mem.roles?.routes?.providers ?? {})) if (p.name) n.providers[id] = p.name
+  for (const [id, name] of mem.provNames) if (!n.providers[id]) n.providers[id] = name
+  return n
+}
+
 // A period's API money as the footer says it: never $0 for tasks with no price; '' with none
 export function apiMoney(a: any): string {
   if (!a || !a.tasks) return ''
@@ -2727,19 +2797,20 @@ export function apiAlone(a: any, money: string): string {
   return `this week: ${money.startsWith('$') ? `API ${money} on ${a.tasks} ${tasks}` : `${a.tasks} API ${tasks}, ${money}`} (no GPU task to compare)`
 }
 
-// A Stats period's API part (the feed's periods[*].api): API $1.27 (deepseek $0.84 · anthropic $0.43)
-export function apiPeriod(a: any): string {
+// A Stats period's API part (the feed's periods[*].api): API $1.27 (DeepSeek $0.84 · Anthropic $0.43)
+export function apiPeriod(a: any, names: Names = NO_NAMES): string {
   const money = apiMoney(a)
   if (!money) return ''
   const provs = Object.entries(a.by_provider ?? {}).filter(([, v]: any) => v.tasks > (v.unknown ?? 0) + (v.plan ?? 0))
-    .sort((x: any, y: any) => y[1].cost - x[1].cost).map(([p, v]: any) => `${p} ${usd(v.cost)}`)
+    .sort((x: any, y: any) => y[1].cost - x[1].cost).map(([p, v]: any) => `${providerWord(p, names)} ${usd(v.cost)}`)
   return `API ${money}${provs.length ? ` (${provs.join(' · ')})` : ''}${a.unknown && money !== 'no price' ? ` + ${a.unknown} with no price` : ''}`
 }
 
-// An API task's RUNNING row's parts (wb top's `via`, `provider`, `spend`): no GPU of ours
+// An API task's RUNNING row's parts after its phase (wb top's `spend`, `waits`); its place and model
+// lead the row, as on the Tasks view (`API DeepSeek deepseek-flash`, modelWord)
 export function apiParts(r: Row): string[] {
   if (r.via !== 'api') return []
-  return [`API ${r.provider ?? '?'}`, typeof r.spend === 'number' ? usd(r.spend) : '', r.waits ? `waits for ${r.waits}` : '']
+  return [typeof r.spend === 'number' ? usd(r.spend) : '', r.waits ? `waits for ${r.waits}` : '']
 }
 
 // The electricity price `wb savings --json` says is set (per kWh), or null
@@ -2792,6 +2863,10 @@ async function setPrice($: any, text: string) {
 // --dry-run --json` gives it, then runs it, under the same gate Claude meets; nothing is a flag on
 // the command line, which Claude could pass. A GPU pin or a size takes no yes (dry run: no gate).
 const ROLES_CACHE_MS = 10_000
+const upper = (w: string) => w.charAt(0).toUpperCase() + w.slice(1)
+// a no-break space inside a unit the pane's edge must not split: `GPU 0+1` wrapped as "GPU" and
+// "0+1", `per M` as "per" and "M" (#1048's review, seen at 120 and 80 columns)
+const NB = '\u00a0'
 const GPU_ROWS = 6 // GPU models with a sizes row; the rest are counted (wb models), as STATS_SHOWN
 const API_MENU = 12 // an API dropdown lists every runnable model up to this; past it, the ones in use
 const ROLE_LABELS: Record<string, string> = { significant: 'Complex coding', trivial: 'Trivial coding', writing: 'English writing' }
@@ -2802,9 +2877,10 @@ const AGENTS_STOPS: [string, string, string][] = [
   ['api', 'API', 'Every role runs on its API model; a role with none can\'t start.'],
   ['both', 'Both (default)', 'Each role runs where its own row says.'],
 ]
+// every value capitalized, as every other row's (#1048's review: "wait (default)" beside "Both (default)")
 const BUSY_STOPS: [string, string, string][] = [
-  ['wait', 'wait (default)', 'A task waits for the GPU, as before.'],
-  ['api', 'use the role\'s API model', 'A task whose role has an API model starts on it while the GPU is busy; a running task never moves.'],
+  ['wait', 'Wait (default)', 'A task waits until the GPU is free.'],
+  ['api', 'Use the role\'s API model', 'A task whose role has an API model starts on it while the GPU is busy; a running task never moves.'],
 ]
 const WORKFLOWS_STOPS: [string, string, string][] = [
   ['off', 'Off (default)', 'Claude runs one task at a time.'],
@@ -2814,14 +2890,17 @@ const THINK_STOPS: [string, string, string][] = [
   ['off', 'Off (default)', 'Faster and cheaper; for tasks started after this.'],
   ['on', 'On', 'Better on hard steps, slower and costs more; for tasks started after this.'],
 ]
+// a size in the roles' words (tasks.ts ROLE_WORDS): `significant only` sat under "Complex coding"
 const SIZE_STOPS: [string, string, string][] = [
-  ['all', 'any size (default)', 'The router may give it any task.'],
-  ['trivial', 'trivial only', 'The router gives it trivial tasks only.'],
-  ['significant', 'significant only', 'The router gives it significant tasks only.'],
+  ['all', 'Any size (default)', 'The router may give it any task.'],
+  ['trivial', `${upper(ROLE_WORDS.trivial!)} only`, 'The router gives it trivial coding tasks only.'],
+  ['significant', `${upper(ROLE_WORDS.significant!)} only`, 'The router gives it complex coding tasks only.'],
 ]
-function roleStops(label: string, api: string | undefined): [string, string, string][] {
+// A role's GPU | API row. `name`: its API model as the API group's row names it (the catalog's name),
+// so one model isn't `deepseek/deepseek-flash` here and `DeepSeek Flash` three rows down
+export function roleStops(label: string, api: string | undefined, name = api): [string, string, string][] {
   return [['gpu', 'GPU', `${label} runs on this machine's GPU.`],
-    ['api', api ? `API: ${api}` : 'API (set its model under API first)', api ? `${label} runs on ${api}; your code goes to its provider.` : 'Pick its API model under API first.']]
+    ['api', api ? `API (${name})` : 'API (set its model under API first)', api ? `${label} runs on ${api}; your code goes to its provider.` : 'Pick its API model under API first.']]
 }
 
 // A model's window as the pane says it: 40K
@@ -2832,7 +2911,7 @@ const windowK = (n: unknown) => typeof n === 'number' && n > 0 ? ` (${Math.round
 export function gpuStops(label: string, gpu: WbModels['gpu'], pinned: string): [string, string, string][] {
   const out: [string, string, string][] = [['auto', 'Auto (the router picks)', `The router picks ${label}'s GPU model for each task.`]]
   for (const g of gpu)
-    out.push([g.id, `${g.label}${windowK(g.window)}${g.cards?.length ? ` · GPU ${g.cards.join('+')}` : ''}`, `Pins ${label} to ${g.id}: the router doesn't pick for it.`])
+    out.push([g.id, `${g.label}${windowK(g.window)}${g.cards?.length ? ` · GPU${NB}${g.cards.join('+')}` : ''}`, `Pins ${label} to ${g.id}: the router doesn't pick for it.`])
   if (pinned !== 'auto' && !gpu.some(g => g.id === pinned)) out.push([pinned, `${pinned} (not found: wb models)`, 'A task of this role exits 3 until it is found again or another is picked.'])
   return out
 }
@@ -2844,7 +2923,7 @@ export function gpuStops(label: string, gpu: WbModels['gpu'], pinned: string): [
 export function apiStops(label: string, m: WbModels | null, current: string, others: string[]): [string, string, string][] {
   const listed = new Map((m?.api ?? []).map(x => [x.id, x]))
   const price = (p: WbModels['api'][number]['price']) => p && typeof p.input === 'number' && typeof p.output === 'number'
-    ? ` · $${p.input}/$${p.output} per M` : ''
+    ? ` · $${p.input}/$${p.output} per${NB}M` : ''
   const line = (id: string): [string, string, string] => {
     const x = listed.get(id)
     if (!x) return [id, id, `${label} uses ${id}.`]
@@ -2910,17 +2989,20 @@ async function setCap($: any, text: string) {
   $.ui.invalidate('ui.render')
 }
 
-// Spend today, from `wb route --json`: `$0.42 of $5 (deepseek $0.42)`; the dollars by `usd`, the
-// Stats tab's (#1022), so the two never say one sum two ways (wave 2's merge)
+// Spend today, from `wb route --json`: `$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14)`; the dollars by
+// `usd`, the Stats tab's (#1022), so the two never say one sum two ways (wave 2's merge), and each
+// provider by its name and the Stats tab's ` · ` (#1048's review: `deepseek $0.28, anthropic`)
 export function spendLine(r: WbRoutes): string {
   const s = r.spend_today ?? { usd: 0, by_provider: {} }
-  const by = Object.entries(s.by_provider ?? {}).filter(([, v]) => v > 0).map(([p, v]) => `${p} ${usd(v)}`)
-  return `Spend today: ${usd(s.usd ?? 0)}${r.day_usd != null ? ` of ${money(r.day_usd)}` : ' (no day cap)'}${by.length ? ` (${by.join(', ')})` : ''}`
+  const by = Object.entries(s.by_provider ?? {}).filter(([, v]) => v > 0).map(([p, v]) => `${r.providers?.[p]?.name || p} ${usd(v)}`)
+  const each = by.length ? ` (${by.join(' · ')})` : ''
+  return `Spend today: ${usd(s.usd ?? 0)}${r.day_usd != null ? ` of ${money(r.day_usd)}${each}` : `${each} · no day cap`}`
 }
 
-// The Connected line: each provider, a stored key as working, the rest with why they can't run
+// The Connected line: each provider, a stored key as working ("key stored": "stored" alone said
+// nothing of what), the rest with why they can't run
 export function connectedLine(r: WbRoutes): string {
-  return 'Connected: ' + Object.values(r.providers ?? {}).map(p => p.key === 'stored' ? `${p.name} (stored)` : `${p.name} (${p.why ?? p.key})`).join(' · ')
+  return 'Connected: ' + Object.values(r.providers ?? {}).map(p => p.key === 'stored' ? `${p.name} (key stored)` : `${p.name} (${p.why ?? p.key})`).join(' · ')
 }
 
 // The rows of the Settings tab's three groups (#1023), as elements: Shared's first part (above Claude
@@ -2928,7 +3010,7 @@ export function connectedLine(r: WbRoutes): string {
 async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
   const { Box, Text, Button } = kit
   const r = role.routes, m = role.models
-  const dim = (key: string, text: string) => <Text key={key} dimColor>{`  ${text}`}</Text>
+  const dim = (key: string, text: string) => infoLine(kit, key, text)
   if (!r) {
     const line = dim('roles-why', role.why)
     return { top: [line], cap: [], gpu: [line, ...mediaRows(kit, $, view, m)], api: [] }
@@ -2937,10 +3019,11 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
   const top = [
     settingRow(kit, $, 'agents', 'Agents', AGENTS_STOPS, r.use, view, v => paneRoute($, ['all', v])),
     settingRow(kit, $, 'busy', 'When the GPU is busy', BUSY_STOPS, r.busy ?? 'wait', view, v => paneRoute($, ['busy', v])),
-    ...roles.map(({ name, label, row }) => settingRow(kit, $, `role-${name}`, label, roleStops(label, row.api), row.via, view, v => paneRoute($, [name, v]))),
+    ...roles.map(({ name, label, row }) => settingRow(kit, $, `role-${name}`, label,
+      roleStops(label, row.api, m?.api.find(x => x.id === row.api)?.name), row.via, view, v => paneRoute($, [name, v]))),
   ]
   const cap = [
-    <kit.Input key="cap" label="▸ API day cap: " value={r.day_usd != null ? String(r.day_usd) : ''}
+    <kit.Input key="cap" label="▸ API day cap" value={r.day_usd != null ? String(r.day_usd) : ''}
       placeholder="not set (needed before an API role; $5 suggested)" submitLabel="set" onSubmit={(v: string) => { void setCap($, v) }} />,
   ]
   const gpu: any[] = []
@@ -2953,14 +3036,16 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
     const shown = [...m.gpu].sort((a, b) => Number(pinned.has(b.id)) - Number(pinned.has(a.id)) || a.label.localeCompare(b.label)).slice(0, GPU_ROWS)
     for (const g of shown) {
       const size = g.sizes.length === 1 ? g.sizes[0]! : 'all'
-      gpu.push(settingRow(kit, $, `size-${g.id}`, g.label, SIZE_STOPS, size, view,
+      // "<model> tasks": the model's name alone (`devstral 24B: trivial only`) didn't say what the row sets
+      gpu.push(settingRow(kit, $, `size-${g.id}`, `${g.label} tasks`, SIZE_STOPS, size, view,
         v => runWb($, ['model', 'sizes', g.id, ...(v === 'all' ? [] : [v])]).then(({ ok, out }) => { mem.roles = null; if (!ok) $.ui.toast(`workbench: ${brief(out)}`) })))
     }
     if (m.gpu.length > GPU_ROWS) gpu.push(dim('gpu-more', `+${m.gpu.length - GPU_ROWS} more (wb models)`))
     const o = m.optimize
     gpu.push(
-      <Box key="optimize-row" flexDirection="row" columnGap={1}>
-        <Text dimColor>{`  Optimize: ${o.running ? 'measuring now' : o.models ? `measured ${o.models} model${o.models === 1 ? '' : 's'}${o.done_at ? `, ${new Date(o.done_at * 1000).toISOString().slice(5, 10)}` : ''}` : 'not run yet'} ·`}</Text>
+      // the date as the Stats tab's (2026-11-20), not 11-20 (#1048's review)
+      <Box key="optimize-row" flexDirection="row" flexWrap="wrap" columnGap={1} paddingLeft={2}>
+        <Text dimColor>{`Optimize: ${o.running ? 'measuring now' : o.models ? `measured ${o.models} model${o.models === 1 ? '' : 's'}${o.done_at ? ` on ${new Date(o.done_at * 1000).toISOString().slice(0, 10)}` : ''}` : 'not run yet'} ·`}</Text>
         <Button key="optimize" label="▸ Measure now" plain onPress={() => {
           void runWb($, ['optimize', 'start']).then(({ out }) => { mem.roles = null; $.ui.toast(`workbench: ${brief(out)}`) })
         }} />
@@ -2997,8 +3082,9 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
 // one off this GPU ("gpu": false, another host) says so. A pick runs `wb image|audio --default NAME`
 // (wb writes images.json's "default" or audio.json's "default_<kind>"); no dialog: nothing spends
 // and nothing leaves the machine. An older wb's models carry no media: no rows.
-const MEDIA_ROWS: [string, string, string][] = [['image', 'Images', 'image'], ['speech', 'Speech', 'audio'],
-  ['sfx', 'Sound effects', 'audio'], ['music', 'Music', 'audio']]
+// each titled as what it picks: "Images: flux" read as images on or off (#1048's review)
+const MEDIA_ROWS: [string, string, string][] = [['image', 'Image engine', 'image'], ['speech', 'Speech engine', 'audio'],
+  ['sfx', 'Sound effects engine', 'audio'], ['music', 'Music engine', 'audio']]
 export function mediaStops(cmd: string, kind: WbMedia): [string, string, string][] {
   return kind.engines.map(e => [e.name, `${e.name}${e.gpu ? '' : ' · off this GPU'}`, `wb ${cmd} runs ${e.name} unless --engine names another.`])
 }
@@ -4487,19 +4573,20 @@ export const register: Register = (on, options) => {
       const probeAt = await probeMode($)
       const prog = await progressSettings($)
       const picked = (args: string[]) => runWb($, args).then(() => { void refreshStats($, true); void syncTop($) })
+      mem.settingsCols = Number(((e.props ?? {}) as Row).bodyColumns ?? 0) // settingRow folds to it
       const roles = await roleRows(kit, $, view, await rolesNow($)) // Shared, GPU and API (#1023)
       return (
         <Box flexDirection="column">
           <Text dimColor>{SETTINGS_HINT}</Text>
           <Box flexDirection="column" marginTop={1}>
-            <Text bold>Shared</Text>
+            {heading(kit, 'Shared')}
             {roles.top}
             {settingRow(kit, $, 'coding', 'Claude coding', CODING_STOPS, await codingMode($), view,
               v => runWb($, ['coding', v]))}
             {settingRow(kit, $, 'workflows', 'Dynamic workflows', WORKFLOWS_STOPS, await workflowsMode($), view,
               v => runWb($, ['workflows', v]))}
             {roles.cap}
-            <Text key="wake" dimColor>{`  Wake Claude: ${mem.wake ? 'on' : 'off'} · change it in /plugin → workbench → options`}</Text>
+            {infoLine(kit, 'wake', `Wake Claude: ${mem.wake ? 'on' : 'off'} · change it in /plugin → workbench → options`)}
             {settingRow(kit, $, 'record', 'Stats recording', RECORD_STOPS, st.recording ? 'on' : 'off', view,
               v => picked(['stats', 'set', 'recording', v]))}
             {settingRow(kit, $, 'live', 'Live view', LIVE_STOPS, st.live ? 'on' : 'off', view,
@@ -4510,21 +4597,21 @@ export const register: Register = (on, options) => {
               v => runWb($, ['progress', v]))}
             {settingRow(kit, $, 'splash', 'Opening animation', SPLASH_STOPS, (await splashOn($)) ? 'on' : 'off', view,
               v => runWb($, ['splash', v]).then(({ ok, out }) => { if (!ok) $.ui.toast(`workbench: ${brief(out)}`) }))}
-            <kit.Input key="price" label="▸ Electricity price per kWh: " value={mem.price ? String(mem.price) : ''}
+            <kit.Input key="price" label="▸ Electricity price per kWh" value={mem.price ? String(mem.price) : ''}
               placeholder="not set (energy shows in Wh)" submitLabel="set" onSubmit={(v: string) => { void setPrice($, v) }} />
           </Box>
           <Box flexDirection="column" marginTop={1}>
-            <Text bold>GPU</Text>
+            {heading(kit, 'GPU')}
             {roles.gpu}
           </Box>
           {roles.api.length ? (
             <Box flexDirection="column" marginTop={1}>
-              <Text bold>API</Text>
+              {heading(kit, 'API')}
               {roles.api}
             </Box>
           ) : null}
           <Box flexDirection="column" marginTop={1}>
-            <Text><Text bold>Experimental</Text><Text dimColor> · may change or go away</Text></Text>
+            {heading(kit, 'Experimental', ' · may change or go away')}
             {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
             {settingRow(kit, $, 'probe', 'Agent code navigation', probeStops(probe, probeAt), probeAt, view,
               v => setProbe($, v))}
@@ -4542,21 +4629,23 @@ export const register: Register = (on, options) => {
       if (!mem.top && !mem.topKids.size) void syncTop($)
       const { feed } = await read($, statsFeed)
       const cols = Math.max(30, Number(((e.props ?? {}) as Row).bodyColumns ?? e.viewport?.columns ?? 60))
-      const now = (await statsSettings($)).live ? liveLines(await read($, topNow), mem.topFails >= 2 ? mem.topWhy : '') : []
+      const top = await read($, topNow)
+      const names = namesNow(list, top)
+      const now = (await statsSettings($)).live ? liveLines(top, mem.topFails >= 2 ? mem.topWhy : '', names) : []
       return (
         <Box flexDirection="column">
           {now.length ? (
             <Box flexDirection="column" marginBottom={1}>
-              <Text bold color="claude">Now</Text>
+              {heading(kit, 'Now')}
               {now.flatMap(parts => wrapParts(parts, cols)).map(parts => (
                 <Text wrap="truncate-end">{parts.map(p => <Text color={p.color} dimColor={p.dim} bold={p.bold}>{p.text}</Text>)}</Text>
               ))}
             </Box>
           ) : null}
-          {statsLines(feed, mem.statsWhy).map(({ label, text }) => (
+          {statsLines(feed, mem.statsWhy, names).map(({ label, text }) => (
             <Box flexDirection="column" marginBottom={label ? 0 : 1}>
               {label
-                ? wrapWords(`${label}: ${text}`, cols).map((l, i) => i === 0 && l.startsWith(label)
+                ? hangWords(`${label}: ${text}`, cols).map((l, i) => i === 0 && l.startsWith(label)
                   ? <Text><Text bold>{label}</Text><Text dimColor>{l.slice(label.length)}</Text></Text>
                   : <Text dimColor>{l}</Text>)
                 : <Text dimColor>{text}</Text>}
