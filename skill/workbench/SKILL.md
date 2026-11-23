@@ -10,10 +10,10 @@ disable-model-invocation: true
 argument-hint: "[first task] [--model <id>] [--merge]"
 ---
 
-# /workbench — local agent writes, Claude reviews
+# /workbench — an OpenCode agent writes, Claude reviews
 
 The user's Claude budget is tight; that is the point of this mode. You are **architect and
-reviewer**: write a precise spec, hand it to a local agent with `wb`, let the runner's test gate
+reviewer**: write a precise spec, hand it to an agent with `wb`, let the runner's test gate
 and auto-fix rounds do the cheap iterations, review only what passes, then accept or steer. Don't
 write the code yourself unless the escape hatch fires.
 

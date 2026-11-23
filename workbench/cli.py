@@ -6625,7 +6625,7 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--version", action="version", version=f"wb {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("start", help="hand a task to a local agent")
+    s = sub.add_parser("start", help="hand a task to an OpenCode agent (GPU or API)")
     s.add_argument("name")
     s.add_argument("--spec", required=True, help="spec file, or - for stdin")
     s.add_argument("--repo", default=".")
