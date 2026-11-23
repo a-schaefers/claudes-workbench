@@ -1169,7 +1169,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     threading.Thread(target=_reader, args=(proc.stdout, q), daemon=True).start()
     threading.Thread(target=_steer_bell, args=(task, proc, q), daemon=True).start()
     power = None
-    if not CURRENT.get("remote") and not models._fake():  # the suite's fakes: the GPU isn't theirs
+    if measures_power(task):
         power = _Power()
         power.start()
 
@@ -1509,6 +1509,13 @@ class _Capture(threading.Thread):
 
 
 POWER_EVERY = 10  # seconds between GPU power samples: fine enough for a round, cheap to read
+
+
+def measures_power(task: store.Task) -> bool:
+    """Whether a round samples this GPU's draw (_Power): not for a remote model (another machine's
+    GPU), the suite's fakes (the GPU isn't theirs), or an API task, which runs on no GPU of ours:
+    its watt-hours would be whatever else the GPU did meanwhile (#1022)."""
+    return not CURRENT.get("remote") and not models._fake() and task.spec.get("via") != "api"
 
 
 class _Power(threading.Thread):
@@ -2598,11 +2605,22 @@ def steps_line(task: store.Task) -> str | None:
             f"(git -C {wt} reset -q --hard && git -C {wt} clean -fdq) and wb accept {task.name} --force")
 
 
+def _spend_part(task: store.Task) -> str:
+    """The round report's money for an API task (#1022): ` · $0.12 so far`, ` · cost unknown`
+    (no price: never a false $0); nothing for a GPU task."""
+    if task.spec.get("via") != "api":
+        return ""
+    from .results import spend_so_far
+    from .savings import usd
+    v = spend_so_far(task)
+    return f" · {usd(v)} so far" if v is not None else " · cost unknown"
+
+
 def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     """The compact report Claude reads; kept short on purpose, the diff is fetched separately."""
     spec, st = task.spec, task.status
     lines = [f"task {task.name} · {spec['model_label']} · round {n} · {rnd['secs'] / 60:.1f} min"
-             f" · local tokens {rnd['tok_in']} in / {rnd['tok_out']} out"]
+             f" · agent tokens {rnd['tok_in']} in / {rnd['tok_out']} out" + _spend_part(task)]
     c = context_state(task)
     if c.get("used") and c.get("window"):
         after = {**st, "round": n + 1}  # judged as the step's next round is (#781)

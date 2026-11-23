@@ -206,7 +206,7 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     state = state or models.status(m)
     ids = lineage(m, probe=state["available"])  # a server down isn't asked its weights
     real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
-            and tuning.judged(r)]
+            and tuning.judged(r) and same_kind(r, m)]
     # the weights each model has now: a server just found down isn't asked again (the audit)
     real = same_weights(real, weights_now(ids) if state["available"] else {})
     # a model that can't run isn't weighed: its server was just found down, and asking it again
@@ -314,8 +314,16 @@ def expected(model_id: str, size: str, weights: str | None = None) -> tuple[floa
         return None, 0
     ids = lineage(m, probe=False)
     real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
-            and tuning.judged(r)]
+            and tuning.judged(r) and same_kind(r, m)]
     return _typical(same_weights(real, {m.id: weights} if weights else {}))
+
+
+def same_kind(row: dict, m: models.Model) -> bool:
+    """Whether a row was run as the model's kind is (a row without `kind` is a GPU one): an
+    Ollama `:cloud` id is a GPU model's in old rows and an API model's now (#1013), and one
+    record mixing the two ranked an API model by GPU tasks (#1022). score's rows feed _per_step
+    and _cheaper, so they rank within a kind too; slice and tuning._rows keep to it as well."""
+    return (row.get("kind") or "gpu") == m.kind
 
 
 def allowed(m: models.Model, size: str) -> bool:
@@ -438,7 +446,8 @@ def slice(m: models.Model) -> Slice:
     files, lines = max(1, round(BASE_FILES * scale)), max(50, round(BASE_LINES * scale / 10) * 10)
     basis = f"{window // 1024}K window" if window else "window unknown"
     ids = {m.id, *earlier(m)}  # under the ids it had before too (#818)
-    rows = same_weights([r for r in store.results() if r.get("model") in ids and tuning.judged(r)],
+    rows = same_weights([r for r in store.results() if r.get("model") in ids and tuning.judged(r)
+                         and same_kind(r, m)],  # its own kind's steps only (#1022's review)
                         weights_now({m.id}))  # another model's steps under the same id (#726)
     steps = [s for r in rows for s in r.get("steps") or []
              if s.get("files") and (not window or s.get("window") in (None, window))]

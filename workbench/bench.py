@@ -26,7 +26,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import ask_mcp, context, gitops, media, models, router, runner, spend, store, verify
+from . import ask_mcp, context, gitops, media, models, results, router, runner, spend, store, verify
 from .runner import PKG_ROOT
 from .watch import Watcher
 
@@ -773,7 +773,8 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
                    experiment_use=st.get("experiment_use") or {}, long_reads=st.get("long_reads", 0),
                    # "on" with probe on: once its level, moderate or aggressive (the owner,
                    # 2026-11-22, #857: off and on, on is large files only)
-                   **({"probe_level": "on"} if context.experiment(task, "probe") else {}))
+                   **({"probe_level": "on"} if context.experiment(task, "probe") else {}),
+                   **paid(task))
         if st.get("last") == PREEMPTED:
             return {**row, "outcome": "preempted"}
         if phase == "failed" and st.get("infra"):  # the setup, the server, the runner, the disk
@@ -803,6 +804,22 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
                 except SystemExit:
                     pass
         shutil.rmtree(d / "tree" if work.parent != d else work, ignore_errors=True)
+
+
+def paid(task: store.Task) -> dict:
+    """A replay on an API model: its runs.jsonl row's `kind` and `paid` {cost, source}
+    (results.api_usage; a replay writes no results row, so its money is said here, #1022)."""
+    if (u := results.api_usage(task)) is None:
+        return {}
+    return {"kind": "api", "paid": {"cost": u["cost"], "source": u["source"]}}
+
+
+def paid_since(since: float = 0) -> dict:
+    """The API replays' money since ``since``, for `wb savings --api`: {tasks, cost, unknown}."""
+    rs = [r for r in store.read_jsonl(runs_file())[0] if isinstance(r, dict) and results.api_row(r)
+          and (r.get("ts") or 0) >= since]
+    known = [c for r in rs if (c := results.row_cost(r)) is not None]
+    return {"tasks": len(rs), "cost": round(sum(known), 6), "unknown": len(rs) - len(known)}
 
 
 def _wait(task: store.Task) -> tuple[dict, int]:
@@ -1001,13 +1018,13 @@ def report(run: str | None = None, label: str | None = None) -> str:
     for r in rs:
         by.setdefault((r.get("label") or "-", r["model"]), []).append(r)
     out = head + [f"{'label':12} {'model':34} {'cases':>5} {'passed':>6} {'rounds':>6} "
-                  f"{'autofix':>7} {'min':>6} {'local tok':>10}"]
+                  f"{'autofix':>7} {'min':>6} {'agent tok':>10} {'paid':>7}"]
     for (lab, model), g in sorted(by.items()):
         n = len(g)
         avg = lambda k: sum(r.get(k) or 0 for r in g) / n  # noqa: E731
         out.append(f"{lab[:12]:12} {model[:34]:34} {n:>5} {sum(r['outcome'] == 'passed' for r in g) / n:>6.0%} "
                    f"{avg('rounds'):>6.1f} {avg('auto_fixes'):>7.1f} {avg('minutes'):>6.1f} "
-                   f"{int(avg('tok_in') + avg('tok_out')):>10}")
+                   f"{int(avg('tok_in') + avg('tok_out')):>10} {results.paid_cell(g):>7}")
     out += use_lines(by)
     have = cases()
     out.append("")

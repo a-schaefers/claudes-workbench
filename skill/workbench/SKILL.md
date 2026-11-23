@@ -513,6 +513,10 @@ Short and honest: what was built, on which model, rounds (automatic and review),
 what you fixed, sent back or flagged, the branch. Report the agent's misses plainly; they are
 evidence about the model, and the router learns from accept and discard. Pass on the
 `claude:` line `wb accept` prints: what the task cost you, measured, beside the estimate of
-writing it yourself and the GPU energy. Call the estimate an estimate. `wb savings` gives the
+writing it yourself and the GPU energy. For a task on an API model that line ends with what the
+provider was paid (`paid … $0.12`, `paid: unknown`, or `plan usage`): pass that part on as a cost,
+never as a saving, and never subtract it from your tokens or the other way round.
+Call the estimate an estimate. `wb savings` gives the
 week's total and its score out of 100 when the user asks what it's saving; `wb savings --card
-<file>.svg` makes the badge as an image for them to keep or post (made here, nothing sent).
+<file>.svg` makes the badge as an image for them to keep or post (made here, nothing sent). The
+score is the GPU's alone; `wb savings --api` gives what API tasks cost, by provider and day.

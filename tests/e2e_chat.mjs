@@ -359,6 +359,16 @@ async function run(engine, device) {
     await page.click('#gear')
     await until(async () => (await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18.'))
     if ((await page.textContent('#saved')).includes('$')) throw new Error('a currency sign: ' + await page.textContent('#saved'))
+    // #1022: an API task's dollars carry a `$` (OpenCode's unit), apart from the saving, while the
+    // energy's cost still has none (#845)
+    appendFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted', kind: 'api', provider: 'deepseek',
+        model: 'deepseek/deepseek-flash', api: { cost: 0.42, source: 'opencode' } }) + '\n')
+    await page.click('#gear')
+    await until(async () => await page.locator('#settings').isHidden())
+    await page.reload()
+    await page.click('#gear')
+    await until(async () => (await page.textContent('#saved')).includes('API models: 1 task, $0.42 (deepseek $0.42).'))
+    if (!(await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18. API')) throw new Error(await page.textContent('#saved'))
     writeFileSync(env.WB_SAVINGS, '{}')  // no price again, for the next engine
     // #101: the badge, its number and its words, legible at phone width
     if (await page.locator('#badge').isHidden()) throw new Error('no badge')

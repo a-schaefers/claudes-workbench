@@ -62,15 +62,15 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   them; `wb patch send`, the one fork, push and pull request (through `gh`, never a token
   printed; under Claude Code only on the mod's dialog's yes). Its git calls run without hooks or a terminal, and it imports everything up front:
   `wb patch init` deletes the copy wb runs from.
-- `results.py`: results.jsonl rows; read them through `store.results()`, which leaves out trials.
+- `results.py`: results.jsonl rows (`kind`, `role`, `provider`; an API task's money, `api_usage`); read them through `store.results()`, which leaves out trials.
 - `router.py`: the model per size, slices, budgets. `tuning.py`: learned knobs (a new one goes in
   `KNOBS`, read with `tuning.value`). `models.py`: discovery (`discover`, GPU only; API models from
   OpenCode's catalog, `hosted`, `lookup`, `note_api`), residency, `GpuLease`.
   `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
   notice).
-- `spend.py`, `savings.py`: a task's cost to Claude, and against writing it. `bench.py`,
-  `verify.py`, `optimize.py`, `top.py`, `images.py`, `audio.py` (`media.py`, what those two
+- `spend.py`, `savings.py`: a task's cost to Claude, and against writing it (the score GPU-only; API dollars apart, `api_totals`). `bench.py`,
+  `verify.py`, `optimize.py`, `top.py` (API tasks under RUNNING, never in rack or queue), `images.py`, `audio.py` (`media.py`, what those two
   share): their `wb` commands. `progress.py`, `stats.py`, `lessons.py`: progress checks, the Stats
   tab, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
   inotify and pidfd waits. `chat.py` + `chat_static/`, `webpush.py`: the web chat. `try/`:

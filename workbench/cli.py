@@ -3414,15 +3414,31 @@ def cmd_savings(a):
                             {m: models.weights(found[m]) for m in {r.get("model") for r in rows}
                              if m in found}, hardware.system()))
         return
+    if a.api:  # the API tasks' money, apart from the score (#1022)
+        return _api_savings(a, period, since)
     t = savings.totals(store.results(), since=since)
     if a.card:  # made here, from the totals alone: the user decides where it goes (#101)
         Path(a.card).write_text(savings.card(t, period), encoding="utf-8")
         s = savings.score(t)
         print(f"wrote {a.card}: " + (f"{s['score']}/100. {s['sentence']}" if s else savings.NO_SCORE))
     elif a.json:
-        print(json.dumps({"period": period, **t, "score": savings.score(t), "price": savings.price()}))
+        print(json.dumps({"period": period, **t, "score": savings.score(t), "price": savings.price(),
+                          "api": savings.api_totals(store.results(trials=True), since)}))
     else:
         print(savings.summary(t, period))
+        if api := savings.api_summary(savings.api_totals(store.results(trials=True), since)):
+            print(api)
+
+
+def _api_savings(a, period: str, since: float) -> None:
+    """`wb savings --api`: the period's API money by provider and day, trials in, and the bench's
+    replays (bench.paid_since)."""
+    t = savings.api_totals(store.results(trials=True), since)
+    replays = bench.paid_since(since)
+    if a.json:
+        print(json.dumps({"period": period, **t, "bench": replays}))
+    else:
+        print(savings.api_report(t, period, replays))
 
 
 def cmd_backlog(a):
@@ -6135,6 +6151,8 @@ def parser() -> argparse.ArgumentParser:
                    "or post: the score out of 100, the period, the counts (made here; nothing sent)")
     s.add_argument("--price", metavar="X|off", help="set the electricity price per kWh (off "
                    "clears it), then report")
+    s.add_argument("--api", action="store_true", help="what the API tasks cost, by provider and "
+                   "day, trials and bench replays in (never part of the score)")
     s.set_defaults(f=cmd_savings)
     sub.add_parser("tune", help="the settings tuned from results, per model and window").set_defaults(f=cmd_tune)
     s = sub.add_parser("gc", help="archive old closed tasks, rotate old notices, remove leftover "
