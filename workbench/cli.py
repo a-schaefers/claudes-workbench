@@ -994,6 +994,15 @@ def _backlog_done(name: str) -> str | None:
             f"one a fresh name, as --backlog {fresh}")
 
 
+# --auto-fix when not given (#1017): each round Claude never sees costs an API task money, so one
+# there; a given value is Claude's word, kept and printed on the start line.
+AUTO_FIX = {"gpu": 2, "api": 1}
+
+
+def auto_fix(a, m: models.Model) -> int:
+    return a.auto_fix if a.auto_fix is not None else AUTO_FIX.get(m.kind, AUTO_FIX["gpu"])
+
+
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
@@ -1149,7 +1158,7 @@ def cmd_start(a):
         **({"unload_for_tests": True} if getattr(a, "unload_for_tests", False) else {}),
         **({"sign": False} if a.no_sign else {}),
         **({"subdir": sub} if sub else {}),
-        "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
+        "auto_fix": (fixes := auto_fix(a, m)), "ask_budget": budget, "ask_timeout": a.ask_timeout,
         # periodic check-ins are opt-in: each wakes Claude, re-reading its whole context, and they
         # were 500K of one task's 1.2M (2026-11-17); the pane shows progress, and the warnings
         # (a nudge, a full window, handovers, a cut base check) still wake
@@ -1180,7 +1189,7 @@ def cmd_start(a):
     fixed = _fixed_line(task, m)  # before the runner, which writes the same rules files
     spawn_runner(task)
     print(f"started {a.name} on {m.label} · branch {gitops.branch_name(a.name)} · "
-          f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
+          f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {fixes}" if a.test else ""))
     if a.test and not a.no_base_check:
         print("base check: the runner runs the acceptance command once on the base first; what "
               "it saw comes with the first report (a check-in at once if --test-timeout cuts it "
@@ -5626,8 +5635,9 @@ def parser() -> argparse.ArgumentParser:
                    help="once the tests pass, one more automatic round in which the agent "
                    "reviews its own change against Claude's checks, before Claude is woken "
                    "(default: learned per model, on until its record says otherwise)")
-    s.add_argument("--auto-fix", type=int, default=2,
-                   help="rounds that send failing tests back without waking Claude (default 2)")
+    s.add_argument("--auto-fix", type=int, default=None,
+                   help="rounds that send failing tests back without waking Claude (default 2 "
+                   "on the GPU, 1 on API)")
     s.add_argument("--ask-budget", type=int, default=2)
     s.add_argument("--ask-timeout", type=int, default=1200)
     s.add_argument("--round-timeout", type=int, help="seconds a round may run (default 2400, "

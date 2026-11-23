@@ -266,8 +266,9 @@ music): the same with `wb audio --list`, but you can't hear: read `reference/aud
 ## 3. Dispatch
 ```
 wb start <kebab-name> --spec <file|-> --repo <repo> --size significant|trivial \
-   --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix 2]
+   --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix N]
 ```
+`--auto-fix` defaults to 2 on the GPU and 1 on API.
 Put the project's compiler, typecheck or lint ahead of the tests in `--test` (`mypy && pytest`):
 its errors reach the agent as auto-fix rounds, not your review. Only one the project runs or
 configures, or a syntax-only check, and only when it passes on the base: `reference/checks.md`
@@ -299,6 +300,7 @@ device), you're woken with `auto-fix skipped:` and the cause, unless the base ch
 command in a quarter of the limit: then it's the change's hang, and auto-fix gets it.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
+On API it's off unless you pass `--self-review` (each round you don't see is paid).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
 the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck,
 failed) — end your turn and wait for it; an agent's question can't wait, so it reaches you

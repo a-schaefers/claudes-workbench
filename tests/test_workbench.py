@@ -27027,7 +27027,8 @@ class ApiDiscovery(Base):
     def test_a_connected_model_is_an_api_model_with_its_catalog_window(self):
         m = self.models.hosted()["acme/coder-flash"]
         self.assertEqual((m.kind, m.key, m.engine, m.name, m.provider), ("api", "stored", "api", "coder-flash", "acme"))
-        self.assertEqual(m.config["limit"]["context"], 200000)
+        self.assertEqual(m.config["limit"]["context"], 131072)                # capped (#1017)
+        self.assertEqual(m.extra["catalog_limit"]["context"], 200000)        # the catalog's
         self.assertEqual((m.base_url, m.package, m.label),
                          ("https://api.acme.test/v1", "@opencode/ai/providers/acme", "Acme (API)"))
         self.assertEqual(m.config["cost"], DISCOVERY_CATALOG[0]["cost"])
@@ -27340,7 +27341,9 @@ class ApiDiscovery(Base):
         while alive() and time.time() < deadline:
             time.sleep(POLL)
         if alive():
-            os.kill(pid, signal.SIGKILL)
+            # it can exit between alive() and the kill: ProcessLookupError, not the failure (seen on 3.11, 2026-11-23)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
             self.fail("the wrapper's OpenCode outlived the timeout")
 
     def test_a_gpu_id_discover_lacks_never_reads_the_catalog(self):

@@ -1,14 +1,19 @@
 """How much one task holds: the window's guess, and the record of each closed step correcting it."""
 import json
 import os
+import shutil
 import signal
+import subprocess
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script too
 
-from workbench import models, router, store
+from unittest import mock
+
+from workbench import models, router, runner, store, tuning
+from tests import test_workbench as tw
 from tests.test_workbench import Base, TEST_CMD, backdate, run_wb, running, wait_phase
 
 
@@ -260,6 +265,269 @@ class Measured(Base):
         self.assertTrue(results._not_the_step(old))                # one written before the cause
         for cause, skip in (("guard", False), ("agent", False), ("a stop added later", True)):
             self.assertIs(results._not_the_step({"kind": "stuck", "cause": cause}), skip)
+
+
+class ApiSizing(Base):
+    """#1017: an API model's window and output capped once (models.api_limits), so the layer's
+    pins, OpenCode's compaction, the slice, status `window`, the steps and the tuning keys agree;
+    its budgets with no local prefill, from the account's speed-api.json; a 600 s header guard;
+    fewer rounds Claude never sees (auto-fix 1, self-review off). With the fake OpenCode's catalog
+    (#1011), the spike's DeepInfra model: a 1M window and 384K output."""
+    catalog = tw.ApiHarness.catalog
+    # the real-OpenCode helpers, borrowed (an ApiHarness subclass would run its tests again)
+    real_env, oc_cwd, real_model, real_run, capture = (
+        tw.ApiHarness.real_env, tw.ApiHarness.oc_cwd, tw.ApiHarness.real_model,
+        tw.ApiHarness.real_run, tw.ApiHarness.capture)
+    layer = staticmethod(tw.ApiHarness.layer)
+
+    def setUp(self):
+        super().setUp()
+        self.catalog(tw.API_CATALOG)
+        self.m = models.hosted()[tw.FLASH]
+
+    def as_api(self, name):
+        """A task wb start ran on the GPU, its task.json then naming the API model, as #1016's
+        wb start --role will write it, and its capped entry recorded as drive records it."""
+        task = store.Task(name)
+        store.write_json(task.dir / "task.json", {**task.spec, "model": tw.FLASH,
+                                                  "opencode_model": tw.FLASH, "via": "api"})
+        task = store.Task(name)
+        runner.pin_api(task, models.resolve(tw.FLASH))
+        return store.Task(name)
+
+    def fail_catalog(self):
+        """hosted.json as a catalog rebuild that failed leaves it (CATALOG_TIMEOUT, OpenCode
+        busy): _build_hosted keeps no models."""
+        doc = store.read_json(models.hosted_path(), {})
+        store.write_json(models.hosted_path(), {**doc, "error": "timed out", "providers": {}, "models": {}})
+
+    def test_an_api_models_window_and_output_are_capped_once_for_every_reader(self):
+        cfg = self.m.config
+        self.assertEqual(cfg["limit"], {"context": 131072, "output": 32768})
+        self.assertEqual(cfg["options"]["max_tokens"], 32768)
+        self.assertEqual(self.m.extra["catalog_limit"], {"context": 1048576, "output": 384000})
+        self.assertEqual(runner.compaction_buffer(cfg), 36864)      # 131072 + 32768 - 131072 + 4096
+        self.assertAlmostEqual(runner.compaction_point(cfg), 0.71875)
+        self.assertEqual(runner.handover_warning(cfg), "")          # 384K out: "no handover fits"
+        self.assertTrue(0.6 < runner.fresh_ceiling(cfg) < 0.7)      # fresh_at 0.4-0.6 allowed
+        self.assertIn("128K window", router.slice(self.m).line())   # not 1024K
+        self.assertEqual(models.lookup(tw.FLASH, cached=True).config["limit"]["context"], 131072)
+        # a smaller catalog keeps its own; an input limit past the capped window is capped too,
+        # or usable_input would read the wrong side
+        self.assertEqual(models.api_limits({"limit": {"context": 65536, "input": 900000, "output": 8000}}),
+                         {"limit": {"context": 65536, "input": 65536, "output": 8000},
+                          "options": {"max_tokens": 8000}})
+        self.assertEqual(models.api_limits({"limit": {"context": 200000}})["limit"]["output"], 32768)
+        self.assertEqual(models.api_limits({"limit": {}}), {"limit": {}})  # no window: can't run
+
+    def test_an_api_tasks_layer_pins_the_capped_window_and_waits_600_s_for_headers(self):
+        self.start("t-gpu", "ok")
+        wait_phase("t-gpu", {"review"})
+        gpu = json.loads(runner.write_config_layer(store.Task("t-gpu")).read_text())
+        self.assertIs(gpu["provider"]["ollama"]["options"]["headerTimeout"], False)  # as today (#491)
+        task = self.as_api("t-gpu")
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        prov = layer["provider"]["deepinfra"]
+        self.assertEqual(prov["models"], {"deepseek-ai/DeepSeek-V4.1-Flash-1017": {
+            "limit": {"context": 131072, "output": 32768}, "options": {"max_tokens": 32768}}})
+        self.assertEqual(prov["options"]["headerTimeout"], 600_000)
+        self.assertEqual(layer["compaction"]["buffer"], 36864)
+        content = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(content["provider"]["deepinfra"]["options"]["headerTimeout"], 600_000)
+        self.assertEqual(content["provider"]["deepinfra"]["models"], prov["models"])
+        self.assertEqual(runner.provider_timeouts(task)["provider"]["deepinfra"]["options"],
+                         {"headerTimeout": 600_000, "chunkTimeout": 960_000})
+
+    def test_a_step_an_api_round_records_is_counted_by_the_next_slice_and_tuning(self):
+        window = (self.m.config.get("limit") or {}).get("context")   # what drive writes to status
+        self.assertEqual(window, 131072)
+        row = {"model": tw.FLASH, "outcome": "accepted", "ran": True, "window": window,
+               "steps": [{"files": 2, "lines": 90, "window": window, "landed": True,
+                          "compacted": False, "stuck": False, "took_over": False}]}
+        store.append_jsonl(store.home() / "results.jsonl", row)
+        self.assertIn("128K window; 1 of 1 measured steps went well", router.slice(self.m).line())
+        self.assertEqual(tuning._key(row), (tw.FLASH, 131072))
+
+    def test_api_budgets_have_no_prefill_term_and_room_for_one_silent_reply(self):
+        self.assertEqual(router.budgets(self.m), {"think": 420, "silence": 900, "round": 2400})
+        def msgs(write, ttft, n=5, out=1000):   # n requests at `write` tok/s after `ttft` s
+            t0 = 1_700_000_000_000                  # ms; a 0 reads as unset
+            return [{"type": "assistant", "time": {"created": t0, "firstToken": t0 + ttft * 1000,
+                                                   "completed": t0 + ttft * 1000 + out / write * 1000},
+                     "tokens": {"input": 50000, "output": out}} for _ in range(n)]
+        router.record_speed(tw.FLASH, msgs(50, 4))
+        self.assertFalse((store.machine_dir() / "speed.json").exists())  # not this machine's
+        row = json.loads((store.home() / "speed-api.json").read_text())[tw.FLASH]
+        self.assertEqual((row["write"], row["ttft"]), ([50.0] * 5, [4.0] * 5))
+        self.assertNotIn("read", row)                    # its time to first token is the network's
+        self.assertEqual(router.api_speed(tw.FLASH), {"write": 50.0, "ttft": 4.0})
+        self.assertEqual(router.speed(tw.FLASH), {"write": 50.0})
+        # 13500 / 50 + 4 = 274 s, clamped up to 420; with a window / read term, ~700 s
+        self.assertEqual(router.budgets(self.m), {"think": 420, "silence": 900, "round": 2400})
+        router.record_read_bound(tw.FLASH, 12)
+        self.assertFalse((store.machine_dir() / "speed.json").exists())
+        self.assertEqual(router.thinking_stall(tw.FLASH, self.m.config), "")
+        # slow: a 32K reply written in silence (reasoning prints nothing until its step ends) must
+        # outlast the silence limit: 32768 / 20 + 4 + 60 s, past the scaled 900
+        (store.home() / "speed-api.json").unlink()
+        router.record_speed(tw.FLASH, msgs(20, 4))
+        got = router.budgets(self.m)
+        self.assertEqual(got["think"], 679)                          # 13500 / 20 + 4
+        self.assertEqual(got["silence"], 1703)                       # ceil(1638.4 + 4) + 60
+        self.assertGreaterEqual(got["round"], got["silence"])
+        self.assertEqual(got["silence"], router.budgets(models.Model(
+            id=tw.FLASH, provider="deepinfra", name="x", base_url="", engine="api", label="x",
+            kind="api"))["silence"])                                 # no config: API_OUTPUT
+
+    def test_an_api_task_auto_fixes_once_and_a_gpu_task_twice_unless_claude_says(self):
+        out = self.start("t-gpu", "ok", "--test", TEST_CMD)
+        self.assertIn("auto-fix 2", out)
+        self.assertEqual(store.Task("t-gpu").spec["auto_fix"], 2)
+        wait_phase("t-gpu", {"review"})
+        state = {"available": True, "resident": True, "why": "API (DeepInfra)"}
+        for name, extra, want in (("t-api", (), 1), ("t-api3", ("--auto-fix", "3"), 3)):
+            with mock.patch.object(tw.cli, "pick_model", lambda *a: (self.m, state, "asked for")), \
+                    mock.patch.object(tw.cli, "spawn_runner", lambda t: None), \
+                    mock.patch.object(tw.cli, "_gpu_wait", lambda *a: ({}, False)):
+                out = run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo),
+                             "--test", TEST_CMD, *extra)
+            self.assertEqual(store.Task(name).spec["auto_fix"], want)
+            self.assertIn(f"auto-fix {want}", out)                   # Claude sees what it costs
+
+    def test_an_api_tasks_self_review_is_off_whatever_the_record_unless_claude_asks(self):
+        (store.home() / "tuning.json").unlink()                      # Base pins it off
+        gpu = models.resolve("mimo")
+        def tuned(name, m, **spec):
+            task = store.Task(name)
+            task.dir.mkdir(parents=True)
+            store.write_json(task.dir / "task.json", {"name": name, "model": m.id, **spec})
+            tuning.tune(task, m.id, m.config["limit"]["context"], {}, runner.fixed_knobs(task, m))
+            return store.Task(name).status["tuned"]["self_review"]
+        names = [f"t-sr{i}" for i in range(30)]               # some explore (tuning.EXPLORE)
+        self.assertEqual({tuned(n, self.m) for n in names}, {0})
+        self.assertIn(1, {tuned(f"g-{n}", gpu) for n in names})     # on by default on the GPU
+        self.assertEqual(tuned("t-own", self.m, self_review=True), 1)  # --self-review: Claude's word
+        self.assertEqual(tuned("t-own-gpu", gpu, self_review=False), 0)
+
+    def test_an_api_round_that_never_got_its_first_token_records_no_read_bound(self):
+        # a real task with its layer and round files, so only the API check keeps a bound out
+        # (with task=None the check's removal crashed instead: the review of #1017)
+        self.start("t-gpu", "ok")
+        wait_phase("t-gpu", {"review"})
+        task = self.as_api("t-gpu")
+        runner.write_config_layer(task)
+        with mock.patch.object(runner, "_down", lambda m: False), \
+                mock.patch.object(runner, "_stopped", lambda m: False):
+            self.assertIsNone(runner.read_bound(task, 1, {"waited": 600, "guard": "silence"}, self.m))
+        self.assertFalse((store.machine_dir() / "speed.json").exists())
+
+    def test_a_users_own_max_tokens_under_the_cap_is_kept_not_raised(self):
+        # an off-machine provider or Ollama cloud entry from the user's own config: 8192 is their
+        # word, and raising it to 32768 spent up to 4x the output they chose (the review of #1017)
+        got = models.api_limits({"limit": {"context": 65536, "output": 32768}, "options": {"max_tokens": 8192}})
+        self.assertEqual(got["limit"]["output"], 8192)
+        self.assertEqual(got["options"]["max_tokens"], 8192)
+        got = models.api_limits({"limit": {"context": 65536}, "options": {"max_tokens": 8192, "x": 1}})
+        self.assertEqual((got["limit"]["output"], got["options"]), (8192, {"max_tokens": 8192, "x": 1}))
+        got = models.api_limits({"limit": {"context": 65536}, "options": {"max_tokens": 100000}})
+        self.assertEqual((got["limit"]["output"], got["options"]["max_tokens"]), (32768, 32768))
+        self.assertEqual(runner.compaction_buffer(got), 32768 + runner.STEP_GROWTH)
+
+    def test_a_catalog_read_failing_mid_task_keeps_an_api_tasks_pins_buffer_and_header_guard(self):
+        # the caps were worked out again each round from hosted.json: a rebuild that failed kept no
+        # models, and the next round compacted at 1M, asked 256K out, waited on headers with no
+        # limit and wrote its speeds as this machine's (the review of #1017)
+        self.start("t-gpu", "ok")
+        wait_phase("t-gpu", {"review"})
+        task = self.as_api("t-gpu")
+        self.assertEqual(task.status["api_entry"], {"limit": {"context": 131072, "output": 32768},
+                                                    "options": {"max_tokens": 32768}})
+        before = json.loads(runner.write_config_layer(task).read_text())
+        self.fail_catalog()
+        self.assertFalse(models.is_api(tw.FLASH))
+        with self.assertRaises(KeyError):   # what a later runner's drive meets: _load_failed
+            models.resolve(tw.FLASH)
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["provider"]["deepinfra"], before["provider"]["deepinfra"])
+        self.assertEqual(layer["provider"]["deepinfra"]["options"]["headerTimeout"], 600_000)
+        self.assertEqual(layer["compaction"], {"background": False, "auto": True, "buffer": 36864})
+        content = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(content["provider"]["deepinfra"]["models"],
+                         {"deepseek-ai/DeepSeek-V4.1-Flash-1017": task.status["api_entry"]})
+        t0 = 1_700_000_000_000
+        msgs = [{"type": "assistant", "time": {"created": t0, "firstToken": t0 + 4000, "completed": t0 + 24000},
+                 "tokens": {"input": 50000, "output": 1000}}] * 3
+        task.set_status(session="ses_1017")
+        with mock.patch("workbench.transcript.export", lambda sid, task=None: {"messages": msgs}):
+            runner.measure_speed(store.Task("t-gpu"), 0)
+        self.assertEqual(router.api_speed(tw.FLASH)["write"], 50.0)
+        self.assertNotIn(tw.FLASH, store.read_json(store.machine_dir() / "speed.json", {}) or {})
+        # back on the GPU: drive's record cleared, the guard lifted as before (#491)
+        runner.pin_api(task, models.resolve("mimo"))
+        self.assertIsNone(runner.api_entry(store.Task("t-gpu")))
+        self.assertIs(runner.provider_timeouts(store.Task("t-gpu"))["provider"]["deepinfra"]["options"]
+                      ["headerTimeout"], False)
+
+    def test_drive_records_an_api_tasks_caps_and_a_later_runner_refuses_a_catalog_that_lost_it(self):
+        with mock.patch.object(tw.cli, "spawn_runner"):
+            self.start("t-gpu", "ok", "--no-base-check")
+        task = store.Task("t-gpu")
+        store.write_json(task.dir / "task.json", {**task.spec, "model": tw.FLASH,
+                                                  "opencode_model": tw.FLASH, "via": "api"})
+        with mock.patch.object(runner, "checkout", return_value=False):  # stop right after resolve
+            runner.drive(store.Task("t-gpu"))
+        self.assertEqual(store.Task("t-gpu").status["api_entry"]["limit"], {"context": 131072, "output": 32768})
+        self.fail_catalog()
+        with mock.patch.object(runner, "checkout", side_effect=AssertionError("ran on")):
+            runner.drive(store.Task("t-gpu"))
+        st = store.Task("t-gpu").status
+        self.assertEqual((st["phase"], st.get("session")), ("failed", None))  # no round unpinned
+        self.assertIn("unknown model", st["last"])
+
+    def test_an_api_models_silence_stops_at_the_gpus_longest(self):
+        # cap / write had no ceiling: at 2 tok/s, 16448 s, a hung request holding the round and a
+        # provider slot 4.6 hours (the review of #1017)
+        top = int(router.SILENCE_DEFAULT_S * router.THINK_MAX / router.THINK_DEFAULT_S)
+        self.assertEqual(router.SILENCE_MAX, top)
+        for write, want in ((20, (679, 1703, 3880)), (5, (1800, top, 10285)), (2, (1800, top, 10285))):
+            store.write_json(store.home() / "speed-api.json", {tw.FLASH: {"write": [write] * 5, "ttft": [4] * 5}})
+            got = router.budgets(self.m)
+            self.assertEqual((got["think"], got["silence"], got["round"]), want, write)
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_compacts_an_api_model_at_the_capped_window_and_asks_32k_out(self):
+        # the edge case the issue names: the layer's pins must merge into a catalog model under
+        # V1 `provider`, or OpenCode compacts at 1M again and asks for 256K out (the spike)
+        entry = self.real_model("deepinfra")
+        mid = f"deepinfra/{entry['id']}"
+        api = models._api_model(mid, {**entry, "name": entry["id"]}, {}, {})
+        self.assertEqual(api.config["limit"]["context"], min(entry["limit"]["context"], 131072))
+        with mock.patch.object(models, "resolve", lambda _: api):
+            pins = runner.model_pins(mid)
+        buffer = runner.compaction_buffer(api.config)
+        usage = json.dumps({"prompt_tokens": 100_000, "completion_tokens": 1, "total_tokens": 100_001})
+        seen = {}
+        for pinned in (True, False):
+            port, out, _ = self.capture(f"cap-{pinned}", CAPTURE_USAGE=usage)
+            layer = self.layer(port, "deepinfra", compaction={"auto": True, "buffer": buffer})
+            if pinned:
+                layer["provider"]["deepinfra"].update(pins["provider"]["deepinfra"])
+            code, rows = self.real_run(mid, layer)
+            self.assertEqual(code, 0, rows)
+            sid = next(r["sessionID"] for r in rows if r.get("sessionID"))
+            p = subprocess.run(["opencode", "run", "--standalone", "-m", mid, "--format", "json",
+                                "--session", sid, "--", "go on"], cwd=self.oc_cwd(),
+                               env=self.real_env(layer), capture_output=True, text=True, timeout=90)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            lines = out.read_text().splitlines()
+            bodies = [json.loads(x) for x in lines]
+            seen[pinned] = ({b.get("max_tokens") for b in bodies if b.get("tools")},
+                            any("<template>" in x and "## Objective" in x for x in lines))
+        # pinned: 32K out at most (OpenCode asks less once the window has less room left), and
+        # 100K tokens are past (131072 - 36864): OpenCode compacts
+        self.assertEqual((max(seen[True][0]), seen[True][1]), (32768, True))
+        # unpinned, the catalog's: min(384000, 256000) out, and no compaction under 1M
+        self.assertEqual(seen[False], ({min(entry["limit"]["output"], 256000)}, False))
 
 
 if __name__ == "__main__":

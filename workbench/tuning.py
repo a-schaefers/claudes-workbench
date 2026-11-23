@@ -71,7 +71,9 @@ KNOBS = {
     # Claude is woken (runner.SELF_REVIEW). It costs local time; a bug it catches saves Claude a
     # feedback round, a whole extra wake (2026-11-18: a trivial handoff came in under Claude
     # writing it only when the first change Claude saw was right). On by default; a model whose
-    # own reviews don't spare Claude's rounds learns it off.
+    # own reviews don't spare Claude's rounds learns it off. On an API model it costs money
+    # instead, a round Claude never sees: fixed off there unless Claude says --self-review
+    # (runner.fixed_knobs, #1017), so neither the record nor the explore turns it on.
     "self_review": Knob((0, 1), 1, "whether the agent reviews its own change before Claude is woken",
                         passed=True),
     # (probe_aggressive, which chose probe's level, went with the levels: the owner, 2026-11-22,

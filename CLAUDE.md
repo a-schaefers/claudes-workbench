@@ -91,7 +91,7 @@ Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change mus
    `opencode run … -- <prompt>` in the worktree through `lane.wrap`, with the layer
    `rules/<task>/opencode.json`. Guards stop a stuck agent; `wb steer` queues a note.
 3. `--test` runs in the agent's lane, environment and shell (its code gains no rights when
-   tested); failures go back up to `--auto-fix` times without waking Claude. At `fresh_at` a
+   tested); failures go back up to `--auto-fix` times (2, on API 1) without waking Claude. At `fresh_at` a
    fresh session takes over; OpenCode's compaction is a backstop just past it, never ahead.
 4. The runner writes the report and a `review`/`stuck`/`failed` notice; nothing a round started
    outlives it (`runner.sweep`); `cli.reap` fails a runner that died silently. The runner checks
@@ -174,4 +174,5 @@ what: ARCHITECTURE.md, *The tests*; the detail: *The runner, inside*, *What the 
   `XDG_DATA_HOME` moves the whole data dir (`opencode debug paths`), so agents get the task's.
   It picks a command's flags by `$SHELL`'s name (zsh's `+o nomatch`): the shim bears its shell's.
 - The user's global MCP servers start even when `"enabled": false`, and a provider's
-  `headerTimeout`/`chunkTimeout` cut a slow request: the layer undoes both.
+  `headerTimeout`/`chunkTimeout` cut a slow request: the layer undoes both (an API provider's
+  header wait is 600 s, not none).
