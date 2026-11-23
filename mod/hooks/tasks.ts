@@ -46,8 +46,9 @@ export const MARK: Record<string, string> = {
   queued: '◌', testing: '◐', asking: '?', review: '◆', stuck: '▲', failed: '✗',
   accepted: '✓', discarded: '–',
 }
-// the roles as Settings names them (#1023's ROLE_LABELS: keep the two the same)
-const ROLE_WORDS: Record<string, string> = { significant: 'complex', trivial: 'trivial', writing: 'writing' }
+// the roles as Settings names them (#1023's ROLE_LABELS: keep the two the same); the Stats tab's
+// By size and Settings' size rows say a size by these too, never `significant` beside "Complex coding"
+export const ROLE_WORDS: Record<string, string> = { significant: 'complex', trivial: 'trivial', writing: 'writing' }
 // progress.TYPICAL_MIN: an estimate needs this many timed tasks of the model and size behind it
 const TYPICAL_MIN = 3
 // meter.CHECKIN_SHARE (#1019): past this share of the day cap its line turns warning

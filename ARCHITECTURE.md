@@ -2107,9 +2107,10 @@ then as an API one (an Ollama `:cloud` id, #1013) gives two lines; each has `kin
 `paid`, its mean dollars a task over the known costs (none known: no `paid`). The trial-free rows
 (`tuning.judged`) give those lines. Plain `wb stats`' headline adds `api this week: 6 task(s), $1.27
 (deepseek $0.84, anthropic $0.43)`, then `N with no price` and `N on plan usage`
-(`stats.api_week_line`). The Stats tab: each period adds `API $1.27 (deepseek $0.84 · anthropic
-$0.43)` (`apiPeriod`; `API plan usage` or `API no price` with no known dollars, `apiMoney`), and
-an API model's line says `paid ~$0.12/task` in place of its write speed. The footer's API-only
+(`stats.api_week_line`). The Stats tab: each period adds `API $1.27 (DeepSeek $0.84 · Anthropic
+$0.43)` (`apiPeriod`, each provider by its name, `providerWord`; `API plan usage` or `API no price`
+with no known dollars, `apiMoney`), and an API model's line (`API DeepSeek deepseek-flash: …`) says
+`paid ~$0.12/task` in place of its write speed. The footer's API-only
 week reads `this week: API $1.27 on 6 tasks (no GPU task to compare)`, or `this week: 1 API task,
 no price (…)` / `2 API tasks, plan usage (…)` (`apiAlone`).
 
@@ -2325,12 +2326,22 @@ user sees.
   week: API $1.27 on 6 tasks (no GPU task to compare)`, #1022). The web chat's link is on Settings
   only.
   The Settings tab (`settingRow`; Buttons, since a Select opened on a click and could pick nothing,
-  2026-11-19): a Button per setting naming its value, the default option saying `(default)` (`▸
-  Claude coding: Let Claude decide (default)`, key `coding`); a press opens its options (keys `coding:only|ask|decide`,
+  2026-11-19): a Button per setting naming its value, capitalized, the default option saying `(default)` (`▸
+  Claude coding: Let Claude decide (default)`, key `coding`); a row wider than the pane is folded
+  to `mem.settingsCols` (the tab's `bodyColumns`) by `hangWords`, its lines after the first two in,
+  under its words, a Text child of the Button (an option's four in; the label stays the control's
+  name; #1048's review: the pane's own wrap went on at the left edge, read as a row of its own); a
+  unit the edge must not split holds a no-break space (`NB`: `GPU 0+1`, `per M`, `61 tok/s`), which
+  `wrapWords` and `wrapParts` keep whole too. Section headings (`heading`: Shared, GPU, API,
+  Experimental, and the Stats tab's Now) are bold in the theme's `claude`; a read-only line
+  (`infoLine`: wake, Connected, Spend today, Optimize, the one-line notes) is dim and padded two
+  (`paddingLeft`), so its wrapped lines align with the rows' words. A press opens its options (keys `coding:only|ask|decide`,
   `chat:off|on`, `probe:off|on`, the chosen one marked `❯`); picking the current option only folds
   the row (#578). Below, the sentence of the option the ring is on (`ui.focus`, the `pane` atom), or
-  on hover (`display: "none"` Boxes under the option's hover scope: no hook runs on hover). **Claude coding** (`CODING_STOPS`, *Claude coding*): `wb
-  coding <mode>`, reading `coding.json` each draw. **Web chat** (`CHAT_STOPS`): `wb chat on|off`.
+  on hover (`display: "none"` Boxes under the option's hover scope: no hook runs on hover), padded
+  four as the options. **Claude coding** (`CODING_STOPS`, *Claude coding*): `wb
+  coding <mode>`, reading `coding.json` each draw. **Web chat** (`CHAT_STOPS`; off's sentence says
+  what off is): `wb chat on|off`.
   **Agent code navigation** (`PROBE_STOPS`, *Experiments*; #857): `Off (default)` and `On (large
   files only)`, on saying `The agent may extract one function of a file over 1,500 lines with
   probe, instead of reading it whole (github.com/probelabs/probe).` (a copy of
@@ -2343,7 +2354,8 @@ user sees.
   a `wb` command (the mod writes no setting itself): **Stats recording** (`RECORD_STOPS`), **Live view** (`LIVE_STOPS`), **Live
   refresh** (`EVERY_STOPS`), read from stats.json (`statsSettings`); **Progress checks**
   (`PROGRESS_STOPS`, `progressSettings`, `progressStops`: `On, after N min` with a kept `after`);
-  **Electricity price per kWh**, an Input (key `price`, `setPrice` via `parsePrice`: one comma or
+  **Electricity price per kWh**, an Input (key `price`, its label with no colon: the Input draws
+  one, and `per kWh: : 0.3` said two; `setPrice` via `parsePrice`: one comma or
   point, a sign or code of up to three characters, decimal digits only; empty runs `--price off`;
   #609). **Opening animation** (`SPLASH_STOPS`, `splash:on|off`): `wb splash on|off`, `splash.json`
   (`splashOn`). The ring follows `SETTING_ROWS`. Order: under **Shared** the Agents switch, the busy
@@ -2354,30 +2366,36 @@ user sees.
   **The roles in Settings** (#1023): read through `rolesNow` (`wb route --json` and `wb models
   --json`, neither asking a server; kept `ROLES_CACHE_MS` 10 s in `mem.roles`, dropped after a pick).
   Shared: **Agents** (`AGENTS_STOPS`, key `agents`: `wb route all gpu|api|both`), **When the GPU is
-  busy** (`BUSY_STOPS`, `busy`: `wb route busy wait|api`), one row per role by its label
-  (`roleStops`, `role-<role>`: `wb route <role> gpu|api`; api without a model says `API (set its
-  model under API first)`), **Dynamic workflows** (`WORKFLOWS_STOPS`, `workflows`: `wb workflows
-  on|off`, read from workflows.json), **API day cap** (an Input, key `cap`: `setCap` via `parseUsd`,
+  busy** (`BUSY_STOPS`, `busy`: `Wait (default)`, `Use the role's API model`; `wb route busy wait|api`),
+  one row per role by its label (`roleStops`, `role-<role>`: `wb route <role> gpu|api`; api reads
+  `API (<the model's catalog name>)`, as the API group's row names it, else its id; without a model,
+  `API (set its model under API first)`), **Dynamic workflows** (`WORKFLOWS_STOPS`, `workflows`: `wb workflows
+  on|off`, read from workflows.json), **API day cap** (an Input, key `cap`, its label with no colon: `setCap` via `parseUsd`,
   parsePrice's forms, `wb route cap <usd>`, empty `wb route cap off`), and the read-only line `Wake
   Claude: on · change it in /plugin → workbench → options` (`mem.wake`; the pane can't write a
   plugin option). GPU: per role `<label> GPU model` (`gpuStops`, `gpu-<role>`: `Auto (the router
   picks)` first, then each GPU model with its window and, where `models.card_numbers` knows them,
   its cards, `· GPU 2+3`; `wb route <role> --gpu <id|auto>`), a sizes row for at most `GPU_ROWS` 6
-  models (pinned first, then by label; `SIZE_STOPS`, `size-<id>`: `wb model sizes <id> [size]`),
-  then `+N more (wb models)`, and `Optimize: …` with a **Measure now** Button (`optimize`: `wb
-  optimize start`); last **Images**, **Speech**, **Sound effects**, **Music** (#1047, `mediaRows`,
+  models (pinned first, then by label; `<label> tasks: Any size (default) | Trivial only | Complex
+  only`, the sizes in tasks.ts's `ROLE_WORDS`, never `significant` under "Complex coding";
+  `SIZE_STOPS`, `size-<id>`: `wb model sizes <id> [size]`), then `+N more (wb models)`, and
+  `Optimize: measured N models on 2026-11-20 ·` (the Stats tab's date form) with a **Measure now**
+  Button (`optimize`: `wb optimize start`; the row wraps it under the line when there's no room);
+  last **Image engine**, **Speech engine**, **Sound effects engine**, **Music engine** (#1047, `mediaRows`,
   `MEDIA_ROWS`, `mediaStops`, keys `media-image|speech|sfx|music`), each only with two or more
   engines of its kind in `wb models --json`'s `media`, every entry its engine's name (`· off this
   GPU` for `gpu` false); a pick runs `wb image|audio --default <name>` with no dialog, and a refusal
   toasts (*The default engines*). API: with no provider whose key is stored and no role holding an API model, the
   one line `No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.`
-  (`NO_PROVIDER`); else `Connected: <provider> (stored) · <provider> (<why>)` (`connectedLine`), per
+  (`NO_PROVIDER`); else `Connected: <provider> (key stored) · <provider> (<why>)` (`connectedLine`), per
   role `<label> API model` (`apiStops`, `api-<role>`: the role's model, the other roles', those
   tasks ran on, and every runnable one while the list is no longer than `API_MENU` 12, each `<name>
   · <provider> (<window>) · $in/$out per M` with a free model's data-use mark; then `Other model…`,
   which opens the Input `api-<role>-other`, an exact id wb checks; `wb route <role> --api <id>`),
   `<label> thinking` (`THINK_STOPS`, `think-<role>`: `wb route <role> --thinking on|off`, for tasks
-  started after it), and `Spend today: $0.42 of $5 (deepseek $0.42)` (`spendLine`, its dollars by the Stats tab's `usd`). A press goes
+  started after it), and `Spend today: $0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14)`, without a
+  cap `Spend today: $0.42 (DeepSeek $0.42) · no day cap` (`spendLine`, its dollars by the Stats
+  tab's `usd`, each provider by its name from `providers`, the Stats tab's ` · `). A press goes
   through `paneRoute`: `wb route --dry-run --json <args>`, and when it is gated the mod writes its
   `approval` to route-ok.json with `by: pane` (the press is the user's yes; no dialog, no flag
   Claude could pass), then runs `wb route <args>`; wb's refusal (no day cap, an unknown id, a key wb
@@ -2387,7 +2405,8 @@ user sees.
   as the `[workbench]` echo (*The mod, inside*).
 - **The Stats tab** opens with **Now** (#408): `wb top --json` drawn by `liveLines` (GPU bars and a
   `BUSY_KEEP` 60-sample sparkline, running tasks, the rack with more than `RACK_FOLD_MIN` 2 models
-  in `RACK_FOLD` folded into one line, the queue; `wrapParts` wraps). One child (`runTop`,
+  in `RACK_FOLD` folded into one line, each speed with its unit, `writes ~61 tok/s`, the queue;
+  `wrapParts` wraps; an API task's row `▶ <task> API DeepSeek deepseek-flash · …`). One child (`runTop`,
   `pumpTop`), run by `syncTop` only while the tab is shown, the pane not minimized and Live view on;
   `stopTop` ends it the moment that stops holding. `syncTop` awaits first, then checks and spawns
   synchronously, giving up if `mem.topGen` moved; `stopTop` ends every child in `mem.topKids`
@@ -2398,7 +2417,17 @@ user sees.
   other way); `showPane` and `restorePane` call `refreshStats` and `syncTop` once their open resolves
   (`paneBack`), not before, when the pane could still read as hidden.
   Below, the history (#406): `wb stats --json` (*The Stats feed*) drawn by `statsLines`, one
-  `Label: text` line a section. The pane caps model lines at `STATS_SHOWN` 3 itself, since the mod
+  `Label: text` line a section, its wrapped lines two in (`hangWords`), as Now's. **The words**
+  (#1048's review, seen live): one model or provider goes by one name on every tab, `Names`
+  (`namesNow`: GPU labels from `wb models --json`, wb top's rack and the tasks; provider names from
+  `wb route --json`'s `providers` and task.json's `provider_name`, `mem.provNames`; an id nothing
+  named stays the id). `modelWord` says a GPU model by its label (`qwen3-coder 30B`, as Now and the
+  Tasks view, never `ollama/qwen3-coder:30b` under it) and an API one as the Tasks view's place and
+  model (`API DeepSeek deepseek-flash`), in the model lines, What helps, Bench and Optimized;
+  `providerWord` a provider (`DeepSeek`). `refreshStats` runs `rolesNow` when it reads the feed
+  (kept `ROLES_CACHE_MS`), so the names are there on a first look. By size says `trivial` and
+  `complex` (`ROLE_WORDS`), What stopped agents `the API day cap` (`GUARD_WORDS.spend`, Settings'
+  word), the milestone `~5.0M Claude tokens saved (estimate, 2026-11-20)`. The pane caps model lines at `STATS_SHOWN` 3 itself, since the mod
   tracks main while `wb` runs from the user's clone (an older wb sends every line, or no
   `model_lines`); What helps, Bench and Optimized name only the shown lines' models. A feed with no
   section says to delegate with /workbench (#549). It is read (`refreshStats`) only while the tab is
@@ -2505,8 +2534,9 @@ the last tick reached, again from the start when the file is replaced or cut; th
 price) and, queued for one of its provider's slots, `waits: "a <provider> slot"`. No live server
 rate (no server of ours: the last call's rate still works). It is never in the rack, which stays
 `discover()`'s GPU models, nor the queue, the lease's waiters: an API task takes no lease. The text
-row ends `  API deepseek · $0.12`; the pane's **Now** row reads `▶ <task> <label> · running ·
-round 2 · 3m10s · API deepseek · $0.12` (`apiParts`).
+row ends `  API deepseek · $0.12`; the pane's **Now** row reads `▶ <task> API DeepSeek deepseek-flash ·
+running · round 2 · 3m10s · $0.12`: its place and model first, as the Tasks row (`modelWord`), then
+`apiParts`' spend and wait.
 
 On a terminal: the alternate screen, redrawn each tick, bars in eighths, the card's short name
 (`top.short`, the pane's `cardName` alike, #576), cbreak stdin for `q`. Ctrl-Z restores the
@@ -5926,7 +5956,11 @@ context bar, the estimate and lateness from `late_min` (and only beside `over`),
 untimed API task with no estimate, no day-cap line for a queued API task; register.test.tsx: three
 tasks at once under one header with their cards and spend at 71 columns, two rows a task at 50, one in a 14-row box,
 the status line's `1 stuck` apart from review, a row's press following its task, the day-cap line only while an API
-task runs, and the splash's measured rows.
+task runs, and the splash's measured rows. The review of Stats and Settings (#1048, part 2): the history's models and
+providers by the names Now and the Tasks view use (and the ids when nothing named them), sizes in the role words, the
+cap's word, Now's API row; `hangWords` and a no-break space held whole; Settings at 52 columns: the headings as Now's,
+a long row folded under its words, read-only lines padded, no doubled colon, the optimize date, the engine and size rows'
+titles, an option's sentence padded.
 
 **Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`, `RealOpenCodeAPI`, `ApiHarness`'s
 `test_real_opencode_*`, `ApiSizing`'s and `ApiSpendKeyhole`'s `test_real_opencode_*`; skip without `opencode`, the
@@ -6247,7 +6281,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `viewFacts` and tasks.ts; the queued `last` texts (the runner's and `models`' `say`: `waiting for the GPU`, `waiting
   for an API slot`, `checking out`, `setting up`, `checking the acceptance command`, `loading`…) → tasks.ts's `QUEUED`
   and `transcript.activity`; the role words (`complex`, `trivial`, `writing`) → tasks.ts's `ROLE_WORDS` and
-  Settings' `ROLE_LABELS`; `progress.TYPICAL_MIN` and `meter.CHECKIN_SHARE` → tasks.ts's copies; `savings.usd` → the
+  Settings' `ROLE_LABELS`, `SIZE_STOPS` and the Stats tab's By size (#1048: a size is said in them); `progress.TYPICAL_MIN` and `meter.CHECKIN_SHARE` → tasks.ts's copies; `savings.usd` → the
   `usd` the mod passes to `taskLines` and `capRow`; **the modeline's look** (`MODELINE`, `claude`) →
   splash.ts's `BAR`, modeline.ts's `BAR`, the room `register.tsx` counts; **a task phase** → modeline.ts's `SAID`.
 - **Stats tab folds**: `top.FOLD` → `RACK_FOLD`; `stats.STATS_MODEL_LINES` → `STATS_SHOWN`; `model_lines`'
