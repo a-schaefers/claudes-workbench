@@ -2285,7 +2285,7 @@ nothing until a surface attaches.
 `model: <id> · API (<provider>) · trivial role, set by you 11-20 · thinking off`, `routes.model_line`;
 a GPU task's as before), `wb status`'s `via` column, `wb watch`'s `routed:` line (`transcript.routed_text`:
 an API task's `API <id> (<provider>) · <role> role, set by you MM-DD · thinking off` from task.json,
-else task.json `route`, the router's why), the pane's row badge (`API · deepseek-flash`, `modelOf`)
+else task.json `route`, the router's why), the pane's row (`API DeepSeek  deepseek-flash`: the place and the model, tasks.ts's `placeOf`, #1048)
 and its `routed` line under the task line, and the web chat's strip over the thread (`Running:
 fix-auth · API deepseek-flash (DeepSeek)`, from `chat.open_tasks`): while away, the chat is all the
 user sees.
@@ -2409,7 +2409,7 @@ user sees.
   the last feed, retries after `STATS_RETRY_MS` 60 s doubling to `RETRY_MAX_MS`, and says why
   (#553: each 1.5 s poll reran a full history read). No timer: hidden it costs nothing, shown a stat
   a poll. The feed is the `stats` atom (`stats-1`).
-- **The status line**: `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting review`, or `⚒
+- **The status line**: `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting review · 1 stuck`, or `⚒
   wb · workbench mode`. Outside workbench mode it counts only `mine`, and is empty without one
   (2026-11-17).
 - **`wb watch [task]`** (`workbench/transcript.py`): the transcript in a terminal. It re-exports
@@ -4238,8 +4238,9 @@ starts could not start anyway). **Off**: the skill's rule, one task at a time, a
 `/workbench`'s text when that comes first) while delegating or with a task open, as `wanted` reads;
 a change either way reaches the conversation as one `[workbench]` row (`sayRules`: the rule, or
 `WORKFLOWS_OFF`), however made. The rule: fan out as a handoff plan (each task its own spec, size, role and
-acceptance command), one shared name prefix for the group (no `--group` flag: tasks started together sit
-together in `wb status` and the pane, which list by start), the plan in one line before the starts, each result
+acceptance command), one shared name prefix for the group, passed as `wb start --group <prefix>` (task.json
+`group`, #1048: the pane draws a group's tasks under one header; nothing is guessed from names, which would join
+`fix-crash` and `fix-menu`), the plan in one line before the starts, each result
 reviewed on its own, merged logic first, then tests, then UI or docs. Each task runs on its own role's model;
 nothing new decides what runs together: the GPU lease (`models.apart` cards together, the rest `--queue`)
 and the provider slots (#1015). No cap on tasks at once (the owner's call, not asked for). The pane's
@@ -4768,7 +4769,7 @@ mode and close the pane (`/workbench` turns it back on).
 setting `userConfig.wake` `on`|`off`, default `on`, changed with `claude plugin configure
 workbench@workbench`, which reloads the module), `hooks/hooks.json` (`{"modules":
 ["./register.tsx"]}`), `hooks/register.tsx` (everything), `hooks/apprentice.ts`, `hooks/splash.ts`
-(#963), `hooks/modeline.ts` (#976), `hooks/register.test.tsx` (`claude plugin test mod`), `types/index.d.ts`
+(#963), `hooks/modeline.ts` (#976), `hooks/tasks.ts` (#1048: the Tasks view's rows), `hooks/register.test.tsx` and `hooks/tasks.test.ts` (`claude plugin test mod`), `types/index.d.ts`
 (the atom types), `.claude-plugin/icon.png` (the `work` pose).
 The root's `.claude-plugin/marketplace.json` (source `./mod`) makes the id `workbench@workbench`,
 read from the clone: `wb update` plus `/reload-plugins` upgrades it. `mod/tsconfig.json` extends
@@ -4781,9 +4782,11 @@ imports from the module's own files pass too). The helpers type `$` as `any`, so
 literals: `HOME`, `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_SAVINGS`, `WB_COMPACT_AT`.
 
 **State.** Ten `$.state` atoms survive a module reload; one read under an old shape tag is absent,
-so change the tag when its type changes: `tasks` (`tasks-9`, WbTask[]: name, phase, round, model,
+so change the tag when its type changes: `tasks` (`tasks-10`, WbTask[]: name, phase, round, model,
 label, via, role, provider, routed (#1016), tests, last, createdAt, updatedAt, tokens, recent, repo, cwd, subdir, session, claude_pid,
-claude_start, backlog, parked, allowed), `live` (`live-1`, {task, lines: {s, t}[]}), `chat`
+claude_start, backlog, parked, allowed, and the Tasks view's (#1048, `viewFacts`): group, cards, tools, tokOut, ctxUsed,
+window, freshAt, autoFixes, autoFixMax, roundFor, reviews, steps, activeS, roundStartedAt, typicalMin, typicalN, lateMin,
+spend), `live` (`live-1`, {task, lines: {s, t}[]}), `chat`
 (`chat-4`, {key, delegating, url, web}: workbench mode, also kept by session id in `$.store`
 `modes`, #689), `pane` (`pane-1`, {tab, open, focus, minimized}), `sessions` (`sessions-1`,
 string[]: the process's session ids), `savings` (`savings-1`, string: the pane's saving line), `stats` (`stats-1`, {key,
@@ -4909,10 +4912,10 @@ compacts once usage reaches `WB_COMPACT_AT`% (default `COMPACT_AT` 0.5; 0 off) o
 threshold (or the window).
 
 **Status line and pane.** `⚒ wb · <name> <phase> r<round>` for queued/running/testing, `<name>
-asks`, `<N> awaiting review` (review, stuck, failed, not parked: `waitsOnClaude`, #541; `mine`
-only, #693), joined by ` · `; `⚒ wb · workbench mode` with nothing listed. The pane: a row per task
-(marks: spinner running, ◌ queued, ◐ testing, ? asking, ◆ review, ▲ stuck, ✗ failed, ✓ accepted, –
-discarded) with its recent lines; the followed task's transcript (lines cut to `LINE_CHARS` 2000,
+asks`, `<N> awaiting review`, `<N> stuck`, `<N> failed` (each counted apart: one review and one stuck
+task read `2 awaiting review`, #1048; not parked: `waitsOnClaude`, #541; `mine` only, #693), joined by
+` · `; `⚒ wb · workbench mode` with nothing listed. The pane: the task list (*The Tasks view*, below);
+the followed task's transcript (lines cut to `LINE_CHARS` 2000,
 within `HISTORY_CHARS` 60,000: Claude Code drops pane text past 100,000), following the newest
 unless scrolled up; the stage (the apprentice as pixels at 20 rows by 40 columns or more, else its
 one-line face; text wrapped by `wrapWords`, as Text's own wrapping beside the raster drew empty
@@ -4920,6 +4923,43 @@ rows); the saving and the tabs. The Stats and Settings tabs and the strip (`Abov
 what the agent does*. The apprentice (`apprentice.ts`): 16×12 pixel art in half blocks into a
 `Raster` (cells as little-endian u32 triplets, base64), a pose per state (rest, blink, think, work,
 swing, tada, ask, slump, sleep), FACE the one-line faces; the bubble is `speechOf`.
+
+**The Tasks view** (#1048; the owner, web chat 2026-11-23: "progress bar indicators or something,
+some type of indications showing me everything that's going on while it happens"). `hooks/tasks.ts`
+lays the list out (the design study's reference renderer, mock.py, ported rule for rule;
+`tasks.test.ts` holds its mockups character for character) and `register.tsx` draws it: `scan` adds
+each task's facts (`viewFacts`, from the task.json and status.json it already reads: nothing new is
+read), `listRows` asks `taskLines` for the rows and adds a task's `wb coding allow` line after them,
+and the render draws one `Text` a row (`wrap="truncate-end"`; none is wider than the pane, so
+`pageShape` counts them exactly). One task is at most two rows. Line 1: the glyph (the spinner
+running, else ◌ ◐ ? ◆ ▲ ✗ ✓ –: no state told by colour alone), the name (underlined when followed),
+the stage (`round 2 · fix 1/2`, `round 3 · self-review`, `waits for the GPU`, `review · tests ✓`…,
+from status `round_for` and the runner's `last`: the queued words match the prefixes
+`transcript.activity` matches), the place (`GPU`, `GPU 1` from status `cards`, `API DeepSeek`), the
+model (an API task's id's last part, a GPU task's label), the role (`complex`, `trivial`,
+`writing`), the spend (status `api`: wave 2's `usd`, `plan`, `no price`) and the elapsed time
+(`3m ago` for a review). Line 2, `⎿`: what it did last (an asking task's question, a stuck one's
+`… · Claude steers it next`) and its meters: `ctx █████▋░░ 71%` (status `live_used` of this
+session over `window`, `┊` at `tuned.fresh_at`), `~6m left` or `3m over` against status `typical`
+(only with `TYPICAL_MIN` 3 timed tasks), the tool count and `3.9K out` (tokens written: the input
+re-reads the context each step). Late is coloured only from the progress checks' own points, 1× and
+2× status `late_min` (step A's review: a 4-minute median coloured a 5-minute task late, where no
+check comes before `progress.FLOOR_MIN`), and only once the estimate says `over` (an `--after` under
+the typical length coloured it beside `~12m left`; no estimate shown, no colour); an API task `hosted.json` doesn't list has no typical and
+shows no estimate. A passing review, a parked task and a closed one have no line 2; closed ones fold
+into one dim line per block. Tasks of one `--group` (two or more) sit under a header (`▾ hiscore · 3
+tasks · 2 running · 1 testing   $0.04  ░░░░░░░░ 0/3 done`, done counting reviews and closed ones;
+narrow, it drops the bar, the spend, then `· 3 tasks`, so `· 1 stuck` stays) joined by `├ │ └`; blocks and their tasks keep start order, so nothing jumps. Columns line up within
+a block and drop for the whole block until the widest row fits: line 1 the role, the model, the long
+stage (`r2`), the long place (`API`), the place; line 2 the tokens, the bar to 5 cells, the tool
+count, the bar (`ctx 56%` stays), the estimate. One row a task (`compactWanted`) in a pane under 20
+rows (the 14-row box below a ~100-column terminal) or when two would leave the transcript, the
+apprentice, the tabs and the modeline under 12 rows. A press on a task's first row (a `plain` Button
+keyed `task-<name>`) follows it (`followTask`, `mem.picked`, which `focusOf` keeps while the task is
+listed). While an API task works (running, testing or asking: not one queued for its slot, the
+owner's "only while an API task runs"), `API today $0.42 of the $5 day cap  ▉░░░░░░░░░` sits above the
+saving (`capRow`: warning from `meter.CHECKIN_SHARE`, error at the cap), from `wb route --json` as
+`rolesNow` caches it, read again past `ROLES_CACHE_MS` off the render's path (`capNow`).
 
 **The web chat listener** (`listen`: workbench mode, chat on, an events child). Another session's
 live claim makes this one stand by: its pid alive and, with a `start`, still started then (`alive`,
@@ -5179,7 +5219,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--role significant\|trivial\|writing` (from `--size`: trivial, else significant), `--size trivial\|significant` (from `--role`: trivial for the trivial role, else significant; both given, the role picks the model and the size the slice and the GPU router's size), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2 on the GPU, 1 on API: `cli.AUTO_FIX`, `cli.auto_fix`; a given value is kept and the start line prints the one used, #1017), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders, or for an API provider's slot), `--trial`, `--local-only` (task.json `local_only`: an API model is refused for this task, as for a repo commands.json marks local-only, *Privacy for API roles*), `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), an API model (a `--model`, or the role's side as it runs, `routes.effective_via`) in a local-only spot, before any model is picked (exit 3, `cli._local_only_check`, #1021), an unreadable routes.json (exit 3, *Roles*), a role that can't run (exit 3, one line, never the other side: an API role's model without a key, gone from the catalog or out of credit, `routes.cant_run`; Agents on API with a role that has no API model; a GPU role with no GPU model, the router's line; a pinned GPU model not found; *A task, start to finish*, #1016), an API model with no price or today's spend at the cap (exit 3, `meter.refusal` in `routes.resolve`, both API paths: a `--model`'s before the dialog, *Spend*, #1019; no cap at all is #1014's to refuse, and the guard stops such a task, `meter.NO_CAP`), a `--model` naming an API model under Claude Code without the dialog's yes (exit 3, `cli.start_gate`, #1014), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4; with routes.json `busy` api a role with an API model starts on it instead, `cli._busy_api`, #1023), an API model's provider already running `API_PARALLEL` (3) tasks (exit 4, `cli._slots_full`; `--queue` waits for a slot, #1015). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL, a writing task's `WRITING_PROTOCOL`) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why (an API task's `model: <id> · API (<provider>) · <role> role, set by you MM-DD · thinking off`, `routes.model_line`; its `started … on <id> (API)`; then `cli._api_notes`: the first API task in a repo for a provider adds the where-note, `note: this task sends the repo, its spec, CLAUDE.md files … to <provider> (the <role> role's model; data policy: <url>)`, its OpenRouter backends task.json's `order`, and `context.api_hidden_note`, *Privacy for API roles*), `next: wb wait <task>`. A writing task (task.json `role: writing`, *The writing role*) gets self-review off unless `--self-review` (`cli.self_review`), probe off (`experiments_off` `a writing task`), the writing handbook, and `--test` stays optional (no note asks for one). |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--role significant\|trivial\|writing` (from `--size`: trivial, else significant), `--size trivial\|significant` (from `--role`: trivial for the trivial role, else significant; both given, the role picks the model and the size the slice and the GPU router's size), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2 on the GPU, 1 on API: `cli.AUTO_FIX`, `cli.auto_fix`; a given value is kept and the start line prints the one used, #1017), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders, or for an API provider's slot), `--trial`, `--local-only` (task.json `local_only`: an API model is refused for this task, as for a repo commands.json marks local-only, *Privacy for API roles*), `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--group NAME` (task.json `group`: one request's fan-out, *Dynamic workflows*; `cli.GROUP_RE`, a task name's characters up to 32, else refused before anything is made, `cli._check_group`, #1048), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), an API model (a `--model`, or the role's side as it runs, `routes.effective_via`) in a local-only spot, before any model is picked (exit 3, `cli._local_only_check`, #1021), an unreadable routes.json (exit 3, *Roles*), a role that can't run (exit 3, one line, never the other side: an API role's model without a key, gone from the catalog or out of credit, `routes.cant_run`; Agents on API with a role that has no API model; a GPU role with no GPU model, the router's line; a pinned GPU model not found; *A task, start to finish*, #1016), an API model with no price or today's spend at the cap (exit 3, `meter.refusal` in `routes.resolve`, both API paths: a `--model`'s before the dialog, *Spend*, #1019; no cap at all is #1014's to refuse, and the guard stops such a task, `meter.NO_CAP`), a `--model` naming an API model under Claude Code without the dialog's yes (exit 3, `cli.start_gate`, #1014), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4; with routes.json `busy` api a role with an API model starts on it instead, `cli._busy_api`, #1023), an API model's provider already running `API_PARALLEL` (3) tasks (exit 4, `cli._slots_full`; `--queue` waits for a slot, #1015). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL, a writing task's `WRITING_PROTOCOL`) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why (an API task's `model: <id> · API (<provider>) · <role> role, set by you MM-DD · thinking off`, `routes.model_line`; its `started … on <id> (API)`; then `cli._api_notes`: the first API task in a repo for a provider adds the where-note, `note: this task sends the repo, its spec, CLAUDE.md files … to <provider> (the <role> role's model; data policy: <url>)`, its OpenRouter backends task.json's `order`, and `context.api_hidden_note`, *Privacy for API roles*), `next: wb wait <task>`. A writing task (task.json `role: writing`, *The writing role*) gets self-review off unless `--self-review` (`cli.self_review`), probe off (`experiments_off` `a writing task`), the writing handbook, and `--test` stays optional (no note asks for one). |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps first. Review/stuck/failed with no live runner; refuses a moved repo (`wb relocate`), OpenCode 1.x (exit 3, `_opencode_again`, #866), an API task whose model left OpenCode's catalog (exit 3, `_model_still_listed`, #1016; next and resume too), an API task whose repo became local-only (exit 3, `_local_only_since`, #1021), empty text. Prompt: `FEEDBACK_HEAD` + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (re-run only with a test) + text; reviews+1. Warns past three reviews. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--include` (bulk additions, large binaries, ignored files the agent wrote), `--no-sign`, `--test` (replaces it, granted to the shell too), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Review only; an API task whose repo became local-only exits 3 (`_local_only_since`, #1021). Commits the step (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`; an empty step advances uncommitted, #507); prompt "Step N of this task is done and committed (<sha>). The next step:" + spec + the task's protocol (`cli.protocol_for`: a writing task keeps `WRITING_PROTOCOL`); advances round, steps, step_round, `reviews` reset, `step_base` the worktree's HEAD (#652), phase queued in one status write right before the spawn (#191: written earlier, an interrupt left the step under review with no runner). A retry after its commit landed (`cli._step_landed`) measures from `HEAD~1` (#85). Says `runner.fresh_reason`'s verdict. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` | `ask/<id>.answer` via `ask_mcp.write_answer`; the id into status `answered`. Refuses empty, over `ask_mcp.FILE_MAX` 256 KiB (`too_long`: never read, the agent waited out its timeout, #605), or closed, racing too (`answer_once`, #938). |
@@ -5450,6 +5490,7 @@ machine is never gone here, `cli._gone`, nor checked by the mod's `noteClaude`: 
 #922), `base` (full sha), `base_ref`, `base_branch` (where `--merge` lands: `HEAD`'s branch, or `--base` naming a local one; null on a detached HEAD, tag or commit),
 `branch`, `model`, `model_label`, `opencode_model` (`<id>#<variant>` for an API task's thinking, `runner.with_thinking`), `weights_id` (`models.identity`), `route` (the router's why; an API task's routing line), `via` (`gpu`|`api`) and `role` (#1016, always; `writing`: *The writing role*; a task from before it has neither, and reads as GPU),
 `provider`, `provider_name` (the catalog's), `thinking` (`off`|`on`, the role's, default off), `said` (the role's `said`, or `asked for[, approved in the dialog]` for a `--model`), and `said_ts` (the role's `ts`) (API only, fixed at start as `model` is), `thinking_shown` (what it does: `thinking off`, `thinking at its lowest effort (it can't turn off)`, `thinking as the model's default (it lists no lower setting)`…), `thinking_off` (`wb-off`'s `{settings}` or `{body}`, #1018), `size`, `stack`, `trial`, `backlog`,
+`group` (`--group`: the tasks one request fanned out to, #1048; missing: no group),
 `bench` (`{case, run, label}`), `test_cmd`, `no_base_check`, `unload_for_tests`, `sign` (false: `--no-sign`), `subdir` (a monorepo package), `setup`,
 `setup_timeout`, `copy`, `siblings`, `local_only` (`--local-only`, #1021), `order` (an OpenRouter role's backends, which the keyhole routes to and the where-note names: `routes.resolve` copies the role's row, `cli._routed_keys`; none for a `--model` start, whose note says `its choice of backend`), `worktree` (when nested), `checkout` (`"runner"`; missing before #529),
 `checkout_bytes` (wb start's disk-check size, counted as taken until the runner checks out; missing when free space was
@@ -5474,6 +5515,10 @@ off), not `wb start`'s.
 | `machine`, `host` | `store.machine()`, `store.host()`: another machine's runner is never reaped, stopped or signalled here while its lock beats (`store.elsewhere`) |
 | `beat` | `runner.BEAT_SECS`; silent past `cli.BEAT_DEAD`, another machine's runner is dead |
 | `round`, `round_started_at` | the round (every kind counts); its start |
+| `round_for` | why the round is (#1048, for the pane's stage words): `start` (`wb start`), `fix` (an auto-fix), `self_review`, `feedback` (`wb feedback`), `steer` (a steer round), `fresh` (a full window's fresh session, `_full_round`), `next` (`wb next`), `resume` (`wb resume`); set with each new round, never cleared; missing before #1048 |
+| `typical` | `{min, n}` at each round's start (`runner.typical_now`): the step's typical active minutes on this model and size (`router.expected`, the files alone; a writing task's on writing's record, `router.record_role`) and how many timed tasks back it; the pane shows an estimate only from `progress.TYPICAL_MIN` (3); missing when there is no timed task, for an API model `hosted.json` doesn't list, or when the record can't be read (the round runs on: only the pane reads it) |
+| `late_min` | with `typical`: the progress checks' first point (`progress.typical`: the user's `--after`, else the typical length at least `FLOOR_MIN`), where the pane starts colouring a task late once its estimate says `over` (2× it error); missing while that is only the size's default (#1048) |
+| `cards` | after the lease (`runner.cards_now`): the cards a local GPU model's Ollama sees (`models.card_numbers`), for the pane's `GPU 1`; only on a machine of two or more discrete cards; null when a later runner can't tell, missing otherwise, and when the server or sysfs can't be read (the round runs on) (#1048) |
 | `limits` | `{think?, silence?, round?}`: unflagged limits raised for a model measured slower (`runner.stretch_limits`); null when none |
 | `api_entry` | an API task's capped `{limit, options: {max_tokens}}`, written as `drive` resolves its model (`runner.pin_api`), read every round instead of the catalog (#1017); null or absent on the GPU |
 | `steps`, `step_round`, `step_sizes` | `wb next`: step number, its first round, the closed steps' `results.step` |
@@ -5873,6 +5918,21 @@ starts (#1015) recording each `close` told a reason (`record_closes`); `ApiSpend
 response against `_KeyholeTest`'s upstream, and its `test_real_opencode_*` runs the real OpenCode through a closed
 keyhole (the 400, not retried).
 
+**The Tasks view's data** (#1048): status `round_for` for each kind of round (`start` and `feedback` in
+`Lifecycle`, `fix` in `AutoFix`, `steer` in `Steering`, `fresh` in `Context`, `self_review`, `next` and `resume`, both its paths, in `Lifecycle`); `typical`
+`{min, n}` from three timed results rows at a round's start, and none with no history (`Lifecycle`); `wb start
+--group` into task.json, none without it, a group that isn't a name refused before anything is made (`StartChecks`);
+the skill's and `WORKFLOWS_RULE`'s `--group` and a fan-out of three under one group (`DynamicWorkflows`). Step C and the
+view (#1048): `cards` on one card of two (a runner driven in the test's process, `models.card_numbers` and
+`hardware.gpus` patched), none on one card nor for an API or remote model, cleared by a later runner; `late_min` at
+`FLOOR_MIN` over a 4-minute median and at the user's `--after`, and no `typical` for an API model `hosted.json` lacks
+(`Lifecycle`); tasks.test.ts: every mockup character for character, every width from 30 to 120, the drop order, the
+context bar, the estimate and lateness from `late_min` (and only beside `over`), a narrow header keeping `· 1 stuck`, an
+untimed API task with no estimate, no day-cap line for a queued API task; register.test.tsx: three
+tasks at once under one header with their cards and spend at 71 columns, two rows a task at 50, one in a 14-row box,
+the status line's `1 stuck` apart from review, a row's press following its task, the day-cap line only while an API
+task runs, and the splash's measured rows.
+
 **Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`, `RealOpenCodeAPI`, `ApiHarness`'s
 `test_real_opencode_*`, `ApiSizing`'s and `ApiSpendKeyhole`'s `test_real_opencode_*`; skip without `opencode`, the
 lane ones without `lane.abi()`). `capture_llm.py <port> <out.jsonl> [calls] [prompt tokens]` records every request,
@@ -6182,12 +6242,18 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **`wb watch --json`** → the mod's `LINE_STYLE`, its pose regex, `live-1`; `--last`, `JSON_LINE_CHARS` with
   `KEEP_LINES`, `LINE_CHARS`.
 - **task.json's routing keys** (`via`, `role`, `provider`, `provider_name`, #1016) → the mod's row builder (`scan`,
-  `modelOf`'s badge) and `chat.open_tasks` with `chat_static/app.js`'s strip; **the `routed` watch kind** → the mod's
+  tasks.ts's `placeOf`) and `chat.open_tasks` with `chat_static/app.js`'s strip; **the `routed` watch kind** → the mod's
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
   and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`.
-- **A `$.state` atom's type** → its tag (`tasks-9`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`,
+- **A `$.state` atom's type** → its tag (`tasks-10`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`,
   `stats-1`, `top-1`, `said-3`, `splash-1`).
-- **The Tasks page's layout** → `pageParts`, `pageShape` (#963); **the modeline's look** (`MODELINE`, `claude`) →
+- **The Tasks page's layout** → `pageParts`, `pageShape` (#963);
+- **The Tasks view** (#1048): the status keys `round_for`, `typical`, `late_min`, `cards`, `api` and task.json `group` →
+  `viewFacts` and tasks.ts; the queued `last` texts (the runner's and `models`' `say`: `waiting for the GPU`, `waiting
+  for an API slot`, `checking out`, `setting up`, `checking the acceptance command`, `loading`…) → tasks.ts's `QUEUED`
+  and `transcript.activity`; the role words (`complex`, `trivial`, `writing`) → tasks.ts's `ROLE_WORDS` and
+  Settings' `ROLE_LABELS`; `progress.TYPICAL_MIN` and `meter.CHECKIN_SHARE` → tasks.ts's copies; `savings.usd` → the
+  `usd` the mod passes to `taskLines` and `capRow`; **the modeline's look** (`MODELINE`, `claude`) →
   splash.ts's `BAR`, modeline.ts's `BAR`, the room `register.tsx` counts; **a task phase** → modeline.ts's `SAID`.
 - **Stats tab folds**: `top.FOLD` → `RACK_FOLD`; `stats.STATS_MODEL_LINES` → `STATS_SHOWN`; `model_lines`'
   `more`/`older`/`variants` → `statsLines`, `cli.cmd_stats`.

@@ -1238,6 +1238,17 @@ def auto_fix(a, m: models.Model) -> int:
     return a.auto_fix if a.auto_fix is not None else AUTO_FIX.get(m.kind, AUTO_FIX["gpu"])
 
 
+GROUP_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}\Z")  # a task name's characters, up to 32
+
+
+def _check_group(group: str | None) -> None:
+    """--group: the tasks one request fanned out to, which the pane draws under one header. Given
+    by Claude, never guessed from names: a shared prefix joined unrelated tasks (fix-crash,
+    fix-menu; #1048). Refused before anything is made."""
+    if group is not None and not GROUP_RE.match(group):
+        die("a group name is lowercase letters, digits and hyphens, at most 32")
+
+
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
@@ -1245,6 +1256,7 @@ def cmd_start(a):
         die("a backlog name is lowercase letters, digits and hyphens, at most 48")
     if a.backlog and (why := _backlog_done(a.backlog)):
         die(why)
+    _check_group(getattr(a, "group", None))
     task = store.Task(a.name)
     if task.exists:  # discarding never frees a name, so the refusal doesn't suggest it (the audit)
         die(f"task {a.name!r} exists ({task.status.get('phase')}): task names are never reused, "
@@ -1413,6 +1425,7 @@ def cmd_start(a):
         # the next start counts it as taken until the runner has made it (#676)
         **({"checkout_bytes": checkout_bytes} if checkout_bytes else {}),
         **({"backlog": a.backlog} if a.backlog else {}),  # a batch left to run: wb backlog
+        **({"group": g} if (g := getattr(a, "group", None)) else {}),  # one request's fan-out (#1048)
         # a replay of the bench driver's (bench.replay): no notices, no results row, not listed
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
         **({"no_base_check": True} if a.no_base_check else {}),
@@ -1435,7 +1448,7 @@ def cmd_start(a):
                            if v] + (["think"] if a.think_timeout is not None else []),
         "created_at": store.now(), "wb_version": __version__}))
     (task.dir / STARTING).unlink(missing_ok=True)  # a task now: wb discard drops it from here on
-    task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
+    task.set_status(phase="queued", round=1, round_for="start", reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
                     opencode=f"{have[0]}.{have[1]}" if have else None,  # runner.opencode_moved
                     skills=handed, skills_ever=handed, skills_rev=skills.revs(handed),
@@ -1586,7 +1599,7 @@ def cmd_feedback(a):
     handled = store.now()  # everything before the new round; what its runner raises stays news
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
-    task.set_status(round=n, reviews=reviews, phase="queued",
+    task.set_status(round=n, reviews=reviews, phase="queued", round_for="feedback",
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
     spawn_runner(task)
@@ -1722,7 +1735,7 @@ def cmd_next(a):
     approved = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
     # the step's own active work and progress checks start here: set against a step's typical
     # length, the chain's total put step 2 past it in its first minutes (#815)
-    advance = dict(round=n, steps=step + 1, step_round=n, reviews=0, step_base=approved,
+    advance = dict(round=n, round_for="next", steps=step + 1, step_round=n, reviews=0, step_base=approved,
                    step_active_s=st.get("active_s") or 0, progress_checks=0,
                    step_sizes=(st.get("step_sizes") or []) + [measured],
                    step_tests={**(st.get("step_tests") or {}), str(step + 1): test},  # #941
@@ -2472,7 +2485,7 @@ def _resume(task: store.Task) -> None:
         # again, its prompt as wb start wrote it, not "Claude stopped your last session…"
         handled = store.now()
         gpu = _gpu_note(task)
-        task.set_status(phase="queued", last="resumed by the reviewer")
+        task.set_status(phase="queued", last="resumed by the reviewer", round_for="resume")
         task.event({"ts": store.now(), "round": 1, "kind": "resumed",
                     "text": "Claude resumed the task: it starts its first round again"})
         spawn_runner(task)
@@ -2488,7 +2501,8 @@ def _resume(task: store.Task) -> None:
         + (f"\n\n{runner.folded_notes(task, n + 1, notes)}" if notes else ""))
     handled = store.now()
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
-    task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer")
+    task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer",
+                    round_for="resume")
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
                 "text": "Claude resumed the task in a fresh session"})
     spawn_runner(task)
@@ -6679,6 +6693,8 @@ def parser() -> argparse.ArgumentParser:
                    "local_only")
     s.add_argument("--backlog", metavar="NAME", help="one of a batch left to run (overnight): "
                    "wb backlog NAME reports on the batch")
+    s.add_argument("--group", metavar="NAME", help="one of the tasks a request fans out to (dynamic "
+                   "workflows): the pane draws them under one header")
     s.add_argument("--no-claude-md", action="store_true",
                    help="start even though the repo has no CLAUDE.md (or .claude/CLAUDE.md)")
     s.add_argument("--allow", action="append", metavar="PATTERN",

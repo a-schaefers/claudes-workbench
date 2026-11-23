@@ -1117,6 +1117,45 @@ def active_so_far(task: store.Task, now: float | None = None) -> float:
         (max(0.0, now - running) if running else 0.0)
 
 
+def typical_now(task: store.Task) -> dict:
+    """Status `typical` {min, n} for a round's start: the step's typical active minutes on this
+    model and size (router.expected, the files alone, #819; a writing task's on writing's record,
+    as progress.typical reads it) and how many timed tasks back it, so the pane can set its
+    estimate against them with no read of its own (#1048); none with no history, nor for an API
+    model hosted.json doesn't list (lookup finds no model to time). And `late_min`, the progress
+    checks' first point (the user's --after, else the typical length at least FLOOR_MIN): the
+    pane colours a task late only from there, as a check would come, never from a raw median of
+    a few minutes (step A's review); none while that is only the size's default."""
+    from . import router  # router -> models; imported late, as checkin_text does
+    spec = task.spec
+    try:  # the pane's estimate only: a record unreadable never stops the round it would time
+        mins, n = router.expected(spec.get("model", ""), spec.get("size", "significant"),
+                                  spec.get("weights_id"), router.record_role(spec.get("role")))
+        late, source = progress.typical(spec)
+    except Exception:
+        return {}
+    return {**({"typical": {"min": round(float(mins), 2), "n": n}} if mins is not None else {}),
+            **({"late_min": round(float(late), 2)} if source != "default" else {})}
+
+
+def cards_now(task: store.Task, m: models.Model) -> dict:
+    """Status `cards`, the cards a local GPU model's Ollama sees (models.card_numbers, #1023), for
+    the pane's `GPU 1` (#1048): only on a machine of two or more discrete cards, where it tells
+    tasks apart; one card stays `GPU`, and an API or remote model has none. A runner after one
+    that wrote cards clears them when it can't tell."""
+    cards = None
+    try:  # the pane's label only: a server or sysfs that can't be read never stops the round
+        if m.kind == "gpu" and m.engine == "ollama" and not m.remote:
+            cards = models.card_numbers(m.root)
+            if cards and len(cards) < 2:
+                devs = hardware.gpus(windows=False)
+                if len([g for g in devs if g.get("discrete")] or devs) < 2:
+                    cards = None
+    except Exception:
+        cards = None
+    return {"cards": cards} if cards or task.status.get("cards") else {}
+
+
 def checkin_text(task: store.Task, n: int, out: dict, since: float, active: float | None = None) -> str:
     """The digest a check-in wakes Claude with: what changed since the last one, and timing.
     ``active``: the round's own count of active work so far, when the round knows it."""
@@ -3949,7 +3988,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
     with models.lease_for(m, task.name, say) as lease:
         # this runner reached the lease: from now on gpu.json says whether it holds the GPU, so
         # wb start no longer counts it as a holder while it steps aside for its tests (#805)
-        task.set_status(leased=os.getpid())
+        task.set_status(leased=os.getpid(), **cards_now(task, m))  # the pane's `GPU 1` (#1048)
         try:
             _loaded(task, _load(task, lease, m))
             window = (m.config.get("limit") or {}).get("context")
@@ -3993,7 +4032,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                             "text": "the model was measured slow here: " + ", ".join(
                                 f"{k} {v // 60} min" for k, v in raised.items())})
             task.set_status(phase="running", round=n, round_started_at=store.now(),
-                            last="agent started")  # not "starting…": the pane shows its progress
+                            last="agent started",  # not "starting…": the pane shows its progress
+                            **typical_now(task))
             task.event({"ts": store.now(), "round": n, "kind": "round", "text": "started"})
             began = time.time()
             try:
@@ -4112,7 +4152,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
                     auto_fix_prompt(tests, task.spec["test_cmd"]))
-                task.set_status(round=n + 1, auto_fixes=used + 1, tests=tests)
+                task.set_status(round=n + 1, auto_fixes=used + 1, tests=tests, round_for="fix")
                 task.event({"ts": store.now(), "round": n, "kind": "autofix",
                             "text": "tests failed; sent the output back to the agent"})
                 if not _go_on(task, n, "auto-fix"):
@@ -4128,7 +4168,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
                     SELF_REVIEW.format(cmd=task.spec["test_cmd"]))
-                task.set_status(round=n + 1, self_reviewed=mark, tests=tests)
+                task.set_status(round=n + 1, self_reviewed=mark, tests=tests, round_for="self_review")
                 task.event({"ts": store.now(), "round": n, "kind": "self_review",
                             "text": "tests pass; the agent reviews its own change first"})
                 if not _go_on(task, n, "self-review"):
@@ -4261,7 +4301,7 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
         asked=ASKED.format("\n\n".join(asks)) if asks else "",
         last="> " + last.replace("\n", "\n> ") if last else "(none)")
         + (f"\n\n{folded_notes(task, n + 1, notes)}" if notes else ""))
-    task.set_status(round=n + 1, context="full", full_pct=pct,
+    task.set_status(round=n + 1, context="full", full_pct=pct, round_for="fresh",
                     full_compacted=True if rnd.get("compacted") else None,  # #774: fresh_reason
                     full_compact_failed=True if failed else None,  # #969: and its reason
                     handovers=task.status.get("handovers", 0) + 1,
@@ -4298,7 +4338,8 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
         task.round_dir(n + 1).joinpath(NUDGED).touch()
         if theirs := [r for r in notes if r.get("by") != "workbench"]:  # ... Claude's notes are
             folded_notes(task, n + 1, theirs)
-    task.set_status(round=n + 1, steer_taken=task.status.get("steer_taken", 0) + len(notes))
+    task.set_status(round=n + 1, steer_taken=task.status.get("steer_taken", 0) + len(notes),
+                    round_for="steer")
 
 
 # What a task's children load from the clone afresh each round, beside this runner's code loaded
