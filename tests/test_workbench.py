@@ -33027,5 +33027,339 @@ class MediaDefaults(Base):
         self.assertEqual(list(media), ["image"])                        # the pane draws the rest
 
 
+
+
+class ApiCompat(Base):
+    """The compatibility sweep for API roles (#1026): bench and optimize stay on GPU models, wb try
+    says when its sample goes to an API role, wb models shows the roles, keys and the catalog's
+    counts (never its ids), and verify, shot and --unload-for-tests take this machine's GPU with no
+    model call. routes.json is written as #1014's routes.read() reads it."""
+    catalog = ApiHarness.catalog
+
+    def setUp(self):
+        super().setUp()
+        from workbench import models
+        self.models = models
+        os.environ["WB_ROUTES"] = str(Path(self.tmp.name) / "routes.json")  # never the user's
+        self.catalog(DISCOVERY_CATALOG, DISCOVERY_AUTH)
+
+    def routes(self, **roles):
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps(
+            {"v": 1, "day_usd": 5, "roles": {r: {"thinking": "off", "said": "…", "by": "dialog",
+                                                 "ts": time.time(), **x} for r, x in roles.items()}}))
+
+    def no_gpu(self):
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({"provider": {}}))
+
+    def fails(self, *argv) -> tuple[int, str]:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err), redirect_stdout(io.StringIO()):
+            cli.main(list(argv))
+        return e.exception.code, err.getvalue()
+
+    def bench_plan(self, found=None) -> tuple[dict, dict]:
+        """bench.start with one trivial case and no --model, the driver not spawned: (plan.json,
+        the driver's environment)."""
+        from workbench import bench
+        seen = {}
+
+        def detach(argv, **k):
+            seen.update(k["env"])
+            return types.SimpleNamespace(pid=os.getpid())
+        with mock.patch.object(bench, "cases", lambda: {"c1": {"size": "trivial"}}), \
+                mock.patch.object(cli, "detach", detach), \
+                mock.patch.object(bench, "driver", lambda: {}), \
+                mock.patch.object(bench.models, "discover", found or self.models.discover):
+            run, _ = bench.start([], [], [], "", 1)
+        return bench.plan(run), seen
+
+    # bench
+
+    def test_a_bench_run_with_no_model_plans_gpu_models_only_with_the_trivial_role_on_api(self):
+        # passes before #1026 too (discover() is GPU-only, #1013): it pins that
+        self.routes(trivial={"via": "api", "api": "acme/coder-flash"})
+        self.assertIn("acme/coder-flash", self.models.hosted())
+        plan, _ = self.bench_plan()
+        ids = {m for _, m in plan["pairs"]}
+        self.assertTrue(ids)
+        self.assertTrue(all(self.models.discover()[m].kind == "gpu" for m in ids), ids)
+        self.assertFalse(ids & set(self.models.hosted()))
+
+    def test_a_bench_run_with_no_model_leaves_out_an_api_model_a_discovery_leaked(self):
+        # #1026: fails without the bench's own kind filter, given a discover() that lists one
+        leaked = {**self.models.discover(), "acme/coder-flash": self.models.hosted()["acme/coder-flash"]}
+        plan, _ = self.bench_plan(lambda: leaked)
+        self.assertNotIn("acme/coder-flash", {m for _, m in plan["pairs"]})
+        self.assertIn("ollama/mimo-v2.6:9b-q8_0", {m for _, m in plan["pairs"]})
+
+    def test_a_bench_run_on_an_api_model_is_refused_and_a_fragment_never_lands_on_one(self):
+        # #1013's refusal, kept for 2.0 (#1026): a replay takes the GPU lease, and an overnight run on
+        # a paid provider would spend with nobody watching; no run is written
+        from workbench import bench
+        with mock.patch.object(bench, "cases", lambda: {"c1": {"size": "trivial"}}):
+            with self.assertRaisesRegex(RuntimeError, "acme/coder-flash is an API model: wb bench "
+                                                      "replays on GPU models only"):
+                bench.start(["acme/coder-flash"], [], [], "", 1)
+            with self.assertRaisesRegex(RuntimeError, "unknown model 'flash'"):
+                bench.start(["flash"], [], [], "", 1)
+        self.assertFalse((bench.home() / "runs").exists() and list((bench.home() / "runs").iterdir()))
+
+    # optimize
+
+    def test_optimize_never_measures_an_api_model_or_an_ollama_cloud_one(self):
+        # #1026: a discover() that leaked them (an Ollama cloud model opted in with "local": true,
+        # as before #1013, and an API model on an Ollama provider): fails without the kind filter
+        from workbench import optimize
+        found = self.models.discover()
+        mimo = found["ollama/mimo-v2.6:9b-q8_0"]
+        cloud = self.models.Model(id="ollama/gpt-oss:120b-cloud", provider="ollama", name="gpt-oss:120b-cloud",
+                                  base_url=mimo.base_url, engine="ollama", label="cloud", remote=True, cloud=True)
+        api = self.models.Model(id="ollama/glm-9:cloud", provider="ollama", name="glm-9:cloud",
+                                base_url=mimo.base_url, engine="ollama", label="api", remote=True, kind="api")
+        with mock.patch.object(optimize.models, "discover", lambda: {**found, cloud.id: cloud, api.id: api}), \
+                mock.patch.object(optimize.models, "status", lambda m, *a, **k: {"available": True}), \
+                mock.patch.object(optimize, "no_gpu_here", lambda m, seen=None: False):
+            ids = [m.id for m in optimize.candidates()]
+        self.assertIn(mimo.id, ids)
+        self.assertNotIn(cloud.id, ids)
+        self.assertNotIn(api.id, ids)
+
+    # wb try
+
+    def test_wb_try_says_when_the_trivial_role_sent_its_sample_to_an_api_model(self):
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("try", "--model", "mimo")                    # a GPU sample: as before
+        self.assertNotIn("wb try: the trivial role", out)
+        wait_phase("try-1", {"review"})
+        task = store.Task("try-1")
+        self.assertEqual(cli._try_api_line(task), "")             # task.json without #1016's keys
+        self.routes(trivial={"via": "api", "api": "acme/coder-flash"})
+        store.write_json(task.dir / "task.json", {**task.spec, "model": "acme/coder-flash", "via": "api",
+                                                 "role": "trivial", "provider": "acme"})
+        self.models.hosted()
+        self.assertEqual(cli._try_api_line(task),
+                         "wb try: the trivial role is API (acme/coder-flash, Acme): the sample's code goes "
+                         "there, and its cost counts toward today's $5 cap")
+        store.write_json(task.dir / "task.json", {**task.spec, "via": "gpu", "role": "trivial"})
+        self.assertEqual(cli._try_api_line(task), "")
+        run_wb("discard", "try-1")
+        real = cli.cmd_start
+
+        def start_on_api(a):  # wb start --role as #1016 writes it: via and role in task.json
+            real(a)
+            t = store.Task(a.name)
+            store.write_json(t.dir / "task.json", {**t.spec, "via": "api", "role": "trivial"})
+        with mock.patch.object(cli, "cmd_start", start_on_api):
+            out = run_wb("try", "--model", "mimo")
+        self.assertRegex(out, r"\nwb try: the trivial role is API \(ollama/mimo-v2.6:9b-q8_0, ollama\): the "
+                              r"sample's code goes there, and its cost counts toward today's \$5 cap\nthe sample project: ")
+        wait_phase("try-2", {"review"})
+
+    def test_wb_try_model_flash_never_resolves_to_an_api_model(self):
+        self.assertIn(FLASH, self.models.hosted())               # "flash" is in two API ids
+        code, err = self.fails("try", "--model", "flash")
+        self.assertIn("unknown model 'flash'", err)
+        code, err = self.fails("try", "--model", "acme/coder-flash")
+        self.assertEqual(code, 3)
+        self.assertIn("acme/coder-flash is an API model", err)
+        self.assertFalse(store.all_tasks())
+        self.assertFalse(list(cli.try_dir().glob("*")) if cli.try_dir().exists() else [])
+
+    def test_wb_try_with_no_gpu_model_and_no_role_exits_3_and_leaves_no_sample(self):
+        self.no_gpu()
+        code, err = self.fails("try")
+        self.assertEqual(code, 3, err)
+        self.assertFalse(store.all_tasks())
+        self.assertFalse(list(cli.try_dir().glob("*")) if cli.try_dir().exists() else [])
+
+    # wb models
+
+    def test_wb_models_with_no_gpu_model_and_an_api_role_shows_the_api_section(self):
+        # #1026: it died with "no local models" and an API-only user's roles never showed
+        self.no_gpu()
+        self.routes(trivial={"via": "api", "api": "acme/coder-flash", "ts": time.mktime((2026, 11, 20, 12, 0, 0, 0, 0, -1))})
+        out = run_wb("models")
+        self.assertTrue(out.startswith("no local models: "), out)
+        self.assertIn("API (OpenCode /connect):", out)
+        self.assertIn("  significant  gpu (no local model: none can run)", out)
+        self.assertIn("  trivial      acme/coder-flash  ready · thinking off · set by you 11-20", out)
+        self.assertIn("keys: acme (stored), deepinfra (stored), nolimit (stored), oauthco (OAuth login: "
+                      "can't run, needs a key wb can hold outside the lane), xenv (environment: can't run, "
+                      "needs a key wb can hold outside the lane)", out)
+        self.assertIn(f"opencode 1 (free: {cli.FREE_NOTE})", out)
+        self.assertNotIn("coder-pro", out)                          # counts, never ids
+        Path(os.environ["WB_ROUTES"]).unlink()
+        self.catalog([])                                            # nothing API: as before
+        self.models.hosted(fresh=True)
+        code, err = self.fails("models")
+        self.assertEqual(code, 1)
+        self.assertIn("no local models: ", err)
+
+    def test_wb_models_names_an_api_roles_state_and_a_gpu_user_gets_two_lines(self):
+        self.catalog([api_entry("opencode", "big-pickle-free", cost=[{"input": 0, "output": 0}])], [])
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(
+            {"provider": {k: v for k, v in OPENCODE_CONFIG["provider"].items() if k != "cloud"}}))
+        self.models.hosted()                                        # a GPU-only user reads the cache
+        out = run_wb("models")
+        tail = out.split("API (OpenCode /connect)")[1].strip().splitlines()
+        self.assertEqual(tail, [": none set up, every role on the GPU",
+                                f"  catalog: opencode 1 (free: {cli.FREE_NOTE}) (wb models --api <text> lists ids)"])
+        self.catalog(DISCOVERY_CATALOG, DISCOVERY_AUTH)
+        self.models.hosted(fresh=True)
+        self.routes(significant={"via": "api", "api": "oauthco/chat-1"}, trivial={"via": "api", "api": "gone/x"},
+                    writing={"via": "gpu", "api": "acme/coder-pro"})
+        out = run_wb("models")
+        self.assertIn("significant  oauthco/chat-1  can't run: needs a key wb can hold outside the lane", out)
+        self.assertIn("trivial      gone/x  not in OpenCode's catalog now", out)
+        self.assertIn("writing      gpu (the router's pick above) · API kept: acme/coder-pro", out)
+        Path(os.environ["WB_ROUTES"]).write_text("{not json")
+        self.assertIn("roles: routes.json can't be read", run_wb("models"))
+
+    def test_wb_models_counts_400_openrouter_ids_on_one_line(self):
+        ids = [f"vendor{i % 7}/model-{i:03d}" for i in range(400)]
+        self.catalog([api_entry("openrouter", x) for x in ids],
+                     [key_row("openrouter", "OpenRouter", STORED)])
+        self.models.hosted()                                        # a GPU-only user reads the cache
+        out = run_wb("models")
+        self.assertRegex(out, r"catalog: (cloud 1, )?openrouter 400\n")  # cloud: the fixture's off-machine one
+        self.assertIn("keys: openrouter (stored)", out)
+        self.assertFalse([x for x in ids if x in out])
+
+    def test_wb_models_api_lists_at_most_30_ids_then_how_many_more(self):
+        self.catalog([api_entry("openrouter", f"deepseek/deep-{i:03d}") for i in range(45)]
+                     + [api_entry("opencode", "deep-free", cost=[{"input": 0, "output": 0}]),
+                        api_entry("acme", "other")], [key_row("openrouter", "OpenRouter", STORED)])
+        out = run_wb("models", "--api", "DEEP").splitlines()
+        self.assertEqual(len(out), cli.API_LIST_MAX + 1)
+        self.assertEqual(out[-1], "and 16 more: a longer text narrows it")
+        self.assertEqual(out[0], f"opencode/deep-free  200K · free: {cli.FREE_NOTE}")
+        self.assertEqual(out[1], "openrouter/deepseek/deep-000  200K · $0.2/$0.6 per 1M in/out")
+        self.assertEqual(out[1:-1], sorted(out[1:-1]))
+        self.assertNotIn("acme/other", "\n".join(out))
+        self.assertIn("no API model in OpenCode's catalog contains 'zzz'", run_wb("models", "--api", "zzz"))
+        self.assertFalse(Path(os.environ["WB_ROUTES"]).exists())   # it lists only
+
+    def test_wb_models_set_default_stays_a_gpu_model_with_an_api_role_set(self):
+        self.routes(significant={"via": "api", "api": "acme/coder-flash"})
+        out = run_wb("models", "--set-default")
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        self.assertEqual(self.models.discover()[cfg["model"]].kind, "gpu")
+        self.assertIn(f"→ {cfg['model']}", out)
+        self.no_gpu()
+        config = Path(os.environ["WB_OPENCODE_CONFIG"])
+        config.write_text(json.dumps({"provider": {}, "model": "kept/as-it-was"}))
+        before = config.read_bytes()
+        code, err = self.fails("models", "--set-default")          # none: it dies as before
+        self.assertEqual(code, 1)
+        self.assertIn("no local models: ", err)
+        self.assertEqual(config.read_bytes(), before)              # OpenCode's default untouched
+
+    def test_wb_models_for_a_gpu_only_user_never_reads_opencodes_catalog_again(self):
+        # #1026's review: every HOSTED_TTL (or config change) a GPU-only user's wb models ran two
+        # OpenCode starts for the catalog, 4 s with a slow one and up to CATALOG_TIMEOUT hung; main
+        # never did. Fails with the section's hosted_doc() call for every user.
+        built = []
+        real = self.models._build_hosted
+
+        def build():
+            built.append(1)
+            return real()
+        with mock.patch.object(self.models, "_build_hosted", build):
+            out = run_wb("models")
+            self.assertEqual(built, [])
+            self.assertIn("API (OpenCode /connect): none set up, every role on the GPU\n"
+                          "  catalog: not read yet (wb models --api <text> reads it)\n", out)
+            run_wb("models", "--api", "coder")                      # asked for: read
+            self.assertEqual(len(built), 1)
+            hosted = self.models.hosted_path()
+            store.write_json(hosted, {**store.read_json(hosted), "ts": 0})   # stale: still the cache
+            self.assertIn("acme 2", run_wb("models"))
+            self.assertEqual(len(built), 1)
+            self.routes(trivial={"via": "api", "api": "acme/coder-flash"})   # a user of API: read
+            self.assertIn("trivial      acme/coder-flash  ready", run_wb("models"))
+            self.assertEqual(len(built), 2)
+
+    def test_wb_models_survives_a_set_date_that_isnt_a_time(self):
+        # #1026's review: a hand-edited ts of 1e20 (OverflowError) or NaN (ValueError: json reads
+        # it) crashed wb models for every user once a role was on API or kept an api id
+        for ts in ("1e20", "-1e20", "NaN", "Infinity", '"11-20"'):
+            Path(os.environ["WB_ROUTES"]).write_text(
+                '{"v": 1, "roles": {"significant": {"via": "gpu", "api": "acme/coder-flash", "ts": %s}}}' % ts)
+            out = run_wb("models")
+            self.assertIn("significant  gpu (the router's pick above) · API kept: acme/coder-flash\n", out, ts)
+
+    def test_a_routes_json_that_cant_be_read_is_one_line_and_wb_try_names_no_cap(self):
+        # #1026's review: a broken routes.json never reads as every role on the GPU (#1014)
+        Path(os.environ["WB_ROUTES"]).write_text("{not json")
+        out = run_wb("models")
+        self.assertIn("API (OpenCode /connect):\n  roles: routes.json can't be read: wb route sets them again\n", out)
+        task = types.SimpleNamespace(spec={"via": "api", "role": "trivial", "model": "acme/coder-flash"})
+        self.assertTrue(cli._try_api_line(task).endswith("counts toward today's API spend"))
+
+    # verify, shot, --unload-for-tests
+
+    def api_task(self) -> store.Task:
+        """Verify's task under review, then written as an API task (#1016's keys), as wb start would.
+        Its GPU round runs without the catalog: the file is outside the agent's lane."""
+        catalog = os.environ.pop("WB_FAKE_CATALOG")
+        # Verify.setUp's body, not the call: its Base.setUp again took this test's environment as
+        # the one to restore, and later classes ran with its WB_GPU_DIR and WB_HOME
+        (self.repo / "calc.py").write_text("def kw(watts):\n    return watts\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "calc"], check=True)
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        wt = store.Task("t").worktree
+        (wt / "calc.py").write_text("def kw(watts):\n    return watts / 1000\n")
+        (wt / "tests").mkdir()
+        (wt / "tests" / "__init__.py").write_text("")
+        (wt / "tests" / "test_calc.py").write_text(
+            "import unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_kw(self):\n        self.assertEqual(kw(250000), 250)\n")
+        os.environ["WB_FAKE_CATALOG"] = catalog
+        task = store.Task("t")
+        store.write_json(task.dir / "task.json", {**task.spec, "model": "acme/coder-flash", "via": "api",
+                                                 "role": "trivial", "provider": "acme"})
+        return task
+
+    def test_verify_and_shot_on_an_api_task_make_no_model_call(self):
+        task = self.api_task()
+        runs = Path(self.tmp.name) / "fake-runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(runs)
+
+        def no(*a, **k):
+            raise AssertionError("a model call")
+        with mock.patch.object(self.models, "make_resident", no), mock.patch.object(self.models, "_post", no):
+            out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
+            self.assertIn("proven: it fails on the base", out)
+            out = run_wb("shot", "t", "--capture", Shot.CAPTURE)
+            self.assertIn("screenshots of t", out)
+        self.assertFalse(runs.exists() and runs.read_text().strip())
+        self.assertEqual(task.spec["model"], "acme/coder-flash")
+
+    def test_an_api_tasks_checks_with_unload_for_tests_take_this_machines_pool(self):
+        from workbench import media, verify
+        task = self.api_task()
+        store.write_json(task.dir / "task.json", {**task.spec, "unload_for_tests": True,
+                                                 "test_cmd": "python3 -m unittest tests.test_calc"})
+        took = []
+
+        @contextlib.contextmanager
+        def pool(who, say, wait, **k):
+            took.append((who, wait))
+            yield
+
+        def no(*a, **k):
+            raise AssertionError("make_resident")
+        with mock.patch.object(media, "gpu", pool), mock.patch.object(self.models, "make_resident", no), \
+                mock.patch.object(self.models, "free_gpu", no):
+            out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
+            self.assertIn("proven", out)
+            self.assertEqual(took, [("t", True)])
+            with runner._tests_gpu(task, types.SimpleNamespace(pool=None)):   # an API task's NoLease (#1015)
+                pass
+        self.assertEqual(took, [("t", True)] * 2)
+
+
 if __name__ == "__main__":
     unittest.main()

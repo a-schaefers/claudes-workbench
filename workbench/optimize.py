@@ -64,11 +64,13 @@ def candidates() -> list[models.Model]:
     the user keeps loaded (models.json `keep_loaded`, by id, by name, or an alias of the same
     model): each probe unloads and reloads its model, and a background measurement dropped the
     user's autocomplete model, which #215 protected only from eviction (#254, the audit of 1.2).
-    Nor this machine's when it has no GPU Ollama can use (no_gpu_here)."""
+    Nor this machine's when it has no GPU Ollama can use (no_gpu_here). Nor an API model, an
+    Ollama cloud one included, whatever a later discovery lists: a probe or a --bench replay
+    would send code to ollama.com or a paid provider unasked (#1026)."""
     held = models.keep_loaded()
     bare: dict = {}
     return [m for m in models.discover().values()
-            if m.engine == "ollama" and m.id not in held and not models._kept_name(m.name, held)
+            if m.engine == "ollama" and getattr(m, "kind", "gpu") == "gpu" and not m.cloud and m.id not in held and not models._kept_name(m.name, held)
             and (m.remote or not no_gpu_here(m, bare)) and models.status(m)["available"]]
 
 

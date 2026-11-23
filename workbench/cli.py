@@ -4079,9 +4079,14 @@ def cmd_models(a):
     if getattr(a, "json", False):
         print(json.dumps(_models_json()))
         return
+    if a.api is not None:
+        return _api_list(a.api)
     found = models.discover()
     if not found:
-        die(f"no local models: {models.why_none()}")
+        if a.set_default or not (api := _api_section(False))[1]:
+            die(f"no local models: {models.why_none()}")
+        print(f"no local models: {models.why_none()}\n\n" + "\n".join(api[0]))
+        return
     # one pass's answers for every status and ranking below: a server asleep is asked once,
     # not per model and again per size (31 s for a wb remote box of 4 models, #705)
     down, catalog = set(), {}
@@ -4112,6 +4117,7 @@ def cmd_models(a):
         for m in found.values():
             if not router.allowed(m, size):
                 print(f"   {m.id:34} not for {size} tasks (wb model sizes)")
+    print("\n" + "\n".join(_api_section(True)[0]))
     if a.set_default:
         top, why = router.choose("significant", down=down, catalog=catalog)
         if top is None:
@@ -4156,6 +4162,142 @@ def _models_json() -> dict:
     return {"gpu": gpu, "api": api, "used": used, "free_line": privacy.FREE_LINE,
             "optimize": {"done_at": st.get("done"), "models": len(st.get("models") or {}),
                          "running": bool(optimize.running(st))}, "media": _media_json()}
+
+
+API_LIST_MAX = 30  # wb models --api: ids at most (OpenRouter alone lists 300+, #1026)
+FREE_NOTE = privacy.FREE_LINE.removeprefix("free: ")  # #1021's words
+CANT_HOLD = "can't run, needs a key wb can hold outside the lane"
+
+
+def _set_on(ts) -> str:
+    """A role's `· set by you MM-DD`, or "" when its ts isn't a time: a hand-edited 1e20 or NaN
+    (json reads it) crashed wb models for every user (#1026's review)."""
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return ""
+    try:
+        return f" · set by you {time.strftime('%m-%d', time.localtime(ts))}"
+    except (OverflowError, ValueError, OSError):
+        return ""
+
+
+def _held(key: str) -> str:
+    """A provider's key source as wb models says it (Model.key, #1013)."""
+    if key == "stored":
+        return "stored"
+    if key == "ollama":
+        return "Ollama's login"
+    what = ("environment" if key.startswith("env:") else "OAuth login" if key == "oauth" else
+            "cloud signing" if key == "signing" else "in a config file")
+    return f"{what}: {CANT_HOLD}"
+
+
+def _api_section(gpu: bool) -> tuple[list[str], bool]:
+    """wb models' API section (#1026): each role, each provider's key, one count per provider of
+    OpenCode's catalog, never its ids (hundreds of lines in Claude's tokens). No completion and no
+    probe of a provider: hosted.json, status's key source and api-health.json only, and the
+    catalog read again (hosted_doc) only with no GPU model or a role on API. (the lines, whether
+    the user uses API at all: a role on API or a stored key; the GPU-only user gets two lines)."""
+    try:
+        doc_r = routes.read()
+    except routes.RoutesError:
+        doc_r = None
+    on_api = [r for r in routes.ROLES if routes.effective_via(doc_r, r) == "api"] if doc_r else []
+    # the catalog is read again (two OpenCode starts, a hung one CATALOG_TIMEOUT) only for a user
+    # of API: a GPU-only user's wb models reads hosted.json as it is, and waits as before (#1026's
+    # review: 4 s on a slow read, every HOSTED_TTL)
+    doc = models.hosted_doc() if on_api or not gpu else models._read_hosted()
+    cat = models._models_of(doc)
+    provs = doc.get("providers") if isinstance(doc.get("providers"), dict) else {}
+    keys = {pid: str(p.get("key") or "") for pid, p in sorted(provs.items())
+            if isinstance(p, dict) and str(p.get("key") or "") not in ("", "none")}
+    used = bool(on_api) or "stored" in keys.values()
+    counts: dict = {}
+    for m in cat.values():
+        n, free = counts.get(m.provider, (0, 0))
+        counts[m.provider] = (n + 1, free + m.free)
+    listed = ", ".join(f"{pid} {n}" + ("" if not free else f" (free: {FREE_NOTE})" if free == n
+                                       else f" ({free} free: {FREE_NOTE})")
+                       for pid, (n, free) in sorted(counts.items()))
+    catalog = f"catalog: {listed}" if listed else \
+        "catalog: not read yet (wb models --api <text> reads it)" if not doc else "catalog: none" + (
+            f" (OpenCode's catalog can't be read: {err})" if (err := str(doc.get("error") or "")) else "")
+    if not used and not keys and doc_r and not any(x.get("api") for x in doc_r["roles"].values()):
+        return (["API (OpenCode /connect): none set up, every role on the GPU",
+                 f"  {catalog}" + (" (wb models --api <text> lists ids)" if listed else "")], False)
+    lines = ["API (OpenCode /connect):"]
+    if not doc_r:
+        lines.append("  roles: routes.json can't be read: wb route sets them again")
+    else:
+        for role in routes.ROLES:
+            r = doc_r["roles"][role]
+            when = _set_on(r.get("ts"))
+            if routes.effective_via(doc_r, role) == "api":
+                mid = str(r.get("api") or "")
+                m = cat.get(mid)
+                st = models.status(m) if m else None
+                state = ("no API model set" if not mid else "not in OpenCode's catalog now" if not st
+                         else "ready" if st["available"] else st["why"])
+                lines.append(f"  {role:12} {mid or 'api'}  {state} · thinking {r.get('thinking') or 'off'}{when}")
+            else:
+                pick = r.get("gpu") or "auto"
+                lines.append(f"  {role:12} gpu " + (
+                    ("(the router's pick above)" if gpu else "(no local model: none can run)")
+                    if pick == "auto" else pick) + (f" · API kept: {r['api']}" if r.get("api") else "") + when)
+    lines.append("  keys: " + (", ".join(f"{pid} ({_held(k)})" for pid, k in keys.items())
+                               or "none: /connect in OpenCode stores one"))
+    lines.append(f"  {catalog}")
+    if listed:
+        lines.append("  wb models --api <text> lists ids")
+    return lines, used
+
+
+def _window(n) -> str:
+    return "?" if not isinstance(n, int) or n <= 0 else f"{n / 1e6:.3g}M" if n >= 1e6 else f"{n // 1000}K"
+
+
+def _api_list(text: str) -> None:
+    """wb models --api TEXT: the catalog's ids containing TEXT (any case), sorted, at most
+    API_LIST_MAX, each with its window, its price per 1M tokens and the free-model note. It lists
+    only: a role is set by wb route, with the user's yes (#1026)."""
+    hits = sorted((m for mid, m in models.hosted().items() if text.lower() in mid.lower()),
+                  key=lambda m: m.id)
+    if not hits:
+        err = models.hosted_error()
+        print(f"no API model in OpenCode's catalog contains {text!r}"
+              + (f" (the catalog can't be read: {err})" if err else ": wb models counts them per provider"))
+        return
+    for m in hits[:API_LIST_MAX]:
+        cost = m.config.get("cost")
+        rate = next((c for c in cost if isinstance(c, dict) and not c.get("tier")), None) \
+            if isinstance(cost, list) else None
+        price = f" · ${rate.get('input') or 0:g}/${rate.get('output') or 0:g} per 1M in/out" \
+            if rate and not m.free else ""
+        # the catalog's own window, the model's fact (#1017 plans every API task to API_WINDOW)
+        own = (m.extra.get("catalog_limit") or m.config.get("limit") or {}).get("context")
+        print(f"{m.id}  {_window(own)}{price}"
+              + (f" · free: {FREE_NOTE}" if m.free else ""))
+    if len(hits) > API_LIST_MAX:
+        print(f"and {len(hits) - API_LIST_MAX} more: a longer text narrows it")
+
+
+def _try_api_line(task: store.Task) -> str:
+    """wb try's one line when its sample went to the trivial role's API model (#1026), from the
+    task.json keys wb start --role writes (`via`, `role`, #1016): a GPU task, or one from before
+    them (read as GPU), says nothing, and its output is unchanged."""
+    spec = task.spec
+    if spec.get("via", "gpu") != "api" or spec.get("role") != "trivial":
+        return ""
+    mid = str(spec.get("model") or "")
+    m = models.lookup(mid, cached=True)
+    who = models.provider_name(m) if m else str(spec.get("provider") or mid.split("/", 1)[0])
+    try:
+        cap = routes.read().get("day_usd")
+    except routes.RoutesError:
+        cap = None
+    toward = f"today's ${cap:g} cap" if isinstance(cap, (int, float)) and not isinstance(cap, bool) \
+        else "today's API spend"
+    return (f"wb try: the trivial role is API ({mid}, {who}): the sample's code goes there, and its "
+            f"cost counts toward {toward}")
 
 
 def cmd_stats(a):
@@ -5943,6 +6085,8 @@ def cmd_try(a):
         if not store.Task(name).exists:
             shutil.rmtree(d, ignore_errors=True)
         raise
+    if line := _try_api_line(store.Task(name)):
+        print(line)
     print(f"the sample project: {d}")
     print(f"hidden check, at review: {py} {shlex.quote(str(TRY / 'check.py'))} "
           f"{shlex.quote(str(store.Task(name).worktree))}")
@@ -7062,9 +7206,12 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_relocate)
     s = sub.add_parser("models", help="the local models, and which the router picks per task size")
     s.add_argument("--set-default", action="store_true",
-                   help="make the router's pick for significant tasks OpenCode's default model")
+                   help="make the router's pick for significant tasks OpenCode's default model "
+                   "(a GPU model: never an API one)")
     s.add_argument("--json", action="store_true", help="the pane's lists, asking no server: the GPU "
                    "models (window, sizes, cards), the API models wb can run, optimize's state")
+    s.add_argument("--api", metavar="TEXT", help="list the API model ids in OpenCode's catalog that "
+                   f"contain TEXT (at most {API_LIST_MAX}), with window and price; lists only")
     s.set_defaults(f=cmd_models)
     s = sub.add_parser("model", help="add a model to OpenCode (--pull downloads it), retire one, "
                                      "limit the task sizes it is routed, or carry a renamed one's record")
@@ -7173,7 +7320,8 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_optimize)
     s = sub.add_parser("try", help="a sample task that proves the setup: a tiny project, its spec "
                        "started as a trivial trial, and the hidden check to run at review")
-    s.add_argument("--model", help="a model id or fragment (default: the router's pick)")
+    s.add_argument("--model", help="a model id (a GPU model's fragment will do; an API model "
+                   "never matches one); default: the router's pick for a trivial task")
     s.set_defaults(f=cmd_try)
     s = sub.add_parser("remote", help="use the Ollama on another machine (LAN, tailnet): its "
                        "provider, marked local, and its tool-capable models registered")
@@ -7200,7 +7348,7 @@ def parser() -> argparse.ArgumentParser:
     x = bs.add_parser("rm", help="remove cases, with their bundles (their results stay)")
     x.add_argument("case", nargs="+")
     x = bs.add_parser("run", help="replay the cases in the background, one at a time")
-    x.add_argument("--model", nargs="+", help="default: every model that can run and takes the case's size")
+    x.add_argument("--model", nargs="+", help="default: every GPU model that can run and takes the case's size")
     x.add_argument("--case", nargs="+", help="default: every case")
     x.add_argument("--skill", nargs="+", help="hand these library skills to every replay")
     x.add_argument("--label", help="a name for this variant (a workbench branch, a skill), to compare by")
