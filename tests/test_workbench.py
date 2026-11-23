@@ -32196,6 +32196,22 @@ class FirstRunApi(Base):
         self.assertIn("\nroles\n  significant  GPU (router)\n", out)
         self.assertLess(out.index("\nroles\n"), out.index("\nreal results (wb stats)"))
 
+    def test_scout_says_a_fraction_of_a_cent_as_wb_savings_and_wb_stats_do(self):
+        # wave 2's merge: scout's :.2f said $0.00 (a task paid, read as free) where wb savings --api
+        # and wb stats' `paid` say $0.004, and $0.00 of no day cap where the pane says $0
+        self.catalog(ROUTES_CATALOG[-3:], [key_row("deepseek", "DeepSeek", STORED)])
+        runner.models.hosted(fresh=True)
+        self.assertEqual(self.wb("route", "trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        lines = cli.scout_api_lines()
+        self.assertIn("api spend, the last 7 days: $0 of $5/day at most", lines)
+        store.append_jsonl(store.home() / "results.jsonl", {
+            "ts": store.now() - 3600, "task": "t-0", "outcome": "accepted", "model": "deepseek/deepseek-flash",
+            "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 0.004, "source": "opencode"}})
+        lines = cli.scout_api_lines()
+        self.assertIn("  deepseek/deepseek-flash  1 task(s) · 100% accepted · ~$0.004/task", lines)
+        self.assertIn("api spend, the last 7 days: $0.004 of $5/day at most (deepseek $0.004)", lines)
+        self.assertIn("$0.004", run_wb("savings", "--api"))
+
     def test_scout_has_no_api_section_with_no_provider_and_no_api_role(self):
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
         del cfg["provider"]["cloud"]                               # the fixture's off-machine provider
@@ -32480,7 +32496,7 @@ class BusyGpu(Base):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + f"every one of deepseek's {cli.models.API_PARALLEL} slots is taken")
         with mock.patch.object(cli.meter, "refusal",
-                               lambda m, role: f"{role} role: API spend today is $5 of the $5 day cap"):
+                               lambda m, role, advice=True: f"{role} role: API spend today is $5 of the $5 day cap"):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + "trivial role: API spend today is $5 of the $5 day cap")
         with mock.patch.object(cli.privacy, "local_only", lambda repo, sub: str(repo)):
@@ -32489,6 +32505,23 @@ class BusyGpu(Base):
             code, out, err = self.begin("t-local", "--role", "trivial")
         self.assertEqual(code, 4)                                    # exit 4 as before, after the note
         self.assertIn(f"note: {why}{self.repo.name} is kept local", out)
+
+    def test_a_spent_cap_note_never_asks_for_more_spend_or_the_gpu_the_role_is_on(self):
+        # wave 2's merge: the busy note carried an API start's refusal, "Ask the user: a higher cap
+        # (wb route cap <usd>), the role on the GPU (wb route trivial gpu), or tomorrow", for a
+        # role on the GPU already, whose start only waits for it
+        self.opt_in()
+        store.append_jsonl(cli.meter.ledger_path(), {
+            "ts": time.time(), "day": cli.meter.day(), "kind": "step", "task": "other", "round": 1,
+            "provider": "deepseek", "model": "deepseek/deepseek-flash", "usd": 5.0, "source": "opencode"})
+        code, out, err = self.begin("t-capped", "--role", "trivial")
+        self.assertEqual(code, 4, err)
+        self.assertIn("note: the GPU is busy, and the trivial role's API model deepseek/deepseek-flash can't "
+                      "take it: trivial role: API spend today is $5 of the $5 day cap (it resets at local "
+                      "midnight)\n", out)
+        self.assertNotIn("Ask the user", out)
+        self.assertIn("Ask the user: a higher cap", cli.meter.refusal(runner.models.lookup("deepseek/deepseek-flash"),
+                                                                     "trivial"))  # an API start's, as before
 
     def test_a_standing_copy_unnamed_keeps_a_busy_start_off_api(self):
         # wave 2's merge: _worktree_setup checked commands.json's standing copy/siblings as a GPU

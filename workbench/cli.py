@@ -705,8 +705,9 @@ def _busy_api(role: str, a, repo: Path, sub: str | None):
         why = f"{repo.name} is kept local ({kept})"
     if why is None:  # commands.json's standing copy/siblings, unnamed (#1021), as an API start's
         why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m)) or None
-    if why is None:  # no price, or today at the day cap (#1019)
-        why = meter.refusal(m, role)
+    if why is None:  # no price, or today at the day cap (#1019), without an API start's advice:
+        # the role is on the GPU and this start only waits for it (wave 2's merge)
+        why = meter.refusal(m, role, advice=False)
     if why:
         return f"the GPU is busy, and the {role} role's API model {mid} can't take it: {why}"
     routed = routes.busy_routed(doc, role, m)
@@ -4517,7 +4518,7 @@ def _api_record(mid: str, since: float) -> str:
         return "no real tasks yet"
     out = [f"{len(rows)} task(s)", f"{100 * sum(r.get('outcome') == 'accepted' for r in rows) // len(rows)}% accepted"]
     if paid := [c for r in rows if (c := results.row_cost(r)) is not None]:
-        out.append(f"~${sum(paid) / len(paid):.2f}/task")
+        out.append(f"~{savings.usd(sum(paid) / len(paid))}/task")  # as wb stats' `paid` says it
     limited = set()
     for r in rows:
         evs, _ = store.read_jsonl(store.home() / "tasks" / str(r.get("task")) / "events.jsonl")
@@ -4549,9 +4550,11 @@ def scout_api_lines() -> list[str]:
         out += [f"  {mid}  {_api_record(mid, now - SCOUT_API_DAYS * 86400)}" for mid in mids]
     cap = f"{routes.money(doc['day_usd'])}/day at most" if doc["day_usd"] is not None else "no day cap"
     t = savings.api_totals(store.results(trials=True), now - SCOUT_SPEND_DAYS * 86400)  # #1022
-    by = ", ".join(f"{p} ${v['cost']:.2f}" for p, v in sorted(t["by_provider"].items(), key=lambda x: -x[1]["cost"])
+    # savings.usd, as wb savings --api and the pane say the same dollars: :.2f said $0.00 for a
+    # task paid a fraction of a cent (wave 2's merge)
+    by = ", ".join(f"{p} {savings.usd(v['cost'])}" for p, v in sorted(t["by_provider"].items(), key=lambda x: -x[1]["cost"])
                    if v["cost"])
-    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: ${t['cost']:.2f} of {cap}"
+    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {savings.usd(t['cost'])} of {cap}"
                + (f" ({by})" if by else "")
                + (f"; {t['unknown']} task(s) with no price" if t.get("unknown") else ""))
     by_prov: dict[str, list] = {}

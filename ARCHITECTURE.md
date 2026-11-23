@@ -562,7 +562,7 @@ inode and size tell a new or rewritten one), so the 5 s tick never re-reads it w
 keyhole's thread and the runner's book at once, and a total written after a newer one would leave
 it under the ledger) is the task's own; #1022's results rows and stats come later.
 
-**The cap at start** (`meter.refusal(m, role=None)`, exit 3; `routes.resolve` on both API paths:
+**The cap at start** (`meter.refusal(m, role=None, advice=True)`, exit 3; `routes.resolve` on both API paths:
 a `--model` before the dialog, and `cli._route_start`'s dry run too, a role's API model before it starts): an API model that isn't a plan or free is refused with no
 price (`<id>: OpenCode's catalog gives no price for it, so the day cap can't be kept`) and at the
 cap (no cap at all is #1014's to refuse for a role; a task that meets none, a routes.json edited by
@@ -572,7 +572,8 @@ saying so, `meter.UNREADABLE`, `routes.json can't be read (<why>), so the day ca
 route shows it`, never NO_CAP's advice, `meter.no_cap`; an unpriced model that started anyway is
 stopped as well, its room negative and `stop_reason` the NO_PRICE line): `trivial role: API spend today is $5.03 of the $5 day cap (it resets at local midnight).
 Ask the user: a higher cap (wb route cap <usd>), the role on the GPU (wb route trivial gpu), or
-tomorrow`. `meter.tail(m)` is the start line's part, ` · today $0.42 of $5`, or a plan's ` · plan
+tomorrow` (the busy opt-in's note, `advice=False`, ends at `midnight)`: its role is on the GPU, the start only
+waits). `meter.tail(m)` is the start line's part, ` · today $0.42 of $5`, or a plan's ` · plan
 usage (OpenCode Go): 1.2M tokens today`, which wb start's model line ends with (`cli.cmd_start`).
 
 **The guard `spend`, inside a round** (`runner._spend_guard`, each tick after the stuck checks, an
@@ -3175,7 +3176,7 @@ engine with no `notes` says "licence: not noted"; `audio.coverage`, #398), and i
 each role's API model's record over `SCOUT_API_DAYS` 30 (`cli._api_record`: tasks, accepted share,
 `~$/task` from #1022's `results.row_cost`, rate-limited rounds from the tasks' `rate_limited` events),
 the spend over `SCOUT_SPEND_DAYS` 7 beside the day cap (#1022's `savings.api_totals`, trials
-included, per provider), and one line per connected provider counting its models with tool calls
+included, per provider; its dollars and `~$/task` by `savings.usd`, as `wb savings --api` and the pane say them), and one line per connected provider counting its models with tool calls
 (free ones, those the catalog doesn't say, a key wb can't hold): never each id, as a provider may list
 hundreds. Only hosted.json's catalog: no network beyond it. Claude researches primary
 sources, recommends keep / add / retire and changes nothing without the user's yes; `wb scout --done
@@ -3325,7 +3326,7 @@ task.json's `route` (`busy: true`, `routes.busy_routed`, with an OpenRouter role
 `routes.resolve`'s). A role with no API model queues or exits 4
 as before; one whose API model can't take it now (not in the catalog, no key, its provider's slots
 full, a repo or task kept local, a standing commands.json `copy`/`siblings` the command line
-doesn't name, `cli._standing_gap`, the day cap reached) does too, after `note: the GPU is busy, and the <role>
+doesn't name, `cli._standing_gap`, the day cap reached, said without an API start's advice) does too, after `note: the GPU is busy, and the <role>
 role's API model <id> can't take it: <why>`. A running task never moves, and nothing goes from API to
 the GPU. Turning it to `api` takes the dialog's yes (it can spend) and a day cap (`NO_CAP`); back to
 `wait` none. While it is on, any change that lets a role newly start on an API model while the GPU is
