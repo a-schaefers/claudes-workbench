@@ -1305,7 +1305,7 @@ def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
     over = {**(extra.get(pid) or {}), **(extra.get(mid) or {})}
     cloud = bool(entry.get("cloud"))
     config = {k: v for k, v in entry.items() if k not in ("free", "cloud")}
-    if isinstance(config.get("limit"), dict):  # the catalog's own; nothing shows it yet (#1017)
+    if isinstance(config.get("limit"), dict):  # the catalog's own: wb models --api shows its window (#1026)
         over = {**over, "catalog_limit": dict(config["limit"])}
     config = api_limits(config)
     return Model(id=mid, provider=pid, name=str(entry.get("name") or mid.split("/", 1)[1]),

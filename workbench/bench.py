@@ -597,7 +597,9 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
         if api := [m.id for m in ms if getattr(m, "kind", "gpu") == "api"]:  # replays take the GPU lease (#1013)
             raise RuntimeError(f"{api[0]} is an API model: wb bench replays on GPU models only")
     else:
-        ms = [m for m in found.values() if models.status(m)["available"]]
+        # GPU models only, whatever a later discovery lists: "every model" never reaches a paid
+        # provider or an Ollama cloud model unasked (#1026)
+        ms = [m for m in found.values() if getattr(m, "kind", "gpu") == "gpu" and models.status(m)["available"]]
     if not ms:
         raise RuntimeError("no model that can run (wb models)")
     pairs = [(c, m.id) for c in chosen for m in ms
