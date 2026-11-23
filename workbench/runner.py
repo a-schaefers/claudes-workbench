@@ -211,6 +211,10 @@ def handover_warning(cfg: dict) -> str:
 # allow, and between chunks at least as long as the silence budget. Provider options merge, so
 # the user's own entry keeps the rest; the user's files stay untouched.
 PROVIDER_TIMEOUTS = ("headerTimeout", "chunkTimeout")
+# An API provider reads no long prompt here, and lifting the wait took away OpenCode's only
+# guard on a request its provider never starts (DeepSeek closes one not started within 10
+# minutes): its header wait is API_HEADER_S instead of none (#1017).
+API_HEADER_S = 600
 
 
 def provider_timeouts(task: store.Task) -> dict:
@@ -219,7 +223,8 @@ def provider_timeouts(task: store.Task) -> dict:
     if not pid:
         return {}
     chunk = max(900, int(float(limit(task, "silence")) + 60)) * 1000
-    return {"provider": {pid: {"options": {"headerTimeout": False, "chunkTimeout": chunk}}}}
+    header = API_HEADER_S * 1000 if api_entry(task) else False
+    return {"provider": {pid: {"options": {"headerTimeout": header, "chunkTimeout": chunk}}}}
 
 
 # A task's limits were fixed in task.json at wb start, so a task on a model not yet measured kept
@@ -273,15 +278,17 @@ def write_config_layer(task: store.Task) -> Path:
         mine = {"permission": users["permission"], **mine}
     wait_ms = int(task.spec.get("ask_timeout", 1200) + 60) * 1000
     try:
-        cfg = models.resolve(task.spec["model"]).config
+        cfg = api_entry(task) or models.resolve(task.spec["model"]).config
     except KeyError:
         cfg = {}
     buffer = compaction_buffer(cfg)
     store.write_json(path, {
         "$schema": "https://opencode.ai/config.json",
-        # the keyhole's base and token last: they are the provider's way out (#1012)
+        # the keyhole's base and token last: they are the provider's way out (#1012); an API
+        # task's capped window and output before them (#1017)
         **models._merge(models._merge(models._merge(models.agent_providers(), provider_timeouts(task)),
-                                      stored_key(task)), keyhole_overlay(task)),
+                                      models._merge(stored_key(task), api_pins(task))),
+                        keyhole_overlay(task)),
         **mine,
         "share": "disabled",  # a user's `share: "auto"` would publish every agent session
         # the user's global small_model (titles, summaries) could be a cloud model whose key
@@ -410,6 +417,53 @@ def model_pins(model_id) -> dict:
     return {"provider": {m.provider: {"models": {m.id.split("/", 1)[1]: entry}}}}
 
 
+def api_pins(task: store.Task) -> dict:
+    """An API task's model pins (model_pins' shape) for the layer file itself: a catalog model has
+    no entry in any config the agent's OpenCode loads, so without them it compacted at the
+    catalog's 1M window and asked for 256K out (#1017). A GPU model's entry is the user's, already
+    loaded. From the task's api_entry, never the catalog again."""
+    entry, model = api_entry(task), str(task.spec.get("model") or "")
+    if not entry or "/" not in model:
+        return {}
+    pid, name = model.split("/", 1)
+    return {"provider": {pid: {"models": {name: entry}}}}
+
+
+# An API task's capped entry is recorded once, when drive resolves its model (status `api_entry`),
+# and every round reads it from there: the layer's pins and compaction buffer, the header guard,
+# where its speed samples go. Worked out again each round from hosted.json, a catalog rebuild that
+# failed mid-task (past HOSTED_TTL or a stamp change; a failed read keeps no models) took them all
+# away: the next round compacted at the catalog's 1M window, asked for 256K out, waited on headers
+# with no limit, and wrote its speeds into this machine's speed.json (the review of #1017). A later
+# runner resolves the model again, and on a catalog that lost it fails the load (_load_failed)
+# rather than run a round unpinned.
+def pin_api(task: store.Task, m: models.Model) -> None:
+    """Status `api_entry`: an API model's `limit` and `options.max_tokens` (models.api_limits'
+    caps), or None on the GPU."""
+    cfg, entry = m.config, None
+    if m.kind == "api" and isinstance(cfg.get("limit"), dict):
+        entry = {"limit": cfg["limit"], **({"options": {"max_tokens": cfg["options"]["max_tokens"]}}
+                                           if "max_tokens" in (cfg.get("options") or {}) else {})}
+    if entry or task.status.get("api_entry"):
+        task.set_status(api_entry=entry)
+
+
+def api_entry(task: store.Task) -> dict | None:
+    """The capped entry pin_api recorded for an API task, or None: a GPU task."""
+    entry = task.status.get("api_entry")
+    return entry if isinstance(entry, dict) and entry else None
+
+
+def fixed_knobs(task: store.Task, m: models.Model) -> dict:
+    """The knobs tuning.tune doesn't choose for this task: Claude's --self-review /
+    --no-self-review; else, for an API model, self_review off (#1017): a round Claude never
+    sees costs money there, so neither the record nor the explore turns it on."""
+    own = task.spec.get("self_review")
+    if own is not None:
+        return {"self_review": int(own)}
+    return {"self_review": 0} if m.kind == "api" else {}
+
+
 # The user's own OPENCODE_CONFIG_CONTENT goes under the rules, not away: replaced, the providers,
 # instructions or permissions kept there were lost to the agent (#347, the audit of 1.4). Its
 # permissions (USERS_RULES: `permissions` and the 1.x `permission` object) go into the layer file,
@@ -440,7 +494,8 @@ def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
                 if isinstance(v, dict) and isinstance(v.get("options"), dict)
                 and any(k in v["options"] for k in PROVIDER_TIMEOUTS)}
     ours = {"share": "disabled", **{k: layer[k] for k in RESTATED if k in layer}}
-    over = models._merge(timeouts, model_pins(layer.get("small_model")).get("provider") or {})
+    pins = model_pins(layer.get("small_model")) or _own_pins(layer)  # an API task's: its record (#1017)
+    over = models._merge(timeouts, pins.get("provider") or {})
     if over := models._merge(over, (keyhole_over or {}).get("provider") or {}):
         ours["provider"] = over
     content = {**users, **ours}
@@ -454,6 +509,17 @@ def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
     if len(text.encode()) > CONFIG_CONTENT_MAX:  # the user's own, too long to add to: wb's alone
         text = json.dumps(ours, separators=(",", ":"))
     return {**dict.fromkeys(PROJECT_CONFIG_OFF, "1"), "OPENCODE_CONFIG_CONTENT": text}
+
+
+def _own_pins(layer: dict) -> dict:
+    """The layer's own entry for its small_model (an API task's api_pins), as model_pins gives
+    one: restated from the task's record when the catalog no longer knows the model (#1017)."""
+    pid, _, name = str(layer.get("small_model") or "").partition("/")
+    entry = (((layer.get("provider") or {}).get(pid) or {}).get("models") or {}).get(name)
+    entry = {k: entry[k] for k in ("limit", "options") if k in entry} if isinstance(entry, dict) else {}
+    if isinstance(entry.get("options"), dict):
+        entry["options"] = {k: v for k, v in entry["options"].items() if k == "max_tokens"}
+    return {"provider": {pid: {"models": {name: entry}}}} if entry else {}
 
 
 # What OpenCode's own environment adds to the agent's: npx and `npm exec` run only what the
@@ -3096,7 +3162,7 @@ def measure_speed(task: store.Task, since: float) -> None:
     try:
         msgs = [m for m in export(sid, task=task).get("messages", [])
                 if ((m.get("time") or {}).get("created") or 0) >= since * 1000]
-        got = router.record_speed(task.spec["model"], msgs)
+        got = router.record_speed(task.spec["model"], msgs, api=api_entry(task) is not None)
         if any(got.values()) and stats.recording():
             had = task.status.get("speeds") or {}
             task.set_status(speeds={k: ((had.get(k) or []) + v)[-TASK_SPEED_KEEP:]
@@ -3127,6 +3193,8 @@ def read_bound(task: store.Task, n: int, rnd: dict, m: models.Model | None = Non
     a request (anything but a timeout): a server that died before the first token read as ~12
     tokens/s, and the model's next rounds and tasks waited an hour of silence (#862)."""
     from . import router
+    if m is not None and m.kind == "api":  # the network's and the queue's time, not a read (#1017)
+        return None
     waited = float(rnd.get("waited") or 0)
     if rnd.get("answered") or rnd.get("interrupted") or waited < BOUND_MIN_S \
             or rnd.get("guard") not in (None, "silence", "round"):
@@ -3443,6 +3511,7 @@ def drive(task: store.Task) -> None:
     # an API task waits for no GPU (#1015): its first line says so
     task.set_status(last="starting" if api else "waiting for the GPU")
     CURRENT["api"] = api  # no GPU power to sample, no keep-alive to renew (run_round)
+    pin_api(task, m)  # an API task's caps, read from the task from now on (#1017)
     # the GPU is not ours to measure when the model is remote; an API model's isn't a GPU's at
     # all, and its savings line is its own (#1015)
     CURRENT["remote"] = m.remote and not api
@@ -3492,9 +3561,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
             _loaded(task, _load(task, lease, m))
             window = (m.config.get("limit") or {}).get("context")
             task.set_status(window=window)
-            own = task.spec.get("self_review")  # --self-review / --no-self-review, else learned
             tuning.tune(task, task.spec["model"], window, {"fresh_at": fresh_ceiling(m.config)},
-                        {} if own is None else {"self_review": int(own)})
+                        fixed_knobs(task, m))  # --self-review / --no-self-review, API's, else learned
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
         handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)

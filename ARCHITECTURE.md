@@ -671,6 +671,30 @@ the handbook take ~5K) a model can't run
 won't register it, `wb doctor` marks it. At 16K no handover fits (`runner.handover_warning`); a
 ceiling below every candidate is the value (`tuning.allowed`).
 
+**An API task's window, output and header wait** (#1017). Its model's entry comes capped from
+`models.api_limits` (*Models: found, loaded, chosen*: 131072 window, 32768 out), and the layer
+file itself carries those pins under `provider.<pid>.models.<name>` (`runner.api_pins`, the
+`model_pins` overlay): a catalog model has no entry in any config the agent's OpenCode loads, and
+the catalog's own numbers would compact at 1M and ask for 256K out (OpenCode caps `max_tokens` at
+`min(limit.output, 256000)`; it asks less as the window's room runs out). `rules_env` restates
+them, as it does a GPU model's. So the buffer is 131072 + 32768 − 131072 + 4096 = 36864, the
+compaction point 71.9% (about 94K tokens, the backstop for a session that only reads, which never
+hands over mid-round), `fresh_ceiling` 66.9% (`fresh_at` 0.4–0.6 allowed, 0.7 and 0.8 not), and
+`handover_warning` says nothing. The real-OpenCode check: `ApiSizing`'s `test_real_opencode_*`,
+which sees 32768 out and a compaction at 100K tokens only with the pins. The header wait: an API
+provider's `headerTimeout` is `runner.API_HEADER_S` (600 s) instead of `false`, since an API reads
+no long prompt here and DeepSeek closes a request not started within 10 minutes; `chunkTimeout`
+stays the larger of 900 s and silence + 60 s. All of it is decided from the task, not the catalog:
+`drive` records the capped entry once, as it resolves the model (`runner.pin_api`, status
+`api_entry`: `{limit, options: {max_tokens}}`, null on the GPU), and each round's layer
+(`api_pins`, the compaction buffer, the header wait, `rules_env`'s restatement) and
+`measure_speed` read it back (`runner.api_entry`). Read again from `hosted.json` each round, a
+catalog rebuild that failed mid-task (it keeps no models) took them all away: the next round
+compacted at 1M, asked 256K out, waited on headers unbounded and wrote its speeds as this
+machine's. A later runner resolves the model again and, on a catalog that lost it, fails the load
+(`_load_failed`) rather than run a round unpinned. Not here yet: the spend cap checked before each
+of `drive`'s `continue`s is #1019's.
+
 **Notes, nudges and interrupts.** `steer.jsonl` (`{ts, text, now}`) holds notes from `wb steer`,
 `wb allow` (to restart the agent under its rule) and the nudge (`by: workbench`);
 `status.steer_taken` counts delivered ones. `_steer_round` opens with `INTERRUPT_HEAD` ("Claude,
@@ -791,7 +815,8 @@ giving up (not a nudge or interrupt), gives a bound (`read_bound`, `router.recor
 prompt (`prompt.md`, `instructions.md`, instruction files at 4 characters a token, plus
 `OPENCODE_PROMPT_TOKENS` 3000) over the seconds waited, low so budgets come out long (#491). No
 bound when the server is down or stopped (`_down`, `_stopped`) or a retry wasn't a timeout: a dying
-server read as ~12 tokens/s and later rounds waited an hour (#862).
+server read as ~12 tokens/s and later rounds waited an hour (#862). Never for an API model: its
+time to first token is the network's and the provider's queue, not a read (#1017).
 
 **Prompt text other code depends on.** Each prompt opens with a head that something else matches
 by prefix; rewording one silently changes those:
@@ -829,6 +854,7 @@ round by `runner.write_config_layer` from `context.layer`) gives it `instruction
 the runner's own limits decide how long a round waits (#491). OpenCode merges provider options, so
 the user's entry keeps the rest. Everything in `rules/<task>/` (config, instruction copies, git
 shim) is outside the lane, so the agent can't rewrite its own rules for its next round.
+An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's window, output and header wait*).
 
 **Instructions** (`context.instruction_files`), absolute paths, in this order:
 - the project's `AGENTS.md` files (`agents_files`), nearest first (*handed back*, below);
@@ -1722,6 +1748,11 @@ cap to a quarter of the window. Trials aren't evidence. `wb tune` shows the reco
 `$WB_HOME/tuning.json` pins (`{"fresh_at": 0.6}`, used as given). A new knob: add it to `KNOBS`,
 read it with `tuning.value(task, name)`.
 
+**API self-review** (#1017). Without `--self-review`/`--no-self-review`, an API task's
+`self_review` is fixed 0 (`runner.fixed_knobs`, passed as `tune`'s `fixed`): a round Claude never
+sees costs money there, so neither the record nor the explore turns it on. `--self-review` is
+Claude's word and runs it.
+
 **Claude's.** `wb` holds the delegation state. Whenever Claude's conversation compacts with this
 session's tasks open in a session that delegated, the mod tells the summary to keep goals,
 decisions and each task's next need, and drop finished tasks' diffs and reports. At a task boundary
@@ -2146,6 +2177,21 @@ chose).
   `env` connection (`env:<NAME>`); a signing provider (`SIGNING`: Bedrock, Vertex) is `signing`;
   `ollama`; else `""` (`_key_source`, the provider's); a keyless free model is `none`, its own: a
   provider holds free and paid models alike, and one source per provider made every sibling `none`.
+- *Its window and output* (`api_limits`, #1017; decision 10 of #1008). `config.limit` is capped once
+  here: `context` `min(catalog, API_WINDOW)` (131072, the slice's saturation point, `GUESS_MAX` ×
+  `BASE_WINDOW`: past it the slice grows only from steps that fit, and every request of a fuller
+  window is paid for, up to 1M tokens a request in a session that only reads); `input` at most that
+  when the catalog has one (`usable_input` reads the smaller); `output` `min(catalog, API_OUTPUT)`
+  (32768; `API_OUTPUT` when none), and `options.max_tokens` that output (DeepSeek honours only
+  `max_tokens`, and 384K out put the compaction point below zero; one reply alone can cost dollars).
+  An entry's own `options.max_tokens` under those is kept, for both: the user's entries (a provider
+  off this machine, an Ollama cloud model) come through here too, and raising theirs to 32768 spent
+  output they never chose. The catalog's own numbers stay in `extra["catalog_limit"]`; nothing
+  shows them yet. Every reader takes the capped window
+  with no change of its own (*An API task's window, output and header wait*; *Couplings*). An
+  entry with no window is left alone: status says it can't run (no guess: it could overrun the
+  real window, and OpenCode would never compact). `is_api(id)`: `lookup(id, cached=True)`'s kind,
+  never a network or OpenCode call.
 - *The cache*, `$WB_HOME/hosted.json` (*Files and formats*): fresh for `HOSTED_TTL` 600 s, rebuilt at
   once when its `stamp` changes (the OpenCode command's files: real path, size, mtime; the mtimes of
   `opencode_config_files()` and models.json; `OPENCODE_CONFIG_CONTENT`'s crc32), or when missing,
@@ -2470,6 +2516,23 @@ caller's `weights`), what it `replaces`, its `variant_of` (#906); only if none, 
 `runner.stretch_limits` raises those no flag gave (`timeouts_given`) where `budgets(m)` is longer,
 into status `limits` (the guards and `chunkTimeout` via `runner.limit`), with a `limits` event
 (#814). A flag's value never changes.
+
+**An API model's budgets** (#1017). `budgets(m)` sends an API model (`m.kind == "api"`) to
+`budgets_api`. Its samples are the account's, not this machine's: `$WB_HOME/speed-api.json`
+(`{"<id>": {"write": [...], "ttft": [seconds...]}}`, `speed-api.lock`). `record_speed` writes there
+for one (its `api`: the task's record, `runner.api_entry`, else `models.is_api`), and
+`record_read_bound` and the runner's `read_bound` skip it: its time to first token is the network
+and the provider's queue, not a read. `api_speed`: the write median and the time to first token's
+90th percentile (`API_TTFT_SHARE`); `speed()` gives its write median. think = 13,500 / write + that
+TTFT, clamped to [420, 1800], with no window / read term (a 1M window and a "read" speed from
+network time gave 200-500 s of prefill no cached request pays). Silence and round scale by think /
+420; silence is at least one reply at the output cap written in silence after the TTFT, plus
+`SILENT_SLACK` 60 s (a reasoning step prints nothing until it ends: the spike), but that floor
+stops at `SILENCE_MAX`, the GPU's own longest silence (900 × 1800 / 420 = 3857 s): uncapped, 2
+tok/s gave 16448 s, and a request hung for good held the round and a provider slot 4.6 hours.
+Round is at least the silence (so at most 10285 s). With write 50 tok/s and TTFT 4 s: 274 s, so
+420/900/2400; at 20 tok/s 679/1703/3880; at 5, 1800/3857/10285. `thinking_stall` and its `wb
+doctor` line skip API models.
 
 **Managing the set.** `wb model add <provider/model> [--pull] [--context N]`: pulls, reads
 `/api/show`, writes `{name, tool_call, reasoning, limit: {context, input: ctx − ctx/8, output:
@@ -4270,7 +4333,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders, or for an API provider's slot), `--trial`, `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), an unreadable routes.json (exit 3, *Roles*), a `--model` naming an API model (exit 3, before any dialog until #1016 turns `cli.API_RUNS` on: `<id> is an API model, and this workbench doesn't start tasks on API models yet: …`, #1013, #1014), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4), an API model's provider already running `API_PARALLEL` (3) tasks (exit 4, `cli._slots_full`; `--queue` waits for a slot, #1015). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why, `next: wb wait <task>`. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2 on the GPU, 1 on API: `cli.AUTO_FIX`, `cli.auto_fix`; a given value is kept and the start line prints the one used, #1017), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders, or for an API provider's slot), `--trial`, `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), an unreadable routes.json (exit 3, *Roles*), a `--model` naming an API model (exit 3, before any dialog until #1016 turns `cli.API_RUNS` on: `<id> is an API model, and this workbench doesn't start tasks on API models yet: …`, #1013, #1014), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4), an API model's provider already running `API_PARALLEL` (3) tasks (exit 4, `cli._slots_full`; `--queue` waits for a slot, #1015). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why, `next: wb wait <task>`. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps first. Review/stuck/failed with no live runner; refuses a moved repo (`wb relocate`), OpenCode 1.x (exit 3, `_opencode_again`, #866), empty text. Prompt: `FEEDBACK_HEAD` + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (re-run only with a test) + text; reviews+1. Warns past three reviews. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--include` (bulk additions, large binaries, ignored files the agent wrote), `--no-sign`, `--test` (replaces it, granted to the shell too), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Review only. Commits the step (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`; an empty step advances uncommitted, #507); prompt "Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL; advances round, steps, step_round, `reviews` reset, `step_base` the worktree's HEAD (#652), phase queued in one status write right before the spawn (#191: written earlier, an interrupt left the step under review with no runner). A retry after its commit landed (`cli._step_landed`) measures from `HEAD~1` (#85). Says `runner.fresh_reason`'s verdict. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` | `ask/<id>.answer` via `ask_mcp.write_answer`; the id into status `answered`. Refuses empty, over `ask_mcp.FILE_MAX` 256 KiB (`too_long`: never read, the agent waited out its timeout, #605), or closed, racing too (`answer_once`, #938). |
@@ -4372,6 +4435,7 @@ $WB_HOME (~/.local/state/workbench)
   notes.md  notes.lock           wb notes
   tuning.json                    optional pins ({"fresh_at": 0.6})
   speed.json  speed.lock         each model's measured write and read speeds
+  speed-api.json  speed-api.lock each API model's write speeds and times to first token (the account's, #1017)
   gpu.lock gpu.json gpu.admit gpu.load   the GPU lease: lock, holders/waiters, admission, one model load at a time; in models.lease_dir():
                                  $WB_GPU_DIR, /var/lib/workbench/gpu when accounts share it (#393), machines/<machine>/ on a network FS (#849)
   machines/<machine>/            on a network FS, one machine's own (store.machine_dir): GPU lease, optimize.json/.log, boxes.json, wsl-gpus.json, speed.json
@@ -4547,6 +4611,7 @@ off), not `wb start`'s.
 | `beat` | `runner.BEAT_SECS`; silent past `cli.BEAT_DEAD`, another machine's runner is dead |
 | `round`, `round_started_at` | the round (every kind counts); its start |
 | `limits` | `{think?, silence?, round?}`: unflagged limits raised for a model measured slower (`runner.stretch_limits`); null when none |
+| `api_entry` | an API task's capped `{limit, options: {max_tokens}}`, written as `drive` resolves its model (`runner.pin_api`), read every round instead of the catalog (#1017); null or absent on the GPU |
 | `steps`, `step_round`, `step_sizes` | `wb next`: step number, its first round, the closed steps' `results.step` |
 | `step_tests` | `{"<step>": cmd or null}` (`wb start`, `wb next`): what `wb bench add` reads; task.json `test_cmd` is only the latest |
 | `step_base` | `wb next`: HEAD as the step advanced: `wb verify`/`wb shot`'s base (`verify._review_base`; without it the newest earlier step's commit by trailer, else the base, #652) |
@@ -4642,6 +4707,7 @@ not started, or the machine broke it, `<infra>: <last>`), `why`, `phase`, `round
   runner died).
 - `lessons.jsonl`: `{ts, task, repo, skills, id, kind, round, text}`; a close `{close: id, ts, how: "skill:<name>"|"dropped", why}`.
 - `speed.json`: `{"<model id>": {"write": [tok/s…], "read": [tok/s…]}}`, last 60 each.
+- `speed-api.json`: `{"<API model id>": {"write": [tok/s…], "ttft": [s…]}}`, last 60 each; in `$WB_HOME`, not `machine_dir`.
 - `stats.json`: `{recording, live, every, ts}`; `every` 1, 2 or 5 s; bad or missing key: `stats.DEFAULTS` (on, on, 2); `set_setting` changes
   one key under `stats.lock` (#564).
 - `gpu.json`: `{"<pid>": {model, task, since, start, uid, user, waiting?, waiting_since?, tests?}}` (`uid`, `user`: for a lease accounts share; `tests`: unload-for-
@@ -4909,7 +4975,7 @@ test's own file, never the user's. The mod's half (the dialog, the file-tool den
 register.test.tsx (`routeProbe`).
 
 **Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`, `RealOpenCodeAPI`, `ApiHarness`'s
-`test_real_opencode_*`; skip without `opencode`, the
+`test_real_opencode_*`, `ApiSizing`'s `test_real_opencode_*`; skip without `opencode`, the
 lane ones without `lane.abi()`). `capture_llm.py <port> <out.jsonl> [calls] [prompt tokens]` records every request,
 answers tool-offering ones with the next scripted `{"name", "arguments"}`, reports `prompt tokens` read (to fill the
 window), returns the compaction template's headings for a compaction request (else `compaction.failed`), and listens at
@@ -5046,6 +5112,7 @@ doc needs its own `!/` line).
   `RealOpenCodeAPI.test_the_tasks_own_catalog_*` on each OpenCode bump, and the fake's `OPENCODE_MODELS_PATH` listing.
 - **`models.API_PARALLEL`** → `cli._slots_full` and `_slot_note`'s text, `NoLease`'s queued `last`, SKILL.md's
   dispatch line.
+- **An API model's window and output** (`models.api_limits`, `API_WINDOW`, `API_OUTPUT`) are the one source for `runner.model_pins`/`api_pins` (the layer), `compaction_buffer`, `router.slice`, status `window` (the steps, `tuning._key`): read them from `m.config` (each round of an API task: status `api_entry`, `runner.pin_api`), never the catalog's `extra["catalog_limit"]` (#1017).
 - **What a handoff costs Claude, measured** → the README's sentence.
 - **Anything a reader looks up** → this file, CLAUDE.md if it names it, the skill if Claude uses it; README only for the
   quickstart (CLAUDE.md's *Keeping the docs true*).
@@ -5097,7 +5164,7 @@ doc needs its own `!/` line).
   catalog read depends on → `_stamp`.
 - **An OpenCode fact the API harness copies** (`api model.list`, `auth list`, `-m` ids and variants, `part.cost`,
   the `retry`/`error` shapes, each protocol's path and key header) → `tests/fake_opencode.py`, `tests/capture_llm.py`
-  and `ApiHarness`'s `test_real_opencode_*` together (*The tests*).
+  and `ApiHarness`'s `test_real_opencode_*` together (*The tests*); its `max_tokens` cap and compaction point, `ApiSizing`'s.
 - **A model server's API fields** (`models.server_facts`, `ollama_served_context`, `weights`) → `test_portable.py`'s
   `Real` tests, *Running your own server*.
 - **What `wb top` reads** (`live_used`, `window`, `round`, `round_started_at`, `load_secs`, `last`; a `step` row's

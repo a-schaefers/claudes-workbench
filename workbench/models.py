@@ -1251,11 +1251,41 @@ def hosted_error() -> str:
     return str(_read_hosted().get("error") or "")
 
 
+def _count(v) -> int | None:
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+
+
+def api_limits(cfg: dict) -> dict:
+    """An API model's entry with its window and output capped (#1017): `limit.context` at most
+    API_WINDOW, `limit.input` at most that, and `limit.output` and `options.max_tokens` both the
+    smallest of the entry's own two and API_OUTPUT (API_OUTPUT when it gives neither). Written
+    once here, so the layer's pins (runner.model_pins), OpenCode's compaction
+    (runner.compaction_buffer), the slice, status `window`, the steps and the tuning keys all read
+    one window. A catalog's 1M window let a session that only reads carry up to 1M tokens a
+    request, and its 384K output put the compaction point below zero. The user's own entries (a
+    configured provider off this machine, an Ollama cloud model) come through here too: a
+    `max_tokens` they set under `limit.output` is theirs, never raised to the cap (the review of
+    #1017). An entry with no window is left alone: status says it can't run."""
+    lim = cfg.get("limit") if isinstance(cfg.get("limit"), dict) else {}
+    if not (context := _count(lim.get("context"))):
+        return cfg
+    opts = cfg.get("options") if isinstance(cfg.get("options"), dict) else {}
+    context = min(context, API_WINDOW)
+    cap = min(v for v in (_count(lim.get("output")), _count(opts.get("max_tokens")), API_OUTPUT) if v)
+    out = {**lim, "context": context, "output": cap}
+    if inp := _count(lim.get("input")):
+        out["input"] = min(inp, context)
+    return {**cfg, "limit": out, "options": {**opts, "max_tokens": cap}}
+
+
 def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
     pid = mid.split("/", 1)[0]
     over = {**(extra.get(pid) or {}), **(extra.get(mid) or {})}
     cloud = bool(entry.get("cloud"))
     config = {k: v for k, v in entry.items() if k not in ("free", "cloud")}
+    if isinstance(config.get("limit"), dict):  # the catalog's own; nothing shows it yet (#1017)
+        over = {**over, "catalog_limit": dict(config["limit"])}
+    config = api_limits(config)
     return Model(id=mid, provider=pid, name=str(entry.get("name") or mid.split("/", 1)[1]),
                  base_url=str(prov.get("api") or ""), engine="api",
                  label=over.get("label") or (OLLAMA_CLOUD if cloud else f"{prov.get('name') or pid} (API)"),
@@ -4180,3 +4210,13 @@ def write_entry(provider: str, name: str, entry: dict | None) -> None:
             entries[name] = {**old, **entry, "options": {**(old.get("options") or {}), **(entry.get("options") or {})}}
             if not entries[name]["options"]:
                 del entries[name]["options"]
+
+
+def is_api(model_id: str) -> bool:
+    """An API model (#1013's kind), from the cached catalog: never a network or OpenCode call."""
+    m = lookup(model_id, cached=True)
+    return bool(m and m.kind == "api")
+
+
+API_WINDOW = 131072   # the effective window an API task plans to (#1017; decision 10)
+API_OUTPUT = 32768    # output pinned for API tasks (#1017)

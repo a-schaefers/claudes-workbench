@@ -498,14 +498,18 @@ def _speed_path():
     return store.machine_dir() / "speed.json"
 
 
-def record_speed(model_id: str, messages: list[dict]) -> dict:
+def record_speed(model_id: str, messages: list[dict], api: bool | None = None) -> dict:
     """Add a session's measured speeds to speed.json: writing (output and reasoning tokens over
     the time from first token to done) and reading (new input tokens over the time to first token).
     A request cut short (a nudge, a stop) still says how fast it read: on a slow machine the
     first request is often the one interrupted, and the reading was never learned (the
-    2026-11-16 audit)."""
+    2026-11-16 audit). ``api``: whether it is an API model, as the task recorded it (the runner's
+    api_entry), else the cached catalog's word (models.is_api)."""
     got = speed_samples(messages)
     write, read = got["write"], got["read"]
+    if models.is_api(model_id) if api is None else api:  # the account's, not this machine's (#1017)
+        _record_api_speed(model_id, write, got["ttft"])
+        return got
     if not (write or read):
         return got
     path = _speed_path()
@@ -520,7 +524,10 @@ def record_speed(model_id: str, messages: list[dict]) -> dict:
 
 def record_read_bound(model_id: str, tok_s: int) -> None:
     """Add a read speed that a request which never got its first token was at most (the
-    runner's read_bound, #491) to speed.json's reading samples."""
+    runner's read_bound, #491) to speed.json's reading samples. Never an API model's: its time
+    to first token is the network and the provider's queue, not how fast it reads (#1017)."""
+    if models.is_api(model_id):
+        return
     path = _speed_path()
     with store.locked(path.with_suffix(".lock")):
         data = store.read_json(path, {}) or {}
@@ -573,6 +580,8 @@ def speed(model_id: str, weights: str | None = None) -> dict:
             ids += [i for key in ("replaces", "variant_of") for i in _up(over, model_id, key) if i not in ids]
             row = next((data[i] for i in ids if data.get(i)), {})
         return row
+    if write := api_speed(model_id).get("write"):  # an API model's: the account's (#1017)
+        return {"write": write}
     row = row_in(_speed_path())
     if not row and (shared := store.home() / "speed.json") != _speed_path():
         row = row_in(shared)  # every machine's, from before #901: until this one has measured it
@@ -581,7 +590,9 @@ def speed(model_id: str, weights: str | None = None) -> dict:
 
 def budgets(m: models.Model, weights: str | None = None) -> dict:
     """{"think", "silence", "round"} in seconds for a task on this model; ``weights``: its
-    identity, when known (speed)."""
+    identity, when known (speed). An API model's: budgets_api."""
+    if getattr(m, "kind", "gpu") == "api":
+        return budgets_api(m)
     sp = speed(m.id, weights)
     if not sp:
         return {"think": THINK_DEFAULT_S, "silence": SILENCE_DEFAULT_S, "round": ROUND_DEFAULT_S}
@@ -603,7 +614,11 @@ def thinking_stall(model_id: str, entry: dict) -> str:
     it acts; at this machine's measured write speed that can outlast the think budget. Seen
     2026-11-18: a 64K entry, thinking, capped at 16K and partly in system RAM at 21 tok/s, went
     silent for 14 minutes at a time until nudged and stopped. The same settings are harmless on a
-    card that writes fast, so it is measured here, not ruled out everywhere."""
+    card that writes fast, so it is measured here, not ruled out everywhere. Not an API model's:
+    its output is pinned (models.API_OUTPUT) and its silence budget holds one reply at the cap
+    (budgets_api)."""
+    if models.is_api(model_id):
+        return ""
     opts = entry.get("options") or {}
     # Ollama honours options.max_tokens; other servers get OpenCode's limit.output
     cap, sp = opts.get("max_tokens") or (entry.get("limit") or {}).get("output"), speed(model_id)
@@ -619,6 +634,74 @@ def thinking_stall(model_id: str, entry: dict) -> str:
             f"at its ~{sp['write']:.0f} tok/s here that is {secs / 60:.0f} min, past its "
             f"{think / 60:.0f}-min think budget, so it can sit silent until nudged and stopped. "
             f"Set its options.reasoningEffort to \"none\" (or a lower output cap) in OpenCode's config")
+
+
+# An API model's budgets (#1017). It reads nothing on this machine: prompt caching and the
+# provider's own hardware make window / read a fiction, and a "read" speed taken from the network
+# time to first token gave a 1M window 200-500 s of prefill no request pays. So think is the time
+# to write THINK_TOKENS plus the time to first token (its 90th percentile: the queue's bad days).
+# A reasoning step streams nothing until it ends (the spike, #1009: `run --format json` printed
+# `step_start` and then nothing until the text), so the silence limit holds one whole reply at the
+# output cap, written in silence, after the first token's wait, with SILENT_SLACK to spare. The
+# samples are the account's, kept in $WB_HOME/speed-api.json: an API's speed isn't this machine's.
+# That floor stops at SILENCE_MAX, the GPU's own longest silence (900 s scaled by THINK_MAX / 420,
+# 3857 s): at 2 tok/s it came to 16448 s, and a request hung for good held the round, and one of
+# the provider's API_PARALLEL slots, 4.6 hours before the guard fired (the review of #1017). A
+# model that slow loses a reply at the cap to the guard; a hang costs more.
+API_TTFT_SHARE = 0.9
+SILENT_SLACK = 60
+SILENCE_MAX = int(SILENCE_DEFAULT_S * THINK_MAX / THINK_DEFAULT_S)
+
+
+def _api_speed_path() -> Path:
+    return store.home() / "speed-api.json"
+
+
+def _record_api_speed(model_id: str, write: list, ttft: list) -> None:
+    if not (write or ttft):
+        return
+    path = _api_speed_path()
+    with store.locked(path.with_suffix(".lock")):
+        data = store.read_json(path, {}) or {}
+        row = data.setdefault(model_id, {})
+        row["write"] = (row.get("write", []) + write)[-SPEED_KEEP:]
+        row["ttft"] = (row.get("ttft", []) + ttft)[-SPEED_KEEP:]
+        store.write_json(path, data)
+
+
+def api_speed(model_id: str) -> dict:
+    """{"write": median tok/s, "ttft": 90th percentile seconds} of an API model, where measured
+    (speed-api.json); {} for one never measured or a GPU model."""
+    data = store.read_json(_api_speed_path(), {}) if _api_speed_path().exists() else {}
+    row = (data or {}).get(model_id) if isinstance(data, dict) else None
+    if not isinstance(row, dict):
+        return {}
+    out = {}
+    if write := [x for x in row.get("write") or [] if isinstance(x, (int, float)) and x > 0]:
+        out["write"] = statistics.median(write)
+    if ttft := sorted(x for x in row.get("ttft") or [] if isinstance(x, (int, float)) and x >= 0):
+        out["ttft"] = ttft[math.ceil(API_TTFT_SHARE * len(ttft)) - 1]
+    return out
+
+
+def budgets_api(m) -> dict:
+    """{"think", "silence", "round"} for an API model: think = THINK_TOKENS / write + the time to
+    first token's 90th percentile, clamped to [THINK_DEFAULT_S, THINK_MAX], with no window / read
+    term; silence and round scale by think / THINK_DEFAULT_S, silence at least one reply at the
+    output cap written in silence (see above) up to SILENCE_MAX, round at least the silence. No
+    write speed: the defaults."""
+    sp = api_speed(m.id)
+    if not sp.get("write"):
+        return {"think": THINK_DEFAULT_S, "silence": SILENCE_DEFAULT_S, "round": ROUND_DEFAULT_S}
+    ttft = sp.get("ttft") or 0
+    think = int(min(max(THINK_TOKENS / sp["write"] + ttft, THINK_DEFAULT_S), THINK_MAX))
+    scale = max(1.0, think / THINK_DEFAULT_S)
+    cfg = getattr(m, "config", None) or {}
+    cap = (cfg.get("options") or {}).get("max_tokens") or (cfg.get("limit") or {}).get("output") \
+        or models.API_OUTPUT
+    silence = max(int(SILENCE_DEFAULT_S * scale),
+                  min(math.ceil(cap / sp["write"] + ttft) + SILENT_SLACK, SILENCE_MAX))
+    return {"think": think, "silence": silence, "round": max(int(ROUND_DEFAULT_S * scale), silence)}
 
 
 def speed_line(model_id: str) -> str:
