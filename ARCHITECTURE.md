@@ -4981,7 +4981,11 @@ provider's passing state), the Agents switch (its line, its gate, `use` alone se
 refusal, an unreadable file; `Base` points `WB_ROUTES` at the
 test's own file, never the user's. The mod's half (the dialog, the file-tool denies, the echo, `said-3`) is in
 register.test.tsx (`routeProbe`). **Dynamic workflows** (`DynamicWorkflows`, #1041): off with no file, an unreadable
-or unknown one, `wb workflows on|off` kept, the skill's two rules; register.test.tsx: the block (once with
+or unknown one, `wb workflows on|off` kept, the skill's two rules, and a fan-out of three (one per role, under
+Claude Code, the API role set through the dialog's approval): the two GPU tasks on Ollamas on separate cards
+(`models.server_devices` patched; models that don't fit one card together) let in together without `--queue`, the API
+task past its provider's three held slots exit 4 then queued with `--queue` until one frees, every start line
+naming its role and model (the runners are the test's: the leases taken as a runner takes them); register.test.tsx: the block (once with
 `/workbench`'s text), one row per change, nothing without the file, a stored `said-2` declined.
 
 **Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`, `RealOpenCodeAPI`, `ApiHarness`'s
