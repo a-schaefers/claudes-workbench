@@ -4613,14 +4613,14 @@ def _lowest(ids: list[str]) -> str:
 
 def _thinking(m, thinking: str) -> tuple[str | None, str, dict | None]:
     """(variant or None, the line that says it, wb's OFF_VARIANT variant or None)."""
-    if thinking == "on":
-        return None, THINKING_ON, None  # the provider's default
     cfg = m.config if isinstance(m.config, dict) else {}
     caps = cfg.get("capabilities") if isinstance(cfg.get("capabilities"), dict) else {}
     rcap = caps.get("reasoning")
     if cfg.get("reasoning") is False or isinstance(rcap, dict) and rcap.get("supported") is False:
         return None, THINKING_NOT, None
     listed = _listed_variants(cfg)
+    if thinking == "on":
+        return _thinking_on(speaks(m), listed)
     if off := next((v["id"] for v in listed if _turns_off(v)), None):
         return off, THINKING_OFF_LINE, None
     kind = speaks(m)
@@ -4637,6 +4637,22 @@ def _thinking(m, thinking: str) -> tuple[str | None, str, dict | None]:
         return OFF_VARIANT, THINKING_OFF_LINE, _off_form(m, THINKING_OFF[kind])
     # OpenCode lists variants for every model its catalog says reasons: none, it doesn't
     return None, THINKING_NOT, None
+
+
+def _thinking_on(kind: str, listed: list[dict]) -> tuple[str | None, str, None]:
+    """Thinking on: a listed effort, never the bare id where one is listed. The bare id is the
+    provider's default, and not every provider's default thinks: a DeepInfra model
+    gave 0 reasoning tokens bare and reasoned at `#high` (2026-11-23, the API calibration), while
+    the start line said `thinking on`. The provider's default effort (DEFAULT_EFFORT; `high` where
+    it names none) when listed, else the lowest listed above it, else the highest listed; with no
+    effort listed, the bare id, as before."""
+    efforts = [v["id"] for v in listed if v["id"] in EFFORTS[2:] and not _turns_off(v)]
+    if not efforts:
+        return None, THINKING_ON, None
+    want = EFFORTS.index(DEFAULT_EFFORT.get(kind, "high"))
+    above = [e for e in efforts if EFFORTS.index(e) >= want]
+    pick = _lowest(above) if above else max(efforts, key=EFFORTS.index)
+    return pick, f"{THINKING_ON} (effort {pick})", None
 
 
 def _no_off_listed(kind: str, listed: list[dict]) -> tuple[str | None, str, None]:

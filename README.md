@@ -2,7 +2,7 @@
 
 # Claude's Workbench
 
-**Claude orchestrates. An OpenCode subagent via API or your GPU writes the code.** Workbench is a
+**Claude orchestrates. OpenCode agents via API or GPU write the code.** Workbench is a
 Claude Code plugin that connects the two inside your normal Claude Code session.
 
 <p align="center">
@@ -16,7 +16,7 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
 <a href="https://github.com/a-schaefers/claudes-workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/claudes-workbench"></a>
 </p>
 
-- **Claude is the lead, your subagents are the crew:** Claude assigns each step to a model
+- **Claude is the lead, your agents are the crew:** Claude assigns each step to a model
   sized for it, reviews what comes back, and returns it until it's right.
 - **Agents get Claude's know-how:** a library of skills Claude keeps and grows, handed out per
   task.
@@ -27,7 +27,7 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
   for a project's icons, illustrations, voice lines, sound effects and music.
 
 On bigger coding tasks, once the session is already open, handing the coding off to the
-subagent typically costs Claude about half the tokens of writing the code itself.
+agents typically costs Claude about half the tokens of writing the code itself.
 
 ## Why small local models hold up
 

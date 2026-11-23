@@ -2760,13 +2760,18 @@ chose).
 
 **Thinking off by default** (#1018). An API task runs with thinking off unless its role says on
 (`thinking: off|on`, decision 5 of #1008; task.json `thinking`, default off). Why off: API
-providers think by default (DeepSeek at effort high) and bill reasoning at the output rate
+providers mostly think by default (DeepSeek at effort high; not DeepInfra's) and bill reasoning at the output rate
 (*API models through OpenCode*, *Cost*); a change to the switch or the effort between requests drops
 DeepSeek's prompt cache; and DeepSeek's own V4 numbers that put thinking 5-8 points ahead on
 SWE-Verified and Terminal Bench are self-reported, for V4, not V4.1. With tools, DeepSeek wants every
 earlier `reasoning_content` sent back: OpenCode 2.3.2 does (checked), so thinking on works there too.
 `runner.thinking_variant(m, thinking) -> (variant | None, shown)`, from the model's catalog entry:
-- `on`: no variant, the provider's default (`thinking on`).
+- `on` (`runner._thinking_on`): a listed effort, never the bare id beside one: the provider's
+  default (`DEFAULT_EFFORT`; `high` where it names none) when listed, else the lowest listed above
+  it, else the highest listed, `thinking on (effort high)`; no effort listed, the bare id, `thinking
+  on`; a model that doesn't reason, its line. Not every provider's default thinks: a DeepInfra
+  model gave 0 reasoning tokens bare and reasoned at `#high`, so a role set to on ran
+  without thinking under a `thinking on` line (2026-11-23, the API calibration).
 - `reasoning: false` (a config entry), or `capabilities.reasoning.supported: false`: none, `thinking
   off (the model doesn't reason)`.
 - the catalog's own variant that turns it off: `none`, or one whose settings or body say so
