@@ -243,8 +243,8 @@ def is_api_task(task) -> bool:
 
 def first_for(repo, provider: str, me: str | None = None) -> bool:
     """Whether no earlier API task of this repo went to this provider: none in tasks/ or the
-    archive (wb gc would otherwise make the note come back). Not results.jsonl: its rows don't
-    say a task was on API (no `via`), and every closed task's directory stays, archived."""
+    archive (wb gc would otherwise make the note come back). Not results.jsonl: rows before #1022
+    don't say a task was on API (no `kind`), and every closed task's directory stays, archived."""
     repo = os.path.realpath(str(repo))
     for t in store.all_tasks(archived=True):
         if t.name == me or not is_api_task(t):
