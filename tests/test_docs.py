@@ -184,8 +184,8 @@ class DocsFor20(unittest.TestCase):
 
     def test_the_readme_pitch_names_the_api_and_the_gpu(self):
         readme = (ROOT / "README.md").read_text()
-        self.assertIn("**Claude orchestrates. An OpenCode subagent via API or your GPU writes the code.**", readme)
-        self.assertIn("**Claude is the lead, your subagents are the crew:**", readme)
+        self.assertIn("**Claude orchestrates. OpenCode agents via API or GPU write the code.**", readme)
+        self.assertIn("**Claude is the lead, your agents are the crew:**", readme)
         self.assertIn("- A model: one you connected in OpenCode (`/connect`), or a local one.", readme)
         self.assertNotIn("local LLM", readme)
 
