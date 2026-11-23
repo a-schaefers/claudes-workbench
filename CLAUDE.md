@@ -89,7 +89,9 @@ Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change mus
    anything slow (checkout, setup, base check) is the runner's, as Claude's Bash stops at 2 min.
 2. The runner holds the GPU (`GpuLease`), loads the model before every round, and runs
    `opencode run … -- <prompt>` in the worktree through `lane.wrap`, with the layer
-   `rules/<task>/opencode.json`. Guards stop a stuck agent; `wb steer` queues a note.
+   `rules/<task>/opencode.json`. Guards stop a stuck agent; an API provider's rate limit,
+   outage or queue pauses their clocks, and held 10 minutes stops the round as `rate_limited`
+   (or `outage`), the provider's and never silence, run again once; `wb steer` queues a note.
 3. `--test` runs in the agent's lane, environment and shell (its code gains no rights when
    tested); failures go back up to `--auto-fix` times without waking Claude. At `fresh_at` a
    fresh session takes over; OpenCode's compaction is a backstop just past it, never ahead.

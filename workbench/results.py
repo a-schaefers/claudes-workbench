@@ -51,7 +51,9 @@ def step(task: store.Task, landed: bool, since: str = "HEAD", gaps=None) -> dict
 # OpenCode exited non-zero. Any other ends a round for reasons outside the step: a shutdown's,
 # a logout's or a kill's SIGTERM (`signal`, runner.SIGNAL_STOP), a runner that died (`died`,
 # cli.reap: killed, out of memory, a reboot), a model server gone again after the round's one
-# revive (`server`, #657), workbench updated under the task (`updated`, runner._updated). Counted
+# revive (`server`, #657), an API provider's rate limit, outage, quota or refused key (`provider`,
+# runner.PROVIDER_GUARDS, #1020), the day's API spend cap (`spend`, runner.SPEND, #1019: the user's
+# budget, not the model's), workbench updated under the task (`updated`, runner._updated). Counted
 # as stuck, a laptop shut down mid-step shrank the model's slice for good (#582, the audit of
 # 1.90), and so did an update mid-step until it had a cause (#660): an allowlist, so the next
 # stop from outside the step can't slip in. Notices from before `cause` are known by their text.

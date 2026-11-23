@@ -67,6 +67,10 @@ API models (#1011), as the spike for #1009 saw OpenCode 2.3.2 print them:
   down   the provider unreachable: `provider.transport` retries the same way, then that error, exit 1
   auth   a 401: the `provider.auth` error at once, exit 1;  quota  a 402: `provider.quota`, exit 1
   nokey  no key for the provider: `provider.no-route` "Model unavailable: <id>", exit 1, no step
+  FAKE_RETRY_OK: ratelimit's and down's retries end in an answer instead (the run goes on as ok)
+  api    one model request to a keyhole, FAKE_API ("<base> <token> <model>"), silent while it waits;
+         a 429 or 5xx back is a `retry` line and the request again (10 at most), another error
+         ends the run (402 provider.quota, 401/403 provider.auth); then as ok (#1020)
 The upstream error's message (FAKE_ERROR_BODY, else a stock one) comes through verbatim, in
 `message` and `response.body`, as in OpenCode (a key-like string in a 401's body reached
 stdout). WB_FAKE_CATALOG names a JSON file: a list of `api model.list` entries (`providerID`, `id`, `variants`, `cost`, `limit`…), or
@@ -278,6 +282,71 @@ def layer_variants(provider: str, mid: str) -> set:
     return found
 
 
+def rate_retries(scenario: str) -> tuple:
+    """OpenCode 2.3.2's retries of a 429 (ratelimit) or an unreachable provider (down); the error
+    it then ends with, as fail()'s arguments."""
+    if scenario == "ratelimit":
+        message = os.environ.get("FAKE_ERROR_BODY") or "Rate limit reached for requests"
+        err = {"type": "provider.rate-limit", "message": message, "status": 429,
+               "response": {"body": json.dumps({"error": {"message": message}})}}
+    else:
+        err = {"type": "provider.transport",
+               "message": "ECONNREFUSED: Unable to connect. Is the computer able to access the url?"}
+    after = os.environ.get("FAKE_RETRY_AFTER")
+    every = float(os.environ.get("FAKE_RETRY_EVERY", 1))
+    for attempt in range(2, int(os.environ.get("FAKE_RETRIES", 10)) + 2):
+        print(json.dumps({"type": "retry", "timestamp": t(), "sessionID": session,
+                          "messageID": "msg_fake", "attempt": attempt,
+                          "nextRetryAt": t() + int(every * 1000),
+                          "error": {**err, **({"retryAfterMs": int(float(after) * 1000)}
+                                              if after and scenario == "ratelimit" else {})}}),
+              flush=True)
+        time.sleep(every)
+    return err["type"], err["message"], err.get("status")
+
+
+def api_request() -> None:
+    """The `api` scenario's one model request, as OpenCode sends it to a keyhole (#1020): to
+    FAKE_API ("<base> <token> <model id at the provider>"), printing nothing while it waits; a
+    429 or 5xx (the keyhole's hold passed back) is a `retry` line and the request again, up to 10
+    times; any other error ends the run as OpenCode does (`provider.quota` for 402,
+    `provider.auth` for 401/403, else `provider.invalid-request`: the fake's guess), exit 1."""
+    import urllib.error
+    import urllib.request
+    base, token, model = os.environ["FAKE_API"].split()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    body = json.dumps({"model": model, "stream": True,
+                       "messages": [{"role": "user", "content": "hi"}]}).encode()
+    for attempt in range(1, 12):
+        req = urllib.request.Request(base + "/chat/completions", data=body, headers={
+            "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            with opener.open(req, timeout=900) as r:
+                r.read()
+            return
+        except urllib.error.HTTPError as e:
+            status, raw = e.code, e.read().decode(errors="replace")
+        except OSError as e:
+            status, raw = None, str(e)
+        try:
+            message = json.loads(raw)["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            message = raw
+        if (status is None or status == 429 or status >= 500) and attempt <= 10:
+            print(json.dumps({"type": "retry", "timestamp": t(), "sessionID": session,
+                              "messageID": "msg_fake", "attempt": attempt + 1,
+                              "nextRetryAt": t() + 1000,
+                              "error": {"type": "provider.rate-limit" if status == 429 else
+                                        "provider.transport" if status is None else "provider.api-error",
+                                        "message": message, "status": status,
+                                        "response": {"body": raw}}}), flush=True)
+            time.sleep(float(os.environ.get("FAKE_RETRY_EVERY", 0.5)))
+            continue
+        fail("provider.quota" if status == 402 else "provider.auth" if status in (401, 403)
+             else "provider.invalid-request", message, status)
+    fail("provider.rate-limit", "too many retries", 429)
+
+
 def tool(name, inp, status="completed", error=None):
     state = {"status": status, "input": inp}
     if error:
@@ -396,6 +465,12 @@ if os.environ.get("FAKE_SURROGATE") and args and args[0] == "run":  # escaped, a
 time.sleep(float(os.environ.get("FAKE_LATE", 0)))  # before any output: reading the prompt
 emit("step_start")
 time.sleep(float(os.environ.get("FAKE_SLEEP", 0)))  # after the first event: the session is known
+if scenario in ("ratelimit", "down") and os.environ.get("FAKE_RETRY_OK"):
+    rate_retries(scenario)  # then the provider answers: the run goes on as ok's (#1020)
+    scenario = "ok"
+if scenario == "api":  # one request through a keyhole, then as ok (#1020)
+    api_request()
+    scenario = "ok"
 if scenario in ("ok", "fix"):
     value = "41" if scenario == "fix" and "--session" not in args else "42"
     with open("answer.txt", "w") as fh:
@@ -423,24 +498,7 @@ elif scenario == "retry":  # as OpenCode 2.3 prints it, after the step_start abo
                                     "message": "Timed out waiting for response headers"}}), flush=True)
         time.sleep(float(os.environ.get("FAKE_RETRY_EVERY", 1)))
 elif scenario in ("ratelimit", "down"):  # OpenCode 2.3.2's ten retries, then the error
-    if scenario == "ratelimit":
-        message = os.environ.get("FAKE_ERROR_BODY") or "Rate limit reached for requests"
-        err = {"type": "provider.rate-limit", "message": message, "status": 429,
-               "response": {"body": json.dumps({"error": {"message": message}})}}
-    else:
-        err = {"type": "provider.transport",
-               "message": "ECONNREFUSED: Unable to connect. Is the computer able to access the url?"}
-    after = os.environ.get("FAKE_RETRY_AFTER")
-    every = float(os.environ.get("FAKE_RETRY_EVERY", 1))
-    for attempt in range(2, int(os.environ.get("FAKE_RETRIES", 10)) + 2):
-        print(json.dumps({"type": "retry", "timestamp": t(), "sessionID": session,
-                          "messageID": "msg_fake", "attempt": attempt,
-                          "nextRetryAt": t() + int(every * 1000),
-                          "error": {**err, **({"retryAfterMs": int(float(after) * 1000)}
-                                              if after and scenario == "ratelimit" else {})}}),
-              flush=True)
-        time.sleep(every)
-    fail(err["type"], err["message"], err.get("status"))
+    fail(*rate_retries(scenario))
 elif scenario in ("auth", "quota"):  # no retry: the error at once
     fail(f"provider.{scenario}", os.environ.get("FAKE_ERROR_BODY") or (
         "Invalid API key" if scenario == "auth" else "Insufficient balance"),

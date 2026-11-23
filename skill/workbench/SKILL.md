@@ -404,6 +404,10 @@ coding choice is the user's (`wb coding`), never changed by a check.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
   the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`.
+  A `rate_limited`, `outage`, `quota` or `auth` stop is the API provider's, not the agent's
+  (the report says "the provider's stop"): tell the user so, and its remedy (wait, top up, or
+  /connect the key again), then `wb feedback <name> --text "carry on"` once it allows. Never
+  switch the task's model or role yourself: a route change takes the user's yes.
 
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
   corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).

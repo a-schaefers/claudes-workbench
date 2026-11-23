@@ -551,6 +551,37 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   moved; `normalize` keeps it (`retry {text,
   attempt}`), and the report says `OpenCode resent N request(s) to the model's server: <error>[; it
   cut the request at the provider's timeout]`. The layer lifts both waits.
+- **An API provider's wait** (#1020) is the third pause, beside Claude's answer and a freeze:
+  `_Clock.step(t, asking, waiting)` pauses the round's time, silence and the think budget alike
+  while `_ProviderWait.waiting` holds (an API task only, `api_task`: task.json `via`, else
+  `models.is_api`): status `ratelimit_until` in the future (the keyhole's hold or queue, below), or
+  an OpenCode `retry` naming a 429/529, a 5xx, a rate limit or a transport failure, for
+  `RETRY_PAUSE_S` (60 s) or to its `nextRetryAt` (the gap before the keyhole's next write; the
+  model's own output ends it), and the tick after either ends. So `active_s` and the speed reward
+  leave it out, a round with any wait skips `measure_speed`, and `read_bound` records nothing (its
+  guard isn't `silence`/`round`). Held past `RATE_WAIT_S` (600 s, the keyhole's `ratelimit.since`, at
+  least the round's start), the round stops before any silence check: guard `rate_limited`
+  ("<provider> rate-limited the agent's requests for 10 minutes (HTTP 429)") or `outage`
+  ("<provider> didn't answer for 10 minutes (HTTP 503)", or the transport's reason); OpenCode
+  exiting on such a run sooner (its 10 retries) is the same stop. `queued` never stops a round.
+  A `provider.quota` (402) or `provider.auth` (401/403) error, or status `api_stop` (the keyhole's
+  quota stop, shared with #1019's spend stop; consumed by the stop), stops it at once: guard
+  `quota` or `auth`. `drive` runs a `rate_limited`/`outage` round again once (`_provider_revive`:
+  a `load` event "<provider> rate-limited the round: it runs again once the cooldown ends", the
+  lease stepped aside, a wait to the provider's `api-health.json` `until`, else `RATE_LIMIT_SECS`,
+  at most `RATE_WAIT_S`, a steer note ending it into `_steer_round`, `wb stop` ending the runner),
+  continuing the session: one revive a round, as a revive re-sends the whole context, which costs
+  money. A second stop, or a quota or key stop, ends it `stuck` with `cause` `provider`, `infra`
+  `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb
+  feedback <task> --text "carry on"` once the provider allows, and `wb route <role> gpu (the user's
+  yes)` when the task has a role; top up or wait for the plan's reset; /connect for a refused
+  key). Its `stopped` event says `by: "provider"`, so it is never a lesson about the agent (the
+  same limit on three tasks of one account read as a recurring one). An `api_stop` whose guard is
+  `spend` (#1019's day cap) stops the round the same way but is the user's budget, not the
+  provider's: `cause` `spend`, `infra` `spend`, `by: "spend"` (`runner.stopped_by`, `SPEND`), no
+  revive and no `provider_remedy`; like `provider` it stays outside `results.THE_STEP`, so it never
+  counts against the model or shrinks its slice (the engineer's call, 2026-11-23). Each run of waiting is one `rate_limited` event as it ends or the round stops; status
+  keys left by a killed runner are cleared as the next round starts, and as each round ends.
 - `background_wait` (a shell command past 2 minutes) pauses the think budget and stretches silence
   to max(`--silence-timeout`, `--test-timeout`) (a long suite was nudged and killed every 7
   minutes); the round limit holds. Once the turn is over (last
@@ -1351,8 +1382,8 @@ certificate failure names Python's Install Certificates command); a request http
 (`InvalidURL`, a `ValueError`) is a 502 `keyhole: can't send this request on (<type>)`, the type
 only and never `unreachable`. Anything else a handler raises is one line in the log, `keyhole: a
 request failed (<type>)` (`_Server.handle_error`), never socketserver's traceback on stderr. Each outcome goes to
-`on_health(state, why, until)`: 2xx `ok`; 402 or `insufficient_quota` `no_credit`; another 429
-`rate_limited` until `Retry-After`, else `RATE_LIMIT_SECS` (60 s); 5xx and transport failures
+`on_health(state, why, until)`: 2xx `ok`; a quota answer (below) or `insufficient_quota` `no_credit`; a 429 or 529
+`rate_limited` until `Retry-After`, else the hold's backoff while it holds (below), else `RATE_LIMIT_SECS` (60 s); 5xx and transport failures
 `unreachable` (the model's health record takes it with #1013). The start line, `keyhole:
 <provider> on 127.0.0.1:<port> for <id>`, the refusals and that failure line are all it logs (the runner's stdout,
 runner.log); no request is logged, and no line holds the key or the token. Accepted: the agent's
@@ -1362,6 +1393,32 @@ model, the layer's provider overlay and `rules_env`'s restatement of it, `NO_PRO
 and status `served` reaching the results come with API models (#1013); without Landlock the user's
 OpenCode store is readable anyway, and whether API roles then refuse or start saying so is the
 owner's call, still open.
+
+**The hold** (#1020). `read_error` sorts an upstream error: 402, or a 429/403 whose body says the
+balance or plan is spent (`QUOTA`: `insufficient_quota`, OpenRouter's `limit_source`, a 5-hour or
+weekly limit), is `quota`; 429 and 529 (Anthropic's overloaded) `rate_limited`; 500, 502, 503, 504
+`outage`, and so are Cloudflare's 520-524 in front of a provider, as transient (`HOLD_CODES`; another
+5xx, a 501, a 505, a 525, goes back at once, its health
+still `unreachable`), as are the transient transport failures (`_transient`: refused, reset,
+DNS, TLS, a timeout; not a certificate that doesn't verify nor a proxy refusing the tunnel, said at
+once). `rate_limited` and `outage` are held: the keyhole waits `Retry-After` (seconds or a date),
+else `BACKOFF` 2, 4, 8 … 60 s, and sends again (the provider's cooldown recorded as that
+backoff, not `RATE_LIMIT_SECS`, or its own next pass would wait a minute), one OpenCode request
+for at most `RATE_HOLD_S` (300 s, `hold=` per keyhole); a wait past what is left of it passes the last answer back at once, redacted,
+with its `Retry-After`, and OpenCode prints `retry` and sends again, held again. Before each send it
+waits out the provider's cooldown in `api-health.json` (`cooldown`: another task's 429 on the same
+account, decision 10's three tasks a provider). It naps in 0.25 s steps and drops the request when
+OpenCode hangs up (a stop, a steer) or the keyhole closes. Each held answer writes status
+(`held`): `ratelimit_until` (now + the wait, at least `HOLD_FLOOR_S` 60 s ahead) and `ratelimit
+{kind, provider, code, since, retry_after, why?}` (`since` kept while the run goes on; the code,
+never the body), and `last` (`rate-limited by <provider> (HTTP 429): waiting, retry in 40 s`). A
+200 whose SSE carries only keep-alive comments for `QUEUED_AFTER_S` (30 s) is `queued`, marked again
+each 30 s; the first event (or a non-SSE body's first bytes) clears both keys (`answered`). `quota`
+writes status `api_stop {guard: "quota", text: "<provider> says the account is out of credit (HTTP
+402)"}` and answers OpenCode 400 `keyhole: <that>: the round stops`, which it doesn't retry. The
+cooldown file the issue named `api-cooldown.json` is #1013's `api-health.json` (`note_api`, through
+`on_health`), which `status()` already reads for "rate-limited by <Provider> until HH:MM", with no
+request.
 
 **Project config can't lift the rules.** OpenCode loads a project's `opencode.json` (worktree,
 `.opencode/`, any directory above) after `OPENCODE_CONFIG` and appends its permissions, so an
@@ -1661,7 +1718,9 @@ in its CLAUDE.md.
 Notices go to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts, task, kind, text, round?, id?, cause?,
 tasks?}`). Kinds: `review` (report and `review_diff`), `stuck`, `failed`, `question` (with `id`),
 `checkin` (periodic, a nudge, a mid-round handover before the last allowed, a base check cut short).
-`cause` (`stuck`/`failed` with a round): `guard`, `agent`, `server` (#657), `updated`
+`cause` (`stuck`/`failed` with a round): `guard`, `agent`, `server` (#657), `provider` (an API provider's
+`rate_limited`/`outage` after its one revive, `quota`, `auth`: #1020), `spend` (the day's API spend
+cap, #1019: `runner.SPEND`), `updated`
 (`runner._updated`), `opencode` (`runner.opencode_moved`), `signal` (`SIGNAL_STOP`), `died`
 (`reap`), `update` (`wb update --stop`). `tasks` names a batch (restart, shutdown, `wb update
 --stop`). `wb` itself writes only `reap`'s `failed` and `cli._stop_for_update`'s `stuck`, one per
@@ -4169,7 +4228,7 @@ $WB_HOME (~/.local/state/workbench)
                                  capabilities, reasoning, tool_call, family, status, free, cloud?}}}; fresh HOSTED_TTL 600 s
                                  (an error DOWN_SECS), rebuilt on a changed stamp; never holds a key
   api-health.json  .lock         each API provider's last bad answer (models.note_api): {<pid>: {state: no_credit|rate_limited|
-                                 unreachable, until (epoch or null), why (redacted), ts}}; ok removes it; past until reads as ok
+                                 unreachable, until (epoch or null), why (redacted), ts}}; ok removes it; past until reads as ok; the provider's cooldown every keyhole waits out, and the revive's wait (#1020)
   update.json                    wb update's last check
   patches.json                   {source (the clone install), upstream (owner/repo on GitHub, else null)}: patches.note_install, by wb patch init, upstream, send and wb update (not --check) on `local`; the mod's consent gate reads it.
                                  prepared {<slug>: {author, email, date (unix), subject}}: the local commit wb patch upstream picked;
@@ -4330,7 +4389,7 @@ off), not `wb start`'s.
 | `reviewed` | `{step, tree}`: the tree the last review notice showed (`gitops.snapshot`, bulky new files left out); the next shows the diff since (the whole diff once git gc pruned it) |
 | `tests` | `{ok, exit, tail, round, lane?, proxy?, hang?}` (`exit`: code, `timeout`, `output limit`; `lane`: devices refused; `proxy`: variables left out, on a connection failure; `hang`: `{base, limit}`, a timeout where the base check ran it in a quarter of the limit or less) |
 | `base_check` | `{ok, exit, tail, limit, secs, cmd}`, `runner.base_check` in the lane before round 1, with `--test` and no `--no-base-check` (`exit` may be `"timeout"`, `"setup failed"`, `"filtered"`: not the task's bytes) |
-| `infra` | the machine failed it: `setup` (`_prepare`), `model` (`_load_failed`: no load, or the server down past `DOWN_WAIT`), `crash`, `disk full` (the crash handler), `runner died` (`cli.reap`); cleared at runner start; a replay with it is an `error` row |
+| `infra` | the machine failed it: `setup` (`_prepare`), `model` (`_load_failed`: no load, or the server down past `DOWN_WAIT`), `provider` (an API provider's stop, #1020), `spend` (the day's API spend cap, #1019), `crash`, `disk full` (the crash handler), `runner died` (`cli.reap`); cleared at runner start; a replay with it is an `error` row |
 | `prepared`, `setup_secs` | the worktree is set up (`_prepare`), so a later runner doesn't again; how long (older tasks: `prepared_paths`, `prepared_marks`, `prepared_bytes`, `runner.prepared_record`) |
 | `checked_out`, `checkout_secs` | `runner.checkout` made the worktree; how long |
 | `taken_over` | `wb takeover`: `runner.checkout` then fails a task not checked out rather than recheck it out (#655); cleared by the hand-back once checked out, for the mod's `delegatedWork` (#926) |
@@ -4369,6 +4428,8 @@ off), not `wb start`'s.
 | `answered` | ids `wb answer` answered, written outside the lane (an answer file the agent wrote isn't one): `questions.answered` |
 | `spec_gaps` | `[{round, text}]` from `--spec-gap` |
 | `served` | `{model, by}`: the model an API task's responses named and OpenRouter's provider (or null), from the keyhole when it first appears or changes |
+| `ratelimit_until`, `ratelimit` | the keyhole's hold or queue (#1020): epoch seconds, at least 60 s ahead; `{kind: rate_limited\|outage\|queued, provider, code, since, retry_after, why?}`; cleared at the first data, at each round's start and end |
+| `api_stop` | `{guard, text}`: stop the round now (the keyhole's `quota`, #1019's spend), consumed by the runner's stop |
 | `updated_at` | every write |
 
 **events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?}`
@@ -4377,7 +4438,7 @@ out, cache, reasoning?}` (reasoning apart from `out`), `error {text}`, `retry {t
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),
 `autofix`, `self_review`, `reading_full`, `full`, `compacted {text}` (mid-round, and it carried on), `load` (a reload before a round), `limits {text}` (stretched),
 `left_bg {text}` (a job left in the background), `round_end {secs, how, guard?}` (stats recording on), `export` (the
-export failed: judged by `live_used`), `stopped {by: "signal"}`, `gpu {text}` (a load warning), `ask {id}`, `answer {id}`, `served {model, by, text}` (the keyhole: the served model changed; `wb watch` and `wb log` show the text). From
+export failed: judged by `live_used`), `stopped {by: "signal"|"provider"|"spend"}` (`provider`: an API provider's stop, #1020; `spend`: the day's spend cap, #1019; `lessons.gather` skips any with `by`), `gpu {text}` (a load warning), `ask {id}`, `answer {id}`, `served {model, by, text}` (the keyhole: the served model changed; `wb watch` and `wb log` show the text), `rate_limited {provider, code, state, since, secs, text}` (a run of an API provider's waiting ended, or the round stopped: #1020). From
 `wb`: `spec_gap`, `next_step`, `stopped` (bail out), `resumed`, `allow`, `steer {now}`, `captain`, `takeover`, `coding` (the user allowed Claude an edit), `error`
 (`reap`: the runner died without a report).
 
@@ -4659,8 +4720,11 @@ write}}`; `session export` gives the assistant message `cost` (`FAKE_COST`, else
 their sums. The API scenarios: `ratelimit` (`step_start`, then `retry` events, attempts 2 to `FAKE_RETRIES`+1, 10 by
 default, `FAKE_RETRY_EVERY` apart, each `{type: "retry", attempt, nextRetryAt, messageID, error: {type:
 "provider.rate-limit", message, status: 429, response: {body}, retryAfterMs}}`, `retryAfterMs` only with
-`FAKE_RETRY_AFTER`; then that error, exit 1), `down` (the same with `provider.transport` ECONNREFUSED, checked on
-2.3.2), `auth` (401, `provider.auth`) and `quota` (402, `provider.quota`), both at once with no retry, and `nokey`
+`FAKE_RETRY_AFTER`; then that error, exit 1; with `FAKE_RETRY_OK` the retries end in an answer, as `ok`), `down`
+(the same with `provider.transport` ECONNREFUSED, checked on 2.3.2), `api` (#1020: one request to a keyhole,
+`FAKE_API` "<base> <token> <model>", silent while held; a 429 or 5xx back is a `retry` and the request again, 10 at
+most, `FAKE_RETRY_EVERY` apart; 402 `provider.quota`, 401/403 `provider.auth`, any other `provider.invalid-request`
+(the fake's guess at OpenCode's type), exit 1; then as `ok`), `auth` (401, `provider.auth`) and `quota` (402, `provider.quota`), both at once with no retry, and `nokey`
 (the no-route error); the upstream message (`FAKE_ERROR_BODY`) comes through verbatim in `message` and
 `response.body`. `WB_FAKE_API=<provider>[/<id>]=<state>,…` gives a model (its own entry first; a config model too) or a provider one
 of those states (or `ok`): its runs play that scenario, and a `nokey` provider drops out of `api model.list`, `models`
@@ -4705,6 +4769,12 @@ and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7:
 outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, install over https, `/api/seen` and
 `/api/active` only while in use, notices, shot pairs, listen's shortlist, the keyboard, uploads; and `sw.js` in a node
 `vm` (`swSays`) for a push's text.
+
+**Rate limits** (`RateLimits`, #1020): the runner in-process (`runner.drive`) on a task written as `wb start --role`
+writes it (`via: api`, `provider`, `role`), the keyhole started in the test as `drive` will start it (#1015,
+`on_health` → `note_api`), `_RateUpstream` the provider (a status until a time, `Retry-After`, keep-alives before
+the answer); limits scaled by patching `RATE_WAIT_S`, `QUEUED_AFTER_S` and the keyhole's `hold`. Each acceptance
+test carries its control (the pause patched off, the queue mark off, the cause as `guard`).
 
 **The keyhole's tests** (`Keyhole`, `RealOpenCodeAPI`, sharing `_KeyholeTest`): canary keys only
 (`CANARY`), never a real one, and no network: `_Upstream`, a provider in the test, records each
@@ -4830,6 +4900,11 @@ doc needs its own `!/` line).
 - **An OpenCode fact the API harness copies** (`api model.list`, `auth list`, `-m` ids and variants, `part.cost`,
   the `retry`/`error` shapes, each protocol's path and key header) → `tests/fake_opencode.py`, `tests/capture_llm.py`
   and `ApiHarness`'s `test_real_opencode_*` together (*The tests*).
+- **The provider's wait** (#1020): `keyhole.RATE_HOLD_S` (300) stays under the layer's header guard (600 s, #1017),
+  or OpenCode cuts a held request itself; `runner.PROVIDER_GUARDS` → the `provider` cause and `runner.SPEND` → the
+  `spend` cause (`runner.stopped_by`, also status `infra`, the `stopped` event's `by`, `bench.replay`'s `error`), both
+  outside `results.THE_STEP`; `api_stop` is shared with #1019's spend stop (guard `spend`); `HOLD_CODES`/`QUOTA` → `note_api`'s states and
+  `_ProviderWait.on_retry`/`on_error`'s reading of OpenCode's `retry` and `error`.
 - **A model server's API fields** (`models.server_facts`, `ollama_served_context`, `weights`) → `test_portable.py`'s
   `Real` tests, *Running your own server*.
 - **What `wb top` reads** (`live_used`, `window`, `round`, `round_started_at`, `load_secs`, `last`; a `step` row's

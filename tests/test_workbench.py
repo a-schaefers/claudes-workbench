@@ -25133,11 +25133,12 @@ class Keyhole(_KeyholeTest):
 
     def test_the_upstreams_answers_set_the_models_health(self):
         seen = []
-        kh = self.keyhole(on_health=lambda *a: seen.append(a))
+        kh = self.keyhole(on_health=lambda *a: seen.append(a), hold=0)  # nothing held (#1020's RateLimits)
         self.post(kh)
         self.up.mode = "status"
         cases = [(402, None, "no_credit"), (429, None, "rate_limited"),
-                 (429, "120", "rate_limited"), (503, None, "unreachable")]
+                 (429, "120", "rate_limited"), (503, None, "unreachable"),
+                 (522, None, "unreachable"), (501, None, "unreachable")]  # not held, still told (#1020)
         for status, after, _ in cases:
             self.up.status, self.up.retry_after, self.up.message = status, after, "nope"
             self.post(kh)
@@ -25155,7 +25156,7 @@ class Keyhole(_KeyholeTest):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             m.base_url = f"http://127.0.0.1:{sock.getsockname()[1]}/v1/openai"  # nothing listens
-        kh = self.keyhole(m, on_health=lambda *a: seen.append(a))
+        kh = self.keyhole(m, on_health=lambda *a: seen.append(a), hold=0)  # passed back at once
         code, _, text = self.post(kh)
         self.assertEqual(code, 502)
         self.assertIn("keyhole: can't reach 127.0.0.1: ", json.loads(text)["error"]["message"])
@@ -25186,7 +25187,7 @@ class Keyhole(_KeyholeTest):
         os.environ["https_proxy"] = f"http://me:p%40ss@127.0.0.1:{proxy.server_port}"
         m = self.model()
         m.base_url = "https://api.example.invalid/v1/openai"
-        kh = self.keyhole(m)
+        kh = self.keyhole(m, hold=0)  # no address for it: an outage, passed back at once
         code, _, text = self.post(kh)
         self.assertEqual(code, 502)
         self.assertIn("keyhole: can't reach api.example.invalid: ", text)
@@ -27405,6 +27406,425 @@ class ApiDiscovery(Base):
         self.assertIn("ollama/gpt-oss:120b is an Ollama cloud model under a plain name", err.getvalue())
         self.assertIn("add it by its cloud name", err.getvalue())
         self.assertNotIn("local", err.getvalue())                 # local: true is no way in
+
+
+
+class _RateUpstream(http.server.BaseHTTPRequestHandler):
+    """A provider for RateLimits: before its server's `rate_until` (monotonic) every request gets
+    `code` (with `after` as Retry-After and `body`'s message); after it, an OpenAI SSE answer,
+    first `keepalive` seconds of `: keep-alive` comments when set. Records each request's time."""
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        s = self.server
+        s.seen.append(time.monotonic())
+        if time.monotonic() < s.rate_until:
+            body = json.dumps({"error": {"message": s.body, "code": s.code}}).encode()
+            self.send_response(s.code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            if s.after:
+                self.send_header("Retry-After", s.after)
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+        def chunk(data: bytes):
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+            self.wfile.flush()
+        try:
+            end = time.monotonic() + s.keepalive
+            while time.monotonic() < end:
+                chunk(b": keep-alive\n\n")
+                time.sleep(0.3)
+            ev = {"model": "deepseek-flash", "choices": [{"index": 0, "delta": {"content": "ok"},
+                                                          "finish_reason": "stop"}],
+                  "usage": {"prompt_tokens": 7, "completion_tokens": 1}}
+            chunk(f"data: {json.dumps(ev)}\n\n".encode())
+            chunk(b"data: [DONE]\n\n")
+            self.wfile.write(b"0\r\n\r\n")
+        except OSError:  # the keyhole hung up (a nudge stopped the round)
+            self.close_connection = True
+
+
+class RateLimits(Base):
+    """An API provider's rate limits, outages and queues pause the round's clocks and stop it as
+    the provider's, never as silence (#1020). The keyhole is started here as runner.drive will
+    start it (#1015), on_health wired to models.note_api; the task is written as wb start --role
+    writes it (#1016: via, provider)."""
+    CANARY = _KeyholeTest.CANARY
+
+    def setUp(self):
+        super().setUp()
+        from workbench import keyhole, models
+        self.kh_mod, self.models = keyhole, models
+        self.up = ThreadingHTTPServer(("127.0.0.1", 0), _RateUpstream)
+        self.up.daemon_threads = True
+        self.up.seen, self.up.rate_until, self.up.code, self.up.after = [], 0.0, 429, "1"
+        self.up.body, self.up.keepalive = "Rate limit reached for requests", 0
+        threading.Thread(target=self.up.serve_forever, daemon=True).start()
+        self.addCleanup(self.up.server_close)
+        self.addCleanup(self.up.shutdown)
+
+    def api_task(self, name, scenario, *extra):
+        """A task as wb start writes it for an API role (#1016), its runner not spawned."""
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start(name, scenario, "--no-base-check", *extra)
+        task = store.Task(name)
+        store.write_json(task.dir / "task.json", {**task.spec, "via": "api", "provider": "deepseek",
+                                                  "role": "significant"})
+        return task
+
+    def keyhole(self, task, hold=3):
+        """The keyhole as drive starts it for the task (#1015), its log in runner.log; FAKE_API
+        points the fake's `api` scenario at it."""
+        m = self.models.Model(id="deepseek/deepseek-flash", provider="deepseek", name="deepseek-flash",
+                              base_url=f"http://127.0.0.1:{self.up.server_port}/v1", engine="api",
+                              label="deepseek-flash", kind="api", key="stored")
+        log = task.dir / "runner.log"
+        kh = self.kh_mod.Keyhole(task, m, self.kh_mod.Key("deepseek", self.CANARY), m.base_url, "bearer",
+                                 log=lambda line: log.open("a").write(line + "\n"), hold=hold,
+                                 on_health=lambda st, why, until: self.models.note_api("deepseek", st, why, until))
+        self.addCleanup(kh.close)
+        os.environ["FAKE_API"] = f"{kh.base} {kh.token} deepseek-flash"
+        return kh
+
+    def events(self, task, kind=None):
+        rows, _ = store.read_jsonl(task.dir / "events.jsonl")
+        return [r for r in rows if kind is None or r.get("kind") == kind]
+
+    def notice(self, task):
+        return [r for r in store.notices() if r["task"] == task.name][-1]
+
+    def test_a_round_whose_provider_rate_limits_it_a_while_finishes_with_no_silence_stop(self):
+        # OpenCode's own retries of a 429: without the pause, "no first output in 0 minutes: the
+        # model may be reading its prompt slowly", an untrue report of a provider that said wait
+        os.environ.update(FAKE_RETRY_OK="1", FAKE_RETRIES="8", FAKE_RETRY_EVERY="1")
+        task = self.api_task("t-rl", "ratelimit", "--silence-timeout", "3", "--think-timeout", "2")
+        runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st.get("nudges", 0)), ("review", 0), st.get("last"))
+        self.assertLess(st["active_s"], 5)                          # the 8 s of 429s left out
+        [ev] = self.events(task, "rate_limited")
+        self.assertEqual((ev["provider"], ev["code"], ev["state"]), ("deepseek", 429, "rate_limited"))
+        self.assertGreaterEqual(ev["secs"], 6)
+        self.assertFalse(self.events(task, "stopped"))
+        other = self.api_task("t-rl2", "ratelimit", "--silence-timeout", "3", "--think-timeout", "2")
+        with mock.patch.object(runner._ProviderWait, "waiting", lambda self, now: False):
+            runner.drive(other)                                     # without the pause
+        self.assertEqual(other.status["phase"], "stuck")
+        self.assertIn("no first output", other.status["last"])
+
+    def test_a_held_429_through_the_keyhole_pauses_the_clocks_until_the_first_token(self):
+        # the whole run held in the keyhole: OpenCode prints no `retry`, so only status
+        # ratelimit_until pauses the clocks (the review of #1020: a hold of 3 s let OpenCode's
+        # retry lines pause them, and the test passed with the keyhole's writes gone)
+        task = self.api_task("t-kh429", "api", "--silence-timeout", "3", "--think-timeout", "2")
+        self.up.rate_until = time.monotonic() + 9
+        self.keyhole(task, hold=15)
+        runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st.get("nudges", 0)), ("review", 0), st.get("last"))
+        self.assertLess(st["active_s"], 6)
+        self.assertGreaterEqual(len(self.up.seen), 4)               # held, sent again each second
+        self.assertFalse(self.events(task, "retry"))                # none reached OpenCode
+        self.assertIsNone(st.get("ratelimit_until"))
+        self.assertIsNone(st.get("ratelimit"))
+        self.assertTrue([e for e in self.events(task, "rate_limited") if e["code"] == 429])
+        self.assertFalse(self.events(task, "stopped"))
+
+    def test_a_429_held_in_the_keyhole_past_the_wait_stops_as_rate_limited_from_its_since(self):
+        # no `retry` line at all: the stop is the keyhole's `since`, never silence (3 s here)
+        task = self.api_task("t-khstop", "api", "--silence-timeout", "3", "--think-timeout", "2")
+        self.up.rate_until = float("inf")
+        self.keyhole(task, hold=60)
+        began = time.monotonic()
+        with mock.patch.object(runner, "RATE_WAIT_S", 4):
+            runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st.get("infra")), ("stuck", "provider"), st.get("last"))
+        self.assertRegex(st["last"], r"^deepseek rate-limited the agent's requests for \d+ seconds \(HTTP 429\)$")
+        self.assertFalse(self.events(task, "retry"))
+        self.assertEqual(len(self.events(task, "load")), 1)         # revived once
+        for ev in self.events(task, "rate_limited"):
+            self.assertLess(ev["secs"], 4 + 3, ev)                  # stopped at RATE_WAIT_S
+        self.assertLess(time.monotonic() - began, 40)               # never the 60 s hold
+        self.assertEqual(self.notice(task)["cause"], "provider")
+
+    def test_a_429_without_retry_after_backs_off_2_then_4_seconds_with_the_health_wired(self):
+        # the provider's cooldown was RATE_LIMIT_SECS, read back by the keyhole's own next pass:
+        # every retry waited 60 s (the review of #1020, 2026-11-23)
+        task = self.api_task("t-back", "ok")
+        kh = self.keyhole(task, hold=30)
+        self.up.rate_until, self.up.after = time.monotonic() + 3, None
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=60)
+        self.addCleanup(conn.close)
+        start = time.monotonic()
+        conn.request("POST", "/v1/chat/completions", body=json.dumps({"model": "deepseek-flash",
+                                                                      "stream": True}).encode(),
+                     headers={"Authorization": f"Bearer {kh.token}"})
+        r = conn.getresponse()
+        r.read()
+        self.assertEqual(r.status, 200)
+        sends = [round(t - start) for t in self.up.seen]
+        self.assertEqual(sends, [0, 2, 6], sends)
+        # another task's keyhole reads the provider's cooldown as this one's wait, not a minute
+        self.assertLess((self.models.api_health("deepseek") or {}).get("until", 0), time.time() + 10)
+
+    def test_a_provider_that_only_rate_limits_is_revived_once_then_stuck_as_the_providers(self):
+        from workbench import results
+        from workbench import lessons
+        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5")
+        task = self.api_task("t-only", "ratelimit", "--silence-timeout", "2", "--think-timeout", "2")
+        began = time.monotonic()
+        with mock.patch.object(runner, "RATE_WAIT_S", 3):
+            runner.drive(task)
+        # stopped at RATE_WAIT_S, in the round: not after OpenCode's 200 retries ran out
+        self.assertLess(time.monotonic() - began, 40)
+        for ev in self.events(task, "rate_limited"):
+            self.assertLess(ev["secs"], 3 + 3, ev)
+        # the provider's, so no lesson about the agent: two tasks on one account made it a
+        # recurring one (the review of #1020)
+        self.assertTrue(all(e.get("by") == "provider" for e in self.events(task, "stopped")))
+        self.assertFalse([x for x in lessons.gather(task, "discarded") if x["kind"] == "stopped"])
+        st = task.status
+        self.assertEqual((st["phase"], st["round"], st.get("infra")), ("stuck", 1, "provider"))
+        self.assertRegex(st["last"], r"^deepseek rate-limited the agent's requests for \d+ seconds \(HTTP 429\)$")
+        [load] = self.events(task, "load")
+        self.assertEqual(load["text"], "deepseek rate-limited the round: it runs again once the cooldown ends")
+        self.assertEqual(len(self.events(task, "stopped")), 2)      # once, revived, then again
+        self.assertEqual(len(self.events(task, "rate_limited")), 2)
+        n = self.notice(task)
+        self.assertEqual((n["kind"], n["cause"]), ("stuck", "provider"))
+        self.assertNotIn(n["cause"], results.THE_STEP)
+        self.assertNotIn("no output for", n["text"])
+        self.assertNotIn("no first output", n["text"])
+        self.assertIn('wb feedback t-only --text "carry on" resumes it once deepseek allows; or '
+                      'wb route significant gpu (the user\'s yes) for the next tasks', n["text"])
+        self.assertIsNone(runner.read_bound(task, 1, {"guard": "rate_limited", "waited": 900}))
+
+    def test_a_providers_stop_is_not_held_against_the_steps_size(self):
+        from workbench import models, results, router
+        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5")
+        task = self.api_task("t-size", "ratelimit", "--silence-timeout", "2")
+        with mock.patch.object(runner, "RATE_WAIT_S", 2), mock.patch.object(models, "RATE_LIMIT_SECS", 1):
+            runner.drive(task)
+        self.assertEqual(task.status["phase"], "stuck")
+        for i in range(3):                                          # what the agent wrote first
+            (task.worktree / f"part{i}.py").write_text("x = 1\n")
+        self.assertIs(results.step(task, False)["stuck"], False)
+        m = models.resolve(task.spec["model"])
+        before = router.slice(m)
+        run_wb("discard", "t-size")
+        row = store.results()[-1]
+        self.assertIs(row["steps"][-1]["stuck"], False)
+        self.assertEqual((router.slice(m).files, router.slice(m).lines), (before.files, before.lines))
+        # the same stop as the step's own (cause "guard"): stuck, and the slice shrinks
+        store.append_jsonl(store.home() / "results.jsonl",
+                           {**row, "ts": time.time(), "steps": [{**row["steps"][-1], "stuck": True}]})
+        self.assertLess(router.slice(m).files, before.files)
+
+    def test_keep_alives_before_the_first_token_are_the_providers_queue_not_thinking(self):
+        # DeepSeek holds a request open with keep-alives up to 10 minutes before inference starts
+        task = self.api_task("t-queue", "api", "--think-timeout", "2", "--silence-timeout", "30")
+        self.up.keepalive = 8
+        self.keyhole(task)
+        with mock.patch.object(self.kh_mod, "QUEUED_AFTER_S", 1):
+            runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st.get("nudges", 0)), ("review", 0), st.get("last"))
+        [ev] = self.events(task, "rate_limited")
+        self.assertEqual(ev["state"], "queued")
+        other = self.api_task("t-queue2", "api", "--think-timeout", "2", "--silence-timeout", "30")
+        self.keyhole(other)
+        with mock.patch.object(self.kh_mod, "QUEUED_AFTER_S", 3600):  # without the mark
+            runner.drive(other)
+        self.assertGreaterEqual(other.status.get("nudges", 0), 1)
+
+    def test_a_402_stops_the_round_at_once_with_the_remedy_and_no_revive(self):
+        task = self.api_task("t-402", "api", "--silence-timeout", "30")
+        self.up.rate_until, self.up.code, self.up.after = float("inf"), 402, None
+        self.up.body = "Insufficient balance"
+        self.keyhole(task)
+        runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st.get("infra")),
+                         ("stuck", "deepseek says the account is out of credit (HTTP 402)", "provider"))
+        self.assertEqual(len(self.up.seen), 1)                      # no retry loop, ours or OpenCode's
+        self.assertIsNone(st.get("api_stop"))                       # consumed by the stop
+        self.assertTrue([e for e in self.events(task, "error") if "keyhole: deepseek says the account "
+                         "is out of credit (HTTP 402): the round stops" in e["text"]])  # a 400: no retry
+        self.assertFalse(self.events(task, "load"))                 # never revived
+        n = self.notice(task)
+        self.assertEqual(n["cause"], "provider")
+        self.assertIn("top up your deepseek account, or wait for the plan's reset", n["text"])
+        self.assertEqual(self.models.api_health("deepseek")["state"], "no_credit")
+        # OpenCode's own provider.quota (no keyhole between): the same stop
+        fake = self.api_task("t-402b", "quota", "--silence-timeout", "30")
+        runner.drive(fake)
+        self.assertEqual((fake.status["phase"], self.notice(fake)["cause"]), ("stuck", "provider"))
+        self.assertIn("(HTTP 402)", fake.status["last"])
+
+    def test_read_bound_records_nothing_for_a_rate_limited_round(self):
+        from workbench import router
+        task = self.api_task("t-rb", "ok")
+        runner.write_config_layer(task)
+        rnd = {"waited": 900, "answered": False, "interrupted": False, "retries": []}
+        self.assertIsNone(runner.read_bound(task, 1, {**rnd, "guard": "rate_limited"}))
+        self.assertIsNone(runner.read_bound(task, 1, {**rnd, "guard": "outage"}))
+        self.assertEqual(router.speed(task.spec["model"]), {})
+        self.assertTrue(runner.read_bound(task, 1, {**rnd, "guard": "silence"}))   # as before
+
+    def test_the_cooldown_is_written_for_the_provider_and_read_without_a_request(self):
+        os.environ["FAKE_CALLS"] = str(Path(self.tmp.name) / "calls.jsonl")
+        task = self.api_task("t-cool", "ok")
+        kh = self.keyhole(task, hold=0)                             # passed back at once
+        self.up.rate_until, self.up.after = time.monotonic() + 2, "2"
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+        self.addCleanup(conn.close)
+        body = json.dumps({"model": "deepseek-flash", "stream": True}).encode()
+        conn.request("POST", "/v1/chat/completions", body=body,
+                     headers={"Authorization": f"Bearer {kh.token}"})
+        r = conn.getresponse()
+        self.assertEqual((r.status, r.getheader("Retry-After")), (429, "2"))
+        r.read()
+        rl = task.status["ratelimit"]
+        self.assertEqual((rl["kind"], rl["provider"], rl["code"], rl["retry_after"]),
+                         ("rate_limited", "deepseek", 429, 2))
+        self.assertGreaterEqual(task.status["ratelimit_until"], time.time() + 55)  # the 60 s floor
+        row = json.loads((store.home() / "api-health.json").read_text())["deepseek"]
+        self.assertEqual(row["state"], "rate_limited")
+        self.assertAlmostEqual(row["until"], time.time() + 2, delta=1.5)
+        m = self.models.Model(id="deepseek/deepseek-flash", provider="deepseek", name="deepseek-flash",
+                              base_url="https://api.deepseek.com", engine="api", label="deepseek-flash",
+                              kind="api", key="stored", config={"limit": {"context": 131072}})
+        seen = len(self.up.seen)
+        self.assertTrue(self.models.status(m)["why"].startswith("rate-limited by "))
+        self.assertEqual(len(self.up.seen), seen)                   # no request to the provider
+        self.assertFalse(Path(os.environ["FAKE_CALLS"]).exists())   # nor to OpenCode
+        # another task's keyhole on the provider waits the cooldown out before sending
+        task2 = self.api_task("t-cool2", "ok")
+        kh2 = self.keyhole(task2, hold=30)
+        start = time.monotonic()
+        conn = http.client.HTTPConnection("127.0.0.1", kh2.port, timeout=30)
+        self.addCleanup(conn.close)
+        conn.request("POST", "/v1/chat/completions", body=body,
+                     headers={"Authorization": f"Bearer {kh2.token}"})
+        r = conn.getresponse()
+        r.read()
+        self.assertEqual(r.status, 200)
+        self.assertGreaterEqual(self.up.seen[-1] - start, 1)        # sent once the cooldown ended
+        self.assertEqual(len(self.up.seen), seen + 1)
+        self.assertIsNone(task2.status.get("ratelimit"))            # cleared at the first data
+
+    def test_the_upstream_body_of_a_429_or_402_never_reaches_the_task_files(self):
+        task = self.api_task("t-leak", "api", "--silence-timeout", "30")
+        self.up.rate_until, self.up.after = time.monotonic() + 2, "1"
+        self.up.body = f"Rate limited for key {self.CANARY}"
+        self.keyhole(task, hold=0)
+        os.environ["FAKE_RETRY_EVERY"] = "1"
+        done = threading.Event()
+
+        def to_402():
+            while not done.wait(0.2):
+                if len(self.up.seen) >= 2:
+                    self.up.rate_until, self.up.code = float("inf"), 402
+                    self.up.body = f"No credit left on {self.CANARY}"
+                    return
+        threading.Thread(target=to_402, daemon=True).start()
+        runner.drive(task)
+        done.set()
+        self.assertEqual(task.status["phase"], "stuck")
+        self.assertTrue(self.events(task, "retry"))                 # the 429 bodies came through OpenCode
+        for f in (task.dir / "events.jsonl", task.dir / "status.json", task.dir / "runner.log",
+                  store.home() / "notify.jsonl", store.home() / "api-health.json"):
+            text = f.read_text()
+            self.assertNotIn(self.CANARY, text, f)
+            self.assertNotIn(self.CANARY[-12:], text, f)
+
+    def test_a_spend_cap_stop_is_its_own_cause_never_held_against_the_model(self):
+        # the engineer's call (2026-11-23): #1019's day cap writes status api_stop {guard: spend};
+        # its stop is the user's budget, neither the provider's nor the step's
+        from workbench import lessons, models, results, router
+        task = self.api_task("t-spend", "ok", "--silence-timeout", "30")
+        why = "the day's API spend cap is reached: $5.02 of $5 today"
+        waiting = runner._ProviderWait.waiting
+
+        def capped(pw, now):  # mid-round, as the keyhole's side writes it
+            if not getattr(pw, "capped", False):
+                pw.capped = True
+                pw.task.set_status(api_stop={"guard": "spend", "text": why})
+            return waiting(pw, now)
+        with mock.patch.object(runner._ProviderWait, "waiting", capped):
+            runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st.get("infra")), ("stuck", why, "spend"))
+        self.assertIsNone(st.get("api_stop"))                       # consumed by the stop
+        self.assertFalse(self.events(task, "load"))                 # never revived
+        n = self.notice(task)
+        self.assertEqual((n["kind"], n["cause"]), ("stuck", "spend"))
+        self.assertNotIn(n["cause"], results.THE_STEP)
+        self.assertNotIn("top up", n["text"])                       # not the provider's remedy
+        stops = self.events(task, "stopped")
+        self.assertTrue(stops and all(e.get("by") == "spend" for e in stops), stops)
+        self.assertFalse([x for x in lessons.gather(task, "discarded") if x["kind"] == "stopped"])
+        for i in range(3):                                          # what the agent wrote first
+            (task.worktree / f"part{i}.py").write_text("x = 1\n")
+        self.assertIs(results.step(task, False)["stuck"], False)
+        m = models.resolve(task.spec["model"])
+        before = router.slice(m)
+        run_wb("discard", "t-spend")
+        self.assertIs(store.results()[-1]["steps"][-1]["stuck"], False)
+        self.assertEqual((router.slice(m).files, router.slice(m).lines), (before.files, before.lines))
+        self.assertEqual([runner.stopped_by(g) for g in ("spend", "quota", "rate_limited", "silence", None)],
+                         ["spend", "provider", "provider", None, None])
+
+    def test_cloudflares_520_to_524_are_held_like_a_502_to_504(self):
+        # the engineer's call (2026-11-23): Cloudflare's origin errors in front of a provider are
+        # as transient as a 502-504; a 501 still goes back at once
+        codes = self.kh_mod.HOLD_CODES
+        self.assertEqual({c: codes.get(c) for c in (502, 503, 504, 520, 521, 522, 523, 524)},
+                         dict.fromkeys((502, 503, 504, 520, 521, 522, 523, 524), "outage"))
+        self.assertNotIn(501, codes)
+        body = json.dumps({"model": "deepseek-flash", "stream": True}).encode()
+        for code, held in ((522, True), (524, True), (501, False)):
+            with self.subTest(code=code):
+                task = self.api_task(f"t-cf{code}", "ok")
+                kh = self.keyhole(task, hold=15)
+                self.up.seen.clear()
+                self.up.code, self.up.after = code, "1"
+                self.up.rate_until = time.monotonic() + 2.5
+                conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+                self.addCleanup(conn.close)
+                conn.request("POST", "/v1/chat/completions", body=body,
+                             headers={"Authorization": f"Bearer {kh.token}"})
+                r = conn.getresponse()
+                r.read()
+                if held:
+                    self.assertEqual(r.status, 200)                 # sent again until it answered
+                    self.assertGreaterEqual(len(self.up.seen), 2)
+                else:
+                    self.assertEqual((r.status, len(self.up.seen)), (501, 1))
+
+    def test_a_gpu_tasks_clocks_ignore_the_provider_keys(self):
+        # a GPU task never reads them: a 429-shaped retry or a stale key pauses nothing (#491)
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-gpu", "retry", "--no-base-check", "--silence-timeout", "3")
+        task = store.Task("t-gpu")
+        task.set_status(ratelimit_until=time.time() + 3600, ratelimit={"kind": "rate_limited",
+                                                                        "since": time.time()})
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "stuck")
+        self.assertIn("no first output", task.status["last"])
+        self.assertFalse(self.events(task, "rate_limited"))
 
 
 if __name__ == "__main__":
