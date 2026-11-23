@@ -1383,12 +1383,34 @@ content too (#519), so should a release load a project's config despite the swit
 can't change them (a project's `compaction.auto: false` left no backstop past the handover; its
 `autoupdate` moved OpenCode past `OPENCODE_TESTED`); so do the task model's `limit` and
 `options.max_tokens` (`model_pins`, never a `baseURL` or key: a wider window moved compaction off
-the planned handover). The layer's `small_model` is the task's model, which is how `rules_env`
+the planned handover). The layer's `small_model` is the task's model (its `opencode_model`, #1018), which is how `rules_env`
 finds it. With the probe experiment (*Experiments*) the layer sets `tool_output`
 (`runner.output_cap`, #857): `max_bytes` `OUTPUT_CAP_SHARE` of `usable_input`, within
 `OUTPUT_CAP_MIN`..`OUTPUT_CAP_MAX` (OpenCode's default), `max_lines` per `OUTPUT_CAP_LINE`. It
 bounds the shell's output, not the built-in `read`, so the probe note says how to read on. The `edit` rule also denies `OPENCODE_FILES` (`*opencode.json`,
 `*opencode.jsonc`, `.opencode/*`, `*/.opencode/*`), and the report flags them with Claude's files.
+
+**The task's thinking variant** (#1018, *Thinking off by default*). The layer's `small_model` is
+the task's `opencode_model`, variant and all: `small_model` takes `<id>#<variant>` (checked on 2.3.2;
+pinned to the bare id, the title went to the catalog's lowest variant, and a model with none
+listed would think on the title). `model_pins` reads the id before the `#`. `wb-off`
+(`runner.thinking_layer`, from task.json `thinking_off`) goes under the task's model: a settings
+variant in V1 form, `provider.<p>.models.<m>.variants.wb-off`; a body field (DeepSeek's
+`thinking`) on a catalog provider only in V2, `providers.<p>.models.<m>.variants: [{id: "wb-off",
+body}]`, since V1 keeps only keys the package has a setting for (checked 2026-11-23 on 2.3.2: a V1
+`thinking` on the catalog's DeepSeek left the agent's request without it; the title request carries
+`thinking: disabled` of OpenCode's own whatever the variant, so only the request with tools tells).
+A config provider on an npm package (`@ai-sdk/openai-compatible` at DeepSeek's host) sends V1 keys
+in the body as they are, so its `wb-off` stays V1. A document that holds one provider in both forms
+loses the V1 entry (checked: `provider.deepseek.options.baseURL` beside `providers.deepseek` went
+unread, the request to DeepSeek's own host; a V1 entry in another document, the user's global
+file, holds), so that provider's whole entry moves to V2 with it (`runner._as_v2`: `options` as
+`settings`, `npm` as `package`, which V2 needs or fails "Unsupported package", a V1 `variants`
+object as a list); other providers stay V1 beside it, and V2 variants merge with the catalog's by
+id (its `#high` still resolved).
+`restate_thinking` says it again in `OPENCODE_CONFIG_CONTENT`, as the model's pins are, its
+provider moved to V2 there too with only its timeouts (never a key or baseURL). A catalog `none`
+needs nothing in the layer.
 
 **The user's MCP servers stay out.** OpenCode merges the user's global MCP servers into every
 agent: one with the user's token would reach every agent, and a remote one runs in OpenCode's
@@ -2116,6 +2138,60 @@ chose).
   on an API id refuse (`sizes are for GPU models; API models run by role`, `cli.API_SIZES`), and `wb
   bench --model` refuses one (replays take the GPU lease), until the roles and their gate land.
 
+**Thinking off by default** (#1018). An API task runs with thinking off unless its role says on
+(`thinking: off|on`, decision 5 of #1008; task.json `thinking`, default off). Why off: API
+providers think by default (DeepSeek at effort high) and bill reasoning at the output rate
+(*API models through OpenCode*, *Cost*); a change to the switch or the effort between requests drops
+DeepSeek's prompt cache; and DeepSeek's own V4 numbers that put thinking 5-8 points ahead on
+SWE-Verified and Terminal Bench are self-reported, for V4, not V4.1. With tools, DeepSeek wants every
+earlier `reasoning_content` sent back: OpenCode 2.3.2 does (checked), so thinking on works there too.
+`runner.thinking_variant(m, thinking) -> (variant | None, shown)`, from the model's catalog entry:
+- `on`: no variant, the provider's default (`thinking on`).
+- `reasoning: false` (a config entry), or `capabilities.reasoning.supported: false`: none, `thinking
+  off (the model doesn't reason)`.
+- the catalog's own variant that turns it off: `none`, or one whose settings or body say so
+  (`reasoningEffort: none`, `reasoning.enabled: false`, `reasoning.effort: none`, `thinking.type:
+  disabled`): `thinking off`. OpenCode 2.3.2 lists `none` for DeepSeek's, DeepInfra's and most
+  OpenAI and OpenRouter models, but for only 2 of Anthropic's 20 (checked 2026-11-23, all 584
+  catalog rows).
+- variants listed, none of them off (`runner._no_off_listed`): never one that thinks more than the
+  bare id, since a variant can turn on thinking the bare id leaves off (the #1018 review: the
+  lowest listed sent Anthropic's older models `thinking: enabled` or `adaptive` where the bare id
+  sent no `thinking`). Anthropic's whose every variant is `thinking.type: enabled` (manual thinking,
+  a `budgetTokens`): the bare id, which OpenCode sends no `thinking` and the API runs without,
+  `thinking off`. Anthropic's adaptive ones: the bare id, `thinking as the model's default (it lists
+  no lower setting)`: some don't think on it, others do and refuse `thinking: disabled` with a 400,
+  and the catalog doesn't tell them apart, so neither `wb-off` nor the lowest listed is safe there.
+  Elsewhere the lowest listed effort (`runner.EFFORTS`' order, `none minimal low medium high xhigh
+  max`) when it is under the provider's default (`runner.DEFAULT_EFFORT`: OpenAI-compatible and
+  OpenRouter `medium`, DeepSeek `high`), `thinking at its lowest effort (it can't turn off)`; else
+  the bare id and the default line (OpenRouter's `high`-only reasoning sends no `reasoning` field
+  bare, but `reasoning.effort: high` with `#high`).
+- no variants but `capabilities.reasoning` without a `toggle`: wb's `wb-off` at the lowest effort
+  (OpenRouter `reasoning.effort: minimal`, else `reasoningEffort` the lowest of
+  `capabilities.reasoning.effort`, both settings), the same line; with no effort listed, none, `thinking
+  on (it can't turn off)`.
+- no variants and the model reasons (a config entry's `reasoning: true`, or `capabilities.reasoning`
+  with its `toggle`): `wb-off`, `runner.THINKING_OFF` by what the provider speaks (`runner.speaks`:
+  the package or npm, else the base URL's host, `SPEAKS_HOST`; anything else is OpenAI-compatible):
+  DeepSeek body `thinking: {type: disabled}` (a setting on a provider of the user's config, whose npm
+  package sends V1 keys in the body: `runner._off_form`), OpenRouter settings `reasoning: {enabled:
+  false}`, Anthropic settings `thinking: {type: disabled}`, OpenAI-compatible settings
+  `reasoningEffort: none`.
+- else (no variants: OpenCode's catalog lists them for every model it says reasons): none,
+  `thinking off (the model doesn't reason)`.
+
+`runner.with_thinking(m, spec)` fixes it in task.json at `wb start` (`opencode_model` `<id>#<variant>`,
+`thinking`, `thinking_shown`, `thinking_off` for `wb-off`), for an API model only: a GPU task thinks
+as its OpenCode entry says, exactly as before, whatever its role's `thinking`. Nothing after the
+start recomputes it (feedback, next, resume, a handover keep `opencode_model`): a role's thinking
+changed mid-task applies to the next task, since a change mid-task would drop the cache. The layer
+carries it (*What the agent knows*, *The task's thinking variant*); `transcript.model_line` shows
+`thinking_shown` (`<label> · thinking off · 1024K context`), never reading `wb-off` from the
+user's config; results rows keep `thinking` (the weekly check's evidence for recommending it for
+`significant`, in chat only, never set). `wb-off` is reserved: a user's own variant of that name
+loses to wb's in the layer.
+
 `wb remote HOST` (`models.add_remote`, #114): checks `/api/version`, writes provider `ollama-<host>`
 (`remote_pid`; `remote_root` brackets IPv6, zone `%25`, read back as discovery reads it, #707)
 with `local: true` and `remote: <root>`, then adds each `/api/tags` model whose `/api/show`
@@ -2585,6 +2661,17 @@ weren't needed. CI pins 2.3.0: not checked there.
   none of those falls back to the task's model at its lowest variant (DeepInfra: the same model,
   `reasoning_effort: none`). A failed title is tried once more on the task's model
   (`core/src/session/title.ts`, `context.ts` `selectTitle`).
+- **Thinking in the layer** (#1018, checked 2026-11-23 on 2.3.2 with `capture_llm.py`, offline). A
+  document with `provider.<p>` (V1) and `providers.<p>` (V2) for the same provider reads only the V2
+  one: V1 `options.baseURL` was lost and the run went to the catalog's host. Another provider's V1
+  entry beside it holds. V2 `settings.{baseURL, apiKey, headerTimeout}` and a V2 model's `limit`
+  work as V1's `options` and `limit` do (a 1.5 s `headerTimeout` cut a 4 s header wait; `limit.output`
+  1234 sent `max_tokens` 1234). A V2 variant list merges with the catalog's by id. `small_model` (and
+  V2 `agents.title.model`) take `#<variant>`: a marker in a `wb-off` body reached the title request.
+  DeepSeek's catalog `#none` sends `thinking: {type: disabled}`, the title too (its lowest);
+  no variant sends no `thinking`. Anthropic's Haiku with no variant got `thinking: {type:
+  adaptive}`. With thinking on and a tool call, the next DeepSeek request carried the assistant's
+  `reasoning_content` back.
 
 ## Bench: real tasks replayed
 
@@ -4295,7 +4382,8 @@ mod's `absolutePath` does the same for `WB_HOME`, `CLAUDE_CONFIG_DIR`, `WB_SAVIN
 the directory rule adopts the task), `claude_start` (`models._started`, against a recycled pid), `claude_machine` (a process on another
 machine is never gone here, `cli._gone`, nor checked by the mod's `noteClaude`: two machines adopted each other's tasks,
 #922), `base` (full sha), `base_ref`, `base_branch` (where `--merge` lands: `HEAD`'s branch, or `--base` naming a local one; null on a detached HEAD, tag or commit),
-`branch`, `model`, `model_label`, `opencode_model`, `weights_id` (`models.identity`), `route`, `size`, `stack`, `trial`, `backlog`,
+`branch`, `model`, `model_label`, `opencode_model` (`<id>#<variant>` for an API task's thinking, `runner.with_thinking`), `weights_id` (`models.identity`), `route`, `size`, `stack`, `trial`, `backlog`,
+`thinking` (an API task's: `off`|`on`, the role's, default off), `thinking_shown` (what it does: `thinking off`, `thinking at its lowest effort (it can't turn off)`, `thinking as the model's default (it lists no lower setting)`…), `thinking_off` (`wb-off`'s `{settings}` or `{body}`, #1018),
 `bench` (`{case, run, label}`), `test_cmd`, `no_base_check`, `unload_for_tests`, `sign` (false: `--no-sign`), `subdir` (a monorepo package), `setup`,
 `setup_timeout`, `copy`, `siblings`, `worktree` (when nested), `checkout` (`"runner"`; missing before #529),
 `checkout_bytes` (wb start's disk-check size, counted as taken until the runner checks out; missing when free space was
@@ -4385,7 +4473,7 @@ export failed: judged by `live_used`), `stopped {by: "signal"}`, `gpu {text}` (a
 `stack`, `subdir`, `rounds`, `auto_fixes`, `reviews`, `spec_rounds`, `tests_ok`, `minutes` (wall clock, queueing and review included), `tok_in`, `tok_out`, `ran` (`results.ran`: a session
 began or a token was written),
 `failed_before`, `skills_offered`, `skills_loaded`, `skills_rev`, `experiments`, `steps`, `window`, `weights_id`,
-`tuned`, `explored`, `tuned_max`, `peak_share`, `self_review_due`, `spec_gaps`, `claude` (`spend.usage`: `{turns,
+`thinking` (an API task's, `off`|`on`, #1018), `tuned`, `explored`, `tuned_max`, `peak_share`, `self_review_due`, `spec_gaps`, `claude` (`spend.usage`: `{turns,
 calls, input, cache_write_5m, cache_write_1h, cache_read, output}`), `gpu_wh`, `remote_gpu`, `active_minutes`
 (status `active_s`), `interventions`, `diff` (accepted: `{files, added, removed, generated?, deleted?}`, `gitops.footprint`),
 `landed_steps` (discarded: the steps `wb next` committed and the discard kept; `steps_dropped` after `--drop-steps`), `backlog`, `trial`, `experiment_use`, `long_reads`,
@@ -4699,6 +4787,7 @@ runner on real OpenCode (`wb start --model cap`): argv, `run --format json` even
 (`context_state`), `session list` (`find_session`), `--session`, a real compaction, the task's own OpenCode home
 (no credentials in it, the user's store given no session, its commands seeing the user's `XDG_DATA_HOME`, #1010)
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
+`ApiThinking`'s `test_real_opencode_*` is one too (#1018): a `wb-off` body variant and the catalog's `none` reach a DeepSeek-shaped server as `thinking: {type: disabled}` in the agent's request, and the npm provider's V1 `wb-off`.
 
 **The browser test** (`e2e_chat.mjs`): the real `bin/wb chat serve` on 13371 (`WB_E2E_PORT`), WebKit as an iPhone 13
 and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7: sends land exactly once through
@@ -4925,4 +5014,5 @@ doc needs its own `!/` line).
   command run at the tagged commit (#422), platforms by hand, each run recorded with SHA, OS, filesystem, versions,
   hardware, result, skip reason; a skip is not a gate), a `v<version>` tag (trailing `.0` dropped, `v0.90`), `gh release
   create v<version> --generate-notes` linking the checklist. **`wb setup`'s links** → README's quickstart, *Installing*.
+- **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.

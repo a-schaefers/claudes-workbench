@@ -505,8 +505,10 @@ def model_line(task: store.Task, data: dict) -> str:
     else:
         think = f"reasoning {effort}" if effort else "reasoning on, default effort"
     ctx = (cfg.get("limit") or {}).get("context")
+    if sp.get("thinking_shown"):  # an API task's, fixed at wb start; never the config's wb-off (#1018)
+        think, variant = sp["thinking_shown"], ""
     return " · ".join(x for x in (sp.get("model_label") or sp.get("model"), think,
-                                  f"variant {variant}", f"{ctx // 1024}K context" if ctx else "") if x)
+                                  variant and f"variant {variant}", f"{ctx // 1024}K context" if ctx else "") if x)
 
 
 def context_fill(data: dict) -> int | None:

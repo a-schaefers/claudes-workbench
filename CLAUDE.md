@@ -175,3 +175,10 @@ what: ARCHITECTURE.md, *The tests*; the detail: *The runner, inside*, *What the 
   It picks a command's flags by `$SHELL`'s name (zsh's `+o nomatch`): the shim bears its shell's.
 - The user's global MCP servers start even when `"enabled": false`, and a provider's
   `headerTimeout`/`chunkTimeout` cut a slow request: the layer undoes both.
+- `-m <provider>/<id>#<variant>` picks a variant (the provider ends at the first `/`); an unknown
+  one is a resolution error, exit 1 before any request. A V1 layer variant on a catalog package
+  keeps only its settings (an npm package sends V1 keys in the body), so a body field there
+  (DeepSeek's `thinking`) needs V2 `providers`, and one provider in both forms loses its V1 entry
+  (`runner._as_v2` moves it whole; V2 says `package`, not `npm`). `small_model` takes `#<variant>`.
+  The title request to a catalog Anthropic or DeepSeek model sends `thinking: disabled` by itself:
+  check a variant on the request with tools.
