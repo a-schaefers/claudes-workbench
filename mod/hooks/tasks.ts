@@ -17,7 +17,7 @@ import type { WbTask } from '../types'
 /** One run of a row's text in one style. */
 export type Part = { text: string; color?: string; dim?: boolean; bold?: boolean; underline?: boolean }
 
-/** What a task's rows read: WbTask's fields plus the ones the view adds (step E fills them in scan). */
+/** What a task's rows read: WbTask's fields plus the ones the view adds (scan fills them, viewFacts). */
 export type TaskFacts = Pick<WbTask, 'name' | 'phase' | 'round' | 'model' | 'label' | 'via' | 'role' |
   'provider' | 'tests' | 'last' | 'createdAt' | 'updatedAt' | 'recent' | 'parked'> & {
   /** task.json `group` ('' for none); `cards` status' card numbers ([] on one card, or an API task) */
@@ -28,6 +28,9 @@ export type TaskFacts = Pick<WbTask, 'name' | 'phase' | 'round' | 'model' | 'lab
   /** the step's active seconds before this round (status `active_s` less `step_active_s`, as
    * runner.active_so_far), the round's start (ms, as createdAt; 0 for none), and status `typical` */
   activeS: number; roundStartedAt: number; typicalMin: number; typicalN: number
+  /** status `late_min`: the progress checks' first point (the user's --after, else the typical
+   * length at least progress.FLOOR_MIN), 0 for none: a task is late only from there */
+  lateMin: number
   spend: number | 'plan' | 'none' | null   // null: no api record (a GPU task, or an older wb)
 }
 
@@ -77,7 +80,7 @@ const ctxBar = (frac: number, freshAt: number | null, w: number) => {
   return b.join('')
 }
 
-// until step E hands it wave 2's usd() (savings.usd's rule): a free model's $0, else cents
+// the pane passes wave 2's usd() (savings.usd's rule); this, a free model's $0, else cents, is the default
 const plainUsd = (x: number) => (x === 0 ? '$0' : `$${x.toFixed(2)}`)
 
 const tokens = (n: number) =>
@@ -140,15 +143,25 @@ export function placeOf(t: TaskFacts, short: boolean): string {
 const activeOf = (t: TaskFacts, now: number) =>
   (t.activeS || 0) + (WORKING.has(t.phase) && t.roundStartedAt ? Math.max(0, now - t.roundStartedAt) / 1000 : 0)
 const typicalOf = (t: TaskFacts) => (t.typicalN >= TYPICAL_MIN && t.typicalMin > 0 ? t.typicalMin * 60 : 0)
+// late from the progress checks' own points, 1x and 2x status `late_min`, never from a raw median:
+// a typical length of 4 minutes coloured a 5-minute task late, where no check comes before
+// progress.FLOOR_MIN (step A's review, #1048); '' before the first, or while it isn't working
+const lateOf = (t: TaskFacts, now: number): '' | 'warning' | 'error' => {
+  if (!(t.lateMin > 0) || !WORKING.has(t.phase)) return ''
+  const active = activeOf(t, now), at = t.lateMin * 60
+  return active >= 2 * at ? 'error' : active >= at ? 'warning' : ''
+}
 
-/** Time against this machine's typical length: `~6m left`, `3m over` (warning; error past twice it);
- * null without TYPICAL_MIN timed tasks behind it, or while it isn't working. */
+/** Time against this machine's typical length: `~6m left`, `3m over` (warning from the progress
+ * checks' first point, error from their second); null without TYPICAL_MIN timed tasks behind it,
+ * or while it isn't working. */
 export function etaOf(t: TaskFacts, now: number): { text: string; color?: string } | null {
   const typ = typicalOf(t)
   if (!typ || !WORKING.has(t.phase)) return null
   const active = activeOf(t, now), left = typ - active
   if (left > 0) return { text: `~${ago(left * 1000)} left` }
-  return { text: `${ago(-left * 1000)} over`, color: active > 2 * typ ? 'error' : 'warning' }
+  const late = lateOf(t, now)
+  return { text: `${ago(-left * 1000)} over`, ...(late ? { color: late } : {}) }
 }
 
 /** The context window's fill and the handover point, while it is working; null when unknown. */
@@ -233,7 +246,6 @@ const DOING_STYLE: Record<string, Style> = {
 
 function rowOf(t: TaskFacts, now: number, spin: string, followed: string, grouped: boolean, usd: (x: number) => string): Row {
   const long = stageOf(t, false), short = stageOf(t, true)
-  const typ = typicalOf(t), active = activeOf(t, now)
   let elapsed: string
   if (t.phase === 'review') {
     // a request's finished task says how long it ran, beside its siblings' times; on its own, how
@@ -241,14 +253,15 @@ function rowOf(t: TaskFacts, now: number, spin: string, followed: string, groupe
     const waited = now - t.updatedAt
     elapsed = grouped ? ago(t.updatedAt - t.createdAt) : waited < 60_000 ? 'now' : `${ago(waited)} ago`
   } else elapsed = ago(now - t.createdAt)
-  const late = typ && WORKING.has(t.phase) ? (active > 2 * typ ? 'error' : active > typ ? 'warning' : '') : ''
+  const late = lateOf(t, now)
   return {
     t, mark: { text: t.phase === 'running' ? spin : MARK[t.phase] ?? '·', color: COLOR[t.phase] },
     name: t.name, underline: t.name === followed,
     stage: long.text, stageS: short.text, stageColor: long.color, fixAt: /fix \d+\/\d+/.test(long.text),
     where: placeOf(t, false), whereS: placeOf(t, true),
     placeStyle: t.via === 'api' ? { color: 'suggestion' } : { dim: true },
-    model: t.label || (t.model ?? '').split('/').pop() || '',
+    // an API task's the id's last part (its place names the provider, #1016's badge), a GPU task's label
+    model: (t.via === 'api' ? '' : t.label) || (t.model ?? '').split('/').pop() || '',
     role: ROLE_WORDS[t.role] ?? t.role ?? '',
     spend: typeof t.spend === 'number' ? usd(t.spend) : t.spend === 'plan' ? 'plan' : t.spend === 'none' ? 'no price' : '',
     elapsed, elapsedStyle: late ? { color: late } : { dim: true },
@@ -424,29 +437,38 @@ function closedLine(tasks: TaskFacts[], cols: number, now: number): Part[] {
 
 /** Every row of the task list, at most `cols` columns each: a block a request (its header, then
  * each task's line 1 and, unless compact, line 2), the block's closed tasks folded to one dim line,
- * an empty row between blocks. `usd`: how spend is written (wave 2's usd(), passed in step E). */
+ * an empty row between blocks. `usd`: how spend is written (the pane passes wave 2's usd()). */
 export function taskRows(list: TaskFacts[], o: { cols: number; now: number; spin: string;
   followed: string; compact: boolean; usd?: (x: number) => string }): Part[][] {
+  return taskLines(list, o).map(l => l.parts)
+}
+
+/** taskRows' rows, each with the task it draws ('' for a header, a gap or the closed line) and
+ * whether it is that task's first line: the pane presses a task's first line to follow it, and
+ * draws its other lines after its last one. */
+export function taskLines(list: TaskFacts[], o: { cols: number; now: number; spin: string;
+  followed: string; compact: boolean; usd?: (x: number) => string }): { parts: Part[]; task: string; first: boolean }[] {
   const usd = o.usd ?? plainUsd
-  const out: Part[][] = []
+  const out: { parts: Part[]; task: string; first: boolean }[] = []
+  const add = (parts: Part[], task = '', first = false) => out.push({ parts, task, first })
   for (const b of blocksOf(list)) {
     const grouped = !!b.group
     const open = b.tasks.filter(t => !CLOSED.has(t.phase))
     const closed = b.tasks.filter(t => CLOSED.has(t.phase))
     if (o.compact && !grouped && !open.length) continue
-    if (!o.compact && out.length) out.push([{ text: '' }])
-    if (grouped) out.push(header(b.group, b.tasks, o.cols, o.compact, usd))
+    if (!o.compact && out.length) add([{ text: '' }])
+    if (grouped) add(header(b.group, b.tasks, o.cols, o.compact, usd))
     if (open.length) {
       const rows = open.map(t => rowOf(t, o.now, o.spin, o.followed, grouped, usd))
       const L = layout(rows, o.cols, grouped)
       rows.forEach((r, i) => {
         const last = i === rows.length - 1
-        out.push(line1(r, o.cols, grouped ? (last ? '└ ' : '├ ') : '', L))
+        add(line1(r, o.cols, grouped ? (last ? '└ ' : '├ ') : '', L), r.name, true)
         if (!o.compact && r.doing !== null)
-          out.push(line2(r, o.cols, grouped ? (last ? '  ' : '│ ') : '', L, r.ctx || r.tools ? L.mw : 0))
+          add(line2(r, o.cols, grouped ? (last ? '  ' : '│ ') : '', L, r.ctx || r.tools ? L.mw : 0), r.name)
       })
     }
-    if (!o.compact && closed.length) out.push(closedLine(closed, o.cols, o.now))
+    if (!o.compact && closed.length) add(closedLine(closed, o.cols, o.now))
   }
   return out
 }

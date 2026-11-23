@@ -83,6 +83,8 @@ import type { Pose } from './apprentice'
 import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
 import type { Plan, Target } from './splash'
 import { activity, loopLength, TICKER_MS, tickerCells } from './modeline'
+import { ago, bar, capRow, clip, compactWanted, taskLines } from './tasks'
+import type { Part as RowPart } from './tasks'
 
 const PANE = 'workbench'
 // Nothing waits on a timer for news: `wb events` (inotify) prints a line the moment a task, a
@@ -95,7 +97,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-9',
+  shape: 'tasks-10',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -287,11 +289,6 @@ const LINE_STYLE: Record<string, Row> = {
   head: { bold: true }, activity: { color: 'claude' }, clock: { dimColor: true },
 }
 const SPIN = ['✻', '✳', '✶', '✢', '·', '✢', '✶', '✳']
-// Each phase's mark in the task list; a running task's is the spinner.
-const MARK: Record<string, string> = {
-  queued: '◌', testing: '◐', asking: '?', review: '◆', stuck: '▲', failed: '✗',
-  accepted: '✓', discarded: '–',
-}
 
 // The apprentice (apprentice.ts) at the foot of the pane: how it stands and what it says about
 // the followed task. A timer (FRAME_MS) swings the wrench now and then while it works and blinks
@@ -324,12 +321,6 @@ const speechOf = (focus: WbTask | undefined, doing: string, list: WbTask[], on: 
   return { pose: working ? 'work' : 'think', say: doing || focus.last || `${focus.phase}…`, more: '', color: COLOR[focus.phase] ?? 'claude' }
 }
 
-// A task's model as its row shows it: an API task's with its badge, `API · <model>` (the
-// provider's own id cut off, as the GPU's label is short), a GPU task's label (#1016)
-export function modelOf(t: Pick<WbTask, 'via' | 'model' | 'label'>): string {
-  return t.via === 'api' ? `API · ${t.model.split('/').pop()}` : t.label || t.model
-}
-
 // The frame a pose shows at a tick: a stroke of the wrench now and then while working, else a
 // blink now and then.
 const frameOf = (pose: Pose, tick: number): Pose => {
@@ -341,9 +332,9 @@ const frameOf = (pose: Pose, tick: number): Pose => {
 // What the Tasks page is made of, apart from its drawing: the render draws it and pageShape
 // measures it, so the two can't disagree (#963).
 function pageParts(list: WbTask[], watched: WbLive, delegating: boolean, now: number, spin: string, cols: number,
-  pixels: boolean) {
-  const when = (t: WbTask) =>
-    ACTIVE.has(t.phase) || NEEDS.has(t.phase) ? `for ${ago(now - t.createdAt)}` : `${ago(now - t.updatedAt)} ago`
+  pixels: boolean, bodyRows = 24, cap: { spent: number; cap: number | null } | null = null) {
+  const rows = listRows(list, watched.task, now, spin, cols, bodyRows)
+  const capLine = cap ? capRow(list, cap.spent, cap.cap, cols, usd) : null
   // The history is drawn, newest within HISTORY_CHARS: the engine scrolls the pane (arrows,
   // while focused) and follows the end as lines arrive. What the agent is doing now is the
   // apprentice's to say.
@@ -360,7 +351,7 @@ function pageParts(list: WbTask[], watched: WbLive, delegating: boolean, now: nu
   const sp = speechOf(focus, doing?.t ?? '', list, delegating)
   const busy = sp.pose === 'work' || sp.pose === 'think'
   return {
-    when, from, history, meta, routed, focus, sp, busy,
+    rows, capLine, from, history, meta, routed, focus, sp, busy,
     // The bubble's inner width beside the apprentice (its columns, the mouth's, the border and
     // padding), or beside the face on one line; each line drawn whole, never squeezed.
     room: Math.max(10, pixels ? cols - COLUMNS - 1 - 4 : cols - 4),
@@ -384,23 +375,18 @@ const NARROW = /^[\x20-\x7e -¬®-˿Ͱ-ԯ‐-‧‰- ⁰-⌙⌜-⌨⌫-⏨⏭
  * the row the apprentice's Raster starts on, `tail` the rows from there to the end.
  */
 export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, saved: string, now: number,
-  cols: number): { rows: number | null; atLeast: number; stage: number; tail: number | null } {
+  cols: number, bodyRows = 24): { rows: number | null; atLeast: number; stage: number; tail: number | null } {
   const spin = SPIN[0] ?? '✻'
-  const page = pageParts(list, watched, delegating, now, spin, cols, true)
+  const page = pageParts(list, watched, delegating, now, spin, cols, true, bodyRows, capOf(list))
   let exact = true
   const line = (text: string) => { // a Text that wraps: one row when it fits
     if (!NARROW.test(text) || text.length > cols) exact = false
     return 1
   }
+  // the task list: one row each, none wider than the pane (taskLines), and the closing gap
   let rows = 0
-  for (const t of list) {
-    rows += line(`${t.phase === 'running' ? spin : MARK[t.phase] ?? '•'} ${t.name} ${t.phase} · round ${t.round} · ` +
-      `${modelOf(t)}${t.tests ? ` · tests ${t.tests}` : ''} · ${page.when(t)}`)
-    for (const l of t.name === watched.task ? [] : t.recent) rows += line(`  ${clip(l, cols - 2)}`)
-    if (t.allowed) for (const l of wrapWords(t.allowed, cols - 2)) rows += line(`  ${l}`)
-    if (t.name !== watched.task && t.recent.length === 0) rows += line(`  ${clip(t.last, cols - 2)}`)
-    rows += 1 // its marginBottom
-  }
+  for (const r of page.rows) rows += line(r.parts.map(p => p.text).join(''))
+  if (page.rows.length) rows += 1
   if (watched.task) {
     rows += line(clip(`── ${watched.task} · ↑↓ scrolls ` + '─'.repeat(cols), cols))
     if (page.meta) rows += line(page.meta.t)
@@ -414,7 +400,7 @@ export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, 
   // the stage's height (the apprentice, the mouth, the bubble below its marginTop), the saving's
   // line, the tabs' marginTop, the tabs, the modeline
   const savedFits = !saved || (NARROW.test(saved) && saved.length <= cols)
-  const tail = Math.max(ROWS, MOUTH + 1, MOUTH - 1 + 2 + said) + (saved ? 1 : 0) + 3
+  const tail = Math.max(ROWS, MOUTH + 1, MOUTH - 1 + 2 + said) + (page.capLine ? 1 : 0) + (saved ? 1 : 0) + 3
   return { rows: exact && savedFits ? stage + tail : null, atLeast: stage + tail, stage, tail: savedFits ? tail : null }
 }
 
@@ -441,13 +427,6 @@ const parseLines = (text: string): Row[] =>
 
 const readJson = async ($: any, path: string): Promise<Row> =>
   $.fs.read(path).then((t: string) => JSON.parse(t)).catch(() => ({}))
-
-const ago = (ms: number) => {
-  const s = Math.max(0, Math.round(ms / 1000))
-  return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`
-}
-
-const clip = (text: string, n: number) => (text.length <= n ? text : text.slice(0, n - 1) + '…')
 
 // Words broken into lines of at most n characters (a longer word is cut across lines). The
 // bubble wraps with this, not with Text's own wrapping: in a row that shares its width, that
@@ -985,15 +964,6 @@ async function pumpTop($: any, child: any) {
       $.ui.invalidate('ui.render')
     }
   }
-}
-
-const BLOCKS = '▏▎▍▌▋▊▉█'
-// ``frac`` (0..1) of ``width`` cells, in eighths, the rest light shade
-export function bar(frac: number, width: number): string {
-  const eighths = Math.round(Math.max(0, Math.min(1, frac)) * width * 8)
-  const full = Math.floor(eighths / 8), part = eighths % 8
-  const drawn = '█'.repeat(full) + (part ? BLOCKS[part - 1] : '')
-  return drawn + '░'.repeat(Math.max(0, width - drawn.length))
 }
 
 const gib = (n: number) => (n / 2 ** 30).toFixed(1)
@@ -2117,6 +2087,8 @@ const mem = {
   paneOpened: false,
   polling: false,
   watching: false,
+  picked: '', // the task whose row the user pressed: followed while listed (#1048)
+  rolesReading: false, // a rolesNow for the Tasks tab's day-cap line under way (capNow)
   wb: 'wb',
   liveKey: '', // the followed task and its updated_at when last read
   liveAt: 0, // when its transcript was last read
@@ -2431,12 +2403,86 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       backlog: String(sp.backlog ?? ''),
       parked: ['review', 'stuck', 'failed'].includes(phase) && !!st.parked, // as store.parked (#698)
       allowed: allowedLine((await readJson($, `${base}/coding.json`)).allowed),
+      ...viewFacts(sp, st),
     })
   }
   for (const name of mem.gone) if (!names.has(name)) mem.gone.delete(name) // removed by hand
   for (const name of mem.recent.keys()) if (!names.has(name) || mem.gone.has(name)) mem.recent.delete(name)
 
   return list.sort((a, b) => a.createdAt - b.createdAt)
+}
+
+// The Tasks view's facts of a task (#1048, tasks.ts), from the task.json and status.json scan
+// already read: nothing new is read for them
+export function viewFacts(sp: Row, st: Row) {
+  const num = (x: unknown) => (Number.isFinite(Number(x)) ? Number(x) : 0)
+  const live = st.live_used && typeof st.live_used === 'object' ? st.live_used : {}
+  const api = st.api && typeof st.api === 'object' ? st.api : null
+  const typical = st.typical && typeof st.typical === 'object' ? st.typical : {}
+  const fresh = Number((st.tuned ?? {}).fresh_at)
+  return {
+    group: typeof sp.group === 'string' ? sp.group : '',
+    cards: Array.isArray(st.cards) ? st.cards.filter((c: unknown) => Number.isInteger(c)) as number[] : [],
+    tools: num(st.tools), tokOut: num(st.tok_out),
+    // the window's fill only while it is this session's: a fresh session's first step reads 0 (#262)
+    ctxUsed: live.session && live.session === st.session ? num(live.used) : 0,
+    window: num(st.window), freshAt: Number.isFinite(fresh) && fresh > 0 ? fresh : null,
+    autoFixes: num(st.auto_fixes), autoFixMax: num(sp.auto_fix), roundFor: String(st.round_for ?? ''),
+    reviews: num(st.reviews), steps: num(st.steps),
+    // runner.active_so_far's parts: the step's rounds so far, and the one under way from its start
+    activeS: Math.max(0, num(st.active_s) - num(st.step_active_s)), roundStartedAt: num(st.round_started_at) * 1000,
+    typicalMin: num(typical.min), typicalN: num(typical.n), lateMin: num(st.late_min),
+    spend: !api ? null : api.plan ? 'plan' as const : typeof api.usd === 'number' ? api.usd as number : 'none' as const,
+  }
+}
+
+// The Tasks list's rows (#1048, tasks.ts): one or two a task, one when the pane can't hold two
+// (compactWanted), each with its task; the user's allowance for a task (`wb coding allow`) after
+// its rows. The render draws them and pageShape counts them, one row each: none wraps.
+type ListRow = { parts: RowPart[]; task: string; first: boolean }
+function listRows(list: WbTask[], followed: string, now: number, spin: string, cols: number, bodyRows: number): ListRow[] {
+  const open = list.filter(t => t.phase !== 'accepted' && t.phase !== 'discarded')
+  const headers = new Set(open.map(t => t.group).filter(g => g && open.filter(t => t.group === g).length >= 2)).size
+  const lines = taskLines(list, { cols, now, spin, followed, compact: compactWanted(open.length, headers, bodyRows), usd })
+  const out: ListRow[] = []
+  lines.forEach((l, i) => {
+    out.push(l)
+    const t = l.task && lines[i + 1]?.task !== l.task ? list.find(x => x.name === l.task) : undefined
+    if (t?.allowed) for (const w of wrapWords(t.allowed, cols - 4)) out.push({ parts: [{ text: `    ${w}`, color: 'claude' }], task: '', first: false })
+  })
+  return out
+}
+
+// The day cap's line's numbers on the Tasks tab (#1048): `wb route --json` as rolesNow last read it,
+// only while an API task is open (the owner, 2026-11-23); null otherwise, or before the first read
+function capOf(list: WbTask[]): { spent: number; cap: number | null } | null {
+  if (!list.some(t => t.via === 'api' && ACTIVE.has(t.phase))) return null
+  const r = mem.roles?.routes
+  return r ? { spent: Number(r.spend_today?.usd ?? 0), cap: typeof r.day_usd === 'number' ? r.day_usd : null } : null
+}
+
+// Reads them again past ROLES_CACHE_MS while an API task is open, off the render's path (a
+// `wb route --json` there held the draw), then redraws
+async function capNow($: any, list: WbTask[]) {
+  if (mem.rolesReading || !list.some(t => t.via === 'api' && ACTIVE.has(t.phase))) return
+  if (mem.roles && (await $.clock.now()) - mem.roles.at < ROLES_CACHE_MS) return
+  mem.rolesReading = true
+  try {
+    await rolesNow($)
+  } catch {
+    return
+  } finally {
+    mem.rolesReading = false
+  }
+  $.ui.invalidate('ui.render')
+}
+
+// A press on a task's row follows it (the owner, 2026-11-23): its transcript below, read at once
+async function followTask($: any, name: string) {
+  mem.picked = name
+  mem.liveKey = ''
+  await refreshLive($, await read($, tasks), await $.clock.now())
+  $.ui.invalidate('ui.render')
 }
 
 // The user's unspent allowance for a task (`wb coding allow`), for its line in the pane: what
@@ -2512,8 +2558,11 @@ async function scope($: any): Promise<string[]> {
 // The task worth watching. The one followed stays while it runs: with two running, choosing by
 // the latest status write swapped the pane between them on every tool call (the 2026-11-16
 // audit). Else the newest started that runs (running, testing, asking before queued: a queued one
-// shows nothing yet), else the newest waiting for Claude.
-const focusOf = (list: WbTask[], followed: string): WbTask | undefined => {
+// shows nothing yet), else the newest waiting for Claude. A task the user pressed (mem.picked,
+// #1048) is followed while it is listed, whatever its phase.
+const focusOf = (list: WbTask[], followed: string, picked = mem.picked): WbTask | undefined => {
+  const chosen = picked ? list.find(t => t.name === picked) : undefined
+  if (chosen) return chosen
   const kept = list.find(t => t.name === followed && ACTIVE.has(t.phase))
   if (kept) return kept
   const by = (ts: WbTask[], k: 'createdAt' | 'updatedAt') => [...ts].sort((a, b) => b[k] - a[k])[0]
@@ -3962,10 +4011,16 @@ function taskParts(list: WbTask[], on: boolean) {
   // counted in this one's "N awaiting review", as if this Claude had them to do (#693)
   const asking = shown.filter(t => t.phase === 'asking' && mine(t))
   const waiting = shown.filter(t => waitsOnClaude(t) && t.phase !== 'asking' && mine(t))
+  // a stuck or failed task is counted as such: "2 awaiting review" said so for one review and one
+  // stuck task (seen live, #1048)
+  const count = (phase: string, word: string) => {
+    const n = waiting.filter(t => t.phase === phase).length
+    return n ? [`${n} ${word}`] : []
+  }
   return { live, parts: [
     ...live.map(t => `${t.name} ${t.phase} r${t.round}`),
     ...asking.map(t => `${t.name} asks`),
-    ...(waiting.length ? [`${waiting.length} awaiting review`] : []),
+    ...count('review', 'awaiting review'), ...count('stuck', 'stuck'), ...count('failed', 'failed'),
   ] }
 }
 
@@ -4515,15 +4570,15 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const spin = SPIN[Math.floor(now / 500) % SPIN.length] ?? '✻'
 
-    // the followed task's own recent lines are in its transcript below, in full
-    const recentOf = (t: WbTask) => (t.name === watched.task ? [] : t.recent)
     // The apprentice, in pixels where the pane has the rows for it (it takes six), else its face
     // on the line. Drawing it in pixels arms the timer that animates it. The stage keeps its
     // height beside a long history, and the bubble wraps its words onto more rows rather than
     // cutting them off: the pane can't be made wider.
     const pixels = (e as Row).surface === 'terminal' && Number(props.scroll?.bodyRows ?? 24) >= 20 && cols >= 40
-    const page = pageParts(list, watched, delegating, now, spin, cols, pixels)
-    const { when, from, history, meta, routed, focus, sp, busy } = page
+    const bodyRows = Number(props.scroll?.bodyRows ?? 24)
+    void capNow($, list)
+    const page = pageParts(list, watched, delegating, now, spin, cols, pixels, bodyRows, capOf(list))
+    const { from, history, meta, routed, sp, busy } = page
     const lines = (text: string, props: Record<string, unknown>) =>
       wrapWords(text, page.room).map(l => <Text {...props} wrap="truncate-end">{l}</Text>)
     const said = [
@@ -4565,28 +4620,20 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
-        {list.map(t => (
+        {page.rows.length ? (
+          // every task at a glance (#1048): one or two rows each, none wider than the pane; a press
+          // on a task's first row follows it
           <Box flexDirection="column" marginBottom={1}>
-            <Text>
-              <Text color={COLOR[t.phase] ?? 'text'}>
-                {t.phase === 'running' ? spin : MARK[t.phase] ?? '•'}{' '}
-              </Text>
-              <Text bold>{t.name}</Text>
-              <Text color={COLOR[t.phase] ?? 'text'}> {t.phase}</Text>
-              <Text dimColor>
-                {' '}· round {t.round} · {modelOf(t)}
-                {t.tests ? ` · tests ${t.tests}` : ''} · {when(t)}
-              </Text>
-            </Text>
-            {recentOf(t).map(line => (
-              <Text dimColor>  {clip(line, cols - 2)}</Text>
-            ))}
-            {t.allowed && wrapWords(t.allowed, cols - 2).map(l => <Text color="claude">  {l}</Text>)}
-            {t.name !== watched.task && t.recent.length === 0 && (
-              <Text dimColor>  {clip(t.last, cols - 2)}</Text>
-            )}
+            {page.rows.map(r => {
+              const runs = r.parts.length
+                ? r.parts.map(p => <Text color={p.color} dimColor={p.dim} bold={p.bold} underline={p.underline}>{p.text}</Text>)
+                : [<Text> </Text>]
+              return r.first
+                ? <Button key={`task-${r.task}`} plain onPress={() => { void followTask($, r.task) }}><Text wrap="truncate-end">{runs}</Text></Button>
+                : <Text wrap="truncate-end">{runs}</Text>
+            })}
           </Box>
-        ))}
+        ) : null}
         {watched.task && (
           <Box flexDirection="column">
             <Text dimColor>{clip(`── ${watched.task} · ↑↓ scrolls ` + '─'.repeat(cols), cols)}</Text>
@@ -4599,6 +4646,7 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         {stage}
+        {page.capLine && <Text wrap="truncate-end">{page.capLine.map(p => <Text color={p.color} dimColor={p.dim}>{p.text}</Text>)}</Text>}
         {saved && <Text dimColor>{saved}</Text>}
         {tabs}
       </Box>

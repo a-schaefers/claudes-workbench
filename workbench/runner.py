@@ -1119,13 +1119,35 @@ def active_so_far(task: store.Task, now: float | None = None) -> float:
 
 def typical_now(task: store.Task) -> dict:
     """Status `typical` {min, n} for a round's start: the step's typical active minutes on this
-    model and size (router.expected, the files alone, #819) and how many timed tasks back it, so
-    the pane can set its estimate against them with no read of its own (#1048); {} with none."""
+    model and size (router.expected, the files alone, #819; a writing task's on writing's record,
+    as progress.typical reads it) and how many timed tasks back it, so the pane can set its
+    estimate against them with no read of its own (#1048); none with no history, nor for an API
+    model hosted.json doesn't list (lookup finds no model to time). And `late_min`, the progress
+    checks' first point (the user's --after, else the typical length at least FLOOR_MIN): the
+    pane colours a task late only from there, as a check would come, never from a raw median of
+    a few minutes (step A's review); none while that is only the size's default."""
     from . import router  # router -> models; imported late, as checkin_text does
     spec = task.spec
     mins, n = router.expected(spec.get("model", ""), spec.get("size", "significant"),
-                              spec.get("weights_id"))
-    return {} if mins is None else {"typical": {"min": round(float(mins), 2), "n": n}}
+                              spec.get("weights_id"), router.record_role(spec.get("role")))
+    late, source = progress.typical(spec)
+    return {**({"typical": {"min": round(float(mins), 2), "n": n}} if mins is not None else {}),
+            **({"late_min": round(float(late), 2)} if source != "default" else {})}
+
+
+def cards_now(task: store.Task, m: models.Model) -> dict:
+    """Status `cards`, the cards a local GPU model's Ollama sees (models.card_numbers, #1023), for
+    the pane's `GPU 1` (#1048): only on a machine of two or more discrete cards, where it tells
+    tasks apart; one card stays `GPU`, and an API or remote model has none. A runner after one
+    that wrote cards clears them when it can't tell."""
+    cards = None
+    if m.kind == "gpu" and m.engine == "ollama" and not m.remote:
+        cards = models.card_numbers(m.root)
+        if cards and len(cards) < 2:
+            devs = hardware.gpus(windows=False)
+            if len([g for g in devs if g.get("discrete")] or devs) < 2:
+                cards = None
+    return {"cards": cards} if cards or task.status.get("cards") else {}
 
 
 def checkin_text(task: store.Task, n: int, out: dict, since: float, active: float | None = None) -> str:
@@ -3960,7 +3982,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
     with models.lease_for(m, task.name, say) as lease:
         # this runner reached the lease: from now on gpu.json says whether it holds the GPU, so
         # wb start no longer counts it as a holder while it steps aside for its tests (#805)
-        task.set_status(leased=os.getpid())
+        task.set_status(leased=os.getpid(), **cards_now(task, m))  # the pane's `GPU 1` (#1048)
         try:
             _loaded(task, _load(task, lease, m))
             window = (m.config.get("limit") or {}).get("context")

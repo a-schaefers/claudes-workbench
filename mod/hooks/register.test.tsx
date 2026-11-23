@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, agentOf, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, liveLines, modelOf, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, splashTarget, statsLines, usd, wrapParts, wrapWords } from './register.js'
+import { absolutePath, agentOf, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, splashTarget, statsLines, usd, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
@@ -5033,8 +5033,9 @@ test('a page that stops being measurable while the animation plays never gets a 
   // 2026-11-21, review of #963: an exact row found early was kept after a line that may wrap came,
   // so the embers landed on a row above the page's real modeline
   const wide = (files: Record<string, string>, dirs: string[]) => {
-    task(files, 'fix-it', 'accepted', { repo: '/home/u/project', cwd: '/home/u/project' })
-    files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'accepted', round: 1, updated_at: ts0, last: '完成した' })
+    // a review's second line is its last (#1048: a closed task's folds into one line without it)
+    task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project' })
+    files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts0, last: '完成した' })
     dirs.push('fix-it')
   }
   // before the words leave: they rise away, as forge drew it (56 frames after the first, no bar)
@@ -5064,8 +5065,8 @@ test('a page that grows past measuring after the words fell puts the bar no high
   await workbench($)
   const ui = await $.ui.mount(splashPane())
   await clock.advance(3900)                                              // the words are falling into row 10, the empty page's last
-  task(files, 'fix-it', 'accepted', { repo: '/home/u/project', cwd: '/home/u/project' })
-  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'accepted', round: 1, updated_at: ts0, last: '完成した' })
+  task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project' })
+  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts0, last: '完成した' })
   dirs.push('fix-it')
   await clock.advance(1500)
   expect(await splashing(ui)).toBe(false)
@@ -5084,18 +5085,23 @@ test('the words fall into the modeline\'s row: the page\'s last when it fits, th
   const empty = pageShape([], none, true, '', 0, 60)
   expect(empty).toEqual({ rows: 11, atLeast: 11, stage: 1, tail: 10 })
   expect(splashTarget(empty, 27)).toEqual({ stage: 1, bar: 10 })
-  // one closed task, out of the mode: its row, its last line, its margin, the stage's margin, a
-  // bubble of two lines beside the apprentice, the saving, the tabs' margin, the tabs, the modeline
+  // one closed task, out of the mode: its folded line (#1048), the list's margin, the stage's
+  // margin, a bubble of two lines beside the apprentice, the saving, the tabs' margin, the tabs,
+  // the modeline
   const one = pageShape([t('fix-it', 'accepted')], none, false, 'this week: saved ~1.2M Claude tokens', 0, 60)
-  expect(one).toEqual({ rows: 3 + 1 + 6 + 1 + 3, atLeast: 14, stage: 4, tail: 10 })
-  expect(splashTarget(one, 27)).toEqual({ stage: 4, bar: 13 })
-  // many: the page overflows, the pane follows its end, the modeline is its last row
-  const many = pageShape(Array.from({ length: 12 }, (_, i) => t(`task-${i}`, 'accepted')), none, false, '', 0, 60)
+  expect(one).toEqual({ rows: 2 + 1 + 6 + 1 + 3, atLeast: 13, stage: 3, tail: 10 })
+  expect(splashTarget(one, 27)).toEqual({ stage: 3, bar: 12 })
+  // a review waiting with its last line: its two rows, none wrapping, so the page is still exact
+  const review = pageShape([t('fix-it', 'review', { last: 'auto-fix skipped: the base fails the same test' })], none, false, '', 0, 60)
+  expect([review.rows, review.stage]).toEqual([3 + 1 + 6 + 1 + 2, 4])
+  // many: the page overflows, the pane follows its end, the modeline is its last row (closed
+  // tasks fold into one line, and so many open ones draw one row each: compactWanted)
+  const many = pageShape(Array.from({ length: 20 }, (_, i) => t(`task-${i}`, 'review')), none, false, '', 0, 60)
   expect(splashTarget(many, 27)).toEqual({ stage: 27 - many.tail!, bar: 26 })
   // a line wider than the pane, or one of wide characters: its height isn't known, so no bar row
   const wide = pageShape([t('fix-it', 'accepted', { last: 'x' })], { task: 'fix-it', lines: [{ s: 'out', t: 'y'.repeat(61) }] }, false, '', 0, 60)
   expect([wide.rows, splashTarget(wide, 27).bar]).toEqual([null, null])
-  const cjk = pageShape([t('fix-it', 'accepted', { last: '完成した' })], none, false, '', 0, 60)
+  const cjk = pageShape([t('fix-it', 'review', { last: '完成した' })], none, false, '', 0, 60)
   expect([cjk.rows, splashTarget(cjk, 27).bar]).toEqual([null, null])
   // ...unless the page surely overflows anyway
   const long = pageShape([t('fix-it', 'running')], { task: 'fix-it', lines: Array.from({ length: 40 }, () => ({ s: 'out', t: 'y'.repeat(70) })) }, false, '', 0, 60)
@@ -5608,7 +5614,7 @@ test('#1016: Agents set in routes.json reaches the conversation, and a value wb 
   expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')
 })
 
-test('#1016: an API task\'s row shows its badge before the model, the live view its routed line, and tasks is tasks-9', async ($, on) => {
+test('#1016: an API task\'s row names API and its provider before the model, the live view its routed line, and tasks is tasks-10', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   task(files, 'fix-api', 'running', { model: 'deepseek/deepseek-flash', model_label: 'DeepSeek (API)', via: 'api',
@@ -5631,20 +5637,19 @@ test('#1016: an API task\'s row shows its badge before the model, the live view 
   await clock.advance(3000)
   const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 120 }, surface: 'terminal' })
   await clock.advance(1600)
-  expect(await ui.find({ type: 'Text', text: /round 1 · API · deepseek-flash/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /round 1 · Qwen 27B/ })).toBeTruthy()          // a GPU row as before
+  // #1048: the place column says API and the provider, the model its id's last part
+  expect(await ui.find({ type: 'Text', text: /fix-api +round 1 +API DeepSeek +deepseek-flash +trivial/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /fix-gpu +round 1 +GPU +Qwen 27B +complex/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^routed: API deepseek\/deepseek-flash \(DeepSeek\) · trivial role/ })).toBeTruthy()
   // the routed line is under the task line, never in the history
   expect((await ui.findAll({ type: 'Text' })).filter((t: any) => /^routed: /.test(String(t.text))).length).toBe(1)
   await ui.unmount()
   expect(sets.length).toBeGreaterThan(0)
   const last = sets.at(-1)
-  expect(last.shape).toBe('tasks-9')
+  expect(last.shape).toBe('tasks-10')
   const api = last.value.find((t: WbTask) => t.name === 'fix-api')
   expect([api.via, api.role, api.provider, api.routed]).toEqual(['api', 'trivial', 'DeepSeek',
     'API deepseek/deepseek-flash (DeepSeek) · trivial role, set by you 11-20 · thinking off'])
-  expect(modelOf({ via: 'api', model: 'openrouter/deepseek/deepseek-v4.1-flash', label: '' })).toBe('API · deepseek-v4.1-flash')
-  expect(modelOf({ via: 'gpu', model: 'ollama/q', label: '' })).toBe('ollama/q')
 })
 
 // The Settings tab's roles (#1023): Shared, GPU and API, read from `wb route --json` and `wb models
@@ -5958,5 +5963,168 @@ test('#1047: Images and each audio kind with two or more engines get a row after
   await ui.press({ key: 'media-sfx:fx1' })
   expect(w.toasts.at(-1)).toBe("workbench: wb: no audio engine 'fx1' (have: fx2 (sfx))")
   expect(await label('media-sfx')).toBe('▸ Sound effects: fx2')                 // as it was
+  await ui.unmount()
+})
+
+// ---------------------------------------------------------------- the Tasks view (#1048)
+// Task files as the runner writes them: three tasks of one request on GPU 0, GPU 1 and DeepSeek
+const T0 = 1_800_000_000 // seconds, the clock's start
+function viewTask(files: Record<string, string>, name: string, spec: Record<string, any>, status: Record<string, any>) {
+  files[`/wb/tasks/${name}/task.json`] = JSON.stringify({ name, created_at: T0 - 600, repo: '/home/u/a', cwd: '/home/u/a',
+    session: 'sess-new', auto_fix: 2, ...spec })
+  files[`/wb/tasks/${name}/status.json`] = JSON.stringify({ round: 1, updated_at: T0, ...status })
+}
+const QWEN30 = { model: 'ollama/qwen3-coder:30b', model_label: 'qwen3-coder 30B', via: 'gpu', role: 'significant' }
+function hiscore(files: Record<string, string>) {
+  const timed = (mins: number, used: number, session: string) => ({ round_started_at: T0 - mins * 60, session,
+    live_used: { session, used }, window: 1000, tuned: { fresh_at: 0.6 }, typical: { min: 20, n: 3 }, late_min: 20 })
+  viewTask(files, 'hiscore-store', { ...QWEN30, group: 'hiscore', created_at: T0 - 14 * 60 },
+    { phase: 'running', round: 2, round_for: 'fix', auto_fixes: 1, cards: [0], last: 'edit src/score_store.py', tools: 17,
+      tok_out: 3900, ...timed(14, 560, 's1') })
+  viewTask(files, 'hiscore-screen', { model: 'ollama/devstral:24b', model_label: 'devstral 24B', via: 'gpu', role: 'significant',
+    group: 'hiscore', created_at: T0 - 9 * 60 },
+    { phase: 'running', round_for: 'start', cards: [1], last: 'write src/ui/hiscore.py', tools: 9, tok_out: 2100,
+      ...timed(9, 710, 's2') })
+  viewTask(files, 'hiscore-docs', { model: 'deepseek/deepseek-v4.1-flash', via: 'api', role: 'writing', provider: 'deepseek',
+    provider_name: 'DeepSeek', group: 'hiscore', created_at: T0 - 6 * 60 },
+    { phase: 'testing', last: 'tests: python3 -m unittest tests.test_docs', tools: 6, tok_out: 1200,
+      api: { usd: 0.04, metered: 0.04, source: 'keyhole', tok: {} }, session: 's3', live_used: { session: 's3', used: 220 },
+      window: 1000, tuned: { fresh_at: 0.6 } })
+  return ['hiscore-store', 'hiscore-screen', 'hiscore-docs']
+}
+// each row of the task list as drawn: the Texts that hold a whole row (truncate-end; its runs are
+// Texts of their own, without it)
+const ROW = /^(▾ |[├│└ ] |[✻✳✶✢·◌◐?◆▲✗✓–] )/
+async function listRows(ui: any): Promise<string[]> {
+  return (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props?.wrap === 'truncate-end')
+    .map((t: any) => String(t.text)).filter((t: string) => ROW.test(t))
+}
+function viewWorld(on: any, files: Record<string, string>, dirs: string[], runs: string[][] = [], route?: () => any) {
+  const ui: string[] = []
+  fakeTasks(on, files, dirs, true, ui)
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    if (e.argv[1] === 'route' && route) return { value: { exitCode: 0, stdout: JSON.stringify(route()), stderr: '' } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  return ui
+}
+
+test('#1048: three tasks running at once draw under one group header with their cards and spend', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  viewWorld(on, files, hiscore(files))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 71, scroll: { offset: 0, bodyRows: 40 } } })
+  await clock.advance(1600)
+  const rows = await listRows(ui)
+  expect(rows.slice(0, 7).map(r => r.replace(/[✻✳✶✢·] hiscore-s/, '✻ hiscore-s').replace(/\d+m$/, 'Nm'))).toEqual([
+    '▾ hiscore · 3 tasks · 2 running · 1 testing    $0.04  ░░░░░░░░ 0/3 done',
+    '├ ✻ hiscore-store  round 2 · fix 1/2           GPU 0                Nm',
+    '│   ⎿ edit src/score_store.py    ctx ████▌┊░░ 56% · ~6m left · 17 tools',
+    '├ ✻ hiscore-screen round 1                     GPU 1                 Nm',
+    '│   ⎿ write src/ui/hiscore.py    ctx █████▋░░ 71% · ~11m left · 9 tools',
+    '└ ◐ hiscore-docs   testing                     API DeepSeek  $0.04   Nm',
+    '    ⎿ tests: python3 -m unitte…              ctx █▊░░░┊░░ 22% · 6 tools',
+  ])
+  // the running cards' last events are gone from the list: the followed task's transcript has them
+  expect(rows.every(r => r.length <= 71)).toBe(true)
+  await ui.unmount()
+})
+
+test('#1048: a 50-column pane keeps each task to two rows', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  viewWorld(on, files, hiscore(files))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 50, scroll: { offset: 0, bodyRows: 40 } } })
+  await clock.advance(1600)
+  const rows = (await listRows(ui)).slice(0, 7)
+  expect(rows.map(r => r.slice(0, 4).replace(/[✻✳✶✢·]/, '✻'))).toEqual(['▾ hi', '├ ✻ ', '│   ', '├ ✻ ', '│   ', '└ ◐ ', '    '])
+  expect(rows.every(r => r.length <= 50)).toBe(true)
+  expect(rows[5]).toMatch(/^└ ◐ hiscore-docs +testing +API +\$0\.04 +\d+m$/)   // the short place; spend and elapsed stay
+  await ui.unmount()
+})
+
+test('#1048: a 14-row box draws one line a task', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  viewWorld(on, files, hiscore(files))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 76, scroll: { offset: 0, bodyRows: 14 } } })
+  await clock.advance(1600)
+  const rows = await listRows(ui)
+  expect(rows[0]).toMatch(/^▾ hiscore · 2 running · 1 testing +0\/3 done$/)
+  expect(rows.slice(1, 4).map(r => r.slice(0, 2))).toEqual(['├ ', '├ ', '└ '])
+  expect(rows.some(r => r.includes('⎿'))).toBe(false)
+  await ui.unmount()
+})
+
+test('#1048: the status line counts a stuck task as stuck, not as awaiting review', async ($, on) => {
+  // seen live: "2 awaiting review" for one review and one stuck task
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  viewTask(files, 'menu-tweak', QWEN30, { phase: 'review', tests: { ok: true }, last: 'tests passed: Claude reviews next' })
+  viewTask(files, 'fix-crash', QWEN30, { phase: 'stuck', last: 'silent for 10 min: stopped' })
+  viewTask(files, 'fix-boot', QWEN30, { phase: 'failed', last: 'opencode exited 1' })
+  const ui = viewWorld(on, files, ['menu-tweak', 'fix-crash', 'fix-boot'])
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(ui.filter(l => l.startsWith('status')).at(-1)).toBe('status ⚒ wb · 1 awaiting review · 1 stuck · 1 failed')
+})
+
+test('#1048: a press on a task\'s row follows it, and its name is underlined', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  const runs: string[][] = []
+  viewWorld(on, files, hiscore(files), runs)
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 71, scroll: { offset: 0, bodyRows: 40 } } })
+  await clock.advance(1600)
+  const watched = () => runs.filter(r => r[1] === 'watch').map(r => r[2])
+  expect(watched().at(-1)).toBe('hiscore-docs')                  // the newest running one, by itself
+  const underlined = async () => (await ui.findAll({ type: 'Text' })).filter((t: any) => t.props?.underline).map((t: any) => t.text)
+  expect(await underlined()).toEqual(['hiscore-docs'])
+  await ui.press({ key: 'task-hiscore-store' })
+  await clock.advance(100)
+  expect(watched().at(-1)).toBe('hiscore-store')
+  await clock.advance(3000)
+  expect(watched().at(-1)).toBe('hiscore-store')                 // it stays followed
+  await ui.redraw()
+  expect(await underlined()).toEqual(['hiscore-store'])
+  await ui.unmount()
+})
+
+test('#1048: the API day cap shows on the Tasks tab only while an API task runs', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  const runs: string[][] = []
+  const route = () => ({ v: 1, use: 'both', busy: 'wait', day_usd: 5, roles: { significant: { via: 'gpu', gpu: 'auto', thinking: 'off', label: 'Complex coding' } },
+    spend_today: { usd: 0.42, by_provider: { deepseek: 0.42 } }, providers: {} })
+  viewTask(files, 'port-parser', { model: 'deepseek/deepseek-v4.1-flash', via: 'api', role: 'significant', provider: 'deepseek',
+    provider_name: 'DeepSeek' }, { phase: 'running', last: 'edit src/parser/lexer.ts', api: { usd: 0.31 } })
+  viewWorld(on, files, ['port-parser'], runs, route)
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 71, scroll: { offset: 0, bodyRows: 40 } } })
+  await clock.advance(1600)
+  await ui.redraw()
+  expect(await ui.find({ type: 'Text', text: /^API today \$0\.42 of the \$5 day cap  ▉░░░░░░░░░$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^[✻✳✶✢·] port-parser round 1 +API DeepSeek +deepseek-v4\.1-flash +\$0\.31 +\d+m$/ })).toBeTruthy()
+  const reads = runs.filter(r => r[1] === 'route').length
+  await clock.advance(5000)
+  expect(runs.filter(r => r[1] === 'route').length).toBe(reads)   // read again only past ROLES_CACHE_MS
+  files['/wb/tasks/port-parser/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: T0 + 10, tests: { ok: true },
+    last: 'tests passed: Claude reviews next', api: { usd: 0.31 } })
+  await clock.advance(31_000)
+  await ui.redraw()
+  expect(await ui.find({ type: 'Text', text: /^API today/ })).toBeFalsy()
   await ui.unmount()
 })

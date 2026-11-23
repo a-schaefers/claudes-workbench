@@ -11,10 +11,12 @@ const fact = (o: Partial<TaskFacts> & { name: string }): TaskFacts => ({
   phase: 'running', round: 1, model: '', label: '', via: 'gpu', role: '', provider: '', tests: null, last: '',
   createdAt: NOW, updatedAt: NOW, recent: [], parked: false, group: '', cards: [], tools: 0, tokOut: 0,
   ctxUsed: 0, window: 0, freshAt: null, autoFixes: 0, autoFixMax: 0, roundFor: '', reviews: 0, steps: 0,
-  activeS: 0, roundStartedAt: 0, typicalMin: 0, typicalN: 0, spend: null, ...o,
+  activeS: 0, roundStartedAt: 0, typicalMin: 0, typicalN: 0, lateMin: 0, spend: null, ...o,
 })
-// a round under way since `mins` ago, on a model whose typical step is 20 minutes (3 timed tasks)
-const timed = (mins: number) => ({ createdAt: NOW - mins * MIN, roundStartedAt: NOW - mins * MIN, typicalMin: 20, typicalN: 3 })
+// a round under way since `mins` ago, on a model whose typical step is 20 minutes (3 timed tasks),
+// the progress checks' first point there too (status late_min)
+const timed = (mins: number) => ({ createdAt: NOW - mins * MIN, roundStartedAt: NOW - mins * MIN, typicalMin: 20, typicalN: 3,
+  lateMin: 20 })
 const ctx = (frac: number) => ({ ctxUsed: Math.round(frac * 1000), window: 1000, freshAt: 0.6 })
 const QWEN = { label: 'qwen3-coder 30B', model: 'ollama/qwen3-coder:30b' }
 const DEVSTRAL = { label: 'devstral 24B', model: 'ollama/devstral:24b' }
@@ -237,6 +239,34 @@ test('the time estimate shows only with three timed tasks behind it, and says ov
   expect(elapsed(5)).toEqual({ text: '5m', dim: true })
   expect(elapsed(23)).toEqual({ text: '23m', color: 'warning' })
   expect(elapsed(45)).toEqual({ text: '45m', color: 'error' })
+})
+
+test('a task is late only from the progress checks\' own points, never from a short typical length', () => {
+  // step A's review: a typical step of 4 minutes coloured a 5-minute task late, where no progress
+  // check comes before progress.FLOOR_MIN (10): status late_min is that point
+  const short = (mins: number, lateMin = 10) => fact({ name: 't', ...timed(mins), typicalMin: 4, lateMin, last: 'edit a.py' })
+  const row = (t: TaskFacts) => taskRows([t], { cols: 89, now: NOW, spin: '✻', followed: '', compact: false })
+  expect(etaOf(short(6), NOW)).toEqual({ text: '2m over' })
+  expect(row(short(6))[0]!.at(-1)).toEqual({ text: '6m', dim: true })
+  expect(partWith(row(short(6))[1]!, /over/)).toEqual({ text: '2m over', dim: true })
+  expect(etaOf(short(12), NOW)).toEqual({ text: '8m over', color: 'warning' })
+  expect(row(short(12))[0]!.at(-1)).toEqual({ text: '12m', color: 'warning' })
+  expect(etaOf(short(21), NOW)?.color).toBe('error')
+  // the user's --after (30) moves the point
+  expect(etaOf(short(21, 30), NOW)).toEqual({ text: '17m over' })
+  expect(row(short(21, 30))[0]!.at(-1)).toEqual({ text: '21m', dim: true })
+  // no point at all (the size's default): never late
+  expect(row(short(60, 0))[0]!.at(-1)).toEqual({ text: '60m', dim: true })
+})
+
+test('an API task whose model wb could not time shows no estimate and is never late', () => {
+  // step A's review: hosted.json lacks the model, so the runner wrote no typical and no late_min
+  const t = fact({ name: 'port-parser', ...DEEPSEEK, role: 'significant', spend: 0.31, createdAt: NOW - 50 * MIN,
+    roundStartedAt: NOW - 50 * MIN, last: 'edit src/parser/lexer.ts', ...ctx(0.44), tools: 31 })
+  expect(etaOf(t, NOW)).toBe(null)
+  const rows = taskRows([t], { cols: 71, now: NOW, spin: '✻', followed: '', compact: false })
+  expect(rows.map(text)[1]).not.toMatch(/left|over/)
+  expect(rows[0]!.at(-1)).toEqual({ text: '50m', dim: true })
 })
 
 test('a stuck task\'s second line says why and who acts next', () => {

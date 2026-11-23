@@ -2,6 +2,7 @@
 import ast
 import base64
 import contextlib
+import dataclasses
 import errno
 import functools
 import re
@@ -360,6 +361,71 @@ class Lifecycle(Base):
     def test_no_history_writes_no_typical(self):
         self.start("t-notyp", "ok")
         self.assertNotIn("typical", wait_phase("t-notyp", {"review"}))
+        self.assertNotIn("late_min", store.Task("t-notyp").status)  # the size's default: no point
+
+    def test_a_task_is_late_only_from_the_progress_checks_own_point(self):
+        # step A's review (#1048): a median of 4 minutes coloured a 5-minute task late, where no
+        # progress check would come before FLOOR_MIN; the user's --after moves the point
+        model = "ollama/mimo-v2.6:9b-q8_0"
+        for mins in (3, 4, 5):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": model, "size": "significant", "outcome": "accepted", "active_minutes": mins})
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-late", "ok")
+        task = store.Task("t-late")
+        self.assertEqual(runner.typical_now(task), {"typical": {"min": 4, "n": 3},
+                                                    "late_min": progress.FLOOR_MIN})
+        progress.set_enabled(True, after=30)
+        self.assertEqual(runner.typical_now(task)["late_min"], 30)
+
+    def test_an_api_task_whose_model_hosted_json_lacks_gets_no_typical(self):
+        # step A's review (#1048): with no model found to time, the pane shows no estimate
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-apityp", "ok")
+        task = store.Task("t-apityp")
+        spec = dict(task.spec, model="deepseek/no-such-model", via="api", provider="deepseek")
+        store.write_json(task.dir / "task.json", spec)
+        for mins in (12, 14, 30):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": spec["model"], "kind": "api", "size": "significant", "outcome": "accepted",
+                "active_minutes": mins})
+        self.assertEqual(runner.typical_now(store.Task("t-apityp")), {})
+
+    def drive_here(self, name: str) -> store.Task:
+        """A task's runner driven in this process, so a test's patches reach it."""
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start(name, "ok", "--no-self-review", "--no-base-check")
+        runner.drive(store.Task(name))
+        return store.Task(name)
+
+    def test_a_task_on_one_card_of_two_records_its_card(self):
+        # #1048: the pane's `GPU 1` tells two tasks on two cards apart
+        two = [{"name": "card", "discrete": True, "uuid": "GPU-a"}, {"name": "card", "discrete": True, "uuid": "GPU-b"}]
+        with mock.patch.object(runner.models, "card_numbers", return_value=[1]), \
+                mock.patch.object(runner.hardware, "gpus", return_value=two):
+            st = self.drive_here("t-card1").status
+        self.assertEqual((st["phase"], st["cards"]), ("review", [1]))
+
+    def test_a_one_card_machine_records_no_cards(self):
+        one = [{"name": "card", "discrete": True, "uuid": "GPU-a"}]
+        with mock.patch.object(runner.models, "card_numbers", return_value=[0]), \
+                mock.patch.object(runner.hardware, "gpus", return_value=one):
+            st = self.drive_here("t-card0").status
+        self.assertEqual(st["phase"], "review")
+        self.assertNotIn("cards", st)  # `GPU`, with no noise
+
+    def test_an_api_task_records_no_cards(self):
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-cardapi", "ok")
+        task = store.Task("t-cardapi")
+        m = runner.models.discover()[task.spec["model"]]
+        with mock.patch.object(runner.models, "card_numbers", return_value=[1]) as cards:
+            self.assertEqual(runner.cards_now(task, dataclasses.replace(m, kind="api")), {})
+            self.assertEqual(runner.cards_now(task, dataclasses.replace(m, remote=True)), {})
+            cards.assert_not_called()
+            # a later runner that can't tell clears what an earlier one wrote
+            task.set_status(cards=[1])
+            self.assertEqual(runner.cards_now(task, dataclasses.replace(m, kind="api")), {"cards": None})
 
     def test_start_refuses_when_opencode_isnt_on_path_and_leaves_nothing(self):
         # the 2026-11-16 audit: the runner emptied the GPU, then the round died as "opencode exited 1"

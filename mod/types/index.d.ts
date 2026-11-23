@@ -40,6 +40,33 @@ export type WbTask = {
   /** the user's unspent allowance for Claude to edit it (`wb coding allow`), as the pane says it;
    * '' for none */
   allowed: string
+  /** The Tasks view's facts (#1048, mod/hooks/tasks.ts's TaskFacts): task.json `group` ('' none);
+   * status `cards` ([] for none: one card, an API task, an older wb), `tools`, `tok_out` */
+  group: string
+  cards: number[]
+  tools: number
+  tokOut: number
+  /** status `live_used.used` (0 unless its session is status `session`), `window`, `tuned.fresh_at` */
+  ctxUsed: number
+  window: number
+  freshAt: number | null
+  /** status `auto_fixes` and task.json `auto_fix`; status `round_for` ('' from an older wb),
+   * `reviews`, `steps` */
+  autoFixes: number
+  autoFixMax: number
+  roundFor: string
+  reviews: number
+  steps: number
+  /** the step's active seconds before this round (status `active_s` less `step_active_s`), the
+   * round's start (ms; 0 none), status `typical` {min, n} (0 none) and `late_min` (0 none) */
+  activeS: number
+  roundStartedAt: number
+  typicalMin: number
+  typicalN: number
+  lateMin: number
+  /** status `api.usd` (wave 2's meter, #1019); 'plan' for a plan's provider, 'none' for no price,
+   * null with no `api` record (a GPU task) */
+  spend: number | 'plan' | 'none' | null
 }
 
 /** One line of `wb watch --json`: a style name and the text. */
