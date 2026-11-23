@@ -570,8 +570,12 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         run_wb(*argv, "--queue")
         # the rival checks its base first (a fixed 2 s sleep lost that race on macOS's runner,
         # nightly of f744898, 2026-11-23): wait for it to reach the GPU's queue
+        # the rival checks its base first, then waits ("checking the acceptance command on the
+        # base", "waiting for the GPU", then who holds it): a fixed 2 s sleep, then a wait for the
+        # first to pass, both lost that race on macOS's runner (nightlies of f744898 and 5678530)
+        want = "waiting for the GPU (held by t-gpu)"
         deadline = time.time() + 60
-        while time.time() < deadline and "the base" in (store.Task("t-rival").status.get("last") or "the base"):
+        while time.time() < deadline and store.Task("t-rival").status.get("last") != want:
             time.sleep(0.1)
         time.sleep(1)                                # and stay there, not let in beside the tests
         st = store.Task("t-rival").status
