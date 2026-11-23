@@ -82,6 +82,10 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   may grant one task an exception ahead (`--when "<condition>"`): show them the task, the
   condition and the exact edit first; once used, `wb coding used <task> --did "…"`, then hand
   the testing back with `wb feedback`.
+- **Dynamic workflows** (the user's choice, `wb workflows`; run `wb workflows on|off` only on
+  their yes): off (the default), run **one task at a time**: start the next when the last is
+  reviewed. On, a `dynamic-workflows` context block says you may fan out (see "Planning work you
+  will hand off"); a later change comes as a `[workbench]` note.
 - **After a compaction or `/clear`**, a `workbench-mode` context block says the mode is still on
   and where this file is: read it again if its procedure is no longer in your context.
 - **Plans are handoff plans**, in plan mode or not: see "Planning work you will hand off" below.
@@ -152,6 +156,12 @@ if you can, and start nothing until the plan is approved; then write the first s
   small model skips one item of a list.
 - **Order**: logic, then its tests, then UI; a step that needs another's interface comes after it,
   through `wb next` on the same agent when it is the same area.
+- **Fan-out** (only with Dynamic workflows on): independent steps may run at once as separate
+  tasks, mixing roles and the GPU and API sides; each runs on its own role's model, never one
+  you pick. Each task is a step as above (spec, size, role, acceptance command); give them one
+  name prefix (`auth-logic`, `auth-tests`, `auth-docs`) and say the plan in one line before the
+  first `wb start`. The GPU and the provider slots decide what runs together: `--queue` the rest
+  (exit 4). Review each result on its own; accept logic first, then tests, then UI or docs.
 - **What stays yours**, marked apart: git, CLAUDE.md, choices and setup only the user can make
   (downloads, licences, public repos), and the checks you run at review (a screenshot to look at,
   tests to break on purpose, a grader).

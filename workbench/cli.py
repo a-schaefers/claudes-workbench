@@ -2883,6 +2883,29 @@ def cmd_coding(a):
                   "allowed until handed back: ") + f"{x['edit']} (the user: \"{x['said']}\")")
 
 
+# Dynamic workflows (#1041): whether Claude may split one request into several tasks that run at
+# once, each on its own role's model. The user's choice, beside `wb coding`'s and kept as it is
+# (`$WB_HOME/workflows.json`); off (no saved choice) is one task at a time, as before there was a
+# choice. Nothing runs that couldn't anyway: the GPU lease and the provider slots still decide.
+WORKFLOWS = {"off": ("Off", "Claude runs one task at a time."),
+             "on": ("On", "Claude may split a request into tasks that run at once, each on its own "
+                          "role's model; the GPUs and the provider slots decide what runs together.")}
+
+
+def workflows_mode() -> str:
+    doc = store.read_json(store.home() / "workflows.json", {})
+    mode = doc.get("mode") if isinstance(doc, dict) else None
+    return mode if mode in WORKFLOWS else "off"
+
+
+def cmd_workflows(a):
+    """Show or set Dynamic workflows (#1041); the mod reads workflows.json back."""
+    if a.state:
+        store.write_json(store.home() / "workflows.json", {"mode": a.state, "ts": store.now()})
+    label, why = WORKFLOWS[workflows_mode()]
+    print(f"Dynamic workflows: {label}{' (default)' if label == 'Off' else ''}. {why}")
+
+
 @one_at_a_time
 def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
@@ -6315,6 +6338,10 @@ def parser() -> argparse.ArgumentParser:
                    "(e.g. the next try still gets the units wrong)")
     s.add_argument("--did", help="used: what Claude changed under the allowance")
     s.set_defaults(f=cmd_coding)
+    s = sub.add_parser("workflows", help="Dynamic workflows: whether Claude may run several tasks "
+                       "at once for one request: show, or set on or off (the default)")
+    s.add_argument("state", nargs="?", choices=["on", "off"])
+    s.set_defaults(f=cmd_workflows)
     s = sub.add_parser("route", help="the roles: which model each kind of work goes to (show, or "
                        "change one on the user's yes)")
     s.add_argument("what", nargs="?", metavar="role|all|cap",

@@ -3504,6 +3504,22 @@ NotebookEdit under `$WB_HOME/tasks/<task>/worktree/` without one (`codingRefusal
 `tool.call` hook), and outside `decide` adds a `claude-coding` block (`CODING_RULES`), a mid-session
 change arriving as a row (`sayRules`, #540). Shell edits aren't seen: the block covers them.
 
+**Dynamic workflows** (#1041). Whether Claude may split one request into several tasks that run at once:
+the user's choice, `wb workflows on|off`, kept beside the coding choice in `$WB_HOME/workflows.json` `{mode, ts}`
+(`cli.WORKFLOWS`, `workflows_mode`), read fresh, default `off` (no file, unreadable JSON, an unknown mode). Like
+`wb coding` it is the user's: Claude runs it only on their yes, and wb gates neither (no dialog: nothing it
+starts could not start anyway). **Off**: the skill's rule, one task at a time, as before there was a choice.
+**On**: the mod adds a `dynamic-workflows` block (`WORKFLOWS_RULE`, from `workflowsMode`, said with
+`/workbench`'s text when that comes first) while delegating or with a task open, as `wanted` reads;
+a change either way reaches the conversation as one `[workbench]` row (`sayRules`: the rule, or
+`WORKFLOWS_OFF`), however made. The rule: fan out as a handoff plan (each task its own spec, size, role and
+acceptance command), one shared name prefix for the group (no `--group` flag: tasks started together sit
+together in `wb status` and the pane, which list by start), the plan in one line before the starts, each result
+reviewed on its own, merged logic first, then tests, then UI or docs. Each task runs on its own role's model;
+nothing new decides what runs together: the GPU lease (`models.apart` cards together, the rest `--queue`)
+and the provider slots (#1015). No cap on tasks at once (the owner's call, not asked for). The pane's
+Settings row is #1023's.
+
 ## Experiments
 
 An experiment changes what the agent may do before it is measured enough: it ships off, the bench
@@ -3969,8 +3985,8 @@ claude_start, backlog, parked, allowed), `live` (`live-1`, {task, lines: {s, t}[
 `modes`, #689), `pane` (`pane-1`, {tab, open, focus, minimized}), `sessions` (`sessions-1`,
 string[]: the process's session ids), `savings` (`savings-1`, string: the pane's saving line), `stats` (`stats-1`, {key,
 feed}: `wb stats --json` and its files' stamp), `top` (`top-1`, {snap, busy}: `wb top --json`'s
-newest tick, each GPU's busy %), `said` (`said-2`, WbSaid | null, {notes, wakeOff, coding, routes}:
-an atom since #697 (`routes` since #1014: a stored `said-1` is declined, read as nothing said), as in `mem` a reload emptied it and `sayRules` waited for good), `splash`
+newest tick, each GPU's busy %), `said` (`said-3`, WbSaid | null, {notes, wakeOff, coding, routes, workflows}:
+an atom since #697 (`routes` since #1014, `workflows` since #1041: a stored `said-1` or `said-2` is declined, read as nothing said), as in `mem` a reload emptied it and `sayRules` waited for good), `splash`
 (`splash-1`, boolean: the opening `/workbench` came, so a reload never replays it; cleared when the mode goes off). Everything else
 is `mem`, reset by a reload. Task facts are re-read from `$WB_HOME`; the mod writes only
 `tasks/<n>/acked`, scout.json's `offered_at` and `chat/listener.json`.
@@ -4052,7 +4068,7 @@ bodies dropped (`$(…)` and backticks in unquoted heredocs and double quotes st
 words and the wrappers with their options (`PREFIXES`: `env`, `time`, `nohup`, `exec`, `command`,
 `timeout` and its duration, `nice`, `ionice`, `stdbuf`) must be `wb` or end in `/wb`. Syntactic:
 `true || wb steer` counts. Off: either quit. While on: the `workbench-mode`, `user-notes` (and
-`claude-coding`) blocks, the idle status line, pane auto-open, chat listening, the boundary
+`claude-coding`, `dynamic-workflows`) blocks, the idle status line, pane auto-open, chat listening, the boundary
 compaction. `mem.delegated` remembers it was on in this load, so a hand-back's compaction still
 keeps the state. No `$.ui.invalidate`: rewriting the
 first message would cost the prompt cache.
@@ -4067,7 +4083,7 @@ everything*. `/workbench-models` records the check as raised (scout.json `offere
 **Context blocks** (`prompt.context`, in this order; computed at the first message and after a
 compaction or `/clear`, not every turn): `workbench-mode` while delegating (MODE_NOTE: until a quit,
 follow the skill, every plan is a handoff plan, the SKILL.md path); `user-notes` while delegating
-with notes; `web-chat` while away (`awayNow`; AWAY_NOTE: "The user is away from the terminal: they
+with notes; `dynamic-workflows` with Dynamic workflows on, delegating or a task open (*Dynamic workflows*); `web-chat` while away (`awayNow`; AWAY_NOTE: "The user is away from the terminal: they
 last used the web chat", reply with `wb chat reply`); `workbench-wake` with `wake` off, delegating
 or a `mine` task open (WAKE_OFF_NOTE: no wake will come, tell the user); `workbench` when `wb
 status` with `scope()` exits 0 listing open tasks (plus `wb report`/`wb watch`; a failure toasts
@@ -4077,7 +4093,7 @@ once). None without a person.
 entered the mode later got no notes, no wake-off note, no coding rule. `mem.said` (`Said`, set by
 `prompt.context`) records what was told; `unsaid` returns what is missing and counts it said (the
 notes once, the wake-off note once, the coding rule whenever the mode differs; CODING_DECIDE on a
-return to "Let Claude decide"). `/workbench` appends them to its text and sets `mem.skillTurn`, so a
+return to "Let Claude decide"; the workflows rule whenever it differs, WORKFLOWS_OFF on a return to off). `/workbench` appends them to its text and sets `mem.skillTurn`, so a
 `prompt.context` in that turn leaves them out (a compaction or the turn's end clears it). Every poll runs `sayRules`: unsaid rules go in as a
 user-role row (`$.session.append`, no turn), or, refused, a queued `[workbench]` turn. Away isn't
 one: it rides on each wake (`awayToo`).
@@ -4235,7 +4251,7 @@ by real path too) or `$WB_HOME/route-ok.json` are denied (`routesFileRefusal`, `
 naming `route-ok.json` with the state directory (as written, through `~`, or `$WB_HOME`: `ROUTE_OK_OWN`); a `grep` for
 the name in the code passes. A speed bump, not a wall: a command that builds the path gets past it (*Roles*, the gate).
 
-**The roles in the conversation.** `WbSaid.routes` (the `said-2` atom) is the roles' summary as the mod reads
+**The roles in the conversation.** `WbSaid.routes` (the `said-3` atom) is the roles' summary as the mod reads
 routes.json (`readRoutes`, `routesSummary`, which says what `routes.summary` says: Couplings) and the cap (`. Day cap
 $N`: in what is compared, so a cap changed alone is a row too; it once wasn't, 2026-11-23), '' while every role is
 the default and no cap is set (nothing to tell), `routes.json can't be read (wb route says why)` for a file wb wouldn't read
@@ -4334,6 +4350,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb note <task> --text "…"` | | A `captain` event. |
 | `wb splash [on\|off]` | | `$WB_HOME/splash.json`: the pane's opening (#963). |
 | `wb experiment [<name> [on\|off]]` | | *Experiments* (`cli.experiment_lines`, `context.EXPERIMENTS`, use over `USE_RECENT` 5 rows, `cli.use_recent`); sets `experiments.json` for later tasks; old probe levels `context.OLD_LEVELS` mean on; `; on is recommended` while `context.PROBE_RECOMMENDED`. |
+| `wb workflows [on\|off]` | | *Dynamic workflows* (#1041): `$WB_HOME/workflows.json`; off by default. |
 | `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | *Claude coding*: the mode and allowances; `allow` records the user's yes for one task until it goes back to the agent; `used` what Claude changed (exit 1 with none). |
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat`, `--setup` | *Screenshots of the base and the candidate*. |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions`, `--user` (the user's ask, recorded) | Stops the runner: phase `review`, status `taken_over`. Refuses (exit 1) an unfinished checkout (the hand-back remade it and lost Claude's edits, #655). Outside "Let Claude decide" needs the user's yes, else exit 3. `--all` takes the rest past a refusal (#601), skipping unready checkouts (#918). Scope (`_scope`, for stop, resume, wait, status too): from Claude Code's Bash without `--repo`/`--session`, the caller's (`cli._caller`: every id in `claude-sessions/<CLAUDE_PID>`, and its directory, #693), else `--all-sessions` or a terminal: every session's; by `session` id wherever it ran, or by directory (`repo`, package, `cwd`; real paths, case-folded where the file system is; never home or `/`) when no `session`, no `--session` given, or its `claude_pid` is gone (#695); a task with neither key is everyone's. Others: `left alone (other sessions'): …`. |
@@ -4420,6 +4437,7 @@ $WB_HOME (~/.local/state/workbench)
   probe-languages.json           {probe (real path), version, languages, at} from `probe search --help`; re-read when path or version differs (context.probe_languages)
   progress.json                  progress checks' opt-in: {on, after?, ts}; none: off
   splash.json                    the pane's opening (wb splash): {on, ts}; on unless "on": false
+  workflows.json                 Dynamic workflows (wb workflows, #1041): {mode: on|off, ts}; none: off
   results.jsonl                  one row per closed task
   stats.json  stats.lock         the Stats tab's settings
   lessons.jsonl                  what each task taught, open until written into a skill or closed
@@ -4961,8 +4979,14 @@ command, another line), every gated kind (a flip, an API model, thinking on API,
 keeping the record of the user's yes, the flips, the refusals (a kept model checked again, one gone from the catalog, a
 provider's passing state), the Agents switch (its line, its gate, `use` alone set), the start refused before any dialog (`API_RUNS` patched off) and its gate, `wb try`'s
 refusal, an unreadable file; `Base` points `WB_ROUTES` at the
-test's own file, never the user's. The mod's half (the dialog, the file-tool denies, the echo, `said-2`) is in
-register.test.tsx (`routeProbe`).
+test's own file, never the user's. The mod's half (the dialog, the file-tool denies, the echo, `said-3`) is in
+register.test.tsx (`routeProbe`). **Dynamic workflows** (`DynamicWorkflows`, #1041): off with no file, an unreadable
+or unknown one, `wb workflows on|off` kept, the skill's two rules, and a fan-out of three (one per role, under
+Claude Code, the API role set through the dialog's approval): the two GPU tasks on Ollamas on separate cards
+(`models.server_devices` patched; models that don't fit one card together) let in together without `--queue`, the API
+task past its provider's three held slots exit 4 then queued with `--queue` until one frees, every start line
+naming its role and model (the runners are the test's: the leases taken as a runner takes them); register.test.tsx: the block (once with
+`/workbench`'s text), one row per change, nothing without the file, a stored `said-2` declined.
 
 **Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`, `RealOpenCodeAPI`, `ApiHarness`'s
 `test_real_opencode_*`; skip without `opencode`, the
@@ -5219,7 +5243,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
   and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`.
 - **A `$.state` atom's type** → its tag (`tasks-9`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`,
-  `stats-1`, `top-1`, `said-2`, `splash-1`).
+  `stats-1`, `top-1`, `said-3`, `splash-1`).
 - **The Tasks page's layout** → `pageParts`, `pageShape` (#963); **the modeline's look** (`MODELINE`, `claude`) →
   splash.ts's `BAR`, modeline.ts's `BAR`, the room `register.tsx` counts; **a task phase** → modeline.ts's `SAID`.
 - **Stats tab folds**: `top.FOLD` → `RACK_FOLD`; `stats.STATS_MODEL_LINES` → `STATS_SHOWN`; `model_lines`'

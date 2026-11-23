@@ -17190,6 +17190,171 @@ class Splash(Base):
         self.assertIn("Enabled (default)", run_wb("splash"))
 
 
+class DynamicWorkflows(Base):
+    """Dynamic workflows (#1041): off by default, `wb workflows on|off` keeps the choice in
+    workflows.json beside coding.json, which the mod reads for its dynamic-workflows block."""
+    def test_off_by_default_and_wb_workflows_keeps_the_choice_where_the_mod_reads_it(self):
+        self.assertEqual(run_wb("workflows"), "Dynamic workflows: Off (default). Claude runs one task "
+                                              "at a time.\n")
+        self.assertFalse((store.home() / "workflows.json").exists())
+        self.assertIn("Dynamic workflows: On. Claude may split a request into tasks that run at once",
+                      run_wb("workflows", "on"))
+        self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["mode"], "on")
+        self.assertEqual(cli.workflows_mode(), "on")
+        self.assertIn("On.", run_wb("workflows"))
+        self.assertIn("Off (default)", run_wb("workflows", "off"))
+        self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["mode"], "off")
+
+    def test_a_workflows_json_wb_cannot_read_or_does_not_know_is_off(self):
+        for text in ("not json", '{"mode": "maybe"}', '["on"]'):
+            (store.home() / "workflows.json").write_text(text)
+            self.assertIn("Off (default)", run_wb("workflows"))
+
+    def test_only_on_or_off_is_taken(self):
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("workflows", "maybe")
+        self.assertFalse((store.home() / "workflows.json").exists())
+
+    def test_the_skill_says_one_task_at_a_time_when_off_and_how_to_fan_out_when_on(self):
+        skill = (Path(__file__).parent.parent / "skill/workbench/SKILL.md").read_text()
+        setting = skill.split("- **Dynamic workflows**")[1].split("\n- **")[0]
+        self.assertIn("off (the default), run **one task at a time**", setting)
+        self.assertIn("only on\n  their yes", setting)
+        fan = skill.split("- **Fan-out**")[1].split("\n- **")[0]
+        for said in ("(spec, size, role, acceptance command)", "one\n  name prefix",
+                     "say the plan in one line", "accept logic first, then tests, then UI or docs"):
+            self.assertIn(said, fan)
+
+    def wb(self, *argv):
+        """(exit code, stdout, stderr) of wb ARGV."""
+        out, err, code = io.StringIO(), io.StringIO(), 0
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                cli.main(list(argv))
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_fan_out_runs_gpu_tasks_on_separate_cards_together_queues_an_api_task_past_its_slots_and_names_each_role(self):
+        # #1041's acceptance: three tasks started at once, one per role, nothing run that
+        # couldn't run anyway. Two Ollamas, one per card (models.apart), whose two models don't
+        # fit one 24 GB card together; the writing role on DeepSeek's API, whose 3 slots
+        # (models.API_PARALLEL) three earlier tasks hold. The runners are this test's: the GPU
+        # lease and the provider slots taken here as each runner would take them
+        models = runner.models
+        ApiHarness.catalog(self, ROLE_CATALOG, ROLE_AUTH)
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama-b"] = {"options": {"baseURL": "http://127.0.0.1:11435/v1"},
+                                       "models": {"coder:9b": {"name": "Coder 9B", "limit": {"context": 32768}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        big, small = "ollama/qwen3.8-27b", "ollama-b/coder:9b"
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({big: {"weights_gb": 20}, small: {"weights_gb": 9}}))
+        os.environ["WB_FAKE_GPU_GB"] = "24"                   # 25 + 11 GB: not on one card
+        m_big, m_small = models.resolve(big), models.resolve(small)
+        self.assertNotEqual(m_big.root, m_small.root)
+        cards = {m_big.root: frozenset({"GPU-00"}), m_small.root: frozenset({"GPU-11"})}
+        for p in (mock.patch.object(models, "server_devices", cards.get),  # the fake reads no cards
+                  mock.patch.object(cli, "spawn_runner", lambda task: 0)):
+            p.start()
+            self.addCleanup(p.stop)
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        flash = models.lookup("deepseek/deepseek-flash")
+        earlier = {n: stack.enter_context(models.NoLease(flash, n, say=lambda s: None))
+                   for n in ("api-1", "api-2", "api-3")}
+        self.assertEqual(models.api_slots_free("deepseek"), 0)
+        # the roles, under Claude Code: GPU pins take no yes, the API one the dialog's (route-ok.json)
+        os.environ["CLAUDECODE"] = "1"
+        for argv in (("significant", "--gpu", big), ("trivial", "--gpu", small)):
+            self.assertEqual(self.wb("route", *argv)[0], 0, argv)
+        api = ("writing", "deepseek/deepseek-flash", "--day-usd", "5")
+        code, out, err = self.wb("route", "--dry-run", "--json", *api)
+        self.assertEqual(code, 0, err)
+        asked = json.loads(out)
+        self.assertTrue(asked["gate"])
+        store.write_json(store.home() / "route-ok.json", {**asked["approval"], "at": time.time()})
+        self.assertEqual(self.wb("route", *api)[0], 0)
+        begin = lambda name, role, *extra: self.wb(  # noqa: E731
+            "start", name, "--spec", str(self.spec), "--repo", str(self.repo), "--role", role, *extra)
+
+        # the logic on card 0, its runner's lease held by a process of its own, as a runner's is
+        code, out, err = begin("fan-logic", "significant")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith(f"started fan-logic on {m_big.label} · branch "), out)
+        self.assertIn("\nmodel: the significant role's GPU model (wb route)\n", out)
+        held_by = Path(self.tmp.name) / "fan-logic-holds"
+        holder = subprocess.Popen([sys.executable, "-c", textwrap.dedent(f"""
+            import sys, time
+            from pathlib import Path
+            sys.path.insert(0, {str(ROOT)!r})
+            from workbench import models
+            with models.GpuLease(models.resolve({big!r}), "fan-logic", lambda s: None):
+                Path({str(held_by)!r}).write_text("in")
+                while Path({str(held_by)!r}).exists():
+                    time.sleep(0.05)
+            """)])
+        self.addCleanup(holder.wait, 10)
+        self.addCleanup(lambda: held_by.unlink(missing_ok=True))
+        deadline = time.time() + 20
+        while not held_by.exists():
+            self.assertLess(time.time(), deadline, "fan-logic's lease never held")
+            time.sleep(POLL)
+
+        # the tests on card 1: let in beside it, no --queue, no wait
+        code, out, err = begin("fan-tests", "trivial")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith(f"started fan-tests on {m_small.label} · branch "), out)
+        self.assertIn("\nmodel: the trivial role's GPU model (wb route)\n", out)
+        self.assertNotIn("the GPU is busy", out)
+        self.assertTrue(models.admits(m_small, models.holders()))
+        stack.enter_context(models.GpuLease(m_small, "fan-tests", say=lambda s: None))
+        self.assertEqual(sorted((h["task"], h["model"], bool(h.get("waiting"))) for h in models.holders().values()),
+                         [("fan-logic", big, False), ("fan-tests", small, False)])   # both run, together
+
+        # the docs on the API, past the provider's slots: exit 4 without --queue, queued with it
+        code, out, err = begin("fan-docs", "writing")
+        self.assertEqual((code, out), (4, ""))
+        self.assertIn("3 tasks already run on deepseek's API (api-1, api-2, api-3): workbench runs at most 3 "
+                      "at once per provider. --queue starts it anyway", err)
+        self.assertFalse(store.Task("fan-docs").dir.exists())
+        code, out, err = begin("fan-docs", "writing", "--queue")
+        self.assertEqual(code, 0, err)
+        day = time.strftime("%m-%d", time.localtime(routes.read()["roles"]["writing"]["ts"]))
+        self.assertTrue(out.startswith("started fan-docs on deepseek/deepseek-flash (API) · branch "), out)
+        # "you": the dialog's yes was the user's (routes.said: only the user sets a role)
+        self.assertIn(f"\nmodel: deepseek/deepseek-flash · API (DeepSeek) · writing role, set by you {day} · "
+                      "thinking off\n", out)
+        self.assertIn("note: 3 tasks run on deepseek's API; this task waits as queued for a slot", out)
+        self.assertNotIn("GPU", out)                          # never the GPU's wait, nor its notes
+        got = threading.Event()
+
+        def docs_runner():
+            with models.NoLease(flash, "fan-docs", say=lambda s: None):
+                got.set()
+                while not stop.is_set():
+                    time.sleep(0.05)
+        stop = threading.Event()
+        waiter = threading.Thread(target=docs_runner, daemon=True)
+        waiter.start()
+        self.addCleanup(waiter.join, 10)
+        self.addCleanup(stop.set)
+        deadline = time.time() + 20
+        while store.Task("fan-docs").status.get("last") != "waiting for an API slot: 3 tasks run on deepseek":
+            self.assertLess(time.time(), deadline, store.Task("fan-docs").status)
+            time.sleep(POLL)
+        self.assertEqual(store.Task("fan-docs").status["phase"], "queued")
+        self.assertFalse(got.is_set())
+        earlier["api-2"].__exit__(None, None, None)           # an earlier API task ends
+        self.assertTrue(got.wait(20), "fan-docs never took the freed slot")
+        self.assertEqual(models.api_holders("deepseek"), ["api-1", "api-3", "fan-docs"])
+        self.assertEqual({h["task"] for h in models.holders().values()}, {"fan-logic", "fan-tests"})
+        # the spec of each says its own role and side
+        self.assertEqual({n: (store.Task(n).spec["role"], store.Task(n).spec["via"], store.Task(n).spec["model"])
+                          for n in ("fan-logic", "fan-tests", "fan-docs")},
+                         {"fan-logic": ("significant", "gpu", big), "fan-tests": ("trivial", "gpu", small),
+                          "fan-docs": ("writing", "api", "deepseek/deepseek-flash")})
+
+
 class Progress(Base):
     """Opt-in progress checks (#95): active work, evidence, a hint or a smaller step, and what
     helped, learned; the coding choice untouched."""
