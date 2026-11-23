@@ -301,6 +301,7 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 | no output (not while waiting on Claude; a background job gets the test timeout if longer) | 15 min | `--silence-timeout` |
 | one round, waits on Claude excluded | 40 min | `--round-timeout` |
 | mid-round handovers in one review round | more than `HANDOVER_MAX` (5) | `runner.drive` |
+| an API task's spend: today at the day cap, or the keyhole refused a request that could pass it (`spend`, *Spend*) | routes.json `day_usd` | `runner._spend_guard`, `runner._go_on` |
 | OpenCode alive after closing its output (#83): SIGTERM, then SIGKILL | the silence limit, at most `EXIT_GRACE` (30 s) | `runner.run_round` |
 
 Past the think budget (7 min, `--think-timeout`, 0 off; from the round's first output, paused
@@ -417,6 +418,119 @@ row's `diff`.
 the machine (`hardware.system()`, `hardware.gpus(windows=False)`), the models' count and weights
 (`models.weights`), the tokens and estimate overall and by size, `COUNTS`, the badge, the energy.
 No model name, repo, task name or price.
+
+### Spend: what an API task costs
+`workbench/meter.py` (#1019). Nothing recorded money for the agent's model, so an API task could
+spend without limit unseen, and a cap cut mid-stream became OpenCode's retry loop until the silence
+limit (robustness M1). Now every API task is metered live into one ledger, and one day cap covers
+every API provider together: routes.json `day_usd` (the user's, #1014; read by `meter._routes`,
+`$WB_ROUTES`, the one call to swap for `routes.load()`), for the local calendar day, reset at local
+midnight. A GPU task writes nothing here and costs nothing: `meter.for_task` is None for it (a
+task.json without `via` reads as GPU, as every task before #1016 does; drive hands it the model,
+else the cached catalog's, `models.lookup(cached=True)`).
+
+**The price** (`meter.price(m)`): the catalog's `cost` from hosted.json (`Model.config`: a list of
+`{input, output, cache{read, write}, tier?}` per million tokens; a config model's `{input, output,
+cache_read, cache_write}` too), lowest tier first. Missing is None, unknown, never 0; every field 0
+is a true 0 (a free model: `meter.is_free`, also OpenCode's `opencode/*-free`, `Model.free`, with no
+price listed; a listed price that isn't 0 is capped whatever the name says). A free model's rows
+are booked, but the cap has nothing to keep: `refusal`, `stop_reason` and `room` are None for it,
+with or without a cap. `meter.metered(prices, tok)` prices tokens the way OpenCode prices
+itself (the spike, *API models through OpenCode*): `input` without cache reads, cache reads and
+writes at their rates, output and reasoning at the output rate (a listed `reasoning` rate wins),
+the context tier past its `size` by input plus cache reads plus cache writes (2.3.2's own rule,
+from its bundled source: without the writes, a first turn caching a 150K context priced at the
+base tier, 5 times low on a long-context price). The issue's first design priced every
+input token at the cache-miss rate; with a 100K cached context that metered 50 times the real
+cost, and OpenCode's own figure is this same catalog estimate, so the meter prices as it does.
+Never under where the split is unknown: a usage that doesn't name its cache reads prices them as
+input, and a missing cache price is the input price.
+
+**Two views, the higher kept.** The keyhole's (`Meter.on_usage`, from the keyhole's thread): each
+upstream response's `usage`, merged into one per response (`keyhole._merged`: Anthropic's
+`message_start` and `message_delta` each carry part; some servers send a running total in every
+chunk) and handed over before the response's last byte, so OpenCode prints that step's
+`step_finish` only after it is booked. `meter.usage_tokens` reads Chat Completions
+(`prompt_tokens` with `prompt_tokens_details.cached_tokens` or DeepSeek's
+`prompt_cache_hit_tokens`, `completion_tokens_details.reasoning_tokens`), the Responses API
+(`input_tokens_details`, `output_tokens_details`) and Anthropic (`cache_read_input_tokens`,
+`cache_creation_input_tokens`). It sees every request the model gets, titles and compaction too
+(which no `step_finish` carries), and a provider's own `usage.cost` (OpenRouter's) wins over the
+catalog (`source: provider`). OpenCode's (`Meter.step`, `step_finish.part.cost`, which
+`events.normalize` keeps as the step row's `cost`): with the keyhole metering, only a `reconcile`
+row when OpenCode's sum for the round passes the keyhole's and the round's earlier reconciles;
+without it (answers with no usage, the suite's fake), each step books its own row, OpenCode's
+cost (`source: opencode`) or the metered one (`metered`). At each round's end (`runner._spend_end`,
+after `measure_speed`) the task's sessions' exported `info.cost` (status `sessions` and `session`,
+each once; `transcript.finished_export` for old ones), which counts the title request, adds one
+`reconcile` row when it is more than the ledger holds for the task. Never less: what the keyhole saw
+is what went out, so the ledger is the higher of the two. **Never a false 0:** an OpenCode cost of
+0 for tokens whose price isn't 0 is not trusted (the step keeps the metered figure, `source:
+"metered (opencode said 0)"`; an export saying 0 reconciles nothing), and an export that failed
+reconciles nothing. What isn't counted: a response cut before its usage arrived, by either view.
+Without the keyhole's view (before #1015 wires `Meter.hooks()` into `keyhole.start`), OpenCode's
+compaction requests count only as far as its `info.cost` does. A catalog price below a backend's
+(an OpenRouter endpoint priced over its listing, without `usage.cost`) meters under.
+
+**The ledger**, `$WB_HOME/spend-api.jsonl` (`store.append_jsonl`, locked; *Files and formats*):
+`step`, `reconcile` and `checkin` rows, each with its local `day` (`meter.day`: a round past
+midnight books its later steps on the new day). `meter.today()` gives `{usd, unpriced_tok,
+plan_tok: {provider: n}, checkin}` from today's rows, read on from the last offset (the file's
+inode and size tell a new or rewritten one), so the 5 s tick never re-reads it whole. Status `api`
+(`{usd, metered, source, tok}`, per row through `Task.set_status`, under the meter's lock: the
+keyhole's thread and the runner's book at once, and a total written after a newer one would leave
+it under the ledger) is the task's own; #1022's results rows and stats come later.
+
+**The cap at start** (`meter.refusal(m, role=None)`, exit 3; `cli.pick_model` for `--model` now,
+`routes.resolve` with the role once #1016 lands): an API model that isn't a plan or free is refused with no
+price (`<id>: OpenCode's catalog gives no price for it, so the day cap can't be kept`) and at the
+cap (no cap at all is #1014's to refuse for a role; a task that meets none, a routes.json edited by
+hand, is stopped by the guard at once, `meter.NO_CAP`, and its keyhole's room is negative, so it
+spends nothing rather than without a limit): `trivial role: API spend today is $5.03 of the $5 day cap (it resets at local midnight).
+Ask the user: a higher cap (wb route cap <usd>), the role on the GPU (wb route trivial gpu), or
+tomorrow`. `meter.tail(m)` is the start line's part, ` · today $0.42 of $5`, or a plan's ` · plan
+usage (OpenCode Go): 1.2M tokens today` (#1016 prints it).
+
+**The guard `spend`, inside a round** (`runner._spend_guard`, each tick after the stuck checks, an
+API task only): status `api_stop` (`{guard, text}`, written by the keyhole's side; #1020's issue
+has its `quota` stop write the same key, so its guard is taken as written: an interface the
+integrator reconciles with #1020, as is its clearing at each round's start, below) or `meter.stop_reason(task)`, today's spend at the cap (`the day's API spend
+cap is reached: $5.02 of $5 today`, or no cap at all, `meter.NO_CAP`). It calls `CURRENT["keyhole"].close(why)` first, so every
+request from then on gets a 400 with `{"error": {"message": "workbench: <why>"}}`, nothing sent
+upstream (`keyhole.Keyhole.close(reason)`; with no reason it shuts the server down as before),
+then sets `out["stuck"]`/`out["guard"]` and `_stop`s OpenCode, which ends a response still
+streaming: the round stops within one tick of the crossing step, never at the silence limit.
+OpenCode 2.3.2 doesn't retry that 400 (`provider.invalid-request`, exit 1 at once, through the
+keyhole, both protocols: `ApiSpendKeyhole`'s real-OpenCode check); were the 400 retried after all, the next tick (5 s)
+stops it from the ledger. **The room** (`Meter.room(body, size)`, the keyhole's `room` hook before
+each request): the cap less today less the request at its worst (its body's length / 4 at the
+dearest tier's input price, its `max_tokens`, `max_completion_tokens` or `max_output_tokens`,
+else `models.API_OUTPUT`, at the output price). Negative: refused the same way, and status
+`api_stop` `{guard: spend}` stops the round on the next tick. Parallel tasks overshoot by at most
+one worst request each. `Meter.begin(n)` clears an old `api_stop`, whatever its guard, as each
+round starts (a resumed task begins clean). **Between
+rounds** (`runner._go_on(task, n, what)`, #1017's helper, before each `continue` in `drive`: the
+handover, Claude's notes, the revive, auto-fix, self-review): at the cap, phase `stuck`, status
+`guard` `spend`, the keyhole closed, and a `stuck` notice ("… <what> didn't run"), with round n's
+report when it has one (`Round <n>'s report (wb report <task> --round <n>):`: auto-fix and
+self-review have already moved status `round` on to n + 1, which never ran). Both notices
+have `cause` `spend`, not the step's own (`results.THE_STEP`), so the slice isn't shrunk, and lead
+with `meter.stop_text`: `<task> stopped: the day's API spend cap is reached ($5.02 of $5 today). Its
+work so far is in the worktree. Ask the user: a higher cap (wb route cap <usd>), the role on the
+GPU, or tomorrow; then wb resume <task>.` The mod's `GUARD_WORDS.spend` names it, and its wake for a
+`cause` `spend` notice ends with `SPEND_NEXT` (ask the user, then `wb resume`), not the stuck wake's
+feedback line: feedback would run a round the cap stops again at once.
+
+**The check-in at half** (`CHECKIN_SHARE` 0.5): a priced row that leaves today at or past half the
+cap, with no `checkin` row today, appends one (under `spend-api.jsonl.checkin.lock`, so tasks in
+parallel add one) and raises `checkin`: `API spend today has passed half the day cap: $2.51 of $5
+(<task> $0.88 so far). Nothing to do unless the user wants to change it.` Once a day across every
+task.
+
+**Plans** (`meter.is_plan`: `opencode-go/*`, an Ollama cloud model): a quota, not dollars. Their
+rows have `usd: null`, `plan: "<provider>"` and the tokens; they never count against the cap, never
+stop for `spend`, never reconcile, and `today()["plan_tok"]` sums them. Their quota errors are #1013's
+and #1020's.
 
 ### Kept awake
 
@@ -1423,8 +1537,8 @@ connection per request (`ssl.create_default_context()`, through wb's own `https_
 end), its `data:` lines read on the way for the served model (`model`, Anthropic's
 `message_start.message.model`, the Responses API's `response.model`) and OpenRouter's `provider`:
 status `served: {model, by}` when it first appears or changes, with a `served` event; and `usage`
-(top-level, `message.usage`, `response.usage` in `response.completed`) for `on_usage` (a no-op until
-the spend cap meters it). The key itself never passes (a body that isn't SSE holds back its last
+(top-level, `message.usage`, `response.usage` in `response.completed`) for `on_usage` (for the
+meter, *Spend*). The key itself never passes (a body that isn't SSE holds back its last
 `len(key) - 1` bytes so a key split across reads is caught), and an SSE line whose JSON has an
 `error` goes through `redact`: a mid-stream error arrives inside a 200 (Anthropic's `event: error`,
 OpenRouter's `data: {"error": …}`). An error is read whole (`ERROR_CAP`, 64 KB; a longer one is cut
@@ -1451,7 +1565,7 @@ it just works). Not yet wired: status `served` reaching the results.
 key (`runner.needs_keyhole`: not an Ollama cloud model, whose `key` is `ollama`, nor a free
 model whose `key` is `none`), starts it before the first round as `CURRENT["keyhole"]`
 (`start_keyhole`: `on_health` is `models.note_api(provider, state, why, until)`, the model's
-health record; `on_usage` is `api_usage`, a no-op the spend cap fills, #1019) and closes it when
+health record; `on_usage` and `room` are the task's meter's, `meter.Meter.hooks`, #1019) and closes it when
 the drive ends. A `KeyholeError` fails the task through `_load_failed` (`<model> can't run:
 <why>`, a `failed` notice) with `keyhole.REMEDY` appended unless the text already gives the
 remedy (`keyhole_failure`). The layer's provider entry gets `keyhole_overlay(task)`:
@@ -1737,7 +1851,7 @@ no check came, and a 1.5-minute typical made every 1.5 minutes a wake). The pane
 rule (2026-11-20): a free measurement is on by default, and each can be turned off. On unless
 stats.json says `recording: false`. With it on: a `round_end {secs, how, guard?}` event (`how`:
 `done`, `stuck`, `handover`, `interrupted`, `failed`; `runner._round_end`); the stopping guard named
-(`repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`) and counted in status
+(`repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) and counted in status
 `guards`; speed samples with time to first token (`router.speed_samples`) in status `speeds`; and
 `results.for_stats` in the row (`started_at`, `load_secs`, `setup_secs`, `nudges`, `asks` by kind,
 `answered`, `guards`, median `speed`, `gpu_w` `{mean, peak}` from status `gpu_w_*`, each only when
@@ -4483,7 +4597,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2 on the GPU, 1 on API: `cli.AUTO_FIX`, `cli.auto_fix`; a given value is kept and the start line prints the one used, #1017), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders, or for an API provider's slot), `--trial`, `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), an unreadable routes.json (exit 3, *Roles*), a `--model` naming an API model (exit 3, before any dialog until #1016 turns `cli.API_RUNS` on: `<id> is an API model, and this workbench doesn't start tasks on API models yet: …`, #1013, #1014), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4), an API model's provider already running `API_PARALLEL` (3) tasks (exit 4, `cli._slots_full`; `--queue` waits for a slot, #1015). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why, `next: wb wait <task>`. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2 on the GPU, 1 on API: `cli.AUTO_FIX`, `cli.auto_fix`; a given value is kept and the start line prints the one used, #1017), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders, or for an API provider's slot), `--trial`, `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), an unreadable routes.json (exit 3, *Roles*), a `--model` naming an API model (exit 3, before any dialog until #1016 turns `cli.API_RUNS` on: `<id> is an API model, and this workbench doesn't start tasks on API models yet: …`, #1013, #1014; with it on, one with no price or today's spend at the cap is refused first, before the dialog: `meter.refusal`, *Spend*, #1019; no cap at all is #1014's to refuse, and the guard stops such a task, `meter.NO_CAP`), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4), an API model's provider already running `API_PARALLEL` (3) tasks (exit 4, `cli._slots_full`; `--queue` waits for a slot, #1015). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why, `next: wb wait <task>`. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps first. Review/stuck/failed with no live runner; refuses a moved repo (`wb relocate`), OpenCode 1.x (exit 3, `_opencode_again`, #866), empty text. Prompt: `FEEDBACK_HEAD` + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (re-run only with a test) + text; reviews+1. Warns past three reviews. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--include` (bulk additions, large binaries, ignored files the agent wrote), `--no-sign`, `--test` (replaces it, granted to the shell too), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Review only. Commits the step (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`; an empty step advances uncommitted, #507); prompt "Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL; advances round, steps, step_round, `reviews` reset, `step_base` the worktree's HEAD (#652), phase queued in one status write right before the spawn (#191: written earlier, an interrupt left the step under review with no runner). A retry after its commit landed (`cli._step_landed`) measures from `HEAD~1` (#85). Says `runner.fresh_reason`'s verdict. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` | `ask/<id>.answer` via `ask_mcp.write_answer`; the id into status `answered`. Refuses empty, over `ask_mcp.FILE_MAX` 256 KiB (`too_long`: never read, the agent waited out its timeout, #605), or closed, racing too (`answer_once`, #938). |
@@ -4603,6 +4717,11 @@ $WB_HOME (~/.local/state/workbench)
                                  unreachable, until (epoch or null), why (redacted), ts}}; ok removes it; past until reads as ok; the provider's cooldown every keyhole waits out, and the revive's wait (#1020)
   api/<provider>.<i>.lock        an API provider's task slots (models.NoLease, #1015): API_PARALLEL (3) files, each flocked by the
                                  runner holding it, its task's name inside (models.api_holders); never in gpu.json
+  spend-api.jsonl  .lock .checkin.lock  the API ledger (meter.py, #1019; *Spend*), one row each, every row {ts, day (local
+                                 %Y-%m-%d)}: step {task, round, provider, model, usd (null: a plan or unpriced), metered,
+                                 source (keyhole|provider|opencode|metered|metered (opencode said 0)), plan?, tok {in, out,
+                                 cache_read, cache_write, reasoning}}; reconcile {task, round, provider, model, usd (OpenCode
+                                 said more), source opencode}; checkin {task, usd_today, cap}: today's one check-in at half
   update.json                    wb update's last check
   patches.json                   {source (the clone install), upstream (owner/repo on GitHub, else null)}: patches.note_install, by wb patch init, upstream, send and wb update (not --check) on `local`; the mod's consent gate reads it.
                                  prepared {<slug>: {author, email, date (unix), subject}}: the local commit wb patch upstream picked;
@@ -4685,7 +4804,8 @@ $WB_HOME (~/.local/state/workbench)
                                  {"via": "gpu"|"api", "gpu": "<id>"|"auto", "api": "<exact id>" (kept on the GPU), "thinking": "off"|"on",
                                  "said": the gated change's line, "by": "dialog"|"pane"|"terminal", "ts", "gpu_by": "terminal"|"claude", "gpu_ts"
                                  (a change that needed no yes: routes.stamp)}}}; a missing role is the GPU's
-                                 default; wb route writes it (store.edit_config), the mod reads it (readRoutes)
+                                 default; wb route writes it (store.edit_config), the mod reads it (readRoutes); its "day_usd" is the API day
+                                 cap the meter keeps (*Spend*, #1019)
 ~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; then $OPENCODE_CONFIG; $WB_OPENCODE_CONFIG) the models
 /tmp/wb-run-<uid>-<hash>/        the agent's XDG_RUNTIME_DIR (lane on; context.runtime_dir), 0700, .wb-owner {home, task} (RUNTIME_OWNER)
 ```
@@ -4812,12 +4932,14 @@ off), not `wb start`'s.
 | `spec_gaps` | `[{round, text}]` from `--spec-gap` |
 | `served` | `{model, by}`: the model an API task's responses named and OpenRouter's provider (or null), from the keyhole when it first appears or changes |
 | `ratelimit_until`, `ratelimit` | the keyhole's hold or queue (#1020): epoch seconds, at least 60 s ahead; `{kind: rate_limited\|outage\|queued, provider, code, since, retry_after, why?}`; cleared at the first data, at each round's start and end |
-| `api_stop` | `{guard, text}`: stop the round now (the keyhole's `quota`, #1019's spend), consumed by the runner's stop |
+| `api` | an API task's spend (#1019, *Spend*): `{usd (the task's ledger total; null for a plan), metered, source (the last row's), tok {in, out, cache_read, cache_write, reasoning}, plan?}`, per ledger row |
+| `api_stop` | `{guard, text}`: stop the round now: the keyhole's `quota` (#1020), or `spend` (`Meter.room` refused a request, #1019); consumed by the runner's stop (`_ProviderWait.stop`, whose `stopped_by` makes `spend` its own cause), and cleared, whatever its guard, as each round begins (`Meter.begin`) |
+| `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap), with `infra` `spend` |
 | `updated_at` | every write |
 
 **events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?}`
 (`brief`: command, path, pattern, url, query or description, 90 chars; a skill's id), `text {text}` (2000), `step {in,
-out, cache, reasoning?}` (reasoning apart from `out`), `error {text}`, `retry {text, attempt}` (OpenCode resent a request). From the runner: `round`, `stopped {text}`, `steer
+out, cache, reasoning?, cost?}` (reasoning apart from `out`; `cost` OpenCode's `part.cost` in USD, the meter's, #1019), `error {text}`, `retry {text, attempt}` (OpenCode resent a request). From the runner: `round`, `stopped {text}`, `steer
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),
 `autofix`, `self_review`, `reading_full`, `full`, `compacted {text}` (mid-round, and it carried on), `load` (a reload before a round), `limits {text}` (stretched),
 `left_bg {text}` (a job left in the background), `round_end {secs, how, guard?}` (stats recording on), `export` (the
@@ -5087,7 +5209,8 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `read`, `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
-`retry` (`FAKE_RETRY_EVERY`), `say`. A new fake behaviour is a new scenario.
+`retry` (`FAKE_RETRY_EVERY`), `say`, `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of
+them, then `ok`'s answer). A new fake behaviour is a new scenario.
 
 **API models in the fake** (#1011, from the spike for #1009 on OpenCode 2.3.2; the real-OpenCode checks below hold on
 2.3.0 too). `WB_FAKE_CATALOG` names a JSON file of `api model.list` entries (a list, or `{"data", "auth"}` to give
@@ -5098,9 +5221,10 @@ splits at the first `/` and the first `#` after it: a catalog provider's unknown
 {"type": "provider.no-route", "message": "Model unavailable: <id>"}}`, an unknown variant (neither the catalog's nor the
 config's `provider.<p>.models.<m>.variants`, V1 or V2, from `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT`) `Variant
 unavailable for <id>: <v>`, both exit 1 before any step; a config model passes as before. Every `step_finish` has
-`part.cost` (from the catalog's first price, its context tier past `size`: `input` without cache reads, reasoning at
-the output rate; `FAKE_COST` for an unpriced model, else 0) and `part.tokens{input, output, reasoning, cache{read,
-write}}`; `session export` gives the assistant message `cost` (`FAKE_COST`, else 0) and `info.cost`/`info.tokens`
+`part.cost` (from the catalog's first price, its context tier past `size` by input plus cache reads and writes: `input` without cache reads, reasoning at
+the output rate; `FAKE_COST` for an unpriced model, else 0; `FAKE_STEP_COST` plays OpenCode's figure, a number or
+`none` for no `part.cost`) and `part.tokens{input, output, reasoning, cache{read, write}}` (`FAKE_STEP_IN` the input,
+120); `session export` gives the assistant message `cost` (`FAKE_COST`, else 0) and `info.cost`/`info.tokens`
 their sums. The API scenarios: `ratelimit` (`step_start`, then `retry` events, attempts 2 to `FAKE_RETRIES`+1, 10 by
 default, `FAKE_RETRY_EVERY` apart, each `{type: "retry", attempt, nextRetryAt, messageID, error: {type:
 "provider.rate-limit", message, status: 429, response: {body}, retryAfterMs}}`, `retryAfterMs` only with
@@ -5130,8 +5254,14 @@ refusal, an unreadable file; `Base` points `WB_ROUTES` at the
 test's own file, never the user's. The mod's half (the dialog, the file-tool denies, the echo, `said-2`) is in
 register.test.tsx (`routeProbe`).
 
+**The spend cap's tests** (#1019): `ApiSpend` writes a task the way `wb start` will (#1016: started on a GPU model with
+`spawn_runner` patched, task.json then naming the API model) and runs `runner.drive` in the test's process, a stub in
+`CURRENT["keyhole"]` recording `close`; `ApiSpendKeyhole` drives the keyhole's `close(reason)`, `room` and one usage per
+response against `_KeyholeTest`'s upstream, and its `test_real_opencode_*` runs the real OpenCode through a closed
+keyhole (the 400, not retried).
+
 **Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`, `RealOpenCodeAPI`, `ApiHarness`'s
-`test_real_opencode_*`, `ApiSizing`'s `test_real_opencode_*`; skip without `opencode`, the
+`test_real_opencode_*`, `ApiSizing`'s and `ApiSpendKeyhole`'s `test_real_opencode_*`; skip without `opencode`, the
 lane ones without `lane.abi()`). `capture_llm.py <port> <out.jsonl> [calls] [prompt tokens]` records every request,
 answers tool-offering ones with the next scripted `{"name", "arguments"}`, reports `prompt tokens` read (to fill the
 window), returns the compaction template's headings for a compaction request (else `compaction.failed`), and listens at
@@ -5194,7 +5324,8 @@ the binary lacks fails without the file and runs through the keyhole with it.
 `_ApiTask`, #1015). `wb start` routes an API model only through a role (#1016), and refuses one
 by `--model` (exit 3), so the test-only route is `_ApiTask.start_api`: `run_wb("start", …)` in
 process with `cli.pick_model` patched to return the API model (`FLASH`, from `API_CATALOG` in
-`WB_FAKE_CATALOG`, its key a canary row of `FAKE_AUTH_EXPORT`). With `spawn=False` the runner is
+`WB_FAKE_CATALOG`, its key a canary row of `FAKE_AUTH_EXPORT`, a $100 day cap in the test's routes.json, without
+which the meter stops the task before it spends, #1019). With `spawn=False` the runner is
 not spawned and `drive_here` runs `runner.drive` in this process, for a test that patches
 `models` (a counted `make_resident`, a `models.resolve` returning an API model on a local
 `_Upstream`, since `_build_hosted` leaves out loopback bases). The fake's `http` scenario then
@@ -5438,3 +5569,5 @@ stays refused), and
   create v<version> --generate-notes` linking the checklist. **`wb setup`'s links** → README's quickstart, *Installing*.
 - **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.
+- **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → the mod's `GUARD_WORDS`, *Stats recording*'s list.
+- **The spend stop** (#1019): `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which #1015's `keyhole.start` call takes) ↔ status `api_stop` (#1020's issue has its `quota` write it too; `Meter.begin` clears it at each round's start, whatever its guard: the integrator reconciles both with #1020). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`.

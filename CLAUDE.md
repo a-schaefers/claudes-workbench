@@ -74,7 +74,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
   notice).
-- `spend.py`, `savings.py`: a task's cost to Claude, and against writing it. `bench.py`,
+- `spend.py`, `savings.py`: a task's cost to Claude, and against writing it. `meter.py`: an API
+  task's money (the ledger `spend-api.jsonl`, the day cap, the `spend` guard: *Spend*). `bench.py`,
   `verify.py`, `optimize.py`, `top.py`, `images.py`, `audio.py` (`media.py`, what those two
   share): their `wb` commands. `progress.py`, `stats.py`, `lessons.py`: progress checks, the Stats
   tab, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
@@ -96,7 +97,8 @@ Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change mus
 2. The runner holds the GPU (`GpuLease`) and loads the model before every round, or for an API
    model holds a provider slot (`NoLease`, never in gpu.json) and starts the keyhole; it runs
    `opencode run … -- <prompt>` in the worktree through `lane.wrap`, with the layer
-   `rules/<task>/opencode.json`. Guards stop a stuck agent; an API provider's rate limit,
+   `rules/<task>/opencode.json`. Guards stop a stuck agent (an API task at the day cap too:
+   `spend`, in the round and before each next one); an API provider's rate limit,
    outage or queue pauses their clocks, and held 10 minutes stops the round as `rate_limited`
    (or `outage`), the provider's and never silence, run again once; `wb steer` queues a note.
 3. `--test` runs in the agent's lane, environment and shell (its code gains no rights when
@@ -130,7 +132,8 @@ API task's `catalog.json`, its `OPENCODE_MODELS_PATH`), `api/` (the provider slo
 clone install and its upstream, which the mod reads; the pull requests it sent), `send-ok.json` (the mod's yes to one send),
 `rescued/`, `upstream/` and `patches/` there; `route-ok.json` is the dialog's yes to one role change
 (`wb route`), or an API start once #1016 runs them. `~/.config/workbench/routes.json` (`$WB_ROUTES`) holds the roles: missing
-is all GPU, unreadable is an error (never read as all GPU).
+is all GPU, unreadable is an error (never read as all GPU). API spend: `spend-api.jsonl`
+(`meter.py`), against routes.json's `day_usd`.
 
 OpenCode's config is written only through `models.own_config`: one unlayered file without
 comments, and a refusal names the change, never the config (it can hold an `apiKey`). Requests to
@@ -140,7 +143,7 @@ ARCHITECTURE.md, *Models: found, loaded, chosen*. GPU paths and the router read 
 API models (Ollama cloud ones too) are `hosted()`'s, cached in `hosted.json`, named by exact id.
 
 Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`,
-`WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR`,
+`WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_SAVINGS`, `WB_ROUTES`, `WB_GPU_DIR`,
 `WB_OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`, `WB_SOURCE` (`wb patch init`'s clone, else
 `~/.local/share/workbench/source`), `WB_ROUTES` (the roles) (relative or `~` allowed: a new one joins
 `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; the agent's `WB_TASK`, `WB_RUN`,

@@ -29,6 +29,7 @@ from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardwa
                transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
+from . import meter
 from .runner import PKG_ROOT
 
 PROTOCOL = """
@@ -597,6 +598,8 @@ def pick_model(size: str, wanted: str | None, stack=(), name: str | None = None)
             die(str(e).strip('"'))
         if m.kind == "api":
             if API_RUNS:  # the user's yes first, in the mod's dialog (#1014)
+                if why := meter.refusal(m):  # no price, or today at the cap (#1019): before the dialog
+                    die(why, 3)
                 start_gate(name or "", m)
             die(f"{m.id} {API_NOT_YET}", 3)  # the runner's side comes with wb start --role
         return m, models.status(m), "asked for"

@@ -429,6 +429,9 @@ coding choice is the user's (`wb coding`), never changed by a check.
   (the report says "the provider's stop"): tell the user so, and its remedy (wait, top up, or
   /connect the key again), then `wb feedback <name> --text "carry on"` once it allows. Never
   switch the task's model or role yourself: a route change takes the user's yes.
+  A `spend` stop (cause `spend`: the day's API spend cap is reached) is the user's call, never a
+  retry: ask them for a higher cap, the role on the GPU, or tomorrow, as the notice says; resume
+  only after they decide. Nothing but the user raises the cap.
 
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
   corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).
@@ -538,6 +541,8 @@ Short and honest: what was built, on which model, rounds (automatic and review),
 what you fixed, sent back or flagged, the branch. Report the agent's misses plainly; they are
 evidence about the model, and the router learns from accept and discard. Pass on the
 `claude:` line `wb accept` prints: what the task cost you, measured, beside the estimate of
-writing it yourself and the GPU energy. Call the estimate an estimate. `wb savings` gives the
+writing it yourself and the GPU energy. Call the estimate an estimate. A task that ran on an API
+model: its API cost too, beside the `claude:` line (`api.usd` in its `status.json`, under
+`$WB_HOME/tasks/<name>/`; a plan's is tokens, not dollars). `wb savings` gives the
 week's total and its score out of 100 when the user asks what it's saving; `wb savings --card
 <file>.svg` makes the badge as an image for them to keep or post (made here, nothing sent).

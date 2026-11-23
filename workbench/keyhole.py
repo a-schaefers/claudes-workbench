@@ -117,6 +117,7 @@ KEY_CHARS = re.compile(r"[\x21-\x7e]+")
 CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]{1,8}")
 LINE_CAP = 64 << 10     # a chunk-size or trailer line
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+SPEND_REFUSED = "the day's API spend cap is reached"  # meter.STOP: a refusal OpenCode doesn't retry
 
 
 class KeyholeError(Exception):
@@ -355,13 +356,15 @@ class Keyhole:
     """The proxy for one task's model: ``model`` (a models.Model: id, provider, name), ``key``
     (a Key), ``upstream`` (the catalog's API base: never anything from a request), ``protocol``
     ("bearer" or "anthropic"). It serves at once, from a daemon thread, on 127.0.0.1 (never
-    localhost, which may be ::1 first). ``on_usage(usage)`` gets each response's usage;
-    ``on_health(state, why, until)`` each outcome (ok, no_credit, rate_limited, unreachable);
-    ``log`` the start and refusal lines (runner.log: the runner's stdout)."""
+    localhost, which may be ::1 first). ``on_usage(usage)`` gets each response's usage, once,
+    before its last byte goes to OpenCode (the meter, #1019); ``on_health(state, why, until)``
+    each outcome (ok, no_credit, rate_limited, unreachable); ``room(body, size)`` is asked before
+    each request is sent on (the meter's spend room: negative is refused); ``log`` the start and
+    refusal lines (runner.log: the runner's stdout)."""
 
     def __init__(self, task, model, key: Key, upstream: str, protocol: str = "bearer", *,
                  timeout: float | None = None, on_usage=None, on_health=None, log=None,
-                 hold: float | None = None):
+                 hold: float | None = None, room=None):
         if not isinstance(key, Key):
             raise TypeError("key must be a Key")
         if protocol not in ("bearer", "anthropic"):
@@ -376,6 +379,8 @@ class Keyhole:
         self.timeout = timeout if timeout is not None else _timeout(task)
         self.on_usage = on_usage or (lambda usage: None)
         self.on_health = on_health or (lambda state, why, until: None)
+        self.room = room
+        self.stopped: str | None = None  # close(reason): every model request refused from now on
         self.log = log or (lambda line: print(line, flush=True))
         self.token = secrets.token_urlsafe(32)
         self._hold = hold
@@ -402,7 +407,13 @@ class Keyhole:
         request, unless given."""
         return RATE_HOLD_S if self._hold is None else self._hold
 
-    def close(self) -> None:
+    def close(self, reason: str | None = None) -> None:
+        """Shut the keyhole down; with ``reason``, keep serving but refuse every model request
+        at once (the spend stop, #1019): a 400 OpenCode doesn't retry, so a round stopped for
+        spend never waits out a retry loop. Either way a held request stops holding (#1020)."""
+        if reason is not None:
+            self.stopped = reason
+            return
         self.closed = True  # a held request stops holding
         self._server.shutdown()
         self._server.server_close()
@@ -515,6 +526,19 @@ class Keyhole:
             self.on_usage(usage)
         except Exception:
             pass
+
+    def refusal(self, body: dict, size: int) -> str | None:
+        """Why this request isn't sent on, or None: the keyhole was closed with a reason, or
+        the meter's room for it is negative (the day cap, #1019)."""
+        if self.stopped:
+            return self.stopped
+        if self.room is None:
+            return None
+        try:
+            left = self.room(body, size)
+        except Exception:  # the meter's failure never fails a request
+            return None
+        return SPEND_REFUSED if left is not None and left < 0 else None
 
     def connection(self) -> http.client.HTTPConnection:
         """A fresh upstream connection (one per request: parallel requests never share one),
@@ -708,6 +732,8 @@ def _handler(kh: Keyhole):
             if "models" in body or asked != kh.model.name:  # a fallback list routes elsewhere
                 kh.refused("a fallback list" if "models" in body else str(asked))
                 return self.send_json(403, f"keyhole: this task may use only {kh.model.id}")
+            if why := kh.refusal(body, len(raw)):  # a 400: OpenCode doesn't retry it (#1019)
+                return self.send_json(400, f"workbench: {_printable(why)}")
             self.forward(raw)
 
         def do_PUT(self):
@@ -833,13 +859,14 @@ def _handler(kh: Keyhole):
 
         def nap(self, secs: float) -> bool:
             """Sleep ``secs`` in short steps; False as soon as OpenCode hangs up or the keyhole
-            closes: a held request is dropped with its client, never sent on for no one."""
+            closes: a held request is dropped with its client, never sent on for no one. A spend
+            stop (close with a reason, #1019) ends a hold too: what it waited for may not go out."""
             end = time.monotonic() + secs
             while (left := end - time.monotonic()) > 0:
-                if kh.closed or self.gone():
+                if kh.closed or kh.stopped or self.gone():
                     return False
                 time.sleep(min(0.25, left))
-            return not (kh.closed or self.gone())
+            return not (kh.closed or kh.stopped or self.gone())
 
         def gone(self) -> bool:
             try:
@@ -902,6 +929,7 @@ def _handler(kh: Keyhole):
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             sse = "event-stream" in (resp.getheader("Content-Type") or "")
+            self.used = {}  # this response's usage, merged: kh.usage once, before its last byte
             key = kh._key.value.encode()
             hold = bytearray()  # SSE: a partial line; else the last len(key) - 1 bytes
             whole = bytearray()
@@ -946,16 +974,25 @@ def _handler(kh: Keyhole):
                 elif hold:
                     send(bytes(hold).replace(key, REDACTED.encode()))
                 hold = bytearray()
+                if not sse and whole:
+                    try:
+                        self.sniff(json.loads(whole))
+                    except ValueError:
+                        pass
+                # before the last byte: OpenCode prints the step's step_finish only once it has
+                # it, so the meter has booked the response by then (#1019)
+                self.flush_usage()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
             except (OSError, http.client.HTTPException):
                 self.close_connection = True  # the client or the upstream went away mid-answer
+                self.flush_usage()  # what the provider counted so far is still spent
                 return
-            if not sse and whole:
-                try:
-                    self.sniff(json.loads(whole))
-                except ValueError:
-                    pass
+
+        def flush_usage(self):
+            used, self.used = getattr(self, "used", None), {}
+            if used:
+                kh.usage(used)
 
         def data_line(self, ln: bytes) -> bytes:
             """One SSE line read for the model and usage, and as it goes on: with the key out,
@@ -991,9 +1028,26 @@ def _handler(kh: Keyhole):
                 kh.saw(served, obj.get("provider"))
             usage = obj.get("usage") or msg.get("usage") or res.get("usage")
             if isinstance(usage, dict) and usage:
-                kh.usage(usage)
+                # one response, one usage: Anthropic's message_start and message_delta each carry
+                # part, and some servers send a running total in every chunk (counts only grow)
+                self.used = _merged(getattr(self, "used", None) or {}, usage)
 
     return Handler
+
+
+def _merged(a: dict, b: dict) -> dict:
+    """Two usage objects of one response as one: numbers the larger, objects merged alike."""
+    out = dict(a)
+    for k, v in b.items():
+        old = out.get(k)
+        if isinstance(v, dict) and isinstance(old, dict):
+            out[k] = _merged(old, v)
+        elif isinstance(v, (int, float)) and not isinstance(v, bool) and \
+                isinstance(old, (int, float)) and not isinstance(old, bool):
+            out[k] = max(old, v)
+        elif v is not None or k not in out:
+            out[k] = v
+    return out
 
 
 class _Ambiguous(ValueError):
@@ -1029,7 +1083,7 @@ def _strict_json(raw: bytes):
     return body
 
 
-def start(task, m, *, log=None, on_usage=None, on_health=None) -> Keyhole:
+def start(task, m, *, log=None, on_usage=None, on_health=None, room=None) -> Keyhole:
     """The keyhole for task ``task``'s API model ``m`` (models.Model: id, provider, name,
     base_url, and the catalog's provider package as ``package``): its key loaded (load_key), its
     protocol from the package, its upstream the catalog's base. Logs one line, no key and no
@@ -1045,6 +1099,6 @@ def start(task, m, *, log=None, on_usage=None, on_health=None) -> Keyhole:
         raise KeyholeError(f"{m.id} has no API base in OpenCode's catalog")
     key = load_key(m.provider, package)
     kh = Keyhole(task, m, key, mirror_path(package, m.base_url), protocol, log=log,
-                 on_usage=on_usage, on_health=on_health)
+                 on_usage=on_usage, on_health=on_health, room=room)
     kh.log(f"keyhole: {m.provider} on 127.0.0.1:{kh.port} for {m.id}")
     return kh
