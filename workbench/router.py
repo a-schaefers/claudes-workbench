@@ -202,10 +202,18 @@ def weights_changed(m: models.Model) -> bool:
     return bool(now and seen and now not in seen)
 
 
-def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Score:
+def of_role(row: dict, role: str) -> bool:
+    """Whether a results row is a record of ``role``'s work: its `role`, else its `size` (a row
+    from before the roles). Writing slices like significant work (decision 1 of #1008), but a
+    model's prose results moved its coding rank and the other way round: each counts apart (#1025)."""
+    return tuning.work(row) == role
+
+
+def score(m: models.Model, size: str, state: dict | None = None, stack=(), role: str | None = None) -> Score:
+    """``role``: the record it ranks on (of_role), the size's when None."""
     state = state or models.status(m)
     ids = lineage(m, probe=state["available"])  # a server down isn't asked its weights
-    real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
+    real = [r for r in store.results() if r.get("model") in ids and of_role(r, role or size)
             and tuning.judged(r)]
     # the weights each model has now: a server just found down isn't asked again (the audit)
     real = same_weights(real, weights_now(ids) if state["available"] else {})
@@ -298,14 +306,16 @@ def _cheaper(close: list[Score]) -> list[Score]:
     return [best] + [s for s in close if s is not best]
 
 
-def expected_minutes(model_id: str, size: str, weights: str | None = None) -> float | None:
+def expected_minutes(model_id: str, size: str, weights: str | None = None,
+                     role: str | None = None) -> float | None:
     """How long a step of this size usually takes on this model, from real tasks: the median of
     their active minutes a step (the agent's own working time), so compare it with a step's active
     time. ``weights``: the task's own (task.json `weights_id`): rows on other weights left out."""
-    return expected(model_id, size, weights)[0]
+    return expected(model_id, size, weights, role)[0]
 
 
-def expected(model_id: str, size: str, weights: str | None = None) -> tuple[float | None, int]:
+def expected(model_id: str, size: str, weights: str | None = None,
+             role: str | None = None) -> tuple[float | None, int]:
     """expected_minutes, and how many timed tasks it is the median of. From the files alone: a
     whole score() asked the server for the weights and the identity it never used, and every
     `wb watch --json` the pane ran each 5 s spent ~5 s on a sleeping LAN box's timeouts (#819)."""
@@ -313,7 +323,7 @@ def expected(model_id: str, size: str, weights: str | None = None) -> tuple[floa
     if not m:
         return None, 0
     ids = lineage(m, probe=False)
-    real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
+    real = [r for r in store.results() if r.get("model") in ids and of_role(r, role or size)
             and tuning.judged(r)]
     return _typical(same_weights(real, {m.id: weights} if weights else {}))
 
@@ -343,14 +353,15 @@ def fits(m: models.Model, budget: int | None) -> bool | None:
     return n <= models.SHARE_AT * budget if n and budget else None
 
 
-def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = None) -> list[Score]:
+def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = None,
+         role: str | None = None) -> list[Score]:
     """Every discovered model's case for a task of this size (in a repo of this stack), best
     first (the user's policy leaves some out: allowed). ``down`` and ``catalog``: what this pass
     has learnt of the servers (models.status), the caller's to share across calls: each model's
     status asked its server afresh, so a wb remote box asleep cost 2.5 s a model (#705)."""
     down = set() if down is None else down
     catalog = {} if catalog is None else catalog
-    scores = [score(m, size, state=models.status(m, down, catalog), stack=stack)
+    scores = [score(m, size, state=models.status(m, down, catalog), stack=stack, role=role)
               for m in models.discover().values() if allowed(m, size)]
     # each model against its own server's cards: with one Ollama per GPU, one budget for all (the
     # first process's) held an 18 GB model on the 24 GB card's server back as not fitting the 8 GB
@@ -374,11 +385,12 @@ def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = No
 
 
 def choose(size: str, stack=(), task_name: str | None = None, down: set | None = None,
-           catalog: dict | None = None) -> tuple[Score | None, str]:
+           catalog: dict | None = None, role: str | None = None) -> tuple[Score | None, str]:
     """The model for a task of this size (in a repo of this stack) and one line on why. With
     ``task_name``, one task in EXPLORE_ONE_IN explores a model outside the band (unproven);
-    ``down``, ``catalog``: rank's."""
-    ranked = rank(size, stack, down, catalog)
+    ``down``, ``catalog``: rank's; ``role``: the record it ranks on (score), the size's when None."""
+    ranked = rank(size, stack, down, catalog, role)
+    work = role or size  # whose record the line speaks of
     if explores(task_name) and (new := unproven(ranked)):
         new[0].explored = True
         ranked = [new[0]] + [s for s in ranked if s is not new[0]]
@@ -398,10 +410,10 @@ def choose(size: str, stack=(), task_name: str | None = None, down: set | None =
     if len(usable) == 1:
         pick = f"the only model allowed {size} work"
     elif top.explored:
-        pick = (f"exploring: its record on {size} work is {top.tries} task(s), too few to leave it "
+        pick = (f"exploring: its record on {work} work is {top.tries} task(s), too few to leave it "
                 f"out (one task in {EXPLORE_ONE_IN})")
     elif top.cheaper:
-        pick = f"costs Claude least on {size} work"
+        pick = f"costs Claude least on {work} work"
     elif size in ("significant", "trivial") and not top.weights:
         # every weight 0 made it "the largest" and "the smallest" at once, by config order (#704)
         pick = "sizes unknown: config order; models.json weights_gb sets a model's size"
@@ -411,7 +423,7 @@ def choose(size: str, stack=(), task_name: str | None = None, down: set | None =
     elif size == "trivial" and top.weights == min(sizes):
         pick = "the smallest model allowed trivial work"
     else:
-        kind = f"{size} {'/'.join(stack)}" if top.like_tries else size
+        kind = f"{work} {'/'.join(stack)}" if top.like_tries else work
         pick = f"the best record on {kind} work"
     if top.guessed and pick.startswith(("the largest", "the smallest")):
         pick += " (its size guessed from its name)"

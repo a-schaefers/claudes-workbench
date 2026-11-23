@@ -28,6 +28,7 @@ from . import audio, chat, gitops, hardware, images, lane, models, skills, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 HANDBOOK = PKG_ROOT / "agent" / "HANDBOOK.md"
+WRITING = PKG_ROOT / "agent" / "WRITING.md"  # the writing role's, in HANDBOOK.md's place (#1025)
 ROOT_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 # Tools an unattended run in a worktree must not use. Nobody answers `question`. Code mode
 # (`execute`) and the opencode_* tools can move the session or remove worktrees. A `subagent`
@@ -909,6 +910,7 @@ PROBE_OFF_SHORT = f"no file over {PROBE_FILE_LINES} lines in a language probe re
 PROBE_OFF_HELP = "probe's languages couldn't be read from `probe search --help`"
 PROBE_OFF_GAVE_UP = (f"no file over {PROBE_FILE_LINES} lines in a language probe reads among "
                      "the largest it counted")
+PROBE_OFF_WRITING = "a writing task"  # prose: no code to navigate (#1025)
 PROBE_OFF_PARTIAL = "a partial clone, whose files git before 2.44 can't count without fetching each"
 # the most of a repo's blobs probe_off counts, largest first, before it gives up (PROBE_OFF_GAVE_UP)
 PROBE_SCAN_BYTES = 64 << 20
@@ -2882,6 +2884,13 @@ def user_rules(task: store.Task) -> list[tuple[Path, Path]]:
     return made
 
 
+def handbook_for(task: store.Task) -> Path:
+    """The handbook this task's agent gets, as rules/<task>/HANDBOOK.md whichever it is (so the
+    instruction path and fixed_prompt's "the handbook" hold): the writing role's prose rules
+    (agent/WRITING.md), else the coding ones (#1025)."""
+    return WRITING if task.spec.get("role") == "writing" else HANDBOOK
+
+
 def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     """(files OpenCode should load, nested CLAUDE.md paths the agent reads when it works there).
     Before the runner has checked the worktree out (wb start's fixed_prompt, #529), the user's
@@ -2891,7 +2900,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     # the agent's own copy: OpenCode shows each instruction file's path, and a path into the
     # workbench repo once led a freshly started agent to go looking there for plans
     handbook = rules_dir(task) / "HANDBOOK.md"
-    handbook.write_text(HANDBOOK.read_text() + "".join(
+    handbook.write_text(handbook_for(task).read_text() + "".join(
         note for name, note in EXPERIMENT_NOTES.items() if experiment(task, name)))
     roots: list[tuple[Path, Path, bool]] = []  # (what OpenCode loads, read from, the user's own)
     user = claude_home() / "CLAUDE.md"

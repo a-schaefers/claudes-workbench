@@ -51,6 +51,49 @@ question(s) for this task). Otherwise make reasonable choices and say what you a
   worth running), add a line `Lesson: <the rule, and why>` to it.
 """
 
+# The writing role's protocol (#1025): prose under its own rules, not the coding ones. Its fold
+# and first bullet, `{test_line}`, the ask_reviewer, lane and `.proposed` bullets, and the
+# `Lesson: <the rule, and why>` line are PROTOCOL's word for word: bench.FOLD and bench.TEST_LINE,
+# transcript's fold and runner.outline_section's split read them, lessons.LESSON the summary's
+# `Lesson:` lines. Its summary bullet is its own (the [TK] gaps, the check's result).
+WRITING_PROTOCOL = """
+
+---
+How to work (workbench protocol):
+- You are in a git worktree on branch {branch}. Git is read-only for you; leave the changes
+  uncommitted. Claude commits, pushes and deploys.
+{test_line}{experiment_protocol}- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
+question(s) for this task). Otherwise make reasonable choices and say what you assumed.
+- This is a writing task: change only the prose the brief names, or clearly means. No code,
+  config or dependency changes.
+- Facts come from the brief, the repository and the sources it names. Never invent a number,
+  quote, name, command or link: write [TK: what is missing] and list it in your summary.
+- Don't reflow, rewrap or reformat text you aren't changing: Claude reviews the diff line by line.
+- You can write only in this worktree, the temp directory and build caches: "Permission denied"
+  anywhere else is that limit, so don't keep trying it. Need a directory outside? Call `ask_reviewer`
+  with `path` set to it (this doesn't use the question budget).
+- CLAUDE.md and AGENTS.md are Claude's, and you can't edit them. When the task asks for a change
+  to one, write the whole new file next to it as `<name>.proposed` (`CLAUDE.md.proposed`); Claude
+  reads the difference and takes it.
+- Finish with a short summary: the files you changed, every [TK] gap, the check's result if there
+  is one, and any assumptions. If you hit something the next agent would trip on too, add a line
+  `Lesson: <the rule, and why>` to it.
+"""
+WRITING = "writing"  # the prose role (#1025; the roles: #1014)
+
+
+def protocol_for(spec: dict) -> str:
+    """The protocol a task's prompts end with: WRITING_PROTOCOL for the writing role, else
+    PROTOCOL. ``spec``: task.json, or what wb start is about to write there."""
+    return WRITING_PROTOCOL if spec.get("role") == WRITING else PROTOCOL
+
+
+def self_review(asked: bool | None, role: str | None) -> bool | None:
+    """task.json `self_review`: --self-review/--no-self-review, else None (the tuning's pick).
+    A writing task's is off unless asked: its check is a code check, mutating tests a prose task
+    hasn't, a round spent (on an API model, paid) for nothing (#1025)."""
+    return False if asked is None and role == WRITING else asked
+
 
 def test_line(test: str | None) -> str:
     """The protocol's acceptance line (bench.TEST_LINE reads it back for a task from before status
@@ -586,10 +629,10 @@ def ago(ts) -> str:
     return f"{s}s" if s < 90 else f"{s // 60}m" if s < 5400 else f"{s // 3600}h"
 
 
-def pick_model(size: str, wanted: str | None, stack=(), name: str | None = None) -> tuple[models.Model, dict, str]:
+def pick_model(size: str, wanted: str | None, stack=(), name: str | None = None, role: str | None = None) -> tuple[models.Model, dict, str]:
     """The task's model: the one asked for, else the router's choice on the evidence (the
     record on this kind of work first: router.score; ``name``: the task's, which decides
-    whether it explores, router.explores)."""
+    whether it explores, router.explores; ``role``: whose record, writing apart, #1025)."""
     if wanted:
         try:
             m = models.resolve(wanted)
@@ -599,7 +642,7 @@ def pick_model(size: str, wanted: str | None, stack=(), name: str | None = None)
             die(f"{m.id} is an API model: wb start runs one only through a role you set (wb route), "
                 "not --model", 3)
         return m, models.status(m), "asked for"
-    top, why = router.choose(size, stack, name)
+    top, why = router.choose(size, stack, name, role=role)
     if top is None:
         die(why, 3)
     return top.model, top.state, why
@@ -1041,7 +1084,8 @@ def cmd_start(a):
     # the package first: its stack is the task's, not the whole monorepo's (#820). Read again
     # below, after the base is checked; a base that names no commit finds none here
     stack = gitops.stack(repo, _package(repo, Path(a.repo).resolve(), a.base))
-    m, state, why = pick_model(a.size, a.model, stack, a.name)
+    role = getattr(a, "role", None)  # #1016's --role; until it lands, none (the size's record)
+    m, state, why = pick_model(a.size, a.model, stack, a.name, role=role)
     if not state["available"] and not a.force:
         fix = models.remedy(m, state)
         die(f"{m.id} can't run: {state['why']}" + (f": {fix}" if fix else "")
@@ -1106,11 +1150,13 @@ def cmd_start(a):
     # off where it can't help: no file in a language probe reads over PROBE_FILE_LINES in the
     # repo, so the task runs as with probe off (the owner, #857). On is large files only, one
     # setting: its levels went (the owner, 2026-11-22, #857: off and on, on is large files only)
-    if exps.get("probe") and (no_probe := context.probe_off(spec_text, repo, sub, base))[0]:
+    if exps.get("probe") and role == WRITING:  # prose has no code to find its way in (#1025)
+        exps, off = {**exps, "probe": False}, {"probe": context.PROBE_OFF_WRITING}
+    elif exps.get("probe") and (no_probe := context.probe_off(spec_text, repo, sub, base))[0]:
         exps, off = {**exps, "probe": False}, {"probe": no_probe[0]}
     elif exps.get("probe"):
         probe = {"probe_files": no_probe[1]}  # the long files the spec names, in probe's languages
-    prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
+    prompt = spec_text.rstrip() + protocol_for({"role": role}).format(branch=gitops.branch_name(a.name),
                                                   test_line=test_line(a.test), budget=budget,
                                                   experiment_protocol=context.experiment_protocol(
                                                       experiments=exps))
@@ -1136,6 +1182,7 @@ def cmd_start(a):
         **({"weights_id": w} if (w := models.identity(m)) else {}),
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
+        **({"role": role} if role else {}),  # #1016 writes it always
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
         **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
         **({"worktree": str(wt.relative_to(task.dir))} if wt != task.dir / "worktree" else {}),
@@ -1153,7 +1200,7 @@ def cmd_start(a):
         # periodic check-ins are opt-in: each wakes Claude, re-reading its whole context, and they
         # were 500K of one task's 1.2M (2026-11-17); the pane shows progress, and the warnings
         # (a nudge, a full window, handovers, a cut base check) still wake
-        "checkin": a.checkin or 0, "self_review": a.self_review,
+        "checkin": a.checkin or 0, "self_review": self_review(a.self_review, role),
         "experiments": exps,  # what this task's agent has: wb experiment
         **probe,  # the long files its spec names, with probe on
         **({"experiments_off": off} if off else {}),  # set, but off for this task, and why
@@ -1430,7 +1477,7 @@ def cmd_next(a):
         f"Step {step} of this task is done and committed ({commit or 'no changes to commit'}). "
         "The next step:\n\n"
         + nxt.rstrip()
-        + PROTOCOL.format(branch=spec["branch"], test_line=test_line(test), budget=budget,
+        + protocol_for(spec).format(branch=spec["branch"], test_line=test_line(test), budget=budget,
                           experiment_protocol=context.experiment_protocol(task)),
         encoding="utf-8")
     handled = store.now()

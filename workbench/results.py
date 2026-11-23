@@ -89,6 +89,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
         steps = [{**s, "claude": c} for s, c in zip(steps, per_step)]
     row = {"ts": store.now(), "task": task.name, "outcome": outcome, "model": spec.get("model"),
            "size": spec.get("size"), "repo": spec.get("repo"), "stack": spec.get("stack"),
+           **({"role": spec["role"]} if spec.get("role") else {}),  # router.of_role (#1025)
            **({"subdir": spec["subdir"]} if spec.get("subdir") else {}),  # the package (#820)
            "rounds": st.get("round", 1),
            "auto_fixes": st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),

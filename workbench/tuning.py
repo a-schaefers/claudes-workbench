@@ -183,8 +183,11 @@ def acted(name: str, row: dict, ceiling=None) -> bool:
     Most tasks are small and never fill 40% of the window: one fast trivial task at 0.5 flipped
     the pick, one discard flipped it back (#721). A `passed` knob, only when a round's tests
     passed (`self_review_due`; a row from before it, when its last tests passed): a task without
-    --test scored 0 or 1 though it ran alike under both, and could turn self-review off (#816)."""
+    --test scored 0 or 1 though it ran alike under both, and could turn self-review off (#816).
+    Nor a writing task's: off by its role, its prose would turn the coding check off (#1025)."""
     k = KNOBS[name]
+    if k.passed and row.get("role") == "writing":  # off by its role, not chosen: no evidence (#1025)
+        return False
     if k.passed:
         due = row.get("self_review_due")
         if not (due if isinstance(due, bool) else row.get("tests_ok") is True):
@@ -205,20 +208,27 @@ def _rows(model: str, window) -> list[dict]:
                                 and r.get("window") == window], router.weights_now({model}))
 
 
+def work(row: dict) -> str | None:
+    """The kind of work a results row records: its `role`, else its `size` (a row from before the
+    roles). router.of_role ranks on it, record's speed baseline groups by it (#1025)."""
+    return row.get("role") or row.get("size")
+
+
 def record(name: str, model: str, window, ceiling=None) -> dict:
     """Each allowed value's evidence for this model and window: {value: [rewards]}, each task's
-    speed set against the usual minutes a step of its own size took (pooled over sizes, a
-    trivial task beat a significant one's median every time, #721)."""
+    speed set against the usual minutes a step of its own kind of work took (pooled over sizes, a
+    trivial task beat a significant one's median every time, #721; a writing task is significant
+    in size, and its quick prose steps marked every coding step slow, #1025)."""
     rows = [r for r in _rows(model, window) if judged(r)
             and (r.get("tuned") or {}).get(name) is not None and acted(name, r, ceiling)]
     usual = {}
-    for size in {r.get("size") for r in rows}:
-        mins = [m for r in rows if r.get("size") == size and (m := _step_minutes(r))]
-        usual[size] = statistics.median(mins) if mins else None
+    for kind in {work(r) for r in rows}:
+        mins = [m for r in rows if work(r) == kind and (m := _step_minutes(r))]
+        usual[kind] = statistics.median(mins) if mins else None
     out: dict = {v: [] for v in allowed(name, ceiling)}
     for r in rows:
         if r["tuned"][name] in out:
-            out[r["tuned"][name]].append(reward(r, usual.get(r.get("size"))))
+            out[r["tuned"][name]].append(reward(r, usual.get(work(r))))
     return out
 
 
