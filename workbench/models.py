@@ -1093,6 +1093,28 @@ def _key_source(pid: str, auth: dict, prov: dict | None) -> str:
     return source
 
 
+def connected() -> dict[str, dict] | None:
+    """The API providers OpenCode holds a key for, read fresh from `auth list` (never a secret):
+    {provider id: {"name", "key"}}, `key` as Model.key says it (_key_source: "stored" is the only
+    one the keyhole can hold; "oauth", "env:<NAME>", "config", "signing" can't run). Providers
+    configured on this machine (the GPU side) are left out. None when `auth list` can't be read
+    (OpenCode missing, or its error): wb setup and the router then say nothing of keys (#1024)."""
+    auth, _ = _auth_rows()
+    if auth is None:
+        return None
+    try:
+        cfg = read_config()
+        configured, (gpu, _) = _providers_of(cfg), _sides(cfg, _overrides(), _provider_dirs())
+    except (RuntimeError, OSError):  # a config that doesn't parse: wb doctor says which
+        configured, gpu = {}, set()
+    out = {}
+    for pid, row in auth.items():
+        key = "" if pid in gpu else _key_source(pid, auth, configured.get(pid))
+        if key:
+            out[pid] = {"name": row["name"], "key": key}
+    return out
+
+
 def _is_free(pid: str, entry: dict) -> bool:
     """An OpenCode free model: `opencode/*-free`, or every price 0 (marked only; child 13 warns
     of its data use)."""
@@ -4220,3 +4242,18 @@ def is_api(model_id: str) -> bool:
 
 API_WINDOW = 131072   # the effective window an API task plans to (#1017; decision 10)
 API_OUTPUT = 32768    # output pinned for API tasks (#1017)
+
+
+def card_numbers(root: str | None, seen: dict | None = None) -> list[int] | None:
+    """The cards the Ollama at ``root`` sees, as numbers in nvidia-smi's order (the discrete
+    cards, as named_cards counts them): the pane's `GPU 2+3` beside a model (#1023). None when
+    server_devices can't tell (one server, a container's, another host's, gpu_gb set by hand).
+    ``seen``: root -> the answer, for one pass."""
+    seen = {} if seen is None else seen
+    if root not in seen:
+        cards = server_devices(root)
+        devs = hardware.gpus(windows=False) if cards else []
+        if any(g.get("discrete") for g in devs):
+            devs = [g for g in devs if g.get("discrete")]
+        seen[root] = [i for i, g in enumerate(devs) if _card(g) in cards] or None if cards else None
+    return seen[root]

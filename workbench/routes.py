@@ -37,10 +37,16 @@ VIAS = ("gpu", "api")
 # back to Both restores the per-role mix
 USES = ("gpu", "api", "both")
 USE_NAMES = {"gpu": "GPU", "api": "API", "both": "Both"}  # as the dialog and the pane say it
+# When the GPU is busy (#1023, the owner's opt-in): routes.json `busy`, missing is "wait" (queue, or
+# exit 4, as before); "api" starts a role that has an API model on it instead, at wb start only (a
+# running task never moves, nor does anything go from API to the GPU). Agents GPU overrides it.
+BUSY = ("wait", "api")
+BUSY_LINE = "GPU busy: on the role's API model, as you set"  # wb start's line when it applies
 THINKING = ("off", "on")
 AUTO = "auto"  # the GPU model the router picks: today's behaviour, the default
 BY = ("dialog", "pane", "terminal", "claude")  # who made a role's last change (`by`, `gpu_by`)
 STAMPS = ("said", "by", "ts", "gpu_by", "gpu_ts")  # a role's record of its changes (stamp)
+CAP_OFF = "off"  # `wb route cap off`: no day cap (#1023), refused while anything can spend
 DAY_USD_SUGGEST = 5  # the dialog's and the first run's suggestion only: there is no default cap
 ROUTE_OK = "route-ok.json"  # $WB_HOME/route-ok.json: the mod's dialog approved this one change
 ROUTE_OK_SECS = 120  # the dialog's yes is for the call it let through, run at once, as SEND_OK_SECS
@@ -115,7 +121,10 @@ def normalize(doc) -> dict:
     use = doc.get("use", "both")
     if use not in USES:
         raise RoutesError(f"use is {use!r}, not {', '.join(USES[:-1])} or {USES[-1]}")
-    return {"v": 1, "use": use, "day_usd": _cap(doc.get("day_usd")), "roles": out}
+    busy = doc.get("busy", "wait")
+    if busy not in BUSY:
+        raise RoutesError(f"busy is {busy!r}, not {' or '.join(BUSY)}")
+    return {"v": 1, "use": use, "busy": busy, "day_usd": _cap(doc.get("day_usd")), "roles": out}
 
 
 def effective_via(doc: dict, role: str) -> str:
@@ -123,6 +132,61 @@ def effective_via(doc: dict, role: str) -> str:
     `via`. Everything that decides GPU or API for a role asks this, never `via` (#1016)."""
     use = doc.get("use", "both")
     return use if use != "both" else doc["roles"][role]["via"]
+
+
+def busy_api(doc: dict, role: str) -> str | None:
+    """The API model ``role`` starts on while the GPU is busy (#1023): its own API model, when
+    the user opted in (`busy` api), Agents isn't GPU and the role runs on the GPU; else None."""
+    if doc.get("busy") != "api" or doc.get("use") == "gpu" or effective_via(doc, role) != "gpu":
+        return None
+    return doc["roles"][role].get("api") or None
+
+
+def busy_api_any(doc: dict) -> bool:
+    """Whether the busy opt-in can send any role to API now (busy_api for some role)."""
+    return any(busy_api(doc, r) for r in ROLES)
+
+
+def _busy_newly(doc: dict, new: dict) -> list:
+    """The roles the busy opt-in can newly send to an API model (busy_api), one they didn't
+    already run on: what a change opens to spending while `busy` stays api."""
+    return [r for r in ROLES if (mid := busy_api(new, r)) and _sent(new, r, mid) != _sent(doc, r, busy_api(doc, r))
+            and not (effective_via(doc, r) == "api" and _sent(doc, r, doc["roles"][r].get("api")) == _sent(new, r, mid))]
+
+
+def _sent(doc: dict, role: str, mid: str | None) -> tuple:
+    """Where ``role``'s code goes on ``mid``: the model and, for an OpenRouter one, its backends
+    (`order`, #1021), which the keyhole routes every request by; new backends are a new place
+    (wave 2's merge with #1023: a busy role's order change read as nothing new)."""
+    order = doc["roles"][role].get("order") if mid and mid.split("/", 1)[0] == OPENROUTER else None
+    return mid, tuple(order or ())
+
+
+def busy_routed(doc: dict, role: str, m) -> dict:
+    """task.json's routing keys for a start the busy opt-in sent to ``m``, the role's API model:
+    as routes.resolve's for a role on API, with `busy` (#1023)."""
+    from . import models
+    row = doc["roles"][role]
+    return {"via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
+            "thinking": row["thinking"], "said": row.get("said") or "", "said_ts": row.get("ts"), "busy": True,
+            # an OpenRouter role's backends, as resolve's: the keyhole routes by them (wave 2's merge)
+            **({"order": list(row["order"])} if row.get("order") and m.provider == OPENROUTER else {})}
+
+
+def _busy_part(doc: dict, new: dict, cap) -> tuple[str, bool]:
+    """The busy row's part of the change line: ('', False) when it is as it was; to api takes the
+    user's yes (it can spend), and a day cap first (NO_CAP); back to wait none."""
+    was, now = doc.get("busy", "wait"), new.get("busy", "wait")
+    if was == now:
+        return "", False
+    if now == "wait":
+        return "When the GPU is busy: the role's API model → wait (queue, as before)", False
+    if cap is None:
+        raise RoutesError(NO_CAP)
+    has = [r for r in ROLES if new["roles"][r].get("api")]
+    what = (f"a role with an API model ({', '.join(has)}) starts on it while the GPU is busy"
+            if has else "no role has an API model yet, so nothing changes until one does")
+    return f"When the GPU is busy: wait → the role's API model ({what}; cap {money(cap)}/day)", True
 
 
 def read() -> dict:
@@ -266,7 +330,7 @@ def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str]) -> tuple[
 def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None = None,
            api: str | None = None, thinking: str | None = None, day_usd=None,
            who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0], use: str | None = None,
-           order: list[str] | None = None) -> Change:
+           order: list[str] | None = None, busy: str | None = None) -> Change:
     """What a `wb route` does to ``doc``: ``role`` one of ROLES, "all" (``use``, the Agents
     switch, and ``thinking`` only) or None (the cap alone). ``who``: an API id's provider, as the
     user knows it (the catalog's name). Never writes. RoutesError for a change that can't be
@@ -276,11 +340,15 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
     new = copy.deepcopy(doc)
     new.setdefault("use", "both")
     if day_usd is not None:
-        new["day_usd"] = _cap(day_usd)
+        new["day_usd"] = None if day_usd == CAP_OFF else _cap(day_usd)
     if use is not None:
         if use not in USES:
             raise RoutesError(f"Agents is gpu, api or both, not {use!r}")
         new["use"] = use
+    if busy is not None:
+        if busy not in BUSY:
+            raise RoutesError(f"busy is wait or api, not {busy!r}")
+        new["busy"] = busy
     cap = new["day_usd"]
     parts, gated, changed = [], False, []
     for r in (ROLES if role == "all" else (role,) if role else ()):
@@ -323,14 +391,76 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
                  for r in ROLES)
     if to_api and cap is None:
         raise RoutesError(NO_CAP)
-    if cap != doc["day_usd"]:
+    busy_line, g = _busy_part(doc, new, cap)
+    if busy_line:
+        parts.append(busy_line)
+        gated |= g
+    elif busy_now := _busy_newly(doc, new):
+        # with the opt-in on, a GPU role given an API model, or Agents back from GPU, can now send
+        # code to API while the GPU is busy: the user's yes and a cap, as any role newly on API
+        # (2026-11-23 review: `wb route all both` re-enabled it with no dialog, and a role's API
+        # model set after `cap off` spent with no cap)
+        if cap is None:
+            raise RoutesError(NO_CAP)
+        parts.append(f"when the GPU is busy, {', '.join(busy_now)} {'starts' if len(busy_now) == 1 else 'start'} "
+                     f"on {'its' if len(busy_now) == 1 else 'their'} API model ({_goes_to(busy_now, new, who)}; "
+                     f"cap {money(cap)}/day)")
+        gated = True
+    if cap is None and doc["day_usd"] is not None:  # `wb route cap off` (#1023): never under an API role
+        if spends := [r for r in ROLES if effective_via(new, r) == "api"] + (["busy"] if busy_api_any(new) else []):
+            raise RoutesError(f"the day cap stays while {', '.join(spends)} can spend on API: put "
+                              f"{'it' if len(spends) == 1 else 'them'} on the GPU (or wb route busy wait) first")
+        parts.append(f"day cap {money(doc['day_usd'])} → none")
+        gated = True
+    elif cap != doc["day_usd"]:
         gated = True
         if doc["day_usd"] is not None or not to_api:  # else the role's "cap $N/day" said it
             parts.append(f"day cap {money(doc['day_usd']) if doc['day_usd'] is not None else 'none'}"
                          f" → {money(cap)}/day")
-    if not changed and not agents and cap == doc["day_usd"]:
+    if not changed and not agents and not busy_line and cap == doc["day_usd"]:
         return Change(new, "", False, [])
     return Change(new, "; ".join(parts), gated, changed)
+
+
+def change_pairs(doc: dict, pairs: list, day_usd=None,
+                 who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0]) -> Change:
+    """Several roles in one change, one line and one yes (#1024: the first run's question):
+    ``pairs`` [(role, via, api)] each as change() takes them, ``day_usd`` the cap for all. All or
+    nothing: RoutesError for any pair change() refuses. The line: each role's move, then where
+    the code goes once per provider, thinking and the cap once: `trivial: GPU → API a ·
+    significant: GPU → API b · your code goes to DeepSeek · thinking off · cap $5/day`."""
+    new, roles, gated = doc, [], False
+    for i, (r, via, api) in enumerate(pairs):
+        ch = change(new, r, via=via, api=api, day_usd=day_usd if i == 0 else None, who=who)
+        new, gated = ch.doc, gated or ch.gated
+        roles += [x for x in ch.roles if x not in roles]
+    cap = new["day_usd"]
+    if not roles and cap == doc["day_usd"]:
+        return Change(new, "", False, [])
+    parts, sent = [], []
+    for r in roles:
+        old, row = doc["roles"][r], new["roles"][r]
+        clauses, _ = _role_part(r, old, row, cap, who)
+        if row["via"] == "api" and (old["via"] != "api" or old.get("api") != row.get("api")):
+            sent.append(r)  # said once for all below, not per role
+            once = {f"your code goes to {who(row['api'])}", f"thinking {row['thinking']}"}
+            clauses = [c for c in clauses if c not in once and c != f"cap {money(cap)}/day"]
+        parts.append(f"{r}: " + " · ".join(clauses))
+    if sent:
+        by: dict[str, list] = {}
+        for r in sent:
+            by.setdefault(who(new["roles"][r]["api"]), []).append(r)
+        parts.append(f"your code goes to {next(iter(by))}" if len(by) == 1 else _goes_to(sent, new, who))
+        think = {new["roles"][r]["thinking"] for r in sent}
+        parts.append(f"thinking {think.pop()}" if len(think) == 1 else
+                     "thinking " + ", ".join(f"{new['roles'][r]['thinking']} ({r})" for r in sent))
+        if cap is not None:
+            parts.append(f"cap {money(cap)}/day")
+    if cap != doc["day_usd"] and (doc["day_usd"] is not None or not sent):
+        parts.append(f"day cap {money(doc['day_usd']) if doc['day_usd'] is not None else 'none'} → {money(cap)}/day")
+    if roles and new.get("use", "both") != "both":
+        parts.append(f"Agents is {USE_NAMES[new['use']]}, so this applies once Agents is Both (wb route all both)")
+    return Change(new, " · ".join(parts), gated, roles)
 
 
 def stamp(ch: Change, by: str, now: float | None = None) -> dict:
@@ -361,7 +491,8 @@ def summary(doc: dict) -> str:
         out.append(text)
     use = doc.get("use", "both")
     head = f"Agents {USE_NAMES[use]}, over each role's own: " if use != "both" else ""
-    return head + "; ".join(out)
+    tail = "; when the GPU is busy, a role with an API model runs on it" if doc.get("busy") == "api" else ""
+    return head + "; ".join(out) + tail
 
 
 def any_api(doc: dict) -> bool:
@@ -483,8 +614,9 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
                 raise Refused(f"{role} role: its GPU model {row['gpu']} isn't found ({str(e).strip(chr(34))}). "
                               f"Ask the user: fix that, or let the router pick (wb route {role} --gpu auto)") from None
             return m, models.status(m), f"the {role} role's GPU model (wb route)", {"via": "gpu", "role": role}
-        # the writing role ranks on its own record (#1025); a coding role on its size's, as before
-        top, why = router.choose(size, stack, name, role=router.record_role(role))
+        # the writing role ranks on its own record (#1025), a coding role on its size's: choose
+        # reads that from the role, which also names it in the refusal's API choice (#1024)
+        top, why = router.choose(size, stack, name, role=role)
         if top is None:
             raise Refused(why)
         return top.model, top.state, why, {"via": "gpu", "role": role}

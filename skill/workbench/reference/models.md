@@ -1,10 +1,15 @@
 # Models: servers, setup, updates and the weekly check
 
-Read from the /workbench skill when no local model can run, the user asks about model servers or
+Read from the /workbench skill when no role can run, the user asks about model servers or
 updating workbench, or the weekly model check is due.
 
-**No local model yet?** If `wb models` lists none that can run, do the model check below first:
-recommend models for this hardware and offer to set them up in OpenCode (ask before any download).
+**No role can run?** In this order:
+- No GPU model, and a provider with a stored key (`wb setup`'s `ok  API keys: …`): the skill's
+  one-question first run (two of that provider's models, the cap, one `wb route … --day-usd`).
+- Neither: lay out both ways in a line each, a local server (below) or `/connect` in OpenCode for
+  an API provider, and let the user pick.
+- A local server: do the model check below first: recommend models for this hardware and offer to
+  set them up in OpenCode (ask before any download).
 **Work with the model server the user already runs**, whichever it is: `wb scout` lists the server
 commands on PATH and the servers answering here (one that "wants an API key" needs it in its
 provider's `options.apiKey`: ask the user for it). Never steer them to one they don't use. With
@@ -29,13 +34,22 @@ default NAT networking: `wb setup`/`wb scout` say when one answers at the Window
 the two ways (mirrored networking, or 0.0.0.0 plus `wb remote`); don't propose a second server
 inside WSL for it.
 
+**Several GPUs, one model per card** (on a first run with several cards, or when the user asks):
+Claude sets it up on request; there is no UI for it. One server per card or card group, each
+started with only its cards visible (`CUDA_VISIBLE_DEVICES=0`, HIP's `HIP_VISIBLE_DEVICES` on AMD),
+on its own port; for Ollama, `OLLAMA_HOST=127.0.0.1:<port>` beside the mask. Register each model
+on its server: `wb model add <provider>/<model> --url http://127.0.0.1:<port>/v1 --context N
+--start "<the command with its mask and port>" --stop "<its stop>"`, a provider per server. A
+role's GPU model (`wb route <role> --gpu <id>`, the user's) then picks its cards. Name no server
+software as required: whichever the user runs, started that way, works.
+
 **Updating workbench.** The mod checks weekly and tells the user; `/workbench-update` is theirs.
 Asked to update it yourself: `wb update` (it refuses while tasks run; tell the user to restart
 Claude Code or run `/reload-plugins` after). A refusal over local changes in the marketplace
 clone, or a local patch that no longer applies: `reference/patching.md`.
 
 **The weekly model check.** Once a week the mod asks you (or the user runs `/workbench-models`)
-to check the local models against this machine. `wb scout` gives the facts: GPU and VRAM, RAM,
+to check the models for each role, GPU and API alike; the GPU side against this machine. `wb scout` gives the facts: GPU and VRAM, RAM,
 disk, what is installed and registered, real-task results, and the watch list
 (models set aside, with what each needs before it is tried again: check each against what is
 new). Then research what is
@@ -58,6 +72,14 @@ should take, `wb model retire <id> [--delete]`; a model now under another id (a 
 them. When you set a model aside, `wb scout --watch "…"` records what would bring it back:
 the change to look for, and the test it must pass. A model you add: offer an overnight
 `wb bench run --model <id>` before its first real task.
+
+**API roles in the check.** For each role on API, `wb scout`'s API section gives its model's
+record (tasks, accepted, paid a task, rate-limited rounds) and the week's spend beside the day cap,
+and a count of each connected provider's models. Look up the same providers' newer or cheaper
+models and any price change on the providers' own pages, and whether thinking would pay for
+`significant` from its record. Recommend in chat only: changing a role is the user's, in the
+dialog (on their words, `wb route`) or the pane's Settings tab. Name a free model only when the
+user asks, with what it does with the code (some keep or train on it).
 
 **The audio and image engines** are in the check too, when `wb scout` lists any (speech, sound
 effects, music, the listener; images). For each, check its model's licence today against the

@@ -1875,6 +1875,28 @@ test('/workbench-models when the weekly check is due raises it once, not twice',
   expect(asked.filter(t => t.includes('The weekly model check is due'))).toHaveLength(1)
 })
 
+test('#1024: the weekly model check covers GPU and API alike, recommends only for API roles and names no model', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'workbench-models', args: '' })
+  await clock.advance(2000)
+  expect(asked).toHaveLength(1)
+  const note = asked[0]!
+  expect(note.startsWith('[workbench] The weekly model check is due.')).toBe(true)   // its readers match it
+  expect(note).toContain('the best models for each role, GPU and API alike')
+  expect(note).not.toContain('local agents')
+  expect(note).toContain('`wb scout`\'s API section: each role\'s model, its record and spend')
+  expect(note).toContain('API roles: recommend in chat only; never run `wb route` or pass `--model` for an API model unasked')
+  // the convention: no model is named in code (only placeholders such as <provider/model>)
+  expect(note).not.toMatch(/\b(deepseek|claude|haiku|sonnet|opus|gpt|grok|gemini|qwen|mimo|llama|mistral|kimi|glm)\b/i)
+  expect(note.replace(/<[^>]*>/g, '')).not.toMatch(/\b[\w.-]+\/[\w.:-]+\b/)          // no provider/model id
+})
+
 test('when wb can\'t run the mod says so once, backs off, and raises no model check', async ($, on) => {
   // the 2026-11-16 audit: `wb events` was respawned every 2 s for good, and nobody was told
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
@@ -3883,7 +3905,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label).filter((l: string) => / {2}[❯ ] /.test(l)))
     .toEqual(['    Only when I say', '    Ask me first', '  ❯ Let Claude decide (default)'])
   const says = async () => ((await ui.find({ key: 'coding-says' })) as any)?.children?.[0]?.children?.[0]?.trim()
-  expect(await says()).toBe('Claude uses its judgment to guide the local agent or make a fix itself.')  // the chosen one's
+  expect(await says()).toBe('Claude uses its judgment to guide the agent or make a fix itself.')  // the chosen one's
   await $.ui.focus({ component: 'Pane', requestId: 'workbench', element: 'coding:only', origin: { kind: 'person' } } as any)  // the person's Tab, as the engine raises it
   expect(await says()).toBe('You tell Claude when to write code.')                                         // the ring's
   await ui.press({ key: 'coding:ask' })
@@ -5229,6 +5251,23 @@ test('#1014: a role change asks the user with wb\'s own change line; Allow write
   await clock.advance(1000)
 })
 
+test('#1024: two roles in one wb route are one dialog: both changes, the provider once and the cap, approved together', async ($, on) => {
+  const { clock, bash, files, w } = await routeProbe($, on)
+  const line = 'trivial: GPU → API deepseek/deepseek-flash · significant: GPU → API deepseek/deepseek-v4-pro · ' +
+    'your code goes to DeepSeek · thinking off · cap $5/day'
+  const argv = ['route', 'trivial', 'deepseek/deepseek-flash', 'significant', 'deepseek/deepseek-v4-pro', '--day-usd', '5']
+  w.reply = { change: line, gate: true, approval: { argv, change: line } }
+  w.answer = 'Allow'
+  const r = await bash('wb route trivial deepseek/deepseek-flash significant deepseek/deepseek-v4-pro --day-usd 5')
+  expect(r).toEqual({ deny: undefined, asked: 1, question: line, dry: [['route', '--dry-run', '--json', ...argv.slice(1)]] })
+  expect(r.question).toContain('trivial: GPU → API')
+  expect(r.question).toContain('significant: GPU → API')
+  expect(r.question.split('your code goes to DeepSeek')).toHaveLength(2)   // the provider once
+  expect(r.question.endsWith('cap $5/day')).toBe(true)
+  expect(JSON.parse(files['/wb/route-ok.json']!)).toEqual({ argv, change: line, at: expect.any(Number) })
+  await clock.advance(1000)
+})
+
 test('#1014: a GPU-only change, a show and a dry run pass without a dialog; a refused dry run is left to wb', async ($, on) => {
   const { clock, bash, w } = await routeProbe($, on)
   w.reply = { change: "significant: GPU model the router's pick → ollama/qwen3.8-27b", gate: false }
@@ -5605,4 +5644,270 @@ test('#1016: an API task\'s row shows its badge before the model, the live view 
     'API deepseek/deepseek-flash (DeepSeek) · trivial role, set by you 11-20 · thinking off'])
   expect(modelOf({ via: 'api', model: 'openrouter/deepseek/deepseek-v4.1-flash', label: '' })).toBe('API · deepseek-v4.1-flash')
   expect(modelOf({ via: 'gpu', model: 'ollama/q', label: '' })).toBe('ollama/q')
+})
+
+// The Settings tab's roles (#1023): Shared, GPU and API, read from `wb route --json` and `wb models
+// --json`; a press writes the one-shot approval for exactly that change and runs it
+const REFUSED = "wb: in Claude Code a role changes only through the workbench mod's dialog, and the user approved none for this change, so nothing changed"
+function settingsWorld(on: any, files: Record<string, string>) {
+  const w = {
+    routes: {
+      v: 1, use: 'both', busy: 'wait', day_usd: 5 as number | null,
+      roles: {
+        significant: { via: 'gpu', gpu: 'auto', thinking: 'off', label: 'Complex coding' },
+        trivial: { via: 'gpu', gpu: 'auto', api: 'deepseek/deepseek-flash', thinking: 'off', label: 'Trivial coding' },
+        writing: { via: 'gpu', gpu: 'auto', thinking: 'off', label: 'English writing' },
+      } as Record<string, any>,
+      spend_today: { usd: 0.42, by_provider: { deepseek: 0.42 } },
+      providers: {
+        deepseek: { name: 'DeepSeek', key: 'stored' },
+        xai: { name: 'xAI', key: 'env', why: "can't run: needs a key wb can hold outside the lane (key in XAI_API_KEY)" },
+      } as Record<string, any>,
+    },
+    models: {
+      gpu: [{ id: 'ollama/qwen-big', label: 'Qwen Big (Ollama)', window: 40960, sizes: [] as string[], cards: [2, 3] as number[] | null },
+        { id: 'ollama/mimo', label: 'MiMo (Ollama)', window: null as number | null, sizes: ['trivial'], cards: null as number[] | null }],
+      api: [{ id: 'deepseek/deepseek-flash', name: 'DeepSeek Flash', provider: 'deepseek', provider_name: 'DeepSeek', window: 131072, price: { input: 0.2, output: 0.6 }, free: false },
+        { id: 'deepseek/deepseek-v4-pro', name: 'DeepSeek V4 Pro', provider: 'deepseek', provider_name: 'DeepSeek', window: 131072, price: { input: 1, output: 3 }, free: false }],
+      used: [] as string[], free_line: 'free: the provider may keep or train on your code',
+      optimize: { done_at: null as number | null, models: 0, running: false },
+    },
+    runs: [] as string[][], toasts: [] as string[], asked: 0, refuse: '', routeCode: 0, routeOut: '',
+    approvals: [] as string[], unwritable: false,
+  }
+  on('ui.toast', (_: any, e: any) => { w.toasts.push(e.text); return { value: undefined } })
+  on('tool.call', (_: any, e: any) => {                                 // a dialog: none may come
+    if (e.tool === 'AskUserQuestion') w.asked++
+    return { result: { stdout: '' }, text: '' }
+  })
+  on('process.run', (_: any, e: any) => {
+    w.runs.push(e.argv)
+    const a: string[] = e.argv.slice(1)
+    const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '' } })
+    const no = (stderr: string) => ({ value: { exitCode: 3, stdout: '', stderr } })
+    if (a[0] === 'route' && a[1] === '--json') return w.routeCode ? { value: { exitCode: w.routeCode, stdout: '', stderr: w.routeOut } } : ok(JSON.stringify(w.routes))
+    if (a[0] === 'models' && a[1] === '--json') return ok(JSON.stringify(w.models))
+    if (a[0] === 'route' && a[1] === '--dry-run') {
+      const args = a.slice(3), change = `CHANGE ${args.join(' ')}`
+      const gate = !args.includes('--gpu')                            // a GPU pin takes no yes
+      return ok(JSON.stringify({ change, gate, ...(gate ? { approval: { argv: ['route', ...args], change } } : {}) }))
+    }
+    if (a[0] === 'route') {
+      const args = a.slice(1)
+      if (!args.includes('--gpu')) {                                  // CLAUDECODE=1: the approval or nothing
+        if (w.unwritable) delete files['/wb/route-ok.json']            // as if its write had failed
+        const ok_ = files['/wb/route-ok.json']
+        if (ok_) w.approvals.push(ok_)
+        delete files['/wb/route-ok.json']
+        if (!ok_ || JSON.stringify(JSON.parse(ok_).argv) !== JSON.stringify(['route', ...args])) return no(REFUSED)
+      }
+      if (w.refuse) return no(w.refuse)
+      const [what, x, y] = args, r = w.routes
+      if (what === 'all') r.use = x!
+      else if (what === 'busy') r.busy = x!
+      else if (what === 'cap') r.day_usd = x === 'off' ? null : Number(x)
+      else if (x === '--gpu') r.roles[what!].gpu = y
+      else if (x === '--api') r.roles[what!].api = y
+      else if (x === '--thinking') r.roles[what!].thinking = y
+      else r.roles[what!].via = x
+      return ok(`changed: CHANGE ${args.join(' ')}`)
+    }
+    if (a[0] === 'model' && a[1] === 'sizes') {
+      const g = w.models.gpu.find(m => m.id === a[2])!
+      g.sizes = a.slice(3)
+      return ok('')
+    }
+    if (a[0] === 'workflows' && a[1]) files['/wb/workflows.json'] = JSON.stringify({ mode: a[1] })
+    if (a[0] === 'optimize') return ok('wb optimize started in the background (pid 9): it holds the GPU alone')
+    return ok('')
+  })
+  return w
+}
+
+async function settingsTab($: any, on: any, files: Record<string, string> = {}) {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, files, [])
+  const w = settingsWorld(on, files)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 120 } })
+  await ui.press({ key: 'tab-settings' })
+  const label = async (key: string) => (await ui.find({ key }))?.props.label as string | undefined
+  const options = async () => (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => / {2}[❯ ] /.test(l))
+  const texts = async () => (await ui.findAll({ type: 'Text' })).map(t => String(t.text ?? ''))
+  const ran = (line: string) => w.runs.some(r => r.join(' ') === line)
+  return { clock, files, w, ui, label, options, texts, ran }
+}
+
+test('#1023: the Settings tab draws Shared, GPU, API and Experimental in order, the Agents switch first, the old rows as they were', { timeoutMs: 20_000 }, async ($, on) => {
+  const { ui, texts, label } = await settingsTab($, on)
+  const heads = (await texts()).filter(t => ['Shared', 'GPU', 'API', 'Experimental'].includes(t))
+  expect(heads).toEqual(['Shared', 'GPU', 'API', 'Experimental'])
+  const rows = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => l.startsWith('▸ '))
+  expect(rows.slice(0, 7)).toEqual(['▸ Agents: Both (default)', '▸ When the GPU is busy: wait (default)', '▸ Complex coding: GPU',
+    '▸ Trivial coding: GPU', '▸ English writing: GPU', '▸ Claude coding: Let Claude decide (default)', '▸ Dynamic workflows: Off (default)'])
+  for (const [key, was] of [['coding', '▸ Claude coding: Let Claude decide (default)'], ['record', '▸ Stats recording: On (default)'],
+    ['live', '▸ Live view: On (default)'], ['every', '▸ Live refresh: 2 s (default)'], ['progress', '▸ Progress checks: Off (default)'],
+    ['splash', '▸ Opening animation: Enabled (default)'], ['chat', '▸ Web chat: Off (default)'], ['probe', '▸ Agent code navigation: Off (default)']])
+    expect([key, await label(key)]).toEqual([key, was])
+  expect(rows.slice(-2)).toEqual(['▸ Web chat: Off (default)', '▸ Agent code navigation: Off (default)'])  // Experimental last
+  expect((await ui.find({ key: 'price' }))?.props.label).toBe('▸ Electricity price per kWh: ')
+  expect((await ui.find({ key: 'cap' }))?.props.value).toBe('5')
+  // wake: the plugin option's value, read-only
+  expect(await texts()).toContain('  Wake Claude: on · change it in /plugin → workbench → options')
+  expect((await ui.findAll({ type: 'Button' })).some(b => /Wake/.test(String(b.props.label)))).toBe(false)
+  await ui.unmount()
+})
+
+test('#1023: a role\'s press writes the one-shot approval for exactly that change and runs it with no dialog; without it wb refuses and the toast says so', { timeoutMs: 20_000 }, async ($, on) => {
+  const { ui, w, label, ran } = await settingsTab($, on)
+  await ui.press({ key: 'role-trivial' })
+  await ui.press({ key: 'role-trivial:api' })
+  expect(w.approvals.map(a => JSON.parse(a))).toEqual([{ argv: ['route', 'trivial', 'api'], change: 'CHANGE trivial api', by: 'pane', at: 1_800_000_001 }])
+  expect(ran('wb route trivial api')).toBe(true)
+  expect(w.asked).toBe(0)                                                // the press is the yes: no dialog
+  expect(w.toasts).toEqual([])
+  expect(await label('role-trivial')).toBe('▸ Trivial coding: API: deepseek/deepseek-flash')
+  w.unwritable = true                                                   // no approval reaches wb
+  await ui.press({ key: 'role-trivial' })
+  await ui.press({ key: 'role-trivial:gpu' })
+  expect(w.toasts.at(-1)).toContain("in Claude Code a role changes only through the workbench mod's dialog")
+  expect(await label('role-trivial')).toBe('▸ Trivial coding: API: deepseek/deepseek-flash')  // as it was
+  await ui.unmount()
+})
+
+test('#1023: the Agents switch, the busy row and Dynamic workflows pick through wb', { timeoutMs: 20_000 }, async ($, on) => {
+  const { ui, label, ran, files } = await settingsTab($, on)
+  await ui.press({ key: 'agents' })
+  expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('Each role runs where its own row says.')
+  await ui.press({ key: 'agents:gpu' })
+  expect(ran('wb route all gpu')).toBe(true)
+  expect(await label('agents')).toBe('▸ Agents: GPU')
+  await ui.press({ key: 'agents' })
+  await ui.press({ key: 'agents:both' })
+  expect(ran('wb route all both')).toBe(true)
+  await ui.press({ key: 'busy' })
+  await ui.press({ key: 'busy:api' })
+  expect(ran('wb route busy api')).toBe(true)
+  expect(await label('busy')).toBe("▸ When the GPU is busy: use the role's API model")
+  await ui.press({ key: 'workflows' })
+  await ui.press({ key: 'workflows:on' })
+  expect(ran('wb workflows on')).toBe(true)
+  expect(JSON.parse(files['/wb/workflows.json']!).mode).toBe('on')
+  expect(await label('workflows')).toBe('▸ Dynamic workflows: On')
+  await ui.unmount()
+})
+
+test('#1023: a role\'s API model is a dropdown of the models wb can run, with Other model… a typed id wb checks; an env key\'s provider is listed with why, never offered', { timeoutMs: 20_000 }, async ($, on) => {
+  const { ui, w, label, options, texts, ran, clock } = await settingsTab($, on)
+  expect(await texts()).toContain("  Connected: DeepSeek (stored) · xAI (can't run: needs a key wb can hold outside the lane (key in XAI_API_KEY))")
+  expect(await label('api-trivial')).toBe('▸ Trivial coding API model: DeepSeek Flash · DeepSeek (128K) · $0.2/$0.6 per M')
+  expect(await label('api-writing')).toBe('▸ English writing API model: (none)')
+  await ui.press({ key: 'api-trivial' })
+  expect(await options()).toEqual(['  ❯ DeepSeek Flash · DeepSeek (128K) · $0.2/$0.6 per M', '    DeepSeek V4 Pro · DeepSeek (128K) · $1/$3 per M', '    Other model…'])
+  expect((await options()).some(o => /xAI/.test(o))).toBe(false)
+  await ui.press({ key: 'api-trivial:deepseek/deepseek-v4-pro' })
+  expect(ran('wb route trivial --api deepseek/deepseek-v4-pro')).toBe(true)
+  expect(await label('api-trivial')).toBe('▸ Trivial coding API model: DeepSeek V4 Pro · DeepSeek (128K) · $1/$3 per M')
+  await ui.press({ key: 'api-trivial' })
+  await ui.press({ key: 'api-trivial:other' })
+  w.refuse = "wb: acme/cod not in OpenCode's catalog: wb models lists the API models"
+  await ui.input({ key: 'api-trivial-other', text: 'acme/cod' })
+  expect(ran('wb route trivial --api acme/cod')).toBe(true)
+  expect(w.toasts.at(-1)).toBe("workbench: wb: acme/cod not in OpenCode's catalog: wb models lists the API models")
+  expect(await label('api-trivial')).toBe('▸ Trivial coding API model: DeepSeek V4 Pro · DeepSeek (128K) · $1/$3 per M')  // kept
+  expect(await ui.find({ key: 'api-trivial-other' })).toBeUndefined()
+  // a long catalog: only the models in use, then Other model…
+  w.refuse = ''
+  w.models.api = Array.from({ length: 40 }, (_, i) => ({ id: `openrouter/m-${i}`, name: `M ${i}`, provider: 'openrouter', provider_name: 'OpenRouter',
+    window: 131072, price: { input: 1, output: 2 }, free: i === 3 }))
+  w.models.used = ['openrouter/m-3']
+  w.routes.roles.trivial.api = 'openrouter/m-7'
+  await clock.advance(11_000)                                           // past the roles' cache
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  await ui.press({ key: 'api-significant' })
+  expect(await options()).toEqual(['  ❯ (none)', '    M 7 · OpenRouter (128K) · $1/$2 per M',
+    '    M 3 · OpenRouter (128K) · $1/$2 per M · free: the provider may keep or train on your code', '    Other model…'])
+  await ui.unmount()
+})
+
+test('#1023: thinking runs wb route <role> --thinking, the day cap takes $5, 5,00 and 5 USD as 5 and empty as off, and spend today reads from wb route --json', { timeoutMs: 20_000 }, async ($, on) => {
+  const { ui, w, texts, ran } = await settingsTab($, on)
+  expect(await texts()).toContain('  Spend today: $0.42 of $5 (deepseek $0.42)')
+  await ui.press({ key: 'think-writing' })
+  expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('for tasks started after this')
+  await ui.press({ key: 'think-writing:on' })
+  expect(ran('wb route writing --thinking on')).toBe(true)
+  for (const typed of ['$5', '5,00', '5 USD']) {
+    w.runs.length = 0
+    await ui.input({ key: 'cap', text: typed })
+    expect([typed, ran('wb route cap 5')]).toEqual([typed, true])
+  }
+  w.runs.length = 0
+  await ui.input({ key: 'cap', text: 'lots' })
+  expect(w.runs.some(r => r[1] === 'route' && r[2] === 'cap')).toBe(false)
+  expect(w.toasts.at(-1)).toContain('the API day cap is dollars')
+  await ui.input({ key: 'cap', text: '' })
+  expect(ran('wb route cap off')).toBe(true)
+  expect((await ui.find({ key: 'cap' }))?.props.value).toBe('')
+  expect(await texts()).toContain('  Spend today: $0.42 (no day cap) (deepseek $0.42)')
+  await ui.unmount()
+})
+
+test('#1023: the GPU group: each role picks Auto or a GPU model with its window and cards, sizes run wb model sizes, and drawing it runs no other wb', { timeoutMs: 20_000 }, async ($, on) => {
+  const { ui, w, label, options, ran, texts, clock } = await settingsTab($, on)
+  const draws = w.runs.filter(r => !['coding', 'experiment', 'chat', 'savings', 'events', 'stats', 'progress', 'splash'].includes(r[1]!)).map(r => r.slice(1).join(' '))
+  expect([...new Set(draws)]).toEqual(['route --json', 'models --json'])    // no status, no probe
+  expect(await label('gpu-significant')).toBe('▸ Complex coding GPU model: Auto (the router picks)')
+  await ui.press({ key: 'gpu-significant' })
+  expect(await options()).toEqual(['  ❯ Auto (the router picks)', '    Qwen Big (Ollama) (40K) · GPU 2+3', '    MiMo (Ollama)'])
+  await ui.press({ key: 'gpu-significant:ollama/qwen-big' })
+  expect(ran('wb route significant --gpu ollama/qwen-big')).toBe(true)
+  expect(w.asked).toBe(0)
+  expect(await label('gpu-significant')).toBe('▸ Complex coding GPU model: Qwen Big (Ollama) (40K) · GPU 2+3')
+  expect(await label('size-ollama/mimo')).toBe('▸ MiMo (Ollama): trivial only')
+  await ui.press({ key: 'size-ollama/mimo' })
+  await ui.press({ key: 'size-ollama/mimo:significant' })
+  expect(ran('wb model sizes ollama/mimo significant')).toBe(true)
+  await ui.press({ key: 'size-ollama/mimo' })
+  await ui.press({ key: 'size-ollama/mimo:all' })
+  expect(ran('wb model sizes ollama/mimo')).toBe(true)
+  await ui.press({ key: 'optimize' })
+  expect(ran('wb optimize start')).toBe(true)
+  w.models.gpu = Array.from({ length: 9 }, (_, i) => ({ id: `ollama/m${i}`, label: `M${i}`, window: null, sizes: [], cards: null }))
+  await clock.advance(11_000)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  const sized = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => /^▸ M\d: /.test(l))
+  expect(sized).toEqual(['▸ M0: any size (default)', '▸ M1: any size (default)', '▸ M2: any size (default)',
+    '▸ M3: any size (default)', '▸ M4: any size (default)', '▸ M5: any size (default)'])  // GPU_ROWS, then counted
+  expect(await texts()).toContain('  +3 more (wb models)')
+  await ui.unmount()
+})
+
+test('#1023: with no provider connected and no API role the API group is one line; a wb without roles leaves them out with one line', { timeoutMs: 20_000 }, async ($, on) => {
+  const { ui, w, texts, clock } = await settingsTab($, on)
+  w.routes.providers = {}
+  delete w.routes.roles.trivial.api
+  await clock.advance(11_000)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  expect(await texts()).toContain('  No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.')
+  for (const key of ['api-trivial', 'think-trivial', 'api-connected']) expect(await ui.find({ key })).toBeUndefined()
+  w.routeCode = 2
+  w.routeOut = "wb: error: argument command: invalid choice: 'route'"
+  await clock.advance(11_000)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  expect((await texts()).filter(t => t === '  wb is older than the mod: wb update').length).toBeGreaterThan(0)
+  for (const key of ['agents', 'busy', 'role-trivial', 'api-trivial', 'cap']) expect(await ui.find({ key })).toBeUndefined()
+  expect(await ui.find({ key: 'coding' })).toBeDefined()                   // the rest as always
+  await ui.unmount()
+})
+
+test('#1023: the busy opt-in is in the roles\' summary, so a change of it alone reaches the conversation', () => {
+  expect(routesSummary({ busy: 'api' })).toBe('significant GPU (the router picks); trivial GPU (the router picks); ' +
+    'writing GPU (the router picks); when the GPU is busy, a role with an API model runs on it')
+  expect(routesSummary({ busy: 'wait' })).toBe(routesSummary({}))
 })

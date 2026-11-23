@@ -33,15 +33,18 @@ const SCOUT_EVERY_MS = 7 * 24 * 3600 * 1000
 const SCOUT_RETRY_MS = 24 * 3600 * 1000 // raised but never finished: ask again a day later
 const MODELS = 'workbench-models'
 const SCOUT_NOTE =
-  '[workbench] The weekly model check is due. As the driver, keep the local agents on the best ' +
-  'models this machine can run:\n' +
+  '[workbench] The weekly model check is due. As the driver, keep the agents on the best ' +
+  'models for each role, GPU and API alike:\n' +
   '1. `wb scout`: this machine\'s hardware, what is installed, and how each model has done ' +
   '(real tasks), and its watch list: models set aside and what each needs ' +
   'before it is tried again.\n' +
   '2. Look up what is newest: open-weight coding models with tool calling, their sizes and ' +
   'quantizations, which fit this GPU\'s VRAM (with room for the context) and this RAM, and ' +
   'recent releases of the model server this machine runs (whichever it is: `wb scout` lists ' +
-  'them). Prefer primary sources (model cards, the server\'s own model library, ' +
+  'them). For roles on API, `wb scout`\'s API section: each role\'s model, its record and spend; ' +
+  'look up newer or cheaper models from the same connected providers on their own pages, and ' +
+  'whether thinking would pay for significant (its record). ' +
+  'Prefer primary sources (model cards, the server\'s own model library, ' +
   'release notes) and recent reports; name nothing you could not verify.\n' +
   '3. Recommend in a few lines: keep, add (the model and quantization, why it should beat what ' +
   'is installed, its size and how it fits), retire (what it replaces, the disk it frees). ' +
@@ -51,7 +54,9 @@ const SCOUT_NOTE =
   '--pull` in the background, on another server its own download then `wb model add`; ' +
   '`wb model sizes <id> …` if it should only take some task sizes, and ' +
   '`wb model retire <id> [--delete]` for what it replaces. Installed models that are not ' +
-  'registered may belong to other tools: ask first.\n' +
+  'registered may belong to other tools: ask first. API roles: recommend in chat only; never ' +
+  'run `wb route` or pass `--model` for an API model unasked (a role changes on the user\'s ' +
+  'words, through the dialog, or in the pane).\n' +
   '5. The audio and image engines `wb scout` lists, if any (speech, sound effects, music, the ' +
   'listener; images): check each model\'s licence today against its licence text, not its tag ' +
   '(licences change: one audio model went non-commercial mid-2026), and whether a newer local ' +
@@ -72,7 +77,7 @@ const SCOUT_NOTE =
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { WbChat, WbLine, WbLive, WbPane, WbSaid, WbStats, WbTask, WbTop } from '../types'
+import type { WbChat, WbLine, WbLive, WbModels, WbPane, WbRoutes, WbSaid, WbStats, WbTask, WbTop } from '../types'
 import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
 import { frameCells, frameCount, packed, plan, SPLASH_MS } from './splash'
@@ -580,7 +585,7 @@ const AGAIN_NOTE = (skill: string) =>
 
 const MODE_NOTE = (skill: string) =>
   'Workbench mode is on in this session: the user ran /workbench, and it lasts until /workbench-quit. ' +
-  'Treat each request as the /workbench skill says: hand its coding to local agents with wb, ' +
+  'Treat each request as the /workbench skill says: hand its coding to agents with wb, ' +
   `then review and accept. Every plan you write, in plan mode or not, is a handoff plan: steps ` +
   `sized to the agents' slice, each with its files, exact interfaces and acceptance command (the ` +
   `skill's "Planning work you will hand off"). If that procedure is not in your context, read ` +
@@ -604,12 +609,12 @@ const HAND_BACK = 'workbench-quit-and-hand-back-claude'
 // Claude coding (#92), the user's choice (`wb coding`): when Claude may write code for a delegated
 // task. "decide" (no saved choice) adds nothing, so Claude works as before there was a choice.
 const CODING_RULES: Record<string, string> = {
-  ask: 'Claude coding is "Ask me first" (the user\'s choice; `wb coding` shows it). The local agent ' +
+  ask: 'Claude coding is "Ask me first" (the user\'s choice; `wb coding` shows it). The agent ' +
     'gets the first shot; review and advise as always. Before you write any of a task\'s code (an ' +
     'edit in its worktree, `wb takeover`), help the agent first (feedback, a smaller step). If it ' +
     'still falls short, ask the user for one specific edit, naming the task and the exact change, ' +
     'and wait: only their yes allows it. Record it with `wb coding allow <task> --edit "…" --said ' +
-    '"<their words>"`; it lasts until you hand the task back. Unanswered, the work stays local.',
+    '"<their words>"`; it lasts until you hand the task back. Unanswered, the work stays with the agent.',
   only: 'Claude coding is "Only when I say" (the user\'s choice; `wb coding` shows it). Never write ' +
     'a task\'s code yourself, not a one-line fix in review nor `wb takeover`: guide the agent, ' +
     'and when it stays stuck, report the blocker to the user and keep the work with the agent. ' +
@@ -642,7 +647,7 @@ async function workflowsMode($: any): Promise<string> {
 const CODING_STOPS: [string, string, string][] = [
   ['only', 'Only when I say', 'You tell Claude when to write code.'],
   ['ask', 'Ask me first', 'Claude can ask to make a specific fix and waits for your yes.'],
-  ['decide', 'Let Claude decide (default)', 'Claude uses its judgment to guide the local agent or make a fix itself.'],
+  ['decide', 'Let Claude decide (default)', 'Claude uses its judgment to guide the agent or make a fix itself.'],
 ]
 
 // The web chat's row: the choice is wb's (`wb chat on|off`, chat/switch.json), off by default
@@ -772,7 +777,7 @@ function progressStops(after: number): [string, string, string][] {
   return [PROGRESS_OFF, ['on', `On, after ${after} min`,
     `A task past ${after} min of active work gets a check and one recommendation, waking Claude.`]]
 }
-const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress|splash):/ // the rows whose ring the pane follows
+const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress|splash|agents|busy|workflows|(?:role|gpu|api|think)-[a-z]+|size-[^:]+):/ // the rows whose ring the pane follows
 
 // One settings row: a Button naming the choice, which opens its options under it, each a Button
 // (a click, or Enter on the ring), the chosen one marked. Under them the sentence of the option
@@ -1690,7 +1695,9 @@ export function routesSummary(doc: Row): string {
   })
   // the Agents switch (#1016): routes.json `use`, over each role's own while it isn't Both
   const use = doc.use === 'gpu' ? 'GPU' : doc.use === 'api' ? 'API' : ''
-  return (use ? `Agents ${use}, over each role's own: ` : '') + roles.join('; ')
+  // the busy opt-in (#1023): said, or a change of it alone would never reach the conversation
+  const busy = doc.busy === 'api' ? '; when the GPU is busy, a role with an API model runs on it' : ''
+  return (use ? `Agents ${use}, over each role's own: ` : '') + roles.join('; ') + busy
 }
 
 // A document wb would read (routes.normalize's checks, in short): else it can't be read
@@ -1699,6 +1706,7 @@ function routesValid(doc: unknown): doc is Row {
   const d = doc as Row
   if (d.day_usd != null && !(typeof d.day_usd === 'number' && d.day_usd > 0)) return false
   if (![undefined, 'gpu', 'api', 'both'].includes(d.use)) return false
+  if (![undefined, 'wait', 'api'].includes(d.busy)) return false
   if (d.roles === undefined) return true
   if (!d.roles || typeof d.roles !== 'object' || Array.isArray(d.roles)) return false
   return Object.entries(d.roles as Row).every(([r, row]: [string, any]) => (ROLES as readonly string[]).includes(r) &&
@@ -1723,7 +1731,7 @@ async function readRoutes($: any): Promise<Routes> {
   if (!routesValid(doc)) return { said: 'routes.json can\'t be read (wb route says why)', api: false, cap: null }
   const rows = Object.values((doc.roles ?? {}) as Record<string, Row>)
   const cap = typeof doc.day_usd === 'number' ? doc.day_usd : null
-  const plain = cap === null && (doc.use ?? 'both') === 'both' && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
+  const plain = cap === null && (doc.use ?? 'both') === 'both' && (doc.busy ?? 'wait') === 'wait' && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
     !r.api && (r.thinking ?? 'off') === 'off')
   return { said: plain ? '' : routesSummary(doc) + (cap !== null ? `. Day cap ${money(cap)}` : ''), api: rows.some(r => !!r.api), cap }
 }
@@ -2011,7 +2019,7 @@ async function codingRefusal($: any, path: string): Promise<string> {
     }
     return ''
   }
-  return `workbench: not edited: ${task} is the local agent's. ${CODING_RULES[mode]}`
+  return `workbench: not edited: ${task} is the agent's. ${CODING_RULES[mode]}`
 }
 // Tasks of another session are listed as left alone: theirs to stop or finish.
 const QUIT_NOTE = (out: string, ok: boolean) =>
@@ -2124,6 +2132,8 @@ const mem = {
   topGen: 0, // bumped by each start and stop: a syncTop whose awaits saw it change starts nothing
   topRetryAt: 0, // not before then, after one ended by itself
   price: null as number | null, // the electricity price wb says is set (`wb savings --json`)
+  roles: null as null | PaneRoles, // the Settings tab's roles and models, as wb last said them (rolesNow, #1023)
+  apiOther: '', // the role whose API row's Other model… box is open (#1023)
   cwd: '', // the session's directory, resolved: which old tasks are this session's (mine)
   home: '', // the home directory, resolved: a session there claims no task by directory
   ids: new Set<string>(), // the `sessions` atom: which tasks are this session's (mine)
@@ -2722,6 +2732,214 @@ async function setPrice($: any, text: string) {
   $.ui.invalidate('ui.render')
 }
 
+// The Settings tab's roles (#1023): Shared (the Agents switch, the busy row, each role's GPU | API,
+// Dynamic workflows, the day cap, wake), GPU (each role's GPU model, the sizes, optimize) and API
+// (connected providers, each role's API model and thinking, spend today). Read through wb (`wb route
+// --json`, `wb models --json`: neither asks a server, #705), kept ROLES_CACHE_MS and dropped after a
+// pick; routes.json stays flat, only the screen groups. A press is the user's yes: the mod writes the
+// dialog's one-shot approval (route-ok.json, `by` pane) for exactly that change, as `wb route
+// --dry-run --json` gives it, then runs it, under the same gate Claude meets; nothing is a flag on
+// the command line, which Claude could pass. A GPU pin or a size takes no yes (dry run: no gate).
+const ROLES_CACHE_MS = 10_000
+const GPU_ROWS = 6 // GPU models with a sizes row; the rest are counted (wb models), as STATS_SHOWN
+const API_MENU = 12 // an API dropdown lists every runnable model up to this; past it, the ones in use
+const ROLE_LABELS: Record<string, string> = { significant: 'Complex coding', trivial: 'Trivial coding', writing: 'English writing' }
+const OLDER_WB = 'wb is older than the mod: wb update'
+const NO_PROVIDER = 'No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.'
+const AGENTS_STOPS: [string, string, string][] = [
+  ['gpu', 'GPU', 'Every role runs on its GPU model: nothing spends. Each role\'s own choice is kept for Both.'],
+  ['api', 'API', 'Every role runs on its API model; a role with none can\'t start.'],
+  ['both', 'Both (default)', 'Each role runs where its own row says.'],
+]
+const BUSY_STOPS: [string, string, string][] = [
+  ['wait', 'wait (default)', 'A task waits for the GPU, as before.'],
+  ['api', 'use the role\'s API model', 'A task whose role has an API model starts on it while the GPU is busy; a running task never moves.'],
+]
+const WORKFLOWS_STOPS: [string, string, string][] = [
+  ['off', 'Off (default)', 'Claude runs one task at a time.'],
+  ['on', 'On', 'Claude may split a request into tasks that run at once, each on its own role\'s model.'],
+]
+const THINK_STOPS: [string, string, string][] = [
+  ['off', 'Off (default)', 'Faster and cheaper; for tasks started after this.'],
+  ['on', 'On', 'Better on hard steps, slower and costs more; for tasks started after this.'],
+]
+const SIZE_STOPS: [string, string, string][] = [
+  ['all', 'any size (default)', 'The router may give it any task.'],
+  ['trivial', 'trivial only', 'The router gives it trivial tasks only.'],
+  ['significant', 'significant only', 'The router gives it significant tasks only.'],
+]
+function roleStops(label: string, api: string | undefined): [string, string, string][] {
+  return [['gpu', 'GPU', `${label} runs on this machine's GPU.`],
+    ['api', api ? `API: ${api}` : 'API (set its model under API first)', api ? `${label} runs on ${api}; your code goes to its provider.` : 'Pick its API model under API first.']]
+}
+
+// A model's window as the pane says it: 40K
+const windowK = (n: unknown) => typeof n === 'number' && n > 0 ? ` (${Math.round(n / 1024)}K)` : ''
+
+// The GPU dropdown's entries: Auto first (the router, today's behaviour), then each GPU model with its
+// window and, on a machine with several cards, the ones its Ollama sees (`GPU 2+3`; nothing unknown)
+export function gpuStops(label: string, gpu: WbModels['gpu'], pinned: string): [string, string, string][] {
+  const out: [string, string, string][] = [['auto', 'Auto (the router picks)', `The router picks ${label}'s GPU model for each task.`]]
+  for (const g of gpu)
+    out.push([g.id, `${g.label}${windowK(g.window)}${g.cards?.length ? ` · GPU ${g.cards.join('+')}` : ''}`, `Pins ${label} to ${g.id}: the router doesn't pick for it.`])
+  if (pinned !== 'auto' && !gpu.some(g => g.id === pinned)) out.push([pinned, `${pinned} (not found: wb models)`, 'A task of this role exits 3 until it is found again or another is picked.'])
+  return out
+}
+
+// The API dropdown's entries: the role's own model, the other roles', those used before, and with a
+// catalog no longer than API_MENU every runnable one (grouped by provider); then Other model…, a typed
+// id wb checks. Only providers whose key wb can hold are listed (wb models --json); a free model
+// carries its data-use mark (#1021).
+export function apiStops(label: string, m: WbModels | null, current: string, others: string[]): [string, string, string][] {
+  const listed = new Map((m?.api ?? []).map(x => [x.id, x]))
+  const price = (p: WbModels['api'][number]['price']) => p && typeof p.input === 'number' && typeof p.output === 'number'
+    ? ` · $${p.input}/$${p.output} per M` : ''
+  const line = (id: string): [string, string, string] => {
+    const x = listed.get(id)
+    if (!x) return [id, id, `${label} uses ${id}.`]
+    return [id, `${x.name} · ${x.provider_name}${windowK(x.window)}${price(x.price)}${x.free ? ` · ${m?.free_line || 'free'}` : ''}`, `${label} uses ${id} on API; your code goes to ${x.provider_name}.`]
+  }
+  const ids: string[] = []
+  const add = (id: string | undefined) => { if (id && !ids.includes(id)) ids.push(id) }
+  add(current)
+  others.forEach(add)
+  ;(m?.used ?? []).filter(id => listed.has(id)).forEach(add)
+  if ((m?.api.length ?? 0) <= API_MENU)
+    [...(m?.api ?? [])].sort((a, b) => `${a.provider_name}\0${a.name}`.localeCompare(`${b.provider_name}\0${b.name}`)).forEach(x => add(x.id))
+  return [...(current ? [] : [['none', '(none)', `${label} has no API model: it runs on the GPU.`] as [string, string, string]]),
+    ...ids.map(line), ['other', 'Other model…', 'Type an exact id (provider/model); wb checks it.']]
+}
+
+// `wb route --json` and `wb models --json`, kept ROLES_CACHE_MS. `why`: wb's line when the roles can't
+// be read (routes.json broken), or OLDER_WB for a wb without them
+type PaneRoles = { at: number; routes: WbRoutes | null; models: WbModels | null; why: string }
+async function rolesNow($: any): Promise<PaneRoles> {
+  const now = await $.clock.now()
+  if (mem.roles && now - mem.roles.at < ROLES_CACHE_MS) return mem.roles
+  const json = async (args: string[]): Promise<[any, string]> => {
+    const { ok, out } = await runWb($, args, 15_000)
+    try {
+      if (ok) return [JSON.parse(out), '']
+    } catch { /* an older wb: no --json */ }
+    return [null, !ok && !/invalid choice|unrecognized arguments/.test(out) && out !== '(no output)' ? brief(out) : OLDER_WB]
+  }
+  const [routes, why] = await json(['route', '--json'])
+  const [models] = await json(['models', '--json'])
+  mem.roles = { at: now, routes: routes?.roles ? routes : null, models: Array.isArray(models?.gpu) ? models : null, why: routes?.roles ? '' : why || OLDER_WB }
+  return mem.roles
+}
+
+// A pane press on the roles: the change as wb computes it, approved for exactly that when it needs the
+// user's yes (the press is it), then made; wb's refusal (no day cap, an unknown id, a key wb can't hold)
+// in a toast, and the row keeps its old value
+async function paneRoute($: any, args: string[]): Promise<boolean> {
+  mem.roles = null
+  const dry = await runWb($, ['route', '--dry-run', '--json', ...args], 60_000)
+  let q: Row | null = null
+  try { q = dry.ok ? JSON.parse(dry.out) : null } catch { q = null }
+  if (!q) { $.ui.toast(`workbench: ${brief(dry.out)}`); return false }
+  if (q.gate && q.approval)
+    await $.fs.write(`${mem.root}/${ROUTE_OK}`, JSON.stringify({ ...q.approval, by: 'pane', at: (await $.clock.now()) / 1000 })).catch(() => {})
+  const { ok, out } = await runWb($, ['route', ...args])
+  mem.roles = null
+  if (!ok) $.ui.toast(`workbench: ${brief(out)}`)
+  return ok
+}
+
+// The day cap as typed, as `wb route cap` takes it: "$5", "5,00", "5 USD" are 5; empty is 'off'
+// (clears it); else null. parsePrice's forms (Couplings)
+export function parseUsd(text: string): number | 'off' | null {
+  return parsePrice(text)
+}
+
+async function setCap($: any, text: string) {
+  const v = parseUsd(text)
+  if (v === null) { $.ui.toast('workbench: the API day cap is dollars, like 5 or $5 (empty clears it)'); return }
+  await paneRoute($, ['cap', String(v)])
+  $.ui.invalidate('ui.render')
+}
+
+// Spend today, from `wb route --json`: `$0.42 of $5 (deepseek $0.42)`; the dollars by `usd`, the
+// Stats tab's (#1022), so the two never say one sum two ways (wave 2's merge)
+export function spendLine(r: WbRoutes): string {
+  const s = r.spend_today ?? { usd: 0, by_provider: {} }
+  const by = Object.entries(s.by_provider ?? {}).filter(([, v]) => v > 0).map(([p, v]) => `${p} ${usd(v)}`)
+  return `Spend today: ${usd(s.usd ?? 0)}${r.day_usd != null ? ` of ${money(r.day_usd)}` : ' (no day cap)'}${by.length ? ` (${by.join(', ')})` : ''}`
+}
+
+// The Connected line: each provider, a stored key as working, the rest with why they can't run
+export function connectedLine(r: WbRoutes): string {
+  return 'Connected: ' + Object.values(r.providers ?? {}).map(p => p.key === 'stored' ? `${p.name} (stored)` : `${p.name} (${p.why ?? p.key})`).join(' · ')
+}
+
+// The rows of the Settings tab's three groups (#1023), as elements: Shared's first part (above Claude
+// coding), its second (the cap, wake), GPU and API. `role`: the roles' read
+async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
+  const { Box, Text, Button } = kit
+  const r = role.routes, m = role.models
+  const dim = (key: string, text: string) => <Text key={key} dimColor>{`  ${text}`}</Text>
+  if (!r) {
+    const line = dim('roles-why', role.why)
+    return { top: [line], cap: [], gpu: [line], api: [] }
+  }
+  const roles = ROLES.map(name => ({ name, label: ROLE_LABELS[name]!, row: r.roles[name] }))
+  const top = [
+    settingRow(kit, $, 'agents', 'Agents', AGENTS_STOPS, r.use, view, v => paneRoute($, ['all', v])),
+    settingRow(kit, $, 'busy', 'When the GPU is busy', BUSY_STOPS, r.busy ?? 'wait', view, v => paneRoute($, ['busy', v])),
+    ...roles.map(({ name, label, row }) => settingRow(kit, $, `role-${name}`, label, roleStops(label, row.api), row.via, view, v => paneRoute($, [name, v]))),
+  ]
+  const cap = [
+    <kit.Input key="cap" label="▸ API day cap: " value={r.day_usd != null ? String(r.day_usd) : ''}
+      placeholder="not set (needed before an API role; $5 suggested)" submitLabel="set" onSubmit={(v: string) => { void setCap($, v) }} />,
+  ]
+  const gpu: any[] = []
+  if (!m) gpu.push(dim('gpu-why', OLDER_WB))
+  else if (!m.gpu.length) gpu.push(dim('gpu-none', 'No GPU model found (wb models)'))
+  else {
+    for (const { name, label, row } of roles)
+      gpu.push(settingRow(kit, $, `gpu-${name}`, `${label} GPU model`, gpuStops(label, m.gpu, row.gpu), row.gpu, view, v => paneRoute($, [name, '--gpu', v])))
+    const pinned = new Set(roles.map(x => x.row.gpu))
+    const shown = [...m.gpu].sort((a, b) => Number(pinned.has(b.id)) - Number(pinned.has(a.id)) || a.label.localeCompare(b.label)).slice(0, GPU_ROWS)
+    for (const g of shown) {
+      const size = g.sizes.length === 1 ? g.sizes[0]! : 'all'
+      gpu.push(settingRow(kit, $, `size-${g.id}`, g.label, SIZE_STOPS, size, view,
+        v => runWb($, ['model', 'sizes', g.id, ...(v === 'all' ? [] : [v])]).then(({ ok, out }) => { mem.roles = null; if (!ok) $.ui.toast(`workbench: ${brief(out)}`) })))
+    }
+    if (m.gpu.length > GPU_ROWS) gpu.push(dim('gpu-more', `+${m.gpu.length - GPU_ROWS} more (wb models)`))
+    const o = m.optimize
+    gpu.push(
+      <Box key="optimize-row" flexDirection="row" columnGap={1}>
+        <Text dimColor>{`  Optimize: ${o.running ? 'measuring now' : o.models ? `measured ${o.models} model${o.models === 1 ? '' : 's'}${o.done_at ? `, ${new Date(o.done_at * 1000).toISOString().slice(5, 10)}` : ''}` : 'not run yet'} ·`}</Text>
+        <Button key="optimize" label="▸ Measure now" plain onPress={() => {
+          void runWb($, ['optimize', 'start']).then(({ out }) => { mem.roles = null; $.ui.toast(`workbench: ${brief(out)}`) })
+        }} />
+      </Box>)
+  }
+  const stored = Object.values(r.providers ?? {}).some(p => p.key === 'stored')
+  const anyApi = roles.some(x => !!x.row.api)
+  const api: any[] = []
+  if (!stored && !anyApi) api.push(dim('api-none', NO_PROVIDER))
+  else {
+    if (Object.keys(r.providers ?? {}).length) api.push(dim('api-connected', connectedLine(r)))
+    for (const { name, label, row } of roles) {
+      const others = roles.filter(x => x.name !== name).map(x => x.row.api).filter((x): x is string => !!x)
+      api.push(settingRow(kit, $, `api-${name}`, `${label} API model`, apiStops(label, m, row.api ?? '', others), row.api ?? 'none', view,
+        async v => { if (v === 'other') { mem.apiOther = name; return } if (v !== 'none') await paneRoute($, [name, '--api', v]) }))
+      if (mem.apiOther === name)
+        api.push(<kit.Input key={`api-${name}-other`} label="    Exact id: " value="" placeholder="provider/model, as OpenCode names it"
+          submitLabel="set" onSubmit={(v: string) => {
+            const id = v.trim()
+            mem.apiOther = ''
+            void (id ? paneRoute($, [name, '--api', id]) : Promise.resolve(false)).then(() => $.ui.invalidate('ui.render'))
+          }} />)
+    }
+    for (const { name, label, row } of roles)
+      api.push(settingRow(kit, $, `think-${name}`, `${label} thinking`, THINK_STOPS, row.thinking ?? 'off', view, v => paneRoute($, [name, '--thinking', v])))
+    api.push(dim('api-spend', spendLine(r)))
+  }
+  return { top, cap, gpu, api }
+}
+
 async function poll($: any) {
   if (!mem.root || !mem.person) return
   if (mem.polling) { // a slow file system must not stack polls, but no change may be missed
@@ -2900,10 +3118,12 @@ export function askForArgs(o: AskFor): string[] {
   return [...(o.for ?? []).map(n => `--for=${n}`), ...(o.for?.length && o.here ? ['--here'] : [])]
 }
 
-// An ask on the page is withdrawn the moment its dialog is settled elsewhere: the hook's signal
-// aborts (the terminal answered, or Esc), or the engine's call goes on past its permission check
-// (askSettledHere). The page was left with a card the terminal had already answered, which the
-// user could still tap. Withdrawn is `expired` by `interrupted`: the page says "settled in the
+// An ask on the page is withdrawn once its dialog is settled elsewhere: the hook's signal aborts
+// (an interrupt), or the engine's call of it ends (askSettledHere, in tool.call's finally). The
+// page was left with a card the terminal had already answered, which the user could still tap.
+// A terminal answer doesn't abort the signal, and this engine has no event as the call starts
+// (`tool.run` came later; an unknown event stops the whole module loading), so a long command
+// allowed in the terminal keeps its card until it ends (the #1042 live check, 2026-11-23: 22 s). Withdrawn is `expired` by `interrupted`: the page says "settled in the
 // terminal". Returns the unwatch.
 type ChatAsk = { tool: string; agent: string; input: Record<string, unknown>; here: boolean; at: number }
 function watchAsk($: any, id: string, ask: ChatAsk, signal?: AbortSignal): () => void {
@@ -3783,7 +4003,7 @@ export const register: Register = (on, options) => {
     }
     await $.command.register({
       name: MODELS,
-      description: 'Check now which local models suit this machine best (weekly on its own)',
+      description: 'Check now which models suit each role best, GPU and API (weekly on its own)',
     })
     await $.command.register({
       name: UPDATE,
@@ -3951,7 +4171,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: MODELS }, async $ => {
     await scoutOffered($, await $.clock.now()) // the weekly check won't raise it again straight after
     mem.queued.push(SCOUT_NOTE) // a command may not start a turn itself: the next poll does
-    return { text: 'Claude will check the local models against this machine now.' }
+    return { text: 'Claude will check the models for each role now, GPU and API.' }
   })
 
   on('command.run', { command: UPDATE }, async $ => {
@@ -4020,7 +4240,7 @@ export const register: Register = (on, options) => {
     return {
       blocks: [...blocks, {
         name: 'workbench',
-        text: `Tasks delegated to local agents with wb (the /workbench skill) are open:\n${status}\n` +
+        text: `Tasks delegated to agents with wb (the /workbench skill) are open:\n${status}\n` +
           'Pick them up from here: `wb report <name>` for one, `wb watch <name>` to follow it.',
       }],
     }
@@ -4177,21 +4397,30 @@ export const register: Register = (on, options) => {
         </Box>
       </Box>
     )
-    // the Settings tab: Claude coding (#93), then the Stats tab's (#406), one row each at rest; the
-    // electricity price is typed (an Input: wb checks it). Last, apart under Experimental, the web chat
-    // and the probe experiment: settings that may change or go away (the user, 2026-11-21)
+    // the Settings tab: Shared (the Agents switch, the busy row and the roles first, #1023; Claude
+    // coding, #93; Dynamic workflows, #1041; the day cap and wake; the Stats tab's, #406), one row
+    // each at rest; the prices are typed (an Input: wb checks them). Then GPU and API (#1023; API
+    // left out with no provider and no API role but its one line). Last, apart under Experimental,
+    // the web chat and the probe experiment: settings that may change or go away (the user, 2026-11-21)
     if (view.tab === 'settings') {
       const st = await statsSettings($)
       const probe = await probeStatus($)
       const probeAt = await probeMode($)
       const prog = await progressSettings($)
       const picked = (args: string[]) => runWb($, args).then(() => { void refreshStats($, true); void syncTop($) })
+      const roles = await roleRows(kit, $, view, await rolesNow($)) // Shared, GPU and API (#1023)
       return (
         <Box flexDirection="column">
           <Text dimColor>{SETTINGS_HINT}</Text>
           <Box flexDirection="column" marginTop={1}>
+            <Text bold>Shared</Text>
+            {roles.top}
             {settingRow(kit, $, 'coding', 'Claude coding', CODING_STOPS, await codingMode($), view,
               v => runWb($, ['coding', v]))}
+            {settingRow(kit, $, 'workflows', 'Dynamic workflows', WORKFLOWS_STOPS, await workflowsMode($), view,
+              v => runWb($, ['workflows', v]))}
+            {roles.cap}
+            <Text key="wake" dimColor>{`  Wake Claude: ${mem.wake ? 'on' : 'off'} · change it in /plugin → workbench → options`}</Text>
             {settingRow(kit, $, 'record', 'Stats recording', RECORD_STOPS, st.recording ? 'on' : 'off', view,
               v => picked(['stats', 'set', 'recording', v]))}
             {settingRow(kit, $, 'live', 'Live view', LIVE_STOPS, st.live ? 'on' : 'off', view,
@@ -4205,6 +4434,16 @@ export const register: Register = (on, options) => {
             <kit.Input key="price" label="▸ Electricity price per kWh: " value={mem.price ? String(mem.price) : ''}
               placeholder="not set (energy shows in Wh)" submitLabel="set" onSubmit={(v: string) => { void setPrice($, v) }} />
           </Box>
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold>GPU</Text>
+            {roles.gpu}
+          </Box>
+          {roles.api.length ? (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold>API</Text>
+              {roles.api}
+            </Box>
+          ) : null}
           <Box flexDirection="column" marginTop={1}>
             <Text><Text bold>Experimental</Text><Text dimColor> · may change or go away</Text></Text>
             {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}

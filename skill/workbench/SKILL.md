@@ -1,9 +1,9 @@
 ---
 name: workbench
 description: >
-  Workbench mode for the rest of the session: Claude hands the coding of each request to local
-  models running in OpenCode, via the workbench `wb` CLI, which routes each task to the best
-  local model for its size; Claude writes the spec, reviews the diff, and accepts or sends
+  Workbench mode for the rest of the session: Claude hands the coding of each request to
+  OpenCode subagents (on this machine's GPU, or an API model the user chose for the task's role)
+  via the workbench `wb` CLI; Claude writes the spec, reviews the diff, and accepts or sends
   feedback, so Claude spends tokens on specs and review instead of code generation. Only when
   the user invokes /workbench — never on your own.
 disable-model-invocation: true
@@ -63,16 +63,33 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   Answer questions, read code, plan, and do what is yours (git, CLAUDE.md, `.claude/`, anything
   outward) yourself, as always. An edit that costs less to make than to spec (a typo, one line)
   you may just make.
-- **First run** (no model can run yet, or the user wants to see it work), in this order, each
-  install or download on the user's yes:
-  1. `wb setup`: its `first run:` lines say what is missing.
-  2. No model yet: `wb scout`, then recommend what fits the machine (reference/models.md, which
-     names no server for them); `wb model add <provider/model> [--pull]`.
-  3. Ollama models only: `wb optimize estimate`, then `wb optimize start` (a minute or two,
+- **First run** (no role can run: `wb start` exits 3 with the router's `no GPU model…` line and
+  no role is on API, `wb setup` says what is missing; or the user wants to see it work), in this
+  order, each install or download on the user's yes. Once a role runs (on the GPU or on API),
+  `/workbench` goes straight to work: this never runs again on its own.
+  1. `wb setup`: its `first run:` lines say what is missing, and which API keys OpenCode holds.
+  2. **No GPU model, a provider with a stored key** (`ok  API keys: …`): `wb models` lists that
+     provider's models. Pick two as the weekly check would: reliable tool calls, a priced model
+     (never a free one), a window of 128K or more, the cheaper for trivial, the stronger for
+     significant; check them against the provider's own pages today. Then ask **one** question,
+     filled from what you found: "Use `<trivial id>` for trivial and `<significant id>` for
+     significant? Your code goes to `<provider>`. Day cap $5?" On a yes, the one command `wb route
+     trivial <id> significant <id> --day-usd 5` (their cap if they named one): the dialog shows
+     it, and its Allow is the consent. Another answer: do what they said. A "not changed" (the
+     dialog's Don't): say it wasn't set, every role stays on the GPU; ask again only if they bring
+     it up. Ask nothing before it: no server install, no `wb scout`.
+  3. **No GPU model and no key**: lay out both ways in two lines, a local server
+     (reference/models.md, which names no server for them) or `/connect` in OpenCode for an API
+     provider; let the user pick, and install nothing unasked. A server: `wb scout`, recommend
+     what fits the machine, `wb model add <provider/model> [--pull]`.
+  4. **A GPU model already** (keys or not): as before; mention once, in a line, that a provider
+     they connected could take a role if they want. Never push it.
+  5. Ollama models only: `wb optimize estimate`, then `wb optimize start` (a minute or two,
      detached): each model's window, measured on this GPU; `wb optimize report` once done.
-  4. `wb try` proves it on a tiny sample: review it as any task and run the hidden check it
-     printed. Then `wb accept` it (the sample is a scratch repo of its own) and show the user the
-     result and the savings line accept prints. Then ask what they'd like built.
+  6. `wb try` proves it on a tiny sample (with trivial on API, it goes to that provider): review
+     it as any task and run the hidden check it printed. Then `wb accept` it (the sample is a
+     scratch repo of its own) and show the user the result and the line accept prints. Then ask
+     what they'd like built.
 - **Claude coding** (the user's choice, `wb coding`): when you may write a task's code yourself,
   a one-line fix in review or `wb takeover` alike. "Let Claude decide" (the default) is this
   skill as written. Otherwise a `claude-coding` context block gives the rule: "Ask me first", or
@@ -186,8 +203,12 @@ been measured to cost you less a task (once each has three with your spend recor
 model, unloading whatever is there. Old results weigh less, and one task in ten goes to a model
 the record left out on fewer than three tasks ("exploring: …"): review it as any other. `wb
 models` shows the ranking per size. Pass
-`--model <id or fragment>` only if the user names one, or when the record argues against the guess,
-and say the model in your reply.
+`--model <id or fragment>` (a GPU model) only if the user names one, or when the record argues
+against the guess, and say the model you passed in your reply. An API model is the user's choice,
+never yours: never pass `--model <api id>`, never run `wb route` without the user's words in this
+conversation, and never move a role between GPU and API because one can't run (`wb start` exits 3:
+tell the user the choices it printed). Recommend; the user sets it, in the dialog or the pane's
+Settings tab.
 
 **Roles are the user's** (`wb route`): which model each kind of work goes to (`significant`,
 `trivial`, `writing`: GPU or API, each side's model, thinking, one day cap). Never pass `--model`
@@ -200,6 +221,10 @@ key to add with /connect, an exact id). The user's **Agents** switch (`wb route 
 gpu|api|both`) puts every role on one side, or Both: each role as set. A role that can't run
 (no key, no GPU model, Agents on API with no API model for it) exits 3 with one line of choices:
 there is no fallback, so ask the user and never retry with another `--role` or `--model` to dodge it.
+The one exception is theirs: with **When the GPU is busy** set to the role's API model (`wb route busy
+api`), a start that would wait for the GPU runs on the role's API model, and its output says `GPU busy:
+on the role's API model, as you set`. The user can set all of this in the pane's Settings tab
+(Shared, GPU, API): point them there rather than offering to run `wb route` yourself.
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
 add a model you judge fit only for small work, and otherwise change it only when the user asks.
 A newly added model has no record, so the router won't pick it over one with a good record:
@@ -207,7 +232,8 @@ replay the bench on it first (`wb bench run --model <id>`, §6), then give it it
 real tasks with `--model` (ones you'd review closely anyway).
 **API models and privacy.** An API model sends the repo, its spec, the CLAUDE.md files and the
 user's `~/.claude` rules to its provider. When you propose an API role, say where the code goes
-(the provider and its data-policy page, from `wb route`'s line). Never remove a `local_only`
+(the provider, as `wb route --dry-run`'s line names it; its data-policy page comes in the note
+of the repo's first task there). Never remove a `local_only`
 from commands.json (a repo the user keeps off API models: `wb start` exits 3 with the choices;
 ask the user). Never name a free model first (the provider may keep or train on the code), and
 never pick an OpenRouter backend (`--order`) for the user: ask which. An API task's lane hides
@@ -574,9 +600,10 @@ the user's yes, and the login is theirs (`! gh auth login`). Read `reference/pat
 this file first; you write the patch yourself.
 
 ## Report to the user
-Short and honest: what was built, on which model (GPU or API, and the role: `model:` at start,
-`routed:` in `wb watch`), rounds (automatic and review), test result,
-what you fixed, sent back or flagged, the branch. Report the agent's misses plainly; they are
+Short and honest: what was built, on which model (GPU, or API and its provider), the role and
+who set it (`model:` at start, `routed:` in `wb watch`), rounds (automatic and review), test result,
+what you fixed, sent back or flagged, the branch. For an API task, pass on the `paid` part of the
+line `wb accept` prints; never call API dollars a saving. Report the agent's misses plainly; they are
 evidence about the model, and the router learns from accept and discard. Pass on the
 `claude:` line `wb accept` prints: what the task cost you, measured, beside the estimate of
 writing it yourself and the GPU energy. For a task on an API model that line ends with what the
