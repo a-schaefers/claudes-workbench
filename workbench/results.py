@@ -279,10 +279,10 @@ def api_usage(task: store.Task) -> dict | None:
     Summed over every session it had (status `sessions` and `session`: handovers, revives and wb
     next each start one), and `backend`, OpenRouter's served provider (status `served.by`, the
     keyhole's), when known. `source`: "opencode" (OpenCode's own cost, from every session's
-    export, or the runner's meter when it counted more: the day cap's figure, #1019), "mixed" (the
-    sessions that exported, the rest filled from the meter), "metered"
-    (the runner's meter, else the step events' cost: a floor, both miss OpenCode's title and
-    compaction requests), "plan" (a quota: no dollars), "unknown" (no price anywhere). `cost` is
+    export), "mixed" (the sessions that exported, the rest filled from the meter), "metered"
+    (the runner's meter when it counted more than every export: the day cap's figure, #1019; else,
+    with no full export, the runner's meter or the step events' cost: a floor, both miss
+    OpenCode's title and compaction requests), "plan" (a quota: no dollars), "unknown" (no price anywhere). `cost` is
     None unless known, never 0 for a missing price: a 0 from OpenCode for a model the catalog
     prices isn't trusted. None for a GPU task. The order: every session's export, then some
     sessions' plus the meter's remainder, then the meter, then the step events' sum (both floors,
