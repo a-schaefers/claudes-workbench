@@ -198,6 +198,11 @@ the GPU and that a task they start stops it, then `wb optimize start [--bench]`;
 detached and wakes no one (a short measuring run also starts by itself when due: the mod says so).
 When `wb optimize report`, or a `note:` from `wb start`, offers a window, ask before `wb optimize
 apply <id>`: a bigger window compacts less, a window all on the GPU writes faster.
+Thinking is the user's choice per role, off by default: an API task runs with it off, or as low
+as its model allows without thinking more than its default (`wb watch` says which), fixed for the
+whole task. A GPU model
+thinks as its OpenCode entry says. You may recommend thinking on for significant work in chat,
+when the records show stuck or extra review rounds it might spare; never set it yourself.
 
 ## 2. Spec (the most valuable thing you write)
 **Spec tokens are output, the dearest you spend: a spec as long as the code it asks for costs

@@ -282,7 +282,7 @@ def write_config_layer(task: store.Task) -> Path:
     except KeyError:
         cfg = {}
     buffer = compaction_buffer(cfg)
-    store.write_json(path, {
+    store.write_json(path, thinking_layer({  # an API task's own thinking variant (#1018)
         "$schema": "https://opencode.ai/config.json",
         # the keyhole's base and token last: they are the provider's way out (#1012); an API
         # task's capped window and output before them (#1017)
@@ -294,7 +294,8 @@ def write_config_layer(task: store.Task) -> Path:
         # the user's global small_model (titles, summaries) could be a cloud model whose key
         # auth.json holds, sent the task's text; an update mid-task could move OpenCode past
         # OPENCODE_TESTED (#353, the audit of 1.4)
-        "small_model": task.spec["model"],
+        # with the task's variant: the title request would otherwise think by default (#1018)
+        "small_model": task.spec.get("opencode_model") or task.spec["model"],
         "autoupdate": False,
         # background: OpenCode 2.3.2's summary written ahead (on by default; 2.3.0 ignores the
         # key) is a full-context request on the agent's own server, below the handover point,
@@ -311,7 +312,7 @@ def write_config_layer(task: store.Task) -> Path:
             # the tool blocks until Claude answers; OpenCode must not give up on it first
             "timeout": {"startup": 15000, "execution": wait_ms},
         }}},
-    })
+    }, task.spec))
     os.chmod(path, 0o600)  # a provider copied in may carry its apiKey
     return path
 
@@ -402,7 +403,7 @@ def model_pins(model_id) -> dict:
     wb planned the handover and the compaction buffer against. A project config's own window for
     the model would move OpenCode's compaction off them (#519). {} for a model wb doesn't know."""
     try:
-        m = models.resolve(model_id) if isinstance(model_id, str) else None
+        m = models.resolve(model_id.partition("#")[0]) if isinstance(model_id, str) else None
     except KeyError:
         m = None
     if m is None:
@@ -505,6 +506,7 @@ def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
         content["providers"] = {**theirs, **{
             pid: models._merge(theirs[pid] if isinstance(theirs[pid], dict) else {}, v2)
             for pid, v2 in keyhole_v2(keyhole_over).items() if pid in theirs}}
+    content, ours = restate_thinking(layer, content), restate_thinking(layer, ours)  # #1018
     text = json.dumps(content, separators=(",", ":"))
     if len(text.encode()) > CONFIG_CONTENT_MAX:  # the user's own, too long to add to: wb's alone
         text = json.dumps(ours, separators=(",", ":"))
@@ -514,7 +516,8 @@ def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
 def _own_pins(layer: dict) -> dict:
     """The layer's own entry for its small_model (an API task's api_pins), as model_pins gives
     one: restated from the task's record when the catalog no longer knows the model (#1017)."""
-    pid, _, name = str(layer.get("small_model") or "").partition("/")
+    # the small_model names the task's thinking variant (#1018): the entry is the bare id's
+    pid, _, name = str(layer.get("small_model") or "").partition("#")[0].partition("/")
     entry = (((layer.get("provider") or {}).get(pid) or {}).get("models") or {}).get(name)
     entry = {k: entry[k] for k in ("limit", "options") if k in entry} if isinstance(entry, dict) else {}
     if isinstance(entry.get("options"), dict):
@@ -4067,6 +4070,234 @@ def main():
             except OSError as e:
                 if not store.disk_full(e):
                     raise
+
+
+# Thinking per task (#1018). API providers think by default (DeepSeek at effort high), and
+# reasoning bills at the output rate, so an API task runs with thinking off unless its role says
+# on (decision 5 of #1008). It is fixed at wb start (with_thinking): DeepSeek drops the prompt
+# cache when the switch or the effort changes between requests, so feedback, next, resume and a
+# handover keep the task's opencode_model as it was. Thinking off is the catalog's own variant
+# that turns it off when the model lists one (`none`: OpenCode 2.3.2 lists it for DeepSeek's,
+# DeepInfra's and most OpenAI and OpenRouter models, but for only 2 of Anthropic's 20); else, for
+# a model that reasons with no variants listed (a config entry's `reasoning: true`), wb's own
+# OFF_VARIANT variant in the layer, as the provider speaks it (THINKING_OFF). A model whose
+# variants have no off position never gets one that thinks more than its bare id (_no_off_listed,
+# the #1018 review): a variant there can turn thinking on that the bare id leaves off. A GPU task
+# gets none of this: it thinks as the user's OpenCode entry says, as before.
+OFF_VARIANT = "wb-off"  # reserved: a user's own variant of that name loses to wb's in the layer
+EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")  # lowest first
+# A body field (DeepSeek's `thinking`) on a catalog provider's package goes only in a V2 variant,
+# `providers.<p>.models.<m>.variants: [{id, body}]`: a V1 variant keeps only keys the package has a
+# setting for (the spike, #1009; checked again on OpenCode 2.3.2, 2026-11-23: a V1 `thinking` on
+# the catalog's deepseek-flash left the agent's request without it). And a document holding a
+# provider in both forms loses the V1 one (`provider.deepseek.options.baseURL` beside
+# `providers.deepseek` went unread), so that provider's whole entry moves to V2 with it (_as_v2).
+# A config provider on an npm package (@ai-sdk/openai-compatible aimed at DeepSeek's host) sends
+# a V1 variant's keys in the body as they are, so its body field stays V1 (_off_form): moved to
+# V2 whole, its `npm` was no package to V2 and the run failed "Unsupported package" (2026-11-23).
+# Settings stay V1, as the spike checked them. The title request carries `thinking: disabled` of
+# OpenCode's own whatever the variant: a check of wb-off reads the agent's request (with tools).
+THINKING_OFF = {
+    "deepseek": {"body": {"thinking": {"type": "disabled"}}},
+    "openrouter": {"settings": {"reasoning": {"enabled": False}}},
+    "anthropic": {"settings": {"thinking": {"type": "disabled"}}},
+    "openai": {"settings": {"reasoningEffort": "none"}},  # every OpenAI-compatible package
+}
+SPEAKS_HOST = {"deepseek": "deepseek.com", "openrouter": "openrouter.ai", "anthropic": "anthropic.com"}
+THINKING_ON = "thinking on"
+THINKING_NOT = "thinking off (the model doesn't reason)"
+THINKING_OFF_LINE = "thinking off"
+THINKING_LOWEST = "thinking at its lowest effort (it can't turn off)"
+THINKING_STAYS = "thinking on (it can't turn off)"
+THINKING_DEFAULT = "thinking as the model's default (it lists no lower setting)"
+# The effort a provider runs a reasoning model at when the request names none (OpenAI's API and
+# OpenRouter: medium; DeepSeek: high), which a listed effort must be under to be picked. None for
+# Anthropic: a bare id there may not think at all (_no_off_listed).
+DEFAULT_EFFORT = {"openai": "medium", "openrouter": "medium", "deepseek": "high"}
+CATALOG_PACKAGE = "@opencode/ai/providers/"  # a catalog provider's package (keyhole.PACKAGE_PREFIX)
+
+
+def speaks(m) -> str:
+    """What the model's provider speaks, for THINKING_OFF: its package (the catalog's, or the
+    config's npm), else its base URL's host; anything else is OpenAI-compatible."""
+    from urllib.parse import urlparse
+    pkg = str(m.package or m.config.get("npm") or "").lower()
+    host = (urlparse(m.base_url or "").hostname or "").lower()
+    return next((k for k, dom in SPEAKS_HOST.items()
+                 if k in pkg or host == dom or host.endswith("." + dom)), "openai")
+
+
+def _listed_variants(cfg: dict) -> list[dict]:
+    """The model's own variants as the catalog lists them, [{id, settings | body}]; a config
+    entry's V1 `{name: settings}` read the same way."""
+    v = cfg.get("variants")
+    if isinstance(v, dict):
+        v = [{"id": k, "settings": s} for k, s in v.items() if isinstance(s, dict)]
+    return [x for x in v if isinstance(x, dict) and isinstance(x.get("id"), str)
+            and x["id"] != OFF_VARIANT] if isinstance(v, list) else []
+
+
+def _turns_off(v: dict) -> bool:
+    if v["id"] == "none":
+        return True
+    s = {**(v.get("settings") if isinstance(v.get("settings"), dict) else {}),
+         **(v.get("body") if isinstance(v.get("body"), dict) else {})}
+    r, t = s.get("reasoning"), s.get("thinking")
+    return ("none" in (s.get("reasoningEffort"), s.get("reasoning_effort"))
+            or isinstance(r, dict) and (r.get("enabled") is False or r.get("effort") == "none")
+            or isinstance(t, dict) and t.get("type") == "disabled")
+
+
+def _lowest(ids: list[str]) -> str:
+    """The lowest effort of these (EFFORTS' order; a name it doesn't know ranks last, the first
+    listed of equals first)."""
+    return min(ids, key=lambda i: EFFORTS.index(i) if i in EFFORTS else len(EFFORTS))
+
+
+def _thinking(m, thinking: str) -> tuple[str | None, str, dict | None]:
+    """(variant or None, the line that says it, wb's OFF_VARIANT variant or None)."""
+    if thinking == "on":
+        return None, THINKING_ON, None  # the provider's default
+    cfg = m.config if isinstance(m.config, dict) else {}
+    caps = cfg.get("capabilities") if isinstance(cfg.get("capabilities"), dict) else {}
+    rcap = caps.get("reasoning")
+    if cfg.get("reasoning") is False or isinstance(rcap, dict) and rcap.get("supported") is False:
+        return None, THINKING_NOT, None
+    listed = _listed_variants(cfg)
+    if off := next((v["id"] for v in listed if _turns_off(v)), None):
+        return off, THINKING_OFF_LINE, None
+    kind = speaks(m)
+    if listed:  # a switch with no off position
+        return _no_off_listed(kind, listed)
+    if isinstance(rcap, dict) and not rcap.get("toggle"):  # reasons, can't be turned off
+        efforts = [e for e in rcap.get("effort") or [] if isinstance(e, str)]
+        if kind == "openrouter":
+            return OFF_VARIANT, THINKING_LOWEST, {"settings": {"reasoning": {"effort": "minimal"}}}
+        if efforts:
+            return OFF_VARIANT, THINKING_LOWEST, {"settings": {"reasoningEffort": _lowest(efforts)}}
+        return None, THINKING_STAYS, None
+    if cfg.get("reasoning") is True or isinstance(rcap, dict):
+        return OFF_VARIANT, THINKING_OFF_LINE, _off_form(m, THINKING_OFF[kind])
+    # OpenCode lists variants for every model its catalog says reasons: none, it doesn't
+    return None, THINKING_NOT, None
+
+
+def _no_off_listed(kind: str, listed: list[dict]) -> tuple[str | None, str, None]:
+    """A model whose listed variants can't turn thinking off: never one that thinks more than
+    the bare id. Anthropic's manual-thinking models (every variant `thinking.type: enabled`, a
+    `budgetTokens`) don't think on the bare id, and OpenCode sends them no `thinking` (checked
+    2026-11-23, OpenCode 2.3.2): off as they are. Its adaptive ones may not either (the 4.6-4.8
+    line; others think on the bare id and refuse `disabled`, and the catalog doesn't say which):
+    the bare id, whose `#low` turned thinking on. Elsewhere the lowest listed effort when it is
+    under the provider's default (DEFAULT_EFFORT), else the bare id."""
+    if kind == "anthropic":
+        types = {(v.get("settings") or {}).get("thinking", {}).get("type") for v in listed
+                 if isinstance(v.get("settings"), dict) and isinstance(v["settings"].get("thinking"), dict)}
+        return (None, THINKING_OFF_LINE if types == {"enabled"} else THINKING_DEFAULT, None)
+    efforts = [v["id"] for v in listed if v["id"] in EFFORTS]
+    default = DEFAULT_EFFORT.get(kind)
+    if efforts and default and EFFORTS.index(low := _lowest(efforts)) < EFFORTS.index(default):
+        return low, THINKING_LOWEST, None
+    return None, THINKING_DEFAULT, None
+
+
+def _off_form(m, off: dict) -> dict:
+    """THINKING_OFF's variant for this model: a body field as a V1 setting on a provider of the
+    user's config (an npm package, which sends V1 keys in the body), else as it is."""
+    pkg = str(m.package or m.config.get("npm") or "")
+    if "body" in off and pkg and not pkg.startswith(CATALOG_PACKAGE):
+        return {"settings": off["body"]}
+    return off
+
+
+def thinking_variant(m, thinking: str) -> tuple[str | None, str]:
+    """The variant that gives an API model this thinking ("off" or "on"), or None for the
+    model's default, and the line that says what it does (task.json `thinking_shown`)."""
+    variant, shown, _ = _thinking(m, thinking)
+    return variant, shown
+
+
+def with_thinking(m, spec: dict) -> dict:
+    """task.json with an API task's thinking fixed (cmd_start, once): `thinking` (task.json's,
+    which the role sets; default off), `thinking_shown`, `opencode_model` with the variant, and
+    `thinking_off`, wb's own variant when one goes in the layer. A GPU task's is left as it was."""
+    if getattr(m, "kind", "gpu") != "api":
+        return spec
+    thinking = "on" if spec.get("thinking") == "on" else "off"
+    variant, shown, off = _thinking(m, thinking)
+    return {**spec, "opencode_model": f"{m.id}#{variant}" if variant else m.id,
+            "thinking": thinking, "thinking_shown": shown, **({"thinking_off": off} if off else {})}
+
+
+def _as_v2(doc: dict, pid: str, mid: str, variant: dict) -> dict:
+    """``doc`` with provider ``pid``'s V1 entry moved to the V2 form (options as settings, a V1
+    variants object as a list, `npm` as `package`) and ``variant`` added to model ``mid``'s variants."""
+    doc = dict(doc)
+    v1 = dict(((doc.get("provider") or {}).get(pid)) or {})
+    rest = {k: v for k, v in (doc.get("provider") or {}).items() if k != pid}
+    v2 = models._merge(((doc.get("providers") or {}).get(pid)) or {},
+                       {**{k: v for k, v in v1.items() if k not in ("options", "models", "npm")},
+                        # V2 names it `package`: a V2 `npm` failed "Unsupported package" (2026-11-23)
+                        **({"package": v1["npm"]} if "npm" in v1 else {}),
+                        **({"settings": v1["options"]} if isinstance(v1.get("options"), dict) else {})})
+    found = dict(v2.get("models") or {})
+    for name, entry in (v1.get("models") or {}).items():
+        entry = dict(entry) if isinstance(entry, dict) else {}
+        if isinstance(entry.get("options"), dict):
+            entry["settings"] = entry.pop("options")
+        # a V1 model's own base (`provider.api`, keyhole_overlay's) is a V2 model's
+        # settings.baseURL, as keyhole_v2 says it: moved as it was, the keyhole's base would be
+        # a key V2 doesn't read (#1015 with #1018)
+        if isinstance(entry.get("provider"), dict) and "api" in entry["provider"]:
+            base = entry.pop("provider")["api"]
+            entry["settings"] = {"baseURL": base, **(entry.get("settings") or {})}
+        if isinstance(entry.get("variants"), dict):
+            entry["variants"] = [{"id": k, "settings": s} for k, s in entry["variants"].items()]
+        found[name] = models._merge(found.get(name) or {}, entry)
+    mine = dict(found.get(mid) or {})
+    mine["variants"] = [v for v in mine.get("variants") or []
+                        if isinstance(v, dict) and v.get("id") != OFF_VARIANT] + [variant]
+    found[mid] = mine
+    doc["providers"] = {**(doc.get("providers") or {}), pid: {**v2, "models": found}}
+    if rest:
+        doc["provider"] = rest
+    else:
+        doc.pop("provider", None)
+    return doc
+
+
+def thinking_layer(doc: dict, spec: dict) -> dict:
+    """The config layer with the task's OFF_VARIANT variant (task.json `thinking_off`) under its
+    model, when its opencode_model names it: a settings variant in V1 form, a body one in V2."""
+    off = spec.get("thinking_off")
+    model, _, variant = str(spec.get("opencode_model") or "").partition("#")
+    if variant != OFF_VARIANT or not isinstance(off, dict) or "/" not in model:
+        return doc
+    pid, _, mid = model.partition("/")
+    if "body" in off:
+        return _as_v2(doc, pid, mid, {"id": OFF_VARIANT, **off})
+    return models._merge(doc, {"provider": {pid: {"models": {mid: {"variants": {
+        OFF_VARIANT: off.get("settings") or {}}}}}}})
+
+
+def restate_thinking(layer: dict, doc: dict) -> dict:
+    """OPENCODE_CONFIG_CONTENT (``doc``) with the layer's OFF_VARIANT variant said again, as the
+    model's pins are (rules_env): the task's model is the layer's small_model. Its provider goes
+    to V2 here too when the layer's did, keeping only its timeouts (never a key or baseURL)."""
+    pid, _, mid = str(layer.get("small_model") or "").partition("#")[0].partition("/")
+    v1 = ((((layer.get("provider") or {}).get(pid) or {}).get("models") or {}).get(mid) or {}).get("variants")
+    if isinstance(v1, dict) and OFF_VARIANT in v1:
+        return models._merge(doc, {"provider": {pid: {"models": {mid: {"variants": {OFF_VARIANT: v1[OFF_VARIANT]}}}}}})
+    v2 = (layer.get("providers") or {}).get(pid) or {}
+    mine = [v for v in ((v2.get("models") or {}).get(mid) or {}).get("variants") or []
+            if isinstance(v, dict) and v.get("id") == OFF_VARIANT]
+    if not mine:
+        return doc
+    doc = _as_v2(doc, pid, mid, mine[0])
+    settings = v2.get("settings") if isinstance(v2.get("settings"), dict) else {}
+    if timeouts := {k: settings[k] for k in PROVIDER_TIMEOUTS if k in settings}:
+        doc["providers"][pid]["settings"] = {**(doc["providers"][pid].get("settings") or {}), **timeouts}
+    return doc
 
 
 if __name__ == "__main__":

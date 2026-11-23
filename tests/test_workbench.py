@@ -28228,7 +28228,9 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         opts = layer["provider"]["deepinfra"]["options"]
         self.assertTrue(opts["baseURL"].startswith("http://127.0.0.1:"), opts)
         self.assertTrue(opts["baseURL"].endswith("/v1/openai"))
-        self.assertEqual(layer["small_model"], FLASH)                # titles on the task's model
+        # titles on the task's model, with its thinking variant (#1018): the catalog's own `none`
+        self.assertEqual(layer["small_model"], task.spec["opencode_model"])
+        self.assertEqual(layer["small_model"], f"{FLASH}#none")
         self.assert_no_canary(json.dumps(layer), (rules / "catalog.json").read_text(),
                               self.all_files(task.dir))
         self.assertNotIn("listed-key", (rules / "catalog.json").read_text())
@@ -28363,6 +28365,387 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.drive_here("api-health")
         health = self.models.api_health("deepinfra")
         self.assertEqual((health or {}).get("state"), "no_credit", health)
+
+
+# Catalog rows for thinking per task (#1018), shaped as OpenCode 2.3.2's `api model.list` prints
+# them: DeepSeek's own API lists `none` (a body field), OpenRouter a model whose variants have no
+# off position, and rows with no variants (a model that doesn't reason), or a reasoning
+# capability and no variants (wb's own variant goes in the layer)
+DEEPSEEK = {"package": "@opencode/ai/providers/deepseek", "settings": {"baseURL": "https://api.deepseek.com"},
+            "cost": [{"input": 0.2, "output": 0.6, "cache": {"read": 0.006, "write": 0}}],
+            "limit": {"context": 1048576, "output": 384000}, "status": "active"}
+OPENROUTER = {"package": "@opencode/ai/providers/openrouter", "settings": {"baseURL": "https://openrouter.ai/api/v1"},
+              "cost": [{"input": 1, "output": 2, "cache": {"read": 0, "write": 0}}],
+              "limit": {"context": 200000, "output": 32000}, "status": "active"}
+THINK_CATALOG = [
+    {**DEEPSEEK, "id": "deepseek-flash", "providerID": "deepseek", "capabilities": {"tools": True},
+     "variants": [{"id": "none", "body": {"thinking": {"type": "disabled"}}}] + [
+         {"id": v, "settings": {"reasoningEffort": v}, "body": {"thinking": {"type": "enabled"}}}
+         for v in ("low", "high", "max")]},
+    {**DEEPSEEK, "id": "deepseek-plain", "providerID": "deepseek",
+     "capabilities": {"tools": True, "reasoning": {"toggle": True}}},
+    {**OPENROUTER, "id": "acme/mandatory-coder", "providerID": "openrouter", "capabilities": {"tools": True},
+     "variants": [{"id": v, "settings": {"reasoning": {"effort": v}}} for v in ("low", "minimal", "high")]},
+    {**OPENROUTER, "id": "acme/mandatory-bare", "providerID": "openrouter",
+     "capabilities": {"tools": True, "reasoning": {"effort": ["low", "high"]}}},
+    {**OPENROUTER, "id": "acme/plain", "providerID": "openrouter", "capabilities": {"tools": True}}]
+
+
+class ApiThinking(Base):
+    """Thinking per task (#1018): an API task runs with thinking off unless its role says on,
+    through the catalog's own off variant or wb's `wb-off` in the layer, fixed at wb start and
+    shown from task.json; a GPU task as before."""
+    catalog = ApiHarness.catalog
+    capture = ApiHarness.capture
+    real_env = ApiHarness.real_env
+    oc_cwd = ApiHarness.oc_cwd
+    layer = staticmethod(ApiHarness.layer)
+    real_run = ApiHarness.real_run
+
+    def setUp(self):
+        super().setUp()
+        from workbench import models
+        self.models = models
+        self.catalog(THINK_CATALOG)
+
+    def start_api(self, name, mid, **extra):
+        """wb start for an API model, as #1016's roles will run it (wb start refuses --model for
+        one until then): the router's pick and the runner left out, the rest as it is."""
+        m = self.models.hosted()[mid]
+        with mock.patch.object(cli, "pick_model", lambda *a: (m, self.models.status(m), "the role")), \
+                mock.patch.object(cli, "_gpu_wait", lambda *a: ({}, False)), \
+                mock.patch.object(cli, "spawn_runner", lambda t: 0), \
+                mock.patch.object(runner, "with_thinking", lambda m, spec, f=runner.with_thinking:
+                                  f(m, {**spec, **extra})):  # task.json's `thinking`, as the role sets it
+            run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo))
+        return store.Task(name)
+
+    def fake_run(self, task, env=None):
+        """The fake OpenCode run as the runner starts it: the task's -m and its environment."""
+        env = runner.opencode_env(task) if env is None else env
+        p = subprocess.run([*shlex.split(FAKE), "run", "--standalone", "-m", task.spec["opencode_model"],
+                            "--auto", "--format", "json", "--", "go"], cwd=task.dir, env={
+                                **env, "FAKE_NO_MCP": "1", "FAKE_SCENARIO": "say"},
+                           capture_output=True, text=True, timeout=60)
+        return p.returncode, [json.loads(x) for x in p.stdout.splitlines() if x.startswith("{")]
+
+    def test_an_api_task_runs_the_catalogs_own_off_variant_fixed_at_its_start(self):
+        task = self.start_api("t-flash", "deepseek/deepseek-flash")
+        sp = task.spec
+        self.assertEqual((sp["opencode_model"], sp["thinking"], sp["thinking_shown"]),
+                         ("deepseek/deepseek-flash#none", "off", "thinking off"))  # off by default
+        self.assertNotIn("thinking_off", sp)                     # nothing of wb's in the layer
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["small_model"], "deepseek/deepseek-flash#none")  # the title too
+        self.assertNotIn("providers", layer)
+        code, rows = self.fake_run(task)
+        self.assertEqual((code, rows[-1]["type"]), (0, "step_finish"), rows)   # the variant resolves
+        # the role's thinking changed mid-task: the task keeps what it started with (the cache)
+        routes = Path(self.tmp.name) / "routes.json"
+        routes.write_text(json.dumps({"v": 1, "roles": {r: {"via": "api", "api": "deepseek/deepseek-flash",
+                                                            "thinking": "on"} for r in ("significant", "trivial")}}))
+        os.environ["WB_ROUTES"] = str(routes)
+        runner.checkout(task)
+        task.set_status(phase="review")
+        with mock.patch.object(cli, "spawn_runner", lambda t: 0):
+            run_wb("feedback", "t-flash", "--text", "Also write b.txt.")
+        self.assertEqual({k: store.Task("t-flash").spec[k] for k in ("opencode_model", "thinking", "thinking_shown")},
+                         {k: sp[k] for k in ("opencode_model", "thinking", "thinking_shown")})
+        self.assertEqual(json.loads(runner.write_config_layer(task).read_text())["small_model"],
+                         "deepseek/deepseek-flash#none")
+        out = transcript.model_line(store.Task("t-flash"), {})
+        self.assertEqual(out, "deepseek (API) · thinking off · 128K context")   # task.json's, no variant; #1017's window
+        from workbench import results
+        row = results.record(task, "discarded")
+        self.assertEqual(row["thinking"], "off")                  # the weekly check's evidence
+
+    def test_a_deepseek_model_with_no_off_variant_gets_wb_off_in_the_layer_and_its_restatement(self):
+        task = self.start_api("t-plain", "deepseek/deepseek-plain")
+        sp = task.spec
+        self.assertEqual((sp["opencode_model"], sp["thinking_shown"]), ("deepseek/deepseek-plain#wb-off", "thinking off"))
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        mine = layer["providers"]["deepseek"]
+        self.assertEqual(mine["models"]["deepseek-plain"]["variants"],
+                         [{"id": "wb-off", "body": {"thinking": {"type": "disabled"}}}])
+        # a body field goes only in V2, and a provider in both forms loses its V1 entry
+        self.assertNotIn("deepseek", layer.get("provider") or {})
+        self.assertIn("chunkTimeout", mine["settings"])            # its timeouts moved with it
+        self.assertEqual(layer["small_model"], "deepseek/deepseek-plain#wb-off")
+        env = runner.opencode_env(task)
+        content = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(content["providers"]["deepseek"]["models"]["deepseek-plain"]["variants"],
+                         mine["models"]["deepseek-plain"]["variants"])  # restated, as the pins are
+        self.assertNotIn("deepseek", content.get("provider") or {})
+        self.assertEqual(content["providers"]["deepseek"]["models"]["deepseek-plain"]["limit"],
+                         runner.models.api_limits(DEEPSEEK)["limit"])     # with the model's pins (#1017's caps)
+        self.assertEqual(content["small_model"], "deepseek/deepseek-plain#wb-off")
+        code, rows = self.fake_run(task, env)
+        self.assertEqual((code, rows[-1]["type"]), (0, "step_finish"), rows)
+        bare = {k: v for k, v in env.items() if k not in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT")}
+        code, rows = self.fake_run(task, bare)                       # without the layer: no such variant
+        self.assertEqual((code, rows[-1]["error"]["message"]),
+                         (1, "Variant unavailable for deepseek/deepseek-plain: wb-off"))
+
+    def test_thinking_on_runs_the_bare_id_with_no_variant_anywhere(self):
+        task = self.start_api("t-on", "deepseek/deepseek-plain", thinking="on")
+        self.assertEqual((task.spec["opencode_model"], task.spec["thinking_shown"]),
+                         ("deepseek/deepseek-plain", "thinking on"))
+        env = runner.opencode_env(task)
+        self.assertNotIn("wb-off", Path(env["OPENCODE_CONFIG"]).read_text())
+        self.assertNotIn("wb-off", env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(self.fake_run(task, env)[0], 0)
+        self.assertIn("thinking on", transcript.model_line(task, {}))
+
+    def test_a_model_that_cant_turn_thinking_off_runs_at_its_lowest_effort_and_says_so(self):
+        task = self.start_api("t-must", "openrouter/acme/mandatory-coder")
+        self.assertEqual((task.spec["opencode_model"], task.spec["thinking_shown"]),
+                         ("openrouter/acme/mandatory-coder#minimal",       # the catalog's lowest
+                          "thinking at its lowest effort (it can't turn off)"))
+        self.assertEqual(self.fake_run(task)[0], 0)
+        task = self.start_api("t-must-bare", "openrouter/acme/mandatory-bare")   # none listed: wb's
+        self.assertEqual(task.spec["opencode_model"], "openrouter/acme/mandatory-bare#wb-off")
+        self.assertIn("lowest effort (it can't turn off)", task.spec["thinking_shown"])
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["provider"]["openrouter"]["models"]["acme/mandatory-bare"]["variants"],
+                         {"wb-off": {"reasoning": {"effort": "minimal"}}})   # a setting: V1
+        self.assertNotIn("providers", layer)
+        env = runner.opencode_env(task)
+        self.assertIn('"wb-off":{"reasoning":{"effort":"minimal"}}', env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(self.fake_run(task, env)[0], 0)
+        task = self.start_api("t-noreason", "openrouter/acme/plain")      # no variants: doesn't reason
+        self.assertEqual((task.spec["opencode_model"], task.spec["thinking_shown"]),
+                         ("openrouter/acme/plain", "thinking off (the model doesn't reason)"))
+
+    def test_the_variant_follows_what_the_provider_speaks(self):
+        M = lambda url="https://api.example.test/v1", package="", **cfg: self.models.Model(  # noqa: E731
+            id="p/m", provider="p", name="m", base_url=url, engine="api", label="P (API)", kind="api",
+            package=package, config=cfg)
+        cases = [
+            (M(reasoning=True, package="@opencode/ai/providers/deepseek"),
+             ("wb-off", "thinking off", {"body": {"thinking": {"type": "disabled"}}})),  # V2 for the catalog's
+            # by its host; an npm package sends V1 keys in the body, so a setting (the #1018 review)
+            (M(reasoning=True, npm="@ai-sdk/openai-compatible", url="https://api.deepseek.com/v1"),
+             ("wb-off", "thinking off", {"settings": {"thinking": {"type": "disabled"}}})),
+            (M(reasoning=True, package="@opencode/ai/providers/anthropic"),
+             ("wb-off", "thinking off", {"settings": {"thinking": {"type": "disabled"}}})),
+            (M(reasoning=True), ("wb-off", "thinking off", {"settings": {"reasoningEffort": "none"}})),
+            (M(reasoning=True, url="https://openrouter.ai/api/v1"),
+             ("wb-off", "thinking off", {"settings": {"reasoning": {"enabled": False}}})),
+            (M(reasoning=False, variants=[{"id": "none"}]), (None, "thinking off (the model doesn't reason)", None)),
+            (M(variants={"quick": {"reasoningEffort": "none"}, "deep": {"reasoningEffort": "high"}}),
+             ("quick", "thinking off", None)),                       # a config's V1 variants, by content
+            # none listed off: never a variant that thinks more than the bare id (the #1018 review)
+            (M(variants=[{"id": "high"}, {"id": "thinking"}]),     # not under OpenAI's default medium
+             (None, "thinking as the model's default (it lists no lower setting)", None)),
+            (M(variants=[{"id": "high"}, {"id": "low"}]),
+             ("low", "thinking at its lowest effort (it can't turn off)", None)),
+            (M(url="https://openrouter.ai/api/v1", variants=[{"id": v, "settings": {"reasoning": {"effort": v}}}
+                                                         for v in ("high", "xhigh", "max")]),
+             (None, "thinking as the model's default (it lists no lower setting)", None)),
+            (M(variants=[{"id": "wb-off", "settings": {"reasoningEffort": "none"}}, {"id": "high"}]),
+             (None, "thinking as the model's default (it lists no lower setting)", None)),  # theirs ignored
+            # Anthropic's manual thinking: the bare id sends no `thinking`, so off as it is
+            (M(package="@opencode/ai/providers/anthropic", variants=[
+                {"id": v, "settings": {"thinking": {"type": "enabled", "budgetTokens": n}}}
+                for v, n in (("high", 16000), ("max", 31999))]), (None, "thinking off", None)),
+            # its adaptive ones: some think on the bare id and refuse `disabled`; `#low` turned on
+            # thinking for those that don't
+            (M(package="@opencode/ai/providers/anthropic", variants=[
+                {"id": v, "settings": {"thinking": {"type": "adaptive"}, "effort": v}} for v in ("low", "high")]),
+             (None, "thinking as the model's default (it lists no lower setting)", None)),
+            (M(capabilities={"reasoning": {"effort": ["high", "medium"]}}),
+             ("wb-off", "thinking at its lowest effort (it can't turn off)", {"settings": {"reasoningEffort": "medium"}})),
+            (M(capabilities={"reasoning": {}}), (None, "thinking on (it can't turn off)", None)),
+        ]
+        for m, want in cases:
+            self.assertEqual(runner._thinking(m, "off"), want, m.config)
+            self.assertEqual(runner.thinking_variant(m, "on"), (None, "thinking on"))
+
+    def test_a_keyhole_models_own_base_moves_to_v2_as_its_settings_base_url(self):
+        # the wave 2 merge (#1015 with #1018): the keyhole overlay gives the model a V1
+        # `provider.api`; moved to V2 as it was, the keyhole's base sat in a key V2 doesn't read
+        base, wbs = "http://127.0.0.1:9/v1", {"id": "wb-off", "body": {"thinking": {"type": "disabled"}}}
+        moved = runner._as_v2({"provider": {"ds": {"options": {"baseURL": base, "apiKey": "tok"}, "models": {
+            "m": {"provider": {"api": base}, "options": {"apiKey": "tok"}}}}}}, "ds", "m", wbs)
+        entry = moved["providers"]["ds"]["models"]["m"]
+        self.assertNotIn("provider", entry)
+        self.assertEqual(entry["settings"], {"baseURL": base, "apiKey": "tok"})
+        self.assertEqual(moved["providers"]["ds"]["settings"], {"baseURL": base, "apiKey": "tok"})
+
+    def test_a_users_own_v1_provider_moves_to_v2_whole_and_wb_off_stays_wbs(self):
+        # the #1018 review: the V2 move's conversions (options, a V1 variants object, a user's own
+        # wb-off) and the content's timeouts had no test; and V2 names npm `package` (a V2 `npm`
+        # failed "Unsupported package" on OpenCode 2.3.2, 2026-11-23)
+        users = {"deepseek": {"options": {"headerTimeout": 5000, "region": "eu"},
+                              "models": {"deepseek-plain": {"options": {"max_tokens": 4096}, "variants": {
+                                  "high": {"reasoningEffort": "high"}, "wb-off": {"reasoningEffort": "max"}}}}}}
+        path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(path.read_text())
+        cfg.setdefault("provider", {}).update(json.loads(json.dumps(users)))
+        path.write_text(json.dumps(cfg))
+        task = self.start_api("t-users", "deepseek/deepseek-plain")
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        wbs = {"id": "wb-off", "body": {"thinking": {"type": "disabled"}}}
+        self.assertNotIn("deepseek", layer.get("provider") or {})
+        v2 = layer["providers"]["deepseek"]
+        self.assertEqual(v2["settings"]["region"], "eu")                  # options as settings
+        self.assertIn("chunkTimeout", v2["settings"])
+        mine = v2["models"]["deepseek-plain"]
+        self.assertEqual((mine["settings"], "options" in mine), ({"max_tokens": 4096}, False))
+        self.assertEqual(mine["variants"], [{"id": "high", "settings": {"reasoningEffort": "high"}}, wbs])
+        with mock.patch.dict(os.environ):                              # the user's content instead
+            del os.environ["WB_OPENCODE_CONFIG"]
+            (Path(self.tmp.name) / "xdg").mkdir()
+            os.environ.update(XDG_CONFIG_HOME=str(Path(self.tmp.name) / "xdg"),
+                              OPENCODE_CONFIG_CONTENT=json.dumps({"provider": users}))
+            content = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
+        self.assertNotIn("deepseek", content.get("provider") or {})
+        cv = content["providers"]["deepseek"]
+        self.assertEqual({k: cv["settings"][k] for k in runner.PROVIDER_TIMEOUTS},   # the layer's, not theirs
+                         {k: v2["settings"][k] for k in runner.PROVIDER_TIMEOUTS})
+        self.assertEqual(cv["settings"]["region"], "eu")
+        # the task's output pin (#1017) said on top: the fake's catalog doesn't carry the user's 4096
+        self.assertEqual(cv["models"]["deepseek-plain"]["settings"], {"max_tokens": runner.models.API_OUTPUT})
+        self.assertEqual(cv["models"]["deepseek-plain"]["variants"],
+                         [{"id": "high", "settings": {"reasoningEffort": "high"}}, wbs])
+        moved = runner._as_v2({"provider": {"dsx": {"npm": "@ai-sdk/openai-compatible", "name": "DSX",
+                                                    "options": {"baseURL": "http://h/v1"}}}}, "dsx", "m", wbs)
+        self.assertEqual(moved, {"providers": {"dsx": {"package": "@ai-sdk/openai-compatible", "name": "DSX",
+                                                       "settings": {"baseURL": "http://h/v1"},
+                                                       "models": {"m": {"variants": [wbs]}}}}})
+
+    def test_a_gpu_task_gets_no_variant_whatever_the_roles_thinking(self):
+        self.start("t-gpu", "ok")
+        wait_phase("t-gpu", {"review"})
+        task = store.Task("t-gpu")
+        self.assertEqual(task.spec["opencode_model"], task.spec["model"])          # as today
+        self.assertFalse({"thinking", "thinking_shown", "thinking_off"} & set(task.spec))
+        gpu = self.models.resolve(task.spec["model"])
+        spec = {**task.spec, "thinking": "off"}                     # as #1016 writes it for a GPU role
+        self.assertEqual(runner.with_thinking(gpu, spec), spec)
+        layer = runner.write_config_layer(task).read_text()
+        self.assertNotIn("wb-off", layer)
+        self.assertEqual(json.loads(layer)["small_model"], task.spec["model"])
+        from workbench import results
+        self.assertNotIn("thinking", results.record(task, "discarded"))
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_sends_thinking_disabled_through_wb_off_and_the_catalogs_none(self):
+        port, out, heads = self.capture("real-think")
+        layer = lambda: {"provider": {"deepseek": {"options": {  # noqa: E731
+            "baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "dummy-key",
+            "headerTimeout": False, "chunkTimeout": 960000}}}}
+        listed = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
+                                env=self.real_env(layer()), capture_output=True, text=True, timeout=60)
+        rows = [e for e in json.loads(listed.stdout)["data"] if e["providerID"] == "deepseek"
+                and e.get("capabilities", {}).get("tools")]
+        self.assertTrue(rows, "no DeepSeek model in this OpenCode's catalog")
+        entry = rows[0]
+        model = f"deepseek/{entry['id']}"
+        Model = lambda **cfg: self.models.Model(  # noqa: E731
+            id=model, provider="deepseek", name=entry["id"], base_url="https://api.deepseek.com",
+            engine="api", label="DeepSeek (API)", kind="api", package=entry.get("package", ""),
+            config={"limit": entry["limit"], **cfg})
+
+        def run(spec):
+            doc = runner.thinking_layer({**layer(), "small_model": spec["opencode_model"]}, spec)
+            path = Path(self.tmp.name) / "think-layer.json"
+            path.write_text(json.dumps(doc))
+            content = runner.restate_thinking(doc, {"share": "disabled", "provider": {"deepseek": {
+                "options": {"headerTimeout": False, "chunkTimeout": 960000}}}})
+            env = {**self.real_env(content), "OPENCODE_CONFIG": str(path)}
+            before = len(out.read_text().splitlines()) if out.exists() else 0
+            p = subprocess.run(["opencode", "run", "--standalone", "-m", spec["opencode_model"], "--format",
+                                "json", "--", "say ok"], cwd=self.oc_cwd(), env=env, capture_output=True,
+                               text=True, timeout=90)
+            self.assertEqual(p.returncode, 0, p.stdout[-2000:])
+            return [json.loads(x) for x in out.read_text().splitlines()][before:]
+
+        # a DeepSeek model that lists no off variant: wb's own, a V2 body field beside V1 options
+        spec = runner.with_thinking(Model(reasoning=True), {"model": model, "opencode_model": model})
+        self.assertEqual(spec["opencode_model"], f"{model}#wb-off")
+        bodies = run(spec)
+        self.assertTrue([b for b in bodies if b.get("tools")], "no agent request")
+        self.assertEqual({json.dumps(b.get("thinking")) for b in bodies}, {'{"type": "disabled"}'})
+        bare = run({"model": model, "opencode_model": model})       # no variant: no field
+        self.assertEqual([b.get("thinking") for b in bare if b.get("tools")], [None])
+        # the catalog's own, as 2.3.2 lists it for DeepSeek
+        spec = runner.with_thinking(Model(variants=entry.get("variants")), {"model": model, "opencode_model": model})
+        self.assertEqual(spec["opencode_model"], f"{model}#none")
+        bodies = run(spec)
+        self.assertEqual([b.get("thinking") for b in bodies if b.get("tools")], [{"type": "disabled"}])
+        # a provider of the user's config on an npm package, at DeepSeek's host: its wb-off stays V1,
+        # whose keys that package sends in the body (moved to V2 whole, its npm failed the run)
+        compat = self.models.Model(
+            id="dsx/ds-model", provider="dsx", name="ds-model", base_url="https://api.deepseek.com/v1",
+            engine="api", label="DSX (API)", kind="api", package="@ai-sdk/openai-compatible",
+            config={"reasoning": True})
+        spec = runner.with_thinking(compat, {"model": compat.id, "opencode_model": compat.id})
+        doc = runner.thinking_layer({"provider": {"dsx": {
+            "npm": "@ai-sdk/openai-compatible", "name": "DSX",
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "dummy-key"},
+            "models": {"ds-model": {"name": "ds-model", "reasoning": True, "tool_call": True,
+                                    "limit": {"context": 65536, "output": 8192}}}}},
+            "small_model": spec["opencode_model"]}, spec)
+        self.assertEqual(doc["provider"]["dsx"]["models"]["ds-model"]["variants"],
+                         {"wb-off": {"thinking": {"type": "disabled"}}})
+        path = Path(self.tmp.name) / "think-compat.json"
+        path.write_text(json.dumps(doc))
+        before = len(out.read_text().splitlines()) if out.exists() else 0
+        p = subprocess.run(["opencode", "run", "--standalone", "-m", spec["opencode_model"], "--format", "json",
+                            "--", "say ok"], cwd=self.oc_cwd(), env={**self.real_env({}), "OPENCODE_CONFIG": str(path)},
+                           capture_output=True, text=True, timeout=90)
+        self.assertEqual(p.returncode, 0, p.stdout[-2000:])
+        bodies = [json.loads(x) for x in out.read_text().splitlines()][before:]
+        self.assertEqual([b.get("thinking") for b in bodies if b.get("tools")], [{"type": "disabled"}])
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_anthropic_with_no_off_variant_runs_its_bare_id_never_turning_thinking_on(self):
+        # the #1018 review: with none of its variants off, wb ran the lowest listed, which sent
+        # `thinking: enabled` (manual) or `adaptive` with an effort where the bare id sent no
+        # `thinking`; and 18 of the catalog's 20 Anthropic models list no `none`
+        port, out, _ = self.capture("real-anthropic")
+        layer = self.layer(port, "anthropic")
+        listed = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
+                                env=self.real_env(layer), capture_output=True, text=True, timeout=60)
+        rows = [e for e in json.loads(listed.stdout)["data"] if e["providerID"] == "anthropic"
+                and e.get("capabilities", {}).get("tools") and e.get("variants")]
+        self.assertTrue(rows, "no Anthropic model with variants in this OpenCode's catalog")
+        kinds = lambda e: {((v.get("settings") or {}).get("thinking") or {}).get("type")  # noqa: E731
+                           for v in e["variants"]}
+        Model = lambda e: self.models.Model(  # noqa: E731
+            id=f"anthropic/{e['id']}", provider="anthropic", name=e["id"], base_url="https://api.anthropic.com/v1",
+            engine="api", label="Anthropic (API)", kind="api", package=e.get("package", ""),
+            config={"limit": e["limit"], "variants": e["variants"], "reasoning": True})
+        for e in rows:                                   # never a variant that turns thinking on
+            spec = runner.with_thinking(Model(e), {"model": f"anthropic/{e['id']}"})
+            _, _, variant = spec["opencode_model"].partition("#")
+            picked = next((v for v in e["variants"] if v["id"] == variant), None)
+            self.assertIn(((picked or {}).get("settings") or {}).get("thinking", {}).get("type"),
+                          (None, "disabled"), (e["id"], variant))
+
+        def agent_request(e):
+            spec = runner.with_thinking(Model(e), {"model": f"anthropic/{e['id']}"})
+            before = len(out.read_text().splitlines()) if out.exists() else 0
+            code, events = self.real_run(spec["opencode_model"], layer)
+            self.assertEqual(code, 0, events[-3:])
+            tools = [b for b in [json.loads(x) for x in out.read_text().splitlines()][before:] if b.get("tools")]
+            self.assertEqual(len(tools), 1)
+            return spec, tools[0]
+        manual = [e for e in rows if kinds(e) == {"enabled"}]
+        if manual:          # off as it is: no `thinking` sent, as the line says
+            e = next((e for e in manual if e["id"] == "claude-haiku-4-5"), manual[0])
+            spec, body = agent_request(e)
+            self.assertEqual((spec["opencode_model"], spec["thinking_shown"], body.get("thinking")),
+                             (f"anthropic/{e['id']}", "thinking off", None))
+        adaptive = [e for e in rows if kinds(e) == {"adaptive"}]
+        if adaptive:        # the bare id: no effort and no `enabled` of wb's
+            e = next((e for e in adaptive if e["id"] == "claude-opus-4-7"), adaptive[0])
+            spec, body = agent_request(e)
+            self.assertEqual(spec["opencode_model"], f"anthropic/{e['id']}")
+            self.assertNotIn("output_config", body)
+            self.assertNotEqual((body.get("thinking") or {}).get("type"), "enabled")
+
 
 if __name__ == "__main__":
     unittest.main()
