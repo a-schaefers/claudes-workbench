@@ -2927,7 +2927,7 @@ test('after a reload the mod still tells the conversation of a rule change, such
   fakeTasks(on, files)
   let reloaded = false
   on('state.get', (_: any, e: any, next: any) => e.key === 'said' && e.plugin === 'workbench' && !reloaded   // the earlier load's
-    ? (reloaded = true, { value: { value: { shape: 'said-2', value: { notes: '', wakeOff: false, coding: 'decide', routes: '' } }, version: 0 } }) : next(e))
+    ? (reloaded = true, { value: { value: { shape: 'said-3', value: { notes: '', wakeOff: false, coding: 'decide', routes: '', workflows: 'off' } }, version: 0 } }) : next(e))
   on('ui.toast', () => ({ value: undefined }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
   const rows: string[] = []
@@ -5142,9 +5142,9 @@ async function reloadedWith($: any, on: any, shape: string, value: Record<string
   return rows.filter(r => /Roles \(|roles changed/.test(r))  // either: a first note, or a change
 }
 
-test('#1014: the said-2 atom from a reload keeps the roles said, so a change made meanwhile is one row', async ($, on) => {
+test('#1014: the said-3 atom from a reload keeps the roles said, so a change made meanwhile is one row', async ($, on) => {
   const was = 'significant GPU (the router picks); trivial GPU (the router picks); writing GPU (the router picks)'
-  expect(await reloadedWith($, on, 'said-2', { notes: '', wakeOff: false, coding: 'decide', routes: was }))
+  expect(await reloadedWith($, on, 'said-3', { notes: '', wakeOff: false, coding: 'decide', routes: was, workflows: 'off' }))
     .toEqual([expect.stringContaining('The roles changed: significant GPU ollama/qwen3.8-27b; trivial GPU')])
 })
 
@@ -5152,6 +5152,70 @@ test('#1014: a stored said-1 (no roles in it) is declined: nothing is taken as s
   // accepted, it would say the roles as a first note (ROUTES_NOTE), which a filter on "The roles
   // changed" alone let pass (2026-11-23 review): every row that names the roles is counted
   expect(await reloadedWith($, on, 'said-1', { notes: '', wakeOff: false, coding: 'decide' })).toEqual([])
+})
+
+test('#1041: a stored said-2 (no workflows in it) is declined as said-1 is: no row comes on a guess', async ($, on) => {
+  expect(await reloadedWith($, on, 'said-2', { notes: '', wakeOff: false, coding: 'decide', routes: '' })).toEqual([])
+})
+
+test('#1041: Dynamic workflows reach the conversation: a dynamic-workflows block when on, nothing when off, one row per change', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/workflows.json': JSON.stringify({ mode: 'on' }) }
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const skill = await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  expect(skill.text).toContain('Dynamic workflows are on')                  // said with the skill's text
+  expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('dynamic-workflows')  // not twice
+  // a fresh conversation's (a /clear's, a compaction's) first block says it
+  const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'dynamic-workflows')
+  expect(block?.text).toContain('you may split a request into several tasks that run at once')
+  expect(block?.text).toContain('say the plan in one line before you start them')
+  expect(block?.text).toContain('merge logic first, then tests, then UI or docs')
+  await clock.advance(31_000)
+  const before = rows.length
+  files['/wb/workflows.json'] = JSON.stringify({ mode: 'off' })            // the user turns it off (a terminal, the pane)
+  await clock.advance(31_000)
+  await clock.advance(31_000)
+  expect(rows.slice(before)).toEqual(['[workbench] Dynamic workflows are now off (the user\'s choice; `wb workflows` shows it): ' +
+    'run one task at a time again, as the /workbench skill says.'])
+  files['/wb/workflows.json'] = JSON.stringify({ mode: 'on' })
+  await clock.advance(31_000)
+  await clock.advance(31_000)
+  expect(rows.slice(before + 1)).toEqual([expect.stringMatching(/^\[workbench\] Dynamic workflows are on/)])
+  expect(asked).toEqual([])                                                  // rows, never a turn of their own
+  // off, the default: no block at all
+  files['/wb/workflows.json'] = JSON.stringify({ mode: 'off' })
+  await clock.advance(31_000)
+  expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('dynamic-workflows')
+})
+
+test('#1041: without workflows.json Dynamic workflows are off, and the conversation is told nothing of them', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const skill = await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  expect(skill.text).not.toContain('Dynamic workflows')
+  files['/wb/workflows.json'] = 'not json'                                  // unreadable reads as off
+  await clock.advance(31_000)
+  const names = (await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)
+  expect(names).toContain('workbench-mode')
+  expect(names).not.toContain('dynamic-workflows')
+  expect(rows.filter(r => r.includes('Dynamic workflows'))).toEqual([])
 })
 
 test('#1014: the mod\'s summary of the roles reads as routes.summary does', () => {

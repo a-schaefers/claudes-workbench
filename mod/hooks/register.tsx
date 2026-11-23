@@ -591,6 +591,25 @@ const CODING_RULES: Record<string, string> = {
     '"…" --said "<their words>"`.',
 }
 
+// Dynamic workflows (#1041), the user's choice (`wb workflows`): whether Claude may run several
+// tasks at once for one request. Off (the default) adds nothing: the skill says one at a time.
+const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb workflows` shows it): you may split a ' +
+  'request into several tasks that run at once, mixing roles and the GPU and API sides; each runs on its own ' +
+  'role\'s model, never one you pick. Plan the fan-out as a handoff plan (each task its own spec, size, role and ' +
+  'acceptance command), name its tasks with one shared prefix, and say the plan in one line before you start them. ' +
+  'The GPU lease and the provider slots decide what runs together (`--queue` the rest). Review each result on its ' +
+  'own merits; merge logic first, then tests, then UI or docs.'
+const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb workflows` shows it): run one task ' +
+  'at a time again, as the /workbench skill says.'
+
+async function workflowsMode($: any): Promise<string> {
+  try {
+    return JSON.parse(await $.fs.read(`${mem.root}/workflows.json`)).mode === 'on' ? 'on' : 'off'
+  } catch {
+    return 'off'
+  }
+}
+
 // The pane's Claude coding row (#93), in order; the choice is wb's (`wb coding`), the sentence is
 // what the pane shows for the option under the ring or the pointer. The default says so, to show
 // how it was at the start (the user, 2026-11-19)
@@ -1948,7 +1967,7 @@ type Said = WbSaid
 // again in that conversation, sayRules waited for it for good: turning wakes off mid-session
 // never said WAKE_OFF_NOTE, and Claude ended its turn waiting for a wake that would not come.
 // A conversation's first context block (a /clear's, a compaction's) sets it again.
-const saidState = atom({ plugin: 'workbench', key: 'said' } as const, null as WbSaid | null, { shape: 'said-2' })
+const saidState = atom({ plugin: 'workbench', key: 'said' } as const, null as WbSaid | null, { shape: 'said-3' })
 async function setSaid($: any, said: Said) {
   mem.said = said
   await update($, saidState, () => said).catch(() => {}) // mem has it for this load either way
@@ -1958,7 +1977,7 @@ async function wanted($: any, delegating: boolean, notesToo = true): Promise<Sai
   const notes = delegating && notesToo ? (await $.fs.read(`${mem.root}/notes.md`).catch(() => '')).trim() : ''
   const any = delegating || mem.open.size > 0
   return { notes, wakeOff: !mem.wake && any, coding: any ? await codingMode($) : 'decide',
-    routes: any ? (await readRoutes($)).said : '' }
+    routes: any ? (await readRoutes($)).said : '', workflows: any ? await workflowsMode($) : 'off' }
 }
 
 // The rules this conversation lacks now, as text, counted as said. Notes come once (Claude adds
@@ -1966,7 +1985,7 @@ async function wanted($: any, delegating: boolean, notesToo = true): Promise<Sai
 // answered in this load (a reload), nothing is known of what it holds: it is all still to say.
 async function unsaid($: any, delegating: boolean): Promise<string[]> {
   const want = await wanted($, delegating, !mem.said?.notes) // said once: not read at every poll
-  const was = mem.said ?? { notes: '', wakeOff: false, coding: 'decide', routes: '' } // after the await: no other caller in between
+  const was = mem.said ?? { notes: '', wakeOff: false, coding: 'decide', routes: '', workflows: 'off' } // after the await: no other caller in between
   const out: string[] = []
   if (want.notes && !was.notes) out.push(NOTES_NOTE(want.notes))
   if (want.wakeOff && !was.wakeOff) out.push(WAKE_OFF_NOTE)
@@ -1974,8 +1993,9 @@ async function unsaid($: any, delegating: boolean): Promise<string[]> {
   if (any && want.coding !== was.coding) out.push(want.coding === 'decide' ? CODING_DECIDE : CODING_RULES[want.coding])
   // the roles (#1014): any change, however made (the dialog, the pane, a terminal, a hand edit)
   if (any && want.routes !== was.routes) out.push(was.routes ? ROUTES_CHANGED(want.routes) : ROUTES_NOTE(await readRoutes($)))
+  if (any && want.workflows !== was.workflows) out.push(want.workflows === 'on' ? WORKFLOWS_RULE : WORKFLOWS_OFF) // #1041
   await setSaid($, { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding,
-    routes: any ? want.routes : was.routes })
+    routes: any ? want.routes : was.routes, workflows: any ? want.workflows : was.workflows })
   return out
 }
 
@@ -3753,6 +3773,7 @@ export const register: Register = (on, options) => {
     await setSaid($, want)
     if (want.coding !== 'decide' && had?.coding !== want.coding) blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
     if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
+    if (want.workflows === 'on' && had?.workflows !== 'on') blocks.push({ name: 'dynamic-workflows', text: WORKFLOWS_RULE })
     if (isAway) blocks.push({ name: 'web-chat', text: AWAY_NOTE })
     if (want.wakeOff && !had?.wakeOff) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
     if (want.routes && had?.routes !== want.routes) { // read while delegating or with a task open, as `wanted` does

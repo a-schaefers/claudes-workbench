@@ -17190,6 +17190,42 @@ class Splash(Base):
         self.assertIn("Enabled (default)", run_wb("splash"))
 
 
+class DynamicWorkflows(Base):
+    """Dynamic workflows (#1041): off by default, `wb workflows on|off` keeps the choice in
+    workflows.json beside coding.json, which the mod reads for its dynamic-workflows block."""
+    def test_off_by_default_and_wb_workflows_keeps_the_choice_where_the_mod_reads_it(self):
+        self.assertEqual(run_wb("workflows"), "Dynamic workflows: Off (default). Claude runs one task "
+                                              "at a time.\n")
+        self.assertFalse((store.home() / "workflows.json").exists())
+        self.assertIn("Dynamic workflows: On. Claude may split a request into tasks that run at once",
+                      run_wb("workflows", "on"))
+        self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["mode"], "on")
+        self.assertEqual(cli.workflows_mode(), "on")
+        self.assertIn("On.", run_wb("workflows"))
+        self.assertIn("Off (default)", run_wb("workflows", "off"))
+        self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["mode"], "off")
+
+    def test_a_workflows_json_wb_cannot_read_or_does_not_know_is_off(self):
+        for text in ("not json", '{"mode": "maybe"}', '["on"]'):
+            (store.home() / "workflows.json").write_text(text)
+            self.assertIn("Off (default)", run_wb("workflows"))
+
+    def test_only_on_or_off_is_taken(self):
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("workflows", "maybe")
+        self.assertFalse((store.home() / "workflows.json").exists())
+
+    def test_the_skill_says_one_task_at_a_time_when_off_and_how_to_fan_out_when_on(self):
+        skill = (Path(__file__).parent.parent / "skill/workbench/SKILL.md").read_text()
+        setting = skill.split("- **Dynamic workflows**")[1].split("\n- **")[0]
+        self.assertIn("off (the default), run **one task at a time**", setting)
+        self.assertIn("only on\n  their yes", setting)
+        fan = skill.split("- **Fan-out**")[1].split("\n- **")[0]
+        for said in ("(spec, size, role, acceptance command)", "one\n  name prefix",
+                     "say the plan in one line", "accept logic first, then tests, then UI or docs"):
+            self.assertIn(said, fan)
+
+
 class Progress(Base):
     """Opt-in progress checks (#95): active work, evidence, a hint or a smaller step, and what
     helped, learned; the coding choice untouched."""
