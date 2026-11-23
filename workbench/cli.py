@@ -626,7 +626,7 @@ def _role_cant_run(m: models.Model, state: dict, routed: dict) -> str | None:
 def _routed_keys(routed: dict) -> dict:
     """task.json's routing keys (#1016), fixed at start as `model` is: `via` and `role` always;
     for API `provider`, `provider_name`, `thinking`, `said` and `said_ts` (when the role has one)."""
-    keys = ("via", "role") + (("provider", "provider_name", "thinking", "said", "said_ts")
+    keys = ("via", "role") + (("provider", "provider_name", "thinking", "said", "said_ts", "busy")
                               if routed.get("via") == "api" else ())
     return {k: routed[k] for k in keys if routed.get(k) is not None}
 
@@ -642,6 +642,48 @@ def _first_api_note(repo: Path, routed: dict, me: str) -> str | None:
     whose = ("asked for" if (routed.get("said") or "").startswith("asked for")
              else f"the {routed['role']} role's model")
     return f"{repo.name}'s code goes to {routed.get('provider_name') or routed['provider']} ({whose})"
+
+
+def _busy_api(role: str, a, repo: Path, sub: str | None):
+    """When the GPU is busy and the user opted in (routes.json `busy` api, #1023): the role's API
+    model as pick_model gives one, (m, state, why, routed); "" when the opt-in doesn't apply (off,
+    Agents GPU, a --model asked for, a role with no API model: it queues or exits 4 as before); a
+    line saying why the role's API model can't take it now, which never changes the start either.
+    Only here, at a start: a running task never moves, and nothing goes from API to the GPU."""
+    if a.model:
+        return ""
+    try:
+        doc = routes.read()
+    except routes.RoutesError:
+        return ""
+    if not (mid := routes.busy_api(doc, role)):
+        return ""
+    m = models.lookup(mid)
+    if m is None or m.kind != "api":
+        return f"the GPU is busy, and the {role} role's API model {mid} isn't in OpenCode's catalog now"
+    state = models.status(m)
+    why = None if state["available"] else state["why"]
+    if why is None and not models.api_slots_free(models.api_provider(m)):
+        why = f"every one of {models.api_provider(m)}'s {models.API_PARALLEL} slots is taken"
+    try:  # wave 2's (#1019 the day cap, #1021 a repo kept local), when this wb has them
+        from . import meter
+    except ImportError:
+        meter = None
+    try:
+        from . import privacy
+    except ImportError:
+        privacy = None
+    if why is None and getattr(a, "local_only", False):  # wave 2's wb start --local-only (#1021)
+        why = "this task is kept local (--local-only)"
+    if why is None and privacy is not None and (local := getattr(privacy, "local_only", None)) \
+            and (kept := local(repo, sub)):
+        why = f"{repo.name} is kept local ({kept})"
+    if why is None and meter is not None and (refusal := getattr(meter, "refusal", None)):
+        why = refusal(m, role)
+    if why:
+        return f"the GPU is busy, and the {role} role's API model {mid} can't take it: {why}"
+    routed = routes.busy_routed(doc, role, m)
+    return m, state, f"{routes.routed_line(m.id, routed)} · {routes.BUSY_LINE}", routed
 
 
 def _gpu_holders(me: str | None = None, of: models.Model | None = None) -> dict:
@@ -1144,6 +1186,11 @@ def cmd_start(a):
         if not getattr(a, "bench", None):
             _say(_preempt_bench(m, a.name))
         held, waits = _gpu_wait(m, a.name)
+    if waits and not isinstance(moved := _busy_api(role, a, repo, sub), str):  # #1023, the user's opt-in
+        m, state, why, routed = moved
+        api, held, waits, slots_full = True, {}, False, False
+    elif waits and moved:
+        print(f"note: {moved}")
     if waits and not a.queue:
         die(models.busy(held, f"{m.id} can't run beside {'it' if len(held) == 1 else 'them'}. "
                         "--queue starts it anyway, to wait behind; or do this step yourself"), 4)
@@ -1303,6 +1350,7 @@ def cmd_start(a):
         print(f"note: {drift}")
     print(routes.model_line(m.id, routed) if api else f"model: {why}" if why != "asked for"
           else f"model: {m.id} (asked for)")
+    _say(routes.BUSY_LINE if routed.get("busy") else "")
     if first_api:
         print(f"note: {first_api}")
     print(f"slice: {router.slice(m).line()}")
@@ -2677,10 +2725,11 @@ def _route_show(as_json: bool) -> None:
     except routes.RoutesError as e:
         die(routes.unreadable(e), 3)
     if as_json:
-        out = {**doc, "summary": routes.summary(doc), "roles": {}}
+        out = {**doc, "summary": routes.summary(doc), "roles": {}, **_route_pane()}
         for r in routes.ROLES:
             row = doc["roles"][r]
-            m = models.lookup(row["api"]) if row.get("api") else None
+            # the cached catalog: the pane draws from this, and never waits on OpenCode (#1023)
+            m = models.lookup(row["api"], cached=True) if row.get("api") else None
             api = None if not row.get("api") else \
                 {"available": False, "resident": False, "why": "not in OpenCode's catalog now"} \
                 if m is None else models.status(m)
@@ -2690,6 +2739,8 @@ def _route_show(as_json: bool) -> None:
         return
     if line := _agents_line(doc):
         print(line)
+    _say("When the GPU is busy: a role with an API model starts on it (wb route busy wait: queue "
+         "instead)" if doc["busy"] == "api" else "")
     width = max(map(len, routes.ROLES)) + 2
     for r in routes.ROLES:
         row = doc["roles"][r]
@@ -2717,6 +2768,42 @@ def _route_show(as_json: bool) -> None:
         print(f"no day cap yet (asked when the first role goes to API; suggest ${routes.DAY_USD_SUGGEST})")
 
 
+# a provider's key as the pane says it (#1023): only a stored one runs (the keyhole holds it)
+KEY_STATES = {"stored": "stored", "oauth": "oauth", "signing": "oauth", "": "none"}
+KEY_HELD = {"oauth": "an OAuth login", "signing": "a cloud login that signs each request",
+            "config": "written in OpenCode's config", "ollama": "Ollama's own login", "": "none stored"}
+
+
+def _route_pane() -> dict:
+    """`wb route --json`'s keys for the pane's Settings tab (#1023): `spend_today` (the day
+    ledger's, spend-api.jsonl: {usd, by_provider}) and `providers` ({id: {name, key, why}}, key
+    stored, env, oauth or none, from the cached catalog: never a network probe or OpenCode run)."""
+    provs = {}
+    for pid, p in (models._read_hosted().get("providers") or {}).items():
+        raw = str(p.get("key") or "")
+        key = "env" if raw.startswith("env:") else KEY_STATES.get(raw, "none")
+        held = f"key in {raw[4:]}" if key == "env" else KEY_HELD.get(raw, raw)
+        provs[pid] = {"name": str(p.get("name") or pid), "key": key,
+                      **({} if key == "stored" else
+                         {"why": f"can't run: needs a key wb can hold outside the lane ({held})" if raw
+                          else "no key: /connect in OpenCode adds one"})}
+    return {"spend_today": _spend_today(), "providers": provs}
+
+
+def _spend_today() -> dict:
+    """Today's API spend (local day) by provider, from the day ledger (#1019's spend-api.jsonl:
+    `step` and `reconcile` rows, each with `day`, `provider` and `usd`); none yet is 0."""
+    day = time.strftime("%Y-%m-%d")
+    rows, _ = store.read_jsonl(store.home() / "spend-api.jsonl")
+    by: dict = {}
+    for r in rows:
+        if isinstance(r, dict) and r.get("day") == day and r.get("kind") in ("step", "reconcile") \
+                and isinstance(r.get("usd"), (int, float)) and not isinstance(r.get("usd"), bool):
+            p = str(r.get("provider") or "?")
+            by[p] = by.get(p, 0.0) + r["usd"]
+    return {"usd": round(sum(by.values()), 6), "by_provider": {p: round(v, 6) for p, v in by.items()}}
+
+
 def _agents_line(doc: dict) -> str:
     """wb route's first line while the Agents switch holds every role on one side (#1016); ''
     for Both, where each role runs as its row says."""
@@ -2739,21 +2826,28 @@ def cmd_route(a):
     what, target = a.what, a.target
     if what is None:
         if any(v is not None for v in (target, a.gpu, a.api, a.thinking, a.day_usd)):
-            die("name a role: wb route <role> gpu|api|<provider/model>, wb route all gpu|api|both, or wb route cap <usd>")
+            die("name a role: wb route <role> gpu|api|<provider/model>, wb route all gpu|api|both, wb route cap <usd>, "
+                "or wb route busy wait|api")
         if a.dry_run:
             print(json.dumps({"change": "", "gate": False}) if a.json else "")
             return
         return _route_show(a.json)
     role, via, api, gpu, day, use = None, None, a.api, a.gpu, a.day_usd, None
+    busy = None
     if what == "cap":
         if a.gpu or a.api or a.thinking or a.day_usd is not None:
             die("wb route cap <usd> takes only the amount")
         try:
-            day = float(target) if target is not None else None
+            day = float(target) if target not in (None, routes.CAP_OFF) else target
         except ValueError:
             day = None
-        if day is None or not day > 0 or day == float("inf"):
-            die(f"wb route cap <usd>: a day cap in dollars, such as {routes.DAY_USD_SUGGEST}")
+        if day != routes.CAP_OFF and (day is None or not day > 0 or day == float("inf")):
+            die(f"wb route cap <usd>|off: a day cap in dollars, such as {routes.DAY_USD_SUGGEST}, or off")
+    elif what == "busy":  # #1023: the opt-in for a busy GPU
+        if a.gpu or a.api or a.thinking or a.day_usd is not None or target not in routes.BUSY:
+            die("wb route busy wait|api: when the GPU is busy, wait (queue, as before) or start a role "
+                "that has an API model on it")
+        busy = target
     elif what == "all":
         role = "all"
         if a.gpu or a.api:
@@ -2771,13 +2865,15 @@ def cmd_route(a):
                 die(f"two API models: {target} and --api {a.api}")
             api, via = target, "api"
     else:
-        die(f"no role {what!r}: the roles are {', '.join(routes.ROLES)} (or all, or cap)")
+        die(f"no role {what!r}: the roles are {', '.join(routes.ROLES)} (or all, cap or busy)")
     if api is not None:
         api = _route_api(api, role).id
     if gpu is not None:
         gpu = _route_gpu(gpu, role)
     if what == "cap":
-        argv = _route_argv("cap", f"{day:g}", None, None, None, None)
+        argv = _route_argv("cap", day if day == routes.CAP_OFF else f"{day:g}", None, None, None, None)
+    elif what == "busy":
+        argv = _route_argv("busy", busy, None, None, None, None)
     else:  # an API id as resolved, given as the positional or --api
         argv = _route_argv(what, target if target in (None, *routes.USES) else api, gpu,
                            api if a.api is not None and target in (None, *routes.USES) else None,
@@ -2788,7 +2884,7 @@ def cmd_route(a):
             die("no role has an API model yet: wb route <role> <provider/model>", 3)
         try:
             ch = routes.change(doc, None if what == "cap" else role, via=via, gpu=gpu, api=api,
-                               thinking=a.thinking, day_usd=day, who=_who, use=use)
+                               thinking=a.thinking, day_usd=day, who=_who, use=use, busy=busy)
         except routes.RoutesError as e:
             die(str(e), 3)
         # a kept API model a role newly runs on (its own flip, or the Agents switch) must still be
@@ -3730,6 +3826,9 @@ def cmd_discard(a):
 
 def cmd_models(a):
     """What OpenCode offers, whether each can run, and who the router would pick per size."""
+    if getattr(a, "json", False):
+        print(json.dumps(_models_json()))
+        return
     found = models.discover()
     if not found:
         die(f"no local models: {models.why_none()}")
@@ -3772,6 +3871,45 @@ def cmd_models(a):
         except RuntimeError as e:
             die(str(e))
         print(f"\nOpenCode's default model: {old} → {top.model.id} ({why})")
+
+
+def _models_json() -> dict:
+    """`wb models --json`, the pane's GPU and API lists (#1023), from the config, models.json,
+    optimize.json and the cached catalog only: no server is asked (a sleeping LAN box held the
+    pane's draw, #705, #819), no catalog rebuilt. `gpu`: [{id, label, window, sizes, cards}],
+    cards the numbers of the cards its Ollama sees (models.card_numbers; None when unknown);
+    `api`: the models of providers whose key wb can hold (stored by /connect), [{id, name,
+    provider, provider_name, window, price {input, output} per million, free}]; `used`: the API
+    models tasks ran on, newest first; `optimize`: {done_at, models, running}."""
+    seen: dict = {}
+    gpu = [{"id": m.id, "label": m.label, "window": (m.config.get("limit") or {}).get("context"),
+            "sizes": list(m.extra.get("sizes") or []),
+            "cards": models.card_numbers(m.root, seen) if m.engine == "ollama" and not m.remote else None}
+           for m in models.discover().values()]
+    api = []
+    for m in models._models_of(models._read_hosted()).values():
+        if m.key != "stored":
+            continue
+        cost = next((c for c in m.config.get("cost") or [] if isinstance(c, dict)), None) \
+            if isinstance(m.config.get("cost"), list) else m.config.get("cost")
+        api.append({"id": m.id, "name": m.config.get("title") or m.name, "provider": m.provider,
+                    "provider_name": models.provider_name(m),
+                    "window": (m.config.get("limit") or {}).get("context"),
+                    "price": {k: cost.get(k) for k in ("input", "output")} if isinstance(cost, dict) else None,
+                    "free": m.free})
+    used: list = []
+    for t in sorted(store.all_tasks(archived=True), key=lambda t: -(t.spec.get("created_at") or 0)):
+        if t.spec.get("via") == "api" and (mid := t.spec.get("model")) and mid not in used:
+            used.append(mid)
+    try:
+        from . import privacy  # #1021's mark for a free model, when this wb has it
+        free_line = getattr(privacy, "FREE_LINE", "")
+    except ImportError:
+        free_line = ""
+    st = optimize.state()
+    return {"gpu": gpu, "api": api, "used": used, "free_line": free_line or "free",
+            "optimize": {"done_at": st.get("done"), "models": len(st.get("models") or {}),
+                         "running": bool(optimize.running(st))}}
 
 
 def cmd_stats(a):
@@ -6378,11 +6516,13 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_workflows)
     s = sub.add_parser("route", help="the roles: which model each kind of work goes to (show, or "
                        "change one on the user's yes)")
-    s.add_argument("what", nargs="?", metavar="role|all|cap",
-                   help="significant, trivial, writing; all (the Agents switch); cap (the day cap)")
-    s.add_argument("target", nargs="?", metavar="gpu|api|both|<provider/model>|<usd>",
+    s.add_argument("what", nargs="?", metavar="role|all|cap|busy",
+                   help="significant, trivial, writing; all (the Agents switch); cap (the day cap); busy "
+                   "(when the GPU is busy)")
+    s.add_argument("target", nargs="?", metavar="gpu|api|both|wait|<provider/model>|<usd>",
                    help="a role: gpu or api flips its selector, an API model's exact id sets it and goes to "
-                   "API; all: gpu, api or both (each role as set); cap: the day cap in dollars")
+                   "API; all: gpu, api or both (each role as set); cap: the day cap in dollars; busy: wait "
+                   "(the default) or api (a role with an API model starts on it while the GPU is busy)")
     s.add_argument("--gpu", metavar="ID|auto", help="the role's GPU model (a fragment will do), or auto: "
                    "the router picks (the default)")
     s.add_argument("--api", metavar="ID", help="the role's API model, its exact OpenCode id; the "
@@ -6458,6 +6598,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("models", help="the local models, and which the router picks per task size")
     s.add_argument("--set-default", action="store_true",
                    help="make the router's pick for significant tasks OpenCode's default model")
+    s.add_argument("--json", action="store_true", help="the pane's lists, asking no server: the GPU "
+                   "models (window, sizes, cards), the API models wb can run, optimize's state")
     s.set_defaults(f=cmd_models)
     s = sub.add_parser("model", help="add a model to OpenCode (--pull downloads it), retire one, "
                                      "limit the task sizes it is routed, or carry a renamed one's record")
