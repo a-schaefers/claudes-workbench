@@ -33,15 +33,18 @@ const SCOUT_EVERY_MS = 7 * 24 * 3600 * 1000
 const SCOUT_RETRY_MS = 24 * 3600 * 1000 // raised but never finished: ask again a day later
 const MODELS = 'workbench-models'
 const SCOUT_NOTE =
-  '[workbench] The weekly model check is due. As the driver, keep the local agents on the best ' +
-  'models this machine can run:\n' +
+  '[workbench] The weekly model check is due. As the driver, keep the agents on the best ' +
+  'models for each role, GPU and API alike:\n' +
   '1. `wb scout`: this machine\'s hardware, what is installed, and how each model has done ' +
   '(real tasks), and its watch list: models set aside and what each needs ' +
   'before it is tried again.\n' +
   '2. Look up what is newest: open-weight coding models with tool calling, their sizes and ' +
   'quantizations, which fit this GPU\'s VRAM (with room for the context) and this RAM, and ' +
   'recent releases of the model server this machine runs (whichever it is: `wb scout` lists ' +
-  'them). Prefer primary sources (model cards, the server\'s own model library, ' +
+  'them). For roles on API, `wb scout`\'s API section: each role\'s model, its record and spend; ' +
+  'look up newer or cheaper models from the same connected providers on their own pages, and ' +
+  'whether thinking would pay for significant (its record). ' +
+  'Prefer primary sources (model cards, the server\'s own model library, ' +
   'release notes) and recent reports; name nothing you could not verify.\n' +
   '3. Recommend in a few lines: keep, add (the model and quantization, why it should beat what ' +
   'is installed, its size and how it fits), retire (what it replaces, the disk it frees). ' +
@@ -51,7 +54,9 @@ const SCOUT_NOTE =
   '--pull` in the background, on another server its own download then `wb model add`; ' +
   '`wb model sizes <id> …` if it should only take some task sizes, and ' +
   '`wb model retire <id> [--delete]` for what it replaces. Installed models that are not ' +
-  'registered may belong to other tools: ask first.\n' +
+  'registered may belong to other tools: ask first. API roles: recommend in chat only; never ' +
+  'run `wb route` or pass `--model` for an API model unasked (a role changes on the user\'s ' +
+  'words, through the dialog, or in the pane).\n' +
   '5. The audio and image engines `wb scout` lists, if any (speech, sound effects, music, the ' +
   'listener; images): check each model\'s licence today against its licence text, not its tag ' +
   '(licences change: one audio model went non-commercial mid-2026), and whether a newer local ' +
@@ -3893,7 +3898,7 @@ export const register: Register = (on, options) => {
     }
     await $.command.register({
       name: MODELS,
-      description: 'Check now which local models suit this machine best (weekly on its own)',
+      description: 'Check now which models suit each role best, GPU and API (weekly on its own)',
     })
     await $.command.register({
       name: UPDATE,
@@ -4060,7 +4065,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: MODELS }, async $ => {
     await scoutOffered($, await $.clock.now()) // the weekly check won't raise it again straight after
     mem.queued.push(SCOUT_NOTE) // a command may not start a turn itself: the next poll does
-    return { text: 'Claude will check the local models against this machine now.' }
+    return { text: 'Claude will check the models for each role now, GPU and API.' }
   })
 
   on('command.run', { command: UPDATE }, async $ => {

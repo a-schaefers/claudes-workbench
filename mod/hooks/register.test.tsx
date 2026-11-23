@@ -1854,6 +1854,28 @@ test('/workbench-models when the weekly check is due raises it once, not twice',
   expect(asked.filter(t => t.includes('The weekly model check is due'))).toHaveLength(1)
 })
 
+test('#1024: the weekly model check covers GPU and API alike, recommends only for API roles and names no model', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'workbench-models', args: '' })
+  await clock.advance(2000)
+  expect(asked).toHaveLength(1)
+  const note = asked[0]!
+  expect(note.startsWith('[workbench] The weekly model check is due.')).toBe(true)   // its readers match it
+  expect(note).toContain('the best models for each role, GPU and API alike')
+  expect(note).not.toContain('local agents')
+  expect(note).toContain('`wb scout`\'s API section: each role\'s model, its record and spend')
+  expect(note).toContain('API roles: recommend in chat only; never run `wb route` or pass `--model` for an API model unasked')
+  // the convention: no model is named in code (only placeholders such as <provider/model>)
+  expect(note).not.toMatch(/\b(deepseek|claude|haiku|sonnet|opus|gpt|grok|gemini|qwen|mimo|llama|mistral|kimi|glm)\b/i)
+  expect(note.replace(/<[^>]*>/g, '')).not.toMatch(/\b[\w.-]+\/[\w.:-]+\b/)          // no provider/model id
+})
+
 test('when wb can\'t run the mod says so once, backs off, and raises no model check', async ($, on) => {
   // the 2026-11-16 audit: `wb events` was respawned every 2 s for good, and nobody was told
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
@@ -5145,6 +5167,23 @@ test('#1014: a role change asks the user with wb\'s own change line; Allow write
     await $.tool.call(input as any)
     return { asked: w.asked.length - n }
   }
+  await clock.advance(1000)
+})
+
+test('#1024: two roles in one wb route are one dialog: both changes, the provider once and the cap, approved together', async ($, on) => {
+  const { clock, bash, files, w } = await routeProbe($, on)
+  const line = 'trivial: GPU → API deepseek/deepseek-flash · significant: GPU → API deepseek/deepseek-v4-pro · ' +
+    'your code goes to DeepSeek · thinking off · cap $5/day'
+  const argv = ['route', 'trivial', 'deepseek/deepseek-flash', 'significant', 'deepseek/deepseek-v4-pro', '--day-usd', '5']
+  w.reply = { change: line, gate: true, approval: { argv, change: line } }
+  w.answer = 'Allow'
+  const r = await bash('wb route trivial deepseek/deepseek-flash significant deepseek/deepseek-v4-pro --day-usd 5')
+  expect(r).toEqual({ deny: undefined, asked: 1, question: line, dry: [['route', '--dry-run', '--json', ...argv.slice(1)]] })
+  expect(r.question).toContain('trivial: GPU → API')
+  expect(r.question).toContain('significant: GPU → API')
+  expect(r.question.split('your code goes to DeepSeek')).toHaveLength(2)   // the provider once
+  expect(r.question.endsWith('cap $5/day')).toBe(true)
+  expect(JSON.parse(files['/wb/route-ok.json']!)).toEqual({ argv, change: line, at: expect.any(Number) })
   await clock.advance(1000)
 })
 

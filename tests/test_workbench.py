@@ -12810,7 +12810,7 @@ class Routing(Base):
             run_wb("model", "sizes", mid, "trivial")
         top, why = router.choose("significant")
         self.assertIsNone(top)
-        self.assertIn("no local model takes significant tasks", why)
+        self.assertIn("no GPU model takes significant tasks", why)
         self.assertIn("wb model sizes", why)
         self.assertIsNotNone(router.choose("trivial")[0])
 
@@ -29163,7 +29163,7 @@ class RoleResolution(Base):
                 mock.patch.object(runner.models, "lookup", lambda *a, **k: looked.append(a) or real(*a, **k)):
             code, out, err = self.begin("t-nogpu", "--role", "trivial")
         self.assertEqual((code, out), (3, ""))
-        self.assertTrue(err.startswith("wb: no local models: "), err)
+        self.assertTrue(err.startswith("wb: no GPU models: "), err)
         self.assertNotIn("deepseek", err)
         self.assertEqual(looked, [])
         self.assertFalse(store.Task("t-nogpu").dir.exists())
@@ -29271,6 +29271,266 @@ class RoleResolution(Base):
                 mock.patch.object(cli, "_need_worktree", lambda t: None):
             self.assertEqual(self.wb("feedback", "t-unread", "--text", "fix it")[0:3:2], (3, f"wb: {line}\n"))
             self.assertFalse(task.round_dir(2).exists())
+
+
+class FirstRunApi(Base):
+    """First run and the skill for API roles (#1024): wb setup sees the keys OpenCode holds, a
+    stored key makes the GPU optional, one wb route sets several roles under one yes, the
+    router's refusal says GPU and names the API choice, wb scout's API section."""
+    catalog = ApiHarness.catalog
+
+    def setUp(self):
+        super().setUp()
+        self.keys(key_row("deepseek", "DeepSeek", STORED))
+        self.ok = store.home() / "route-ok.json"
+
+    def keys(self, *rows):
+        """The fake OpenCode's catalog (ROUTES_CATALOG) with these `auth list` rows."""
+        self.catalog(ROUTES_CATALOG, list(rows))
+        runner.models.hosted(fresh=True)
+
+    def wb(self, *argv):
+        """(exit code, stdout, stderr) of wb ARGV."""
+        out, err, code = io.StringIO(), io.StringIO(), 0
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                cli.main(list(argv))
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def key_lines(self, gpu=True):
+        with mock.patch.object(cli.models, "discover", return_value=cli.models.discover() if gpu else {}):
+            lines = cli.first_run()
+        return [x for x in lines if "API key" in x or "key is" in x or "signed in" in x or "cloud login" in x]
+
+    # wb setup
+
+    def test_setup_names_a_stored_key_and_which_roles_use_it(self):
+        self.assertEqual(self.key_lines(), ["ok  API keys: deepseek (stored via /connect); no role uses one yet"])
+        code, _, err = self.wb("route", "trivial", "deepseek/deepseek-flash", "significant",
+                               "deepseek/deepseek-v4-pro", "--day-usd", "5")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.key_lines(), ["ok  API keys: deepseek (stored via /connect); significant and "
+                                            "trivial use it"])
+        self.assertEqual(self.wb("route", "all", "gpu")[0], 0)     # the Agents switch: none runs on it now
+        self.assertEqual(self.key_lines(), ["ok  API keys: deepseek (stored via /connect); no role uses one yet"])
+        self.assertEqual(self.wb("route", "all", "both")[0], 0)
+        self.keys(key_row("deepseek", "DeepSeek", STORED), key_row("anthropic", "Anthropic", STORED))
+        self.assertEqual(self.key_lines(), ["ok  API keys: deepseek (stored via /connect), anthropic (stored via "
+                                            "/connect); significant uses deepseek, trivial uses deepseek"])
+
+    def test_an_env_key_or_an_oauth_login_is_never_shown_as_usable(self):
+        self.keys(key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}))
+        self.assertEqual(self.key_lines(), ["--  xai's key is in XAI_API_KEY: wb can't hold it outside the lane "
+                                            "yet; /connect stores one it can"])
+        self.keys(key_row("anthropic", "Anthropic", OAUTH))
+        self.assertEqual(self.key_lines(), ["--  anthropic is signed in with OAuth: wb can't hold that outside the "
+                                            "lane; an API key through /connect works"])
+        self.keys(key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}), key_row("anthropic", "Anthropic", OAUTH),
+                  key_row("deepseek", "DeepSeek", STORED))
+        lines = self.key_lines()
+        self.assertEqual(lines, ["ok  API keys: deepseek (stored via /connect); no role uses one yet",
+                                 "--  xai's key is in XAI_API_KEY, anthropic is signed in with OAuth: wb can't hold "
+                                 "those outside the lane; /connect stores a key it can"])
+        self.keys()
+        self.assertEqual(self.key_lines(), [cli.NO_KEY])
+        # no `auth list` to read (OpenCode missing): its own line says so, and none of keys
+        os.environ["WB_OPENCODE_BIN"] = str(Path(self.tmp.name) / "no-such-opencode")
+        self.assertEqual(self.key_lines(), [])
+
+    def test_with_a_stored_key_and_no_gpu_model_the_gpu_lines_read_as_optional(self):
+        with mock.patch.object(cli.models, "discover", return_value={}), \
+                mock.patch.object(cli.models, "ollama_answers", return_value=False), \
+                mock.patch.object(cli.models, "_get", return_value=None), \
+                mock.patch.object(cli.models, "servers_here", return_value=([], [])):
+            with mock.patch.object(cli.models, "_fake", return_value=False):
+                lines = cli.first_run()
+            self.assertEqual(lines[1:3], [cli.NO_SERVER_OPTIONAL, cli.NO_LOCAL_OPTIONAL])
+            self.assertEqual(cli.NO_LOCAL_OPTIONAL, "--  no local model registered (optional: an API role can do "
+                                                    "the coding; run /workbench)")
+            self.assertNotIn("Claude picks one for this machine", "\n".join(lines))
+            for rows in ((), (key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}),)):
+                self.keys(*rows)                                   # no key wb can hold: as before
+                with mock.patch.object(cli.models, "_fake", return_value=False):
+                    lines = cli.first_run()
+                self.assertIn("no model server answers here: start yours", lines[1])
+                self.assertEqual(lines[2], "--  no local model registered yet: run /workbench in Claude Code, "
+                                           "and Claude picks one for this machine (wb scout)")
+        self.keys(key_row("deepseek", "DeepSeek", STORED))
+        lines = cli.first_run()                                     # a GPU model too: as before
+        self.assertRegex(lines[2], r"^ok  \d+ local model\(s\) registered$")
+        self.assertIn("ok  a model server answers", lines)
+
+    # wb route: several roles in one change
+
+    def test_several_roles_change_in_one_call_one_line_and_one_approval(self):
+        argv = ("trivial", "deepseek/deepseek-flash", "significant", "deepseek/deepseek-v4-pro", "--day-usd", "5")
+        line = ("trivial: GPU → API deepseek/deepseek-flash · significant: GPU → API deepseek/deepseek-v4-pro · "
+                "your code goes to DeepSeek · thinking off · cap $5/day")
+        os.environ["CLAUDECODE"] = "1"
+        code, out, err = self.wb("route", "--dry-run", "--json", *argv)
+        self.assertEqual(code, 0, err)
+        asked = json.loads(out)
+        self.assertEqual((asked["change"], asked["gate"]), (line, True))
+        self.assertEqual(asked["approval"]["argv"], ["route", *argv])
+        self.assertEqual(self.wb("route", *argv)[0], 3)            # no yes: nothing
+        self.assertFalse(Path(os.environ["WB_ROUTES"]).exists())
+        store.write_json(self.ok, {**asked["approval"], "at": time.time()})
+        code, out, err = self.wb("route", *argv)
+        self.assertEqual((code, out), (0, f"changed: {line}\n"), err)
+        self.assertFalse(self.ok.exists())                         # one yes for the whole change
+        doc = routes.read()
+        self.assertEqual({r: (doc["roles"][r]["via"], doc["roles"][r].get("api"), doc["roles"][r].get("by"))
+                          for r in ("trivial", "significant")},
+                         {"trivial": ("api", "deepseek/deepseek-flash", "dialog"),
+                          "significant": ("api", "deepseek/deepseek-v4-pro", "dialog")})
+        self.assertEqual(doc["day_usd"], 5)
+        self.assertEqual(doc["roles"]["trivial"]["said"], line)
+        # two providers: where each role's code goes, the cap once
+        os.environ.pop("CLAUDECODE")
+        self.keys(key_row("deepseek", "DeepSeek", STORED), key_row("anthropic", "Anthropic", STORED))
+        code, out, err = self.wb("route", "--dry-run", "writing", "anthropic/claude-haiku-5-5", "trivial", "gpu")
+        self.assertEqual(out, "writing: GPU → API anthropic/claude-haiku-5-5 · trivial: API deepseek/deepseek-flash → "
+                              "GPU · API kept: deepseek/deepseek-flash · your code goes to Anthropic · thinking off · "
+                              "cap $5/day\n", err)
+
+    def test_several_roles_are_all_or_nothing_and_a_refusal_names_the_pair(self):
+        code, _, err = self.wb("route", "trivial", "deepseek/deepseek-flash", "significant", "deepseek/nope",
+                               "--day-usd", "5")
+        self.assertEqual(code, 3)
+        self.assertEqual(err, "wb: significant deepseek/nope: not in OpenCode's catalog: wb models lists the API models\n")
+        self.assertFalse(Path(os.environ["WB_ROUTES"]).exists())
+        self.keys(key_row("deepseek", "DeepSeek", STORED), key_row("anthropic", "Anthropic", OAUTH))
+        code, _, err = self.wb("route", "trivial", "deepseek/deepseek-flash", "significant",
+                               "anthropic/claude-haiku-5-5", "--day-usd", "5")
+        self.assertEqual(code, 3)
+        self.assertTrue(err.startswith("wb: anthropic/claude-haiku-5-5 can't be a role's model: "), err)
+        self.assertFalse(Path(os.environ["WB_ROUTES"]).exists())
+        code, _, err = self.wb("route", "trivial", "deepseek/deepseek-flash", "significant", "deepseek/deepseek-v4-pro")
+        self.assertEqual((code, err), (3, f"wb: {routes.NO_CAP}\n"))   # the cap is asked with the first API role
+        for argv, want in ((("trivial", "gpu", "significant"), "significant has no choice"),
+                           (("trivial", "gpu", "trivial", "api"), "trivial is named twice"),
+                           (("trivial", "gpu", "cap", "5"), "no role 'cap'"),
+                           (("trivial", "gpu", "significant", "gpu", "--thinking", "on"), "go in a wb route of their own")):
+            with self.subTest(argv=argv):
+                code, _, err = self.wb("route", *argv)
+                self.assertNotEqual(code, 0)
+                self.assertIn(want, err)
+        self.assertFalse(Path(os.environ["WB_ROUTES"]).exists())
+        self.assertEqual(self.wb("route", "trivial", "gpu", "significant", "gpu")[1], "unchanged: " +
+                         routes.summary(routes.read()) + "\n")
+
+    def test_an_openrouter_id_is_set_alone_never_in_several_roles(self):
+        self.catalog([*ROUTES_CATALOG, api_entry("openrouter", "deepseek/deepseek-v4.1-flash")],
+                     [key_row("deepseek", "DeepSeek", STORED), key_row("openrouter", "OpenRouter", STORED)])
+        runner.models.hosted(fresh=True)
+        code, _, err = self.wb("route", "trivial", "deepseek/deepseek-flash", "significant",
+                               "openrouter/deepseek/deepseek-v4.1-flash", "--day-usd", "5")
+        self.assertEqual((code, err), (3, "wb: significant openrouter/deepseek/deepseek-v4.1-flash: an OpenRouter "
+                                          "role is set in a wb route of its own\n"))
+        self.assertFalse(Path(os.environ["WB_ROUTES"]).exists())
+
+    # the router's refusal
+
+    def test_the_routers_refusal_says_gpu_and_offers_an_api_role_only_with_a_stored_key(self):
+        from workbench import router
+        down = {"available": False, "resident": False, "why": "the server is down"}
+        choice = ("; or put trivial on an API model you connected (the user's yes): wb route trivial <id>, "
+                  "wb models lists them")
+        with mock.patch.object(router.models, "status", lambda *a, **k: dict(down)):
+            top, why = router.choose("trivial")
+            self.assertIsNone(top)
+            self.assertTrue(why.startswith("no GPU model can run: "), why)
+            self.assertTrue(why.endswith(choice), why)
+            self.assertNotIn("local", why)
+            self.assertTrue(router.choose("significant", role="writing")[1].endswith(
+                choice.replace("trivial", "writing")))
+            for rows in ((), (key_row("anthropic", "Anthropic", OAUTH),)):
+                self.keys(*rows)
+                why = router.choose("trivial")[1]
+                self.assertTrue(why.startswith("no GPU model can run: "), why)
+                self.assertNotIn("wb route", why)
+        self.keys(key_row("deepseek", "DeepSeek", STORED))
+        with mock.patch.object(router.models, "discover", lambda *a, **k: {}):
+            why = router.choose("trivial")[1]
+        self.assertTrue(why.startswith("no GPU models: "), why)
+        self.assertTrue(why.endswith(choice), why)
+        # wb start: exit 3 with that one line, the role's own name in it; nothing started
+        with mock.patch.object(cli, "spawn_runner", lambda task: 0), \
+                mock.patch.object(router.models, "discover", lambda *a, **k: {}):
+            code, out, err = self.wb("start", "t-none", "--spec", str(self.spec), "--repo", str(self.repo),
+                                     "--role", "writing")
+        self.assertEqual((code, out), (3, ""))
+        self.assertTrue(err.startswith("wb: no GPU models: "), err)
+        self.assertIn("wb route writing <id>", err)
+        self.assertFalse(store.Task("t-none").dir.exists())
+
+    def test_with_agents_on_the_gpu_the_refusal_offers_no_api_role(self):
+        # the user's Agents switch holds every role on the GPU: `wb route <role> <id>` would only
+        # "apply once Agents is Both", so naming it as the way out sent Claude round a dialog that
+        # changed nothing that runs (#1024's review)
+        from workbench import router
+        self.assertEqual(self.wb("route", "trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        self.assertEqual(self.wb("route", "all", "gpu")[0], 0)
+        with mock.patch.object(cli, "spawn_runner", lambda task: 0), \
+                mock.patch.object(router.models, "discover", lambda *a, **k: {}):
+            why = router.choose("trivial", role="trivial")[1]
+            code, out, err = self.wb("start", "t-held", "--spec", str(self.spec), "--repo", str(self.repo),
+                                     "--role", "trivial")
+        self.assertTrue(why.startswith("no GPU models: "), why)
+        self.assertNotIn("wb route", why)
+        self.assertEqual((code, out), (3, ""))
+        self.assertTrue(err.startswith("wb: no GPU models: "), err)
+        self.assertNotIn("wb route", err)
+        self.assertEqual(self.wb("route", "all", "both")[0], 0)   # Both: the role's own choice again
+        with mock.patch.object(router.models, "discover", lambda *a, **k: {}):
+            self.assertIn("wb route significant <id>", router.choose("significant", role="significant")[1])
+
+    # wb scout
+
+    def test_scout_shows_the_roles_api_records_spend_and_a_count_per_provider(self):
+        many = [api_entry("bigrouter", f"m-{i}") for i in range(300)]
+        self.catalog([*ROUTES_CATALOG[-3:], *many], [key_row("deepseek", "DeepSeek", STORED),
+                                                key_row("bigrouter", "BigRouter", STORED),
+                                                key_row("anthropic", "Anthropic", OAUTH)])
+        runner.models.hosted(fresh=True)
+        self.assertEqual(self.wb("route", "trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        now = store.now()
+        for i, outcome in enumerate(("accepted", "accepted", "discarded")):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "ts": now - 3600, "task": f"t-{i}", "outcome": outcome, "model": "deepseek/deepseek-flash",
+                "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 0.1, "source": "opencode"}})
+        (store.home() / "tasks" / "t-0").mkdir(parents=True)
+        store.append_jsonl(store.home() / "tasks" / "t-0" / "events.jsonl",
+                           {"ts": now, "round": 1, "kind": "rate_limited", "text": "x"})
+        lines = cli.scout_api_lines()
+        self.assertEqual(lines[:5], ["", "roles", "  significant  GPU (router)",
+                                     "  trivial      API deepseek/deepseek-flash, set by you "
+                                     + time.strftime("%m-%d") + ", thinking off",
+                                     "  writing      GPU (router)"])
+        self.assertEqual(lines[5:7], ["api models in roles (the last 30 days)",
+                                      "  deepseek/deepseek-flash  3 task(s) · 66% accepted"
+                                      + (" · ~$0.10/task" if hasattr(cli.results, "row_cost") else "")
+                                      + " · 1 rate-limited round(s)"])
+        if hasattr(cli.savings, "api_totals"):  # #1022's, wave 2: the money over 7 days, beside the cap
+            self.assertIn("api spend, the last 7 days: $0.30 of $5/day at most (deepseek $0.30)", lines)
+        at = lines.index("connected providers (models with tool calls)")
+        self.assertEqual(lines[at + 1:], ["  anthropic: 1 (can't run: anthropic is signed in with OAuth)",
+                                          "  bigrouter: 300", "  cloud: 0, 1 the catalog doesn't say (can't run: no key)",
+                                          "  deepseek: 2"])   # one line each, never 300
+        out = run_wb("scout")
+        self.assertIn("\nroles\n  significant  GPU (router)\n", out)
+        self.assertLess(out.index("\nroles\n"), out.index("\nreal results (wb stats)"))
+
+    def test_scout_has_no_api_section_with_no_provider_and_no_api_role(self):
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        del cfg["provider"]["cloud"]                               # the fixture's off-machine provider
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        self.catalog([], [])
+        runner.models.hosted(fresh=True)
+        self.assertEqual(cli.scout_api_lines(), [])
+        self.assertNotIn("\nroles\n", run_wb("scout"))
 
 
 class SettingsRoles(Base):
