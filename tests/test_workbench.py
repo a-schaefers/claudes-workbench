@@ -28,6 +28,7 @@ import types
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.parse
 from unittest import mock
 import warnings
@@ -12990,14 +12991,16 @@ class Routing(Base):
         self.assertEqual(out.exception.code, 3)
         self.assertIn("can't call tools", err.getvalue())
 
-    def test_an_ollama_cloud_model_is_left_to_the_user_to_allow(self):
-        # the 2026-11-16 audit: a cloud model looked smallest, so trivial work went to ollama.com
+    def test_an_ollama_cloud_model_is_never_routed_and_wb_model_add_refuses_it(self):
+        # the 2026-11-16 audit: a cloud model looked smallest, so trivial work went to ollama.com.
+        # Ranked as a GPU model it read "can't run"; an API model now, it isn't ranked (#1013)
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
         cfg["provider"]["ollama"]["models"]["gpt-oss:120b-cloud"] = {}
         Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
-        from workbench import router
+        from workbench import models, router
         self.assertEqual(router.choose("trivial")[0].model.id, "ollama/mimo-v2.6:9b-q8_0")
-        self.assertIn("Ollama cloud model", router.rank("trivial")[-1].state["why"])
+        self.assertNotIn("ollama/gpt-oss:120b-cloud", [s.model.id for s in router.rank("trivial")])
+        self.assertEqual(models.hosted()["ollama/gpt-oss:120b-cloud"].kind, "api")
         err = io.StringIO()
         with self.assertRaises(SystemExit), redirect_stderr(err):
             run_wb("model", "add", "ollama/kimi:cloud")
@@ -26456,15 +26459,19 @@ class ProbeWhereItHelps(Base):
 
 # The two models the spike for #1009 ran (OpenCode 2.3.2's catalog; 2.3.0 bundles both alike),
 # trimmed to the fields `api model.list` prints that workbench reads
+# 2.3.2 prints the key OpenCode holds for a layer or a free model in each entry's settings.apiKey
+# (#1013's review): a sentinel, so a test sees one copied anywhere
+LISTED_KEY = "listed-key-sentinel-7f3a"
 API_CATALOG = [
-    {"id": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "providerID": "deepinfra", "family": "deepseek-flash",
+    {"id": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "modelID": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "providerID": "deepinfra", "family": "deepseek-flash",
      "package": "@opencode/ai/providers/deepinfra",
-     "settings": {"baseURL": "https://api.deepinfra.com/v1/openai"},
+     "settings": {"baseURL": "https://api.deepinfra.com/v1/openai", "apiKey": LISTED_KEY},
      "capabilities": {"tools": True, "input": ["text", "image"], "output": ["text"], "temperature": True},
      "variants": [{"id": v, "settings": {"reasoningEffort": v}} for v in ("none", "low", "high", "max")],
      "cost": [{"input": 0.2, "output": 0.6, "cache": {"read": 0.006, "write": 0}}],
      "limit": {"context": 1048576, "output": 384000}, "status": "active"},
-    {"id": "claude-haiku-5-5", "providerID": "anthropic", "family": "claude-haiku",
+    {"id": "claude-haiku-5-5", "modelID": "claude-haiku-5-5", "providerID": "anthropic", "family": "claude-haiku",
      "package": "@opencode/ai/providers/anthropic", "settings": {"baseURL": "https://api.anthropic.com/v1"},
      "capabilities": {"tools": True, "input": ["text", "image", "pdf"], "output": ["text"],
                       "temperature": False},
@@ -26872,6 +26879,26 @@ class ApiHarness(Base):
         self.assertEqual(len(out.read_text().splitlines()), before + len(bodies))
 
     @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_lists_an_alias_by_its_model_id_and_a_layer_key_in_settings(self):
+        # what hosted() relies on (#1013's review): Model.name is modelID, and settings carries the
+        # layer's key, so _build_hosted copies chosen fields only, never settings
+        entry = self.real_model("deepinfra")
+        layer = {"provider": {"deepinfra": {"options": {"baseURL": "https://deepinfra.invalid/v1",
+                                                        "apiKey": "dummy-key"},  # off this machine
+                                            "models": {"wb-alias": {"id": entry["id"]}}}}}
+        out = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
+                             env=self.real_env(layer), capture_output=True, text=True, timeout=60)
+        listed = {e["id"]: e for e in json.loads(out.stdout)["data"] if e["providerID"] == "deepinfra"}
+        self.assertEqual((listed["wb-alias"]["modelID"], listed[entry["id"]]["modelID"]), (entry["id"], entry["id"]))
+        self.assertEqual(listed["wb-alias"]["settings"]["apiKey"], "dummy-key")
+        from workbench import models
+        with mock.patch.object(models, "_opencode_json", lambda *a: (json.loads(out.stdout), "")
+                               if a[:2] == ("api", "model.list") else ([], "")):
+            doc = models.hosted_doc(fresh=True)
+        self.assertEqual(doc["models"]["deepinfra/wb-alias"]["name"], entry["id"])
+        self.assertNotIn("dummy-key", json.dumps(doc))
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
     def test_real_opencode_keeps_the_title_on_the_tasks_model_when_small_model_is_pinned(self):
         entry = self.real_model("anthropic", lambda e: e.get("family") != "claude-haiku")
         model = f"anthropic/{entry['id']}"
@@ -26938,6 +26965,446 @@ class ApiHarness(Base):
             self.assertEqual((err["type"], err["status"], err["message"]),
                              (kind, int(status), "no: sk-test-0123456789abcdef"))  # verbatim
             self.assertEqual(len(out.read_text().splitlines()), 1)              # no retry
+
+
+
+def api_entry(pid, mid, context=200000, **extra):
+    """One `api model.list` entry, as OpenCode 2.3.2 prints it (the spike for #1009): `modelID` the
+    id at the provider (an alias's differs), `settings.apiKey` the key OpenCode holds, if any."""
+    return {"id": mid, "modelID": mid, "providerID": pid, "family": mid.split("-")[0],
+            "package": f"@opencode/ai/providers/{pid}",
+            "settings": {"baseURL": f"https://api.{pid}.test/v1", "apiKey": LISTED_KEY},
+            "capabilities": {"tools": True, "input": ["text"], "output": ["text"], "temperature": True},
+            "variants": [{"id": "none", "settings": {"reasoningEffort": "none"}}],
+            "cost": [{"input": 0.2, "output": 0.6, "cache": {"read": 0.01, "write": 0}}],
+            "limit": {"context": context, "output": 8192}, "status": "active", **extra}
+
+
+def key_row(pid, name, *connections):
+    return {"id": pid, "name": name, "connections": list(connections)}
+
+
+STORED = {"type": "credential", "id": "cred_1", "label": "default", "method": "key"}
+OAUTH = {"type": "credential", "id": "cred_2", "label": "default", "method": "oauth"}
+DISCOVERY_CATALOG = [api_entry("acme", "coder-flash"), api_entry("acme", "coder-pro", 400000),
+                     api_entry("oauthco", "chat-1"), api_entry("xenv", "grok-9"),
+                     api_entry("literal", "model-a"), api_entry("nolimit", "x", context=None),
+                     api_entry("opencode", "big-pickle-free", cost=[{"input": 0, "output": 0}]),
+                     API_CATALOG[0]]
+DISCOVERY_AUTH = [key_row("acme", "Acme", STORED), key_row("oauthco", "OAuthCo", OAUTH),
+                  key_row("xenv", "XEnv", {"type": "env", "name": "XENV_API_KEY"}),
+                  key_row("nolimit", "NoLimit", STORED), key_row("deepinfra", "DeepInfra", STORED)]
+
+
+class ApiDiscovery(Base):
+    """API models in discovery (#1013): models.hosted() from OpenCode's catalog (the fake's
+    `api model.list` and `auth list`), exact ids, status from the key source and api-health.json
+    with no network, the Ollama cloud models moved out of discover(), --model refused."""
+    catalog = ApiHarness.catalog
+
+    def setUp(self):
+        super().setUp()
+        from workbench import models
+        self.models = models
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        # a provider with a literal apiKey in the user's own file (decision 6: can't run)
+        cfg["provider"]["literal"] = {"options": {"apiKey": "not-a-real-key-0000"}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        self.calls = Path(self.tmp.name) / "fake-calls.jsonl"
+        os.environ["FAKE_CALLS"] = str(self.calls)
+        self.catalog(DISCOVERY_CATALOG, DISCOVERY_AUTH)
+
+    def reads(self) -> int:
+        """How many times wb read OpenCode's catalog."""
+        return sum(json.loads(x)[:2] == ["api", "model.list"]
+                   for x in (self.calls.read_text().splitlines() if self.calls.exists() else []))
+
+    def state(self, mid):
+        m = self.models.hosted()[mid]
+        st = self.models.status(m)
+        return st, self.models.may_come_up(st), self.models.remedy(m, st)
+
+    def test_a_connected_model_is_an_api_model_with_its_catalog_window(self):
+        m = self.models.hosted()["acme/coder-flash"]
+        self.assertEqual((m.kind, m.key, m.engine, m.name, m.provider), ("api", "stored", "api", "coder-flash", "acme"))
+        self.assertEqual(m.config["limit"]["context"], 200000)
+        self.assertEqual((m.base_url, m.package, m.label),
+                         ("https://api.acme.test/v1", "@opencode/ai/providers/acme", "Acme (API)"))
+        self.assertEqual(m.config["cost"], DISCOVERY_CATALOG[0]["cost"])
+        self.assertEqual(m.config["variants"], DISCOVERY_CATALOG[0]["variants"])
+        self.assertNotIn("acme/coder-flash", self.models.discover())
+        deep = self.models.hosted()[FLASH]                        # split at the first / only
+        self.assertEqual((deep.provider, deep.name), ("deepinfra", "deepseek-ai/DeepSeek-V4.1-Flash-1017"))
+        free = self.models.hosted()["opencode/big-pickle-free"]
+        self.assertEqual((free.free, free.key), (True, "none"))   # keyless: it can run
+        self.assertTrue(self.models.status(free)["available"])
+        self.assertFalse(m.free)
+        doc = json.loads((store.home() / "hosted.json").read_text())
+        self.assertEqual(doc["providers"]["acme"], {"name": "Acme", "key": "stored", "package":
+                                                    "@opencode/ai/providers/acme", "api": "https://api.acme.test/v1"})
+        self.assertEqual((doc["v"], doc["error"]), (1, ""))
+        self.assertEqual(self.models.lookup("acme/coder-flash").id, "acme/coder-flash")
+        self.assertEqual(self.models.lookup("ollama/mimo-v2.6:9b-q8_0").kind, "gpu")
+        self.assertNotIn(LISTED_KEY, json.dumps(doc))             # settings.apiKey: never copied
+        self.assertNotIn(LISTED_KEY, json.dumps([x.config for x in self.models.hosted().values()]))
+        os.environ["WB_FAKE_API"] = "acme=nokey"                  # OpenCode can't authenticate it
+        self.assertNotIn("acme/coder-flash", self.models.hosted_doc(fresh=True)["models"])
+
+    def test_discover_never_returns_an_api_model(self):
+        # passes before #1013 too: it pins the rule that keeps the GPU paths on the GPU
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama"]["models"]["gpt-oss:120b-cloud"] = {"limit": {"context": 131072}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"ollama/gpt-oss:120b-cloud": {"local": True}}))
+        found = self.models.discover()
+        self.assertTrue(found)
+        self.assertEqual([m.id for m in found.values() if getattr(m, "kind", "gpu") == "api"], [])
+
+    def test_api_models_resolve_by_exact_id_only(self):
+        self.assertEqual(self.models.resolve("acme/coder-flash").kind, "api")
+        self.assertEqual(self.models.resolve(FLASH).id, FLASH)
+        for fragment in ("flash", "coder-pro", "acme", "acme/coder"):  # coder-pro: the only match
+            with self.assertRaises(KeyError) as e:
+                self.models.resolve(fragment)
+            self.assertIn(f"unknown model {fragment!r}", e.exception.args[0])
+            self.assertIn("API models are named by their exact id, as OpenCode lists them "
+                          "(opencode models)", e.exception.args[0])
+            self.assertNotIn("acme/coder-flash", e.exception.args[0])   # no catalog ids listed
+        self.assertEqual(self.models.resolve("mimo").id, "ollama/mimo-v2.6:9b-q8_0")  # GPU: fragments
+        self.assertEqual(self.models.resolve("strata").kind, "gpu")
+
+    def test_each_api_state_reads_as_specified(self):
+        self.catalog(DISCOVERY_CATALOG, [r for r in DISCOVERY_AUTH if r["id"] != "deepinfra"])
+        os.environ["WB_FAKE_API"] = "xenv=ratelimit"  # a run's state: status never runs one
+        st, up, fix = self.state(FLASH)
+        self.assertEqual((st["available"], st["why"], up),
+                         (False, "no key for deepinfra: run /connect in OpenCode and add it", False))
+        self.assertEqual(fix, "run /connect in OpenCode and add an API key for deepinfra")
+        st, up, fix = self.state("oauthco/chat-1")
+        self.assertEqual((st["available"], up), (False, False))
+        self.assertEqual(st["why"], "can't run: needs a key wb can hold outside the lane (OAuthCo's is "
+                         "an OAuth login): store an API key with /connect")
+        self.assertEqual(fix, "store an API key for OAuthCo with /connect in OpenCode")
+        st, up, _ = self.state("nolimit/x")
+        self.assertEqual((st["why"], up), ("OpenCode's catalog gives no context window for it, so wb "
+                                           "can't plan its handovers", False))
+        self.assertEqual(self.state("acme/coder-flash")[0],
+                         {"available": True, "resident": True, "why": "API (Acme)"})
+        self.models.note_api("acme", "no_credit", "HTTP 402: Insufficient balance")
+        st, up, fix = self.state("acme/coder-flash")
+        self.assertEqual((st["available"], st["why"], up), (
+            False, "out of credit or quota at Acme (HTTP 402: Insufficient balance): top it up, or "
+                   "wait for the plan's reset; wb never switches models", False))
+        self.assertEqual(fix, "top up your Acme account, or wait for the plan's reset")
+        until = time.time() + 600
+        self.models.note_api("acme", "rate_limited", "HTTP 429", until=until)
+        st, up, fix = self.state("acme/coder-pro")              # the provider's, every model
+        hhmm = time.strftime("%H:%M", time.localtime(until))
+        self.assertEqual((st["available"], st["why"], up), (False, f"rate-limited by Acme until {hhmm}", True))
+        self.assertEqual(fix, f"wait for Acme's limit to lift ({hhmm})")
+        self.models.note_api("acme", "unreachable", "ECONNREFUSED")
+        st, up, fix = self.state("acme/coder-flash")
+        self.assertEqual((st["available"], st["why"], up), (False, "can't reach api.acme.test (ECONNREFUSED)", True))
+        self.assertEqual(fix, "check the network to api.acme.test; it may come up")
+        self.models.note_api("acme", "ok")
+        self.assertEqual(self.state("acme/coder-flash")[0]["why"], "API (Acme)")
+
+    def test_status_asks_no_network_for_an_api_model(self):
+        os.environ.pop("WB_FAKE_MODELS")  # no short-circuit: status as on a user's machine
+        def refuse(*a, **k):
+            raise AssertionError("status asked the network")
+        ids = ("acme/coder-flash", "oauthco/chat-1", "xenv/grok-9", "literal/model-a", "nolimit/x")
+        found = self.models.hosted()
+        with mock.patch.object(self.models, "_open", refuse), \
+                mock.patch.object(urllib.request, "urlopen", refuse):
+            for state in ("ok", "no_credit", "rate_limited", "unreachable"):
+                self.models.note_api("acme", state, "HTTP 500")
+                for mid in ids:
+                    self.assertIn("why", self.models.status(found[mid]))
+            self.assertIsNone(self.models.identity(found["acme/coder-flash"]))
+            self.assertEqual(self.models.weights(found["acme/coder-flash"]), 0)
+            self.assertFalse(self.models.keep_warm(found["acme/coder-flash"]))
+
+    def test_oauth_env_and_config_keys_cant_run(self):
+        found = self.models.hosted()
+        said = {mid: self.models.status(found[mid]) for mid in ("oauthco/chat-1", "xenv/grok-9", "literal/model-a")}
+        self.assertEqual({m: found[m].key for m in said},
+                         {"oauthco/chat-1": "oauth", "xenv/grok-9": "env:XENV_API_KEY", "literal/model-a": "config"})
+        for mid, st in said.items():
+            self.assertFalse(st["available"])
+            self.assertTrue(st["why"].startswith("can't run: needs a key wb can hold outside the lane"), st)
+            self.assertFalse(self.models.may_come_up(st))
+        self.assertIn("(XEnv's is from the environment, XENV_API_KEY)", said["xenv/grok-9"]["why"])
+        self.assertIn(f"(literal's is written in {os.environ['WB_OPENCODE_CONFIG']})", said["literal/model-a"]["why"])
+        self.assertNotIn("not-a-real-key", json.dumps(said) + (store.home() / "hosted.json").read_text())
+
+    def test_the_catalog_is_read_once_per_ttl(self):
+        self.models.hosted()
+        self.models.hosted()
+        self.models.lookup("acme/coder-flash")
+        self.assertEqual(self.reads(), 1)
+        cfg = Path(os.environ["WB_OPENCODE_CONFIG"])
+        later = cfg.stat().st_mtime + 5
+        os.utime(cfg, (later, later))                             # a touched config: read again
+        self.models.hosted()
+        self.assertEqual(self.reads(), 2)
+        path = store.home() / "hosted.json"
+        doc = json.loads(path.read_text())
+        doc["ts"] -= self.models.HOSTED_TTL + 1                   # past the TTL: read again
+        store.write_json(path, doc)
+        self.models.hosted()
+        self.models.hosted()
+        self.assertEqual(self.reads(), 3)
+        path.write_text("{not json")                              # a corrupt cache: rebuilt
+        self.assertIn("acme/coder-flash", self.models.hosted())
+        self.assertEqual(self.reads(), 4)
+
+    def test_a_failed_catalog_read_leaves_gpu_starts_alone(self):
+        os.environ["FAKE_CATALOG_FAIL"] = "1"
+        self.assertEqual(self.models.hosted(), {})
+        self.assertEqual(self.models.hosted_error(),
+                         "Error: Unable to connect. Is the computer able to access the url?")
+        self.models.hosted()
+        self.assertEqual(self.reads(), 1)                         # cached for DOWN_SECS
+        with self.assertRaisesRegex(KeyError, "unknown model 'acme/coder-flash'"):
+            self.models.resolve("acme/coder-flash")
+        self.start("t-gpu", "ok")
+        self.assertEqual(wait_phase("t-gpu", {"review"})["phase"], "review")
+
+    def test_an_ollama_cloud_model_is_an_api_model_even_with_local_true(self):
+        from workbench import router
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"] = {"ollama": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
+                                      "models": {"gpt-oss:120b-cloud": {"limit": {"context": 131072}}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"ollama/gpt-oss:120b-cloud": {"local": True}}))
+        self.assertEqual(self.models.discover(), {})
+        m = self.models.hosted()["ollama/gpt-oss:120b-cloud"]
+        self.assertEqual((m.kind, m.key, m.label, m.engine), ("api", "ollama", "Ollama cloud (ollama.com)", "api"))
+        self.assertEqual(self.models.status(m)["why"], "API (Ollama cloud)")
+        top, why = router.choose("trivial")
+        self.assertIsNone(top)
+        self.assertIn("ollama/gpt-oss:120b-cloud is an Ollama cloud model, an API model now", why)
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):  # no model: doctor exits 1
+            cli.main(["doctor"])
+        self.assertIn("--  ollama/gpt-oss:120b-cloud is an Ollama cloud model, an API model now: set a "
+                      "role to use it", buf.getvalue())
+
+    def test_wb_start_refuses_an_api_model_by_model_flag(self):
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as out, redirect_stderr(err):
+            run_wb("start", "t-api", "--spec", str(self.spec), "--repo", str(self.repo),
+                   "--model", "acme/coder-flash")
+        self.assertEqual(out.exception.code, 3)
+        self.assertIn("acme/coder-flash is an API model: wb start runs one only through a role you "
+                      "set (wb route), not --model", err.getvalue())
+        self.assertFalse(store.Task("t-api").exists)
+        for argv in (("model", "sizes", "acme/coder-flash", "trivial"), ("model", "retire", "acme/coder-flash"),
+                     ("model", "rename", "ollama/old", "acme/coder-flash")):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err):
+                run_wb(*argv)
+            self.assertIn("sizes are for GPU models; API models run by role", err.getvalue())
+        self.assertNotIn("acme/coder-flash", json.loads(Path(os.environ["WB_MODELS"]).read_text()
+                                                         if Path(os.environ["WB_MODELS"]).exists() else "{}"))
+
+    def test_note_api_marks_and_clears_a_provider(self):
+        self.models.note_api("acme", "no_credit", "402: quota exceeded for key sk-proj-abcdefghijklmnopqrstuvwx\nmore")
+        st = self.models.status(self.models.hosted()["acme/coder-flash"])
+        self.assertFalse(st["available"])
+        self.assertTrue(st["why"].startswith("out of credit or quota at Acme (402: quota exceeded for key [redacted])"), st)
+        row = json.loads((store.home() / "api-health.json").read_text())["acme"]
+        self.assertEqual((row["state"], row["until"], row["why"]), ("no_credit", None, "402: quota exceeded for key [redacted]"))
+        self.assertNotIn("abcdefghijklmnop", (store.home() / "api-health.json").read_text())
+        self.models.note_api("acme", "ok")
+        self.assertEqual(json.loads((store.home() / "api-health.json").read_text()), {})
+        self.assertTrue(self.models.status(self.models.hosted()["acme/coder-flash"])["available"])
+        self.models.note_api("acme", "rate_limited", "429", until=time.time() - 1)  # past its until
+        self.assertTrue(self.models.status(self.models.hosted()["acme/coder-flash"])["available"])
+        self.models.note_api("acme", "rate_limited", "429")       # no Retry-After: a minute
+        row = json.loads((store.home() / "api-health.json").read_text())["acme"]
+        self.assertAlmostEqual(row["until"] - row["ts"], self.models.RATE_LIMIT_SECS, delta=1)
+        with self.assertRaises(ValueError):
+            self.models.note_api("acme", "broke")
+
+    def test_a_no_key_answer_is_checked_fresh(self):
+        self.catalog(DISCOVERY_CATALOG, [r for r in DISCOVERY_AUTH if r["id"] != "acme"])
+        self.assertEqual(self.models.hosted()["acme/coder-flash"].key, "")   # cached: no key
+        self.catalog(DISCOVERY_CATALOG, DISCOVERY_AUTH)                      # /connect, just now
+        m = self.models.hosted()["acme/coder-flash"]
+        self.assertEqual(m.key, "")                                          # still the cache's
+        self.assertEqual(self.models.status(m), {"available": True, "resident": True, "why": "API (Acme)"})
+        self.assertEqual(self.models.hosted()["acme/coder-flash"].key, "stored")  # written back
+        self.assertEqual(self.reads(), 1)
+
+    # #1013's review
+
+    def test_a_paid_model_without_a_key_stays_unrunnable_beside_a_free_sibling(self):
+        # the key source was the provider's, "none" from whichever model came first
+        for order in ((api_entry("mix", "zero", cost=[{"input": 0, "output": 0}]), api_entry("mix", "paid")),
+                      (api_entry("mix", "paid"), api_entry("mix", "zero", cost=[{"input": 0, "output": 0}]))):
+            self.catalog(list(order), [])
+            self.models.hosted_doc(fresh=True)
+            self.models._AUTH_FRESH.clear()
+            found = self.models.hosted()
+            self.assertEqual((found["mix/zero"].key, found["mix/paid"].key), ("none", ""))
+            self.assertTrue(self.models.status(found["mix/zero"])["available"])
+            self.assertEqual(self.models.status(found["mix/paid"])["why"],
+                             "no key for mix: run /connect in OpenCode and add it")
+            self.models._AUTH_FRESH.clear()                     # the fresh check, from either one
+            self.models.status(self.models.hosted()["mix/zero"])
+            self.assertEqual(self.models.hosted()["mix/paid"].key, "")
+            self.assertEqual(json.loads((store.home() / "hosted.json").read_text())["providers"]["mix"]["key"], "")
+
+    def test_a_server_opencode_found_on_this_machine_is_no_api_model(self):
+        # 2.3.2 lists a running Ollama at 127.0.0.1 with no config: wb model add's, not /connect's
+        local = api_entry("autollama", "qwen:7b", cost=[])
+        local["settings"] = {"baseURL": "http://127.0.0.1:11434/v1"}
+        named = api_entry("autollama2", "coder:7b", cost=[])
+        named["settings"] = {"baseURL": "http://localhost:8080/v1"}
+        self.catalog(DISCOVERY_CATALOG + [local, named], DISCOVERY_AUTH)
+        found = self.models.hosted()
+        self.assertNotIn("autollama/qwen:7b", found)
+        self.assertNotIn("autollama2/coder:7b", found)
+        self.assertIn("acme/coder-flash", found)
+
+    def test_a_provider_connected_after_the_cache_was_read_resolves(self):
+        os.environ["WB_FAKE_API"] = "acme=nokey"
+        self.assertNotIn("acme/coder-flash", self.models.hosted())
+        os.environ.pop("WB_FAKE_API")                             # /connect: no stamp changes
+        with self.assertRaisesRegex(KeyError, "unknown model"):   # within AUTH_FRESH_SECS: cached
+            self.models.resolve("acme/coder-flash")
+        self.assertEqual(self.reads(), 1)
+        path = store.home() / "hosted.json"
+        doc = json.loads(path.read_text())
+        doc["ts"] -= self.models.AUTH_FRESH_SECS + 1
+        store.write_json(path, doc)
+        self.assertEqual(self.models.resolve("acme/coder-flash").kind, "api")
+        self.assertEqual(self.reads(), 2)
+        os.environ["FAKE_CATALOG_FAIL"] = "1"                     # a failed read stays cached
+        self.models.hosted_doc(fresh=True)
+        doc = json.loads(path.read_text())
+        doc["ts"] -= self.models.AUTH_FRESH_SECS + 1
+        store.write_json(path, doc)
+        with self.assertRaises(KeyError):
+            self.models.resolve("acme/coder-pro")
+        self.assertEqual(self.reads(), 3)
+
+    def test_an_alias_is_named_by_its_id_at_the_provider(self):
+        alias = api_entry("acme", "alias-x")
+        alias["modelID"] = "real-name"
+        self.catalog([alias, api_entry("acme", "plain")], DISCOVERY_AUTH)
+        found = self.models.hosted()
+        self.assertEqual((found["acme/alias-x"].name, found["acme/plain"].name), ("real-name", "plain"))
+
+    def test_odd_catalog_and_cache_shapes_dont_crash(self):
+        odd = [api_entry("acme", "s1", settings="x"), api_entry("acme", "s2", limit=[1]),
+               api_entry("acme", "s3", capabilities="x", cost=7, variants={"a": 1}, modelID=3)]
+        self.catalog(odd, DISCOVERY_AUTH)
+        found = {k: v for k, v in self.models.hosted().items() if k.startswith("acme/")}
+        self.assertEqual(sorted(found), ["acme/s1", "acme/s2", "acme/s3"])
+        for m in found.values():
+            self.assertIn("why", self.models.status(m))
+        self.assertEqual(found["acme/s3"].name, "s3")
+        path = store.home() / "hosted.json"
+        for bad in ({"acme": "x"}, ["acme"]):                     # the current stamp, a foreign row
+            doc = json.loads(path.read_text())
+            doc["providers"] = bad
+            path.write_text(json.dumps(doc))
+            self.assertIn("acme/s1", self.models.hosted())        # foreign: read again
+
+    def test_a_hung_catalog_read_leaves_nothing_running(self):
+        pidfile = Path(self.tmp.name) / "oc.pid"
+        oc = Path(self.tmp.name) / "oc.py"
+        oc.write_text(f"import os, time\nopen({str(pidfile)!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
+        wrapper = Path(self.tmp.name) / "opencode-wrapper"     # npm's launcher: OpenCode is its child
+        wrapper.write_text(f"#!/bin/sh\n{shlex.quote(sys.executable)} {shlex.quote(str(oc))}\necho done\n")
+        wrapper.chmod(0o755)
+        os.environ["WB_OPENCODE_BIN"] = str(wrapper)
+        with mock.patch.object(self.models, "CATALOG_TIMEOUT", 2):
+            self.assertEqual(self.models.hosted(), {})
+        self.assertIn("took over 2 s", self.models.hosted_error())
+        pid = int(pidfile.read_text())
+
+        def alive():
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            try:  # a zombie waiting on its new parent is gone too
+                return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+            except OSError:
+                return True
+        deadline = time.time() + 10
+        while alive() and time.time() < deadline:
+            time.sleep(POLL)
+        if alive():
+            os.kill(pid, signal.SIGKILL)
+            self.fail("the wrapper's OpenCode outlived the timeout")
+
+    def test_a_gpu_id_discover_lacks_never_reads_the_catalog(self):
+        # a renamed or retired model, an old task's id, rename's OLD, a typo: two OpenCode starts
+        # on every wb watch --json the pane polls, where hosted() could never have the id
+        for mid in ("ollama/gone:7b", "ollama/nope", "strata/old.gguf"):
+            self.assertTrue(self.models.gpu_side(mid), mid)
+            self.assertIsNone(self.models.lookup(mid))
+            with self.assertRaises(KeyError):
+                self.models.resolve(mid)
+            self.assertFalse(cli._api_id(mid))
+        self.assertEqual(self.reads(), 0)
+        for mid in ("acme/coder-flash", "ollama/gpt-oss:120b-cloud", "gone/x", "mimo"):
+            self.assertFalse(self.models.gpu_side(mid), mid)
+        self.assertEqual(self.models.lookup("acme/coder-flash").kind, "api")
+        self.assertEqual(self.reads(), 1)
+
+    def test_the_pane_reads_the_cache_and_never_rebuilds_it(self):
+        from workbench import router, transcript
+        self.assertIsNone(self.models.lookup("acme/coder-flash", cached=True))   # no cache: nothing
+        self.assertEqual(self.reads(), 0)
+        self.models.hosted()
+        path = store.home() / "hosted.json"
+        doc = json.loads(path.read_text())
+        doc["ts"] -= self.models.HOSTED_TTL + 1                   # stale: the pane still reads it
+        store.write_json(path, doc)
+        self.assertEqual(self.models.lookup("acme/coder-flash", cached=True).kind, "api")
+        router.expected("acme/coder-flash", "small")
+        task = store.Task("t-pane")
+        task.dir.mkdir(parents=True)
+        store.write_json(task.dir / "task.json", {"model": "acme/coder-flash"})
+        transcript.model_line(task, {})
+        self.assertEqual(self.reads(), 1)
+
+    def test_a_plain_named_cloud_model_isnt_called_an_api_model(self):
+        # Ollama forwards it under a plain name (its tags row's remote_host): hosted() knows cloud
+        # models by name only, so "local": true left one nothing could run
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"] = {"ollama": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
+                                      "models": {"gpt-oss:120b": {"limit": {"context": 131072}}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"ollama": {"engine": "ollama"},
+                                                             "ollama/gpt-oss:120b": {"local": True}}))
+        os.environ.pop("WB_FAKE_MODELS")
+        tags = {"models": [{"name": "gpt-oss:120b", "remote_host": "https://ollama.com:443"}]}
+        get = lambda url, timeout=2.5: tags if url.endswith("/api/tags") else (  # noqa: E731
+            {"version": "0.12.0"} if url.endswith("/api/version") else {"models": []})
+
+        def offline(*a, **k):  # this machine's own Ollama must not answer for the test's
+            raise urllib.error.URLError("offline")
+        with mock.patch.object(self.models, "_get", get), mock.patch.object(self.models, "_open", offline), \
+                mock.patch.object(self.models, "emulator", lambda root: None):
+            m = self.models.discover()["ollama/gpt-oss:120b"]
+            why = self.models.status(m)["why"]
+            self.assertNotIn("API model, never", why)
+            self.assertEqual(why, self.models.CLOUD_WHY)
+            self.assertIn("never a GPU model; add it by its cloud name (:cloud, -cloud) to use it as an "
+                          "API model", why)
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err):
+                run_wb("model", "add", "ollama/gpt-oss:120b")
+        self.assertIn("ollama/gpt-oss:120b is an Ollama cloud model under a plain name", err.getvalue())
+        self.assertIn("add it by its cloud name", err.getvalue())
+        self.assertNotIn("local", err.getvalue())                 # local: true is no way in
 
 
 if __name__ == "__main__":

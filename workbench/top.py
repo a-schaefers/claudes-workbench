@@ -500,8 +500,8 @@ class Top:
                 r.update(state="can't run", why="ollama is not answering")
             elif row is None:
                 r.update(state="can't run", why=f"{m.name} is not pulled")
-            elif models._cloud_row(row) and not models.cloud_allowed(m.id):
-                r.update(state="can't run", why=models.CLOUD_WHY.format(id=m.id))
+            elif models._cloud_row(row):  # a cloud model under a plain name: never a GPU one (#1013)
+                r.update(state="can't run", why=models.CLOUD_WHY)
             else:
                 hit = next((x for x in ps.get(m.server) or [] if models._matches(m.name, {x.get("name")})), None)
                 if hit is None:

@@ -309,7 +309,7 @@ def expected(model_id: str, size: str, weights: str | None = None) -> tuple[floa
     """expected_minutes, and how many timed tasks it is the median of. From the files alone: a
     whole score() asked the server for the weights and the identity it never used, and every
     `wb watch --json` the pane ran each 5 s spent ~5 s on a sleeping LAN box's timeouts (#819)."""
-    m = models.discover().get(model_id)
+    m = models.lookup(model_id, cached=True)  # an API task's too; the pane polls: no rebuild
     if not m:
         return None, 0
     ids = lineage(m, probe=False)

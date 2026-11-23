@@ -487,11 +487,15 @@ def activity(task: store.Task, data: dict, now: float | None = None) -> str | No
 def model_line(task: store.Task, data: dict) -> str:
     """The model and how it is set to think: OpenCode's variant and the model's own settings."""
     sp = task.spec
-    m = models.discover().get(sp.get("model", ""))
+    m = models.lookup(sp.get("model", ""), cached=True)  # an API task's too; the pane polls: no rebuild
     cfg = m.config if m else {}
     variant = ((data.get("info") or {}).get("model") or {}).get("variant") \
         or (sp.get("opencode_model", "").partition("#")[2]) or "default"
-    vopts = ((cfg.get("variants") or {}).get(variant) or {})
+    variants = cfg.get("variants") or {}
+    if isinstance(variants, list):  # the catalog's: [{id, settings | body}]
+        variants = {v.get("id"): v.get("settings") or v.get("body") or {}
+                    for v in variants if isinstance(v, dict)}
+    vopts = (variants.get(variant) or {}) if isinstance(variants, dict) else {}
     opts = {**(cfg.get("options") or {}), **(vopts.get("options") or vopts)}
     effort = opts.get("reasoningEffort") or opts.get("reasoning_effort") or (
         f"{_k(opts['thinking']['budgetTokens'])} thinking tokens"
