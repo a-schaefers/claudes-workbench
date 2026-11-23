@@ -213,6 +213,10 @@ class Base(unittest.TestCase):
         self.tmp.name = os.path.realpath(self.tmp.name)
         tmp = Path(self.tmp.name)
         self.env_before = dict(os.environ)
+        # and again after every cleanup: a mock.patch.dict a test started (Lane.fake_home) stops
+        # after tearDown and put this test's WB_* back, so a later class read its WB_GPU_DIR
+        # (Privacy then test_portable's Optimize on Python 3.11, wave 2's merge, 2026-11-23)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self.env_before)))
         # the suite may run in Claude Code's Bash: no task is a session's unless a test says so
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         os.environ.pop("CLAUDE_PID", None)
@@ -17323,7 +17327,7 @@ class DynamicWorkflows(Base):
         self.assertTrue(out.startswith("started fan-docs on deepseek/deepseek-flash (API) · branch "), out)
         # "you": the dialog's yes was the user's (routes.said: only the user sets a role)
         self.assertIn(f"\nmodel: deepseek/deepseek-flash · API (DeepSeek) · writing role, set by you {day} · "
-                      "thinking off\n", out)
+                      "thinking off · today $0.00 of $5\n", out)  # meter.tail (#1019)
         self.assertIn("note: 3 tasks run on deepseek's API; this task waits as queued for a slot", out)
         self.assertNotIn("GPU", out)                          # never the GPU's wait, nor its notes
         got = threading.Event()
@@ -25744,11 +25748,12 @@ class Keyhole(_KeyholeTest):
 
     def test_the_upstreams_answers_set_the_models_health(self):
         seen = []
-        kh = self.keyhole(on_health=lambda *a: seen.append(a))
+        kh = self.keyhole(on_health=lambda *a: seen.append(a), hold=0)  # nothing held (#1020's RateLimits)
         self.post(kh)
         self.up.mode = "status"
         cases = [(402, None, "no_credit"), (429, None, "rate_limited"),
-                 (429, "120", "rate_limited"), (503, None, "unreachable")]
+                 (429, "120", "rate_limited"), (503, None, "unreachable"),
+                 (522, None, "unreachable"), (501, None, "unreachable")]  # not held, still told (#1020)
         for status, after, _ in cases:
             self.up.status, self.up.retry_after, self.up.message = status, after, "nope"
             self.post(kh)
@@ -25766,7 +25771,7 @@ class Keyhole(_KeyholeTest):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             m.base_url = f"http://127.0.0.1:{sock.getsockname()[1]}/v1/openai"  # nothing listens
-        kh = self.keyhole(m, on_health=lambda *a: seen.append(a))
+        kh = self.keyhole(m, on_health=lambda *a: seen.append(a), hold=0)  # passed back at once
         code, _, text = self.post(kh)
         self.assertEqual(code, 502)
         self.assertIn("keyhole: can't reach 127.0.0.1: ", json.loads(text)["error"]["message"])
@@ -25797,7 +25802,7 @@ class Keyhole(_KeyholeTest):
         os.environ["https_proxy"] = f"http://me:p%40ss@127.0.0.1:{proxy.server_port}"
         m = self.model()
         m.base_url = "https://api.example.invalid/v1/openai"
-        kh = self.keyhole(m)
+        kh = self.keyhole(m, hold=0)  # no address for it: an outage, passed back at once
         code, _, text = self.post(kh)
         self.assertEqual(code, 502)
         self.assertIn("keyhole: can't reach api.example.invalid: ", text)
@@ -26305,6 +26310,8 @@ class RealOpenCodeAPI(_KeyholeTest):
             self.assertEqual(got["settings"].pop("apiKey"), kh.token)
             want = json.loads(json.dumps(want))
             want["settings"].pop("baseURL")
+            # the window and output as the task plans to them, not the catalog's (#1017)
+            want["limit"] = models.api_limits({"limit": want["limit"]})["limit"]
             self.assertEqual(got, want)                                    # field for field
         # a run of the model the binary lacks, through the keyhole, its variant applied
         m = found[f"{new['providerID']}/{new['id']}"]
@@ -27302,8 +27309,9 @@ SPIKE_IDS = {"deepinfra": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "anthropic": "
 
 def priced(entry: dict, tok: dict) -> float:
     """A step's cost as OpenCode 2.3 reckons it from the catalog (the spike for #1009): `input`
-    leaves out cache reads, reasoning is billed as output, a context tier applies past its size."""
-    used = tok["input"] + tok["cache"]["read"]
+    leaves out cache reads, reasoning is billed as output, a context tier applies past its size
+    (by input plus cache reads plus cache writes: 2.3.2's rule, #1019's review)."""
+    used = tok["input"] + tok["cache"]["read"] + tok["cache"]["write"]
     rate = [p for p in entry["cost"] if not p.get("tier") or used > p["tier"]["size"]][-1]
     return (tok["input"] * rate["input"] + (tok["output"] + tok["reasoning"]) * rate["output"]
             + tok["cache"]["read"] * rate["cache"]["read"]
@@ -27840,7 +27848,8 @@ class ApiDiscovery(Base):
     def test_a_connected_model_is_an_api_model_with_its_catalog_window(self):
         m = self.models.hosted()["acme/coder-flash"]
         self.assertEqual((m.kind, m.key, m.engine, m.name, m.provider), ("api", "stored", "api", "coder-flash", "acme"))
-        self.assertEqual(m.config["limit"]["context"], 200000)
+        self.assertEqual(m.config["limit"]["context"], 131072)                # capped (#1017)
+        self.assertEqual(m.extra["catalog_limit"]["context"], 200000)        # the catalog's
         self.assertEqual((m.base_url, m.package, m.label),
                          ("https://api.acme.test/v1", "@opencode/ai/providers/acme", "Acme (API)"))
         self.assertEqual(m.config["cost"], DISCOVERY_CATALOG[0]["cost"])
@@ -28154,7 +28163,9 @@ class ApiDiscovery(Base):
         while alive() and time.time() < deadline:
             time.sleep(POLL)
         if alive():
-            os.kill(pid, signal.SIGKILL)
+            # it can exit between alive() and the kill: ProcessLookupError, not the failure (seen on 3.11, 2026-11-23)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
             self.fail("the wrapper's OpenCode outlived the timeout")
 
     def test_a_gpu_id_discover_lacks_never_reads_the_catalog(self):
@@ -28275,6 +28286,44 @@ class Routes(Base):
         self.assertEqual(shown["roles"]["writing"]["label"], "English writing")
         self.assertEqual(shown["summary"], "significant GPU (the router picks); trivial GPU (the router "
                                            "picks); writing GPU (the router picks)")
+
+    def test_an_openrouter_roles_order_is_kept_through_a_read_and_an_edit(self):
+        # the wave 2 merge (#1014 with #1021): normalize kept only #1014's keys, so a role's
+        # `order`, which the keyhole and the where-note read, was dropped by every read
+        self.path.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {"trivial": {
+            "via": "gpu", "api": "openrouter/x/y", "order": ["baseten", "deepinfra/fp8"]}}}))
+        self.assertEqual(routes.read()["roles"]["trivial"]["order"], ["baseten", "deepinfra/fp8"])
+        self.assertEqual(self.route("cap", "7")[0], 0)
+        self.assertEqual(self.doc()["roles"]["trivial"]["order"], ["baseten", "deepinfra/fp8"])
+        self.path.write_text(json.dumps({"v": 1, "roles": {"trivial": {"order": "baseten"}}}))
+        with self.assertRaises(routes.RoutesError):
+            routes.read()
+
+    def test_an_openrouter_role_needs_its_backends_and_the_line_names_them(self):
+        # #1021's `--order` on #1014's wb route (the wave 2 merge): one OpenRouter id is served by
+        # many backends, so a role never goes to one nobody chose
+        self.catalog([*ROUTES_CATALOG, api_entry("openrouter", "vendor/model-x")],
+                     [*ROUTES_AUTH, key_row("openrouter", "OpenRouter", STORED)])
+        runner.models.hosted(fresh=True)
+        code, out, err = self.route("trivial", "openrouter/vendor/model-x", "--day-usd", "5")
+        self.assertEqual((code, out), (3, ""))
+        self.assertIn("openrouter/vendor/model-x is served by many backends that differ in quantization and "
+                      "data policy: pick them with --order <name>[,<name>]", err)
+        self.assertFalse(self.path.exists())
+        os.environ["CLAUDECODE"] = "1"
+        asked = self.dry("trivial", "openrouter/vendor/model-x", "--day-usd", "5", "--order", "baseten, deepinfra/fp8")
+        self.assertIn("· backends baseten, deepinfra/fp8 ·", asked["change"])
+        self.assertEqual(asked["approval"]["argv"], ["route", "trivial", "openrouter/vendor/model-x", "--day-usd", "5",
+                                                     "--order", "baseten,deepinfra/fp8"])
+        self.approve(asked["approval"])
+        self.assertEqual(self.route("trivial", "openrouter/vendor/model-x", "--day-usd", "5", "--order",
+                                    "baseten,deepinfra/fp8")[0], 0)
+        self.assertEqual(self.doc()["roles"]["trivial"]["order"], ["baseten", "deepinfra/fp8"])
+        self.assertEqual(self.dry("trivial", "--order", "baseten")["change"],
+                         "trivial: backends baseten, deepinfra/fp8 → baseten")      # gated: the dialog
+        os.environ.pop("CLAUDECODE")
+        self.route("trivial", "deepseek/deepseek-flash")                           # another provider's
+        self.assertNotIn("order", self.doc()["roles"]["trivial"])
 
     def test_a_role_set_in_a_terminal_writes_the_plans_document_and_prints_the_change(self):
         code, out, err = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
@@ -28689,6 +28738,9 @@ class _ApiTask:
 
     def api_setup(self):
         self.catalog(API_CATALOG)
+        # a day cap, as wb route sets one before any API role: without it the meter stops an API
+        # task before it spends (meter.NO_CAP, #1019)
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
         os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
             {"id": f"cred_{p}", "integrationID": p, "label": "main", "active": True,
              "value": {"type": "key", "key": self.CANARY}} for p in ("deepinfra", "anthropic")])
@@ -28746,7 +28798,8 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         discovery never lists one on this machine, so models.resolve is patched to give it."""
         m = self.model()
         m.kind, m.key, m.remote = "api", "stored", True
-        m.config = {"limit": {"context": 200000, "output": 8192}}
+        # priced as the catalog prices it: an unpriced API model is refused at start (#1019)
+        m.config = {"limit": {"context": 200000, "output": 8192}, "cost": [{"input": 0.2, "output": 0.6}]}
         real = self.models.resolve
         p = mock.patch.object(self.models, "resolve", lambda w: m if w == m.id else real(w))
         p.start()
@@ -28891,7 +28944,9 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         opts = layer["provider"]["deepinfra"]["options"]
         self.assertTrue(opts["baseURL"].startswith("http://127.0.0.1:"), opts)
         self.assertTrue(opts["baseURL"].endswith("/v1/openai"))
-        self.assertEqual(layer["small_model"], FLASH)                # titles on the task's model
+        # titles on the task's model, with its thinking variant (#1018): the catalog's own `none`
+        self.assertEqual(layer["small_model"], task.spec["opencode_model"])
+        self.assertEqual(layer["small_model"], f"{FLASH}#none")
         self.assert_no_canary(json.dumps(layer), (rules / "catalog.json").read_text(),
                               self.all_files(task.dir))
         self.assertNotIn("listed-key", (rules / "catalog.json").read_text())
@@ -28931,7 +28986,9 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         errors = [e for e in events if e.get("kind") == "error"]
         self.assertTrue(errors, events)
         self.assertIn("Incorrect API key provided: [key redacted]", json.dumps(errors))
-        self.assertIn("[key redacted]", task.status["last"])
+        # the round ends as the provider's `auth` stop (#1020), whose line names the refusal and
+        # no part of the key; the upstream's own words stay in events, redacted
+        self.assertEqual(task.status["last"], "deepinfra refused the API key (HTTP 401)")
         self.assert_no_canary(self.all_files(task.dir), json.dumps(task.status))
 
     def test_a_proxy_in_the_agents_env_doesnt_catch_the_keyhole(self):
@@ -29028,6 +29085,2576 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual((health or {}).get("state"), "no_credit", health)
 
 
+# Catalog rows for thinking per task (#1018), shaped as OpenCode 2.3.2's `api model.list` prints
+# them: DeepSeek's own API lists `none` (a body field), OpenRouter a model whose variants have no
+# off position, and rows with no variants (a model that doesn't reason), or a reasoning
+# capability and no variants (wb's own variant goes in the layer)
+DEEPSEEK = {"package": "@opencode/ai/providers/deepseek", "settings": {"baseURL": "https://api.deepseek.com"},
+            "cost": [{"input": 0.2, "output": 0.6, "cache": {"read": 0.006, "write": 0}}],
+            "limit": {"context": 1048576, "output": 384000}, "status": "active"}
+OPENROUTER = {"package": "@opencode/ai/providers/openrouter", "settings": {"baseURL": "https://openrouter.ai/api/v1"},
+              "cost": [{"input": 1, "output": 2, "cache": {"read": 0, "write": 0}}],
+              "limit": {"context": 200000, "output": 32000}, "status": "active"}
+THINK_CATALOG = [
+    {**DEEPSEEK, "id": "deepseek-flash", "providerID": "deepseek", "capabilities": {"tools": True},
+     "variants": [{"id": "none", "body": {"thinking": {"type": "disabled"}}}] + [
+         {"id": v, "settings": {"reasoningEffort": v}, "body": {"thinking": {"type": "enabled"}}}
+         for v in ("low", "high", "max")]},
+    {**DEEPSEEK, "id": "deepseek-plain", "providerID": "deepseek",
+     "capabilities": {"tools": True, "reasoning": {"toggle": True}}},
+    {**OPENROUTER, "id": "acme/mandatory-coder", "providerID": "openrouter", "capabilities": {"tools": True},
+     "variants": [{"id": v, "settings": {"reasoning": {"effort": v}}} for v in ("low", "minimal", "high")]},
+    {**OPENROUTER, "id": "acme/mandatory-bare", "providerID": "openrouter",
+     "capabilities": {"tools": True, "reasoning": {"effort": ["low", "high"]}}},
+    {**OPENROUTER, "id": "acme/plain", "providerID": "openrouter", "capabilities": {"tools": True}}]
+
+
+class ApiThinking(Base):
+    """Thinking per task (#1018): an API task runs with thinking off unless its role says on,
+    through the catalog's own off variant or wb's `wb-off` in the layer, fixed at wb start and
+    shown from task.json; a GPU task as before."""
+    catalog = ApiHarness.catalog
+    capture = ApiHarness.capture
+    real_env = ApiHarness.real_env
+    oc_cwd = ApiHarness.oc_cwd
+    layer = staticmethod(ApiHarness.layer)
+    real_run = ApiHarness.real_run
+
+    def setUp(self):
+        super().setUp()
+        from workbench import models
+        self.models = models
+        self.catalog(THINK_CATALOG)
+
+    def start_api(self, name, mid, **extra):
+        """wb start for an API model, as #1016's roles will run it (wb start refuses --model for
+        one until then): the router's pick and the runner left out, the rest as it is."""
+        m = self.models.hosted()[mid]
+        routed = {"via": "api", "role": "trivial", "provider": m.provider, "provider_name": m.provider,
+                  "thinking": "off", "said": ""}
+        with mock.patch.object(cli, "pick_model", lambda *a, **k: (m, self.models.status(m), "the role", routed)), \
+                mock.patch.object(cli, "_gpu_wait", lambda *a: ({}, False)), \
+                mock.patch.object(cli, "spawn_runner", lambda t: 0), \
+                mock.patch.object(runner, "with_thinking", lambda m, spec, f=runner.with_thinking:
+                                  f(m, {**spec, **extra})):  # task.json's `thinking`, as the role sets it
+            run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo))
+        return store.Task(name)
+
+    def fake_run(self, task, env=None):
+        """The fake OpenCode run as the runner starts it: the task's -m and its environment."""
+        env = runner.opencode_env(task) if env is None else env
+        p = subprocess.run([*shlex.split(FAKE), "run", "--standalone", "-m", task.spec["opencode_model"],
+                            "--auto", "--format", "json", "--", "go"], cwd=task.dir, env={
+                                **env, "FAKE_NO_MCP": "1", "FAKE_SCENARIO": "say"},
+                           capture_output=True, text=True, timeout=60)
+        return p.returncode, [json.loads(x) for x in p.stdout.splitlines() if x.startswith("{")]
+
+    def test_an_api_task_runs_the_catalogs_own_off_variant_fixed_at_its_start(self):
+        task = self.start_api("t-flash", "deepseek/deepseek-flash")
+        sp = task.spec
+        self.assertEqual((sp["opencode_model"], sp["thinking"], sp["thinking_shown"]),
+                         ("deepseek/deepseek-flash#none", "off", "thinking off"))  # off by default
+        self.assertNotIn("thinking_off", sp)                     # nothing of wb's in the layer
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["small_model"], "deepseek/deepseek-flash#none")  # the title too
+        self.assertNotIn("providers", layer)
+        code, rows = self.fake_run(task)
+        self.assertEqual((code, rows[-1]["type"]), (0, "step_finish"), rows)   # the variant resolves
+        # the role's thinking changed mid-task: the task keeps what it started with (the cache)
+        routes = Path(self.tmp.name) / "routes.json"
+        routes.write_text(json.dumps({"v": 1, "roles": {r: {"via": "api", "api": "deepseek/deepseek-flash",
+                                                            "thinking": "on"} for r in ("significant", "trivial")}}))
+        os.environ["WB_ROUTES"] = str(routes)
+        runner.checkout(task)
+        task.set_status(phase="review")
+        with mock.patch.object(cli, "spawn_runner", lambda t: 0):
+            run_wb("feedback", "t-flash", "--text", "Also write b.txt.")
+        self.assertEqual({k: store.Task("t-flash").spec[k] for k in ("opencode_model", "thinking", "thinking_shown")},
+                         {k: sp[k] for k in ("opencode_model", "thinking", "thinking_shown")})
+        self.assertEqual(json.loads(runner.write_config_layer(task).read_text())["small_model"],
+                         "deepseek/deepseek-flash#none")
+        out = transcript.model_line(store.Task("t-flash"), {})
+        self.assertEqual(out, "deepseek (API) · thinking off · 128K context")   # task.json's, no variant; #1017's window
+        from workbench import results
+        row = results.record(task, "discarded")
+        self.assertEqual(row["thinking"], "off")                  # the weekly check's evidence
+
+    def test_a_deepseek_model_with_no_off_variant_gets_wb_off_in_the_layer_and_its_restatement(self):
+        task = self.start_api("t-plain", "deepseek/deepseek-plain")
+        sp = task.spec
+        self.assertEqual((sp["opencode_model"], sp["thinking_shown"]), ("deepseek/deepseek-plain#wb-off", "thinking off"))
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        mine = layer["providers"]["deepseek"]
+        self.assertEqual(mine["models"]["deepseek-plain"]["variants"],
+                         [{"id": "wb-off", "body": {"thinking": {"type": "disabled"}}}])
+        # a body field goes only in V2, and a provider in both forms loses its V1 entry
+        self.assertNotIn("deepseek", layer.get("provider") or {})
+        self.assertIn("chunkTimeout", mine["settings"])            # its timeouts moved with it
+        self.assertEqual(layer["small_model"], "deepseek/deepseek-plain#wb-off")
+        env = runner.opencode_env(task)
+        content = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(content["providers"]["deepseek"]["models"]["deepseek-plain"]["variants"],
+                         mine["models"]["deepseek-plain"]["variants"])  # restated, as the pins are
+        self.assertNotIn("deepseek", content.get("provider") or {})
+        self.assertEqual(content["providers"]["deepseek"]["models"]["deepseek-plain"]["limit"],
+                         runner.models.api_limits(DEEPSEEK)["limit"])     # with the model's pins (#1017's caps)
+        self.assertEqual(content["small_model"], "deepseek/deepseek-plain#wb-off")
+        code, rows = self.fake_run(task, env)
+        self.assertEqual((code, rows[-1]["type"]), (0, "step_finish"), rows)
+        bare = {k: v for k, v in env.items() if k not in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT")}
+        code, rows = self.fake_run(task, bare)                       # without the layer: no such variant
+        self.assertEqual((code, rows[-1]["error"]["message"]),
+                         (1, "Variant unavailable for deepseek/deepseek-plain: wb-off"))
+
+    def test_thinking_on_runs_the_bare_id_with_no_variant_anywhere(self):
+        task = self.start_api("t-on", "deepseek/deepseek-plain", thinking="on")
+        self.assertEqual((task.spec["opencode_model"], task.spec["thinking_shown"]),
+                         ("deepseek/deepseek-plain", "thinking on"))
+        env = runner.opencode_env(task)
+        self.assertNotIn("wb-off", Path(env["OPENCODE_CONFIG"]).read_text())
+        self.assertNotIn("wb-off", env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(self.fake_run(task, env)[0], 0)
+        self.assertIn("thinking on", transcript.model_line(task, {}))
+
+    def test_a_model_that_cant_turn_thinking_off_runs_at_its_lowest_effort_and_says_so(self):
+        task = self.start_api("t-must", "openrouter/acme/mandatory-coder")
+        self.assertEqual((task.spec["opencode_model"], task.spec["thinking_shown"]),
+                         ("openrouter/acme/mandatory-coder#minimal",       # the catalog's lowest
+                          "thinking at its lowest effort (it can't turn off)"))
+        self.assertEqual(self.fake_run(task)[0], 0)
+        task = self.start_api("t-must-bare", "openrouter/acme/mandatory-bare")   # none listed: wb's
+        self.assertEqual(task.spec["opencode_model"], "openrouter/acme/mandatory-bare#wb-off")
+        self.assertIn("lowest effort (it can't turn off)", task.spec["thinking_shown"])
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["provider"]["openrouter"]["models"]["acme/mandatory-bare"]["variants"],
+                         {"wb-off": {"reasoning": {"effort": "minimal"}}})   # a setting: V1
+        self.assertNotIn("providers", layer)
+        env = runner.opencode_env(task)
+        self.assertIn('"wb-off":{"reasoning":{"effort":"minimal"}}', env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(self.fake_run(task, env)[0], 0)
+        task = self.start_api("t-noreason", "openrouter/acme/plain")      # no variants: doesn't reason
+        self.assertEqual((task.spec["opencode_model"], task.spec["thinking_shown"]),
+                         ("openrouter/acme/plain", "thinking off (the model doesn't reason)"))
+
+    def test_the_variant_follows_what_the_provider_speaks(self):
+        M = lambda url="https://api.example.test/v1", package="", **cfg: self.models.Model(  # noqa: E731
+            id="p/m", provider="p", name="m", base_url=url, engine="api", label="P (API)", kind="api",
+            package=package, config=cfg)
+        cases = [
+            (M(reasoning=True, package="@opencode/ai/providers/deepseek"),
+             ("wb-off", "thinking off", {"body": {"thinking": {"type": "disabled"}}})),  # V2 for the catalog's
+            # by its host; an npm package sends V1 keys in the body, so a setting (the #1018 review)
+            (M(reasoning=True, npm="@ai-sdk/openai-compatible", url="https://api.deepseek.com/v1"),
+             ("wb-off", "thinking off", {"settings": {"thinking": {"type": "disabled"}}})),
+            (M(reasoning=True, package="@opencode/ai/providers/anthropic"),
+             ("wb-off", "thinking off", {"settings": {"thinking": {"type": "disabled"}}})),
+            (M(reasoning=True), ("wb-off", "thinking off", {"settings": {"reasoningEffort": "none"}})),
+            (M(reasoning=True, url="https://openrouter.ai/api/v1"),
+             ("wb-off", "thinking off", {"settings": {"reasoning": {"enabled": False}}})),
+            (M(reasoning=False, variants=[{"id": "none"}]), (None, "thinking off (the model doesn't reason)", None)),
+            (M(variants={"quick": {"reasoningEffort": "none"}, "deep": {"reasoningEffort": "high"}}),
+             ("quick", "thinking off", None)),                       # a config's V1 variants, by content
+            # none listed off: never a variant that thinks more than the bare id (the #1018 review)
+            (M(variants=[{"id": "high"}, {"id": "thinking"}]),     # not under OpenAI's default medium
+             (None, "thinking as the model's default (it lists no lower setting)", None)),
+            (M(variants=[{"id": "high"}, {"id": "low"}]),
+             ("low", "thinking at its lowest effort (it can't turn off)", None)),
+            (M(url="https://openrouter.ai/api/v1", variants=[{"id": v, "settings": {"reasoning": {"effort": v}}}
+                                                         for v in ("high", "xhigh", "max")]),
+             (None, "thinking as the model's default (it lists no lower setting)", None)),
+            (M(variants=[{"id": "wb-off", "settings": {"reasoningEffort": "none"}}, {"id": "high"}]),
+             (None, "thinking as the model's default (it lists no lower setting)", None)),  # theirs ignored
+            # Anthropic's manual thinking: the bare id sends no `thinking`, so off as it is
+            (M(package="@opencode/ai/providers/anthropic", variants=[
+                {"id": v, "settings": {"thinking": {"type": "enabled", "budgetTokens": n}}}
+                for v, n in (("high", 16000), ("max", 31999))]), (None, "thinking off", None)),
+            # its adaptive ones: some think on the bare id and refuse `disabled`; `#low` turned on
+            # thinking for those that don't
+            (M(package="@opencode/ai/providers/anthropic", variants=[
+                {"id": v, "settings": {"thinking": {"type": "adaptive"}, "effort": v}} for v in ("low", "high")]),
+             (None, "thinking as the model's default (it lists no lower setting)", None)),
+            (M(capabilities={"reasoning": {"effort": ["high", "medium"]}}),
+             ("wb-off", "thinking at its lowest effort (it can't turn off)", {"settings": {"reasoningEffort": "medium"}})),
+            (M(capabilities={"reasoning": {}}), (None, "thinking on (it can't turn off)", None)),
+        ]
+        for m, want in cases:
+            self.assertEqual(runner._thinking(m, "off"), want, m.config)
+            self.assertEqual(runner.thinking_variant(m, "on"), (None, "thinking on"))
+
+    def test_a_keyhole_models_own_base_moves_to_v2_as_its_settings_base_url(self):
+        # the wave 2 merge (#1015 with #1018): the keyhole overlay gives the model a V1
+        # `provider.api`; moved to V2 as it was, the keyhole's base sat in a key V2 doesn't read
+        base, wbs = "http://127.0.0.1:9/v1", {"id": "wb-off", "body": {"thinking": {"type": "disabled"}}}
+        moved = runner._as_v2({"provider": {"ds": {"options": {"baseURL": base, "apiKey": "tok"}, "models": {
+            "m": {"provider": {"api": base}, "options": {"apiKey": "tok"}}}}}}, "ds", "m", wbs)
+        entry = moved["providers"]["ds"]["models"]["m"]
+        self.assertNotIn("provider", entry)
+        self.assertEqual(entry["settings"], {"baseURL": base, "apiKey": "tok"})
+        self.assertEqual(moved["providers"]["ds"]["settings"], {"baseURL": base, "apiKey": "tok"})
+
+    def test_a_users_own_v1_provider_moves_to_v2_whole_and_wb_off_stays_wbs(self):
+        # the #1018 review: the V2 move's conversions (options, a V1 variants object, a user's own
+        # wb-off) and the content's timeouts had no test; and V2 names npm `package` (a V2 `npm`
+        # failed "Unsupported package" on OpenCode 2.3.2, 2026-11-23)
+        users = {"deepseek": {"options": {"headerTimeout": 5000, "region": "eu"},
+                              "models": {"deepseek-plain": {"options": {"max_tokens": 4096}, "variants": {
+                                  "high": {"reasoningEffort": "high"}, "wb-off": {"reasoningEffort": "max"}}}}}}
+        path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(path.read_text())
+        cfg.setdefault("provider", {}).update(json.loads(json.dumps(users)))
+        path.write_text(json.dumps(cfg))
+        task = self.start_api("t-users", "deepseek/deepseek-plain")
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        wbs = {"id": "wb-off", "body": {"thinking": {"type": "disabled"}}}
+        self.assertNotIn("deepseek", layer.get("provider") or {})
+        v2 = layer["providers"]["deepseek"]
+        self.assertEqual(v2["settings"]["region"], "eu")                  # options as settings
+        self.assertIn("chunkTimeout", v2["settings"])
+        mine = v2["models"]["deepseek-plain"]
+        self.assertEqual((mine["settings"], "options" in mine), ({"max_tokens": 4096}, False))
+        self.assertEqual(mine["variants"], [{"id": "high", "settings": {"reasoningEffort": "high"}}, wbs])
+        with mock.patch.dict(os.environ):                              # the user's content instead
+            del os.environ["WB_OPENCODE_CONFIG"]
+            (Path(self.tmp.name) / "xdg").mkdir()
+            os.environ.update(XDG_CONFIG_HOME=str(Path(self.tmp.name) / "xdg"),
+                              OPENCODE_CONFIG_CONTENT=json.dumps({"provider": users}))
+            content = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
+        self.assertNotIn("deepseek", content.get("provider") or {})
+        cv = content["providers"]["deepseek"]
+        self.assertEqual({k: cv["settings"][k] for k in runner.PROVIDER_TIMEOUTS},   # the layer's, not theirs
+                         {k: v2["settings"][k] for k in runner.PROVIDER_TIMEOUTS})
+        self.assertEqual(cv["settings"]["region"], "eu")
+        # the task's output pin (#1017) said on top: the fake's catalog doesn't carry the user's 4096
+        self.assertEqual(cv["models"]["deepseek-plain"]["settings"], {"max_tokens": runner.models.API_OUTPUT})
+        self.assertEqual(cv["models"]["deepseek-plain"]["variants"],
+                         [{"id": "high", "settings": {"reasoningEffort": "high"}}, wbs])
+        moved = runner._as_v2({"provider": {"dsx": {"npm": "@ai-sdk/openai-compatible", "name": "DSX",
+                                                    "options": {"baseURL": "http://h/v1"}}}}, "dsx", "m", wbs)
+        self.assertEqual(moved, {"providers": {"dsx": {"package": "@ai-sdk/openai-compatible", "name": "DSX",
+                                                       "settings": {"baseURL": "http://h/v1"},
+                                                       "models": {"m": {"variants": [wbs]}}}}})
+
+    def test_a_gpu_task_gets_no_variant_whatever_the_roles_thinking(self):
+        self.start("t-gpu", "ok")
+        wait_phase("t-gpu", {"review"})
+        task = store.Task("t-gpu")
+        self.assertEqual(task.spec["opencode_model"], task.spec["model"])          # as today
+        self.assertFalse({"thinking", "thinking_shown", "thinking_off"} & set(task.spec))
+        gpu = self.models.resolve(task.spec["model"])
+        spec = {**task.spec, "thinking": "off"}                     # as #1016 writes it for a GPU role
+        self.assertEqual(runner.with_thinking(gpu, spec), spec)
+        layer = runner.write_config_layer(task).read_text()
+        self.assertNotIn("wb-off", layer)
+        self.assertEqual(json.loads(layer)["small_model"], task.spec["model"])
+        from workbench import results
+        self.assertNotIn("thinking", results.record(task, "discarded"))
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_sends_thinking_disabled_through_wb_off_and_the_catalogs_none(self):
+        port, out, heads = self.capture("real-think")
+        layer = lambda: {"provider": {"deepseek": {"options": {  # noqa: E731
+            "baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "dummy-key",
+            "headerTimeout": False, "chunkTimeout": 960000}}}}
+        listed = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
+                                env=self.real_env(layer()), capture_output=True, text=True, timeout=60)
+        rows = [e for e in json.loads(listed.stdout)["data"] if e["providerID"] == "deepseek"
+                and e.get("capabilities", {}).get("tools")]
+        self.assertTrue(rows, "no DeepSeek model in this OpenCode's catalog")
+        entry = rows[0]
+        model = f"deepseek/{entry['id']}"
+        Model = lambda **cfg: self.models.Model(  # noqa: E731
+            id=model, provider="deepseek", name=entry["id"], base_url="https://api.deepseek.com",
+            engine="api", label="DeepSeek (API)", kind="api", package=entry.get("package", ""),
+            config={"limit": entry["limit"], **cfg})
+
+        def run(spec):
+            doc = runner.thinking_layer({**layer(), "small_model": spec["opencode_model"]}, spec)
+            path = Path(self.tmp.name) / "think-layer.json"
+            path.write_text(json.dumps(doc))
+            content = runner.restate_thinking(doc, {"share": "disabled", "provider": {"deepseek": {
+                "options": {"headerTimeout": False, "chunkTimeout": 960000}}}})
+            env = {**self.real_env(content), "OPENCODE_CONFIG": str(path)}
+            before = len(out.read_text().splitlines()) if out.exists() else 0
+            p = subprocess.run(["opencode", "run", "--standalone", "-m", spec["opencode_model"], "--format",
+                                "json", "--", "say ok"], cwd=self.oc_cwd(), env=env, capture_output=True,
+                               text=True, timeout=90)
+            self.assertEqual(p.returncode, 0, p.stdout[-2000:])
+            return [json.loads(x) for x in out.read_text().splitlines()][before:]
+
+        # a DeepSeek model that lists no off variant: wb's own, a V2 body field beside V1 options
+        spec = runner.with_thinking(Model(reasoning=True), {"model": model, "opencode_model": model})
+        self.assertEqual(spec["opencode_model"], f"{model}#wb-off")
+        bodies = run(spec)
+        self.assertTrue([b for b in bodies if b.get("tools")], "no agent request")
+        self.assertEqual({json.dumps(b.get("thinking")) for b in bodies}, {'{"type": "disabled"}'})
+        bare = run({"model": model, "opencode_model": model})       # no variant: no field
+        self.assertEqual([b.get("thinking") for b in bare if b.get("tools")], [None])
+        # the catalog's own, as 2.3.2 lists it for DeepSeek
+        spec = runner.with_thinking(Model(variants=entry.get("variants")), {"model": model, "opencode_model": model})
+        self.assertEqual(spec["opencode_model"], f"{model}#none")
+        bodies = run(spec)
+        self.assertEqual([b.get("thinking") for b in bodies if b.get("tools")], [{"type": "disabled"}])
+        # a provider of the user's config on an npm package, at DeepSeek's host: its wb-off stays V1,
+        # whose keys that package sends in the body (moved to V2 whole, its npm failed the run)
+        compat = self.models.Model(
+            id="dsx/ds-model", provider="dsx", name="ds-model", base_url="https://api.deepseek.com/v1",
+            engine="api", label="DSX (API)", kind="api", package="@ai-sdk/openai-compatible",
+            config={"reasoning": True})
+        spec = runner.with_thinking(compat, {"model": compat.id, "opencode_model": compat.id})
+        doc = runner.thinking_layer({"provider": {"dsx": {
+            "npm": "@ai-sdk/openai-compatible", "name": "DSX",
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "dummy-key"},
+            "models": {"ds-model": {"name": "ds-model", "reasoning": True, "tool_call": True,
+                                    "limit": {"context": 65536, "output": 8192}}}}},
+            "small_model": spec["opencode_model"]}, spec)
+        self.assertEqual(doc["provider"]["dsx"]["models"]["ds-model"]["variants"],
+                         {"wb-off": {"thinking": {"type": "disabled"}}})
+        path = Path(self.tmp.name) / "think-compat.json"
+        path.write_text(json.dumps(doc))
+        before = len(out.read_text().splitlines()) if out.exists() else 0
+        p = subprocess.run(["opencode", "run", "--standalone", "-m", spec["opencode_model"], "--format", "json",
+                            "--", "say ok"], cwd=self.oc_cwd(), env={**self.real_env({}), "OPENCODE_CONFIG": str(path)},
+                           capture_output=True, text=True, timeout=90)
+        self.assertEqual(p.returncode, 0, p.stdout[-2000:])
+        bodies = [json.loads(x) for x in out.read_text().splitlines()][before:]
+        self.assertEqual([b.get("thinking") for b in bodies if b.get("tools")], [{"type": "disabled"}])
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_anthropic_with_no_off_variant_runs_its_bare_id_never_turning_thinking_on(self):
+        # the #1018 review: with none of its variants off, wb ran the lowest listed, which sent
+        # `thinking: enabled` (manual) or `adaptive` with an effort where the bare id sent no
+        # `thinking`; and 18 of the catalog's 20 Anthropic models list no `none`
+        port, out, _ = self.capture("real-anthropic")
+        layer = self.layer(port, "anthropic")
+        listed = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
+                                env=self.real_env(layer), capture_output=True, text=True, timeout=60)
+        rows = [e for e in json.loads(listed.stdout)["data"] if e["providerID"] == "anthropic"
+                and e.get("capabilities", {}).get("tools") and e.get("variants")]
+        self.assertTrue(rows, "no Anthropic model with variants in this OpenCode's catalog")
+        kinds = lambda e: {((v.get("settings") or {}).get("thinking") or {}).get("type")  # noqa: E731
+                           for v in e["variants"]}
+        Model = lambda e: self.models.Model(  # noqa: E731
+            id=f"anthropic/{e['id']}", provider="anthropic", name=e["id"], base_url="https://api.anthropic.com/v1",
+            engine="api", label="Anthropic (API)", kind="api", package=e.get("package", ""),
+            config={"limit": e["limit"], "variants": e["variants"], "reasoning": True})
+        for e in rows:                                   # never a variant that turns thinking on
+            spec = runner.with_thinking(Model(e), {"model": f"anthropic/{e['id']}"})
+            _, _, variant = spec["opencode_model"].partition("#")
+            picked = next((v for v in e["variants"] if v["id"] == variant), None)
+            self.assertIn(((picked or {}).get("settings") or {}).get("thinking", {}).get("type"),
+                          (None, "disabled"), (e["id"], variant))
+
+        def agent_request(e):
+            spec = runner.with_thinking(Model(e), {"model": f"anthropic/{e['id']}"})
+            before = len(out.read_text().splitlines()) if out.exists() else 0
+            code, events = self.real_run(spec["opencode_model"], layer)
+            self.assertEqual(code, 0, events[-3:])
+            tools = [b for b in [json.loads(x) for x in out.read_text().splitlines()][before:] if b.get("tools")]
+            self.assertEqual(len(tools), 1)
+            return spec, tools[0]
+        manual = [e for e in rows if kinds(e) == {"enabled"}]
+        if manual:          # off as it is: no `thinking` sent, as the line says
+            e = next((e for e in manual if e["id"] == "claude-haiku-4-5"), manual[0])
+            spec, body = agent_request(e)
+            self.assertEqual((spec["opencode_model"], spec["thinking_shown"], body.get("thinking")),
+                             (f"anthropic/{e['id']}", "thinking off", None))
+        adaptive = [e for e in rows if kinds(e) == {"adaptive"}]
+        if adaptive:        # the bare id: no effort and no `enabled` of wb's
+            e = next((e for e in adaptive if e["id"] == "claude-opus-4-7"), adaptive[0])
+            spec, body = agent_request(e)
+            self.assertEqual(spec["opencode_model"], f"anthropic/{e['id']}")
+            self.assertNotIn("output_config", body)
+            self.assertNotEqual((body.get("thinking") or {}).get("type"), "enabled")
+
+
+class _RateUpstream(http.server.BaseHTTPRequestHandler):
+    """A provider for RateLimits: before its server's `rate_until` (monotonic) every request gets
+    `code` (with `after` as Retry-After and `body`'s message); after it, an OpenAI SSE answer,
+    first `keepalive` seconds of `: keep-alive` comments when set. Records each request's time."""
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        s = self.server
+        s.seen.append(time.monotonic())
+        if time.monotonic() < s.rate_until:
+            body = json.dumps({"error": {"message": s.body, "code": s.code}}).encode()
+            self.send_response(s.code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            if s.after:
+                self.send_header("Retry-After", s.after)
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+        def chunk(data: bytes):
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+            self.wfile.flush()
+        try:
+            end = time.monotonic() + s.keepalive
+            while time.monotonic() < end:
+                chunk(b": keep-alive\n\n")
+                time.sleep(0.3)
+            ev = {"model": "deepseek-flash", "choices": [{"index": 0, "delta": {"content": "ok"},
+                                                          "finish_reason": "stop"}],
+                  "usage": {"prompt_tokens": 7, "completion_tokens": 1}}
+            chunk(f"data: {json.dumps(ev)}\n\n".encode())
+            chunk(b"data: [DONE]\n\n")
+            self.wfile.write(b"0\r\n\r\n")
+        except OSError:  # the keyhole hung up (a nudge stopped the round)
+            self.close_connection = True
+
+
+class RateLimits(Base):
+    """An API provider's rate limits, outages and queues pause the round's clocks and stop it as
+    the provider's, never as silence (#1020). The keyhole is started here as runner.drive will
+    start it (#1015), on_health wired to models.note_api; the task is written as wb start --role
+    writes it (#1016: via, provider)."""
+    CANARY = _KeyholeTest.CANARY
+
+    def setUp(self):
+        super().setUp()
+        from workbench import keyhole, models
+        self.kh_mod, self.models = keyhole, models
+        self.up = ThreadingHTTPServer(("127.0.0.1", 0), _RateUpstream)
+        self.up.daemon_threads = True
+        self.up.seen, self.up.rate_until, self.up.code, self.up.after = [], 0.0, 429, "1"
+        self.up.body, self.up.keepalive = "Rate limit reached for requests", 0
+        threading.Thread(target=self.up.serve_forever, daemon=True).start()
+        self.addCleanup(self.up.server_close)
+        self.addCleanup(self.up.shutdown)
+
+    def api_task(self, name, scenario, *extra):
+        """A task as wb start writes it for an API role (#1016), its runner not spawned."""
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start(name, scenario, "--no-base-check", *extra)
+        task = store.Task(name)
+        store.write_json(task.dir / "task.json", {**task.spec, "via": "api", "provider": "deepseek",
+                                                  "role": "significant"})
+        return task
+
+    def keyhole(self, task, hold=3):
+        """The keyhole as drive starts it for the task (#1015), its log in runner.log; FAKE_API
+        points the fake's `api` scenario at it."""
+        m = self.models.Model(id="deepseek/deepseek-flash", provider="deepseek", name="deepseek-flash",
+                              base_url=f"http://127.0.0.1:{self.up.server_port}/v1", engine="api",
+                              label="deepseek-flash", kind="api", key="stored")
+        log = task.dir / "runner.log"
+        kh = self.kh_mod.Keyhole(task, m, self.kh_mod.Key("deepseek", self.CANARY), m.base_url, "bearer",
+                                 log=lambda line: log.open("a").write(line + "\n"), hold=hold,
+                                 on_health=lambda st, why, until: self.models.note_api("deepseek", st, why, until))
+        self.addCleanup(kh.close)
+        os.environ["FAKE_API"] = f"{kh.base} {kh.token} deepseek-flash"
+        return kh
+
+    def events(self, task, kind=None):
+        rows, _ = store.read_jsonl(task.dir / "events.jsonl")
+        return [r for r in rows if kind is None or r.get("kind") == kind]
+
+    def notice(self, task):
+        return [r for r in store.notices() if r["task"] == task.name][-1]
+
+    def test_a_round_whose_provider_rate_limits_it_a_while_finishes_with_no_silence_stop(self):
+        # OpenCode's own retries of a 429: without the pause, "no first output in 0 minutes: the
+        # model may be reading its prompt slowly", an untrue report of a provider that said wait
+        os.environ.update(FAKE_RETRY_OK="1", FAKE_RETRIES="8", FAKE_RETRY_EVERY="1")
+        task = self.api_task("t-rl", "ratelimit", "--silence-timeout", "3", "--think-timeout", "2")
+        runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st.get("nudges", 0)), ("review", 0), st.get("last"))
+        self.assertLess(st["active_s"], 5)                          # the 8 s of 429s left out
+        [ev] = self.events(task, "rate_limited")
+        self.assertEqual((ev["provider"], ev["code"], ev["state"]), ("deepseek", 429, "rate_limited"))
+        self.assertGreaterEqual(ev["secs"], 6)
+        self.assertFalse(self.events(task, "stopped"))
+        other = self.api_task("t-rl2", "ratelimit", "--silence-timeout", "3", "--think-timeout", "2")
+        with mock.patch.object(runner._ProviderWait, "waiting", lambda self, now: False):
+            runner.drive(other)                                     # without the pause
+        self.assertEqual(other.status["phase"], "stuck")
+        self.assertIn("no first output", other.status["last"])
+
+    def test_a_held_429_through_the_keyhole_pauses_the_clocks_until_the_first_token(self):
+        # the whole run held in the keyhole: OpenCode prints no `retry`, so only status
+        # ratelimit_until pauses the clocks (the review of #1020: a hold of 3 s let OpenCode's
+        # retry lines pause them, and the test passed with the keyhole's writes gone)
+        task = self.api_task("t-kh429", "api", "--silence-timeout", "3", "--think-timeout", "2")
+        self.up.rate_until = time.monotonic() + 9
+        self.keyhole(task, hold=15)
+        runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st.get("nudges", 0)), ("review", 0), st.get("last"))
+        self.assertLess(st["active_s"], 6)
+        self.assertGreaterEqual(len(self.up.seen), 4)               # held, sent again each second
+        self.assertFalse(self.events(task, "retry"))                # none reached OpenCode
+        self.assertIsNone(st.get("ratelimit_until"))
+        self.assertIsNone(st.get("ratelimit"))
+        self.assertTrue([e for e in self.events(task, "rate_limited") if e["code"] == 429])
+        self.assertFalse(self.events(task, "stopped"))
+
+    def test_a_429_held_in_the_keyhole_past_the_wait_stops_as_rate_limited_from_its_since(self):
+        # no `retry` line at all: the stop is the keyhole's `since`, never silence (3 s here)
+        task = self.api_task("t-khstop", "api", "--silence-timeout", "3", "--think-timeout", "2")
+        self.up.rate_until = float("inf")
+        self.keyhole(task, hold=60)
+        began = time.monotonic()
+        with mock.patch.object(runner, "RATE_WAIT_S", 4):
+            runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st.get("infra")), ("stuck", "provider"), st.get("last"))
+        self.assertRegex(st["last"], r"^deepseek rate-limited the agent's requests for \d+ seconds \(HTTP 429\)$")
+        self.assertFalse(self.events(task, "retry"))
+        self.assertEqual(len(self.events(task, "load")), 1)         # revived once
+        for ev in self.events(task, "rate_limited"):
+            self.assertLess(ev["secs"], 4 + 3, ev)                  # stopped at RATE_WAIT_S
+        self.assertLess(time.monotonic() - began, 40)               # never the 60 s hold
+        self.assertEqual(self.notice(task)["cause"], "provider")
+
+    def test_a_429_without_retry_after_backs_off_2_then_4_seconds_with_the_health_wired(self):
+        # the provider's cooldown was RATE_LIMIT_SECS, read back by the keyhole's own next pass:
+        # every retry waited 60 s (the review of #1020, 2026-11-23)
+        task = self.api_task("t-back", "ok")
+        kh = self.keyhole(task, hold=30)
+        self.up.rate_until, self.up.after = time.monotonic() + 3, None
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=60)
+        self.addCleanup(conn.close)
+        start = time.monotonic()
+        conn.request("POST", "/v1/chat/completions", body=json.dumps({"model": "deepseek-flash",
+                                                                      "stream": True}).encode(),
+                     headers={"Authorization": f"Bearer {kh.token}"})
+        r = conn.getresponse()
+        r.read()
+        self.assertEqual(r.status, 200)
+        sends = [round(t - start) for t in self.up.seen]
+        self.assertEqual(sends, [0, 2, 6], sends)
+        # another task's keyhole reads the provider's cooldown as this one's wait, not a minute
+        self.assertLess((self.models.api_health("deepseek") or {}).get("until", 0), time.time() + 10)
+
+    def test_a_provider_that_only_rate_limits_is_revived_once_then_stuck_as_the_providers(self):
+        from workbench import results
+        from workbench import lessons
+        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5")
+        task = self.api_task("t-only", "ratelimit", "--silence-timeout", "2", "--think-timeout", "2")
+        began = time.monotonic()
+        with mock.patch.object(runner, "RATE_WAIT_S", 3):
+            runner.drive(task)
+        # stopped at RATE_WAIT_S, in the round: not after OpenCode's 200 retries ran out
+        self.assertLess(time.monotonic() - began, 40)
+        for ev in self.events(task, "rate_limited"):
+            self.assertLess(ev["secs"], 3 + 3, ev)
+        # the provider's, so no lesson about the agent: two tasks on one account made it a
+        # recurring one (the review of #1020)
+        self.assertTrue(all(e.get("by") == "provider" for e in self.events(task, "stopped")))
+        self.assertFalse([x for x in lessons.gather(task, "discarded") if x["kind"] == "stopped"])
+        st = task.status
+        self.assertEqual((st["phase"], st["round"], st.get("infra")), ("stuck", 1, "provider"))
+        self.assertRegex(st["last"], r"^deepseek rate-limited the agent's requests for \d+ seconds \(HTTP 429\)$")
+        [load] = self.events(task, "load")
+        self.assertEqual(load["text"], "deepseek rate-limited the round: it runs again once the cooldown ends")
+        self.assertEqual(len(self.events(task, "stopped")), 2)      # once, revived, then again
+        self.assertEqual(len(self.events(task, "rate_limited")), 2)
+        n = self.notice(task)
+        self.assertEqual((n["kind"], n["cause"]), ("stuck", "provider"))
+        self.assertNotIn(n["cause"], results.THE_STEP)
+        self.assertNotIn("no output for", n["text"])
+        self.assertNotIn("no first output", n["text"])
+        self.assertIn('wb feedback t-only --text "carry on" resumes it once deepseek allows; or '
+                      'wb route significant gpu (the user\'s yes) for the next tasks', n["text"])
+        self.assertIsNone(runner.read_bound(task, 1, {"guard": "rate_limited", "waited": 900}))
+
+    def test_a_providers_stop_is_not_held_against_the_steps_size(self):
+        from workbench import models, results, router
+        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5")
+        task = self.api_task("t-size", "ratelimit", "--silence-timeout", "2")
+        with mock.patch.object(runner, "RATE_WAIT_S", 2), mock.patch.object(models, "RATE_LIMIT_SECS", 1):
+            runner.drive(task)
+        self.assertEqual(task.status["phase"], "stuck")
+        for i in range(3):                                          # what the agent wrote first
+            (task.worktree / f"part{i}.py").write_text("x = 1\n")
+        self.assertIs(results.step(task, False)["stuck"], False)
+        m = models.resolve(task.spec["model"])
+        before = router.slice(m)
+        run_wb("discard", "t-size")
+        # the fake's model is a GPU entry run as an API task (task.json `via`): its row says `kind`
+        # api, and #1022's slice reads only rows of the model's own kind, so the row is given the
+        # entry's kind here, or neither check below would read it (the wave 2 merge)
+        rows, _ = store.read_jsonl(store.home() / "results.jsonl")
+        (store.home() / "results.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in [*rows[:-1], {**rows[-1], "kind": m.kind}]))
+        row = store.results()[-1]
+        self.assertIs(row["steps"][-1]["stuck"], False)
+        self.assertEqual((router.slice(m).files, router.slice(m).lines), (before.files, before.lines))
+        # the same stop as the step's own (cause "guard"): stuck, and the slice shrinks
+        store.append_jsonl(store.home() / "results.jsonl",
+                           {**row, "ts": time.time(), "steps": [{**row["steps"][-1], "stuck": True}]})
+        self.assertLess(router.slice(m).files, before.files)
+
+    def test_keep_alives_before_the_first_token_are_the_providers_queue_not_thinking(self):
+        # DeepSeek holds a request open with keep-alives up to 10 minutes before inference starts
+        task = self.api_task("t-queue", "api", "--think-timeout", "2", "--silence-timeout", "30")
+        self.up.keepalive = 8
+        self.keyhole(task)
+        with mock.patch.object(self.kh_mod, "QUEUED_AFTER_S", 1):
+            runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st.get("nudges", 0)), ("review", 0), st.get("last"))
+        [ev] = self.events(task, "rate_limited")
+        self.assertEqual(ev["state"], "queued")
+        other = self.api_task("t-queue2", "api", "--think-timeout", "2", "--silence-timeout", "30")
+        self.keyhole(other)
+        with mock.patch.object(self.kh_mod, "QUEUED_AFTER_S", 3600):  # without the mark
+            runner.drive(other)
+        self.assertGreaterEqual(other.status.get("nudges", 0), 1)
+
+    def test_a_402_stops_the_round_at_once_with_the_remedy_and_no_revive(self):
+        task = self.api_task("t-402", "api", "--silence-timeout", "30")
+        self.up.rate_until, self.up.code, self.up.after = float("inf"), 402, None
+        self.up.body = "Insufficient balance"
+        self.keyhole(task)
+        runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st.get("infra")),
+                         ("stuck", "deepseek says the account is out of credit (HTTP 402)", "provider"))
+        self.assertEqual(len(self.up.seen), 1)                      # no retry loop, ours or OpenCode's
+        self.assertIsNone(st.get("api_stop"))                       # consumed by the stop
+        self.assertTrue([e for e in self.events(task, "error") if "keyhole: deepseek says the account "
+                         "is out of credit (HTTP 402): the round stops" in e["text"]])  # a 400: no retry
+        self.assertFalse(self.events(task, "load"))                 # never revived
+        n = self.notice(task)
+        self.assertEqual(n["cause"], "provider")
+        self.assertIn("top up your deepseek account, or wait for the plan's reset", n["text"])
+        self.assertEqual(self.models.api_health("deepseek")["state"], "no_credit")
+        # OpenCode's own provider.quota (no keyhole between): the same stop
+        fake = self.api_task("t-402b", "quota", "--silence-timeout", "30")
+        runner.drive(fake)
+        self.assertEqual((fake.status["phase"], self.notice(fake)["cause"]), ("stuck", "provider"))
+        self.assertIn("(HTTP 402)", fake.status["last"])
+
+    def test_read_bound_records_nothing_for_a_rate_limited_round(self):
+        from workbench import router
+        task = self.api_task("t-rb", "ok")
+        runner.write_config_layer(task)
+        rnd = {"waited": 900, "answered": False, "interrupted": False, "retries": []}
+        self.assertIsNone(runner.read_bound(task, 1, {**rnd, "guard": "rate_limited"}))
+        self.assertIsNone(runner.read_bound(task, 1, {**rnd, "guard": "outage"}))
+        self.assertEqual(router.speed(task.spec["model"]), {})
+        self.assertTrue(runner.read_bound(task, 1, {**rnd, "guard": "silence"}))   # as before
+
+    def test_the_cooldown_is_written_for_the_provider_and_read_without_a_request(self):
+        os.environ["FAKE_CALLS"] = str(Path(self.tmp.name) / "calls.jsonl")
+        task = self.api_task("t-cool", "ok")
+        kh = self.keyhole(task, hold=0)                             # passed back at once
+        self.up.rate_until, self.up.after = time.monotonic() + 2, "2"
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+        self.addCleanup(conn.close)
+        body = json.dumps({"model": "deepseek-flash", "stream": True}).encode()
+        conn.request("POST", "/v1/chat/completions", body=body,
+                     headers={"Authorization": f"Bearer {kh.token}"})
+        r = conn.getresponse()
+        self.assertEqual((r.status, r.getheader("Retry-After")), (429, "2"))
+        r.read()
+        rl = task.status["ratelimit"]
+        self.assertEqual((rl["kind"], rl["provider"], rl["code"], rl["retry_after"]),
+                         ("rate_limited", "deepseek", 429, 2))
+        self.assertGreaterEqual(task.status["ratelimit_until"], time.time() + 55)  # the 60 s floor
+        row = json.loads((store.home() / "api-health.json").read_text())["deepseek"]
+        self.assertEqual(row["state"], "rate_limited")
+        self.assertAlmostEqual(row["until"], time.time() + 2, delta=1.5)
+        m = self.models.Model(id="deepseek/deepseek-flash", provider="deepseek", name="deepseek-flash",
+                              base_url="https://api.deepseek.com", engine="api", label="deepseek-flash",
+                              kind="api", key="stored", config={"limit": {"context": 131072}})
+        seen = len(self.up.seen)
+        self.assertTrue(self.models.status(m)["why"].startswith("rate-limited by "))
+        self.assertEqual(len(self.up.seen), seen)                   # no request to the provider
+        self.assertFalse(Path(os.environ["FAKE_CALLS"]).exists())   # nor to OpenCode
+        # another task's keyhole on the provider waits the cooldown out before sending
+        task2 = self.api_task("t-cool2", "ok")
+        kh2 = self.keyhole(task2, hold=30)
+        start = time.monotonic()
+        conn = http.client.HTTPConnection("127.0.0.1", kh2.port, timeout=30)
+        self.addCleanup(conn.close)
+        conn.request("POST", "/v1/chat/completions", body=body,
+                     headers={"Authorization": f"Bearer {kh2.token}"})
+        r = conn.getresponse()
+        r.read()
+        self.assertEqual(r.status, 200)
+        self.assertGreaterEqual(self.up.seen[-1] - start, 1)        # sent once the cooldown ended
+        self.assertEqual(len(self.up.seen), seen + 1)
+        self.assertIsNone(task2.status.get("ratelimit"))            # cleared at the first data
+
+    def test_the_upstream_body_of_a_429_or_402_never_reaches_the_task_files(self):
+        task = self.api_task("t-leak", "api", "--silence-timeout", "30")
+        self.up.rate_until, self.up.after = time.monotonic() + 2, "1"
+        self.up.body = f"Rate limited for key {self.CANARY}"
+        self.keyhole(task, hold=0)
+        os.environ["FAKE_RETRY_EVERY"] = "1"
+        done = threading.Event()
+
+        def to_402():
+            while not done.wait(0.2):
+                if len(self.up.seen) >= 2:
+                    self.up.rate_until, self.up.code = float("inf"), 402
+                    self.up.body = f"No credit left on {self.CANARY}"
+                    return
+        threading.Thread(target=to_402, daemon=True).start()
+        runner.drive(task)
+        done.set()
+        self.assertEqual(task.status["phase"], "stuck")
+        self.assertTrue(self.events(task, "retry"))                 # the 429 bodies came through OpenCode
+        for f in (task.dir / "events.jsonl", task.dir / "status.json", task.dir / "runner.log",
+                  store.home() / "notify.jsonl", store.home() / "api-health.json"):
+            text = f.read_text()
+            self.assertNotIn(self.CANARY, text, f)
+            self.assertNotIn(self.CANARY[-12:], text, f)
+
+    def test_a_spend_cap_stop_is_its_own_cause_never_held_against_the_model(self):
+        # the engineer's call (2026-11-23): #1019's day cap writes status api_stop {guard: spend};
+        # its stop is the user's budget, neither the provider's nor the step's
+        from workbench import lessons, models, results, router
+        task = self.api_task("t-spend", "ok", "--silence-timeout", "30")
+        why = "the day's API spend cap is reached: $5.02 of $5 today"
+        waiting = runner._ProviderWait.waiting
+
+        def capped(pw, now):  # mid-round, as the keyhole's side writes it
+            if not getattr(pw, "capped", False):
+                pw.capped = True
+                pw.task.set_status(api_stop={"guard": "spend", "text": why})
+            return waiting(pw, now)
+        with mock.patch.object(runner._ProviderWait, "waiting", capped):
+            runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st.get("infra")), ("stuck", why, "spend"))
+        self.assertIsNone(st.get("api_stop"))                       # consumed by the stop
+        self.assertFalse(self.events(task, "load"))                 # never revived
+        n = self.notice(task)
+        self.assertEqual((n["kind"], n["cause"]), ("stuck", "spend"))
+        self.assertNotIn(n["cause"], results.THE_STEP)
+        self.assertNotIn("top up", n["text"])                       # not the provider's remedy
+        stops = self.events(task, "stopped")
+        self.assertTrue(stops and all(e.get("by") == "spend" for e in stops), stops)
+        self.assertFalse([x for x in lessons.gather(task, "discarded") if x["kind"] == "stopped"])
+        for i in range(3):                                          # what the agent wrote first
+            (task.worktree / f"part{i}.py").write_text("x = 1\n")
+        self.assertIs(results.step(task, False)["stuck"], False)
+        m = models.resolve(task.spec["model"])
+        before = router.slice(m)
+        run_wb("discard", "t-spend")
+        self.assertIs(store.results()[-1]["steps"][-1]["stuck"], False)
+        self.assertEqual((router.slice(m).files, router.slice(m).lines), (before.files, before.lines))
+        self.assertEqual([runner.stopped_by(g) for g in ("spend", "quota", "rate_limited", "silence", None)],
+                         ["spend", "provider", "provider", None, None])
+
+    def test_cloudflares_520_to_524_are_held_like_a_502_to_504(self):
+        # the engineer's call (2026-11-23): Cloudflare's origin errors in front of a provider are
+        # as transient as a 502-504; a 501 still goes back at once
+        codes = self.kh_mod.HOLD_CODES
+        self.assertEqual({c: codes.get(c) for c in (502, 503, 504, 520, 521, 522, 523, 524)},
+                         dict.fromkeys((502, 503, 504, 520, 521, 522, 523, 524), "outage"))
+        self.assertNotIn(501, codes)
+        body = json.dumps({"model": "deepseek-flash", "stream": True}).encode()
+        for code, held in ((522, True), (524, True), (501, False)):
+            with self.subTest(code=code):
+                task = self.api_task(f"t-cf{code}", "ok")
+                kh = self.keyhole(task, hold=15)
+                self.up.seen.clear()
+                self.up.code, self.up.after = code, "1"
+                self.up.rate_until = time.monotonic() + 2.5
+                conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+                self.addCleanup(conn.close)
+                conn.request("POST", "/v1/chat/completions", body=body,
+                             headers={"Authorization": f"Bearer {kh.token}"})
+                r = conn.getresponse()
+                r.read()
+                if held:
+                    self.assertEqual(r.status, 200)                 # sent again until it answered
+                    self.assertGreaterEqual(len(self.up.seen), 2)
+                else:
+                    self.assertEqual((r.status, len(self.up.seen)), (501, 1))
+
+    def test_a_gpu_tasks_clocks_ignore_the_provider_keys(self):
+        # a GPU task never reads them: a 429-shaped retry or a stale key pauses nothing (#491)
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-gpu", "retry", "--no-base-check", "--silence-timeout", "3")
+        task = store.Task("t-gpu")
+        task.set_status(ratelimit_until=time.time() + 3600, ratelimit={"kind": "rate_limited",
+                                                                        "since": time.time()})
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "stuck")
+        self.assertIn("no first output", task.status["last"])
+        self.assertFalse(self.events(task, "rate_limited"))
+
+
+# #1019's priced models: $5000 per million input tokens, so FAKE_STEP_IN=100 is a $0.50 step
+SPEND_M, SPEND_FREE, SPEND_NONE, SPEND_GO = ("meterco/priced-1", "meterco/free-1", "meterco/noprice-1",
+                                             "opencode-go/plan-1")
+SPEND_TIER = "meterco/tiered-1"  # dearer past 100K of context, as Anthropic's long-context price
+SPEND_CATALOG = [
+    {"id": i.split("/", 1)[1], "providerID": i.split("/", 1)[0], "package": "@opencode/ai/providers/openai-compatible",
+     "settings": {"baseURL": "https://api.meterco.example/v1"}, "capabilities": {"tools": True},
+     "variants": [], "limit": {"context": 1000000, "output": 32768}, "status": "active", **extra}
+    for i, extra in ((SPEND_M, {"cost": [{"input": 5000, "output": 0, "cache": {"read": 50, "write": 0}}]}),
+                     (SPEND_FREE, {"cost": [{"input": 0, "output": 0, "cache": {"read": 0, "write": 0}}]}),
+                     (SPEND_NONE, {}),
+                     (SPEND_GO, {"cost": [{"input": 1, "output": 2, "cache": {"read": 0, "write": 0}}]}),
+                     (SPEND_TIER, {"cost": [{"input": 1, "output": 5, "cache": {"read": 0.1, "write": 1.25}},
+                                            {"input": 2, "output": 10, "cache": {"read": 0.2, "write": 2.5},
+                                             "tier": {"type": "context", "size": 100000}}]}))]
+
+
+class ApiSpend(Base):
+    """What an API task costs (#1019): the meter, the day's ledger, the cap at start, the spend
+    guard in and between rounds, the one check-in a day, plans, and the keyhole's part."""
+
+    def setUp(self):
+        super().setUp()
+        from workbench import meter
+        self.meter = meter
+        path = Path(self.tmp.name) / "catalog.json"
+        path.write_text(json.dumps(SPEND_CATALOG))
+        os.environ["WB_FAKE_CATALOG"] = str(path)
+        os.environ["WB_ROUTES"] = str(Path(self.tmp.name) / "routes.json")
+        # the key each priced provider's keyhole loads (#1015 starts one for every API task
+        # that takes a key); the fake's scenarios here send nothing through it
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": f"cred_{p}", "integrationID": p, "label": "main", "active": True,
+             "value": {"type": "key", "key": "sk-spend-test"}} for p in ("meterco", "opencode-go")])
+        self.cap(100)
+        meter._METERS.clear()
+        self.addCleanup(meter._METERS.clear)
+        self.addCleanup(runner.CURRENT.pop, "keyhole", None)
+
+    def cap(self, usd):
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": usd, "roles": {}})
+
+    def record_closes(self, calls):
+        """The task's own keyhole (drive starts it, #1015), each close it is told a reason for
+        (the spend stop) appended to ``calls``; its shutdown at the drive's end is not."""
+        real = runner.start_keyhole
+
+        def start(task, m):
+            kh = real(task, m)
+            close = kh.close
+
+            def told(reason=None):
+                if reason is not None:
+                    calls.append(("close", reason))
+                return close(reason)
+            kh.close = told
+            return kh
+        p = mock.patch.object(runner, "start_keyhole", start)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def spent(self, usd, day=None, task="other"):
+        """A row of another task's in today's ledger (or ``day``'s)."""
+        store.append_jsonl(self.meter.ledger_path(), {
+            "ts": time.time(), "day": day or self.meter.day(), "kind": "step", "task": task,
+            "round": 1, "provider": "meterco", "model": SPEND_M, "usd": usd, "metered": usd,
+            "source": "opencode", "tok": {"in": 1, "out": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}})
+
+    def api_task(self, name, model=SPEND_M, scenario="ok", *extra, **env):
+        """A task on an API model, written as wb start will (#1016), for the runner to drive here."""
+        os.environ.update(FAKE_SCENARIO=scenario, **env)
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo",
+                   "--no-base-check", *extra)
+        task = store.Task(name)
+        store.write_json(task.dir / "task.json", {**task.spec, "model": model, "opencode_model": model,
+                                                  "via": "api", "provider": model.split("/")[0]})
+        return task
+
+    def rows(self, task=None, kind=None):
+        got, _ = store.read_jsonl(self.meter.ledger_path())
+        return [r for r in got if (task is None or r.get("task") == task) and (kind is None or r["kind"] == kind)]
+
+    def notices(self, name, kind):
+        got, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        return [r for r in got if r["task"] == name and r["kind"] == kind]
+
+    def test_each_step_books_opencodes_cost_and_the_round_end_brings_the_ledger_to_the_export(self):
+        task = self.api_task("t-cost", SPEND_M, "spend", FAKE_STEPS="2", FAKE_STEP_IN="100",
+                             FAKE_STEP_EVERY="0.05", FAKE_COST="1.75")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        steps = self.rows("t-cost", "step")
+        self.assertEqual([(r["usd"], r["source"], r["day"]) for r in steps],   # two reads, the answer
+                         [(0.5, "opencode", self.meter.day())] * 3)
+        self.assertEqual(steps[0]["tok"], {"in": 100, "out": 30, "cache_read": 0, "cache_write": 0,
+                                           "reasoning": 0})
+        rec = self.rows("t-cost", "reconcile")       # the export said $1.75: the title, uncounted live
+        self.assertEqual([(round(r["usd"], 6), r["source"]) for r in rec], [(0.25, "opencode")])
+        self.assertEqual(task.status["api"]["usd"], 1.75)
+        self.assertEqual(self.meter.today()["usd"], 1.75)
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertEqual([e["cost"] for e in ev if e["kind"] == "step"], [0.5] * 3)  # events.normalize
+
+    def test_steps_without_opencodes_cost_are_priced_from_the_catalog(self):
+        task = self.api_task("t-meter", SPEND_M, "ok", FAKE_STEP_IN="100", FAKE_STEP_COST="none")
+        runner.drive(task)
+        (row,) = self.rows("t-meter", "step")
+        self.assertEqual((row["usd"], row["metered"], row["source"]), (0.5, 0.5, "metered"))
+        m = runner.models.lookup(SPEND_M)  # cache reads at their own rate, as OpenCode
+        self.assertEqual(self.meter.metered(self.meter.price(m), {"in": 100, "cache_read": 1000000,
+                                                                  "cache_write": 0, "out": 0, "reasoning": 0}), 50.5)
+
+    def test_an_opencode_cost_of_0_for_a_priced_model_is_never_trusted(self):
+        task = self.api_task("t-zero", SPEND_M, "ok", FAKE_STEP_IN="100", FAKE_STEP_COST="0")
+        runner.drive(task)                                            # the export says 0 too
+        (row,) = self.rows("t-zero", "step")
+        self.assertEqual((row["usd"], row["source"]), (0.5, "metered (opencode said 0)"))
+        self.assertEqual(self.rows("t-zero", "reconcile"), [])
+        free = self.api_task("t-free", SPEND_FREE, "ok", FAKE_STEP_COST="0")
+        runner.drive(free)                                            # a free model's 0 is true
+        self.assertEqual([(r["usd"], r["source"]) for r in self.rows("t-free")], [(0.0, "opencode")])
+
+    def test_wb_start_refuses_an_api_model_at_the_day_cap_and_one_with_no_price(self):
+        self.cap(5)
+        self.spent(3.0)
+        self.spent(2.03)
+        self.spent(9.0, day="2000-01-01")                        # another day's: not today's
+        for model, said in ((SPEND_M, f"{SPEND_M}: API spend today is $5.03 of the $5 day cap (it "
+                                      "resets at local midnight). Ask the user: a higher cap (wb route cap "
+                                      "<usd>), the role on the GPU (wb route <role> gpu), or tomorrow"),
+                            (SPEND_NONE, f"{SPEND_NONE}: OpenCode's catalog gives no price for it, so the "
+                                         "day cap can't be kept")):
+            err = io.StringIO()
+            # the refusal comes before #1014's dialog, once #1016 lets API tasks start
+            with self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True):
+                run_wb("start", "t-cap", "--spec", str(self.spec), "--repo", str(self.repo), "--model", model)
+            self.assertEqual(e.exception.code, 3)
+            self.assertIn(said, err.getvalue())
+            self.assertFalse(store.Task("t-cap").dir.exists())
+        m = runner.models.lookup(SPEND_M)
+        self.assertTrue(self.meter.refusal(m, "trivial").startswith(
+            "trivial role: API spend today is $5.03 of the $5 day cap"))
+        with mock.patch.object(cli, "spawn_runner"):          # a GPU model starts as ever
+            self.assertIn("started t-gpu", self.start("t-gpu", "ok"))
+        self.assertFalse(task_rows := self.rows("t-gpu"), task_rows)
+
+    def test_a_role_on_an_unpriced_model_is_refused_at_start_and_stopped_however_it_started(self):
+        # wave 2's review: #1016's routes.resolve never asked meter.refusal for a role's API model,
+        # and the room said "nothing to keep" for an unpriced one: it ran with no cap at all
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {
+            "trivial": {"via": "api", "api": SPEND_NONE, "thinking": "off"}}})
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err):
+            run_wb("start", "t-none", "--spec", str(self.spec), "--repo", str(self.repo), "--role", "trivial")
+        self.assertEqual(e.exception.code, 3)
+        self.assertIn(f"{SPEND_NONE}: OpenCode's catalog gives no price for it, so the day cap can't be kept",
+                      err.getvalue())
+        self.assertFalse(store.Task("t-none").dir.exists())
+        task = self.api_task("t-none", SPEND_NONE)               # started anyway (an older wb, by hand)
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_NONE))
+        self.assertLess(mt.room({"model": "noprice-1"}, 400), 0)
+        self.assertEqual(self.meter.stop_reason(task), f"{SPEND_NONE}: {self.meter.NO_PRICE}")
+
+    def test_a_routes_json_that_cant_be_read_stops_a_task_saying_so_never_that_there_is_no_cap(self):
+        # wave 2's review: a set day_usd beside a value routes.read refuses read as "no cap", and
+        # NO_CAP's advice (wb route cap) brought up the dialog that every role starts over on the GPU
+        task = self.api_task("t-unread", SPEND_M)                # started, then the file edited by hand
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "day_usd": 20, "roles": {
+            "trivial": {"via": "api", "api": "openrouter/acme/coder", "order": "baseten"}}}))
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_M))
+        self.assertIsNone(self.meter.cap())
+        self.assertLess(mt.room({"model": "priced-1"}, 400), 0)  # spends nothing still
+        why = self.meter.stop_reason(task)
+        self.assertTrue(why.startswith("routes.json can't be read (") and why.endswith(
+            "so the day cap can't be kept: wb route shows it"), why)
+        self.assertIn("order", why)
+        self.assertNotIn("wb route cap", self.meter.stop_text(task))
+        self.cap(20)                                             # fixed: the cap again
+        task.set_status(api_stop=None)
+        self.assertEqual((self.meter.cap(), self.meter.stop_reason(task)), (20.0, None))
+
+    def test_the_start_lines_spend_part_says_todays_spend_of_the_cap(self):
+        self.cap(5)
+        self.spent(0.30)
+        self.spent(0.12)
+        self.spent(4.0, day="2000-01-01")
+        m = runner.models.lookup(SPEND_M)
+        self.assertEqual(self.meter.tail(m), " · today $0.42 of $5")
+        self.assertEqual(self.meter.tail(runner.models.lookup("ollama/mimo-v2.6:9b-q8_0")), "")
+
+    def test_the_spend_guard_stops_the_round_within_a_tick_of_the_crossing_step(self):
+        self.cap(5)
+        self.spent(3.80)                                         # $1.20 left: the third step crosses
+        calls = []
+        self.record_closes(calls)
+        real = runner._stop
+        task = self.api_task("t-guard", SPEND_M, "spend", FAKE_STEP_IN="100", FAKE_STEPS="50")
+        began = time.monotonic()
+        with mock.patch.object(runner, "_stop", side_effect=lambda p: (calls.append(("stop", None)), real(p))):
+            runner.drive(task)
+        self.assertLess(time.monotonic() - began, 30)            # far under the silence limit
+        st = task.status
+        self.assertEqual(st["phase"], "stuck")
+        self.assertEqual(len(self.rows("t-guard", "step")), 3)  # stopped at the crossing step
+        why = "the day's API spend cap is reached: $5.30 of $5 today"
+        self.assertEqual(st["last"], why)
+        self.assertEqual(calls[:2], [("close", why), ("stop", None)])  # the keyhole refuses first
+        (notice,) = self.notices("t-guard", "stuck")
+        self.assertEqual(notice["cause"], "spend")
+        from workbench import results
+        self.assertNotIn(notice["cause"], results.THE_STEP)       # the slice isn't shrunk for it
+        self.assertTrue(notice["text"].startswith(
+            "t-guard stopped: the day's API spend cap is reached ($5.30 of $5 today). Its work so far is "
+            "in the worktree. Ask the user: a higher cap (wb route cap <usd>), the role on the GPU, or "
+            "tomorrow; then wb resume t-guard."))
+
+    def test_the_cap_is_checked_before_every_round_drive_goes_on_to(self):
+        # #1017's _go_on: the in-round guard off, the cap reached in round 1 stops the auto-fix round
+        self.cap(1)
+        self.spent(0.6)
+        task = self.api_task("t-goon", SPEND_M, "fix", "--test", TEST_CMD, "--auto-fix", "2",
+                             FAKE_STEP_IN="100")
+        with mock.patch.object(runner, "_spend_guard"):
+            runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st["guard"], st["round"]), ("stuck", "spend", 2))
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertFalse([e for e in ev if e.get("round") == 2 and e["kind"] == "step"])  # never ran
+        (notice,) = self.notices("t-goon", "stuck")
+        self.assertEqual(notice["cause"], "spend")
+        self.assertIn("auto-fix didn't run", notice["text"])
+        # status `round` is already 2, which never ran: round 1's report goes with the notice
+        self.assertIn("Round 1's report (wb report t-goon --round 1):\n"
+                      + task.round_dir(1).joinpath("summary.md").read_text(), notice["text"])
+        self.cap(100)                                           # the user raised it: a GPU-like go on
+        self.assertTrue(runner._go_on(task, 2, "auto-fix"))
+
+    def test_half_the_cap_wakes_claude_once_a_day_across_every_task(self):
+        self.cap(2)
+        for name in ("t-half1", "t-half2", "t-half3"):          # $0.60 each: the second crosses $1
+            runner.drive(self.api_task(name, SPEND_M, "ok", FAKE_STEP_IN="120"))
+        self.assertEqual(len(self.rows(kind="checkin")), 1)
+        said = [n for t in ("t-half1", "t-half2", "t-half3") for n in self.notices(t, "checkin")]
+        self.assertEqual([n["task"] for n in said], ["t-half2"])
+        self.assertEqual(said[0]["text"], "API spend today has passed half the day cap: $1.20 of $2 "
+                                          "(t-half2 $0.60 so far). Nothing to do unless the user wants to change it.")
+        self.assertEqual(self.rows(kind="checkin")[0]["usd_today"], 1.2)
+
+    def test_a_plans_tokens_are_its_usage_never_dollars_nor_a_spend_stop(self):
+        self.cap(1)
+        self.spent(5.0)                                          # past the cap: a plan runs anyway
+        task = self.api_task("t-go", SPEND_GO, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        (row,) = self.rows("t-go")
+        self.assertEqual((row["usd"], row["plan"], row["tok"]["in"]), (None, "opencode-go", 120))
+        m = runner.models.lookup(SPEND_GO)
+        self.assertIsNone(self.meter.refusal(m))
+        self.assertTrue(self.meter.tail(m).startswith(" · plan usage ("))
+        self.assertTrue(self.meter.tail(m).endswith("): 150 tokens today"))
+        self.assertEqual(self.meter.today()["plan_tok"], {"opencode-go": 150})
+        self.assertEqual(self.meter.today()["usd"], 5.0)
+
+    def test_the_keyholes_usage_books_each_response_and_opencodes_figure_only_adds_what_it_lacks(self):
+        task = self.api_task("t-kh-meter", SPEND_M)
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_M))  # as drive makes it
+        mt.begin(1)
+        mt.on_usage({"prompt_tokens": 1100, "completion_tokens": 40,  # Chat Completions, a cache hit
+                     "prompt_tokens_details": {"cached_tokens": 1000},
+                     "completion_tokens_details": {"reasoning_tokens": 10}})
+        mt.on_usage({"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 2000,
+                     "cache_creation_input_tokens": 0})                  # Anthropic's
+        mt.on_usage({"input_tokens": 300, "output_tokens": 9, "cost": 0.0123})  # the provider's own
+        a, b, c = self.rows("t-kh-meter", "step")
+        self.assertEqual((a["tok"], a["usd"], a["source"]),
+                         ({"in": 100, "cache_read": 1000, "cache_write": 0, "out": 30, "reasoning": 10},
+                          (100 * 5000 + 1000 * 50) / 1e6, "keyhole"))
+        self.assertEqual(b["tok"]["cache_read"], 2000)
+        self.assertEqual((c["usd"], c["source"]), (0.0123, "provider"))
+        mt.step({"cost": 0.1, "tokens": {"input": 100}})       # OpenCode's says less: nothing booked
+        self.assertEqual(len(self.rows("t-kh-meter")), 3)
+        mt.step({"cost": 2.0, "tokens": {"input": 100}})       # more than all three: the difference
+        (rec,) = self.rows("t-kh-meter", "reconcile")
+        self.assertAlmostEqual(rec["usd"], 2.1 - (a["usd"] + b["usd"] + c["usd"]), places=9)
+        mt.step({"cost": 0.5, "tokens": {"input": 100}})       # after a reconcile: only its own
+        self.assertEqual([round(r["usd"], 9) for r in self.rows("t-kh-meter", "reconcile")][1:], [0.5])
+        self.assertEqual(self.meter.usage_tokens({"input_tokens": 50, "output_tokens": 20,  # Responses
+                                                  "input_tokens_details": {"cached_tokens": 30},
+                                                  "output_tokens_details": {"reasoning_tokens": 5}}),
+                         {"in": 20, "cache_read": 30, "cache_write": 0, "out": 15, "reasoning": 5})
+
+    def test_the_keyholes_room_refuses_a_request_that_could_pass_the_cap(self):
+        self.cap(5)
+        self.spent(4.0)
+        task = self.api_task("t-room", SPEND_M)
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_M))
+        body = {"model": "priced-1", "max_tokens": 1000}
+        self.assertAlmostEqual(mt.room(body, 400), 1 - 100 * 5000 / 1e6, places=9)
+        self.assertIsNone(task.status.get("api_stop"))
+        self.assertLess(mt.room(body, 4000), 0)                 # 1000 tokens at $5000/M: $5
+        self.assertEqual(task.status["api_stop"]["guard"], "spend")
+        self.assertTrue(self.meter.stop_reason(task).startswith(
+            "the day's API spend cap is reached: $4 of $5 today, and its next request could cost up to $5"))
+        out = {"stuck": None, "guard": None}
+        runner._spend_guard(task, out)
+        self.assertEqual(out["guard"], "spend")
+        mt.begin(2)                                              # a new round clears it
+        self.assertIsNone(task.status.get("api_stop"))
+        Path(os.environ["WB_ROUTES"]).unlink()                   # no cap at all: no room, a stop
+        self.assertLess(mt.room(body, 400), 0)
+        self.assertEqual(self.meter.stop_reason(task), self.meter.NO_CAP)
+        self.assertIsNone(self.meter.refusal(runner.models.lookup(SPEND_M)))  # #1014 refuses a role
+
+    def test_a_context_tier_is_picked_by_input_cache_reads_and_cache_writes_together(self):
+        # the review of #1019: the tier was picked by input and cache reads only, and a first turn
+        # writing a 150K context to the cache priced 5 times low (OpenCode 2.3.2 counts the writes)
+        prices = self.meter.price(runner.models.lookup(SPEND_TIER))
+        self.assertEqual([p["size"] for p in prices], [0.0, 100000.0])
+        tok = {"in": 10, "cache_read": 0, "cache_write": 150000, "out": 100, "reasoning": 0}
+        self.assertAlmostEqual(self.meter.metered(prices, tok), (10 * 2 + 150000 * 2.5 + 100 * 10) / 1e6, places=12)
+        tok = {"in": 60000, "cache_read": 50000, "cache_write": 0, "out": 0, "reasoning": 0}
+        self.assertAlmostEqual(self.meter.metered(prices, tok), (60000 * 2 + 50000 * 0.2) / 1e6, places=12)
+        tok = {"in": 1000, "cache_read": 0, "cache_write": 0, "out": 10, "reasoning": 0}   # under it
+        self.assertAlmostEqual(self.meter.metered(prices, tok), (1000 * 1 + 10 * 5) / 1e6, places=12)
+
+    def test_the_room_prices_a_request_at_the_dearest_tier(self):
+        self.cap(5)
+        self.spent(1.0)
+        task = self.api_task("t-room-tier", SPEND_TIER)
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_TIER))
+        body = {"model": "tiered-1", "max_tokens": 2000}
+        self.assertAlmostEqual(mt.room(body, 40000), 4 - (10000 * 2 + 2000 * 10) / 1e6, places=9)
+
+    def test_a_free_model_is_booked_but_never_refused_or_stopped_by_the_cap(self):
+        # the review of #1019: a model priced 0 met the cap, and with no cap every request it made
+        # was refused, though it costs nothing
+        self.cap(5)
+        self.spent(5.03)
+        m = runner.models.lookup(SPEND_FREE)
+        self.assertTrue(self.meter.is_free(m))
+        self.assertIsNone(self.meter.refusal(m))
+        task = self.api_task("t-free-cap", SPEND_FREE, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        self.assertEqual([(r["usd"], r["kind"]) for r in self.rows("t-free-cap")], [(0.0, "step")])
+        mt = self.meter.for_task(task)
+        self.assertIsNone(self.meter.stop_reason(task))
+        self.assertIsNone(mt.room({"model": "free-1"}, 400))
+        Path(os.environ["WB_ROUTES"]).unlink()                   # no cap at all: still nothing to keep
+        self.assertIsNone(self.meter.stop_reason(task))
+        self.assertIsNone(mt.room({"model": "free-1"}, 400))
+        self.assertIsNone(task.status.get("api_stop"))
+        ns = types.SimpleNamespace
+        self.assertTrue(self.meter.is_free(ns(free=True, config={})))  # OpenCode's free, unpriced
+        self.assertFalse(self.meter.is_free(ns(free=True, config={"cost": [{"input": 1, "output": 0}]})))
+        self.assertFalse(self.meter.is_free(ns(free=False, config={})))
+
+    def test_status_api_never_ends_under_the_ledger_when_two_threads_book_at_once(self):
+        # the review of #1019: the keyhole's thread built its total under the lock and wrote it
+        # after; the runner's newer total landed first and the older one last
+        task = self.api_task("t-race", SPEND_M)
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_M))
+        real, slow = store.Task.set_status, []
+
+        def set_status(t, **kw):
+            if "api" in kw and threading.current_thread() is not threading.main_thread() and not slow:
+                slow.append(1)
+                time.sleep(0.3)
+            return real(t, **kw)
+
+        with mock.patch.object(store.Task, "set_status", set_status):
+            th = threading.Thread(target=mt.on_usage, args=({"input_tokens": 200, "output_tokens": 0},))
+            th.start()
+            time.sleep(0.1)
+            mt.on_usage({"input_tokens": 100, "output_tokens": 0})
+            th.join()
+        self.assertEqual(slow, [1])
+        total = sum(r["usd"] for r in self.rows("t-race"))
+        self.assertAlmostEqual(total, 1.5, places=9)
+        self.assertAlmostEqual(store.Task("t-race").status["api"]["usd"], total, places=9)
+
+    def test_the_checkin_is_checked_again_under_its_lock(self):
+        # the review of #1019: another task's check-in landing between this one's look at today
+        # and its lock gave two rows and two wakes; only the look again under the lock stops it
+        self.cap(2)
+        task = self.api_task("t-half-lock", SPEND_M)
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_M))
+        self.spent(1.5)
+        store.append_jsonl(self.meter.ledger_path(), {"ts": time.time(), "day": self.meter.day(),
+                                                      "kind": "checkin", "task": "other",
+                                                      "usd_today": 1.5, "cap": 2})
+        real, looks = self.meter.today, []
+
+        def before_it_landed():                 # the two looks before the lock miss that row
+            looks.append(1)
+            return {**real(), "checkin": False} if len(looks) <= 2 else real()
+
+        with mock.patch.object(self.meter, "today", before_it_landed):
+            mt._checkin()
+        self.assertGreater(len(looks), 2)
+        self.assertEqual(len(self.rows(kind="checkin")), 1)
+        self.assertEqual(self.notices("t-half-lock", "checkin"), [])
+
+    def test_a_task_without_via_reads_as_a_gpu_one(self):
+        # the brief: every task before #1016 has no `via`, and reads as a GPU task (no meter)
+        runner.models.lookup(SPEND_M)                             # hosted.json, as a runner left it
+        task = self.api_task("t-novia", SPEND_M)
+        spec = {k: v for k, v in task.spec.items() if k != "via"}
+        store.write_json(task.dir / "task.json", spec)
+        self.assertIsNone(self.meter.for_task(store.Task("t-novia")))
+        self.meter._METERS.clear()
+        store.write_json(task.dir / "task.json", {**spec, "via": "api"})
+        self.assertIsNotNone(self.meter.for_task(task))           # with via api: its meter
+
+    def test_the_cap_stops_self_review_and_a_handover_before_they_run(self):
+        # the review of #1019: only auto-fix's _go_on was exercised; the in-round guard off, the
+        # cap reached in round 1, each next round is stopped by _go_on, the keyhole closed first
+        self.cap(1)
+        self.spent(0.6)
+        calls = []
+        self.record_closes(calls)
+        task = self.api_task("t-goon-sr", SPEND_M, "ok", "--test", TEST_CMD, "--self-review", FAKE_STEP_IN="100")
+        with mock.patch.object(runner, "_spend_guard"):
+            runner.drive(task)
+        why = "the day's API spend cap is reached: $1.10 of $1 today"
+        self.assertEqual((task.status["phase"], task.status["guard"]), ("stuck", "spend"))
+        self.assertEqual(calls, [("close", why)])
+        (notice,) = self.notices("t-goon-sr", "stuck")
+        self.assertEqual(notice["cause"], "spend")
+        self.assertIn(f"self-review didn't run: {why}.", notice["text"])
+        self.assertFalse(task.round_dir(2).joinpath("summary.md").exists())
+        calls.clear()
+        real = runner.run_round
+
+        def full(t, n, keep=False):                               # round 1's session filled up
+            rnd = real(t, n, keep)
+            if n == 1:
+                rnd.update(full=900000, stuck=None, guard=None)
+            return rnd
+
+        task = self.api_task("t-goon-full", SPEND_M, "ok", FAKE_STEP_IN="100")
+        with mock.patch.object(runner, "_spend_guard"), mock.patch.object(runner, "run_round", full):
+            runner.drive(task)
+        why = "the day's API spend cap is reached: $1.60 of $1 today"
+        self.assertEqual((task.status["phase"], task.status["guard"], task.status["handovers"]),
+                         ("stuck", "spend", 1))
+        self.assertEqual(calls, [("close", why)])
+        (notice,) = self.notices("t-goon-full", "stuck")
+        self.assertIn(f"the handover didn't run: {why}.", notice["text"])
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertFalse([e for e in ev if e.get("round") == 2 and e["kind"] == "step"])
+
+
+class ApiSpendKeyhole(_KeyholeTest):
+    """The keyhole's part of the spend cap (#1019): one usage per response, close(reason), room."""
+
+    def test_close_with_a_reason_refuses_every_request_with_a_400_opencode_doesnt_retry(self):
+        kh = self.keyhole()
+        self.assertEqual(self.post(kh)[0], 200)
+        kh.close("the day's API spend cap is reached: $5.02 of $5 today")
+        code, _, body = self.post(kh)
+        self.assertEqual(code, 400)
+        self.assertEqual(json.loads(body)["error"]["message"],
+                         "workbench: the day's API spend cap is reached: $5.02 of $5 today")
+        self.assertEqual(len(self.up.seen), 1)                  # nothing more went upstream
+
+    def test_a_negative_room_refuses_the_request_before_it_goes_out(self):
+        asked = []
+        kh = self.keyhole(room=lambda body, size: (asked.append((body["model"], size)), -0.01)[1])
+        code, _, body = self.post(kh)
+        self.assertEqual((code, json.loads(body)["error"]["message"]),
+                         (400, "workbench: the day's API spend cap is reached"))
+        self.assertEqual(self.up.seen, [])
+        self.assertEqual(asked[0][0], kh.model.name)
+        ok = self.keyhole(room=lambda body, size: 3.0)
+        self.assertEqual(self.post(ok)[0], 200)
+
+    def test_a_request_held_through_a_rate_limit_asks_for_room_again_before_it_goes_out_again(self):
+        # wave 2's review: #1020's hold sent a request on after the day's room ran out during the
+        # wait (another task spent), the room asked once, before the first send
+        state = {"left": 1.0, "asked": 0}
+
+        def room(body, size):
+            state["asked"] += 1
+            return state["left"]
+        self.up.mode, self.up.status, self.up.retry_after = "status", 429, "1"
+        kh = self.keyhole(hold=20, room=room)
+
+        def meanwhile():  # during the hold: no room left, and the limit lifts
+            time.sleep(0.5)
+            state["left"] = -0.5
+            self.up.mode = "ok"
+        threading.Thread(target=meanwhile, daemon=True).start()
+        code, _, body = self.post(kh)
+        self.assertEqual((code, json.loads(body)["error"]["message"]),
+                         (400, "workbench: the day's API spend cap is reached"))
+        self.assertEqual(len([s for s in self.up.seen if s["method"] == "POST"]), 1)  # the 429 alone
+        self.assertEqual(state["asked"], 2)
+
+    def test_each_response_gives_one_usage_however_many_chunks_carry_it(self):
+        usage = []
+        ant = self.keyhole(self.model("anthropic", "claude-haiku-5-5", "/v1", "anthropic"),
+                           on_usage=usage.append)
+        self.post(ant, "/messages?beta=true")                   # message_start, then message_delta
+        self.assertEqual(usage, [{"input_tokens": 7, "output_tokens": 2}])
+        usage.clear()
+        kh = self.keyhole(on_usage=usage.append)
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [f'data: {{"model": "m", "usage": {{"prompt_tokens": 9, "completion_tokens": {i}}}}}\n\n'
+                          .encode() for i in (1, 2, 3)] + [b"data: [DONE]\n\n"]
+        self.post(kh)                                           # a running total in every chunk
+        self.assertEqual(usage, [{"prompt_tokens": 9, "completion_tokens": 3}])
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_takes_the_spend_refusal_at_once_without_a_retry(self):
+        # the review of #1019: the spike checked 401, 402 and 403 for no retry, never the 400 the
+        # keyhole answers a spend stop with; through the keyhole itself, for both protocols
+        why = "the day's API spend cap is reached: $5.02 of $5 today"
+        tmp = Path(self.tmp.name)
+        for provider, name, path, package in (
+                ("deepinfra", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "/v1/openai",
+                 "@opencode/ai/providers/deepinfra"),
+                ("anthropic", "claude-haiku-5-5", "/v1", "@opencode/ai/providers/anthropic")):
+            kh = self.keyhole(self.model(provider, name, path, package))
+            kh.close(why)
+            layer = tmp / f"spend-layer-{provider}.json"
+            layer.write_text(json.dumps({"provider": {provider: {"options": self.kh_mod.layer_options(kh)}}}))
+            env = {"PATH": os.environ["PATH"], "HOME": str(tmp / "home"), "PWD": str(self.repo),
+                   "OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_CONFIG": str(layer),
+                   **{f"XDG_{d.upper()}_HOME": str(tmp / "xdg" / d) for d in ("config", "data", "state", "cache")}}
+            began = time.monotonic()
+            r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", kh.model.id,
+                                "--format", "json", "--", "say ok"], cwd=self.repo, env=env,
+                               capture_output=True, text=True, timeout=120)
+            rows = [json.loads(x) for x in r.stdout.splitlines() if x.startswith("{")]
+            self.assertEqual((r.returncode, [x["type"] for x in rows]), (1, ["step_start", "error"]),
+                             (provider, r.stdout[-2000:], r.stderr[-2000:]))
+            self.assertEqual((rows[-1]["error"]["type"], rows[-1]["error"]["status"]),
+                             ("provider.invalid-request", 400), provider)
+            self.assertIn(f"workbench: {why}", rows[-1]["error"]["message"], provider)
+            self.assertLess(time.monotonic() - began, 60, provider)   # no retry loop's backoff
+            self.assertEqual(self.up.seen, [], provider)               # nothing went upstream
+
+
+class Privacy(_KeyholeTest):
+    """Privacy for API roles (#1021): where the code goes (cli.privacy.where and the start's note),
+    a per-repo or per-task local_only, standing copies and siblings named or refused, token
+    dotfiles hidden in an API lane when they hold a credential, and OpenRouter routed to the role's backends alone. An API
+    start is made the way #1016's wb start will make one: pick_model's answer stands in."""
+
+    def setUp(self):
+        super().setUp()
+        self.conf = Path(self.tmp.name) / "commands.json"
+        self.routes = Path(self.tmp.name) / "routes.json"
+        os.environ["WB_ROUTES"] = str(self.routes)
+        self.claude = Path(self.tmp.name) / "claude-home"   # no ~/.claude rules unless a test says
+        os.environ["CLAUDE_CONFIG_DIR"] = str(self.claude)
+
+    def api_model(self, mid=FLASH, label="DeepInfra (API)", free=False):
+        pid, name = mid.split("/", 1)
+        return runner.models.Model(id=mid, provider=pid, name=name, base_url="https://api.example/v1",
+                            engine="api", label=label, kind="api", key="stored", free=free,
+                            package=f"@opencode/ai/providers/{pid}")
+
+    def local_only(self, key=None, **more):
+        self.conf.write_text(json.dumps({"repos": {str(key or self.repo): {"local_only": True, **more}}}))
+
+    def role(self, role="significant", **entry):
+        self.routes.write_text(json.dumps({"v": 1, "roles": {role: entry}}))
+
+    def fails(self, *argv) -> tuple[int, str]:
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            cli.main(list(argv))
+        return cm.exception.code, err.getvalue()
+
+    def start_api(self, name, m=None, *extra):
+        """wb start as #1016 makes an API task: pick_model resolves to the API model; the GPU
+        lease, the bench and the runner (#1015's) are left out."""
+        m = m or self.api_model()
+        state = {"available": True, "resident": True, "why": "ready (API)"}
+        routed = {"via": "api", "role": "trivial", "provider": m.provider, "provider_name": m.provider,
+                  "thinking": "off", "said": ""}
+        with mock.patch.object(cli, "pick_model", return_value=(m, state, "the trivial role", routed)), \
+                mock.patch.object(cli, "_gpu_wait", return_value=({}, False)), \
+                mock.patch.object(cli, "_preempt_bench", return_value=""), \
+                mock.patch.object(cli, "spawn_runner"), \
+                mock.patch.object(runner.models, "box_others", return_value=[]):
+            out = run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo), *extra)
+        store.write_json(store.Task(name).dir / "task.json",       # #1016's keys
+                         {**store.Task(name).spec, "via": "api", "provider": m.provider})
+        return out
+
+    # 1-3, 5: local_only at start
+
+    def test_a_local_only_repo_refuses_an_api_role_with_both_choices_and_runs_a_gpu_one(self):
+        self.local_only()
+        self.role(via="api", api=FLASH)
+        code, err = self.fails("start", "t-lo", "--spec", str(self.spec), "--repo", str(self.repo))
+        self.assertEqual(code, 3)
+        self.assertIn(f'{cli.privacy.home_path(self.repo)} is local-only (commands.json "repos"): the '
+                      f"significant role is on API ({FLASH}). Choices: put significant on the GPU "
+                      "(wb route significant gpu, the user's yes), or the user lifts local_only "
+                      "for this repo.", err)
+        self.assertFalse(store.Task("t-lo").exists)
+        self.role(via="gpu", api=FLASH)                          # the same start, the role on the GPU
+        os.environ["FAKE_SCENARIO"] = "ok"
+        self.assertIn("started t-lo", run_wb("start", "t-lo", "--spec", str(self.spec),
+                                             "--repo", str(self.repo)))
+        wait_phase("t-lo", ("review",))
+
+    def test_local_only_asks_the_agents_switch_over_a_roles_own_via(self):
+        # wave 2's review: the check read the role's own `via`, so Agents on API (`use`) sent a
+        # local-only repo's code to the provider, and Agents on GPU refused a start the GPU ran
+        self.local_only()
+        self.routes.write_text(json.dumps({"v": 1, "use": "api", "day_usd": 5,
+                                           "roles": {"significant": {"via": "gpu", "api": FLASH}}}))
+        self.assertIn(f"the significant role is on API ({FLASH})",
+                      cli.local_only_refusal(self.repo, None, "significant", None))
+        code, err = self.fails("start", "t-lo-use", "--spec", str(self.spec), "--repo", str(self.repo))
+        self.assertEqual(code, 3)
+        self.assertIn("is local-only", err)
+        self.routes.write_text(json.dumps({"v": 1, "use": "gpu", "day_usd": 5,
+                                           "roles": {"significant": {"via": "api", "api": FLASH}}}))
+        self.assertEqual(cli.local_only_refusal(self.repo, None, "significant", None), "")
+
+    def test_local_only_for_one_task_refuses_an_api_role_in_a_repo_commands_json_never_named(self):
+        self.role("trivial", via="api", api=FLASH)
+        code, err = self.fails("start", "t-lo1", "--spec", str(self.spec), "--repo", str(self.repo),
+                               "--size", "trivial", "--local-only")
+        self.assertEqual(code, 3)
+        self.assertIn("is local-only (--local-only): the trivial role is on API", err)
+        self.assertIn("put trivial on the GPU (wb route trivial gpu, the user's yes), or the user "
+                      "drops --local-only for this task", err)
+        self.start("t-lo2", "ok", "--local-only")                # a GPU model: it runs, and says so
+        self.assertTrue(store.Task("t-lo2").spec["local_only"])
+        wait_phase("t-lo2", ("review",))
+
+    def test_an_api_model_asked_for_in_a_local_only_repo_is_refused_before_any_gate(self):
+        ApiHarness.catalog(self)
+        self.local_only()
+        with mock.patch.object(cli, "pick_model", wraps=cli.pick_model) as picked:
+            code, err = self.fails("start", "t-lo3", "--spec", str(self.spec), "--repo", str(self.repo),
+                                   "--model", FLASH)
+        self.assertEqual(code, 3)
+        self.assertIn(f"the task's model is API ({FLASH}, --model). Choices: a GPU model, or the "
+                      "user lifts local_only for this repo.", err)
+        picked.assert_not_called()                               # the model's gate (#1014) never asked
+        # and the line #1014's `wb route --dry-run --model` prints in place of its dialog, given
+        # the start's repo, so the user is never asked to approve a start that would be refused
+        self.assertIn(f"the task's model is API ({FLASH}, --model)",
+                      cli.local_only_refusal(self.repo, None, "significant", FLASH))
+        self.conf.write_text("{}")
+        self.assertEqual(cli.local_only_refusal(self.repo, None, "significant", FLASH), "")
+
+    def test_local_only_follows_the_nearest_entry_that_says_it_and_a_package_alone_may_be_one(self):
+        (self.repo / "pkg").mkdir()
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"local_only": True},
+                                                   str(self.repo / "pkg"): {"setup": "true"}}}))
+        self.assertTrue(cli.privacy.local_only(self.repo, "pkg"))    # a setup entry lifts nothing
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"local_only": True},
+                                                   str(self.repo / "pkg"): {"local_only": False}}}))
+        self.assertIsNone(cli.privacy.local_only(self.repo, "pkg"))  # said so, nearest
+        self.conf.write_text(json.dumps({"repos": {str(self.repo / "pkg"): {"local_only": True}}}))
+        self.assertTrue(cli.privacy.local_only(self.repo, "pkg"))
+        self.assertIsNone(cli.privacy.local_only(self.repo))         # the root isn't
+
+    def test_commands_json_refuses_a_local_only_that_isnt_true_or_false(self):
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"local_only": "yes"}}}))
+        with self.assertRaises(RuntimeError) as cm:
+            context.commands_conf()
+        self.assertIn('"local_only" is true or false', str(cm.exception))
+
+    # 4: local-only since the task started
+
+    def test_next_and_feedback_on_an_api_task_whose_repo_became_local_only_name_takeover_and_discard(self):
+        self.start("t-since", "ok")
+        wait_phase("t-since", ("review",))
+        t = store.Task("t-since")
+        store.write_json(t.dir / "task.json", {**t.spec, "via": "api", "provider": "deepinfra"})
+        self.local_only()
+        code, err = self.fails("next", "t-since", "--spec", str(self.spec), "-m", "step 1")
+        self.assertEqual(code, 3)
+        self.assertIn("this repo is local-only now; the task's model is API (deepinfra): "
+                      "wb takeover t-since or wb discard t-since", err)
+        self.assertEqual(self.fails("feedback", "t-since", "--text", "again")[0], 3)
+        self.assertEqual(t.status["phase"], "review")            # nothing was sent
+        store.write_json(t.dir / "task.json", {**t.spec, "via": "gpu"})  # a GPU task: as before
+        run_wb("feedback", "t-since", "--text", "again")
+        wait_phase("t-since", ("review",))
+
+    def test_resume_refuses_an_api_task_whose_repo_became_local_only_and_resume_all_goes_on_past_it(self):
+        for n in ("t-ra", "t-rb"):
+            self.start(n, "ok")
+            wait_phase(n, ("review",))
+            store.Task(n).set_status(phase="stuck", last=cli.RESTARTED)   # as a restart leaves them
+        t = store.Task("t-ra")
+        store.write_json(t.dir / "task.json", {**t.spec, "via": "api", "provider": "deepinfra"})
+        self.local_only()
+        code, err = self.fails("resume", "t-ra")
+        self.assertEqual(code, 3)
+        self.assertIn("this repo is local-only now; the task's model is API (deepinfra): "
+                      "wb takeover t-ra or wb discard t-ra", err)
+        # --all: one such task said, the GPU one after it resumed all the same (it exited the
+        # whole batch at the first, #1021's review)
+        out = run_wb("resume", "--all")
+        self.assertIn("this repo is local-only now; the task's model is API (deepinfra)", out)
+        self.assertIn("resumed t-rb", out)
+        self.assertEqual(t.status["phase"], "stuck")
+        wait_phase("t-rb", ("review",))
+
+    # 6: standing copies and siblings
+
+    def test_an_api_task_takes_a_standing_copy_only_when_named_and_a_gpu_task_as_before(self):
+        (self.repo / ".gitignore").write_text("local.cfg\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        (self.repo / "local.cfg").write_text("db=dev\n")
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["local.cfg"]}}}))
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            self.start_api("t-cp1")
+        self.assertEqual(cm.exception.code, 3)
+        self.assertIn('commands.json "repos" copies local.cfg into every task, and this one is on '
+                      "API (DeepInfra): name it (--copy local.cfg) to send it, or put the role on "
+                      "the GPU", err.getvalue())
+        out = self.start_api("t-cp2", None, "--copy", "local.cfg")
+        self.assertIn("and local.cfg (--copy) to DeepInfra", out)
+        self.assertEqual(store.Task("t-cp2").spec["copy"], ["local.cfg"])
+        self.start("t-cp3", "ok")                                # GPU: copied as today, unnamed
+        self.assertEqual(store.Task("t-cp3").spec["copy"], ["local.cfg"])
+        wait_phase("t-cp3", ("review",))
+
+    def test_an_api_task_takes_a_standing_sibling_only_when_named(self):
+        shared = self.repo.parent / "shared"
+        shared.mkdir()
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"siblings": ["shared"]}}}))
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            self.start_api("t-sib1")
+        self.assertEqual(cm.exception.code, 3)
+        self.assertIn("links shared beside every task", err.getvalue())
+        self.assertIn("shared (--sibling)", self.start_api("t-sib2", None, "--sibling", "../shared"))
+
+    # 11: the where-note
+
+    def test_the_first_api_task_of_a_repo_and_provider_says_what_goes_where_and_later_ones_dont(self):
+        self.claude.mkdir()
+        (self.claude / "CLAUDE.md").write_text("my rules\n")
+        out = self.start_api("t-w1")
+        self.assertIn("note: this task sends the repo, its spec, CLAUDE.md files and your ~/.claude "
+                      "rules to DeepInfra (the trivial role's model; data policy: "
+                      "https://docs.deepinfra.com/account/data-privacy)", out)  # whose choice: #1016's
+        self.assertNotIn("this task sends", self.start_api("t-w2"))      # the same provider again
+        other = self.api_model("anthropic/claude-haiku-5-5", "Anthropic (API)")
+        self.assertIn("to Anthropic (the trivial role's model; data policy: https://www.anthropic.com/legal/privacy)",
+                      self.start_api("t-w3", other))
+        # archived tasks count too, so wb gc can't bring the note back
+        store.archive_dir().mkdir(parents=True, exist_ok=True)
+        for n in ("t-w1", "t-w2", "t-w3"):
+            shutil.move(str(store.Task(n).dir), str(store.archive_dir() / n))
+        self.assertNotIn("this task sends", self.start_api("t-w4"))
+
+    # 7: token dotfiles in an API lane
+
+    def bare(self, name, via):
+        task = store.Task(name)
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": name, "repo": str(self.repo), "via": via}))
+        return task
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_an_api_lane_hides_the_registry_tokens_a_gpu_lane_reads_and_m2_repository_stays_writable(self):
+        home = Lane.fake_home(self)
+        files = [".npmrc", ".m2/settings.xml", ".gradle/gradle.properties",
+                 ".config/pypoetry/auth.toml", ".hex/hex.config", ".nuget/NuGet/NuGet.Config"]
+        for rel in files:
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text("//registry.example/:_authToken=t\n")
+        (home / ".npmrc.bak").write_text("x")                       # a neighbour stays
+        script = ("import os, sys\nfor f in sys.argv[2:]:\n    try:\n        open(f).read(); print('read')\n"
+                  "    except PermissionError:\n        print('refused')\n"
+                  "os.makedirs(sys.argv[1] + '/repository/org/x', exist_ok=True)\n"
+                  "open(sys.argv[1] + '/repository/org/x/x.pom', 'w').write('x'); print('built')\n")
+        for via, want in (("api", "refused"), ("gpu", "read")):
+            task = self.bare(f"t-dot-{via}", via)
+            out = subprocess.run(lane.wrap(context.writable(task),
+                                           [sys.executable, "-c", script, str(home / ".m2"),
+                                            *(str(home / f) for f in files), str(home / ".npmrc.bak")],
+                                           context.readable(task)),
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.stdout.split(), [want] * len(files) + ["read", "built"], (via, out.stderr))
+        self.assertIn(str(home / ".gradle" / "caches"), context.writable(self.bare("t-dot-g", "api")))
+        self.assertIn("an API task can't read ~/.config/pypoetry/auth.toml, ~/.gradle/gradle.properties, "
+                      "~/.hex/hex.config, ~/.m2/settings.xml and 2 more", context.api_hidden_note())
+        for home_ in (home / ".hex", home / ".nuget"):              # the other split homes (#1021's review)
+            self.assertIn(str(home_ / "packages"), context.writable(self.bare(f"t-dot-{home_.name[1:]}", "api")))
+
+    # Each config with and without a credential: only the first is hidden (#1021's decision,
+    # 2026-11-23: hiding every one stopped Maven, Gradle, dotnet… for users with no secret there)
+    WITH_AND_WITHOUT = {
+        ".npmrc": ("//registry.example/:_authToken=npm_t\n",
+                   "registry=https://registry.example/\n//registry.example/:_authToken=${NPM_TOKEN}\n"),
+        ".m2/settings.xml": ("<settings><servers><server><id>r</id><username>u</username>"
+                             "<password>p</password></server></servers></settings>",
+                             "<settings>\n<!-- <server><password>example</password></server> -->\n"
+                             "<localRepository>/srv/m2</localRepository>\n</settings>\n"),
+        ".config/pip/pip.conf": ("[global]\nindex-url = https://u:tok@pypi.example/simple\n",
+                                 "[global]\nindex-url = https://pypi.org/simple\ntimeout = 60\n"),
+        ".pip/pip.conf": ("[global]\nextra-index-url = https://__token__@pypi.example/simple\n",
+                          "[global]\nno-cache-dir = true\n"),
+        ".bundle/config": ('---\nBUNDLE_GEMS__CONTRIBSYS__COM: "u:p"\n',
+                           '---\nBUNDLE_PATH: "vendor/bundle"\nBUNDLE_BUILD__NOKOGIRI: "--use-system-libraries"\n'),
+        ".bunfig.toml": ('[install.registry]\nurl = "https://registry.example/"\ntoken = "t"\n',
+                         '[install]\nregistry = "https://registry.npmjs.org/"\n'),
+        ".config/composer/auth.json": ('{"github-oauth": {"github.com": "ghp_t"}}', '{"github-oauth": {}}'),
+        ".gradle/gradle.properties": ("gpr.key=ghp_t\n", "org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=1g\n"),
+    }
+
+    def test_a_token_file_is_hidden_from_an_api_task_only_when_it_holds_a_credential(self):
+        home = Path(self.tmp.name) / "home"
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for v in ("XDG_CONFIG_HOME", "PIP_CONFIG_FILE", "BUNDLE_CONFIG", "BUNDLE_USER_CONFIG",
+                      "BUNDLE_USER_HOME", "NPM_CONFIG_USERCONFIG", "npm_config_userconfig"):
+                os.environ.pop(v, None)
+            for rel, (secret, plain) in self.WITH_AND_WITHOUT.items():
+                f = home / rel
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(plain)
+                self.assertNotIn(os.path.realpath(f), context.api_hidden_paths(), rel)
+                f.write_text(secret)
+                self.assertIn(os.path.realpath(f), context.api_hidden_paths(), rel)
+            # one that can't be read or parsed counts as holding one
+            (home / ".config/composer/auth.json").write_text('{"http-basic": ')
+            (home / ".npmrc").write_bytes(b"\xff\xfe_\x00a\x00")
+            hidden = context.api_hidden_paths()
+            for rel in (".config/composer/auth.json", ".npmrc"):
+                self.assertIn(os.path.realpath(home / rel), hidden, rel)
+            note = context.api_hidden_note()
+            self.assertIn("each holds a credential, which would reach the provider): in its lane", note)
+            self.assertIn("Bundler", note.split("stop")[0])          # Bundler stops on every run
+            self.assertIn("installs from a private registry fail", note)
+            # and where a variable moves pip's and Bundler's
+            moved = Path(self.tmp.name) / "moved"
+            moved.mkdir()
+            (moved / "pip.ini").write_text("[global]\nindex-url = https://u:p@x.example/simple\n")
+            (moved / "bundle").write_text('---\nBUNDLE_HTTPS://GEMS__EXAMPLE__COM/: "t"\n')
+            os.environ.update(PIP_CONFIG_FILE=str(moved / "pip.ini"), BUNDLE_USER_CONFIG=str(moved / "bundle"))
+            tools = context._api_hidden_tools()
+            self.assertEqual((tools[os.path.realpath(moved / "pip.ini")], tools[os.path.realpath(moved / "bundle")]),
+                             ("pip", "Bundler"))
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_an_api_lane_reads_a_config_with_no_credential_and_refuses_one_with(self):
+        home = Lane.fake_home(self)
+        files = [".npmrc", ".m2/settings.xml", ".config/pip/pip.conf"]
+        script = ("import sys\nfor f in sys.argv[1:]:\n    try:\n        open(f).read(); print('read')\n"
+                  "    except PermissionError:\n        print('refused')\n")
+        for rel in files:
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+        for state in ("plain", "secret"):
+            for rel in files:
+                (home / rel).write_text(self.WITH_AND_WITHOUT[rel][state == "plain"])
+            task = self.bare(f"t-cred-{state}", "api")
+            out = subprocess.run(lane.wrap(context.writable(task),
+                                           [sys.executable, "-c", script, *(str(home / f) for f in files)],
+                                           context.readable(task)),
+                                 capture_output=True, text=True, timeout=20)
+            want = "read" if state == "plain" else "refused"
+            self.assertEqual(out.stdout.split(), [want] * len(files), (state, out.stderr))
+
+    def test_a_moved_tool_home_with_a_token_file_is_hidden_and_split_with_what_it_makes(self):
+        """GRADLE_USER_HOME and HEX_HOME hide their files in an API lane and are split around
+        them, so what Gradle and Hex make at their top is made first; NuGet's home too, with
+        only the NuGet.Config dotnet writes on first use (#1021's review: a first restore
+        couldn't make packages/, and a moved Gradle home was granted nothing)."""
+        home, gh, hh = (Path(self.tmp.name) / n for n in ("home", "gradle-home", "hex-home"))
+        (home / ".nuget/NuGet").mkdir(parents=True)
+        (home / ".nuget/NuGet/NuGet.Config").write_text("<configuration/>")
+        gh.mkdir()
+        (gh / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2g\n")
+        hh.mkdir()
+        (hh / "hex.config").write_text("[]")
+        with mock.patch.dict(os.environ, {"HOME": str(home), "GRADLE_USER_HOME": str(gh), "HEX_HOME": str(hh)}):
+            for v in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+                os.environ.pop(v, None)
+            # with no credential in them nothing is hidden, and the homes are granted whole
+            self.assertEqual(context.api_hidden_paths(), set())
+            self.assertIn(str(gh), context.writable(self.bare("t-mv-none", "api")))
+            (home / ".nuget/NuGet/NuGet.Config").write_text(
+                '<configuration><packageSourceCredentials><feed><add key="ClearTextPassword" value="p" />'
+                "</feed></packageSourceCredentials></configuration>")
+            (gh / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2g\nmavenPassword=p\n")
+            (hh / "hex.config").write_text('{api_key,<<"k">>}.\n')
+            hidden = context.api_hidden_paths()
+            self.assertIn(os.path.realpath(gh / "gradle.properties"), hidden)
+            self.assertIn(os.path.realpath(hh / "hex.config"), hidden)
+            gpu = context.writable(self.bare("t-mv-gpu", "gpu"))
+            self.assertIn(str(gh), gpu)                              # the GPU's: granted whole
+            api = context.writable(self.bare("t-mv-api", "api"))
+            self.assertNotIn(str(gh), api)
+            for made in (gh / "caches", gh / "wrapper", hh / "packages", home / ".nuget/packages"):
+                self.assertIn(str(made), api)
+            self.assertIn("in its lane Gradle and dotnet stop on every run, and Hex installs from a "
+                          "private registry fail", context.api_hidden_note())
+
+    def test_the_start_says_which_token_files_an_api_lane_hides_and_a_gpu_start_doesnt(self):
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        (home / ".npmrc").write_text("//registry.example/:_authToken=t\n")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            self.assertIn("note: an API task can't read ~/.npmrc (it holds a credential, which would "
+                          "reach the provider): in its lane npm installs from a private registry fail",
+                          self.start_api("t-dn1"))
+            # a tool that stops on every run with its file unreadable is named as one (#1021's
+            # review: the note said only private installs fail, and Maven never ran at all)
+            (home / ".m2").mkdir()
+            (home / ".m2/settings.xml").write_text("<settings/>")
+            self.assertNotIn("Maven", context.api_hidden_note())     # no credential: Maven runs
+            (home / ".m2/settings.xml").write_text("<settings><servers><server><id>r</id>"
+                                                   "<password>p</password></server></servers></settings>")
+            self.assertIn("(each holds a credential, which would reach the provider): in its lane Maven "
+                          "stops on every run, and npm installs from a private registry fail",
+                          context.api_hidden_note())
+            self.assertNotIn("can't read ~/.npmrc", self.start("t-dn2", "ok"))
+            wait_phase("t-dn2", ("review",))
+
+    # 8, 9: OpenRouter
+
+    def test_an_openrouter_id_needs_its_backends_named_and_its_requests_go_to_them_alone(self):
+        rid = "openrouter/deepseek/deepseek-v4.1-flash"
+        why = cli.privacy.order_refusal(rid, [])
+        self.assertIn("is served by many backends that differ in quantization and data policy: pick "
+                      "them with --order <name>[,<name>] (openrouter.ai/deepseek/deepseek-v4.1-flash, "
+                      "Providers tab)", why)
+        self.assertIsNone(cli.privacy.order_refusal(rid, cli.privacy.parse_order("baseten")))
+        self.assertIsNone(cli.privacy.order_refusal(FLASH, []))       # one backend: nothing to pick
+        port, out, _ = ApiHarness.capture(self, "or")
+        m = self.model("openrouter", "deepseek/deepseek-v4.1-flash", "/api/v1",
+                       "@opencode/ai/providers/openrouter")
+        m.base_url = f"http://127.0.0.1:{port}/api/v1"
+        kh = self.keyhole(m, order=["baseten"])
+        self.assertEqual(self.post(kh, body={"model": m.name, "stream": True, "provider": {
+            "order": ["cheapest"], "allow_fallbacks": True, "data_collection": "deny"}})[0], 200)
+        sent = [json.loads(x) for x in out.read_text().splitlines()]
+        self.assertEqual(sent[-1]["provider"], {"order": ["baseten"], "allow_fallbacks": False,
+                                                "data_collection": "deny"})
+        di = self.keyhole(self.model(path="/v1/openai"))         # another provider: byte for byte
+        di_m = di.model
+        di_m.base_url = f"http://127.0.0.1:{port}/v1/openai"
+        kh2 = self.keyhole(di_m)
+        self.post(kh2, raw=b'{"model": "%s",  "stream": true, "provider": {"x": 1}}' % di_m.name.encode())
+        self.assertEqual(json.loads(out.read_text().splitlines()[-1])["provider"], {"x": 1})
+        # the task's order, as wb start records it: the keyhole's start reads it
+        store.write_json(self.task.dir / "task.json", {"silence_timeout": 900, "order": ["baseten"]})
+        with mock.patch.object(self.kh_mod, "load_key", return_value=self.kh_mod.Key("openrouter", self.CANARY)):
+            started = self.kh_mod.start(self.task, m, log=self.lines.append)
+        self.addCleanup(started.close)
+        self.assertEqual(started.order, ["baseten"])
+        # and the layer records it under the task's model (OpenCode 2.3.2 sends it, checked)
+        layer = runner.openrouter_routing(types.SimpleNamespace(spec={"via": "api", "model": rid, "order": ["baseten"]}))
+        self.assertEqual(layer, {"provider": {"openrouter": {"models": {"deepseek/deepseek-v4.1-flash": {
+            "options": {"provider": {"order": ["baseten"], "allow_fallbacks": False}}}}}}})
+        self.assertEqual(runner.openrouter_routing(types.SimpleNamespace(spec={"via": "api", "model": FLASH,
+                                                                         "order": ["x"]})), {})
+        # and in the layer write_config_layer writes, beside what it held already (#1021's review:
+        # the wiring was untested)
+        self.start("t-orl", "ok")
+        wait_phase("t-orl", ("review",))
+        t = store.Task("t-orl")
+        store.write_json(t.dir / "task.json", {**t.spec, "via": "api", "model": rid, "order": ["baseten"]})
+        with mock.patch.object(runner.models, "agent_providers", return_value={"provider": {"openrouter": {
+                "name": "OpenRouter", "models": {"deepseek/deepseek-v4.1-flash": {"name": "x"}}}}}):
+            written = json.loads(runner.write_config_layer(t).read_text())
+        self.assertEqual(written["provider"]["openrouter"]["models"]["deepseek/deepseek-v4.1-flash"],
+                         {"name": "x", "options": {"provider": {"order": ["baseten"], "allow_fallbacks": False}}})
+
+    def test_a_backend_outside_the_order_is_an_event_and_a_report_line_never_silent(self):
+        m = self.model("openrouter", "deepseek/deepseek-v4.1-flash", "/api/v1",
+                       "@opencode/ai/providers/openrouter")
+        kh = self.keyhole(m, order=["baseten", "deepinfra/fp8"])
+        self.up.by = "DeepInfra"                                   # its display name: in the order
+        self.post(kh)
+        self.up.by = "Novita"
+        self.post(kh)
+        rows = [e for e in store.read_jsonl(self.task.dir / "events.jsonl")[0] if e["kind"] == "backend"]
+        self.assertEqual([r["text"] for r in rows], ["OpenRouter served Novita, not baseten, deepinfra/fp8"])
+        self.assertEqual(runner.backend_lines(self.task, 1),
+                         ["NOTE: OpenRouter served Novita, not baseten, deepinfra/fp8"])
+        self.assertEqual(runner.backend_lines(self.task, 2), [])
+        self.assertIn("backend", transcript.EVENT_KINDS)
+        shown = [e for e in transcript.task_entries(self.task) if "OpenRouter served" in e.lines[0][1]]
+        self.assertEqual([e.lines for e in shown],                # wb watch shows it as bad news
+                         [[("bad", "■ OpenRouter served Novita, not baseten, deepinfra/fp8")]])
+        # display names that don't fold to their slug (OpenRouter's list, 2026-11-23)
+        self.assertFalse(cli.privacy.outside_order("Google", ["google-vertex"]))
+        self.assertFalse(cli.privacy.outside_order("Sakana AI", ["sakana"]))
+        self.assertTrue(cli.privacy.outside_order("Google AI Studio", ["google-vertex"]))
+        self.start("t-rep", "ok")                                # in the round's report
+        wait_phase("t-rep", ("review",))
+        t = store.Task("t-rep")
+        t.event({"ts": store.now(), "round": 1, "kind": "backend", "text": "OpenRouter served Novita, not baseten"})
+        rnd = {"secs": 60, "tok_in": 1, "tok_out": 1, "stuck": None, "exit": 0, "tools": {},
+               "errors": [], "texts": ["done"]}
+        self.assertIn("NOTE: OpenRouter served Novita, not baseten", runner.summary_text(t, 1, rnd, None))
+
+    # 10, and the line's other parts
+
+    def test_where_marks_a_free_model_and_names_the_policy_page_or_says_to_see_it(self):
+        free = cli.privacy.where(self.api_model("opencode/big-pickle-free", "OpenCode Zen (API)", free=True))
+        self.assertTrue(free["free"])
+        self.assertTrue(free["line"].endswith("the provider may keep or train on your code"))
+        self.assertEqual(free["policy"], "https://opencode.ai/docs/zen/")
+        paid = cli.privacy.where(self.api_model())
+        self.assertEqual(paid, {"provider": "deepinfra", "name": "DeepInfra",
+                                "line": "your code goes to DeepInfra",
+                                "policy": "https://docs.deepinfra.com/account/data-privacy",
+                                "free": False, "backends": []})
+        odd = cli.privacy.where(self.api_model("acme/m1", "Acme (API)"))
+        self.assertEqual((odd["policy"], odd["line"]), (None, "your code goes to Acme · see Acme's data policy"))
+        orr = cli.privacy.where(self.api_model("openrouter/deepseek/x", "OpenRouter (API)"), ["baseten"])
+        self.assertIn("via OpenRouter to baseten, no fallbacks (OpenRouter's account setting decides "
+                      "whether backends may keep it)", orr["line"])
+        self.assertEqual(orr["backends"], ["baseten"])
+
+    def test_doctor_says_nothing_of_free_models_wb_never_uses(self):
+        # wave 2's review: a `--` line on every doctor run once hosted.json listed any free model,
+        # for models wb never suggests; one the user picks carries FREE_LINE where it is chosen
+        store.write_json(runner.models.hosted_path(), {"v": 1, "ts": time.time(), "stamp": None, "error": "",
+                                                "providers": {"opencode": {"name": "OpenCode Zen"}},
+                                                "models": {"opencode/a-free": {"free": True},
+                                                           "opencode/b": {"free": False}}})
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(io.StringIO()), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        self.assertNotIn("free model", buf.getvalue())
+        self.assertIn(cli.privacy.FREE_LINE, cli.privacy.where(self.api_model("opencode/a-free", free=True))["line"])
+
+
+class Writing(Base):
+    """The writing role (#1025): prose under its own short handbook and protocol, not the coding
+    rules; self-review and probe off unless asked; `--test` optional; its record apart in the
+    router. Until #1016's `wb start --role` lands, the start parser gets the flag here."""
+
+    def setUp(self):
+        super().setUp()
+        real = cli.parser
+
+        def with_role():
+            ap = real()
+            start = next(a for a in ap._actions if hasattr(a, "choices") and isinstance(a.choices, dict)
+                         and "start" in a.choices).choices["start"]
+            if not any("--role" in a.option_strings for a in start._actions):  # #1016 has it
+                start.add_argument("--role", choices=["significant", "trivial", "writing"])
+            return ap
+        patch = mock.patch.object(cli, "parser", with_role)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.spec.write_text("Write the answer to answer.txt, for the README's readers.\n")
+
+    def protocol(self, task, protocol, test=None):
+        return protocol.format(branch=task.spec["branch"], test_line=cli.test_line(test),
+                               budget=task.spec["ask_budget"], experiment_protocol="")
+
+    def test_a_writing_task_gets_the_writing_handbook_and_protocol_and_a_coding_one_the_coding_ones(self):
+        for name, role, handbook, protocol in (("t-w", "writing", context.WRITING, cli.WRITING_PROTOCOL),
+                                               ("t-c", "significant", context.HANDBOOK, cli.PROTOCOL)):
+            self.start(name, "ok", "--role", role)
+            wait_phase(name, {"review"})
+            task = store.Task(name)
+            self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_bytes(), handbook.read_bytes())
+            self.assertEqual(task.round_dir(1).joinpath("prompt.md").read_text(),
+                             self.spec.read_text().rstrip() + self.protocol(task, protocol))
+        self.assertEqual(store.Task("t-w").spec["role"], "writing")
+        self.assertNotEqual(cli.WRITING_PROTOCOL, cli.PROTOCOL)
+        # fixed_prompt names it the handbook all the same (the file name is kept)
+        self.assertIn("the handbook", [label for label, _ in context.fixed_prompt(store.Task("t-w"))[1]])
+
+    def test_a_writing_prompt_keeps_the_fold_its_readers_split_on(self):
+        from workbench import bench
+        self.start("t-fold", "ok", "--role", "writing", "--test", "true")
+        wait_phase("t-fold", {"review"})
+        prompt = store.Task("t-fold").round_dir(1).joinpath("prompt.md").read_text()
+        brief = self.spec.read_text().rstrip()
+        self.assertIn("- This is a writing task:", prompt)
+        self.assertIn(bench.FOLD, prompt)
+        self.assertEqual(bench._spec_of(prompt), brief + "\n")
+        self.assertEqual(bench.TEST_LINE.search(prompt).group(1), "true")
+        head, lines = transcript._user_message(prompt, verbose=False)
+        self.assertEqual(head, "Claude → agent · spec")
+        shown = "\n".join(t for _, t in lines)
+        self.assertIn("(+ the workbench protocol; -v shows it)", shown)
+        self.assertNotIn("writing task", shown)
+        # runner.outline_section's split, on PROTOCOL's opening up to the branch
+        self.assertEqual(prompt.split(cli.PROTOCOL.split("{branch}")[0])[0], brief)
+        self.assertIn("Lesson: <the rule, and why>", prompt)  # lessons.LESSON reads the summary's
+
+    def test_a_writing_task_with_a_check_runs_it_on_the_base_and_sends_a_failure_back(self):
+        from workbench import bench
+        (self.repo / "Makefile").write_text("docs:\n\tgrep -qx 42 answer.txt\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "Makefile"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "docs check"], check=True)
+        self.start("t-check", "fix", "--role", "writing", "--test", "make docs")
+        st = wait_phase("t-check", {"review"})
+        task = store.Task("t-check")
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL, "make docs")))
+        self.assertEqual(bench.TEST_LINE.search(prompt).group(1), "make docs")
+        self.assertIs(st["base_check"]["ok"], False)                     # run on the base
+        self.assertEqual((st["round"], st["auto_fixes"]), (2, 1))         # 41 sent back as auto-fix
+        self.assertTrue(st["tests"]["ok"])
+        self.assertIn("acceptance tests fail", task.round_dir(2).joinpath("prompt.md").read_text())
+
+    def test_a_writing_task_with_no_check_goes_straight_to_review(self):
+        out = self.start("t-nocheck", "ok", "--role", "writing")
+        self.assertNotIn("base check", out)
+        self.assertNotIn("--test", out)                                   # no note asking for one
+        st = wait_phase("t-nocheck", {"review"})
+        self.assertEqual((st["round"], st.get("auto_fixes")), (1, 0))
+        self.assertNotIn("base_check", st)
+        self.assertIsNone(st.get("tests"))
+        task = store.Task("t-nocheck")
+        self.assertFalse((task.dir / "base-tests.txt").exists())
+        self.assertTrue(task.round_dir(1).joinpath("prompt.md").read_text().endswith(
+            self.protocol(task, cli.WRITING_PROTOCOL)))
+        self.assertFalse(task.round_dir(2).exists())                      # no auto-fix, no self-review
+
+    def test_wb_next_on_a_writing_task_keeps_the_writing_protocol(self):
+        self.start("t-next", "ok", "--role", "writing")
+        wait_phase("t-next", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now the changelog line.\n")
+        run_wb("next", "t-next", "--spec", str(step2), "-m", "docs: the answer")
+        task = store.Task("t-next")
+        prompt = task.round_dir(2).joinpath("prompt.md").read_text()
+        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL)))
+        self.assertNotIn("No unrelated refactors", prompt)
+        wait_phase("t-next", {"review"})
+
+    def test_self_review_is_off_for_a_writing_task_unless_asked(self):
+        (Path(self.tmp.name) / "state" / "tuning.json").write_text('{"self_review": 1}')  # pinned on
+        for name, want, *flags in (("t-sr0", 0, "writing"), ("t-sr1", 1, "writing", "--self-review"),
+                                   ("t-src", 1, "significant")):
+            self.start(name, "ok", "--role", *flags)
+            self.assertEqual(wait_phase(name, {"review"})["tuned"]["self_review"], want, name)
+        self.assertIs(store.Task("t-sr0").spec["self_review"], False)
+        self.assertIsNone(store.Task("t-src").spec["self_review"])        # the tuning's, as before
+        # off by its role, a writing row is no evidence of the knob (a coding row with it off is)
+        from workbench import tuning
+        row = {"model": "m", "window": 1, "outcome": "accepted", "ran": True, "self_review_due": True,
+               "tuned": {"self_review": 0}}
+        self.assertTrue(tuning.acted("self_review", row))
+        self.assertFalse(tuning.acted("self_review", {**row, "role": "writing"}))
+
+    def test_probe_is_off_for_a_writing_task_and_says_why(self):
+        fake_probe(Path(self.tmp.name))
+        long_code(self.repo)                                              # where probe would be on
+        run_wb("experiment", "probe", "on")
+        for name, role in (("t-probe", "writing"), ("t-probe-c", "significant")):
+            self.start(name, "ok", "--role", role)
+            wait_phase(name, {"review"})
+        task = store.Task("t-probe")
+        self.assertEqual(task.spec["experiments"], {"probe": False})
+        self.assertEqual(task.spec["experiments_off"], {"probe": "a writing task"})
+        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_bytes(), context.WRITING.read_bytes())
+        self.assertNotIn(context.EXPERIMENT_PROTOCOL["probe"], task.round_dir(1).joinpath("prompt.md").read_text())
+        self.assertIn("probe: off for this task (a writing task)", run_wb("status", "t-probe"))
+        self.assertEqual(store.Task("t-probe-c").spec["experiments"], {"probe": "on"})  # coding: as before
+
+    def test_the_router_counts_a_models_writing_record_apart_from_its_coding_one(self):
+        from workbench import router
+        m = cli.models.resolve("mimo")
+        rows = [{"model": m.id, "size": "significant", "role": "writing", "outcome": "accepted",
+                 "ran": True, "active_minutes": 5},
+                {"model": m.id, "size": "significant", "role": "significant", "outcome": "accepted",
+                 "ran": True, "active_minutes": 30},
+                {"model": m.id, "size": "significant", "outcome": "discarded", "ran": True,
+                 "active_minutes": 40},                                   # before the roles: its size
+                {"model": m.id, "size": "trivial", "outcome": "accepted", "ran": True}]
+        for r in rows:
+            store.append_jsonl(store.home() / "results.jsonl", r)
+        writing = router.score(m, "significant", role="writing")
+        self.assertEqual((writing.tries, writing.wins), (1, 1))
+        for coding in (router.score(m, "significant"), router.score(m, "significant", role="significant")):
+            self.assertEqual((coding.tries, coding.wins), (2, 1))
+        self.assertEqual(router.score(m, "trivial").tries, 1)
+        self.assertEqual(router.expected(m.id, "significant", role="writing"), (5, 1))
+        self.assertEqual(router.expected(m.id, "significant"), (35, 2))
+        top, why = router.choose("significant", role="writing")
+        self.assertIn("the best record on writing work", why)
+        self.assertEqual(top.model.id, m.id)
+        # the results row carries the role the router reads
+        self.start("t-row", "ok", "--role", "writing")
+        wait_phase("t-row", {"review"})
+        run_wb("discard", "t-row")
+        self.assertEqual([r for r in store.results() if r.get("task") == "t-row"][-1]["role"], "writing")
+
+    def record(self, model, role, outcome, n, minutes=2.0):
+        for _ in range(n):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": model, "size": "significant", "outcome": outcome, "ran": True,
+                "minutes": minutes, "active_minutes": minutes, **({"role": role} if role else {})})
+
+    def test_wb_start_routes_a_writing_task_on_its_writing_record_and_a_coding_one_on_its_coding_one(self):
+        # the review of #1025: the router's role filter was tested only by calling it, and
+        # dropping `role` from wb start's pick_model or router.choose call still passed. #1016's
+        # routes.resolve must pass it too: this start fails when it doesn't
+        from workbench import router
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({
+            "ollama/qwen3.8-27b": {"weights_gb": 13}, "ollama/mimo-v2.6:9b-q8_0": {"weights_gb": 9.7},
+            "strata": {"weights_gb": 55}}))
+        writer, coder = "ollama/qwen3.8-27b", "ollama/mimo-v2.6:9b-q8_0"  # neither the largest
+        self.record("strata/strata", "writing", "discarded", 3)
+        self.record("strata/strata", "significant", "discarded", 3)
+        self.record(writer, "writing", "accepted", 4)
+        self.record(writer, "significant", "discarded", 3)
+        self.record(coder, "writing", "discarded", 3)
+        self.record(coder, None, "accepted", 4)                           # before the roles: its size
+        os.environ["FAKE_SCENARIO"] = "ok"
+        for name, role, model, work in (("t-rw", "writing", writer, "writing"),
+                                        ("t-rcode", "significant", coder, "significant")):
+            self.assertFalse(router.explores(name), name)                 # the record decides
+            run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo),
+                   "--size", "significant", "--role", role)
+            spec = store.Task(name).spec
+            self.assertEqual(spec["model"], model, name)
+            self.assertIn(f"the best record on {work} work", spec["route"])
+            run_wb("stop", name)
+
+    def test_a_writing_tasks_time_estimates_come_from_its_writing_record(self):
+        # the review of #1025: progress.typical, the check-in's ETA and wb watch's clock line
+        # each read the role, and dropping it from any one still passed. 12 minutes a prose
+        # step against 40 a coding one on the same model
+        from workbench import progress
+        m = cli.models.resolve("mimo").id
+        self.record(m, "writing", "accepted", 3, minutes=12.0)
+        self.record(m, "significant", "accepted", 3, minutes=40.0)
+        self.start("t-eta", "ok", "--role", "writing")
+        wait_phase("t-eta", {"review"})
+        task = store.Task("t-eta")
+        self.assertEqual(progress.typical(task.spec), (12.0, "measured"))
+        self.assertEqual(progress.typical({**task.spec, "role": None}), (40.0, "measured"))
+        task.set_status(phase="running")                                  # an ETA only while it works
+        self.assertIn("(typically 12m)", transcript.clock_line(task))
+        self.assertIn("(typically 12m)", runner.checkin_text(task, 1, {"texts": []}, since=0, active=0))
+
+    def test_prose_steps_leave_the_coding_rows_speed_reward_alone(self):
+        # the review of #1025: tuning.record set each row's speed against the median step of its
+        # size, and a writing task is significant: four 4-minute prose steps made 30-minute coding
+        # steps slow, 1.0 to 0.85, and pushed the coding pick off fresh_at 0.5
+        from workbench import tuning
+        row = lambda mins, val, role=None: {  # noqa: E731
+            "model": "m", "window": 32768, "outcome": "accepted", "ran": True, "size": "significant",
+            "active_minutes": mins, "tuned": {"fresh_at": val}, **({"role": role} if role else {})}
+        coding = [row(30, 0.5), row(30, 0.5), row(30, 0.6)]
+        prose = [row(4, 0.6, "writing") for _ in range(4)]
+        recs = []
+        for rows in (coding, coding + prose):
+            with mock.patch.object(tuning, "_rows", lambda model, window, rows=rows: rows):
+                recs.append(tuning.record("fresh_at", "m", 32768))
+        self.assertEqual(recs[0][0.5], recs[1][0.5])                       # coding alone: unmoved
+        self.assertEqual(recs[1][0.6][:1], recs[0][0.6])
+        self.assertEqual(len(recs[1][0.6]), 5)                             # prose still counts, at its own pace
+
+
+class ApiStats(Base):
+    """#1022: what an API task cost, recorded and shown beside the GPU-only savings score."""
+    USAGE = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
+             "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}   # weighted 56K
+    DIFF = {"files": 4, "added": 61, "removed": 1}                         # ~59K to write
+
+    def setUp(self):
+        super().setUp()
+        os.environ["WB_SAVINGS"] = str(Path(self.tmp.name) / "savings.json")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "claude")  # never the user's
+
+    def rows(self, *rows):
+        for r in rows:
+            store.append_jsonl(store.home() / "results.jsonl", r)
+
+    def gpu_row(self, **o):
+        return {"ts": store.now() - 3600, "outcome": "accepted", "task": "g", "model": "ollama/mimo",
+                "size": "trivial", "claude": self.USAGE, "diff": self.DIFF, "gpu_wh": 30.0, **o}
+
+    def api_row(self, cost=0.42, source="opencode", provider="deepseek", **o):
+        return {"ts": store.now() - 3600, "outcome": "accepted", "task": "a", "kind": "api",
+                "role": "trivial", "provider": provider, "model": f"{provider}/flash", "size": "trivial",
+                "claude": self.USAGE, "diff": self.DIFF, "api": {"cost": cost, "source": source}, **o}
+
+    def api_task(self, name, status=None, **spec) -> store.Task:
+        """A task as wb start --role would write it for an API route (#1016), never started."""
+        t = store.Task(name)
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": name, "model": "deepseek/deepseek-flash",
+                                               "model_label": "deepseek-flash", "via": "api",
+                                               "provider": "deepseek", "role": "trivial",
+                                               "created_at": store.now() - 60, **spec})
+        store.write_json(t.dir / "status.json", {"phase": "review", "round": 1, **(status or {})})
+        return t
+
+    def test_an_accepted_api_task_leaves_the_gpu_score_as_the_gpu_task_alone_and_gets_its_own_line(self):
+        from workbench import savings
+        self.rows(self.gpu_row())
+        alone = savings.totals(store.results(), since=store.now() - 7 * 86400)
+        gpu_line = run_wb("savings").splitlines()[0]
+        self.rows(self.api_row())
+        both = savings.totals(store.results(), since=store.now() - 7 * 86400)
+        self.assertEqual(both, alone)                    # of 1, claude and saved as the GPU task's
+        self.assertEqual(savings.score(both), savings.score(alone))
+        out = run_wb("savings").splitlines()
+        self.assertEqual(out[0], gpu_line)               # the GPU line's saved unchanged
+        self.assertEqual(out[1], "api: 1 task(s) · $0.42 (deepseek $0.42) · claude 56K · "
+                                 "writing it yourself ~59K (estimate)")
+        self.assertIsNone(savings.of_row(self.api_row()))
+
+    def test_an_api_task_with_no_price_counts_as_one_with_no_price_never_as_0_dollars(self):
+        from workbench import savings
+        self.rows(self.api_row(cost=None, source="unknown"))
+        a = savings.api_totals(store.results(trials=True))
+        self.assertEqual((a["tasks"], a["cost"], a["unknown"]), (1, 0.0, 1))
+        out = run_wb("savings") + run_wb("savings", "--api") + run_wb("stats")
+        self.assertIn("api: 1 task(s) · 1 with no price", out)
+        self.assertIn("1 with no price", run_wb("savings", "--api"))
+        self.assertNotIn("$0.00", out)
+        self.assertNotIn("$0 ", out)
+        self.assertEqual(savings.line(self.api_row(cost=None, source="unknown")),
+                         "claude: 56K · writing it yourself: ~59K (estimate) · paid: unknown (no price for this model)")
+        self.assertEqual(savings.line(self.api_row()), "claude: 56K · writing it yourself: ~59K (estimate) · "
+                                                      "paid deepseek $0.42 (deepseek/flash)")
+
+    def test_wb_savings_api_says_the_week_by_provider_and_day_with_trials_and_bench_replays_in(self):
+        from workbench import bench
+        now = store.now()
+        self.rows(self.api_row(cost=0.30, ts=now - 2 * 86400),
+                  self.api_row(cost=0.54, ts=now - 86400),
+                  self.api_row(cost=0.43, provider="anthropic", trial=True, outcome="discarded"),
+                  self.api_row(cost=9.0, ts=now - 20 * 86400))                       # before the week
+        store.append_jsonl(bench.runs_file(), {"ts": now, "outcome": "passed", "kind": "api",
+                                               "model": "deepseek/flash", "paid": {"cost": 0.3, "source": "opencode"}})
+        out = run_wb("savings", "--api", "--week").splitlines()
+        # the providers once, on their own line (#1022's review: the header said them too)
+        self.assertEqual(out[0], "api, the last 7 days: 3 task(s), $1.27 (incl. 1 trial)")
+        self.assertEqual(out[1], "  by provider: deepseek $0.84 (2) · anthropic $0.43 (1)")
+        self.assertTrue(out[2].startswith("  by day: "), out)
+        self.assertEqual(out[2].count("$"), 3)
+        self.assertEqual(out[3], "  bench replays: $0.30 (1)")
+        j = json.loads(run_wb("savings", "--api", "--week", "--json"))
+        self.assertEqual(j["by_provider"]["deepseek"], {"tasks": 2, "cost": 0.84, "unknown": 0})
+        self.assertEqual(round(sum(j["by_day"].values()), 2), 1.27)
+        self.assertEqual((j["trials"], j["bench"]["cost"]), (1, 0.3))
+        self.assertEqual(json.loads(run_wb("savings", "--json"))["api"]["tasks"], 3)
+
+    def test_wb_stats_shows_kind_paid_and_agent_tok_and_an_api_row_reads_its_mean_cost(self):
+        mimo = "ollama/mimo-v2.6:9b-q8_0"
+        self.rows(self.gpu_row(model=mimo), self.api_row(cost=0.10), self.api_row(cost=0.14),
+                  self.api_row(provider="zai", cost=None, source="unknown"),
+                  self.api_row(provider="zen", cost=0.2), self.api_row(provider="zen", cost=None, source="unknown"))
+        out = run_wb("stats", "--all")
+        head = next(x for x in out.splitlines() if x.startswith("model "))
+        for col in ("kind", "role", "paid", "agent tok"):
+            self.assertIn(col, head)
+        self.assertNotIn("local tok", out)
+        lines = {x.split()[0]: x.split() for x in out.splitlines() if x.split() and "/" in x.split()[0]}
+        self.assertEqual((lines[mimo][1], lines[mimo][-2]), ("gpu", "-"))
+        self.assertEqual((lines["deepseek/flash"][1], lines["deepseek/flash"][-2]), ("api", "$0.12"))
+        self.assertEqual(lines["zai/flash"][-2], "?")
+        self.assertEqual(lines["zen/flash"][-2], "~$0.20")
+        self.assertTrue(all(len(x) <= 120 for x in out.splitlines() if x.startswith(("model ", "ollama/"))))
+        self.assertIn("api this week: 5 task(s), $0.44 (deepseek $0.24, zen $0.20), 2 with no price", out)
+
+    def test_the_stats_feed_has_the_weeks_api_money_by_provider_and_energy_leaves_api_rows_out(self):
+        self.rows(self.gpu_row(gpu_wh=30.0), self.api_row(gpu_wh=500.0),   # a stray reading: not ours
+                  self.api_row(cost=0.1, trial=True))                     # money spent is spent
+        f = json.loads(run_wb("stats", "--json"))
+        week = f["periods"]["week"]
+        self.assertEqual(round(week["api"]["by_provider"]["deepseek"]["cost"], 2), 0.52)
+        self.assertEqual((week["api"]["tasks"], week["api"]["plan"]), (2, 0))
+        self.assertEqual(week["energy"]["wh"], 30.0)
+        self.assertEqual(week["savings"]["tasks"], 1)
+        line = next(m for m in f["model_lines"]["lines"] if m["model"] == "deepseek/flash")
+        self.assertEqual((line["kind"], line["paid"]), ("api", 0.42))    # the router's view: no trial
+
+    def test_a_gpu_models_router_score_ignores_an_api_row_under_the_same_id(self):
+        from workbench import models, router
+        m = models.discover()["ollama/mimo-v2.6:9b-q8_0"]
+        row = {"ts": store.now(), "outcome": "accepted", "model": m.id, "size": "trivial",
+               "claude": self.USAGE, "steps": [{"landed": True}], "minutes": 3, "active_minutes": 3}
+        self.rows(row, {**row, "kind": "api", "outcome": "discarded"}, {**row, "kind": "api"})
+        state = {"available": True, "resident": False, "fits": True}
+        s = router.score(m, "trivial", state)
+        self.assertEqual((s.tries, s.wins), (1, 1))
+        self.assertEqual(s.claude_n, 1)
+        self.assertEqual(router.expected(m.id, "trivial")[1], 1)
+
+    def test_an_api_tasks_row_keeps_claudes_spend_apart_from_the_providers_cost(self):
+        from workbench import results, savings, spend
+        os.environ["FAKE_COST"] = "0.42"
+        t = self.api_task("t-api", {"session": "ses_one"})
+        with mock.patch.object(spend, "usage_by_step", return_value=(self.USAGE, [])):
+            row = results.record(t, "accepted")
+        self.assertEqual(row["claude"], self.USAGE)                  # untouched by the dollars
+        self.assertEqual((row["kind"], row["role"], row["provider"]), ("api", "trivial", "deepseek"))
+        self.assertEqual((row["api"]["cost"], row["api"]["source"]), (0.42, "opencode"))
+        self.assertEqual(set(row["api"]["tokens"]), {"in", "out", "cache_read", "cache_write", "reasoning"})
+        a = savings.api_totals([row])
+        self.assertEqual((a["claude"], a["cost"]), (spend.weighted(self.USAGE), 0.42))
+        gpu = results.record(store.Task(self.api_task("t-gpu", via=None).name), "discarded")
+        self.assertEqual((gpu["kind"], "api" in gpu), ("gpu", False))
+
+    def test_a_task_with_two_sessions_records_the_sum_of_both_sessions_cost(self):
+        from workbench import results
+        os.environ["FAKE_COST"] = "0.21"
+        t = self.api_task("t-two", {"sessions": ["ses_first"], "session": "ses_second"})
+        self.assertEqual(results.api_usage(t)["cost"], 0.42)       # the handover's session counted too
+        os.environ["FAKE_COST"] = "0"                               # OpenCode said 0, no catalog price
+        t = self.api_task("t-zero", {"session": "ses_zero"})
+        self.assertEqual(results.api_usage(t), {"cost": None, "source": "unknown",
+                                                "tokens": dict.fromkeys(results.TOKEN_KEYS, 0)})
+        t.set_status(api={"usd": 0.05}, served={"model": "x", "by": "baseten"})  # the meter (#1019)
+        self.assertEqual({k: results.api_usage(t)[k] for k in ("cost", "source", "backend")},
+                         {"cost": 0.05, "source": "metered", "backend": "baseten"})
+        with mock.patch.object(results, "catalog_price", return_value=0.0):   # a free model
+            self.assertEqual(results.api_usage(self.api_task("t-free", {"session": "ses_f"}))["cost"], 0.0)
+
+    def test_an_api_tasks_round_samples_no_gpu_power_and_its_row_has_no_gpu_wh(self):
+        from workbench import results
+        gpu, api = self.api_task("t-g", via=None), self.api_task("t-a", {"gpu_wh": 12.0, "remote_gpu": True})
+        with mock.patch.object(runner.models, "_fake", return_value=False), \
+                mock.patch.dict(runner.CURRENT, {"remote": False, "api": False}):  # drive's, per task
+            self.assertTrue(runner.measures_power(gpu))
+            self.assertFalse(runner.measures_power(api))
+        with mock.patch.object(results.spend, "usage_by_step", return_value=(None, [])):
+            row = results.record(api, "accepted")
+        self.assertNotIn("gpu_wh", row)
+        self.assertNotIn("remote_gpu", row)
+
+    def test_an_api_task_shows_under_running_with_its_spend_and_never_in_the_rack_or_queue(self):
+        from workbench import models, top
+        now = time.time()
+        mimo = "ollama/mimo-v2.6:9b-q8_0"
+        for name, spec, st in (
+                ("gpu-busy", {"model": mimo}, {"phase": "running", "round": 1, "updated_at": now}),
+                ("api-busy", {"model": "deepseek/deepseek-flash", "model_label": "deepseek-flash", "via": "api",
+                              "provider": "deepseek"}, {"phase": "running", "round": 2, "updated_at": now}),
+                ("api-meter", {"model": "deepseek/deepseek-flash", "via": "api", "provider": "deepseek"},
+                 {"phase": "running", "round": 1, "updated_at": now, "api": {"usd": 0.2}}),
+                ("api-wait", {"model": "deepseek/deepseek-flash", "via": "api", "provider": "deepseek"},
+                 {"phase": "queued", "updated_at": now})):
+            d = store.tasks_dir() / name
+            d.mkdir(parents=True)
+            store.write_json(d / "task.json", {**spec, "created_at": now - 60})
+            store.write_json(d / "status.json", st)
+        for c in (0.05, 0.07):
+            for name in ("api-busy", "api-meter"):
+                store.append_jsonl(store.tasks_dir() / name / "events.jsonl",
+                                   {"ts": now - 5, "round": 2, "kind": "step", "in": 10, "out": 5, "cost": c})
+        waiter = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(waiter.wait)
+        self.addCleanup(waiter.kill)
+        store.write_json(store.home() / "gpu.json", {
+            str(os.getpid()): {"model": mimo, "task": "gpu-busy", "since": now - 60, "start": models._started(os.getpid())},
+            str(waiter.pid): {"model": mimo, "task": "later", "since": now - 5, "waiting": True,
+                              "start": models._started(waiter.pid)}})
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        with mock.patch.object(hardware, "system", lambda: "linux"), \
+                mock.patch.object(hardware, "smi_path", lambda: None), \
+                mock.patch.object(hardware, "_run", lambda *argv: ""):
+            snap = top.Top(2, drm=drm).tick()
+        run = {r["task"]: r for r in snap["running"]}
+        self.assertEqual({k: run["api-busy"].get(k) for k in ("via", "provider", "spend", "label")},
+                         {"via": "api", "provider": "deepseek", "spend": 0.12, "label": "deepseek-flash"})
+        self.assertEqual(run["api-meter"]["spend"], 0.2)              # the meter (#1019) before the steps
+        self.assertEqual(run["api-wait"]["waits"], "a deepseek slot")
+        self.assertNotIn("spend", run["api-wait"])                   # nothing known yet: never $0
+        self.assertNotIn("via", run["gpu-busy"])
+        self.assertFalse({r["model"] for r in snap["rack"]} & {"deepseek/deepseek-flash"})
+        self.assertFalse(any(str(t).startswith("api-") for r in snap["rack"] for t in r.get("tasks") or []))
+        self.assertEqual([q["task"] for q in snap["queue"]], ["later"])
+        self.assertIn("API deepseek · $0.12", top.render(snap, 200, color=False))
+
+    def test_a_gpu_only_stats_and_bench_table_read_as_before_and_never_cut_a_model_id(self):
+        # wave 2's review: a GPU-only user's table gained `kind` and `paid`, renamed `size` and
+        # `local tok`, and cut two qwen3-coder quantizations to the same 30 characters
+        from workbench import bench
+        q4, q8 = "ollama/qwen3-coder:30b-a3b-instruct-q4_K_M", "ollama/qwen3-coder:30b-a3b-instruct-q8_0"
+        self.rows(self.gpu_row(model=q4), self.gpu_row(model=q8))
+        out = run_wb("stats", "--all").splitlines()
+        head = next(x for x in out if x.startswith("model "))
+        self.assertEqual(head.split()[:3], ["model", "size", "tasks"])
+        self.assertIn("local tok", head)
+        for col in ("kind", "paid", "agent tok"):
+            self.assertNotIn(col, head)
+        self.assertTrue(any(x.startswith(q4 + " ") for x in out), out)
+        self.assertTrue(any(x.startswith(q8 + " ") for x in out), out)
+        base = {"ts": store.now(), "run": "r2", "case": "c", "outcome": "passed", "rounds": 1, "minutes": 2,
+                "tok_in": 10, "tok_out": 5, "model": "ollama/mimo"}
+        store.append_jsonl(bench.runs_file(), base)
+        rep = bench.report("r2").splitlines()
+        self.assertTrue(rep[0].rstrip().endswith("local tok"), rep[0])
+        self.assertNotIn("paid", rep[0])
+
+    def test_a_bench_replay_on_an_api_model_writes_paid_and_the_table_shows_it(self):
+        from workbench import bench
+        os.environ["FAKE_COST"] = "0.3"
+        t = self.api_task("bench-x", {"session": "ses_b"}, bench={"case": "c"})
+        self.assertEqual(bench.paid(t), {"kind": "api", "paid": {"cost": 0.3, "source": "opencode"}})
+        self.assertEqual(bench.paid(self.api_task("bench-g", via=None)), {})
+        base = {"ts": store.now(), "run": "r1", "case": "c", "outcome": "passed", "rounds": 1, "minutes": 2,
+                "tok_in": 10, "tok_out": 5}
+        for r in ({**base, "model": "deepseek/flash", **bench.paid(t)}, {**base, "model": "ollama/mimo"}):
+            store.append_jsonl(bench.runs_file(), r)
+        out = bench.report("r1").splitlines()
+        self.assertIn("agent tok", out[0])
+        self.assertTrue(out[0].rstrip().endswith("paid"))
+        self.assertTrue(next(x for x in out if "deepseek/flash" in x).rstrip().endswith("$0.30"))
+        self.assertTrue(next(x for x in out if "ollama/mimo" in x).rstrip().endswith(" -"))
+
+    def test_the_round_report_says_agent_tokens_and_an_api_tasks_spend_so_far(self):
+        os.environ["FAKE_COST"] = "0.06"                            # each step's, as OpenCode prices it
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-rep", "ok", "--no-base-check")
+            self.start("t-rep-api", "ok", "--no-base-check")
+        t, a = store.Task("t-rep"), store.Task("t-rep-api")
+        store.write_json(a.dir / "task.json", {**a.spec, "via": "api", "provider": "deepseek"})
+        for task in (t, a):
+            runner.drive(store.Task(task.name))
+        first = lambda task: (task.dir / "rounds" / "1" / "summary.md").read_text().splitlines()[0]  # noqa: E731
+        self.assertRegex(first(t), r" · local tokens \d+ in / \d+ out$")    # a GPU task: as before, no money
+        self.assertRegex(first(a), r" · agent tokens \d+ in / \d+ out · \$0\.\d\d so far$")
+        (a.dir / "events.jsonl").write_text("")                     # no cost known, no price
+        self.assertEqual(runner._spend_part(store.Task(a.name)), " · cost unknown")
+        a.set_status(api={"usd": 0.2})                              # the meter's key (#1019)
+        self.assertEqual(runner._spend_part(store.Task(a.name)), " · $0.20 so far")
+
+    def test_a_step_event_keeps_opencodes_cost_and_the_cache_read_and_write_apart(self):
+        from workbench import events
+        raw = {"type": "step_finish", "part": {"cost": 0.0011, "tokens": {"input": 5, "output": 2,
+                                                                          "cache": {"read": 300, "write": 7}}}}
+        row = events.normalize(raw, 1)
+        self.assertEqual({k: row[k] for k in ("cost", "cache", "cache_read", "cache_write")},
+                         {"cost": 0.0011, "cache": 307, "cache_read": 300, "cache_write": 7})
+        del raw["part"]["cost"]
+        self.assertNotIn("cost", events.normalize(raw, 1))          # missing is unknown, never 0
+
+    # --- #1022's review -----------------------------------------------------------------------
+
+    def test_wb_top_sums_a_long_api_tasks_spend_over_every_step_not_the_newest_64k(self):
+        # #1022's review: the spend was the step costs of events.jsonl's last 64 KB, $0.22 of $2.00
+        from workbench import results, top
+        t = self.api_task("api-long", {"phase": "running", "updated_at": time.time()})
+        now = time.time()
+        with open(t.dir / "events.jsonl", "w") as fh:
+            for _ in range(2000):
+                fh.write(json.dumps({"ts": now - 5, "round": 1, "kind": "tool", "tool": "read", "ok": True,
+                                     "brief": "x" * 60}) + "\n")
+                fh.write(json.dumps({"ts": now - 5, "round": 1, "kind": "step", "in": 10, "out": 5,
+                                     "cost": 0.001}) + "\n")
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        with mock.patch.object(hardware, "system", lambda: "linux"), \
+                mock.patch.object(hardware, "smi_path", lambda: None), \
+                mock.patch.object(hardware, "_run", lambda *argv: ""):
+            view = top.Top(2, drm=drm)
+            spend = lambda: next(r for r in view.tick()["running"] if r["task"] == "api-long")["spend"]  # noqa: E731
+            self.assertEqual(spend(), 2.0)
+            self.assertEqual(spend(), results.spend_so_far(t))           # the round report's figure
+            with open(t.dir / "events.jsonl", "a") as fh:                  # read on, not again
+                fh.write(json.dumps({"kind": "step", "cost": 0.5}) + "\n" + '{"kind": "step", "co')
+            self.assertEqual(spend(), 2.5)                                 # a half-written line waits
+            (t.dir / "events.jsonl").write_text(json.dumps({"kind": "step", "cost": 0.04}) + "\n")
+            self.assertEqual(spend(), 0.04)                                # a new file: summed afresh
+
+    def test_wb_stats_sizes_the_model_column_to_a_long_id_so_its_row_stays_in_its_columns_uncut(self):
+        # #1022's review: an ordinary 33-character Ollama id pushed `gpu` 3 columns right of `kind`;
+        # cutting it to 30 made two quantizations read alike (wave 2's review): the column grows
+        mid = "ollama/qwen3-coder:30b-a3b-q4_K_M"
+        self.rows(self.gpu_row(model=mid), self.api_row(cost=0.10))
+        out = run_wb("stats", "--all").splitlines()
+        head = next(x for x in out if x.startswith("model "))
+        row = next(x for x in out if x.startswith(mid + " "))
+        self.assertEqual(head.index("kind"), row.index(" gpu ") + 1)
+        self.assertLessEqual(len(row), 123)
+
+    def test_one_id_run_as_a_gpu_model_and_then_an_api_one_keeps_two_records(self):
+        # #1022's review: an Ollama `:cloud` id's old GPU rows and its new API ones made one
+        # `api` line with their minutes averaged; the two records never mix
+        mid = "ollama/gpt-oss:120b-cloud"
+        self.rows(self.gpu_row(model=mid, remote_gpu=True, minutes=3),
+                  self.api_row(model=mid, provider="ollama", minutes=30, cost=1.0))
+        out = [x.split() for x in run_wb("stats", "--all").splitlines() if x.startswith(mid)]
+        self.assertEqual(sorted((x[1], x[8]) for x in out), [("api", "30.0"), ("gpu", "3.0")])
+        f = json.loads(run_wb("stats", "--json"))
+        lines = sorted((m["kind"], m["tasks"], m.get("paid")) for m in f["model_lines"]["lines"] if m["model"] == mid)
+        self.assertEqual(lines, [("api", 1, 1.0), ("gpu", 1, None)])
+
+    def test_plan_usage_is_counted_apart_and_never_reads_as_0_dollars(self):
+        # #1022's review: the feed dropped `plan`, so the pane read "API $0" for a plan-only week
+        from workbench import results, savings, stats
+        t = self.api_task("t-go", {"session": "ses_go"}, model="opencode-go/kimi", provider="opencode-go")
+        os.environ["FAKE_COST"] = "0.3"                             # a plan's quota: not dollars
+        u = results.api_usage(t)
+        self.assertEqual((u["cost"], u["source"], u["plan"]), (None, "plan", "opencode-go"))
+        self.rows(self.api_row(provider="opencode-go", cost=None, source="plan", api={"cost": None, "source": "plan",
+                                                                                     "plan": "opencode-go"}))
+        a = savings.api_totals(store.results(trials=True))
+        self.assertEqual((a["tasks"], a["plan"], a["unknown"], a["cost"]), (1, 1, 0, 0.0))
+        week = json.loads(run_wb("stats", "--json"))["periods"]["week"]["api"]
+        self.assertEqual((week["tasks"], week["plan"]), (1, 1))
+        self.assertEqual(stats.api_week_line(week), "api this week: 1 task(s), 1 on plan usage")
+        self.assertEqual(run_wb("savings", "--api").splitlines()[:2],
+                         ["api, the last 7 days: 1 task(s), 1 on plan usage",
+                          "  by provider: opencode-go plan usage (1)"])
+        self.assertIn("api: 1 task(s) · 1 on plan usage", run_wb("savings"))
+        self.assertTrue(savings.line(store.results()[0]).endswith("· plan usage (opencode-go)"))
+        self.assertNotIn("$0", run_wb("savings") + run_wb("savings", "--api") + run_wb("stats"))
+
+    def test_only_the_catalogs_cloud_flag_makes_an_ollama_model_plan_usage_never_a_cloud_suffix(self):
+        # #1022's review: any provider's `-cloud` model read as plan usage, its dollars uncounted
+        from workbench import models, results
+        ApiHarness.catalog(self, [api_entry("zai", "glm-cloud")], [key_row("zai", "Z", STORED)])
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama"]["models"]["gpt-oss:120b-cloud"] = {}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        hosted = models.hosted()
+        self.assertEqual((hosted["zai/glm-cloud"].cloud, hosted["ollama/gpt-oss:120b-cloud"].cloud), (False, True))
+        self.assertEqual(results._plan("ollama/gpt-oss:120b-cloud"), "ollama")
+        self.assertEqual(results._plan("opencode-go/kimi"), "opencode-go")
+        for mid in ("zai/glm-cloud", "openrouter/some-model-cloud"):  # one listed, one not
+            self.assertIsNone(results._plan(mid))
+        os.environ["FAKE_COST"] = "0.07"
+        u = results.api_usage(self.api_task("t-zai", {"session": "ses_z"}, model="zai/glm-cloud", provider="zai"))
+        self.assertEqual((u["cost"], u["source"]), (0.07, "opencode"))
+        # the engineer's call (#1022): an Ollama cloud model is plan usage with no dollars, as
+        # opencode-go is, whatever its session says it cost
+        u = results.api_usage(self.api_task("t-oc", {"session": "ses_oc"}, model="ollama/gpt-oss:120b-cloud",
+                                            provider="ollama"))
+        self.assertEqual((u["cost"], u["source"], u["plan"]), (None, "plan", "ollama"))
+
+    def test_the_catalog_prices_a_free_model_at_0_and_leaves_opencodes_0_for_a_priced_one_unknown(self):
+        # catalog_price unmocked (#1022's review): the `free` flag, the price walk, a tier's size
+        from workbench import models, results
+        ApiHarness.catalog(self, DISCOVERY_CATALOG + [api_entry("opencode", "quiet-free", cost=[])], DISCOVERY_AUTH)
+        models.hosted()
+        self.assertEqual(results.catalog_price("opencode/big-pickle-free"), 0.0)
+        self.assertEqual(results.catalog_price("opencode/quiet-free"), 0.0)   # free by its name, no prices
+        self.assertEqual(results.catalog_price("acme/coder-flash"), 1.0)
+        self.assertIsNone(results.catalog_price("nolisted/model"))
+        os.environ["FAKE_COST"] = "0"                               # OpenCode says 0 for both
+        free = results.api_usage(self.api_task("t-free0", {"session": "ses_f"}, model="opencode/big-pickle-free",
+                                               provider="opencode"))
+        self.assertEqual((free["cost"], free["source"]), (0.0, "opencode"))   # a true 0
+        priced = results.api_usage(self.api_task("t-priced0", {"session": "ses_p"}, model="acme/coder-flash",
+                                                 provider="acme"))
+        self.assertEqual((priced["cost"], priced["source"]), (None, "unknown"))  # never a false 0
+
+    def test_a_session_whose_export_fails_is_filled_from_the_meter_beside_the_ones_that_exported(self):
+        # #1022's review: one failed export dropped the whole sum, the sessions that exported
+        # theirs thrown away; the engineer's call: their sum, the rest filled from the meter (the
+        # runner's, else the step events'), "mixed". With no session exported it is the meter's
+        from workbench import results, transcript
+        os.environ["FAKE_COST"] = "0.21"
+        t = self.api_task("t-part", {"sessions": ["ses_ok"], "session": "ses_gone", "api": {"usd": 0.5}})
+        for c in (0.01, 0.02):
+            store.append_jsonl(t.dir / "events.jsonl", {"kind": "step", "in": 1, "out": 1, "cost": c})
+        real = transcript.export
+
+        def export(sid, *a, **k):  # the handover's earlier session exports; the current one fails
+            if sid == "ses_gone":
+                raise RuntimeError("Session not found")
+            return real(sid, *a, **k)
+        with mock.patch.object(transcript, "export", export):
+            self.assertEqual(transcript.finished_export(t, "ses_ok")["info"]["cost"], 0.21)
+            u = results.api_usage(t)
+            self.assertEqual((u["cost"], u["source"]), (0.5, "mixed"))          # 0.21 + the meter's 0.29
+            t.set_status(api=None)
+            u = results.api_usage(store.Task(t.name))
+            self.assertEqual((u["cost"], u["source"]), (0.21, "mixed"))         # the steps' 0.03: no remainder
+            t.set_status(sessions=[])                                            # none exported: the meter's
+            u = results.api_usage(store.Task(t.name))
+            self.assertEqual((u["cost"], u["source"]), (0.03, "metered"))
+            t.set_status(sessions=["ses_ok"])
+            (t.dir / "events.jsonl").write_text("")                              # no meter to fill from
+            u = results.api_usage(store.Task(t.name))
+            self.assertEqual((u["cost"], u["source"]), (None, "unknown"))       # never a false, low sum
+        self.assertEqual(results.api_usage(store.Task(t.name))["source"], "opencode")  # both exported
+
+    def test_the_row_never_records_less_than_the_meter_the_day_cap_and_the_round_report_counted(self):
+        # wave 2's review: every session exported at $0.30 (OpenCode's estimate) while the keyhole's
+        # meter booked $0.50 (the provider's own usage.cost): the ledger and the round report said
+        # $0.50, the results row $0.30
+        from workbench import meter, models, results
+        os.environ["FAKE_COST"] = "0.30"
+        t = self.api_task("t-or", {"session": "ses_one"})
+        m = models.Model(id="deepseek/deepseek-flash", provider="deepseek", name="deepseek-flash",
+                         base_url="http://127.0.0.1:9/v1", engine="api", label="x", kind="api",
+                         config={"cost": [{"input": 0.2, "output": 0.6}]})
+        meter.Meter(t, m).on_usage({"prompt_tokens": 1000, "completion_tokens": 10, "cost": 0.50})
+        t = store.Task("t-or")
+        self.assertEqual((meter.task_total("t-or"), results.spend_so_far(t)), (0.5, 0.5))
+        self.assertEqual({k: results.api_usage(t)[k] for k in ("cost", "source")}, {"cost": 0.5, "source": "metered"})
+        t.set_status(api={"usd": 0.1})                    # a meter below OpenCode's figure: OpenCode's
+        self.assertEqual({k: results.api_usage(t)[k] for k in ("cost", "source")}, {"cost": 0.3, "source": "opencode"})
+
+    def test_a_sessions_info_cost_counts_before_its_messages_which_miss_the_title_request(self):
+        # the engineer's call (#1022's review): info.cost wins, it counts OpenCode's title request,
+        # real money no message carries; the fake's info.cost equals its messages' sum, so this
+        # export is made here
+        from workbench import results, transcript
+        t = self.api_task("t-info", {"session": "ses_i"})
+        both = {"info": {"cost": 0.5}, "messages": [{"type": "assistant", "cost": 0.3}]}
+        with mock.patch.object(transcript, "export", return_value=both):
+            self.assertEqual(results.api_usage(t)["cost"], 0.5)
+        with mock.patch.object(transcript, "export", return_value={"info": {}, "messages": both["messages"]}):
+            self.assertEqual(results.api_usage(t)["cost"], 0.3)
+
+    def test_a_gpu_models_slice_and_tuned_knobs_ignore_api_rows_under_the_same_id(self):
+        # #1022's review: same_kind was in score and expected only; the slice and the knobs are
+        # the model's record too
+        from workbench import models, router, tuning
+        m = models.discover()["ollama/mimo-v2.6:9b-q8_0"]
+        before = router.slice(m)
+        api = {"ts": store.now(), "outcome": "discarded", "model": m.id, "size": "trivial", "kind": "api",
+               "steps": [{"files": 1, "lines": 60, "landed": False, "went": "badly"}]}
+        self.rows(api, api, api, {**api, "kind": "gpu", "steps": []})
+        self.assertEqual(router.slice(m), before)
+        self.assertEqual([r.get("kind") for r in tuning._rows(m.id, None)], ["gpu"])
+
+    def test_a_cost_under_a_cent_is_written_out_never_in_scientific_notation(self):
+        # #1022's review: `:.2g` printed $4e-05; the pane and the chat say the same as this
+        from workbench.savings import usd
+        self.assertEqual([usd(x) for x in (4e-5, 4.1e-5, 0.0041, 0.009999, 0.01, 0.42, 0)],
+                         ["$0.00004", "$0.000041", "$0.0041", "$0.01", "$0.01", "$0.42", "$0"])
+        js = (ROOT / "workbench" / "chat_static" / "app.js").read_text()
+        tsx = (ROOT / "mod" / "hooks" / "register.tsx").read_text()
+        for src in (js, tsx):
+            self.assertNotIn("toPrecision(2)}", src)                # the old $0.000040 rule
+            self.assertIn("r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')", src)
+
+    def test_a_bench_replay_on_an_api_task_writes_its_paid_to_runs_jsonl(self):
+        # acceptance 11, driven through replay (#1022's review: dropping **paid(task) left it green).
+        # wb start --model <api id> waits for #1016: the task.json is made an API one after start
+        from workbench import bench
+        self.start("t-src", "ok", "--test", "sh tests/check.sh")    # as Bench.accepted, in this class
+        wait_phase("t-src", {"review"})
+        (store.Task("t-src").worktree / "tests").mkdir()
+        (store.Task("t-src").worktree / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        run_wb("accept", "t-src", "-m", "feat: the answer")
+        bench.add("t-src")
+        os.environ.update(FAKE_SCENARIO="ok", FAKE_COST="0.3")
+        real = bench._start_task
+
+        def start(case, model, name, *rest):
+            real(case, model, name, *rest)
+            t = store.Task(name)
+            store.write_json(t.dir / "task.json", {**t.spec, "via": "api", "provider": "deepseek"})
+        with mock.patch.object(bench, "_start_task", start):
+            row = bench.replay(bench.cases()["t-src"], "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual((row["kind"], row["paid"]), ("api", {"cost": 0.3, "source": "opencode"}))
+        gpu = bench.replay(bench.cases()["t-src"], "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertNotIn("paid", gpu)
+
+
 ROLE_CATALOG = [*ROUTES_CATALOG, api_entry("openrouter", "deepseek/deepseek-v4.1-flash")]
 ROLE_AUTH = [*ROUTES_AUTH, key_row("openrouter", "OpenRouter", STORED)]
 
@@ -29094,9 +31721,11 @@ class RoleResolution(Base):
                           "said": said["said"], "said_ts": said["ts"]})
         day = time.strftime("%m-%d", time.localtime(said["ts"]))
         self.assertIn(f"\nmodel: deepseek/deepseek-flash · API (DeepSeek) · trivial role, set by you {day} · "
-                      "thinking off\n", out)                    # child 11 adds spend today
+                      "thinking off · today $0.00 of $5\n", out)  # with today's spend (meter.tail, #1019)
         self.assertTrue(out.startswith("started t-api on deepseek/deepseek-flash (API) · branch "), out)
-        self.assertIn(f"\nnote: {self.repo.name}'s code goes to DeepSeek (the trivial role's model)\n", out)
+        # the first API task in the repo for this provider: whose choice and where it goes (#1021's words)
+        self.assertIn("\nnote: this task sends the repo, its spec, CLAUDE.md files", out)
+        self.assertIn(" to DeepSeek (the trivial role's model; data policy: ", out)
         # wb watch --json: a routed line naming the provider and the role, after the meta line
         rows = [json.loads(x) for x in self.wb("watch", "t-api", "--json")[1].splitlines()]
         self.assertEqual([r["s"] for r in rows[:2]], ["meta", "routed"])
@@ -29111,11 +31740,45 @@ class RoleResolution(Base):
         # a second task there for that provider: the repo's code went there already, no note
         code, out, _ = self.begin("t-api2", "--role", "trivial")
         self.assertEqual(code, 0)
-        self.assertNotIn("code goes to", out)
+        self.assertNotIn("this task sends", out)
+
+    def test_an_openrouter_roles_backends_reach_task_json_and_the_note_names_those_alone(self):
+        # wave 2's review: routes.json's `order` never reached task.json, so the keyhole sent no
+        # order (any backend) while the start note, built from routes.json, named the chosen ones
+        from workbench import runner as rn
+        self.set_role("significant", "openrouter/deepseek/deepseek-v4.1-flash", "--order", "baseten,deepinfra",
+                      "--day-usd", "5")
+        code, out, err = self.begin("t-or", "--role", "significant")
+        self.assertEqual(code, 0, err)
+        t = store.Task("t-or")
+        self.assertEqual(t.spec["order"], ["baseten", "deepinfra"])
+        self.assertIn("via OpenRouter to baseten, deepinfra, no fallbacks", out)
+        self.assertEqual(rn.openrouter_routing(t)["provider"]["openrouter"]["models"]["deepseek/deepseek-v4.1-flash"]
+                         ["options"]["provider"], {"order": ["baseten", "deepinfra"], "allow_fallbacks": False})
+        self.set_role("trivial", "deepseek/deepseek-flash")    # another provider's role: no order
+        self.assertEqual(self.begin("t-ds", "--role", "trivial")[0], 0)
+        self.assertNotIn("order", store.Task("t-ds").spec)
+        # a --model start on OpenRouter has no backends chosen: its note says so, never the role's
+        code, out, err = self.begin("t-or-asked", "--model", "openrouter/deepseek/deepseek-v4.1-flash",
+                                    "--repo", str(self.other_repo()))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("order", store.Task("t-or-asked").spec)
+        self.assertIn("via OpenRouter to its choice of backend, no fallbacks", out)
+
+    def other_repo(self) -> Path:
+        """A second repo with a committed CLAUDE.md: a provider's first task there says the note."""
+        repo = Path(self.tmp.name) / "other"
+        repo.mkdir()
+        for argv in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+            subprocess.run(["git", *argv], cwd=repo, check=True)
+        (repo / "CLAUDE.md").write_text("# other\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
+        return repo
 
     def test_wb_status_shows_via_and_never_cuts_the_provider(self):
         self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
-        self.set_role("significant", "openrouter/deepseek/deepseek-v4.1-flash")
+        self.set_role("significant", "openrouter/deepseek/deepseek-v4.1-flash", "--order", "baseten")
         self.assertEqual(self.begin("t-or", "--role", "significant")[0], 0)
         self.assertEqual(self.begin("t-ds", "--role", "trivial")[0], 0)
         self.set_role("all", "gpu")
@@ -29220,8 +31883,9 @@ class RoleResolution(Base):
         self.assertEqual(code, 0, err)                         # a terminal: no dialog
         sp = store.Task("t-asked").spec
         self.assertEqual((sp["via"], sp["said"], sp["role"]), ("api", "asked for", "significant"))
-        self.assertIn("\nmodel: deepseek/deepseek-v4-pro · API (DeepSeek) · asked for · thinking off\n", out)
-        self.assertIn("(asked for)\n", out)                    # the first-API note
+        self.assertIn("\nmodel: deepseek/deepseek-v4-pro · API (DeepSeek) · asked for · thinking off · today $0.00, "
+                      "no day cap\n", out)
+        self.assertIn(" to DeepSeek (asked for; data policy: ", out)  # the first-API note
 
     def test_a_model_that_left_the_catalog_mid_task_is_never_replaced(self):
         # robustness minor 5: a bare KeyError said `could not load <id>: '<id>'`
@@ -29430,6 +32094,16 @@ class FirstRunApi(Base):
         self.assertEqual((code, err), (3, "wb: significant openrouter/deepseek/deepseek-v4.1-flash: an OpenRouter "
                                           "role is set in a wb route of its own\n"))
         self.assertFalse(Path(os.environ["WB_ROUTES"]).exists())
+        # wave 2's --order names one role's backends: never on several (wave 2's merge)
+        code, _, err = self.wb("route", "trivial", "gpu", "significant", "gpu", "--order", "baseten")
+        self.assertEqual(code, 1)
+        self.assertIn("--order, all, cap and busy go in a wb route of their own", err)
+        # nor does a pair's `api` put a kept OpenRouter model on API without its backends
+        routes.write({"day_usd": 5, "roles": {"significant": {"api": "openrouter/deepseek/deepseek-v4.1-flash"}}})
+        code, _, err = self.wb("route", "significant", "api", "trivial", "gpu")
+        self.assertEqual(code, 3)
+        self.assertIn("pick them with --order", err)
+        self.assertEqual(routes.read()["roles"]["significant"]["via"], "gpu")
 
     # the router's refusal
 
@@ -29511,10 +32185,9 @@ class FirstRunApi(Base):
                                      "  writing      GPU (router)"])
         self.assertEqual(lines[5:7], ["api models in roles (the last 30 days)",
                                       "  deepseek/deepseek-flash  3 task(s) · 66% accepted"
-                                      + (" · ~$0.10/task" if hasattr(cli.results, "row_cost") else "")
-                                      + " · 1 rate-limited round(s)"])
-        if hasattr(cli.savings, "api_totals"):  # #1022's, wave 2: the money over 7 days, beside the cap
-            self.assertIn("api spend, the last 7 days: $0.30 of $5/day at most (deepseek $0.30)", lines)
+                                      + " · ~$0.10/task · 1 rate-limited round(s)"])
+        # the money over 7 days, beside the cap (savings.api_totals, #1022)
+        self.assertIn("api spend, the last 7 days: $0.30 of $5/day at most (deepseek $0.30)", lines)
         at = lines.index("connected providers (models with tool calls)")
         self.assertEqual(lines[at + 1:], ["  anthropic: 1 (can't run: anthropic is signed in with OAuth)",
                                           "  bigrouter: 300", "  cloud: 0, 1 the catalog doesn't say (can't run: no key)",
@@ -29522,6 +32195,22 @@ class FirstRunApi(Base):
         out = run_wb("scout")
         self.assertIn("\nroles\n  significant  GPU (router)\n", out)
         self.assertLess(out.index("\nroles\n"), out.index("\nreal results (wb stats)"))
+
+    def test_scout_says_a_fraction_of_a_cent_as_wb_savings_and_wb_stats_do(self):
+        # wave 2's merge: scout's :.2f said $0.00 (a task paid, read as free) where wb savings --api
+        # and wb stats' `paid` say $0.004, and $0.00 of no day cap where the pane says $0
+        self.catalog(ROUTES_CATALOG[-3:], [key_row("deepseek", "DeepSeek", STORED)])
+        runner.models.hosted(fresh=True)
+        self.assertEqual(self.wb("route", "trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        lines = cli.scout_api_lines()
+        self.assertIn("api spend, the last 7 days: $0 of $5/day at most", lines)
+        store.append_jsonl(store.home() / "results.jsonl", {
+            "ts": store.now() - 3600, "task": "t-0", "outcome": "accepted", "model": "deepseek/deepseek-flash",
+            "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 0.004, "source": "opencode"}})
+        lines = cli.scout_api_lines()
+        self.assertIn("  deepseek/deepseek-flash  1 task(s) · 100% accepted · ~$0.004/task", lines)
+        self.assertIn("api spend, the last 7 days: $0.004 of $5/day at most (deepseek $0.004)", lines)
+        self.assertIn("$0.004", run_wb("savings", "--api"))
 
     def test_scout_has_no_api_section_with_no_provider_and_no_api_role(self):
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
@@ -29740,6 +32429,12 @@ class BusyGpu(Base):
         self.assertTrue(out.startswith("started t-busy on deepseek/deepseek-flash (API) · "), out)
         self.assertIn(routes.BUSY_LINE, sp["route"])
         self.assertNotIn("waits as queued", out)
+        # wave 2's merge: the start line's spend part and the thinking read the busy path's model
+        self.assertIn("model: deepseek/deepseek-flash · API (DeepSeek) · ", out)
+        self.assertIn(" · thinking off · today $0.00 of $5\n", out)
+        self.assertEqual((sp["thinking"], sp["opencode_model"].split("#")[0], sp["auto_fix"]),
+                         ("off", "deepseek/deepseek-flash", cli.AUTO_FIX["api"]))
+        self.assertIn("thinking_shown", sp)
         self.assertEqual(store.Task("t-busy").status["phase"], "queued")
 
     def test_with_busy_wait_the_default_a_busy_gpu_exits_4_as_before(self):
@@ -29783,33 +32478,89 @@ class BusyGpu(Base):
         # 2026-11-23 review: wave 2's --local-only is checked against the role's side before the
         # GPU wait, so the busy opt-in, after it, must refuse it too
         self.opt_in()
-        asked = types.SimpleNamespace(model=None, local_only=True)
-        self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
+        self.assertEqual(cli._busy_api("trivial", self.asked(local_only=True), self.repo, None),
                          "the GPU is busy, and the trivial role's API model deepseek/deepseek-flash can't take it: "
                          "this task is kept local (--local-only)")
-        self.assertIsInstance(cli._busy_api("trivial", types.SimpleNamespace(model=None), self.repo, None), tuple)
+        self.assertIsInstance(cli._busy_api("trivial", self.asked(), self.repo, None), tuple)
+
+    @staticmethod
+    def asked(**kw):
+        """wb start's arguments as _busy_api reads them."""
+        return types.SimpleNamespace(**{"model": None, "local_only": False, "copy": None, "sibling": None, **kw})
 
     def test_full_slots_a_spent_cap_or_a_repo_kept_local_leave_the_start_as_before_and_say_why(self):
-        # wave 2's meter.refusal and privacy.local_only by the package's attribute, as `from .
-        # import` finds them: these hold before and after it lands (2026-11-23 review)
-        import workbench
         self.opt_in()
         why = "the GPU is busy, and the trivial role's API model deepseek/deepseek-flash can't take it: "
-        asked = types.SimpleNamespace(model=None)
+        asked = self.asked()
         with mock.patch.object(cli.models, "api_slots_free", lambda provider: False):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + f"every one of deepseek's {cli.models.API_PARALLEL} slots is taken")
-        spent = types.SimpleNamespace(refusal=lambda m, role: f"{role} role: API spend today is $5 of the $5 day cap")
-        with mock.patch.object(workbench, "meter", spent, create=True):
+        with mock.patch.object(cli.meter, "refusal",
+                               lambda m, role, advice=True: f"{role} role: API spend today is $5 of the $5 day cap"):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + "trivial role: API spend today is $5 of the $5 day cap")
-        kept = types.SimpleNamespace(local_only=lambda repo, sub: str(repo))
-        with mock.patch.object(workbench, "privacy", kept, create=True):
+        with mock.patch.object(cli.privacy, "local_only", lambda repo, sub: str(repo)):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + f"{self.repo.name} is kept local ({self.repo})")
             code, out, err = self.begin("t-local", "--role", "trivial")
         self.assertEqual(code, 4)                                    # exit 4 as before, after the note
         self.assertIn(f"note: {why}{self.repo.name} is kept local", out)
+
+    def test_a_spent_cap_note_never_asks_for_more_spend_or_the_gpu_the_role_is_on(self):
+        # wave 2's merge: the busy note carried an API start's refusal, "Ask the user: a higher cap
+        # (wb route cap <usd>), the role on the GPU (wb route trivial gpu), or tomorrow", for a
+        # role on the GPU already, whose start only waits for it
+        self.opt_in()
+        store.append_jsonl(cli.meter.ledger_path(), {
+            "ts": time.time(), "day": cli.meter.day(), "kind": "step", "task": "other", "round": 1,
+            "provider": "deepseek", "model": "deepseek/deepseek-flash", "usd": 5.0, "source": "opencode"})
+        code, out, err = self.begin("t-capped", "--role", "trivial")
+        self.assertEqual(code, 4, err)
+        self.assertIn("note: the GPU is busy, and the trivial role's API model deepseek/deepseek-flash can't "
+                      "take it: trivial role: API spend today is $5 of the $5 day cap (it resets at local "
+                      "midnight)\n", out)
+        self.assertNotIn("Ask the user", out)
+        self.assertIn("Ask the user: a higher cap", cli.meter.refusal(runner.models.lookup("deepseek/deepseek-flash"),
+                                                                     "trivial"))  # an API start's, as before
+
+    def test_a_standing_copy_unnamed_keeps_a_busy_start_off_api(self):
+        # wave 2's merge: _worktree_setup checked commands.json's standing copy/siblings as a GPU
+        # start's, then the busy opt-in moved it to API, so a copied .env.local reached the provider
+        self.opt_in()
+        conf = {"copy": [".env.local"]}
+        with mock.patch.object(cli.context, "repo_conf", lambda repo, sub=None: conf):
+            line = cli._busy_api("trivial", self.asked(), self.repo, None)
+            self.assertIsInstance(line, str)
+            self.assertIn("can't take it: commands.json \"repos\" copies .env.local into every task", line)
+            self.assertIsInstance(cli._busy_api("trivial", self.asked(copy=[".env.local"]), self.repo, None), tuple)
+
+    def test_a_busy_start_on_an_openrouter_role_carries_its_backends(self):
+        # wave 2's merge: busy_routed had no `order`, so the keyhole sent the busy task to any backend
+        for argv in (("trivial", "--api", "openrouter/deepseek/deepseek-v4.1-flash", "--order", "baseten",
+                      "--day-usd", "5"), ("busy", "api")):
+            code, _, err = self.wb("route", *argv)
+            self.assertEqual(code, 0, err)
+        code, out, err = self.begin("t-or-busy", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-or-busy").spec
+        self.assertEqual((sp["via"], sp.get("busy"), sp.get("order")), ("api", True, ["baseten"]))
+
+    def test_busy_api_with_an_openrouter_role_and_no_backends_is_refused(self):
+        # wave 2's merge: `wb route busy api` let an OpenRouter role with no --order start on API
+        doc = routes.normalize({"day_usd": 5, "roles": {"trivial": {"api": "openrouter/deepseek/deepseek-v4.1-flash"}}})
+        routes.write(doc)
+        code, _, err = self.wb("route", "busy", "api")
+        self.assertEqual(code, 3)
+        self.assertIn("pick them with --order", err)
+        self.assertEqual(routes.read()["busy"], "wait")
+
+    def test_a_busy_roles_new_backends_are_a_new_place_for_its_code(self):
+        # wave 2's merge: _busy_newly compared model ids alone; new backends are where the code goes
+        doc = routes.normalize({"day_usd": 5, "busy": "api", "roles": {"trivial": {
+            "api": "openrouter/deepseek/deepseek-v4.1-flash", "order": ["baseten"]}}})
+        new = routes.change(doc, "trivial", order=["deepinfra"]).doc
+        self.assertEqual(routes._busy_newly(doc, new), ["trivial"])
+        self.assertEqual(routes._busy_newly(doc, doc), [])
 
 
 class MediaDefaults(Base):

@@ -71,7 +71,9 @@ KNOBS = {
     # Claude is woken (runner.SELF_REVIEW). It costs local time; a bug it catches saves Claude a
     # feedback round, a whole extra wake (2026-11-18: a trivial handoff came in under Claude
     # writing it only when the first change Claude saw was right). On by default; a model whose
-    # own reviews don't spare Claude's rounds learns it off.
+    # own reviews don't spare Claude's rounds learns it off. On an API model it costs money
+    # instead, a round Claude never sees: fixed off there unless Claude says --self-review
+    # (runner.fixed_knobs, #1017), so neither the record nor the explore turns it on.
     "self_review": Knob((0, 1), 1, "whether the agent reviews its own change before Claude is woken",
                         passed=True),
     # (probe_aggressive, which chose probe's level, went with the levels: the owner, 2026-11-22,
@@ -183,8 +185,11 @@ def acted(name: str, row: dict, ceiling=None) -> bool:
     Most tasks are small and never fill 40% of the window: one fast trivial task at 0.5 flipped
     the pick, one discard flipped it back (#721). A `passed` knob, only when a round's tests
     passed (`self_review_due`; a row from before it, when its last tests passed): a task without
-    --test scored 0 or 1 though it ran alike under both, and could turn self-review off (#816)."""
+    --test scored 0 or 1 though it ran alike under both, and could turn self-review off (#816).
+    Nor a writing task's: off by its role, its prose would turn the coding check off (#1025)."""
     k = KNOBS[name]
+    if k.passed and row.get("role") == "writing":  # off by its role, not chosen: no evidence (#1025)
+        return False
     if k.passed:
         due = row.get("self_review_due")
         if not (due if isinstance(due, bool) else row.get("tests_ok") is True):
@@ -197,28 +202,39 @@ def acted(name: str, row: dict, ceiling=None) -> bool:
 def _rows(model: str, window) -> list[dict]:
     """The rows for this model and window recorded on the weights it has now (router.same_weights:
     knobs learned on another model under the same id don't carry over, #726), under the ids it
-    had before too (router.earlier: a renamed provider or alias started fresh, #818)."""
+    had before too (router.earlier: a renamed provider or alias started fresh, #818), and of the
+    model's own kind (router.same_kind: a GPU model's knobs never learn from an API one's tasks
+    under the same id, #1022)."""
     from . import models, router  # router imports this module
     m = models.lookup(model)  # an API task's model too (#1013)
     ids = {model, *(router.earlier(m) if m else [])}
     return router.same_weights([r for r in store.results() if r.get("model") in ids
-                                and r.get("window") == window], router.weights_now({model}))
+                                and r.get("window") == window
+                                and (m is None or router.same_kind(r, m))],  # #1022's review
+                               router.weights_now({model}))
+
+
+def work(row: dict) -> str | None:
+    """The kind of work a results row records: its `role`, else its `size` (a row from before the
+    roles). router.of_role ranks on it, record's speed baseline groups by it (#1025)."""
+    return row.get("role") or row.get("size")
 
 
 def record(name: str, model: str, window, ceiling=None) -> dict:
     """Each allowed value's evidence for this model and window: {value: [rewards]}, each task's
-    speed set against the usual minutes a step of its own size took (pooled over sizes, a
-    trivial task beat a significant one's median every time, #721)."""
+    speed set against the usual minutes a step of its own kind of work took (pooled over sizes, a
+    trivial task beat a significant one's median every time, #721; a writing task is significant
+    in size, and its quick prose steps marked every coding step slow, #1025)."""
     rows = [r for r in _rows(model, window) if judged(r)
             and (r.get("tuned") or {}).get(name) is not None and acted(name, r, ceiling)]
     usual = {}
-    for size in {r.get("size") for r in rows}:
-        mins = [m for r in rows if r.get("size") == size and (m := _step_minutes(r))]
-        usual[size] = statistics.median(mins) if mins else None
+    for kind in {work(r) for r in rows}:
+        mins = [m for r in rows if work(r) == kind and (m := _step_minutes(r))]
+        usual[kind] = statistics.median(mins) if mins else None
     out: dict = {v: [] for v in allowed(name, ceiling)}
     for r in rows:
         if r["tuned"][name] in out:
-            out[r["tuned"][name]].append(reward(r, usual.get(r.get("size"))))
+            out[r["tuned"][name]].append(reward(r, usual.get(work(r))))
     return out
 
 

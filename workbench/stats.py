@@ -220,12 +220,14 @@ def _model_lines(rows: list[dict], now: float) -> dict | None:
         mid = newer.get(mid, mid)
         return ((over.get(mid) or {}) if isinstance(over.get(mid), dict) else {}).get("variant_of") or mid
     sources = {base(m) for m in found} | set(found)
+    # an API model is no discover() model: its rows say it ran (the catalog isn't read here)
+    sources |= {r["model"] for r in rows if r.get("model") and r.get("kind") == "api"}
     groups = defaultdict(list)
-    for r in rows:
+    for r in rows:  # by kind too: one id run as a GPU model and then an API one keeps two (#1022)
         if r.get("model"):
-            groups[base(r["model"])].append(r)
+            groups[(base(r["model"]), r.get("kind") == "api")].append(r)
     lines, older = [], {"models": 0, "tasks": 0}
-    for b, rs in groups.items():
+    for (b, _), rs in groups.items():
         last = max((r.get("ts") or 0 for r in rs), default=0)
         if b not in sources or (last and now - last > OLD_DAYS * 86400):
             older["models"] += 1
@@ -264,7 +266,8 @@ def _model_stats(model: str, rs: list[dict]) -> dict:
          "minutes": _mean([r.get("minutes") for r in rs]),
          "local_tokens": round(sum((r.get("tok_in") or 0) + (r.get("tok_out") or 0) for r in rs) / n),
          **({"claude": round(sum(claude) / len(claude))} if claude else {}),
-         **({"speed": sp} if (sp := router.speed(model)) else {})}
+         **({"speed": sp} if (sp := router.speed(model)) else {}),
+         **_kind_stats(rs)}
     trend = [[r["ts"], r["speed"]["write"]] for r in sorted(rs, key=lambda r: r.get("ts") or 0)
              if r.get("ts") and isinstance(r.get("speed"), dict) and r["speed"].get("write")]
     if trend:
@@ -275,6 +278,23 @@ def _model_stats(model: str, rs: list[dict]) -> dict:
         if old:
             m["write_change_pct"] = round(100 * (new - old) / old)
     return {k: v for k, v in m.items() if v is not None}
+
+
+def _kind_stats(rs: list[dict]) -> dict:
+    """A model's `kind` and, for an API model, `paid`: the mean dollars a task over its rows with
+    a known cost (none known: left out, never 0) (#1022)."""
+    from .results import api_row, row_cost
+    if not any(map(api_row, rs)):
+        return {"kind": "gpu"}
+    known = [c for r in rs if api_row(r) and (c := row_cost(r)) is not None]
+    return {"kind": "api", **({"paid": round(sum(known) / len(known), 6)} if known else {})}
+
+
+def _api_period(a: dict) -> dict | None:
+    """A period's `api` part of the feed, from savings.api_totals; None with no API task."""
+    if not a["tasks"]:
+        return None
+    return {k: a[k] for k in ("tasks", "cost", "unknown", "plan", "by_provider")}  # plan: no false $0
 
 
 def _by(rows: list[dict], key) -> dict:
@@ -362,7 +382,8 @@ def _energy(rows: list[dict], price: float | None) -> dict | None:
     the rows it can compare, so a period's tasks run outside a session lost their watt-hours
     (#568). The cost with a price set."""
     whs = [r["gpu_wh"] for r in rows if isinstance(r.get("gpu_wh"), (int, float))
-           and not isinstance(r["gpu_wh"], bool) and not r.get("remote_gpu")]
+           and not isinstance(r["gpu_wh"], bool) and not r.get("remote_gpu")
+           and r.get("kind") != "api"]  # an API task ran on no GPU of ours (#1022)
     if not whs:
         return None
     wh = round(sum(whs), 1)
@@ -382,6 +403,7 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
     rows = [r for r in every if tuning.judged(r)]  # trials and spec-gap discards out
     out: dict = {"ts": now, "until": _midnight(now), "settings": settings(), "tasks": len(rows)}
     price = savings.price()
+    paid_rows = store.results(trials=True)  # the money counts trials: money spent is spent (#1022)
     periods = {}
     for name, span in savings.PERIODS.items():
         since = now - span if span else 0
@@ -390,7 +412,8 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
         # in the saving (Claude's tokens were spent) but not the task count: said beside it (#569)
         gaps = sum(1 for r in every if (r.get("ts") or 0) >= since and not tuning.judged(r))
         energy = _energy([r for r in every if (r.get("ts") or 0) >= since], price)
-        if rs or t["tasks"] or gaps or energy:
+        api = _api_period(savings.api_totals(paid_rows, since))
+        if rs or t["tasks"] or gaps or energy or api:
             landed = sum(map(_landed, rs))
             periods[name] = {"tasks": len(rs), "landed": landed,
                              **({"accepted_pct": round(100 * landed / len(rs))} if rs else {}),
@@ -399,7 +422,8 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
                              # nothing to compare: no savings, rather than a row of zeros
                              **({"savings": t, "score": savings.score(t)} if t["tasks"] else {}),
                              **({"active_minutes": am} if (am := round(sum(r.get("active_minutes") or 0
-                                                                           for r in rs), 1)) else {})}
+                                                                           for r in rs), 1)) else {}),
+                             **({"api": api} if api else {})}
     sections = {
         "periods": lambda: periods,
         "streak": lambda: _streak(rows, now),
@@ -438,6 +462,8 @@ def summary(f: dict) -> list[str]:
                      f"{p['landed']} landed" + (f" ({p['accepted_pct']}%)" if "accepted_pct" in p else "")
                      + (f", and {p['spec_gaps']} discard(s) put down to the spec" if p.get("spec_gaps") else "")
                      + (f" · {said} Claude tokens (estimate) · score {s['score']}/100" if s else ""))
+    if api := (f.get("periods", {}).get("week") or {}).get("api"):
+        lines.append(api_week_line(api))
     if st := f.get("streak"):  # a run that ended isn't mentioned: only the best (the plan's rule)
         lines.append(f"streak: {st['current']} day(s) in a row with a task landed · best {st['best']}"
                      if st["current"] else f"best streak: {st['best']} day(s) in a row with a task landed")
@@ -455,3 +481,18 @@ def summary(f: dict) -> list[str]:
         lines.append("what stopped agents: " + " · ".join(f"{k} {v}" for k, v in
                                                         sorted(g.items(), key=lambda kv: -kv[1])))
     return lines
+
+
+def api_week_line(api: dict) -> str:
+    """`wb stats`' API line: api this week: 6 task(s), $1.27 (deepseek $0.84, anthropic $0.43),
+    then the tasks with no price and on plan usage, each said apart (never a false $0)."""
+    from .savings import usd
+    plan = api.get("plan") or 0
+    priced = {p: v for p, v in api["by_provider"].items() if v["tasks"] > v["unknown"] + v.get("plan", 0)}
+    known = api["tasks"] - api["unknown"] - plan
+    return (f"api this week: {api['tasks']} task(s)"
+            + (f", {usd(api['cost'])} (" + ", ".join(f"{p} {usd(v['cost'])}" for p, v in
+                                                      sorted(priced.items(), key=lambda kv: -kv[1]["cost"]))
+               + ")" if known else "")
+            + (f", {api['unknown']} with no price" if api["unknown"] else "")
+            + (f", {plan} on plan usage" if plan else ""))

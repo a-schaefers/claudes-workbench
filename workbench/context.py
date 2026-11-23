@@ -24,10 +24,11 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from . import audio, chat, gitops, hardware, images, lane, models, routes, skills, store
+from . import audio, chat, gitops, hardware, images, lane, models, privacy, routes, skills, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 HANDBOOK = PKG_ROOT / "agent" / "HANDBOOK.md"
+WRITING = PKG_ROOT / "agent" / "WRITING.md"  # the writing role's, in HANDBOOK.md's place (#1025)
 ROOT_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 # Tools an unattended run in a worktree must not use. Nobody answers `question`. Code mode
 # (`execute`) and the opencode_* tools can move the session or remove worktrees. A `subagent`
@@ -694,6 +695,10 @@ def commands_conf() -> dict:
                                'of seconds, e.g. 3600')
         if v.get("merge", "merge") not in MERGE_AS:
             raise RuntimeError(f'{path}: "repos" → {repo!r}: "merge" is one of {", ".join(MERGE_AS)}')
+        # read as a privacy switch: "yes" or 1 is no answer either way (#1021)
+        if "local_only" in v and not isinstance(v["local_only"], bool):
+            raise RuntimeError(f'{path}: "repos" → {repo!r}: "local_only" is true or false '
+                               '(true: API models never get this repo)')
     return conf
 
 
@@ -909,6 +914,7 @@ PROBE_OFF_SHORT = f"no file over {PROBE_FILE_LINES} lines in a language probe re
 PROBE_OFF_HELP = "probe's languages couldn't be read from `probe search --help`"
 PROBE_OFF_GAVE_UP = (f"no file over {PROBE_FILE_LINES} lines in a language probe reads among "
                      "the largest it counted")
+PROBE_OFF_WRITING = "a writing task"  # prose: no code to navigate (#1025)
 PROBE_OFF_PARTIAL = "a partial clone, whose files git before 2.44 can't count without fetching each"
 # the most of a repo's blobs probe_off counts, largest first, before it gives up (PROBE_OFF_GAVE_UP)
 PROBE_SCAN_BYTES = 64 << 20
@@ -1157,21 +1163,28 @@ def repo_conf(repo: str | Path, sub: str | None = None) -> dict:
     path inside its worktree: a linked worktree of a configured repo is that repo (#498). Any
     key once matched by git dir, so in a monorepo the first package's entry (its setup, its
     copies, its merge) applied to every task of the repo, the root's and the other packages' (#778)."""
+    return next((v for _, v in repo_entries(repo, sub)), {})
+
+
+def repo_entries(repo: str | Path, sub: str | None = None) -> list[tuple[str, dict]]:
+    """Every commands.json `repos` entry for the task's spot, nearest first, as (key, entry):
+    repo_conf's rule, whose first is the one that applies. privacy.local_only reads further up
+    for a `local_only` the nearest doesn't state (#1021)."""
     repos = commands_conf().get("repos") or {}
     if not repos:
-        return {}
+        return []
     top = os.path.realpath(repo)
     spot = os.path.realpath(Path(repo) / sub) if sub else top
 
     def within(p: str, d: str) -> bool:
         return d == "." or p == d or p.startswith(d.rstrip(os.sep) + os.sep)
 
-    best = max(((len(kr), v) for k, v in repos.items()
-                if within(kr := os.path.realpath(Path(k).expanduser()), top) and within(spot, kr)),
-               default=None, key=lambda x: x[0])
-    if best:
-        return best[1]
-    common, rel_spot, found = gitops.common_dir(repo), os.path.relpath(spot, top), None
+    by_path = sorted(((len(kr), k, v) for k, v in repos.items()
+                      if within(kr := os.path.realpath(Path(k).expanduser()), top) and within(spot, kr)),
+                     key=lambda x: -x[0])
+    if by_path:
+        return [(k, v) for _, k, v in by_path]
+    common, rel_spot, found = gitops.common_dir(repo), os.path.relpath(spot, top), []
     for k, v in repos.items() if common else ():
         kp = Path(k).expanduser()
         if gitops.common_dir(kp) != common:
@@ -1181,9 +1194,9 @@ def repo_conf(repo: str | Path, sub: str | None = None) -> dict:
         except gitops.GitError:
             continue
         rank = 0 if rel == "." else len(rel) + 1
-        if within(rel_spot, rel) and (found is None or rank > found[0]):
-            found = (rank, v)
-    return found[1] if found else {}
+        if within(rel_spot, rel):
+            found.append((rank, k, v))
+    return [(k, v) for _, k, v in sorted(found, key=lambda x: -x[0])]
 
 
 def shell_rules(task: store.Task) -> list[dict]:
@@ -1323,7 +1336,17 @@ MADE_TEXT = {"nimbledata2.json": '{"version": 1, "reverseDeps": {}}\n'}
 # and what a tool makes at the top of its home when a secret inside splits it (SECRETS): with
 # Maven's master password in ~/.m2, a first build couldn't make repository/ there, nor the
 # wrapper (./mvnw, its base ~/.m2) its wrapper/ (#992, 2026-11-22)
-SPLIT_MADE = {".m2": ("repository/", "wrapper/")}
+SPLIT_MADE = {".m2": ("repository/", "wrapper/"),
+              # and in an API task's lane, where Gradle's gradle.properties, Hex's hex.config and
+              # NuGet's NuGet.Config are hidden too when they hold a credential (API_HIDDEN,
+              # #1021): what Gradle makes at its user home's top, Hex's package cache, NuGet's
+              # global packages folder (dotnet writes NuGet.Config on first use, so a first
+              # restore couldn't make packages/)
+              ".gradle": ("caches/", "daemon/", "native/", "wrapper/", "jdks/", "notifications/",
+                          ".tmp/", "build-scan-data/"),
+              ".hex": ("packages/",), ".nuget": ("packages/",)}
+# and the same homes where the user moved them (API_HIDDEN_VARS hides the file inside those too)
+SPLIT_MADE_VARS = {"GRADLE_USER_HOME": ".gradle", "HEX_HOME": ".hex"}
 # and what the common tools make in a cache home split around an active venv (poetry's, from
 # `poetry shell` or direnv), made first so the split grants them: Landlock can only allow, so a
 # split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825)
@@ -1638,11 +1661,15 @@ def writable(task: store.Task) -> list[str] | None:
     for c in {os.path.realpath(c) for c in (home / ".nimble", nimble) if c and os.path.isabs(c)}:
         if os.path.isdir(c):  # split around bin/ whenever it exists (MADE_FIRST, below)
             _make_first(c, NIMBLE_MADE)
-    hidden = _hidden()
+    hidden = _hidden() | {h for h in api_hidden(task) if os.path.lexists(h)}  # #1021
     for d, names in SPLIT_MADE.items():  # only a home a secret splits: else it is granted whole
         c = os.path.realpath(home / d)
         if os.path.isdir(c) and any(_under(h, c) for h in hidden):
             _make_first(c, names)
+    for v, d in SPLIT_MADE_VARS.items():  # GRADLE_USER_HOME's, HEX_HOME's (#1021's review)
+        c = os.path.realpath(os.environ[v]) if os.path.isabs(os.environ.get(v) or "") else ""
+        if c and os.path.isdir(c) and any(_under(h, c) for h in hidden):
+            _make_first(c, SPLIT_MADE[d])
     for k, n in MADE_FIRST.items():  # ~/.rustup's toolchains/, ~/.nimble's bin/ (#911)
         r = os.environ.get(k) if k.isupper() else str(home / k)
         if r and os.path.isabs(r) and os.path.isdir(r):  # made, so it is split out: else the
@@ -2062,6 +2089,58 @@ SECRET_VARS = ("GNUPGHOME", "PASSWORD_STORE_DIR", "GH_CONFIG_DIR", "DOCKER_CONFI
                "ANSIBLE_GALAXY_TOKEN_PATH", "MC_CONFIG_DIR",
                # and semgrep's settings, its login inside (#999)
                "SEMGREP_SETTINGS_FILE")
+# Hidden in an API task's lane only (#1021): the registry and token files SECRETS' comment keeps
+# readable because installs read them. On the GPU that trade keeps a token on this machine; on
+# an API task every file the agent reads and every command's output goes to the provider, so
+# `cat ~/.npmrc`, or a failing install echoing its config, would send the registry token there.
+# Most of these tools stop on every run when one is there but unreadable, not only on a private
+# install (API_HIDDEN_STOPS), so one is hidden only when it holds a credential
+# (privacy.holds_credential: #1021's decision, 2026-11-23), and wb start names which (api_hidden_note).
+# Each path from its tool's docs (2026-11-23): npm's user config, Yarn Berry's, Maven's
+# settings.xml, Gradle's user-home properties, NuGet's user config in both places tools use
+# (the .NET CLI's ~/.nuget/NuGet, Mono's ~/.config/NuGet) and their additional config/ folders,
+# poetry's config dir (XDG on Linux, Library/Application Support on macOS), composer's home
+# (XDG, else ~/.composer, as on macOS), pub's tokens (cli_util's applicationConfigHome: XDG,
+# Library/Application Support on macOS), Hex's home and its MIX_XDG config, pip's user config
+# (pip's configuration.py: the XDG one and the legacy ~/.pip), Bundler's global config
+# (Settings#global_config_file) and bun's global bunfig (bunfig's get_home_config_path).
+API_HIDDEN = (".npmrc", ".yarnrc.yml", ".m2/settings.xml", ".gradle/gradle.properties",
+              ".nuget/NuGet/NuGet.Config", ".config/NuGet/NuGet.Config", ".nuget/config",
+              ".config/NuGet/config", ".config/pypoetry/auth.toml",
+              "Library/Application Support/pypoetry/auth.toml", ".config/composer/auth.json",
+              ".composer/auth.json", ".config/dart/pub-tokens.json",
+              "Library/Application Support/dart/pub-tokens.json", ".hex/hex.config",
+              ".config/hex/hex.config", ".config/pip/pip.conf", ".pip/pip.conf", ".bundle/config",
+              ".bunfig.toml")
+# where the user moved them: (variable, the file inside, or "" for a file named by the variable,
+# and its tool, or None for API_HIDDEN_TOOL's by the file's name); bun reads
+# $XDG_CONFIG_HOME/.bunfig.toml in place of ~/.bunfig.toml
+API_HIDDEN_VARS = (("NPM_CONFIG_USERCONFIG", "", "npm"), ("npm_config_userconfig", "", "npm"),
+                   ("GRADLE_USER_HOME", "gradle.properties", None), ("POETRY_CONFIG_DIR", "auth.toml", None),
+                   ("COMPOSER_HOME", "auth.json", None), ("HEX_HOME", "hex.config", None),
+                   ("PIP_CONFIG_FILE", "", "pip"), ("BUNDLE_CONFIG", "", "Bundler"),
+                   ("BUNDLE_USER_CONFIG", "", "Bundler"), ("BUNDLE_USER_HOME", "config", "Bundler"),
+                   ("XDG_CONFIG_HOME", ".bunfig.toml", None))
+# which tool reads each, by its name, or its folder's and its name (~/.bundle/config)
+API_HIDDEN_TOOL = {".npmrc": "npm", ".yarnrc.yml": "Yarn", "settings.xml": "Maven",
+                   "gradle.properties": "Gradle", "NuGet.Config": "dotnet", "config": "dotnet",
+                   "auth.toml": "poetry",
+                   "auth.json": "Composer", "pub-tokens.json": "dart pub get", "hex.config": "Hex",
+                   "pip.conf": "pip", ".bundle/config": "Bundler", ".bunfig.toml": "bun"}
+# and the tools that stop on every run while theirs is there but unreadable, so in an API lane
+# they don't run at all (#1021's review, 2026-11-23, each from its source): Yarn Berry
+# (Configuration.findFolderRcFile rethrows all but ENOENT), Maven (DefaultSettingsBuilder:
+# "Non-readable settings", FATAL), Gradle (DefaultGradlePropertiesLoader: isFile, then
+# GUtil.loadProperties throws), NuGet (SettingsFile: "Failed to read NuGet.Config due to
+# unauthorized access"; every dotnet restore, build and test), poetry and composer (SECRETS'
+# comment: read on every command), pub (an unreadable pub-tokens.json ends `dart pub get`),
+# Bundler (Settings#load_config reads it through filesystem_access: EACCES is a PermissionError,
+# every bundle command). npm (an unreadable ~/.npmrc still ran `npm test`), Hex (Hex.Config.read
+# takes any read error as no config), pip (configparser's read skips a file it can't open) and
+# bun (unreadable_config skips an auto-loaded bunfig, "like npm") fail only what needs the
+# token: a private registry's install.
+API_HIDDEN_STOPS = frozenset({"Yarn", "Maven", "Gradle", "dotnet", "poetry", "Composer", "dart pub get",
+                              "Bundler"})
 # Of the home directory's own entries, the dotfiles (tools' configs, caches, toolchains) stay
 # readable, and these (R's and Perl's user libraries); the user's documents and other projects
 # don't, beyond the task's repo, workbench itself, the programs on PATH and what Claude allowed.
@@ -2419,6 +2498,58 @@ def secret_paths() -> set[str]:
     return {r for r in map(os.path.realpath, paths) if r not in whole}
 
 
+def api_hidden_paths() -> set[str]:
+    """API_HIDDEN, real paths, where the environment says they are too (XDG_CONFIG_HOME as
+    secret_paths honours it, API_HIDDEN_VARS): each that holds a credential
+    (privacy.holds_credential), so a config with none keeps its tool working."""
+    return set(_api_hidden_tools())
+
+
+def _api_hidden_tools() -> dict[str, str]:
+    """api_hidden_paths, each with the tool that reads it (API_HIDDEN_TOOL)."""
+    home = Path.home()
+    paths = [(home / h, None) for h in API_HIDDEN]
+    if os.environ.get("XDG_CONFIG_HOME"):
+        paths += [(Path(os.environ["XDG_CONFIG_HOME"]) / h[len(".config/"):], None)
+                  for h in API_HIDDEN if h.startswith(".config/")]
+    for var, inside, tool in API_HIDDEN_VARS:
+        if (v := os.environ.get(var)) and os.path.isabs(os.path.expanduser(v)):
+            paths.append((Path(v).expanduser() / inside, tool))
+    whole = {"/", os.path.realpath(home)}
+    return {r: tool or API_HIDDEN_TOOL.get(f"{p.parent.name}/{p.name}") or API_HIDDEN_TOOL.get(p.name, "npm")
+            for p, tool in paths
+            if (r := os.path.realpath(p)) not in whole and privacy.holds_credential(r)}
+
+
+def api_hidden(task: store.Task) -> set[str]:
+    """What an API task's lane leaves out besides SECRETS (API_HIDDEN); nothing for a GPU task."""
+    return api_hidden_paths() if task.spec.get("via") == "api" else set()
+
+
+def api_hidden_note() -> str:
+    """wb start's note for an API task when a file API_HIDDEN names holds a credential, else '': the files,
+    then the tools that don't run in its lane (API_HIDDEN_STOPS) and those whose private-registry
+    installs fail."""
+    home = os.path.realpath(Path.home())
+    tools = _api_hidden_tools()
+    there = sorted(tools)  # each there and holding a credential (a file, or NuGet's config/)
+    if not there:
+        return ""
+    names = ", ".join("~" + p[len(home):] if p.startswith(home + os.sep) else p for p in there[:4])
+    more = f" and {len(there) - 4} more" if len(there) > 4 else ""
+    used = list(dict.fromkeys(tools[p] for p in there))
+    stop = [t for t in used if t in API_HIDDEN_STOPS]
+    fail = [t for t in used if t not in API_HIDDEN_STOPS]
+
+    def both(xs):
+        return xs[0] if len(xs) == 1 else f"{', '.join(xs[:-1])} and {xs[-1]}"
+    said = ([f"{both(stop)} stop{'s' if len(stop) == 1 else ''} on every run"] if stop else []) + \
+        ([f"{both(fail)} installs from a private registry fail"] if fail else [])
+    held = "it holds a credential" if len(there) == 1 else "each holds a credential"
+    return (f"an API task can't read {names}{more} ({held}, which would reach the provider): "
+            f"in its lane {', and '.join(said)}")
+
+
 # where conda, mamba and micromamba say their install is, with or without an env activated
 CONDA_VARS = ("CONDA_EXE", "CONDA_PYTHON_EXE", "MAMBA_EXE", "MAMBA_ROOT_PREFIX")
 
@@ -2502,7 +2633,7 @@ def readable(task: store.Task) -> list[str] | None:
     if lane is None:
         return None
     home = os.path.realpath(Path.home())
-    hidden = secret_paths() | private_paths()
+    hidden = secret_paths() | private_paths() | api_hidden(task)  # API_HIDDEN: an API task's (#1021)
     keep = {os.path.realpath(p) for p in (task.spec.get("repo"), PKG_ROOT, *lane,  # PKG_ROOT:
                                           *lane_paths(task), *siblings(task))  # the git shim,
             if p}                                                              # the ask server
@@ -2883,6 +3014,13 @@ def user_rules(task: store.Task) -> list[tuple[Path, Path]]:
     return made
 
 
+def handbook_for(task: store.Task) -> Path:
+    """The handbook this task's agent gets, as rules/<task>/HANDBOOK.md whichever it is (so the
+    instruction path and fixed_prompt's "the handbook" hold): the writing role's prose rules
+    (agent/WRITING.md), else the coding ones (#1025)."""
+    return WRITING if task.spec.get("role") == "writing" else HANDBOOK
+
+
 def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     """(files OpenCode should load, nested CLAUDE.md paths the agent reads when it works there).
     Before the runner has checked the worktree out (wb start's fixed_prompt, #529), the user's
@@ -2892,7 +3030,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     # the agent's own copy: OpenCode shows each instruction file's path, and a path into the
     # workbench repo once led a freshly started agent to go looking there for plans
     handbook = rules_dir(task) / "HANDBOOK.md"
-    handbook.write_text(HANDBOOK.read_text() + "".join(
+    handbook.write_text(handbook_for(task).read_text() + "".join(
         note for name, note in EXPERIMENT_NOTES.items() if experiment(task, name)))
     roots: list[tuple[Path, Path, bool]] = []  # (what OpenCode loads, read from, the user's own)
     user = claude_home() / "CLAUDE.md"

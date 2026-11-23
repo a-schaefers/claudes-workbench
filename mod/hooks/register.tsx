@@ -559,6 +559,10 @@ const BATCH_NEXT = (names: string[]) => names.length > 1
 const batchOf = (row: Row): string[] | null =>
   Array.isArray(row.tasks) && row.tasks.length ? row.tasks.map(String) : null
 const RUNNING = new Set(['queued', 'running', 'testing'])
+// A stop at the day's API spend cap (#1019, cause `spend`) is the user's call: feedback would run
+// a round that stops again at once, so the wake asks for their decision, as the notice does.
+const SPEND_NEXT = (n: string) => 'Ask the user: a higher cap (`wb route cap <usd>`), the role on ' +
+  `the GPU, or tomorrow; then \`wb resume ${n}\`. Never retry it with feedback yourself.`
 
 // A question delivered into a running turn (#542): the engine frames it as another session's
 // message, so one line says whose it is and that it can't wait for the turn to end.
@@ -1043,7 +1047,7 @@ export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; 
   for (const r of (s.running ?? []) as Row[]) {
     const parts = [r.phase, r.round ? `round ${r.round}` : '', typeof r.round_s === 'number' ? secs(r.round_s) : '',
       typeof r.tok_s === 'number' ? `${Math.round(r.tok_s)} tok/s${r.tok_s_from === 'live' ? '' : ' (last call)'}` : '',
-      typeof r.context_pct === 'number' ? `context ${r.context_pct}%` : ''].filter(Boolean)
+      typeof r.context_pct === 'number' ? `context ${r.context_pct}%` : '', ...apiParts(r)].filter(Boolean)
     out.push([{ color: 'claude', text: '▶ ' }, { bold: true, text: `${r.task} ` }, { dim: true, text: `${r.label || r.model} · ${parts.join(' · ')}` }])
   }
   if (!(s.running ?? []).length) out.push([{ dim: true, text: 'Nothing running.' }])
@@ -1790,6 +1794,7 @@ const GUARD_WORDS: Record<string, string> = {
   repeat: 'the same call repeated', errors: 'tool errors in a row', no_edit: 'no file changed',
   round: 'the round time limit', silence: 'silence', think: 'thinking with no tool call',
   handovers: 'handovers without finishing',
+  spend: "the day's API spend cap",
 }
 
 // stats.STATS_MODEL_LINES, kept here too: the mod tracks main while wb runs from the user's clone,
@@ -1824,6 +1829,7 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
       // the period's own energy, every task's: the saving's counts only the tasks it compares (#568)
       p.energy?.wh ? `${p.energy.wh >= 1000 ? `${(p.energy.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.energy.wh)} Wh`}` +
         (p.energy.cost != null ? `, cost ${p.energy.cost.toFixed(2)}` : '') : '',
+      apiPeriod(p.api),
     ]
     out.push({ label, text: parts.filter(Boolean).join(' · ') })
   }
@@ -1854,7 +1860,8 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   const shown = all.slice(0, STATS_SHOWN), past = all.slice(STATS_SHOWN)
   for (const [model, m] of shown) {
     const trend = spark((m.write_trend ?? []).map((p: number[]) => p[1]))
-    const speed = m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''
+    const speed = m.kind === 'api' ? (typeof m.paid === 'number' ? ` · paid ~${usd(m.paid)}/task` : '')
+      : m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''
     const change = typeof m.write_change_pct === 'number' && m.write_change_pct
       ? ` (${m.write_change_pct > 0 ? '+' : ''}${m.write_change_pct}%)` : ''
     const windows = (m.windows ?? []).length > 1 ? ` (${m.windows.map((w: number) => `${Math.round(w / 1024)}K`).join(', ')})` : ''
@@ -1931,6 +1938,62 @@ async function codingMode($: any): Promise<string> {
   } catch {
     return 'decide'
   }
+}
+
+// Each repo commands.json gives a `local_only`, with its value (#1021), or null when the text isn't JSON
+function localOnlyMarks(text: string): Map<string, unknown> | null {
+  try {
+    const repos = JSON.parse(text)?.repos
+    if (!repos || typeof repos !== 'object') return new Map()
+    return new Map(Object.entries(repos).filter(([, v]: [string, any]) => v && typeof v === 'object' && 'local_only' in v)
+      .map(([k, v]: [string, any]) => [k, v.local_only]))
+  } catch {
+    return null
+  }
+}
+
+// The text an Edit, MultiEdit or Write would leave in the file, from its text now
+function editedText(e: Row, now: string): string {
+  if (e.tool === 'Write') return String(e.content ?? '')
+  const edits = e.tool === 'MultiEdit' && Array.isArray(e.edits) ? e.edits : [e]
+  let text = now
+  for (const ed of edits) {
+    const from = String(ed.old_string ?? ''), to = String(ed.new_string ?? '')
+    text = ed.replace_all ? text.split(from).join(to) : text.replace(from, () => to)
+  }
+  return text
+}
+
+const marksOf = (text: string, value: string) => (text.match(new RegExp(`"local_only"\\s*:\\s*${value}\\b`, 'g')) ?? []).length
+
+// Why Claude's edit of commands.json is refused, or '': only the user lifts a repo's local_only
+// (#1021). Refused: an edit that drops a `"local_only": true`, and one that writes a `false` the
+// text didn't have, since the nearest entry that states it decides (privacy.local_only): a
+// package's `false` under a local-only root lifted it (#1021's review). A text that isn't JSON
+// counts the marks instead. The file is matched by real path, so another spelling of it (`/./`,
+// a linked config directory) is the same file. A shell's write isn't seen here, as with
+// routes.json (#1014's gate).
+async function localOnlyRefusal($: any, e: Row, path: string): Promise<string> {
+  if (!mem.commandsFile) return ''
+  const file = await realPath($, mem.commandsFile)
+  if (absolutePath(path, '', mem.cwd) !== file && await realPath($, absolutePath(path, '', mem.cwd)) !== file) return ''
+  const now = await $.fs.read(file).catch(() => '')
+  const text = editedText(e, now)
+  const before = localOnlyMarks(now), after = localOnlyMarks(text)
+  let dropped: string[], lifted: string[]
+  if (before && after) {
+    dropped = [...before].filter(([k, v]) => v === true && after.get(k) !== true).map(([k]) => k)
+    lifted = [...after].filter(([k, v]) => v !== true && before.get(k) !== v && !dropped.includes(k)).map(([k]) => k)
+  } else {  // not JSON before or after: by the marks' count
+    const named = before ? [...before].filter(([, v]) => v === true).map(([k]) => k) : ['a repo']
+    dropped = marksOf(text, 'true') < marksOf(now, 'true') ? named : []
+    lifted = marksOf(text, 'false') > marksOf(now, 'false') ? ['a repo'] : []
+  }
+  const why = [...(dropped.length ? [`drops "local_only": true for ${dropped.join(', ')}`] : []),
+    ...(lifted.length ? [`sets "local_only" to something other than true for ${lifted.join(', ')} (the nearest entry that says it decides, so it lifts one above)`] : [])]
+  if (!why.length) return ''
+  return `workbench: not changed: this edit ${why.join(' and ')} in commands.json. ` +
+    'Only the user lifts a repo\'s local_only (it keeps API models off that repo); tell them, and leave it as it is.'
 }
 
 // Why Claude may not make this edit now, or '': outside a task's worktree, under "decide", or
@@ -2133,6 +2196,7 @@ const mem = {
   shown: '' as Pose | '', // the frame on screen now
   skill: '', // the /workbench skill's SKILL.md, for the workbench-mode block
   savingsFile: '', // savings.json, where wb keeps the kWh price ($WB_SAVINGS): the Stats key stamps it
+  commandsFile: '', // commands.json ($WB_COMMANDS): Claude's edit never drops a repo's local_only (#1021)
   fold: false, // the session's directory is on a file system that ignores case (macOS): `within`
   termDialogs: [] as TermDialog[], // dialogs up in the terminal while the user wasn't away (#959)
 }
@@ -2579,13 +2643,52 @@ const SCOUT_QUIET_MS = 60_000
 export function savedLine(out: string): string {
   let t: any
   try { t = JSON.parse(out) } catch { return '' }
-  if (!t || typeof t.tasks !== 'number' || !t.tasks || typeof t.saved !== 'number') return ''
+  const api = apiMoney(t?.api)
+  if (!t || typeof t.tasks !== 'number' || !t.tasks || typeof t.saved !== 'number') return api ? apiAlone(t.api, api) : ''
   const n = (x: number) => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : `${Math.round(x / 1e3)}K`)
   const pct = t.self_est > 0 ? ` (${Math.round((100 * t.saved) / t.self_est)}%, estimate)` : ' (estimate)'
   const what = t.saved >= 0 ? `saved ~${n(t.saved)} Claude tokens${pct}` : `cost ~${n(-t.saved)} more Claude tokens (estimate)`
   const cost = typeof t.cost === 'number' ? `, cost ${t.cost.toFixed(2)}` : ''
   const gpu = t.wh ? ` · ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${cost}` : ''
-  return `this week: ${what}${gpu}`
+  return `this week: ${what}${gpu}${api ? ` · API ${api}` : ''}`
+}
+
+// API dollars (#1022): OpenCode's unit, so a `$`, unlike the electricity's cost (the user's own
+// price, #609); a cent's fraction to two figures, written out ($0.00004), a free model's $0:
+// savings.usd's rule, so the CLI and the pane agree (toPrecision gave $0.000040 and $0.010)
+export function usd(x: number): string {
+  if (x === 0) return '$0'
+  if (Math.abs(x) >= 0.01) return `$${x.toFixed(2)}`
+  const r = Number(x.toPrecision(2))
+  return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
+}
+
+// A period's API money as the footer says it: never $0 for tasks with no price; '' with none
+export function apiMoney(a: any): string {
+  if (!a || !a.tasks) return ''
+  const known = a.tasks - (a.unknown ?? 0) - (a.plan ?? 0)
+  return known > 0 ? usd(a.cost ?? 0) : a.plan ? 'plan usage' : 'no price'
+}
+
+// An API-only week: API $1.27 on 6 tasks, or 1 API task, no price (no dollars to put "on")
+export function apiAlone(a: any, money: string): string {
+  const tasks = `task${a.tasks === 1 ? '' : 's'}`
+  return `this week: ${money.startsWith('$') ? `API ${money} on ${a.tasks} ${tasks}` : `${a.tasks} API ${tasks}, ${money}`} (no GPU task to compare)`
+}
+
+// A Stats period's API part (the feed's periods[*].api): API $1.27 (deepseek $0.84 · anthropic $0.43)
+export function apiPeriod(a: any): string {
+  const money = apiMoney(a)
+  if (!money) return ''
+  const provs = Object.entries(a.by_provider ?? {}).filter(([, v]: any) => v.tasks > (v.unknown ?? 0) + (v.plan ?? 0))
+    .sort((x: any, y: any) => y[1].cost - x[1].cost).map(([p, v]: any) => `${p} ${usd(v.cost)}`)
+  return `API ${money}${provs.length ? ` (${provs.join(' · ')})` : ''}${a.unknown && money !== 'no price' ? ` + ${a.unknown} with no price` : ''}`
+}
+
+// An API task's RUNNING row's parts (wb top's `via`, `provider`, `spend`): no GPU of ours
+export function apiParts(r: Row): string[] {
+  if (r.via !== 'api') return []
+  return [`API ${r.provider ?? '?'}`, typeof r.spend === 'number' ? usd(r.spend) : '', r.waits ? `waits for ${r.waits}` : '']
 }
 
 // The electricity price `wb savings --json` says is set (per kWh), or null
@@ -2756,9 +2859,8 @@ async function setCap($: any, text: string) {
   $.ui.invalidate('ui.render')
 }
 
-const usd = (v: number) => money(Math.round(v * 100) / 100)
-
-// Spend today, from `wb route --json`: `$0.42 of $5 (deepseek $0.42)`
+// Spend today, from `wb route --json`: `$0.42 of $5 (deepseek $0.42)`; the dollars by `usd`, the
+// Stats tab's (#1022), so the two never say one sum two ways (wave 2's merge)
 export function spendLine(r: WbRoutes): string {
   const s = r.spend_today ?? { usd: 0, by_provider: {} }
   const by = Object.entries(s.by_provider ?? {}).filter(([, v]) => v > 0).map(([p, v]) => `${p} ${usd(v)}`)
@@ -3526,7 +3628,8 @@ async function deliver($: any, now: number) {
       }
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
       // a batch's wake ends with its resume, not the failure's next step (#544)
-      const next = batch ? BATCH_NEXT(batch) : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
+      const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? SPEND_NEXT(name)
+        : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`
       const text = `[workbench] ${who}.\n\n${row.text}\n\n${next}`
@@ -3904,6 +4007,8 @@ export const register: Register = (on, options) => {
     mem.skill = `${config ? abs(config) : `${home}/.claude`}/skills/workbench/SKILL.md`
     const priced = await $.env.get('WB_SAVINGS')
     mem.savingsFile = priced ? abs(priced) : `${home}/.config/workbench/savings.json`
+    const commands = await $.env.get('WB_COMMANDS')
+    mem.commandsFile = commands ? abs(commands) : `${home}/.config/workbench/commands.json`
     mem.startedAt = await $.clock.now()
     // 2026-11-17: /delegate became /workbench. A copy updated across it still has only the old
     // skill link, which now leads nowhere: wb setup makes the new one and drops the old.
@@ -3981,6 +4086,7 @@ export const register: Register = (on, options) => {
     const path = field ? (e as any)[field] : undefined
     if (typeof path === 'string') {
       const why = (await codingRefusal($, path)) || (await routesFileRefusal($, path))
+        || (await localOnlyRefusal($, e as Row, path))
       if (why) return { deny: why }
     }
     // Nothing goes to workbench upstream without the user's yes to that very command (#1005,

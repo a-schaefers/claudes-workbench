@@ -34,6 +34,8 @@ from pathlib import Path
 
 from . import (ask_mcp, context, gitguard, gitops, hardware, keyhole, lane, lessons, models, progress,
                skills, stats, store, tuning)
+from . import meter
+from . import privacy
 from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize
 from .watch import Watcher
 
@@ -211,6 +213,10 @@ def handover_warning(cfg: dict) -> str:
 # allow, and between chunks at least as long as the silence budget. Provider options merge, so
 # the user's own entry keeps the rest; the user's files stay untouched.
 PROVIDER_TIMEOUTS = ("headerTimeout", "chunkTimeout")
+# An API provider reads no long prompt here, and lifting the wait took away OpenCode's only
+# guard on a request its provider never starts (DeepSeek closes one not started within 10
+# minutes): its header wait is API_HEADER_S instead of none (#1017).
+API_HEADER_S = 600
 
 
 def provider_timeouts(task: store.Task) -> dict:
@@ -219,7 +225,8 @@ def provider_timeouts(task: store.Task) -> dict:
     if not pid:
         return {}
     chunk = max(900, int(float(limit(task, "silence")) + 60)) * 1000
-    return {"provider": {pid: {"options": {"headerTimeout": False, "chunkTimeout": chunk}}}}
+    header = API_HEADER_S * 1000 if api_entry(task) else False
+    return {"provider": {pid: {"options": {"headerTimeout": header, "chunkTimeout": chunk}}}}
 
 
 # A task's limits were fixed in task.json at wb start, so a task on a model not yet measured kept
@@ -273,21 +280,25 @@ def write_config_layer(task: store.Task) -> Path:
         mine = {"permission": users["permission"], **mine}
     wait_ms = int(task.spec.get("ask_timeout", 1200) + 60) * 1000
     try:
-        cfg = models.resolve(task.spec["model"]).config
+        cfg = api_entry(task) or models.resolve(task.spec["model"]).config
     except KeyError:
         cfg = {}
     buffer = compaction_buffer(cfg)
-    store.write_json(path, {
+    store.write_json(path, thinking_layer({  # an API task's own thinking variant (#1018)
         "$schema": "https://opencode.ai/config.json",
-        # the keyhole's base and token last: they are the provider's way out (#1012)
+        # the keyhole's base and token last: they are the provider's way out (#1012); an API
+        # task's capped window and output (#1017) and OpenRouter's routing (#1021) before them
         **models._merge(models._merge(models._merge(models.agent_providers(), provider_timeouts(task)),
-                                      stored_key(task)), keyhole_overlay(task)),
+                                      models._merge(models._merge(stored_key(task), api_pins(task)),
+                                                    openrouter_routing(task))),
+                        keyhole_overlay(task)),
         **mine,
         "share": "disabled",  # a user's `share: "auto"` would publish every agent session
         # the user's global small_model (titles, summaries) could be a cloud model whose key
         # auth.json holds, sent the task's text; an update mid-task could move OpenCode past
         # OPENCODE_TESTED (#353, the audit of 1.4)
-        "small_model": task.spec["model"],
+        # with the task's variant: the title request would otherwise think by default (#1018)
+        "small_model": task.spec.get("opencode_model") or task.spec["model"],
         "autoupdate": False,
         # background: OpenCode 2.3.2's summary written ahead (on by default; 2.3.0 ignores the
         # key) is a full-context request on the agent's own server, below the handover point,
@@ -304,9 +315,30 @@ def write_config_layer(task: store.Task) -> Path:
             # the tool blocks until Claude answers; OpenCode must not give up on it first
             "timeout": {"startup": 15000, "execution": wait_ms},
         }}},
-    })
+    }, task.spec))
     os.chmod(path, 0o600)  # a provider copied in may carry its apiKey
     return path
+
+
+def openrouter_routing(task: store.Task) -> dict:
+    """An OpenRouter task's routing in the layer, where `wb watch` and the layer's readers see it:
+    the role's `order` and `allow_fallbacks: false` under the task's model entry (V1
+    `provider.openrouter.models.<m>.options.provider`, which OpenCode 2.3.2 migrates to the
+    model's `settings.provider` and its OpenRouter package sends as the body's `provider`). The
+    keyhole sets the same on every request, so this is the record, not the guard (#1021)."""
+    order = task.spec.get("order")
+    mid = str(task.spec.get("model") or "")
+    if task.spec.get("via") != "api" or not order or mid.split("/", 1)[0] != privacy.OPENROUTER:
+        return {}
+    return {"provider": {privacy.OPENROUTER: {"models": {mid.split("/", 1)[1]: {
+        "options": {"provider": privacy.routing(order)}}}}}}
+
+
+def backend_lines(task: store.Task, n: int) -> list[str]:
+    """The round report's lines for a backend OpenRouter served outside the role's order
+    (keyhole `backend` events of round ``n``): never silent (#1021)."""
+    return [f"NOTE: {e.get('text', '')}" for e in store.read_jsonl(task.dir / "events.jsonl")[0]
+            if e.get("kind") == "backend" and e.get("round") == n]
 
 
 def stored_key(task: store.Task) -> dict:
@@ -395,7 +427,7 @@ def model_pins(model_id) -> dict:
     wb planned the handover and the compaction buffer against. A project config's own window for
     the model would move OpenCode's compaction off them (#519). {} for a model wb doesn't know."""
     try:
-        m = models.resolve(model_id) if isinstance(model_id, str) else None
+        m = models.resolve(model_id.partition("#")[0]) if isinstance(model_id, str) else None
     except KeyError:
         m = None
     if m is None:
@@ -408,6 +440,53 @@ def model_pins(model_id) -> dict:
     if not entry:
         return {}
     return {"provider": {m.provider: {"models": {m.id.split("/", 1)[1]: entry}}}}
+
+
+def api_pins(task: store.Task) -> dict:
+    """An API task's model pins (model_pins' shape) for the layer file itself: a catalog model has
+    no entry in any config the agent's OpenCode loads, so without them it compacted at the
+    catalog's 1M window and asked for 256K out (#1017). A GPU model's entry is the user's, already
+    loaded. From the task's api_entry, never the catalog again."""
+    entry, model = api_entry(task), str(task.spec.get("model") or "")
+    if not entry or "/" not in model:
+        return {}
+    pid, name = model.split("/", 1)
+    return {"provider": {pid: {"models": {name: entry}}}}
+
+
+# An API task's capped entry is recorded once, when drive resolves its model (status `api_entry`),
+# and every round reads it from there: the layer's pins and compaction buffer, the header guard,
+# where its speed samples go. Worked out again each round from hosted.json, a catalog rebuild that
+# failed mid-task (past HOSTED_TTL or a stamp change; a failed read keeps no models) took them all
+# away: the next round compacted at the catalog's 1M window, asked for 256K out, waited on headers
+# with no limit, and wrote its speeds into this machine's speed.json (the review of #1017). A later
+# runner resolves the model again, and on a catalog that lost it fails the load (_load_failed)
+# rather than run a round unpinned.
+def pin_api(task: store.Task, m: models.Model) -> None:
+    """Status `api_entry`: an API model's `limit` and `options.max_tokens` (models.api_limits'
+    caps), or None on the GPU."""
+    cfg, entry = m.config, None
+    if m.kind == "api" and isinstance(cfg.get("limit"), dict):
+        entry = {"limit": cfg["limit"], **({"options": {"max_tokens": cfg["options"]["max_tokens"]}}
+                                           if "max_tokens" in (cfg.get("options") or {}) else {})}
+    if entry or task.status.get("api_entry"):
+        task.set_status(api_entry=entry)
+
+
+def api_entry(task: store.Task) -> dict | None:
+    """The capped entry pin_api recorded for an API task, or None: a GPU task."""
+    entry = task.status.get("api_entry")
+    return entry if isinstance(entry, dict) and entry else None
+
+
+def fixed_knobs(task: store.Task, m: models.Model) -> dict:
+    """The knobs tuning.tune doesn't choose for this task: Claude's --self-review /
+    --no-self-review; else, for an API model, self_review off (#1017): a round Claude never
+    sees costs money there, so neither the record nor the explore turns it on."""
+    own = task.spec.get("self_review")
+    if own is not None:
+        return {"self_review": int(own)}
+    return {"self_review": 0} if m.kind == "api" else {}
 
 
 # The user's own OPENCODE_CONFIG_CONTENT goes under the rules, not away: replaced, the providers,
@@ -440,7 +519,8 @@ def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
                 if isinstance(v, dict) and isinstance(v.get("options"), dict)
                 and any(k in v["options"] for k in PROVIDER_TIMEOUTS)}
     ours = {"share": "disabled", **{k: layer[k] for k in RESTATED if k in layer}}
-    over = models._merge(timeouts, model_pins(layer.get("small_model")).get("provider") or {})
+    pins = model_pins(layer.get("small_model")) or _own_pins(layer)  # an API task's: its record (#1017)
+    over = models._merge(timeouts, pins.get("provider") or {})
     if over := models._merge(over, (keyhole_over or {}).get("provider") or {}):
         ours["provider"] = over
     content = {**users, **ours}
@@ -450,10 +530,23 @@ def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
         content["providers"] = {**theirs, **{
             pid: models._merge(theirs[pid] if isinstance(theirs[pid], dict) else {}, v2)
             for pid, v2 in keyhole_v2(keyhole_over).items() if pid in theirs}}
+    content, ours = restate_thinking(layer, content), restate_thinking(layer, ours)  # #1018
     text = json.dumps(content, separators=(",", ":"))
     if len(text.encode()) > CONFIG_CONTENT_MAX:  # the user's own, too long to add to: wb's alone
         text = json.dumps(ours, separators=(",", ":"))
     return {**dict.fromkeys(PROJECT_CONFIG_OFF, "1"), "OPENCODE_CONFIG_CONTENT": text}
+
+
+def _own_pins(layer: dict) -> dict:
+    """The layer's own entry for its small_model (an API task's api_pins), as model_pins gives
+    one: restated from the task's record when the catalog no longer knows the model (#1017)."""
+    # the small_model names the task's thinking variant (#1018): the entry is the bare id's
+    pid, _, name = str(layer.get("small_model") or "").partition("#")[0].partition("/")
+    entry = (((layer.get("provider") or {}).get(pid) or {}).get("models") or {}).get(name)
+    entry = {k: entry[k] for k in ("limit", "options") if k in entry} if isinstance(entry, dict) else {}
+    if isinstance(entry.get("options"), dict):
+        entry["options"] = {k: v for k, v in entry["options"].items() if k == "max_tokens"}
+    return {"provider": {pid: {"models": {name: entry}}}} if entry else {}
 
 
 # What OpenCode's own environment adds to the agent's: npx and `npm exec` run only what the
@@ -1031,7 +1124,7 @@ def checkin_text(task: store.Task, n: int, out: dict, since: float, active: floa
     spec, st, now = task.spec, task.status, time.time()
     took = now - spec["created_at"]
     typical = router.expected_minutes(spec["model"], spec.get("size", "significant"),
-                                      spec.get("weights_id"))
+                                      spec.get("weights_id"), spec.get("role"))
     eta = ""
     if typical:  # active work against active work: the wall clock held queues and reviews (#543)
         left = typical * 60 - (active_so_far(task, now) if active is None else active)
@@ -1088,15 +1181,15 @@ FROZEN_SECS = 60
 
 class _Clock:
     """The round's time and its silence, less the waits that aren't the agent's: Claude's answer
-    to a question, and a frozen machine."""
+    to a question, an API provider's rate limit, outage or queue (#1020), and a frozen machine."""
 
     def __init__(self, t: float):
         self.t0 = self.tick = self.seen = t
         self.paused = 0.0
 
-    def step(self, t: float, asking: bool) -> None:
+    def step(self, t: float, asking: bool, waiting: bool = False) -> None:
         dt, self.tick = t - self.tick, t
-        if asking:  # waiting on Claude: neither the round's time nor silence
+        if asking or waiting:  # waiting on Claude, or on the provider: neither the round's time nor silence
             self.paused += dt
             self.seen = t
         elif dt > FROZEN_SECS:
@@ -1108,6 +1201,196 @@ class _Clock:
 
     def quiet(self, t: float) -> float:
         return t - self.seen
+
+
+# An API provider making the agent wait (#1020). The keyhole (keyhole.py) holds a request through
+# a 429 or an outage and writes status `ratelimit_until`/`ratelimit`; OpenCode prints nothing
+# while it waits, so without this the silence guard said "no output for 15 minutes", or "the model
+# may be reading its prompt slowly", of a provider that had said "wait", and the think nudge fired
+# on DeepSeek's queue. Held this long, the round stops as `rate_limited` or `outage`, the
+# provider's and not the step's, and runs again once (drive).
+RATE_WAIT_S = 600
+RETRY_PAUSE_S = 60   # an API `retry` line pauses the clocks this long: OpenCode's own backoff
+HELD = ("rate_limited", "outage")
+PROVIDER_GUARDS = frozenset({*HELD, "quota", "auth"})  # stops that are the provider's (cause "provider")
+# #1019's day spend cap: status `api_stop {guard: "spend"}` or its own stop between rounds. A cause
+# of its own, `spend`, outside results.THE_STEP like `provider`: the user's budget, never held
+# against the model or its slice (the engineer's call, 2026-11-23)
+SPEND = "spend"
+
+
+def stopped_by(guard: str | None) -> str | None:
+    """Whose stop a guard is when it isn't the agent's: `provider` (PROVIDER_GUARDS) or `spend`
+    (the cap), the notice's cause, status `infra` and the `stopped` event's `by`; else None."""
+    return "provider" if guard in PROVIDER_GUARDS else SPEND if guard == SPEND else None
+
+
+def api_task(task: store.Task) -> bool:
+    """Whether the task runs an API model: task.json `via` (#1016), else its model's kind in the
+    cached catalog. Every task before #1016 reads as GPU."""
+    via = task.spec.get("via")
+    if via in ("gpu", "api"):
+        return via == "api"
+    try:
+        return models.is_api(task.spec.get("model") or "")
+    except Exception:  # a config that can't be read: a GPU task, as before
+        return False
+
+
+def provider_of(task: store.Task) -> str:
+    """The task's provider id: task.json `provider` (#1016), else its model id before the first /."""
+    return str(task.spec.get("provider") or (task.spec.get("model") or "").partition("/")[0])
+
+
+def _span(secs: float) -> str:
+    secs = int(max(0, secs))
+    if secs >= 120:
+        return f"{secs // 60} minutes"
+    return "1 minute" if secs >= 60 else f"{secs} seconds"
+
+
+class _ProviderWait:
+    """One round's view of its API provider (#1020): the keyhole's status keys and OpenCode's own
+    `retry` and `error` lines. ``waiting`` pauses the clocks, ``stop`` says when the provider (not
+    the agent) ends the round, ``end`` closes it: the `rate_limited` event and the stop after
+    OpenCode gave up. A GPU task's is inert: nothing pauses, nothing stops."""
+
+    def __init__(self, task: store.Task, n: int):
+        self.task, self.n = task, n
+        self.api = api_task(task)
+        self.provider = provider_of(task) if self.api else ""
+        self.began = time.time()
+        self.st: dict = {}
+        self.retry: dict | None = None  # the run OpenCode's retry lines show: kind, code, since, why
+        self.retry_until = 0.0
+        self.run: dict | None = None    # the wait now: kind, code, since, held_since, why
+        self.was = False                # waiting at the last tick: the gap since counts as the wait
+        self.fatal = None               # (guard, text): a 402 or 401 OpenCode gave up on at once
+        self.held = False               # any wait this round (measure_speed skips the round)
+        st = task.status
+        if self.api and (st.get("ratelimit_until") or st.get("ratelimit")):
+            # a runner killed mid-hold left them: the new round starts with none (edge cases)
+            task.set_status(ratelimit_until=None, ratelimit=None)
+
+    def waiting(self, now: float) -> bool:
+        if not self.api:
+            return False
+        self.st = st = self.task.status
+        rl, until = st.get("ratelimit"), st.get("ratelimit_until")
+        now_wait = None
+        if isinstance(rl, dict) and isinstance(until, (int, float)) and until > now:
+            since = rl.get("since") if isinstance(rl.get("since"), (int, float)) else now
+            now_wait = {"kind": rl.get("kind"), "code": rl.get("code"), "why": rl.get("why"),
+                        "since": max(since, self.began)}
+        elif self.retry and self.retry_until > now:
+            now_wait = dict(self.retry)
+        if now_wait is None:
+            if self.run:
+                self._ended(now)
+            was, self.was = self.was, False
+            return was
+        if self.run is None:
+            self.run = {**now_wait, "held_since": None}
+        else:
+            self.run.update({k: v for k, v in now_wait.items() if k != "since" and v is not None})
+            self.run["since"] = min(self.run["since"], now_wait["since"])
+        if self.run["kind"] in HELD and self.run["held_since"] is None:
+            self.run["held_since"] = now_wait["since"] if now_wait["kind"] in HELD else now
+        self.was = self.held = True
+        return True
+
+    def on_retry(self, raw: dict, now: float) -> None:
+        """An OpenCode `retry` line: a 429, 5xx, rate limit or transport failure pauses the clocks
+        RETRY_PAUSE_S (or to its nextRetryAt), across the gap before the keyhole's next write."""
+        if not self.api:
+            return
+        err = raw.get("error") if isinstance(raw.get("error"), dict) else {}
+        code = err.get("status") if isinstance(err.get("status"), int) else None
+        text = f"{err.get('type') or ''} {err.get('message') or ''}"
+        rate = code in (429, 529) or bool(re.search(r"(?i)rate.?limit", text))
+        if not (rate or (code or 0) >= 500 or "transport" in text):
+            return
+        why = "connection refused" if "ECONNREFUSED" in text else "no answer"
+        self.retry = {"kind": "rate_limited" if rate else "outage", "code": code, "why": why,
+                      "since": self.retry["since"] if self.retry else now}
+        nxt = raw.get("nextRetryAt")
+        later = nxt / 1000 + 5 if isinstance(nxt, (int, float)) and nxt / 1000 < now + 900 else 0
+        self.retry_until = max(now + RETRY_PAUSE_S, later)
+
+    def on_error(self, raw: dict) -> None:
+        """An OpenCode `error` line: a 402 (provider.quota) or 401/403 (provider.auth) ends the
+        round at once, the provider's; a rate limit or outage it gave up on, `end` stops."""
+        if not self.api:
+            return
+        err = raw.get("error") if isinstance(raw.get("error"), dict) else {}
+        kind, code = str(err.get("type") or ""), err.get("status")
+        if kind == "provider.quota" or code == 402:
+            self.fatal = ("quota", f"{self.provider} says the account is out of credit "
+                                   f"(HTTP {code or 402})")
+        elif kind == "provider.auth" or code in (401, 403):
+            self.fatal = ("auth", f"{self.provider} refused the API key (HTTP {code or 401})")
+
+    def answered(self) -> None:
+        """The model's own output: whatever OpenCode retried got through."""
+        self.retry, self.retry_until = None, 0.0
+
+    def stop(self, now: float, gave_up: bool = False) -> tuple[str, str] | None:
+        """(guard, text) when the provider ends the round: a quota or key error, the keyhole's (or
+        #1019's) `api_stop`, or a rate limit or outage held RATE_WAIT_S (``gave_up``: any held
+        run, OpenCode having exited on it)."""
+        if not self.api:
+            return None
+        if self.fatal:
+            return self.fatal
+        stop = self.st.get("api_stop")
+        if isinstance(stop, dict) and stop.get("guard"):
+            # consumed: the next round starts clean. #1019's `spend` comes through here too:
+            # cause `spend`, not `provider` (stopped_by)
+            self.task.set_status(api_stop=None)
+            return str(stop["guard"]), str(stop.get("text") or f"{self.provider} stopped the round")
+        run = self.run or ({**self.retry, "held_since": self.retry["since"]} if gave_up and self.retry else None)
+        if not run or run["kind"] not in HELD or run["held_since"] is None:
+            return None
+        secs = now - run["held_since"]
+        if secs < RATE_WAIT_S and not gave_up:
+            return None
+        if run["kind"] == "rate_limited":
+            return "rate_limited", (f"{self.provider} rate-limited the agent's requests for "
+                                    f"{_span(secs)} (HTTP {run.get('code') or 429})")
+        detail = f"HTTP {run['code']}" if run.get("code") else run.get("why") or "no answer"
+        return "outage", f"{self.provider} didn't answer for {_span(secs)} ({detail})"
+
+    def _ended(self, now: float) -> None:
+        run, self.run = self.run, None
+        if not run:
+            return
+        secs = round(now - run["since"], 1)
+        code = f" (HTTP {run['code']})" if run.get("code") else ""
+        what = {"rate_limited": f"rate-limited by {self.provider}{code}",
+                "outage": f"{self.provider} didn't answer{code}",
+                "queued": f"{self.provider} held the request in its queue"}.get(run["kind"], "waited")
+        self.task.event({"ts": store.now(), "round": self.n, "kind": "rate_limited",
+                         "provider": self.provider, "code": run.get("code"), "state": run["kind"],
+                         "since": run["since"], "secs": secs,
+                         "text": f"{what} for {_span(secs)}: the round's clocks were paused"})
+
+    def end(self, out: dict, now: float) -> None:
+        """After the round: OpenCode that exited on a rate limit, an outage or a quota error is
+        the provider's stop; the wait's event; the status keys cleared; `held` for drive."""
+        if not self.api:
+            return
+        if not out["stuck"] and out["exit"] not in (0, None) and not (
+                out.get("lingered") or out.get("interrupted") or out.get("full")):
+            self.st = self.task.status
+            if why := self.stop(now, gave_up=True):
+                out["guard"], out["stuck"] = why
+                self.task.event({"ts": store.now(), "round": self.n, "kind": "stopped", "text": why[1],
+                                 **({"by": by} if (by := stopped_by(why[0])) else {})})
+        self._ended(now)
+        out["held"] = self.held
+        st = self.task.status
+        if st.get("ratelimit_until") or st.get("ratelimit"):
+            self.task.set_status(ratelimit_until=None, ratelimit=None)
 
 
 # OpenCode's own lines, not the model's output: what read_bound counts as no answer yet
@@ -1192,8 +1475,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     threading.Thread(target=_reader, args=(proc.stdout, q), daemon=True).start()
     threading.Thread(target=_steer_bell, args=(task, proc, q), daemon=True).start()
     power = None
-    # the suite's fakes: the GPU isn't theirs; an API model's isn't this machine's (#1015)
-    if not CURRENT.get("remote") and not CURRENT.get("api") and not models._fake():
+    if measures_power(task):
         power = _Power()
         power.start()
 
@@ -1211,6 +1493,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
     started = time.time()  # the wall clock, for check-ins: they compare with timestamps in files
     clock = _Clock(time.monotonic())
+    provider = _ProviderWait(task, n)  # an API provider's rate limit, outage or queue (#1020)
     prior = float(task.status.get("active_s") or 0)  # earlier rounds' active work
     # what the ETA and the progress checks compare: this step's alone (#815)
     step_prior = prior - float(task.status.get("step_active_s") or 0)
@@ -1234,6 +1517,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # session between two steps, and the agent worked on from its summary (#774).
     last_step: tuple = (None, 0)
     opened: dict = {}  # the questions open this round (ask_mcp.relay)
+    spend = _spend_round(task, n)  # an API task's meter (#1019), else None
     warmed = time.monotonic()  # the model's keep-alive, renewed while the round waits (#864)
     while True:
         try:  # woken by the agent's output or a steer note; the timeout runs the clocks below
@@ -1245,7 +1529,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         now, mono = time.time(), time.monotonic()
         ask_mcp.relay(task, opened)  # the agent's questions: checked, counted, raised
         asking = task.status.get("phase") == "asking"  # the agent is waiting on Claude: not silent
-        clock.step(mono, asking)
+        clock.step(mono, asking, provider.waiting(now))
         got = _event(line)
         kinds = {raw.get("type") for raw in got}
         # A `retry` line is OpenCode giving up on a request and sending it again, not the model's
@@ -1262,6 +1546,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             clock.seen, heard = mono, True
         if not kinds <= NOT_THE_MODEL:  # its first token, or later ones (read_bound)
             out["answered"] = True
+            provider.answered()
         # The line's event, when it is one (0 or 1 of them): a line that isn't (a stray print, a
         # number or list) or an event normalize drops skips only this body, never the clocks and
         # the steer check below. Those `continue`d past them, and a stream of unknown progress
@@ -1302,6 +1587,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 out["texts"].append(row["text"])
                 row["text"] = row["text"][:2000]
             elif row["kind"] == "step":
+                if spend:
+                    spend.step(raw.get("part") or {})  # the ledger, before the guard below
                 out["tok_in"] += row["in"]
                 out["tok_out"] += row["out"]
                 used = row["in"] + row.get("cache", 0) + row["out"] + row.get("reasoning", 0)  # #644
@@ -1353,6 +1640,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                         _reading_full(task, n, used, window, floor)
             elif row["kind"] == "error":
                 out["errors"].append(f"opencode: {row['text']}")
+                provider.on_error(raw)
                 if compaction_failed(raw):
                     # OpenCode's compaction failed ("Compaction produced no summary"): the session
                     # is over its window and can't go on, so a fresh one takes over, whether or
@@ -1369,6 +1657,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                         out["full"], out["compacted"] = last_step[1] or window or 1, True
             elif row["kind"] == "retry":
                 out["retries"].append(row["text"])
+                provider.on_retry(raw, now)
                 task.set_status(last=f"OpenCode retries a request: {row['text']}"[:200])
             task.event(row)
             why = detector.feed({**row, "sig": sig}) if sig else None
@@ -1387,6 +1676,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                                 + " still running in the background: stopped"})
             _stop(proc)
             break
+        if not out["stuck"] and (why := provider.stop(now)):  # before silence: never "no output"
+            out["guard"], out["stuck"] = why
         hush = wait_hush if waiting_bg else silence
         if not out["stuck"] and clock.ran(mono) > wall:
             out["stuck"], out["guard"] = f"the round ran past its {int(wall // 60)}-minute limit", "round"
@@ -1424,8 +1715,13 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                     task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
                     f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
                     round=n)
+        if not out["stuck"] and spend:
+            _spend_guard(task, out)
         if out["stuck"]:
-            task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": out["stuck"]})
+            # by: the provider's or the spend cap's stop is no lesson about the agent
+            # (lessons.gather; #1020)
+            task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": out["stuck"],
+                        **({"by": by} if (by := stopped_by(out["guard"])) else {})})
             _stop(proc)
             break
         if out["full"]:
@@ -1473,6 +1769,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         out["exit"] = proc.wait()
         out["lingered"] = True  # our stop's exit, not a crash: the round is what its events say
     log.close()
+    provider.end(out, time.time())
     ask_mcp.close(task, opened)  # its server is gone: closed, so nothing takes them for open
     if task.status.get("asking") or task.status.get("phase") == "asking":  # it ended
         task.set_status(asking=None, phase="running")  # mid-question: nothing reads that answer now
@@ -1534,6 +1831,14 @@ class _Capture(threading.Thread):
 
 
 POWER_EVERY = 10  # seconds between GPU power samples: fine enough for a round, cheap to read
+
+
+def measures_power(task: store.Task) -> bool:
+    """Whether a round samples this GPU's draw (_Power): not for a remote model (another machine's
+    GPU), the suite's fakes (the GPU isn't theirs), or an API task, which runs on no GPU of ours:
+    its watt-hours would be whatever else the GPU did meanwhile (#1022)."""
+    return not CURRENT.get("remote") and not CURRENT.get("api") and not models._fake() \
+        and task.spec.get("via") != "api"  # CURRENT["api"]: the model's kind, for a task before #1016's via
 
 
 class _Power(threading.Thread):
@@ -2623,11 +2928,25 @@ def steps_line(task: store.Task) -> str | None:
             f"(git -C {wt} reset -q --hard && git -C {wt} clean -fdq) and wb accept {task.name} --force")
 
 
+def _spend_part(task: store.Task) -> str:
+    """The round report's money for an API task (#1022): ` · $0.12 so far`, ` · cost unknown`
+    (no price: never a false $0); nothing for a GPU task."""
+    if task.spec.get("via") != "api":
+        return ""
+    from .results import spend_so_far
+    from .savings import usd
+    v = spend_so_far(task)
+    return f" · {usd(v)} so far" if v is not None else " · cost unknown"
+
+
 def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     """The compact report Claude reads; kept short on purpose, the diff is fetched separately."""
     spec, st = task.spec, task.status
+    # `agent`, not `local`, for an API task's tokens alone (#1022): a GPU task's line is as it was
+    # (wave 2's review)
+    who = "agent" if spec.get("via") == "api" else "local"
     lines = [f"task {task.name} · {spec['model_label']} · round {n} · {rnd['secs'] / 60:.1f} min"
-             f" · local tokens {rnd['tok_in']} in / {rnd['tok_out']} out"]
+             f" · {who} tokens {rnd['tok_in']} in / {rnd['tok_out']} out" + _spend_part(task)]
     c = context_state(task)
     if c.get("used") and c.get("window"):
         after = {**st, "round": n + 1}  # judged as the step's next round is (#781)
@@ -2643,8 +2962,11 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
             if e.get("kind") == "reading_full" and e.get("round") == n]
     if full:
         lines.append("reading: " + full[-1]["text"])
+    lines += backend_lines(task, n)  # #1021
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
+        if rnd.get("guard") in PROVIDER_GUARDS:
+            lines.append(provider_remedy(task, rnd["guard"]))
     elif rnd.get("left_bg"):  # #658: what the agent left running, stopped with it
         lines.append("the agent left " + ", ".join(f"`{j}`" for j in rnd["left_bg"])
                      + " running in the background when its turn ended; stopped")
@@ -3096,7 +3418,7 @@ def measure_speed(task: store.Task, since: float) -> None:
     try:
         msgs = [m for m in export(sid, task=task).get("messages", [])
                 if ((m.get("time") or {}).get("created") or 0) >= since * 1000]
-        got = router.record_speed(task.spec["model"], msgs)
+        got = router.record_speed(task.spec["model"], msgs, api=api_entry(task) is not None)
         if any(got.values()) and stats.recording():
             had = task.status.get("speeds") or {}
             task.set_status(speeds={k: ((had.get(k) or []) + v)[-TASK_SPEED_KEEP:]
@@ -3127,6 +3449,8 @@ def read_bound(task: store.Task, n: int, rnd: dict, m: models.Model | None = Non
     a request (anything but a timeout): a server that died before the first token read as ~12
     tokens/s, and the model's next rounds and tasks waited an hour of silence (#862)."""
     from . import router
+    if m is not None and m.kind == "api":  # the network's and the queue's time, not a read (#1017)
+        return None
     waited = float(rnd.get("waited") or 0)
     if rnd.get("answered") or rnd.get("interrupted") or waited < BOUND_MIN_S \
             or rnd.get("guard") not in (None, "silence", "round"):
@@ -3236,14 +3560,12 @@ def needs_keyhole(m: models.Model) -> bool:
 
 def start_keyhole(task: store.Task, m: models.Model) -> keyhole.Keyhole:
     """The task's keyhole, its answers recorded as the provider's health (api-health.json, which
-    status reads) and its usage handed to api_usage."""
+    status reads), and the task's meter's hooks (#1019): each response's usage booked, and the
+    day cap's room asked before each request goes out."""
+    mt = meter.for_task(task, m)
     return keyhole.start(task, m,
                          on_health=lambda state, why, until: models.note_api(m.provider, state, why, until),
-                         on_usage=lambda usage: api_usage(task, usage))
-
-
-def api_usage(task: store.Task, usage: dict) -> None:
-    """Each API response's usage, as the keyhole read it. Nothing yet: the spend meter is #1019's."""
+                         **(mt.hooks() if mt is not None else {}))
 
 
 def keyhole_failure(e: Exception) -> str:
@@ -3432,6 +3754,50 @@ def _tests_gpu(task: store.Task, lease):
         yield
 
 
+def provider_remedy(task: store.Task, guard: str) -> str:
+    """What to do about a stop that is the provider's (#1020): never a model or route switched
+    by wb or Claude (the 2.0 rules); `wb route` only with a role, and only with the user's yes."""
+    p, name = provider_of(task), task.name
+    resume = f'wb feedback {name} --text "carry on"'
+    if guard == "quota":
+        return (f"the provider's stop, not the agent's: top up your {p} account, or wait for the "
+                f"plan's reset; then {resume} resumes it")
+    if guard == "auth":
+        return (f"the provider's stop, not the agent's: store {p}'s API key again with /connect "
+                f"in OpenCode; then {resume} resumes it")
+    role = task.spec.get("role")
+    return (f"the provider's stop, not the agent's: {resume} resumes it once {p} allows"
+            + (f"; or wb route {role} gpu (the user's yes) for the next tasks" if role else ""))
+
+
+def _provider_revive(task: store.Task, n: int, rnd: dict, lease) -> bool:
+    """Round n stopped by its provider's rate limit or outage, the first time: wait out the
+    provider's cooldown (api-health.json's `until`, else RATE_LIMIT_SECS; at most RATE_WAIT_S),
+    then run it again, continuing the session. One revive a round: it re-sends the whole context,
+    which costs money. True to run it again; False when a steer note came in meanwhile (the
+    caller's _steer_round takes it). wb stop ends the runner, and the wait with it."""
+    p = provider_of(task)
+    task.event({"ts": store.now(), "round": n, "kind": "load",
+                "text": (f"{p} rate-limited the round" if rnd["guard"] == "rate_limited" else
+                         f"{p} didn't answer the round") + ": it runs again once the cooldown ends"})
+    # nothing of ours needs the GPU while the provider makes us wait; #1015's NoLease may lack it
+    getattr(lease, "step_aside", lambda: None)()
+    now = time.time()
+    try:
+        until = (models.api_health(p) or {}).get("until")
+    except Exception:  # an unreadable file: the plain wait
+        until = None
+    until = until if isinstance(until, (int, float)) and until > now else now + models.RATE_LIMIT_SECS
+    end = min(until, now + RATE_WAIT_S)
+    task.set_status(last=f"{rnd['stuck']}: the round runs again at "
+                         f"{time.strftime('%H:%M:%S', time.localtime(end))} (wb stop gives up)")
+    while (left := end - time.time()) > 0:
+        if pending_steer(task):
+            return False
+        time.sleep(min(1.0, left))
+    return not pending_steer(task)
+
+
 def _rejoin(task: store.Task, lease) -> None:
     """Back on the GPU before a round, after the tests or a server's wait let it go (#257):
     queued, in its first-come place, when the GPU is someone else's meanwhile."""
@@ -3445,6 +3811,75 @@ def _gpu_side(task: store.Task) -> bool:
         return models.gpu_side(task.spec["model"])
     except Exception:  # a config that doesn't parse: resolve's to report
         return True
+
+
+def _spend_round(task: store.Task, n: int):
+    """An API task's meter for round n (meter.Meter: its live figures from 0), else None."""
+    if (spend := meter.for_task(task)) is not None:
+        spend.begin(n)
+    return spend
+
+
+def _spend_guard(task: store.Task, out: dict) -> None:
+    """The in-round spend guard (#1019), each tick: the keyhole's own stop (status `api_stop`,
+    its guard: the room it refused for, #1020's quota) or the day cap reached
+    (meter.stop_reason). The keyhole refuses at once (a 400 OpenCode doesn't retry), then the
+    round stops: no retry loop runs to the silence limit."""
+    stop = task.status.get("api_stop")
+    if isinstance(stop, dict) and stop.get("text"):
+        why, guard = str(stop["text"]), str(stop.get("guard") or "spend")
+    elif why := meter.stop_reason(task):
+        guard = "spend"
+    else:
+        return
+    if (kh := CURRENT.get("keyhole")) is not None:
+        kh.close(why)
+    out["stuck"], out["guard"] = why, guard
+
+
+def _spend_end(task: store.Task) -> None:
+    """An API task's round over: OpenCode's figure for its sessions, reconciled into the ledger."""
+    if (spend := meter.for_task(task)) is None or spend.plan:
+        return
+    from .transcript import export, finished_export
+    st = task.status
+    sessions = {}
+    try:
+        for sid in dict.fromkeys([*(st.get("sessions") or []), st.get("session")]):
+            if sid:
+                sessions[sid] = export(sid, task=task) if sid == st.get("session") \
+                    else finished_export(task, sid)
+        spend.end_round(sessions)
+    except Exception:  # a measurement: never a reason to stop the task
+        pass
+
+
+def _spend_lead(task: store.Task, rnd: dict) -> str:
+    """The stuck notice's first line for a spend stop: what to ask the user."""
+    return meter.stop_text(task) + "\n" if rnd.get("guard") == "spend" else ""
+
+
+def _go_on(task: store.Task, n: int, what: str) -> bool:
+    """Before each `continue` in drive (#1017, #1019): for an API task, today's spend under the
+    cap. At it, the task stops before ``what`` runs: phase `stuck`, status `guard` `spend`, a
+    `stuck` notice with cause `spend` (not the step's own: results.THE_STEP). A GPU task always
+    goes on, for nothing."""
+    if meter.for_task(task) is None or not (why := meter.stop_reason(task)):
+        return True
+    if (kh := CURRENT.get("keyhole")) is not None:
+        kh.close(why)
+    # infra and `by` as the in-round stop has them (stopped_by, #1020): the user's budget, never
+    # the step's, nor a lesson about the agent
+    task.set_status(phase="stuck", last=why[:200], guard="spend", infra=SPEND)
+    task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": f"{why}: {what} didn't run",
+                "by": SPEND})
+    text = f"{meter.stop_text(task)}\n{what} didn't run: {why}."
+    # auto-fix and self-review have moved status `round` on to n + 1, which never ran: round n's
+    # report goes with the notice, and says where it is (wb report alone said "no report yet")
+    if (summary := task.round_dir(n) / "summary.md").exists():
+        text += f"\nRound {n}'s report (wb report {task.name} --round {n}):\n{summary.read_text()}"
+    task.notify("stuck", text, round=n, cause="spend")
+    return False
 
 
 def drive(task: store.Task) -> None:
@@ -3468,6 +3903,8 @@ def drive(task: store.Task) -> None:
     # an API task waits for no GPU (#1015): its first line says so
     task.set_status(last="starting" if api else "waiting for the GPU")
     CURRENT["api"] = api  # no GPU power to sample, no keep-alive to renew (run_round)
+    pin_api(task, m)  # an API task's caps, read from the task from now on (#1017)
+    meter.for_task(task, m)  # an API task's meter (#1019): the ledger, the spend guard, the keyhole's hooks
     # the GPU is not ours to measure when the model is remote; an API model's isn't a GPU's at
     # all, and its savings line is its own (#1015)
     CURRENT["remote"] = m.remote and not api
@@ -3517,9 +3954,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
             _loaded(task, _load(task, lease, m))
             window = (m.config.get("limit") or {}).get("context")
             task.set_status(window=window)
-            own = task.spec.get("self_review")  # --self-review / --no-self-review, else learned
             tuning.tune(task, task.spec["model"], window, {"fresh_at": fresh_ceiling(m.config)},
-                        {} if own is None else {"self_review": int(own)})
+                        fixed_knobs(task, m))  # --self-review / --no-self-review, API's, else learned
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
         handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)
@@ -3564,7 +4000,9 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 rnd = run_round(task, n, keep=keep)
             finally:  # before the lease is released: the GPU's next task must not meet our agent
                 _end_agent(task)
-            measure_speed(task, began)
+            if not rnd.get("held"):  # a held request's first token waited on the provider (#1020)
+                measure_speed(task, began)
+            _spend_end(task)
             if (bound := read_bound(task, n, rnd, m)) and rnd["guard"] == "silence":
                 from . import router
                 rnd["stuck"] += (f" (it read at most ~{bound} tokens/s here: this task's next "
@@ -3575,6 +4013,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 if handed <= HANDOVER_MAX:
                     _round_end(task, n, rnd, began)
                     _full_round(task, n, rnd, handed)
+                    if not _go_on(task, n, "the handover"):
+                        return
                     continue
                 rnd["guard"] = "handovers"
                 rnd["stuck"] = (f"handed over to a fresh session {HANDOVER_MAX} times in this "
@@ -3588,6 +4028,15 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
             _round_end(task, n, rnd, began)
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])
+                if not _go_on(task, n, "Claude's note"):
+                    return
+                continue
+            if rnd["guard"] in HELD and revived != n:  # the provider's rate limit or outage: once (#1020)
+                revived = n
+                if not _provider_revive(task, n, rnd, lease):
+                    _steer_round(task, n, False)
+                if not _go_on(task, n, "the round again"):  # the day cap holds here too (#1019)
+                    return
                 continue
             crashed = not rnd["stuck"] and rnd["exit"] not in (0, None)
             hushed = rnd["guard"] == "silence"  # OpenCode retrying a server that is gone
@@ -3610,9 +4059,11 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                         _wait_up(task, m)
                     except RuntimeError as e:
                         return _load_failed(task, e)
+                if not _go_on(task, n, "the round again"):
+                    return
                 continue
             if rnd["stuck"] or died(rnd):
-                text = summary_text(task, n, rnd, None) + _undelivered(task)
+                text = _spend_lead(task, rnd) + summary_text(task, n, rnd, None) + _undelivered(task)
                 task.round_dir(n).joinpath("summary.md").write_text(text)
                 phase = "stuck" if rnd["stuck"] else "failed"
                 # its server gone again after the round's one revive: the machine's, not the
@@ -3624,10 +4075,13 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     # the provider's error, as the keyhole redacted it (an auth or quota error
                     # ends the run at once): what Claude needs to know, not only the exit (#1012)
                     last = f"{last}: {said[-1]}"[:200]
-                task.set_status(phase=phase, last=last, **({"infra": "model"} if server else {}))
+                # the provider's or the spend cap's, not the step's (#1020, #1019)
+                ours = None if server else stopped_by(rnd["guard"])
+                task.set_status(phase=phase, last=last,
+                                **({"infra": "model"} if server else {"infra": ours} if ours else {}))
                 # what stopped it, for results.step: a guard or the agent's own exit (#582)
-                task.notify(phase, text, round=n,
-                            cause="server" if server else "guard" if rnd["stuck"] else "agent")
+                task.notify(phase, text, round=n, cause="server" if server else ours
+                            or ("guard" if rnd["stuck"] else "agent"))
                 return
             # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257.
             # Theirs is waited for (a peer's round, up to its timeout; this machine's pool for a
@@ -3641,12 +4095,16 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 tests = run_tests(task, n)
             if pending_steer(task):  # a note that came in while the tests ran
                 _steer_round(task, n, False)
+                if not _go_on(task, n, "Claude's note"):
+                    return
                 continue
             text = summary_text(task, n, rnd, tests)
             if skip := not_the_code(task, tests):  # first: what Claude must do about it
                 text = f"auto-fix skipped: {skip}\n" + text
             if pending_steer(task):  # a note that came in while the report was written
                 _steer_round(task, n, False)
+                if not _go_on(task, n, "Claude's note"):
+                    return
                 continue
             task.round_dir(n).joinpath("summary.md").write_text(text)
             used = task.status.get("auto_fixes", 0)
@@ -3657,6 +4115,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 task.set_status(round=n + 1, auto_fixes=used + 1, tests=tests)
                 task.event({"ts": store.now(), "round": n, "kind": "autofix",
                             "text": "tests failed; sent the output back to the agent"})
+                if not _go_on(task, n, "auto-fix"):
+                    return
                 continue
             if tests and tests["ok"] and not task.status.get("self_review_due"):
                 # self-review could run, whether or not it does: only such a task is evidence
@@ -3671,6 +4131,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 task.set_status(round=n + 1, self_reviewed=mark, tests=tests)
                 task.event({"ts": store.now(), "round": n, "kind": "self_review",
                             "text": "tests pass; the agent reviews its own change first"})
+                if not _go_on(task, n, "self-review"):
+                    return
                 continue
             task.set_status(phase="review", tests=tests,
                             last="tests passed: Claude reviews next" if tests and tests["ok"]
@@ -4024,6 +4486,234 @@ def main():
             except OSError as e:
                 if not store.disk_full(e):
                     raise
+
+
+# Thinking per task (#1018). API providers think by default (DeepSeek at effort high), and
+# reasoning bills at the output rate, so an API task runs with thinking off unless its role says
+# on (decision 5 of #1008). It is fixed at wb start (with_thinking): DeepSeek drops the prompt
+# cache when the switch or the effort changes between requests, so feedback, next, resume and a
+# handover keep the task's opencode_model as it was. Thinking off is the catalog's own variant
+# that turns it off when the model lists one (`none`: OpenCode 2.3.2 lists it for DeepSeek's,
+# DeepInfra's and most OpenAI and OpenRouter models, but for only 2 of Anthropic's 20); else, for
+# a model that reasons with no variants listed (a config entry's `reasoning: true`), wb's own
+# OFF_VARIANT variant in the layer, as the provider speaks it (THINKING_OFF). A model whose
+# variants have no off position never gets one that thinks more than its bare id (_no_off_listed,
+# the #1018 review): a variant there can turn thinking on that the bare id leaves off. A GPU task
+# gets none of this: it thinks as the user's OpenCode entry says, as before.
+OFF_VARIANT = "wb-off"  # reserved: a user's own variant of that name loses to wb's in the layer
+EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")  # lowest first
+# A body field (DeepSeek's `thinking`) on a catalog provider's package goes only in a V2 variant,
+# `providers.<p>.models.<m>.variants: [{id, body}]`: a V1 variant keeps only keys the package has a
+# setting for (the spike, #1009; checked again on OpenCode 2.3.2, 2026-11-23: a V1 `thinking` on
+# the catalog's deepseek-flash left the agent's request without it). And a document holding a
+# provider in both forms loses the V1 one (`provider.deepseek.options.baseURL` beside
+# `providers.deepseek` went unread), so that provider's whole entry moves to V2 with it (_as_v2).
+# A config provider on an npm package (@ai-sdk/openai-compatible aimed at DeepSeek's host) sends
+# a V1 variant's keys in the body as they are, so its body field stays V1 (_off_form): moved to
+# V2 whole, its `npm` was no package to V2 and the run failed "Unsupported package" (2026-11-23).
+# Settings stay V1, as the spike checked them. The title request carries `thinking: disabled` of
+# OpenCode's own whatever the variant: a check of wb-off reads the agent's request (with tools).
+THINKING_OFF = {
+    "deepseek": {"body": {"thinking": {"type": "disabled"}}},
+    "openrouter": {"settings": {"reasoning": {"enabled": False}}},
+    "anthropic": {"settings": {"thinking": {"type": "disabled"}}},
+    "openai": {"settings": {"reasoningEffort": "none"}},  # every OpenAI-compatible package
+}
+SPEAKS_HOST = {"deepseek": "deepseek.com", "openrouter": "openrouter.ai", "anthropic": "anthropic.com"}
+THINKING_ON = "thinking on"
+THINKING_NOT = "thinking off (the model doesn't reason)"
+THINKING_OFF_LINE = "thinking off"
+THINKING_LOWEST = "thinking at its lowest effort (it can't turn off)"
+THINKING_STAYS = "thinking on (it can't turn off)"
+THINKING_DEFAULT = "thinking as the model's default (it lists no lower setting)"
+# The effort a provider runs a reasoning model at when the request names none (OpenAI's API and
+# OpenRouter: medium; DeepSeek: high), which a listed effort must be under to be picked. None for
+# Anthropic: a bare id there may not think at all (_no_off_listed).
+DEFAULT_EFFORT = {"openai": "medium", "openrouter": "medium", "deepseek": "high"}
+CATALOG_PACKAGE = "@opencode/ai/providers/"  # a catalog provider's package (keyhole.PACKAGE_PREFIX)
+
+
+def speaks(m) -> str:
+    """What the model's provider speaks, for THINKING_OFF: its package (the catalog's, or the
+    config's npm), else its base URL's host; anything else is OpenAI-compatible."""
+    from urllib.parse import urlparse
+    pkg = str(m.package or m.config.get("npm") or "").lower()
+    host = (urlparse(m.base_url or "").hostname or "").lower()
+    return next((k for k, dom in SPEAKS_HOST.items()
+                 if k in pkg or host == dom or host.endswith("." + dom)), "openai")
+
+
+def _listed_variants(cfg: dict) -> list[dict]:
+    """The model's own variants as the catalog lists them, [{id, settings | body}]; a config
+    entry's V1 `{name: settings}` read the same way."""
+    v = cfg.get("variants")
+    if isinstance(v, dict):
+        v = [{"id": k, "settings": s} for k, s in v.items() if isinstance(s, dict)]
+    return [x for x in v if isinstance(x, dict) and isinstance(x.get("id"), str)
+            and x["id"] != OFF_VARIANT] if isinstance(v, list) else []
+
+
+def _turns_off(v: dict) -> bool:
+    if v["id"] == "none":
+        return True
+    s = {**(v.get("settings") if isinstance(v.get("settings"), dict) else {}),
+         **(v.get("body") if isinstance(v.get("body"), dict) else {})}
+    r, t = s.get("reasoning"), s.get("thinking")
+    return ("none" in (s.get("reasoningEffort"), s.get("reasoning_effort"))
+            or isinstance(r, dict) and (r.get("enabled") is False or r.get("effort") == "none")
+            or isinstance(t, dict) and t.get("type") == "disabled")
+
+
+def _lowest(ids: list[str]) -> str:
+    """The lowest effort of these (EFFORTS' order; a name it doesn't know ranks last, the first
+    listed of equals first)."""
+    return min(ids, key=lambda i: EFFORTS.index(i) if i in EFFORTS else len(EFFORTS))
+
+
+def _thinking(m, thinking: str) -> tuple[str | None, str, dict | None]:
+    """(variant or None, the line that says it, wb's OFF_VARIANT variant or None)."""
+    if thinking == "on":
+        return None, THINKING_ON, None  # the provider's default
+    cfg = m.config if isinstance(m.config, dict) else {}
+    caps = cfg.get("capabilities") if isinstance(cfg.get("capabilities"), dict) else {}
+    rcap = caps.get("reasoning")
+    if cfg.get("reasoning") is False or isinstance(rcap, dict) and rcap.get("supported") is False:
+        return None, THINKING_NOT, None
+    listed = _listed_variants(cfg)
+    if off := next((v["id"] for v in listed if _turns_off(v)), None):
+        return off, THINKING_OFF_LINE, None
+    kind = speaks(m)
+    if listed:  # a switch with no off position
+        return _no_off_listed(kind, listed)
+    if isinstance(rcap, dict) and not rcap.get("toggle"):  # reasons, can't be turned off
+        efforts = [e for e in rcap.get("effort") or [] if isinstance(e, str)]
+        if kind == "openrouter":
+            return OFF_VARIANT, THINKING_LOWEST, {"settings": {"reasoning": {"effort": "minimal"}}}
+        if efforts:
+            return OFF_VARIANT, THINKING_LOWEST, {"settings": {"reasoningEffort": _lowest(efforts)}}
+        return None, THINKING_STAYS, None
+    if cfg.get("reasoning") is True or isinstance(rcap, dict):
+        return OFF_VARIANT, THINKING_OFF_LINE, _off_form(m, THINKING_OFF[kind])
+    # OpenCode lists variants for every model its catalog says reasons: none, it doesn't
+    return None, THINKING_NOT, None
+
+
+def _no_off_listed(kind: str, listed: list[dict]) -> tuple[str | None, str, None]:
+    """A model whose listed variants can't turn thinking off: never one that thinks more than
+    the bare id. Anthropic's manual-thinking models (every variant `thinking.type: enabled`, a
+    `budgetTokens`) don't think on the bare id, and OpenCode sends them no `thinking` (checked
+    2026-11-23, OpenCode 2.3.2): off as they are. Its adaptive ones may not either (the 4.6-4.8
+    line; others think on the bare id and refuse `disabled`, and the catalog doesn't say which):
+    the bare id, whose `#low` turned thinking on. Elsewhere the lowest listed effort when it is
+    under the provider's default (DEFAULT_EFFORT), else the bare id."""
+    if kind == "anthropic":
+        types = {(v.get("settings") or {}).get("thinking", {}).get("type") for v in listed
+                 if isinstance(v.get("settings"), dict) and isinstance(v["settings"].get("thinking"), dict)}
+        return (None, THINKING_OFF_LINE if types == {"enabled"} else THINKING_DEFAULT, None)
+    efforts = [v["id"] for v in listed if v["id"] in EFFORTS]
+    default = DEFAULT_EFFORT.get(kind)
+    if efforts and default and EFFORTS.index(low := _lowest(efforts)) < EFFORTS.index(default):
+        return low, THINKING_LOWEST, None
+    return None, THINKING_DEFAULT, None
+
+
+def _off_form(m, off: dict) -> dict:
+    """THINKING_OFF's variant for this model: a body field as a V1 setting on a provider of the
+    user's config (an npm package, which sends V1 keys in the body), else as it is."""
+    pkg = str(m.package or m.config.get("npm") or "")
+    if "body" in off and pkg and not pkg.startswith(CATALOG_PACKAGE):
+        return {"settings": off["body"]}
+    return off
+
+
+def thinking_variant(m, thinking: str) -> tuple[str | None, str]:
+    """The variant that gives an API model this thinking ("off" or "on"), or None for the
+    model's default, and the line that says what it does (task.json `thinking_shown`)."""
+    variant, shown, _ = _thinking(m, thinking)
+    return variant, shown
+
+
+def with_thinking(m, spec: dict) -> dict:
+    """task.json with an API task's thinking fixed (cmd_start, once): `thinking` (task.json's,
+    which the role sets; default off), `thinking_shown`, `opencode_model` with the variant, and
+    `thinking_off`, wb's own variant when one goes in the layer. A GPU task's is left as it was."""
+    if getattr(m, "kind", "gpu") != "api":
+        return spec
+    thinking = "on" if spec.get("thinking") == "on" else "off"
+    variant, shown, off = _thinking(m, thinking)
+    return {**spec, "opencode_model": f"{m.id}#{variant}" if variant else m.id,
+            "thinking": thinking, "thinking_shown": shown, **({"thinking_off": off} if off else {})}
+
+
+def _as_v2(doc: dict, pid: str, mid: str, variant: dict) -> dict:
+    """``doc`` with provider ``pid``'s V1 entry moved to the V2 form (options as settings, a V1
+    variants object as a list, `npm` as `package`) and ``variant`` added to model ``mid``'s variants."""
+    doc = dict(doc)
+    v1 = dict(((doc.get("provider") or {}).get(pid)) or {})
+    rest = {k: v for k, v in (doc.get("provider") or {}).items() if k != pid}
+    v2 = models._merge(((doc.get("providers") or {}).get(pid)) or {},
+                       {**{k: v for k, v in v1.items() if k not in ("options", "models", "npm")},
+                        # V2 names it `package`: a V2 `npm` failed "Unsupported package" (2026-11-23)
+                        **({"package": v1["npm"]} if "npm" in v1 else {}),
+                        **({"settings": v1["options"]} if isinstance(v1.get("options"), dict) else {})})
+    found = dict(v2.get("models") or {})
+    for name, entry in (v1.get("models") or {}).items():
+        entry = dict(entry) if isinstance(entry, dict) else {}
+        if isinstance(entry.get("options"), dict):
+            entry["settings"] = entry.pop("options")
+        # a V1 model's own base (`provider.api`, keyhole_overlay's) is a V2 model's
+        # settings.baseURL, as keyhole_v2 says it: moved as it was, the keyhole's base would be
+        # a key V2 doesn't read (#1015 with #1018)
+        if isinstance(entry.get("provider"), dict) and "api" in entry["provider"]:
+            base = entry.pop("provider")["api"]
+            entry["settings"] = {"baseURL": base, **(entry.get("settings") or {})}
+        if isinstance(entry.get("variants"), dict):
+            entry["variants"] = [{"id": k, "settings": s} for k, s in entry["variants"].items()]
+        found[name] = models._merge(found.get(name) or {}, entry)
+    mine = dict(found.get(mid) or {})
+    mine["variants"] = [v for v in mine.get("variants") or []
+                        if isinstance(v, dict) and v.get("id") != OFF_VARIANT] + [variant]
+    found[mid] = mine
+    doc["providers"] = {**(doc.get("providers") or {}), pid: {**v2, "models": found}}
+    if rest:
+        doc["provider"] = rest
+    else:
+        doc.pop("provider", None)
+    return doc
+
+
+def thinking_layer(doc: dict, spec: dict) -> dict:
+    """The config layer with the task's OFF_VARIANT variant (task.json `thinking_off`) under its
+    model, when its opencode_model names it: a settings variant in V1 form, a body one in V2."""
+    off = spec.get("thinking_off")
+    model, _, variant = str(spec.get("opencode_model") or "").partition("#")
+    if variant != OFF_VARIANT or not isinstance(off, dict) or "/" not in model:
+        return doc
+    pid, _, mid = model.partition("/")
+    if "body" in off:
+        return _as_v2(doc, pid, mid, {"id": OFF_VARIANT, **off})
+    return models._merge(doc, {"provider": {pid: {"models": {mid: {"variants": {
+        OFF_VARIANT: off.get("settings") or {}}}}}}})
+
+
+def restate_thinking(layer: dict, doc: dict) -> dict:
+    """OPENCODE_CONFIG_CONTENT (``doc``) with the layer's OFF_VARIANT variant said again, as the
+    model's pins are (rules_env): the task's model is the layer's small_model. Its provider goes
+    to V2 here too when the layer's did, keeping only its timeouts (never a key or baseURL)."""
+    pid, _, mid = str(layer.get("small_model") or "").partition("#")[0].partition("/")
+    v1 = ((((layer.get("provider") or {}).get(pid) or {}).get("models") or {}).get(mid) or {}).get("variants")
+    if isinstance(v1, dict) and OFF_VARIANT in v1:
+        return models._merge(doc, {"provider": {pid: {"models": {mid: {"variants": {OFF_VARIANT: v1[OFF_VARIANT]}}}}}})
+    v2 = (layer.get("providers") or {}).get(pid) or {}
+    mine = [v for v in ((v2.get("models") or {}).get(mid) or {}).get("variants") or []
+            if isinstance(v, dict) and v.get("id") == OFF_VARIANT]
+    if not mine:
+        return doc
+    doc = _as_v2(doc, pid, mid, mine[0])
+    settings = v2.get("settings") if isinstance(v2.get("settings"), dict) else {}
+    if timeouts := {k: settings[k] for k in PROVIDER_TIMEOUTS if k in settings}:
+        doc["providers"][pid]["settings"] = {**(doc["providers"][pid].get("settings") or {}), **timeouts}
+    return doc
 
 
 if __name__ == "__main__":

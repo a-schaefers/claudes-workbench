@@ -29,6 +29,8 @@ from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardwa
                transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
+from . import meter
+from . import privacy
 from .runner import PKG_ROOT
 
 PROTOCOL = """
@@ -50,6 +52,49 @@ question(s) for this task). Otherwise make reasonable choices and say what you a
   If you hit something the next agent would trip on too (a library's quirk, a pitfall, a check
   worth running), add a line `Lesson: <the rule, and why>` to it.
 """
+
+# The writing role's protocol (#1025): prose under its own rules, not the coding ones. Its fold
+# and first bullet, `{test_line}`, the ask_reviewer, lane and `.proposed` bullets, and the
+# `Lesson: <the rule, and why>` line are PROTOCOL's word for word: bench.FOLD and bench.TEST_LINE,
+# transcript's fold and runner.outline_section's split read them, lessons.LESSON the summary's
+# `Lesson:` lines. Its summary bullet is its own (the [TK] gaps, the check's result).
+WRITING_PROTOCOL = """
+
+---
+How to work (workbench protocol):
+- You are in a git worktree on branch {branch}. Git is read-only for you; leave the changes
+  uncommitted. Claude commits, pushes and deploys.
+{test_line}{experiment_protocol}- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
+question(s) for this task). Otherwise make reasonable choices and say what you assumed.
+- This is a writing task: change only the prose the brief names, or clearly means. No code,
+  config or dependency changes.
+- Facts come from the brief, the repository and the sources it names. Never invent a number,
+  quote, name, command or link: write [TK: what is missing] and list it in your summary.
+- Don't reflow, rewrap or reformat text you aren't changing: Claude reviews the diff line by line.
+- You can write only in this worktree, the temp directory and build caches: "Permission denied"
+  anywhere else is that limit, so don't keep trying it. Need a directory outside? Call `ask_reviewer`
+  with `path` set to it (this doesn't use the question budget).
+- CLAUDE.md and AGENTS.md are Claude's, and you can't edit them. When the task asks for a change
+  to one, write the whole new file next to it as `<name>.proposed` (`CLAUDE.md.proposed`); Claude
+  reads the difference and takes it.
+- Finish with a short summary: the files you changed, every [TK] gap, the check's result if there
+  is one, and any assumptions. If you hit something the next agent would trip on too, add a line
+  `Lesson: <the rule, and why>` to it.
+"""
+WRITING = "writing"  # the prose role (#1025; the roles: #1014)
+
+
+def protocol_for(spec: dict) -> str:
+    """The protocol a task's prompts end with: WRITING_PROTOCOL for the writing role, else
+    PROTOCOL. ``spec``: task.json, or what wb start is about to write there."""
+    return WRITING_PROTOCOL if spec.get("role") == WRITING else PROTOCOL
+
+
+def self_review(asked: bool | None, role: str | None) -> bool | None:
+    """task.json `self_review`: --self-review/--no-self-review, else None (the tuning's pick).
+    A writing task's is off unless asked: its check is a code check, mutating tests a prose task
+    hasn't, a round spent (on an API model, paid) for nothing (#1025)."""
+    return False if asked is None and role == WRITING else asked
 
 
 def test_line(test: str | None) -> str:
@@ -625,23 +670,12 @@ def _role_cant_run(m: models.Model, state: dict, routed: dict) -> str | None:
 
 def _routed_keys(routed: dict) -> dict:
     """task.json's routing keys (#1016), fixed at start as `model` is: `via` and `role` always;
-    for API `provider`, `provider_name`, `thinking`, `said` and `said_ts` (when the role has one)."""
-    keys = ("via", "role") + (("provider", "provider_name", "thinking", "said", "said_ts", "busy")
+    for API `provider`, `provider_name`, `thinking`, `said` and `said_ts` (when the role has one),
+    an OpenRouter role's `order` (#1021), which the keyhole routes every request by, and `busy`
+    when the busy opt-in sent it there (#1023)."""
+    keys = ("via", "role") + (("provider", "provider_name", "thinking", "said", "said_ts", "order", "busy")
                               if routed.get("via") == "api" else ())
     return {k: routed[k] for k in keys if routed.get(k) is not None}
-
-
-def _first_api_note(repo: Path, routed: dict, me: str) -> str | None:
-    """The first API task in a repo for a provider says where its code goes (#1016): no earlier
-    task with the same repo and provider. Child 13 adds the data policy's words."""
-    if routed.get("via") != "api":
-        return None
-    if any(t.name != me and t.spec.get("repo") == str(repo) and t.spec.get("provider") == routed["provider"]
-           for t in store.all_tasks()):
-        return None
-    whose = ("asked for" if (routed.get("said") or "").startswith("asked for")
-             else f"the {routed['role']} role's model")
-    return f"{repo.name}'s code goes to {routed.get('provider_name') or routed['provider']} ({whose})"
 
 
 def _busy_api(role: str, a, repo: Path, sub: str | None):
@@ -665,21 +699,15 @@ def _busy_api(role: str, a, repo: Path, sub: str | None):
     why = None if state["available"] else state["why"]
     if why is None and not models.api_slots_free(models.api_provider(m)):
         why = f"every one of {models.api_provider(m)}'s {models.API_PARALLEL} slots is taken"
-    try:  # wave 2's (#1019 the day cap, #1021 a repo kept local), when this wb has them
-        from . import meter
-    except ImportError:
-        meter = None
-    try:
-        from . import privacy
-    except ImportError:
-        privacy = None
-    if why is None and getattr(a, "local_only", False):  # wave 2's wb start --local-only (#1021)
+    if why is None and a.local_only:  # wb start --local-only (#1021)
         why = "this task is kept local (--local-only)"
-    if why is None and privacy is not None and (local := getattr(privacy, "local_only", None)) \
-            and (kept := local(repo, sub)):
+    if why is None and (kept := privacy.local_only(repo, sub)):  # commands.json's (#1021)
         why = f"{repo.name} is kept local ({kept})"
-    if why is None and meter is not None and (refusal := getattr(meter, "refusal", None)):
-        why = refusal(m, role)
+    if why is None:  # commands.json's standing copy/siblings, unnamed (#1021), as an API start's
+        why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m)) or None
+    if why is None:  # no price, or today at the day cap (#1019), without an API start's advice:
+        # the role is on the GPU and this start only waits for it (wave 2's merge)
+        why = meter.refusal(m, role, advice=False)
     if why:
         return f"the GPU is busy, and the {role} role's API model {mid} can't take it: {why}"
     routed = routes.busy_routed(doc, role, m)
@@ -906,13 +934,15 @@ CACHE_DIRS = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".to
               ".cache", ".idea", ".vscode")
 
 
-def _worktree_setup(repo: Path, a, sub: str | None = None) -> dict:
+def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", where: str = "") -> dict:
     """The task's `setup`, `copy` and `siblings`: commands.json's `repos` entry for the repo,
     with --setup in its place and --copy/--sibling added, each checked (#201, the 2026-11-19
     audit). A copied path must be ignored in the checkout (else it shows in the review diff) and
     no secret (SECRET_FILES): the user's settings stay theirs. A sibling is a directory beside
     the repo the lane may read."""
     conf = context.repo_conf(repo, sub)  # the package's entry, not the repo's first (#778)
+    if via == "api":  # nothing standing goes to a provider unnamed (#1021)
+        _standing_refusal(conf, a, where)
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
     for raw in [*conf.get("copy", []), *(a.copy or [])]:
@@ -984,6 +1014,109 @@ def _worktree_setup(repo: Path, a, sub: str | None = None) -> dict:
         die("--setup-timeout is seconds: a positive whole number")
     return {k: v for k, v in (("setup", setup), ("copy", copy), ("siblings", sibs),
                               ("setup_timeout", limit if setup else None)) if v}
+
+
+def _standing_refusal(conf: dict, a, where: str) -> None:
+    """An API task takes commands.json's standing `copy` and `siblings` only when this command
+    line names them too: a `.env.local` copied into every worktree, or a `../shared` the lane
+    reads, would reach the provider unasked (#1021). Exit 3, the entry and how to name it."""
+    if why := _standing_gap(conf, a, where):
+        die(why, 3)
+
+
+def _standing_gap(conf: dict, a, where: str) -> str:
+    """_standing_refusal's line, or '': also the busy opt-in's (#1023), which moves a GPU start to
+    an API model after _worktree_setup checked it as a GPU one (wave 2's merge)."""
+    named_copy = {os.path.normpath(x.strip()).rstrip("/") for x in a.copy or []}
+    named_sib = {x.strip().rstrip("/").removeprefix("../") for x in a.sibling or []}
+    for raw in conf.get("copy", []):
+        if os.path.normpath(raw.strip()).rstrip("/") not in named_copy:
+            return privacy.standing_refusal("copy", raw, where)
+    for raw in conf.get("siblings", []):
+        if raw.strip().rstrip("/").removeprefix("../") not in named_sib:
+            return privacy.standing_refusal("siblings", raw, where)
+    return ""
+
+
+def _role(a) -> str:
+    """The role a start runs on: --role (#1016), else the size's (routes.role_and_size)."""
+    return routes.role_and_size(getattr(a, "role", None), a.size)[0]
+
+
+def _local_only_check(a, repo: Path, role: str, sub: str | None) -> None:
+    """Refuse an API model for a local-only spot before any model is picked (#1021): exit 3 with
+    the choices (local_only_refusal); never the GPU instead."""
+    if why := local_only_refusal(repo, sub, role, a.model, a.local_only):
+        die(why, 3)
+
+
+def local_only_refusal(repo: Path, sub: str | None, role: str, model: str | None,
+                       this_task: bool = False) -> str:
+    """Why an API model may not take this spot (commands.json `repos.<path>.local_only`, or
+    --local-only: ``this_task``), or '': ``model`` (--model) when it is an API id, else the
+    role's side as it runs (routes.effective_via: the Agents switch over the role's own `via`).
+    The line wb start dies with; #1014's `wb route --dry-run --model` gives it
+    the start's repo and prints it in place of a dialog line, so the user is never asked to
+    approve a start that would be refused (#1021's review)."""
+    key = privacy.local_only(repo, sub)
+    if not key and not this_task:
+        return ""
+    if model:
+        try:
+            m = models.resolve(model)
+        except KeyError:
+            return ""  # pick_model says why
+        if m.kind != "api":
+            return ""
+        model_id, asked = m.id, True
+    else:
+        try:  # unreadable: wb start refuses it (routes.resolve) before anything is sent
+            doc = routes.read()
+        except routes.RoutesError:
+            return ""
+        # the Agents switch over the role's own via: its `use: api` once sent a local-only repo's
+        # code with the role's via on gpu, and `use: gpu` refused a start the GPU ran (wave 2's review)
+        entry = doc["roles"].get(role) or {}
+        if routes.effective_via(doc, role) != "api" or not entry.get("api"):
+            return ""
+        model_id, asked = str(entry["api"]), False
+    at = privacy.home_path(Path(key).expanduser() if key else repo)
+    why = 'commands.json "repos"' if key else "--local-only"
+    return privacy.local_only_line(at, why, role, model_id, asked)
+
+
+def _local_only_now(task: store.Task) -> str:
+    """For an API task whose repo became local-only after it started, the line wb next, feedback
+    and resume refuse it with (takeover or discard: its model is fixed per task), else ''."""
+    if privacy.is_api_task(task) and privacy.local_only(task.spec["repo"], task.spec.get("subdir")):
+        return privacy.since_start_line(task)
+    return ""
+
+
+def _local_only_since(task: store.Task) -> None:
+    """wb next/feedback/resume on an API task whose repo became local-only since it started:
+    exit 3 (#1021)."""
+    if why := _local_only_now(task):
+        die(why, 3)
+
+
+def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> list[str]:
+    """An API task's start notes: on the repo's first task to this provider, what goes, to whom
+    and whose choice it was (privacy.where_note, #1016's first-task note with #1021's words), and
+    the token files its lane hides: those holding a credential (#1021). ``routed``: what task.json
+    holds (_routed_keys): the backends named are the ones the keyhole routes by, never routes.json's
+    (an `order` the note named once never reached the task: wave 2's review)."""
+    notes = []
+    if privacy.first_for(repo, m.provider, task_name):
+        info = privacy.where(m, routed.get("order"))
+        named = [f"{c} (--copy)" for c in a.copy or []] + [f"{x} (--sibling)" for x in a.sibling or []]
+        rules = (context.claude_home() / "CLAUDE.md").is_file() or (context.claude_home() / "rules").is_dir()
+        whose = ("asked for" if (routed.get("said") or "").startswith("asked for")
+                 else f"the {routed.get('role') or _role(a)} role's model")
+        notes.append(privacy.where_note(info, rules, named, whose))
+    if gap := context.api_hidden_note():
+        notes.append(gap)
+    return notes
 
 
 # What an install makes, at any depth: a monorepo's per-package node_modules or .venv
@@ -1096,6 +1229,15 @@ def _backlog_done(name: str) -> str | None:
             f"one a fresh name, as --backlog {fresh}")
 
 
+# --auto-fix when not given (#1017): each round Claude never sees costs an API task money, so one
+# there; a given value is Claude's word, kept and printed on the start line.
+AUTO_FIX = {"gpu": 2, "api": 1}
+
+
+def auto_fix(a, m: models.Model) -> int:
+    return a.auto_fix if a.auto_fix is not None else AUTO_FIX.get(m.kind, AUTO_FIX["gpu"])
+
+
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
@@ -1146,6 +1288,7 @@ def cmd_start(a):
     # the role (#1016): --role, else from --size; routes.json read there, never as all GPU
     # (that would move the user off their API choice unsaid, #1014)
     role, size = routes.role_and_size(a.role, a.size)
+    _local_only_check(a, repo, role, _package(repo, Path(a.repo).resolve(), a.base))  # #1021
     m, state, why, routed = pick_model(role, size, a.model, stack, a.name)
     # an API role's model: no fallback, and --force (a --model's) never starts it anyway: the task
     # went on to fail in the runner, the user never asked (#1016's review)
@@ -1170,7 +1313,7 @@ def cmd_start(a):
         print(f"package: {sub} (its own CLAUDE.md): the agent, the setup and the tests run there")
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
-    setup = _worktree_setup(repo, a, sub)
+    setup = _worktree_setup(repo, a, sub, m.kind, models.provider_name(m))
     checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
@@ -1229,11 +1372,13 @@ def cmd_start(a):
     # off where it can't help: no file in a language probe reads over PROBE_FILE_LINES in the
     # repo, so the task runs as with probe off (the owner, #857). On is large files only, one
     # setting: its levels went (the owner, 2026-11-22, #857: off and on, on is large files only)
-    if exps.get("probe") and (no_probe := context.probe_off(spec_text, repo, sub, base))[0]:
+    if exps.get("probe") and role == WRITING:  # prose has no code to find its way in (#1025)
+        exps, off = {**exps, "probe": False}, {"probe": context.PROBE_OFF_WRITING}
+    elif exps.get("probe") and (no_probe := context.probe_off(spec_text, repo, sub, base))[0]:
         exps, off = {**exps, "probe": False}, {"probe": no_probe[0]}
     elif exps.get("probe"):
         probe = {"probe_files": no_probe[1]}  # the long files the spec names, in probe's languages
-    prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
+    prompt = spec_text.rstrip() + protocol_for({"role": role}).format(branch=gitops.branch_name(a.name),
                                                   test_line=test_line(a.test), budget=budget,
                                                   experiment_protocol=context.experiment_protocol(
                                                       experiments=exps))
@@ -1242,7 +1387,7 @@ def cmd_start(a):
     # from the model's measured speed on this machine, else defaults; its identity (cached:
     # weights_id below) finds the speed it had under an id it was renamed from (#905)
     limits = router.budgets(m, models.identity(m))
-    store.write_json(task.dir / "task.json", {
+    store.write_json(task.dir / "task.json", runner.with_thinking(m, {  # fixed per task (#1018)
         "name": a.name, "repo": str(repo), "cwd": os.getcwd(), "base": base, "base_ref": a.base,
         # the repository's own git dir: where its branch is once `repo` is removed (#498)
         **({"git_common": str(common)} if (common := gitops.common_dir(repo)) else {}),
@@ -1261,6 +1406,7 @@ def cmd_start(a):
         "opencode_model": m.id, "route": why, "size": size, "stack": stack,
         **_routed_keys(routed),  # via, role; an API model's provider, thinking, said (#1016)
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
+        **({"local_only": True} if a.local_only else {}),  # this task's alone (#1021)
         **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
         **({"worktree": str(wt.relative_to(task.dir))} if wt != task.dir / "worktree" else {}),
         "checkout": "runner",  # the runner makes the worktree, before its setup (#529)
@@ -1273,11 +1419,11 @@ def cmd_start(a):
         **({"unload_for_tests": True} if getattr(a, "unload_for_tests", False) else {}),
         **({"sign": False} if a.no_sign else {}),
         **({"subdir": sub} if sub else {}),
-        "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
+        "auto_fix": (fixes := auto_fix(a, m)), "ask_budget": budget, "ask_timeout": a.ask_timeout,
         # periodic check-ins are opt-in: each wakes Claude, re-reading its whole context, and they
         # were 500K of one task's 1.2M (2026-11-17); the pane shows progress, and the warnings
         # (a nudge, a full window, handovers, a cut base check) still wake
-        "checkin": a.checkin or 0, "self_review": a.self_review,
+        "checkin": a.checkin or 0, "self_review": self_review(a.self_review, role),
         "experiments": exps,  # what this task's agent has: wb experiment
         **probe,  # the long files its spec names, with probe on
         **({"experiments_off": off} if off else {}),  # set, but off for this task, and why
@@ -1287,7 +1433,7 @@ def cmd_start(a):
         # the rest stretch when a round measures the model slow (runner.stretch_limits, #814)
         "timeouts_given": [k for k, v in (("round", a.round_timeout), ("silence", a.silence_timeout))
                            if v] + (["think"] if a.think_timeout is not None else []),
-        "created_at": store.now(), "wb_version": __version__})
+        "created_at": store.now(), "wb_version": __version__}))
     (task.dir / STARTING).unlink(missing_ok=True)  # a task now: wb discard drops it from here on
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
@@ -1302,10 +1448,9 @@ def cmd_start(a):
     context.grant(task, "test_tools", tools)
     context.grant(task, "paths", lane_dirs)
     fixed = _fixed_line(task, m)  # before the runner, which writes the same rules files
-    first_api = _first_api_note(repo, routed, a.name)
     spawn_runner(task)
     print(f"started {a.name} on {f'{m.id} (API)' if api else m.label} · branch {gitops.branch_name(a.name)} · "
-          f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
+          f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {fixes}" if a.test else ""))
     if a.test and not a.no_base_check:
         print("base check: the runner runs the acceptance command once on the base first; what "
               "it saw comes with the first report (a check-in at once if --test-timeout cuts it "
@@ -1348,11 +1493,12 @@ def cmd_start(a):
         print(f"note: {fixed}")
     if drift := runner.untested(have):
         print(f"note: {drift}")
-    print(routes.model_line(m.id, routed) if api else f"model: {why}" if why != "asked for"
+    # an API task's ends with today's spend against the cap, or its plan's usage (meter.tail, #1019)
+    print(routes.model_line(m.id, routed) + meter.tail(m) if api else f"model: {why}" if why != "asked for"
           else f"model: {m.id} (asked for)")
     _say(routes.BUSY_LINE if routed.get("busy") else "")
-    if first_api:
-        print(f"note: {first_api}")
+    for note in _api_notes(a.name, repo, m, a, routed) if api else ():  # #1016, #1021
+        print(f"note: {note}")
     print(f"slice: {router.slice(m).line()}")
     if gaps := results.spec_gap_line():
         print(gaps)
@@ -1413,6 +1559,7 @@ def _spec_gaps(task: store.Task, gaps: list[str] | None) -> None:
 def cmd_feedback(a):
     task = need(a.name)
     reap(task)
+    _local_only_since(task)  # #1021
     st = task.status
     if st.get("phase") not in ("review", "stuck", "failed"):
         die(f"{a.name} is {st.get('phase')}; feedback goes to a task waiting for review")
@@ -1514,6 +1661,7 @@ def cmd_next(a):
     worktree, same session (so it keeps what it has read), unless it is full or --fresh."""
     task = need(a.name)
     reap(task)
+    _local_only_since(task)  # #1021
     spec, st = task.spec, task.status
     if st.get("phase") != "review":
         die(f"{a.name} is {st.get('phase')}; wb next follows an approved step under review")
@@ -1564,7 +1712,7 @@ def cmd_next(a):
         f"Step {step} of this task is done and committed ({commit or 'no changes to commit'}). "
         "The next step:\n\n"
         + nxt.rstrip()
-        + PROTOCOL.format(branch=spec["branch"], test_line=test_line(test), budget=budget,
+        + protocol_for(spec).format(branch=spec["branch"], test_line=test_line(test), budget=budget,
                           experiment_protocol=context.experiment_protocol(task)),
         encoding="utf-8")
     handled = store.now()
@@ -2284,6 +2432,9 @@ def cmd_resume(a):
         if not _rechecks_out(t) and (why := _worktree_problem(t)):
             print(why)  # as _resume would say it, without ending the batch
             continue
+        if why := _local_only_now(t):  # its repo became local-only: the rest still go on (#1021)
+            print(why)
+            continue
         with store.locked(runner.lock_file(t.name, "cmd")):  # as one_at_a_time, task by task
             _resume(t)
 
@@ -2306,6 +2457,7 @@ def _resume(task: store.Task) -> None:
     st, name = task.status, task.name
     if st.get("phase") not in ("stuck", "failed"):
         die(f"{name} is {st.get('phase')}; wb resume continues a stopped task")
+    _local_only_since(task)  # #1021
     if why := _accepting(task):  # (#878)
         die(why)
     if runner_alive(task):
@@ -2666,12 +2818,13 @@ def _who(mid: str) -> str:
     return models.provider_name(m) if m is not None and m.kind == "api" else mid.split("/", 1)[0]
 
 
-def _route_argv(role, target, gpu, api, thinking, day) -> list[str]:
+def _route_argv(role, target, gpu, api, thinking, day, order=None) -> list[str]:
     """The change as one canonical command (after `wb`): what the dialog approved and the gate
     compares, whatever spelling (an abbreviation, `--flag=value`) Claude used."""
     out = ["route", *([role] if role else []), *([str(target)] if target is not None else [])]
     for flag, v in (("--gpu", gpu), ("--api", api), ("--thinking", thinking),
-                    ("--day-usd", f"{day:g}" if day is not None else None)):
+                    ("--day-usd", f"{day:g}" if day is not None else None),
+                    ("--order", ",".join(order) if order is not None else None)):
         if v is not None:
             out += [flag, v]
     return out
@@ -2713,6 +2866,17 @@ def _route_start(a) -> None:
         return
     if not API_RUNS:  # exit 3: the mod lets the call through, and wb start refuses it, unasked
         die(f"{m.id} {API_NOT_YET}", 3)
+    # a local-only spot's refusal in place of a dialog line (#1021): never ask the user to
+    # approve a start wb start refuses
+    try:
+        repo = gitops.toplevel(Path(ns.repo).resolve())
+        sub = _package(repo, Path(ns.repo).resolve(), ns.base)
+    except gitops.GitError:
+        repo = sub = None  # wb start says why
+    if repo is not None and (why := local_only_refusal(repo, sub, _role(ns), ns.model, ns.local_only)):
+        die(why, 3)
+    if why := meter.refusal(m):  # no price, or today at the cap (#1019): wb start refuses it too
+        die(why, 3)
     line = start_line(ns.name, m)
     print(json.dumps({"change": line, "gate": True,
                       "approval": {"start": {"task": ns.name, "model": m.id}, "change": line}})
@@ -2747,7 +2911,7 @@ def _route_show(as_json: bool) -> None:
         gone = row.get("api") and models.lookup(row["api"]) is None
         if row["via"] == "api":
             bits = [f"API {row['api']} ({_who(row['api'])})" + (" (not in OpenCode's catalog now)" if gone else ""),
-                    f"thinking {row['thinking']}"]
+                    f"thinking {row['thinking']}", *([f"backends {', '.join(row['order'])}"] if row.get("order") else [])]
         else:
             bits = ["GPU (the router picks)" if row["gpu"] == routes.AUTO else f"GPU {row['gpu']} (pinned)"]
             if row.get("api"):
@@ -2792,16 +2956,18 @@ def _route_pane() -> dict:
 
 def _spend_today() -> dict:
     """Today's API spend (local day) by provider, from the day ledger (#1019's spend-api.jsonl:
-    `step` and `reconcile` rows, each with `day`, `provider` and `usd`); none yet is 0."""
-    day = time.strftime("%Y-%m-%d")
-    rows, _ = store.read_jsonl(store.home() / "spend-api.jsonl")
+    `step` and `reconcile` rows, each with `day`, `provider` and `usd`); none yet is 0. `usd` is
+    meter.today()'s, the sum the day cap is checked against, so the pane never shows another
+    (wave 2's merge: this read the ledger a second way)."""
+    day = meter.day()
+    rows, _ = store.read_jsonl(meter.ledger_path())
     by: dict = {}
     for r in rows:
         if isinstance(r, dict) and r.get("day") == day and r.get("kind") in ("step", "reconcile") \
-                and isinstance(r.get("usd"), (int, float)) and not isinstance(r.get("usd"), bool):
+                and meter._num(r.get("usd")):
             p = str(r.get("provider") or "?")
             by[p] = by.get(p, 0.0) + r["usd"]
-    return {"usd": round(sum(by.values()), 6), "by_provider": {p: round(v, 6) for p, v in by.items()}}
+    return {"usd": meter.today()["usd"], "by_provider": {p: round(v, 6) for p, v in by.items()}}
 
 
 def _agents_line(doc: dict) -> str:
@@ -2825,7 +2991,7 @@ def cmd_route(a):
         return _route_start(a)
     what, target = a.what, a.target
     if what is None:
-        if any(v is not None for v in (target, a.gpu, a.api, a.thinking, a.day_usd)):
+        if any(v is not None for v in (target, a.gpu, a.api, a.thinking, a.day_usd, a.order)):
             die("name a role: wb route <role> gpu|api|<provider/model>, wb route all gpu|api|both, wb route cap <usd>, "
                 "or wb route busy wait|api")
         if a.dry_run:
@@ -2835,6 +3001,9 @@ def cmd_route(a):
     if a.more:
         return _route_pairs(a)
     role, via, api, gpu, day, use = None, None, a.api, a.gpu, a.day_usd, None
+    order = privacy.parse_order(a.order) if a.order is not None else None
+    if a.order is not None and (what not in routes.ROLES or not order):
+        die("--order names an OpenRouter role's backends: wb route <role> openrouter/<model> --order <name>[,<name>]")
     busy = None
     if what == "cap":
         if a.gpu or a.api or a.thinking or a.day_usd is not None:
@@ -2879,14 +3048,14 @@ def cmd_route(a):
     else:  # an API id as resolved, given as the positional or --api
         argv = _route_argv(what, target if target in (None, *routes.USES) else api, gpu,
                            api if a.api is not None and target in (None, *routes.USES) else None,
-                           a.thinking, a.day_usd)
+                           a.thinking, a.day_usd, order)
 
     def changed(doc) -> routes.Change:
         if use == "api" and not routes.any_api(doc):
             die("no role has an API model yet: wb route <role> <provider/model>", 3)
         try:
             ch = routes.change(doc, None if what == "cap" else role, via=via, gpu=gpu, api=api,
-                               thinking=a.thinking, day_usd=day, who=_who, use=use, busy=busy)
+                               thinking=a.thinking, day_usd=day, who=_who, use=use, order=order, busy=busy)
         except routes.RoutesError as e:
             die(str(e), 3)
         # a kept API model a role newly runs on (its own flip, or the Agents switch) must still be
@@ -2895,9 +3064,23 @@ def cmd_route(a):
             if routes.effective_via(ch.doc, r) == "api" and (kept := ch.doc["roles"][r].get("api")) \
                     and kept != api and routes.effective_via(doc, r) != "api":
                 _route_api(kept, r)
+        _order_check(doc, ch.doc)
         return ch
 
     _route_apply(a, argv, changed)
+
+
+def _order_check(doc: dict, new: dict) -> None:
+    """An OpenRouter model run without its backends (#1021): exit 3, no dialog, for a role a
+    change newly sends there, on its own side or the Agents switch, or by the busy opt-in (#1023:
+    `wb route busy api` reached one that no check saw, wave 2's merge)."""
+    busy = routes._busy_newly(doc, new)
+    for r in routes.ROLES:
+        row = new["roles"][r]
+        if (routes.effective_via(new, r) == "api" and (
+                row.get("api") != doc["roles"][r].get("api") or routes.effective_via(doc, r) != "api")
+                or r in busy) and (why := privacy.order_refusal(str(row.get("api") or ""), row.get("order"))):
+            die(why, 3)
 
 
 def _route_pairs(a) -> None:
@@ -2905,9 +3088,9 @@ def _route_pairs(a) -> None:
     change, so the first run's one question is one dialog. A choice is gpu, api or an API model's
     exact id. All or nothing: any pair wb refuses (an id not in the catalog, a key wb can't hold, a
     role named twice) exits 3 naming it, before anything is written."""
-    if a.gpu or a.api or a.thinking or a.start is not None or a.what in ("all", "cap"):
+    if a.gpu or a.api or a.thinking or a.order is not None or a.start is not None or a.what in ("all", "cap", "busy"):
         die("several roles take a choice each (gpu, api or an API model's exact id) and --day-usd; "
-            "--gpu, --api, --thinking, all and cap go in a wb route of their own")
+            "--gpu, --api, --thinking, --order, all, cap and busy go in a wb route of their own")
     words = [a.what, a.target, *a.more]
     if len(words) % 2:
         die(f"{words[-1]} has no choice: wb route <role> gpu|api|<provider/model> <role> …")
@@ -2924,7 +3107,7 @@ def _route_pairs(a) -> None:
             why = models.hosted_error()
             die(f"{role} {target}: {ROUTE_CATALOG}" + (f" (its read failed: {why})" if why else ""), 3)
         m = _route_api(target, role)
-        if m.provider == getattr(routes, "OPENROUTER", "openrouter"):  # its backends are chosen alone
+        if m.provider == routes.OPENROUTER:  # its backends (--order) are chosen in a wb route of their own
             die(f"{role} {m.id}: an OpenRouter role is set in a wb route of its own", 3)
         pairs.append((role, "api", m.id))
     argv = ["route", *(w for r, via, mid in pairs for w in (r, mid or via)),
@@ -2938,6 +3121,7 @@ def _route_pairs(a) -> None:
         for r, via, mid in pairs:  # a kept API model a role newly runs on must still be one it may run
             if mid is None and routes.effective_via(ch.doc, r) == "api" and routes.effective_via(doc, r) != "api":
                 _route_api(ch.doc["roles"][r]["api"], r)
+        _order_check(doc, ch.doc)  # a kept OpenRouter model, put on API with no backends
         return ch
 
     _route_apply(a, argv, changed)
@@ -3954,13 +4138,8 @@ def _models_json() -> dict:
     for t in sorted(store.all_tasks(archived=True), key=lambda t: -(t.spec.get("created_at") or 0)):
         if t.spec.get("via") == "api" and (mid := t.spec.get("model")) and mid not in used:
             used.append(mid)
-    try:
-        from . import privacy  # #1021's mark for a free model, when this wb has it
-        free_line = getattr(privacy, "FREE_LINE", "")
-    except ImportError:
-        free_line = ""
     st = optimize.state()
-    return {"gpu": gpu, "api": api, "used": used, "free_line": free_line or "free",
+    return {"gpu": gpu, "api": api, "used": used, "free_line": privacy.FREE_LINE,
             "optimize": {"done_at": st.get("done"), "models": len(st.get("models") or {}),
                          "running": bool(optimize.running(st))}, "media": _media_json()}
 
@@ -4015,15 +4194,31 @@ def cmd_savings(a):
                             {m: models.weights(found[m]) for m in {r.get("model") for r in rows}
                              if m in found}, hardware.system()))
         return
+    if a.api:  # the API tasks' money, apart from the score (#1022)
+        return _api_savings(a, period, since)
     t = savings.totals(store.results(), since=since)
     if a.card:  # made here, from the totals alone: the user decides where it goes (#101)
         Path(a.card).write_text(savings.card(t, period), encoding="utf-8")
         s = savings.score(t)
         print(f"wrote {a.card}: " + (f"{s['score']}/100. {s['sentence']}" if s else savings.NO_SCORE))
     elif a.json:
-        print(json.dumps({"period": period, **t, "score": savings.score(t), "price": savings.price()}))
+        print(json.dumps({"period": period, **t, "score": savings.score(t), "price": savings.price(),
+                          "api": savings.api_totals(store.results(trials=True), since)}))
     else:
         print(savings.summary(t, period))
+        if api := savings.api_summary(savings.api_totals(store.results(trials=True), since)):
+            print(api)
+
+
+def _api_savings(a, period: str, since: float) -> None:
+    """`wb savings --api`: the period's API money by provider and day, trials in, and the bench's
+    replays (bench.paid_since)."""
+    t = savings.api_totals(store.results(trials=True), since)
+    replays = bench.paid_since(since)
+    if a.json:
+        print(json.dumps({"period": period, **t, "bench": replays}))
+    else:
+        print(savings.api_report(t, period, replays))
 
 
 def cmd_backlog(a):
@@ -4317,15 +4512,14 @@ def _role_where(doc: dict, r: str) -> str:
 
 
 def _api_record(mid: str, since: float) -> str:
-    """An API model's real tasks since ``since``: tasks, accepted, paid a task (wave 2's
-    results.row_cost, when this workbench records it), rounds a provider rate-limited."""
+    """An API model's real tasks since ``since``: tasks, accepted, paid a task (results.row_cost,
+    #1019), rounds a provider rate-limited."""
     rows = [r for r in store.results() if r.get("model") == mid and (r.get("ts") or 0) >= since]
     if not rows:
         return "no real tasks yet"
     out = [f"{len(rows)} task(s)", f"{100 * sum(r.get('outcome') == 'accepted' for r in rows) // len(rows)}% accepted"]
-    cost = getattr(results, "row_cost", None)
-    if cost is not None and (paid := [c for r in rows if (c := cost(r)) is not None]):
-        out.append(f"~${sum(paid) / len(paid):.2f}/task")
+    if paid := [c for r in rows if (c := results.row_cost(r)) is not None]:
+        out.append(f"~{savings.usd(sum(paid) / len(paid))}/task")  # as wb stats' `paid` says it
     limited = set()
     for r in rows:
         evs, _ = store.read_jsonl(store.home() / "tasks" / str(r.get("task")) / "events.jsonl")
@@ -4356,13 +4550,14 @@ def scout_api_lines() -> list[str]:
         out.append(f"api models in roles (the last {SCOUT_API_DAYS} days)")
         out += [f"  {mid}  {_api_record(mid, now - SCOUT_API_DAYS * 86400)}" for mid in mids]
     cap = f"{routes.money(doc['day_usd'])}/day at most" if doc["day_usd"] is not None else "no day cap"
-    if (totals := getattr(savings, "api_totals", None)) is not None:  # wave 2's (#1022)
-        t = totals(store.results(trials=True), now - SCOUT_SPEND_DAYS * 86400)
-        by = ", ".join(f"{p} ${v['cost']:.2f}" for p, v in sorted(t["by_provider"].items(), key=lambda x: -x[1]["cost"])
-                       if v["cost"])
-        out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: ${t['cost']:.2f} of {cap}"
-                   + (f" ({by})" if by else "")
-                   + (f"; {t['unknown']} task(s) with no price" if t.get("unknown") else ""))
+    t = savings.api_totals(store.results(trials=True), now - SCOUT_SPEND_DAYS * 86400)  # #1022
+    # savings.usd, as wb savings --api and the pane say the same dollars: :.2f said $0.00 for a
+    # task paid a fraction of a cent (wave 2's merge)
+    by = ", ".join(f"{p} {savings.usd(v['cost'])}" for p, v in sorted(t["by_provider"].items(), key=lambda x: -x[1]["cost"])
+                   if v["cost"])
+    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {savings.usd(t['cost'])} of {cap}"
+               + (f" ({by})" if by else "")
+               + (f"; {t['unknown']} task(s) with no price" if t.get("unknown") else ""))
     by_prov: dict[str, list] = {}
     for m in hosted.values():
         by_prov.setdefault(m.provider, []).append(m)
@@ -6451,8 +6646,9 @@ def parser() -> argparse.ArgumentParser:
                    help="once the tests pass, one more automatic round in which the agent "
                    "reviews its own change against Claude's checks, before Claude is woken "
                    "(default: learned per model, on until its record says otherwise)")
-    s.add_argument("--auto-fix", type=int, default=2,
-                   help="rounds that send failing tests back without waking Claude (default 2)")
+    s.add_argument("--auto-fix", type=int, default=None,
+                   help="rounds that send failing tests back without waking Claude (default 2 "
+                   "on the GPU, 1 on API)")
     s.add_argument("--ask-budget", type=int, default=2)
     s.add_argument("--ask-timeout", type=int, default=1200)
     s.add_argument("--round-timeout", type=int, help="seconds a round may run (default 2400, "
@@ -6478,6 +6674,9 @@ def parser() -> argparse.ArgumentParser:
                    "no room for its model: it waits behind them (else exit 4)")
     s.add_argument("--trial", action="store_true", help="a check of workbench itself (a scratch "
                    "repo): its result and lessons don't count as evidence")
+    s.add_argument("--local-only", action="store_true", help="this task's code stays on this "
+                   "machine: an API model is refused (exit 3), as for a repo commands.json marks "
+                   "local_only")
     s.add_argument("--backlog", metavar="NAME", help="one of a batch left to run (overnight): "
                    "wb backlog NAME reports on the batch")
     s.add_argument("--no-claude-md", action="store_true",
@@ -6759,6 +6958,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--api", metavar="ID", help="the role's API model, its exact OpenCode id; the "
                    "selector stays as it is")
     s.add_argument("--thinking", choices=routes.THINKING, help="the role's thinking (off by default)")
+    s.add_argument("--order", metavar="NAME[,NAME]", help="an OpenRouter role's backends, which every "
+                   "request goes to alone (the model's Providers tab on openrouter.ai): the user's choice")
     s.add_argument("--day-usd", type=float, metavar="N", help="the day cap in dollars (asked when "
                    f"the first role goes to API; suggest {routes.DAY_USD_SUGGEST})")
     s.add_argument("--json", action="store_true", help="show: the roles as JSON, each API model's "
@@ -7005,6 +7206,8 @@ def parser() -> argparse.ArgumentParser:
                    "or post: the score out of 100, the period, the counts (made here; nothing sent)")
     s.add_argument("--price", metavar="X|off", help="set the electricity price per kWh (off "
                    "clears it), then report")
+    s.add_argument("--api", action="store_true", help="what the API tasks cost, by provider and "
+                   "day, trials and bench replays in (never part of the score)")
     s.set_defaults(f=cmd_savings)
     sub.add_parser("tune", help="the settings tuned from results, per model and window").set_defaults(f=cmd_tune)
     s = sub.add_parser("gc", help="archive old closed tasks, rotate old notices, remove leftover "

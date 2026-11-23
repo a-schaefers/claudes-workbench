@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, agentOf, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, liveLines, modelOf, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, splashTarget, statsLines, wrapParts, wrapWords } from './register.js'
+import { absolutePath, agentOf, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, liveLines, modelOf, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, splashTarget, statsLines, usd, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
@@ -1099,6 +1099,27 @@ test('a shutdown\'s notice for one task says to resume it', async ($, on) => {
   expect(woken[0]).toContain('[workbench] Task `a` was interrupted.')
   expect(woken[0]).toContain('`wb resume a` continues it in a fresh session')
   expect(woken[0]).not.toContain('Steer it')
+})
+
+test('a stop at the day\'s API spend cap wakes Claude to ask the user, never to send feedback', async ($, on) => {
+  // the review of #1019: the stuck wake said "Steer it with wb feedback", and feedback runs a
+  // round that the cap stops again at once; the notice and the skill say to ask the user
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'a', 'stuck')
+  notice(files, { ts: ts0, task: 'a', kind: 'stuck', round: 1, cause: 'spend',
+    text: "a stopped: the day's API spend cap is reached ($5.02 of $5 today)." })
+  fakeTasks(on, files, ['a'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('Ask the user: a higher cap (`wb route cap <usd>`), the role on the GPU, or tomorrow; then `wb resume a`.')
+  expect(woken[0]).not.toContain('Steer it')
+  expect(woken[0]).not.toContain('wb feedback')
 })
 
 test('two wakes due in one turn both arrive, the second after the first one\'s turn', async ($, on) => {
@@ -3302,6 +3323,47 @@ test('a leftover task waiting on Claude stops neither the weekly check nor the o
   expect(quietForJobs([{ ...t('stuck', hour), parked: true }], now, ours)).toBe(true)
 })
 
+test('Claude\'s edit of commands.json never drops a repo\'s local_only; other edits pass (#1021)', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const conf = '/home/u/.config/workbench/commands.json'
+  const files: Record<string, string> = {
+    [conf]: JSON.stringify({ allow: ['make *'], repos: { '~/src/client': { local_only: true }, '~/src/app': { setup: 'npm ci' } } }, null, 1),
+  }
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('tool.call', () => ({ result: {}, text: '' }))                // the engine's own tool
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const edit = (old_string: string, new_string: string, path = conf) =>
+    $.tool.call({ tool: 'Edit', file_path: path, old_string, new_string } as any) as Promise<any>
+  const lifted = await edit('"local_only": true', '"local_only": false')
+  expect(lifted.deny).toContain('drops "local_only": true for ~/src/client')
+  expect(lifted.deny).toContain('Only the user lifts')
+  expect((await edit('"make *"', '"make *", "cargo *"')).deny).toBeUndefined()   // an allow pattern: as before
+  expect((await edit('"local_only": true', '"local_only": true,')).deny).toBeUndefined()  // broken JSON, the mark kept
+  expect((await edit('"local_only": true', '"local_only": tru')).deny).toContain('~/src/client')  // broken, and it's gone
+  const w = await $.tool.call({ tool: 'Write', file_path: conf, content: '{"allow": []}' } as any) as any
+  expect(w.deny).toContain('~/src/client')
+  expect((await $.tool.call({ tool: 'Write', file_path: conf, content: files[conf].replace('"make *"', '"go *"') } as any) as any).deny).toBeUndefined()
+  expect((await edit('"local_only": true', '"local_only": false', '/home/u/other.json')).deny).toBeUndefined()  // another file
+  // a nearer entry saying false lifts the root's (the nearest that states it decides): refused,
+  // as is a false written where none was (#1021's review)
+  const nearer = await edit('"repos": {', '"repos": {\n  "~/src/client/pkg": {"local_only": false},')
+  expect(nearer.deny).toContain('sets "local_only" to something other than true for ~/src/client/pkg')
+  expect((await edit('"setup": "npm ci"', '"setup": "npm ci", "local_only": false')).deny).toContain('~/src/app')
+  expect((await edit('"setup": "npm ci"', '"setup": "npm ci", "local_only": true')).deny).toBeUndefined()  // adding one: fine
+  // the same file by another spelling, or through a linked directory
+  expect((await edit('"local_only": true', '"local_only": false', '/home/u/.config/./workbench/commands.json')).deny).toContain('~/src/client')
+  links['/home/u/cfg/commands.json'] = conf
+  expect((await edit('"local_only": true', '"local_only": false', '/home/u/cfg/commands.json')).deny).toContain('~/src/client')
+  delete links['/home/u/cfg/commands.json']
+  engine.env = { WB_COMMANDS: '~/wb/commands.json' }               // moved: the guard follows it
+  files['/home/u/wb/commands.json'] = files[conf]
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect((await edit('"local_only": true', '"local_only": false', '/home/u/wb/commands.json')).deny).toContain('~/src/client')
+  engine.env = undefined
+})
+
 test('Claude coding: its own edit in a task\'s worktree waits for the user\'s yes, unless Claude decides', async ($, on) => {
   // #92: the user's choice of when Claude writes a delegated task's code
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
@@ -3920,6 +3982,25 @@ test('the Stats tab draws the history, read from wb stats only while it is shown
   files['/wb/results.jsonl'] = '{}\n{}\n{}\n'
   await clock.advance(31_000)
   expect(reads.length).toBe(2)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
+test('the Stats tab names a spend stop in what stopped agents', async ($, on) => {
+  // #1019: the runner's `spend` guard (the day's API spend cap) read as a bare "spend"
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  const pane = fakeTasks(on, files, [])
+  on('process.run', (_: any, e: any) => e.argv[1] === 'stats' && e.argv[2] === '--json'
+    ? { value: { exitCode: 0, stdout: JSON.stringify({ ...FEED, guards: { spend: 2, silence: 1 } }), stderr: '' } }
+    : { value: { exitCode: 0, stdout: '', stderr: '' } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(10)
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts.some(t => t.includes("the day's API spend cap 2 · silence 1"))).toBe(true)
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })
@@ -5451,6 +5532,33 @@ test('#1014: the mod\'s summary of the roles reads as routes.summary does', () =
     writing: { via: 'gpu', gpu: 'ollama/x', api: 'anthropic/claude-haiku-5-5', thinking: 'on' } } }))
     .toBe('significant GPU (the router picks); trivial API deepseek/deepseek-flash, thinking off; writing GPU ollama/x, ' +
       'API kept: anthropic/claude-haiku-5-5, thinking on')
+})
+
+test('an API task\'s dollars sit beside the saving, never in it, and an API-only week says there was no GPU task (#1022)', () => {
+  const api = { tasks: 6, cost: 1.27, unknown: 0, plan: 0, by_provider: { deepseek: { tasks: 4, cost: 0.84, unknown: 0 }, anthropic: { tasks: 2, cost: 0.43, unknown: 0 } } }
+  const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })
+  expect(savedLine(t({ api }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · API $1.27')
+  expect(savedLine(t({ tasks: 0, saved: 0, api }))).toBe('this week: API $1.27 on 6 tasks (no GPU task to compare)')
+  expect(savedLine(t({ tasks: 0, saved: 0, api: { tasks: 1, cost: 0, unknown: 1, plan: 0 } })))
+    .toBe('this week: 1 API task, no price (no GPU task to compare)')                    // never $0 for no price
+  expect(savedLine(t({ tasks: 0, saved: 0, api: { tasks: 2, cost: 0, unknown: 0, plan: 2 } })))
+    .toBe('this week: 2 API tasks, plan usage (no GPU task to compare)')                 // a quota, not $0
+  // the feed's plan count (stats._api_period) keeps a plan-only week from reading API $0 (#1022's review)
+  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, api: { tasks: 1, cost: 0, unknown: 0, plan: 1,
+    by_provider: { 'opencode-go': { tasks: 1, cost: 0, unknown: 0, plan: 1 } } } } } })[0].text).toContain('API plan usage')
+  // savings.usd's rule: a cent's fraction written out, never 4e-05 nor $0.010
+  expect([usd(4e-5), usd(4.1e-5), usd(0.0041), usd(0.009999), usd(0.42), usd(0)]).toEqual(['$0.00004', '$0.000041', '$0.0041', '$0.01', '$0.42', '$0'])
+  expect(savedLine(t({ api: { tasks: 0, cost: 0, unknown: 0, plan: 0 } }))).toBe('this week: saved ~30K Claude tokens (38%, estimate)')
+  const week = statsLines({ tasks: 6, periods: { week: { tasks: 6, landed: 6, api } } })[0].text
+  expect(week).toContain('API $1.27 (deepseek $0.84 · anthropic $0.43)')
+  const model = statsLines({ tasks: 2, model_lines: { lines: [{ model: 'deepseek/deepseek-flash', tasks: 2, accepted_pct: 100,
+    kind: 'api', paid: 0.12, speed: { write: 80 } }] } }).find(l => l.label === 'deepseek/deepseek-flash')!
+  expect(model.text).toContain('paid ~$0.12/task')
+  expect(model.text).not.toContain('writes ~')
+  const row = liveLines({ snap: { ts: 0, every: 2, gpus: [], rack: [], queue: [], running: [{ task: 'fix-auth',
+    model: 'deepseek/deepseek-flash', label: 'deepseek-flash', phase: 'running', round: 2, round_s: 190,
+    via: 'api', provider: 'deepseek', spend: 0.12 }] }, busy: {} } as any)[0].map(p => p.text).join('')
+  expect(row).toBe('▶ fix-auth deepseek-flash · running · round 2 · 3m10s · API deepseek · $0.12')
 })
 
 test('#1016: the Agents switch: its change line is the dialog\'s text, and the roles\' summary says it', async ($, on) => {

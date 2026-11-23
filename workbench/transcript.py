@@ -360,7 +360,7 @@ EVENT_KINDS = frozenset({
     "round", "tests", "autofix", "self_review", "ask", "answer", "captain", "steer", "skills",
     "allow", "interrupted", "fresh", "full", "load", "left_bg", "reading_full", "compacted",
     "limits", "export", "resumed", "coding", "spec_gap", "next_step", "takeover", "stopped",
-    "error", "retry", "gpu", "served"})
+    "error", "retry", "gpu", "served", "rate_limited", "backend"})
 
 
 def task_entries(task: store.Task) -> list[Entry]:
@@ -408,8 +408,11 @@ def task_entries(task: store.Task) -> list[Entry]:
         # spec_gap and coding were dropped as kinds with no branch (#846), and then compacted,
         # limits and export, written just before (#865)
         elif kind in ("fresh", "full", "load", "left_bg", "reading_full", "compacted", "limits", "export",
-                      "served"):  # served: the keyhole, an API model's provider changed what ran
+                      "served",  # served: the keyhole, an API model's provider changed what ran
+                      "rate_limited"):  # an API provider's wait, the clocks paused (#1020)
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
+        elif kind == "backend":  # OpenRouter served a backend outside the role's order (#1021)
+            out.append(Entry(ts, key, [("bad", f"■ {r.get('text', '')}")]))
         elif kind in ("resumed", "coding"):  # the text says who: Claude, or the user's allowance
             out.append(Entry(ts, key, [("claude", f"■ {r.get('text', '')}")]))
         elif kind == "spec_gap":
@@ -505,8 +508,10 @@ def model_line(task: store.Task, data: dict) -> str:
     else:
         think = f"reasoning {effort}" if effort else "reasoning on, default effort"
     ctx = (cfg.get("limit") or {}).get("context")
+    if sp.get("thinking_shown"):  # an API task's, fixed at wb start; never the config's wb-off (#1018)
+        think, variant = sp["thinking_shown"], ""
     return " · ".join(x for x in (sp.get("model_label") or sp.get("model"), think,
-                                  f"variant {variant}", f"{ctx // 1024}K context" if ctx else "") if x)
+                                  variant and f"variant {variant}", f"{ctx // 1024}K context" if ctx else "") if x)
 
 
 def context_fill(data: dict) -> int | None:
@@ -534,7 +539,7 @@ def clock_line(task: store.Task, now: float | None = None, data: dict | None = N
         parts.append(f"model load {_secs(st['load_secs'] * 1000)}")
     if st.get("phase") in ("queued", "running", "testing", "asking"):
         typical = router.expected_minutes(sp.get("model", ""), sp.get("size", "significant"),
-                                          sp.get("weights_id"))
+                                          sp.get("weights_id"), router.record_role(sp.get("role")))
         if typical:  # against active work, as typical is (#543)
             from .runner import active_so_far
             left = typical * 60 - active_so_far(task, now)

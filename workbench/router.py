@@ -202,11 +202,27 @@ def weights_changed(m: models.Model) -> bool:
     return bool(now and seen and now not in seen)
 
 
-def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Score:
+def record_role(role: str | None) -> str | None:
+    """The role whose record ranks and times a task, given task.json's or wb start's `role`:
+    writing's own (#1025), else None, its size's, as before roles. #1016 writes a role for every
+    task, and a coding one read as its role timed a `--size` other than its role's on the wrong
+    record (wave 2's merge)."""
+    return role if role == "writing" else None
+
+
+def of_role(row: dict, role: str) -> bool:
+    """Whether a results row is a record of ``role``'s work: its `role`, else its `size` (a row
+    from before the roles). Writing slices like significant work (decision 1 of #1008), but a
+    model's prose results moved its coding rank and the other way round: each counts apart (#1025)."""
+    return tuning.work(row) == role
+
+
+def score(m: models.Model, size: str, state: dict | None = None, stack=(), role: str | None = None) -> Score:
+    """``role``: the record it ranks on (of_role), the size's when None."""
     state = state or models.status(m)
     ids = lineage(m, probe=state["available"])  # a server down isn't asked its weights
-    real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
-            and tuning.judged(r)]
+    real = [r for r in store.results() if r.get("model") in ids and of_role(r, role or size)
+            and tuning.judged(r) and same_kind(r, m)]
     # the weights each model has now: a server just found down isn't asked again (the audit)
     real = same_weights(real, weights_now(ids) if state["available"] else {})
     # a model that can't run isn't weighed: its server was just found down, and asking it again
@@ -298,14 +314,16 @@ def _cheaper(close: list[Score]) -> list[Score]:
     return [best] + [s for s in close if s is not best]
 
 
-def expected_minutes(model_id: str, size: str, weights: str | None = None) -> float | None:
+def expected_minutes(model_id: str, size: str, weights: str | None = None,
+                     role: str | None = None) -> float | None:
     """How long a step of this size usually takes on this model, from real tasks: the median of
     their active minutes a step (the agent's own working time), so compare it with a step's active
     time. ``weights``: the task's own (task.json `weights_id`): rows on other weights left out."""
-    return expected(model_id, size, weights)[0]
+    return expected(model_id, size, weights, role)[0]
 
 
-def expected(model_id: str, size: str, weights: str | None = None) -> tuple[float | None, int]:
+def expected(model_id: str, size: str, weights: str | None = None,
+             role: str | None = None) -> tuple[float | None, int]:
     """expected_minutes, and how many timed tasks it is the median of. From the files alone: a
     whole score() asked the server for the weights and the identity it never used, and every
     `wb watch --json` the pane ran each 5 s spent ~5 s on a sleeping LAN box's timeouts (#819)."""
@@ -313,9 +331,17 @@ def expected(model_id: str, size: str, weights: str | None = None) -> tuple[floa
     if not m:
         return None, 0
     ids = lineage(m, probe=False)
-    real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
-            and tuning.judged(r)]
+    real = [r for r in store.results() if r.get("model") in ids and of_role(r, role or size)
+            and tuning.judged(r) and same_kind(r, m)]
     return _typical(same_weights(real, {m.id: weights} if weights else {}))
+
+
+def same_kind(row: dict, m: models.Model) -> bool:
+    """Whether a row was run as the model's kind is (a row without `kind` is a GPU one): an
+    Ollama `:cloud` id is a GPU model's in old rows and an API model's now (#1013), and one
+    record mixing the two ranked an API model by GPU tasks (#1022). score's rows feed _per_step
+    and _cheaper, so they rank within a kind too; slice and tuning._rows keep to it as well."""
+    return (row.get("kind") or "gpu") == m.kind
 
 
 def allowed(m: models.Model, size: str) -> bool:
@@ -343,14 +369,15 @@ def fits(m: models.Model, budget: int | None) -> bool | None:
     return n <= models.SHARE_AT * budget if n and budget else None
 
 
-def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = None) -> list[Score]:
+def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = None,
+         role: str | None = None) -> list[Score]:
     """Every discovered model's case for a task of this size (in a repo of this stack), best
     first (the user's policy leaves some out: allowed). ``down`` and ``catalog``: what this pass
     has learnt of the servers (models.status), the caller's to share across calls: each model's
     status asked its server afresh, so a wb remote box asleep cost 2.5 s a model (#705)."""
     down = set() if down is None else down
     catalog = {} if catalog is None else catalog
-    scores = [score(m, size, state=models.status(m, down, catalog), stack=stack)
+    scores = [score(m, size, state=models.status(m, down, catalog), stack=stack, role=role)
               for m in models.discover().values() if allowed(m, size)]
     # each model against its own server's cards: with one Ollama per GPU, one budget for all (the
     # first process's) held an 18 GB model on the 24 GB card's server back as not fitting the 8 GB
@@ -399,9 +426,13 @@ def choose(size: str, stack=(), task_name: str | None = None, down: set | None =
            catalog: dict | None = None, role: str | None = None) -> tuple[Score | None, str]:
     """The model for a task of this size (in a repo of this stack) and one line on why. With
     ``task_name``, one task in EXPLORE_ONE_IN explores a model outside the band (unproven);
-    ``down``, ``catalog``: rank's. None and the refusal when no GPU model can take it, which names
-    the API choice for ``role`` (the size's name when not given) when a key is stored (#1024)."""
-    ranked = rank(size, stack, down, catalog)
+    ``down``, ``catalog``: rank's; ``role``: the task's role (wb route's), which picks the record
+    it ranks on (record_role: writing's own, else the size's). None and the refusal when no GPU
+    model can take it, which names the API choice for ``role`` (the size's name when not given)
+    when a key is stored (#1024)."""
+    record = record_role(role)
+    ranked = rank(size, stack, down, catalog, record)
+    work = record or size  # whose record the line speaks of
     if explores(task_name) and (new := unproven(ranked)):
         new[0].explored = True
         ranked = [new[0]] + [s for s in ranked if s is not new[0]]
@@ -422,10 +453,10 @@ def choose(size: str, stack=(), task_name: str | None = None, down: set | None =
     if len(usable) == 1:
         pick = f"the only model allowed {size} work"
     elif top.explored:
-        pick = (f"exploring: its record on {size} work is {top.tries} task(s), too few to leave it "
+        pick = (f"exploring: its record on {work} work is {top.tries} task(s), too few to leave it "
                 f"out (one task in {EXPLORE_ONE_IN})")
     elif top.cheaper:
-        pick = f"costs Claude least on {size} work"
+        pick = f"costs Claude least on {work} work"
     elif size in ("significant", "trivial") and not top.weights:
         # every weight 0 made it "the largest" and "the smallest" at once, by config order (#704)
         pick = "sizes unknown: config order; models.json weights_gb sets a model's size"
@@ -435,7 +466,7 @@ def choose(size: str, stack=(), task_name: str | None = None, down: set | None =
     elif size == "trivial" and top.weights == min(sizes):
         pick = "the smallest model allowed trivial work"
     else:
-        kind = f"{size} {'/'.join(stack)}" if top.like_tries else size
+        kind = f"{work} {'/'.join(stack)}" if top.like_tries else work
         pick = f"the best record on {kind} work"
     if top.guessed and pick.startswith(("the largest", "the smallest")):
         pick += " (its size guessed from its name)"
@@ -462,7 +493,8 @@ def slice(m: models.Model) -> Slice:
     files, lines = max(1, round(BASE_FILES * scale)), max(50, round(BASE_LINES * scale / 10) * 10)
     basis = f"{window // 1024}K window" if window else "window unknown"
     ids = {m.id, *earlier(m)}  # under the ids it had before too (#818)
-    rows = same_weights([r for r in store.results() if r.get("model") in ids and tuning.judged(r)],
+    rows = same_weights([r for r in store.results() if r.get("model") in ids and tuning.judged(r)
+                         and same_kind(r, m)],  # its own kind's steps only (#1022's review)
                         weights_now({m.id}))  # another model's steps under the same id (#726)
     steps = [s for r in rows for s in r.get("steps") or []
              if s.get("files") and (not window or s.get("window") in (None, window))]
@@ -522,14 +554,18 @@ def _speed_path():
     return store.machine_dir() / "speed.json"
 
 
-def record_speed(model_id: str, messages: list[dict]) -> dict:
+def record_speed(model_id: str, messages: list[dict], api: bool | None = None) -> dict:
     """Add a session's measured speeds to speed.json: writing (output and reasoning tokens over
     the time from first token to done) and reading (new input tokens over the time to first token).
     A request cut short (a nudge, a stop) still says how fast it read: on a slow machine the
     first request is often the one interrupted, and the reading was never learned (the
-    2026-11-16 audit)."""
+    2026-11-16 audit). ``api``: whether it is an API model, as the task recorded it (the runner's
+    api_entry), else the cached catalog's word (models.is_api)."""
     got = speed_samples(messages)
     write, read = got["write"], got["read"]
+    if models.is_api(model_id) if api is None else api:  # the account's, not this machine's (#1017)
+        _record_api_speed(model_id, write, got["ttft"])
+        return got
     if not (write or read):
         return got
     path = _speed_path()
@@ -544,7 +580,10 @@ def record_speed(model_id: str, messages: list[dict]) -> dict:
 
 def record_read_bound(model_id: str, tok_s: int) -> None:
     """Add a read speed that a request which never got its first token was at most (the
-    runner's read_bound, #491) to speed.json's reading samples."""
+    runner's read_bound, #491) to speed.json's reading samples. Never an API model's: its time
+    to first token is the network and the provider's queue, not how fast it reads (#1017)."""
+    if models.is_api(model_id):
+        return
     path = _speed_path()
     with store.locked(path.with_suffix(".lock")):
         data = store.read_json(path, {}) or {}
@@ -597,6 +636,8 @@ def speed(model_id: str, weights: str | None = None) -> dict:
             ids += [i for key in ("replaces", "variant_of") for i in _up(over, model_id, key) if i not in ids]
             row = next((data[i] for i in ids if data.get(i)), {})
         return row
+    if write := api_speed(model_id).get("write"):  # an API model's: the account's (#1017)
+        return {"write": write}
     row = row_in(_speed_path())
     if not row and (shared := store.home() / "speed.json") != _speed_path():
         row = row_in(shared)  # every machine's, from before #901: until this one has measured it
@@ -605,7 +646,9 @@ def speed(model_id: str, weights: str | None = None) -> dict:
 
 def budgets(m: models.Model, weights: str | None = None) -> dict:
     """{"think", "silence", "round"} in seconds for a task on this model; ``weights``: its
-    identity, when known (speed)."""
+    identity, when known (speed). An API model's: budgets_api."""
+    if getattr(m, "kind", "gpu") == "api":
+        return budgets_api(m)
     sp = speed(m.id, weights)
     if not sp:
         return {"think": THINK_DEFAULT_S, "silence": SILENCE_DEFAULT_S, "round": ROUND_DEFAULT_S}
@@ -627,7 +670,11 @@ def thinking_stall(model_id: str, entry: dict) -> str:
     it acts; at this machine's measured write speed that can outlast the think budget. Seen
     2026-11-18: a 64K entry, thinking, capped at 16K and partly in system RAM at 21 tok/s, went
     silent for 14 minutes at a time until nudged and stopped. The same settings are harmless on a
-    card that writes fast, so it is measured here, not ruled out everywhere."""
+    card that writes fast, so it is measured here, not ruled out everywhere. Not an API model's:
+    its output is pinned (models.API_OUTPUT) and its silence budget holds one reply at the cap
+    (budgets_api)."""
+    if models.is_api(model_id):
+        return ""
     opts = entry.get("options") or {}
     # Ollama honours options.max_tokens; other servers get OpenCode's limit.output
     cap, sp = opts.get("max_tokens") or (entry.get("limit") or {}).get("output"), speed(model_id)
@@ -643,6 +690,74 @@ def thinking_stall(model_id: str, entry: dict) -> str:
             f"at its ~{sp['write']:.0f} tok/s here that is {secs / 60:.0f} min, past its "
             f"{think / 60:.0f}-min think budget, so it can sit silent until nudged and stopped. "
             f"Set its options.reasoningEffort to \"none\" (or a lower output cap) in OpenCode's config")
+
+
+# An API model's budgets (#1017). It reads nothing on this machine: prompt caching and the
+# provider's own hardware make window / read a fiction, and a "read" speed taken from the network
+# time to first token gave a 1M window 200-500 s of prefill no request pays. So think is the time
+# to write THINK_TOKENS plus the time to first token (its 90th percentile: the queue's bad days).
+# A reasoning step streams nothing until it ends (the spike, #1009: `run --format json` printed
+# `step_start` and then nothing until the text), so the silence limit holds one whole reply at the
+# output cap, written in silence, after the first token's wait, with SILENT_SLACK to spare. The
+# samples are the account's, kept in $WB_HOME/speed-api.json: an API's speed isn't this machine's.
+# That floor stops at SILENCE_MAX, the GPU's own longest silence (900 s scaled by THINK_MAX / 420,
+# 3857 s): at 2 tok/s it came to 16448 s, and a request hung for good held the round, and one of
+# the provider's API_PARALLEL slots, 4.6 hours before the guard fired (the review of #1017). A
+# model that slow loses a reply at the cap to the guard; a hang costs more.
+API_TTFT_SHARE = 0.9
+SILENT_SLACK = 60
+SILENCE_MAX = int(SILENCE_DEFAULT_S * THINK_MAX / THINK_DEFAULT_S)
+
+
+def _api_speed_path() -> Path:
+    return store.home() / "speed-api.json"
+
+
+def _record_api_speed(model_id: str, write: list, ttft: list) -> None:
+    if not (write or ttft):
+        return
+    path = _api_speed_path()
+    with store.locked(path.with_suffix(".lock")):
+        data = store.read_json(path, {}) or {}
+        row = data.setdefault(model_id, {})
+        row["write"] = (row.get("write", []) + write)[-SPEED_KEEP:]
+        row["ttft"] = (row.get("ttft", []) + ttft)[-SPEED_KEEP:]
+        store.write_json(path, data)
+
+
+def api_speed(model_id: str) -> dict:
+    """{"write": median tok/s, "ttft": 90th percentile seconds} of an API model, where measured
+    (speed-api.json); {} for one never measured or a GPU model."""
+    data = store.read_json(_api_speed_path(), {}) if _api_speed_path().exists() else {}
+    row = (data or {}).get(model_id) if isinstance(data, dict) else None
+    if not isinstance(row, dict):
+        return {}
+    out = {}
+    if write := [x for x in row.get("write") or [] if isinstance(x, (int, float)) and x > 0]:
+        out["write"] = statistics.median(write)
+    if ttft := sorted(x for x in row.get("ttft") or [] if isinstance(x, (int, float)) and x >= 0):
+        out["ttft"] = ttft[math.ceil(API_TTFT_SHARE * len(ttft)) - 1]
+    return out
+
+
+def budgets_api(m) -> dict:
+    """{"think", "silence", "round"} for an API model: think = THINK_TOKENS / write + the time to
+    first token's 90th percentile, clamped to [THINK_DEFAULT_S, THINK_MAX], with no window / read
+    term; silence and round scale by think / THINK_DEFAULT_S, silence at least one reply at the
+    output cap written in silence (see above) up to SILENCE_MAX, round at least the silence. No
+    write speed: the defaults."""
+    sp = api_speed(m.id)
+    if not sp.get("write"):
+        return {"think": THINK_DEFAULT_S, "silence": SILENCE_DEFAULT_S, "round": ROUND_DEFAULT_S}
+    ttft = sp.get("ttft") or 0
+    think = int(min(max(THINK_TOKENS / sp["write"] + ttft, THINK_DEFAULT_S), THINK_MAX))
+    scale = max(1.0, think / THINK_DEFAULT_S)
+    cfg = getattr(m, "config", None) or {}
+    cap = (cfg.get("options") or {}).get("max_tokens") or (cfg.get("limit") or {}).get("output") \
+        or models.API_OUTPUT
+    silence = max(int(SILENCE_DEFAULT_S * scale),
+                  min(math.ceil(cap / sp["write"] + ttft) + SILENT_SLACK, SILENCE_MAX))
+    return {"think": think, "silence": silence, "round": max(int(ROUND_DEFAULT_S * scale), silence)}
 
 
 def speed_line(model_id: str) -> str:

@@ -2,7 +2,7 @@
 from collections import defaultdict
 from statistics import median
 
-from . import context, gitops, skills, spend, stats, store
+from . import context, gitops, meter, skills, spend, stats, store
 
 
 def step(task: store.Task, landed: bool, since: str = "HEAD", gaps=None) -> dict:
@@ -51,7 +51,9 @@ def step(task: store.Task, landed: bool, since: str = "HEAD", gaps=None) -> dict
 # OpenCode exited non-zero. Any other ends a round for reasons outside the step: a shutdown's,
 # a logout's or a kill's SIGTERM (`signal`, runner.SIGNAL_STOP), a runner that died (`died`,
 # cli.reap: killed, out of memory, a reboot), a model server gone again after the round's one
-# revive (`server`, #657), workbench updated under the task (`updated`, runner._updated). Counted
+# revive (`server`, #657), an API provider's rate limit, outage, quota or refused key (`provider`,
+# runner.PROVIDER_GUARDS, #1020), the day's API spend cap (`spend`, runner.SPEND, #1019: the user's
+# budget, not the model's), workbench updated under the task (`updated`, runner._updated). Counted
 # as stuck, a laptop shut down mid-step shrank the model's slice for good (#582, the audit of
 # 1.90), and so did an update mid-step until it had a cause (#660): an allowlist, so the next
 # stop from outside the step can't slip in. Notices from before `cause` are known by their text.
@@ -89,6 +91,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
         steps = [{**s, "claude": c} for s, c in zip(steps, per_step)]
     row = {"ts": store.now(), "task": task.name, "outcome": outcome, "model": spec.get("model"),
            "size": spec.get("size"), "repo": spec.get("repo"), "stack": spec.get("stack"),
+           **({"role": spec["role"]} if spec.get("role") else {}),  # router.of_role (#1025)
            **({"subdir": spec["subdir"]} if spec.get("subdir") else {}),  # the package (#820)
            "rounds": st.get("round", 1),
            "auto_fixes": st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
@@ -105,6 +108,9 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            **({"landed_steps": landed} if landed else {}),
            "window": st.get("window"),
            **({"weights_id": spec["weights_id"]} if spec.get("weights_id") else {}),  # #726
+           # an API task's thinking, off or on (the weekly check's evidence, #1018); a GPU task
+           # thinks as its OpenCode entry says, so it has none
+           **({"thinking": spec["thinking"]} if spec.get("thinking_shown") and spec.get("thinking") else {}),
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},
            **({"peak_share": st["peak_share"]} if "peak_share" in st else {}),  # tuning (#721)
@@ -134,8 +140,230 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            # the levels (the owner, 2026-11-22, #857: off and on, on is large files only)
            **({"probe_long": bool(spec.get("probe_files"))} if context.experiment(task, "probe") else {}),
            "long_reads": st.get("long_reads", 0), **for_stats(task), **extra}
+    row = _with_route(task, row)
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row
+
+
+# --- API tasks (#1022): what the row says of the route, and the money -------------------------
+
+TOKEN_KEYS = ("in", "out", "cache_read", "cache_write", "reasoning")
+PLAN_PROVIDERS = meter.PLAN_PROVIDERS  # a quota, not dollars: the meter's one list (#1019)
+
+
+def api_row(row: dict) -> bool:
+    """A results row (or bench row) of a task on an API model; a row without `kind` is a GPU one,
+    an Ollama `:cloud` one too: it was routed as a remote GPU model. (models.is_api takes a model
+    id; this takes a row.)"""
+    return isinstance(row, dict) and row.get("kind") == "api"
+
+
+def task_kind(spec: dict) -> str:
+    """task.json `via` (#1016): "api", or "gpu" for every task without it."""
+    return "api" if spec.get("via") == "api" else "gpu"
+
+
+def _with_route(task: store.Task, row: dict) -> dict:
+    """The row's `kind`, `role` and `provider`, and for an API task its money (`api`). An API
+    task's GPU never ran it: no `gpu_wh` (the runner's sampler is off for it) and no
+    `remote_gpu` (hosted() models are remote, so the runner set it, #117's line for another
+    machine's GPU, untrue for a provider's servers)."""
+    spec = task.spec
+    kind, model = task_kind(spec), str(spec.get("model") or "")
+    row = {**row, "kind": kind, "role": spec.get("role"),
+           "provider": spec.get("provider") or (model.split("/", 1)[0] if "/" in model else None)}
+    if kind == "api":
+        row.pop("gpu_wh", None)
+        row.pop("remote_gpu", None)
+        row["api"] = api_usage(task)
+    return row
+
+
+def _num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def catalog_price(model_id: str) -> float | None:
+    """What the catalog says the model costs: None with no price (unknown), 0.0 when every price
+    is 0 (a free model: a true 0), else 1.0 (priced; the meter has the rates). From hosted.json
+    as it is: never a catalog read at a close or a poll."""
+    from . import models
+    try:
+        m = models.lookup(model_id, cached=True)
+    except Exception:  # a config it can't read: the price is unknown, never 0
+        return None
+    if m is None:
+        return None
+    if m.free:
+        return 0.0
+    nums: list = []
+
+    def walk(v):
+        if _num(v):
+            nums.append(v)
+        elif isinstance(v, dict):
+            for k, x in v.items():
+                if k != "tier":  # a tier's `size` is tokens, not a price
+                    walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+    walk((m.config or {}).get("cost"))
+    if not nums:
+        return None
+    return 0.0 if not any(nums) else 1.0
+
+
+def _plan(model_id: str) -> str | None:
+    """The plan a model's usage counts against (OpenCode Go, an Ollama cloud model): its provider,
+    else None. An Ollama cloud model by the catalog's `cloud` flag (#1013), never by its name: any
+    provider's model may end in `-cloud`, and its dollars would go uncounted (#1022's review)."""
+    from . import models
+    pid = model_id.partition("/")[0]
+    if pid in PLAN_PROVIDERS:
+        return pid
+    try:
+        m = models.lookup(model_id, cached=True)
+    except Exception:  # a config it can't read: no plan known, so the dollars are looked for
+        return None
+    return pid if m is not None and m.cloud else None
+
+
+def metered(st: dict) -> float | None:
+    """The runner's live meter in status (#1019's `api.usd`), or None."""
+    v = st.get("api")
+    return float(v["usd"]) if isinstance(v, dict) and _num(v.get("usd")) else None
+
+
+def _step_rows(task: store.Task) -> list[dict]:
+    return [e for e in store.read_jsonl(task.dir / "events.jsonl")[0]
+            if isinstance(e, dict) and e.get("kind") == "step"]
+
+
+def step_cost(rows: list) -> float:
+    """The step events' summed `cost` (OpenCode's own, live), over whatever rows it is given."""
+    return sum(e["cost"] for e in rows if isinstance(e, dict) and e.get("kind") == "step"
+               and _num(e.get("cost")))
+
+
+def spend_so_far(task: store.Task) -> float | None:
+    """An API task's dollars so far (live_spend, from its own files: every step, not a tail)."""
+    return live_spend(str(task.spec.get("model") or ""), task.status, step_cost(_step_rows(task)))
+
+
+def live_spend(model_id: str, st: dict, total: float) -> float | None:
+    """A live API task's dollars so far: the runner's meter, else ``total``, the step events'
+    summed `cost` over the whole events.jsonl (a tail's sum was a fraction of a long task's,
+    #1022's review; wb top keeps a running sum), else 0 for a free model; None when unknown (never
+    a false 0: an unpriced model's steps say 0)."""
+    if (v := metered(st)) is not None:
+        return v
+    if total > 0:
+        return round(total, 6)
+    return 0.0 if catalog_price(model_id) == 0 else None
+
+
+def _session_cost(data: dict) -> float | None:
+    """One exported session's cost: `info.cost` (it counts the title request, which no message
+    carries: the spike for #1009), else the assistant messages' summed; None with neither."""
+    info = data.get("info") if isinstance(data.get("info"), dict) else {}
+    if _num(info.get("cost")):
+        return float(info["cost"])
+    costs = [m["cost"] for m in data.get("messages") or []
+             if isinstance(m, dict) and m.get("type") == "assistant" and _num(m.get("cost"))]
+    return float(sum(costs)) if costs else None
+
+
+def api_usage(task: store.Task) -> dict | None:
+    """An API task's money at its close, for its row's `api`: {cost, tokens, source}.
+    Summed over every session it had (status `sessions` and `session`: handovers, revives and wb
+    next each start one), and `backend`, OpenRouter's served provider (status `served.by`, the
+    keyhole's), when known. `source`: "opencode" (OpenCode's own cost, from every session's
+    export, or the runner's meter when it counted more: the day cap's figure, #1019), "mixed" (the
+    sessions that exported, the rest filled from the meter), "metered"
+    (the runner's meter, else the step events' cost: a floor, both miss OpenCode's title and
+    compaction requests), "plan" (a quota: no dollars), "unknown" (no price anywhere). `cost` is
+    None unless known, never 0 for a missing price: a 0 from OpenCode for a model the catalog
+    prices isn't trusted. None for a GPU task. The order: every session's export, then some
+    sessions' plus the meter's remainder, then the meter, then the step events' sum (both floors,
+    `metered`), then a free model's 0."""
+    spec, st = task.spec, task.status
+    if task_kind(spec) != "api":
+        return None
+    from . import transcript
+    model = str(spec.get("model") or "")
+    steps = _step_rows(task)
+    tokens = {k: 0 for k in TOKEN_KEYS}
+    for e in steps:
+        for k in TOKEN_KEYS:
+            if _num(e.get(k)):
+                tokens[k] += e[k]
+        if "cache_read" not in e and _num(e.get("cache")):  # a row from before the split
+            tokens["cache_read"] += e["cache"]
+    out = {"cost": None, "tokens": tokens, "source": "unknown"}
+    served = st.get("served") if isinstance(st.get("served"), dict) else {}
+    if isinstance(served.get("by"), str) and served["by"]:  # OpenRouter's backend, the last seen
+        out["backend"] = served["by"]
+    if (plan := _plan(model)) is not None:
+        return {**out, "source": "plan", "plan": plan}
+    price = catalog_price(model)
+    cur = st.get("session")
+    sids = list(dict.fromkeys([*(s for s in st.get("sessions") or [] if s), *([cur] if cur else [])]))
+    costs = []
+    for sid in sids:
+        try:
+            data = transcript.export(sid, task=task) if sid == cur else transcript.finished_export(task, sid)
+        except Exception:  # an export that can't be read: this session's cost is unknown
+            data = {}
+        costs.append(_session_cost(data) if isinstance(data, dict) else None)
+    said = [c for c in costs if c is not None]
+    if said and len(said) == len(costs) and (sum(said) > 0 or price == 0):
+        # never below the runner's meter, the ledger the day cap counted: it adds the provider's
+        # own usage.cost and answers a steer or stop cut short, which OpenCode doesn't bill, and the
+        # row once said $0.30 where the ledger and the round report said $0.50 (wave 2's review)
+        if (live := metered(st)) is not None and live > sum(said):
+            return {**out, "cost": round(live, 6), "source": "metered"}
+        return {**out, "cost": round(sum(said), 6), "source": "opencode"}
+    # the meter: the runner's, else the step events' cost (OpenCode's per step, but no step
+    # carries its title or compaction requests, so a floor like the meter and labelled as one,
+    # #1022's review). Both are the whole task's, every session's.
+    meter = metered(st)
+    if meter is None and (live := [e["cost"] for e in steps if _num(e.get("cost"))]) and sum(live) > 0:
+        meter = float(sum(live))
+    if said and len(said) < len(costs) and meter is not None:
+        # some sessions exported, some didn't (the engineer's call, #1022): the exported ones'
+        # own cost, the rest filled from the meter, the part of it those don't account for.
+        # Dropping the whole sum for one failed export threw away the sessions that said theirs
+        total = sum(said) + max(0.0, meter - sum(said))
+        if total > 0:
+            return {**out, "cost": round(total, 6), "source": "mixed"}
+    if meter is not None:
+        return {**out, "cost": round(meter, 6), "source": "metered"}
+    if price == 0:
+        return {**out, "cost": 0.0, "source": "opencode"}
+    return out
+
+
+def row_cost(row: dict) -> float | None:
+    """A results or bench row's known dollars (`api.cost`, a bench row's `paid.cost`), or None."""
+    for key in ("api", "paid"):
+        v = row.get(key)
+        if isinstance(v, dict) and _num(v.get("cost")):
+            return float(v["cost"])
+    return None
+
+
+def paid_cell(rows: list[dict]) -> str:
+    """The tables' `paid`: the mean dollars a task over the rows with a known cost; `-` for GPU
+    rows, `?` when none is known, `~$0.12` when some are unknown."""
+    api = [r for r in rows if api_row(r)]
+    if not api:
+        return "-"
+    known = [c for r in api if (c := row_cost(r)) is not None]
+    if not known:
+        return "?"
+    from .savings import usd
+    return ("~" if len(known) < len(api) else "") + usd(sum(known) / len(known))
 
 
 def _apart(steps: list[dict], key: str, fields: tuple) -> dict:
@@ -209,19 +437,30 @@ def table(only: set | None = None) -> str:
     if not rows:
         return "no finished tasks yet" + left_out
     by = defaultdict(list)
-    for r in rows:
-        by[(r["model"], r.get("size") or "?")].append(r)
+    for r in rows:  # by kind and role (#1022), a row from before roles by its size: one id run as
+        # a GPU model and then an API one (an Ollama `:cloud` id, #1013) keeps two records
+        by[(r["model"], "api" if api_row(r) else "gpu", r.get("role") or r.get("size") or "?")].append(r)
     claude = any("claude" in r for r in rows)
-    out = [f"{'model':34} {'size':12} {'tasks':>5} {'accepted':>8} {'rounds':>6} "
-           f"{'autofix':>7} {'reviews':>7} {'min':>6} {'local tok':>10}"
+    # `kind`, `paid` and `agent tok` (#1022) only with an API row shown: a GPU-only table reads as
+    # before (`size`, `local tok`), and no id is cut, so two long ones never read alike (wave 2's
+    # review: two qwen3-coder quantizations both read `ollama/qwen3-coder:30b-a3b-ins`)
+    api = any(kind == "api" for _, kind, _ in by)
+    width = max([30 if api else 34] + [len(model) for model, _, _ in by])
+    work = "role" if api or any(w not in ("trivial", "significant", "?") for _, _, w in by) else "size"
+    ww = 11 if work == "role" else 12
+    out = [f"{'model':{width}} " + (f"{'kind':4} " if api else "") + f"{work:{ww}} {'tasks':>5} "
+           f"{'accepted':>8} {'rounds':>6} {'autofix':>7} {'reviews':>7} {'min':>6} "
+           + (f"{'agent tok':>9} {'paid':>7}" if api else f"{'local tok':>10}")
            + (f" {'claude':>9}" if claude else "")]
-    for (model, size), rs in sorted(by.items()):
+    for (model, kind, role), rs in sorted(by.items()):
         n = len(rs)
         acc = sum(r["outcome"] == "accepted" for r in rs)
         avg = lambda k: sum(r.get(k) or 0 for r in rs) / n  # noqa: E731
-        out.append(f"{model:34} {size:12} {n:>5} {acc / n:>7.0%} {avg('rounds'):>6.1f} "
+        tok = int(avg('tok_in') + avg('tok_out'))
+        out.append(f"{model:{width}} " + (f"{kind:4} " if api else "") + f"{role[:ww]:{ww}} {n:>5} "
+                   f"{acc / n:>7.0%} {avg('rounds'):>6.1f} "
                    f"{avg('auto_fixes'):>7.1f} {avg('reviews'):>7.1f} {avg('minutes'):>6.1f} "
-                   f"{int(avg('tok_in') + avg('tok_out')):>10}"
+                   + (f"{tok:>9} {paid_cell(rs):>7}" if api else f"{tok:>10}")
                    + (f" {_claude_avg(rs):>9}" if claude else ""))
     if claude:
         unknown = sum("claude" not in r for r in rows)

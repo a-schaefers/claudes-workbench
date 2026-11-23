@@ -230,6 +230,16 @@ add a model you judge fit only for small work, and otherwise change it only when
 A newly added model has no record, so the router won't pick it over one with a good record:
 replay the bench on it first (`wb bench run --model <id>`, §6), then give it its first few
 real tasks with `--model` (ones you'd review closely anyway).
+**API models and privacy.** An API model sends the repo, its spec, the CLAUDE.md files and the
+user's `~/.claude` rules to its provider. When you propose an API role, say where the code goes
+(the provider, as `wb route --dry-run`'s line names it; its data-policy page comes in the note
+of the repo's first task there). Never remove a `local_only`
+from commands.json (a repo the user keeps off API models: `wb start` exits 3 with the choices;
+ask the user). Never name a free model first (the provider may keep or train on the code), and
+never pick an OpenRouter backend (`--order`) for the user: ask which. An API task's lane hides
+each registry config that holds a credential (a token, password, key; one without stays readable
+and its tool works); when `wb start`'s note says a tool stops on every run there (Maven, Gradle,
+dotnet, Bundler…), that repo's task won't build on API: tell the user, and offer the GPU role.
 Model servers (none runnable, which server, a model on another machine), updating workbench, and
 **the weekly model check** (the mod asks once a week; `/workbench-models`): read
 `reference/models.md` beside this file first.
@@ -239,6 +249,11 @@ the GPU and that a task they start stops it, then `wb optimize start [--bench]`;
 detached and wakes no one (a short measuring run also starts by itself when due: the mod says so).
 When `wb optimize report`, or a `note:` from `wb start`, offers a window, ask before `wb optimize
 apply <id>`: a bigger window compacts less, a window all on the GPU writes faster.
+Thinking is the user's choice per role, off by default: an API task runs with it off, or as low
+as its model allows without thinking more than its default (`wb watch` says which), fixed for the
+whole task. A GPU model
+thinks as its OpenCode entry says. You may recommend thinking on for significant work in chat,
+when the records show stuck or extra review rounds it might spare; never set it yourself.
 
 ## 2. Spec (the most valuable thing you write)
 **Spec tokens are output, the dearest you spend: a spec as long as the code it asks for costs
@@ -318,8 +333,9 @@ music): the same with `wb audio --list`, but you can't hear: read `reference/aud
 ## 3. Dispatch
 ```
 wb start <kebab-name> --spec <file|-> --repo <repo> --role significant|trivial|writing \
-   --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix 2]
+   --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix N]
 ```
+`--auto-fix` defaults to 2 on the GPU and 1 on API.
 Put the project's compiler, typecheck or lint ahead of the tests in `--test` (`mypy && pytest`):
 its errors reach the agent as auto-fix rounds, not your review. Only one the project runs or
 configures, or a syntax-only check, and only when it passes on the base: `reference/checks.md`
@@ -351,6 +367,7 @@ device), you're woken with `auto-fix skipped:` and the cause, unless the base ch
 command in a quarter of the limit: then it's the change's hang, and auto-fix gets it.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
+On API it's off unless you pass `--self-review` (each round you don't see is paid).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
 the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck,
 failed) — end your turn and wait for it; an agent's question can't wait, so it reaches you
@@ -471,6 +488,13 @@ coding choice is the user's (`wb coding`), never changed by a check.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
   the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`.
+  A `rate_limited`, `outage`, `quota` or `auth` stop is the API provider's, not the agent's
+  (the report says "the provider's stop"): tell the user so, and its remedy (wait, top up, or
+  /connect the key again), then `wb feedback <name> --text "carry on"` once it allows. Never
+  switch the task's model or role yourself: a route change takes the user's yes.
+  A `spend` stop (cause `spend`: the day's API spend cap is reached) is the user's call, never a
+  retry: ask them for a higher cap, the role on the GPU, or tomorrow, as the notice says; resume
+  only after they decide. Nothing but the user raises the cap.
 
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
   corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).
@@ -582,6 +606,11 @@ what you fixed, sent back or flagged, the branch. For an API task, pass on the `
 line `wb accept` prints; never call API dollars a saving. Report the agent's misses plainly; they are
 evidence about the model, and the router learns from accept and discard. Pass on the
 `claude:` line `wb accept` prints: what the task cost you, measured, beside the estimate of
-writing it yourself and the GPU energy. Call the estimate an estimate. `wb savings` gives the
+writing it yourself and the GPU energy. For a task on an API model that line ends with what the
+provider was paid (`paid … $0.12`, `paid: unknown`, or `plan usage`): pass that part on as a cost,
+never as a saving, and never subtract it from your tokens or the other way round (the live
+figure while it runs is `api.usd` in its `status.json`, under `$WB_HOME/tasks/<name>/`).
+Call the estimate an estimate. `wb savings` gives the
 week's total and its score out of 100 when the user asks what it's saving; `wb savings --card
-<file>.svg` makes the badge as an image for them to keep or post (made here, nothing sent).
+<file>.svg` makes the badge as an image for them to keep or post (made here, nothing sent). The
+score is the GPU's alone; `wb savings --api` gives what API tasks cost, by provider and day.

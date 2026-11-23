@@ -18,7 +18,9 @@ What a request must pass, in order (each refusal a JSON error body):
    UTF-8 JSON with no duplicate key, no NaN, and no top-level key that folds to `model` or
    `models` but isn't `model`: a server reading JSON otherwise (Go's encoding/json matches keys
    case-insensitively; some parsers keep the first duplicate) would route a body that passed.
-Then the body goes on as it is, the client's auth headers dropped and the real one added, and
+Then the body goes on as it is (an OpenRouter body with its `provider` routing set to the role's
+`order` and `allow_fallbacks: false`, whatever OpenCode sent: #1021), the client's auth headers
+dropped and the real one added, and
 the response comes back as it arrives (SSE a whole line at a time), its `data:` lines read on
 the way for the served model (status `served`) and the usage (`on_usage`); the key itself never
 passes, and an SSE line with an `error` goes through `redact`. An upstream error is read whole
@@ -47,6 +49,7 @@ import json
 import os
 import re
 import secrets
+import select
 import socket
 import socketserver
 import ssl
@@ -59,7 +62,7 @@ import urllib.request
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import store
+from . import privacy, store
 
 NEEDS = "needs a key wb can hold outside the lane"
 REMEDY = "store an API key with /connect in OpenCode"
@@ -83,6 +86,25 @@ BODY_CAP = 32 << 20     # a 131K-token prompt is a few MB of JSON
 ERROR_CAP = 64 << 10    # an upstream error body, read whole to redact it
 SNIFF_CAP = 4 << 20     # a non-streamed JSON answer kept to read its model and usage
 RATE_LIMIT_SECS = 60    # a 429 without Retry-After: how long the model is rate limited
+# The hold (#1020): a 429, a 529 or an outage (a 5xx, a refused or reset connection, DNS, TLS) is
+# held here and sent upstream again, waiting Retry-After or backing off BACKOFF; one OpenCode
+# request for at most RATE_HOLD_S, under the 600 s header guard (#1017's), so OpenCode never cuts
+# it; past it the last answer goes back, OpenCode prints `retry` and sends again. Status
+# `ratelimit_until` (at least HOLD_FLOOR_S ahead) and `ratelimit` tell the runner, whose clocks
+# pause meanwhile: OpenCode prints nothing while a request waits.
+RATE_HOLD_S = 300
+QUEUED_AFTER_S = 30     # a 200 with only SSE keep-alives this long: the provider's queue
+HOLD_FLOOR_S = 60
+BACKOFF = (2, 60)       # without Retry-After: 2, 4, 8 … 60 s
+# Cloudflare's 520-524 (the origin's unknown error, down, refused, timed out) in front of a
+# provider are as transient as a 502-504: held too (the engineer's call on #1020, 2026-11-23)
+HOLD_CODES = {429: "rate_limited", 529: "rate_limited",   # 529: Anthropic's "overloaded"
+              **dict.fromkeys((500, 502, 503, 504, 520, 521, 522, 523, 524), "outage")}
+# A 429 or 403 that is a spent balance or plan limit, not a rate: no wait helps (OpenAI's
+# insufficient_quota, OpenRouter's limit_source, a plan's 5-hour or weekly limit)
+QUOTA = re.compile(r"(?i)insufficient[_ ](?:quota|balance|credits?|funds)|exceeded your current "
+                   r"quota|out of credits?|credits? (?:are |is )?(?:exhausted|used up)|limit_source"
+                   r"|\b(?:5|five)[- ]hour\b|weekly (?:usage )?limit|plan(?:'s)? (?:usage )?limit")
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
        "trailers", "transfer-encoding", "upgrade", "proxy-connection"}
 CLIENT_AUTH = {"authorization", "x-api-key", "api-key"}
@@ -97,6 +119,7 @@ KEY_CHARS = re.compile(r"[\x21-\x7e]+")
 CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]{1,8}")
 LINE_CAP = 64 << 10     # a chunk-size or trailer line
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+SPEND_REFUSED = "the day's API spend cap is reached"  # meter.STOP too: a refusal OpenCode doesn't retry
 
 
 class KeyholeError(Exception):
@@ -335,12 +358,15 @@ class Keyhole:
     """The proxy for one task's model: ``model`` (a models.Model: id, provider, name), ``key``
     (a Key), ``upstream`` (the catalog's API base: never anything from a request), ``protocol``
     ("bearer" or "anthropic"). It serves at once, from a daemon thread, on 127.0.0.1 (never
-    localhost, which may be ::1 first). ``on_usage(usage)`` gets each response's usage;
-    ``on_health(state, why, until)`` each outcome (ok, no_credit, rate_limited, unreachable);
-    ``log`` the start and refusal lines (runner.log: the runner's stdout)."""
+    localhost, which may be ::1 first). ``on_usage(usage)`` gets each response's usage, once,
+    before its last byte goes to OpenCode (the meter, #1019); ``on_health(state, why, until)``
+    each outcome (ok, no_credit, rate_limited, unreachable); ``room(body, size)`` is asked before
+    each request is sent on (the meter's spend room: negative is refused); ``log`` the start and
+    refusal lines (runner.log: the runner's stdout)."""
 
     def __init__(self, task, model, key: Key, upstream: str, protocol: str = "bearer", *,
-                 timeout: float | None = None, on_usage=None, on_health=None, log=None):
+                 timeout: float | None = None, on_usage=None, on_health=None, log=None,
+                 hold: float | None = None, room=None, order=None):
         if not isinstance(key, Key):
             raise TypeError("key must be a Key")
         if protocol not in ("bearer", "anthropic"):
@@ -350,13 +376,21 @@ class Keyhole:
         if up.scheme not in ("https", "http") or not up.hostname:
             raise KeyholeError(f"{model.id}'s API base isn't an http(s) URL")
         self.task, self.model, self._key, self.protocol = task, model, key, protocol
+        # OpenRouter's backends, as the role chose them (task.json `order`, #1021): every request
+        # is routed to them alone, and a response from another is an event and a report line
+        self.order = [str(b) for b in order or () if str(b).strip()]
         self._up = up
         self.upstream_path = up.path.rstrip("/")
         self.timeout = timeout if timeout is not None else _timeout(task)
         self.on_usage = on_usage or (lambda usage: None)
         self.on_health = on_health or (lambda state, why, until: None)
+        self.room = room
+        self.stopped: str | None = None  # close(reason): every model request refused from now on
         self.log = log or (lambda line: print(line, flush=True))
         self.token = secrets.token_urlsafe(32)
+        self._hold = hold
+        self.closed = False
+        self._marked = False  # status ratelimit written and not yet cleared
         self._refused: set[str] = set()
         self._lock = threading.Lock()
         st = task.status if task is not None else {}
@@ -372,7 +406,20 @@ class Keyhole:
     def __repr__(self) -> str:
         return f"Keyhole({self.model.id} on 127.0.0.1:{self.port})"
 
-    def close(self) -> None:
+    @property
+    def hold(self) -> float:
+        """How long one request is held through a rate limit or outage: RATE_HOLD_S, read each
+        request, unless given."""
+        return RATE_HOLD_S if self._hold is None else self._hold
+
+    def close(self, reason: str | None = None) -> None:
+        """Shut the keyhole down; with ``reason``, keep serving but refuse every model request
+        at once (the spend stop, #1019): a 400 OpenCode doesn't retry, so a round stopped for
+        spend never waits out a retry loop. Either way a held request stops holding (#1020)."""
+        if reason is not None:
+            self.stopped = reason
+            return
+        self.closed = True  # a held request stops holding
         self._server.shutdown()
         self._server.server_close()
 
@@ -420,6 +467,27 @@ class Keyhole:
         self.task.event({"ts": store.now(), "round": self.task.status.get("round", 1),
                          "kind": "served", **now,
                          "text": f"the provider served {_printable(model)}{via}"})
+        if self.model.provider == privacy.OPENROUTER and privacy.outside_order(now["by"], self.order):
+            self.task.event({"ts": store.now(), "round": self.task.status.get("round", 1),
+                             "kind": "backend", "by": now["by"],
+                             "text": f"OpenRouter served {_printable(now['by'])}, not "
+                                     f"{', '.join(_printable(b) for b in self.order)}"})
+
+    def route_body(self, body: dict, raw: bytes) -> bytes:
+        """The bytes forwarded: an OpenRouter request's `provider` routing set here, not trusted
+        to OpenCode (2.3.2 builds it from the model's `settings.provider`, which its resolver
+        replaces with the catalog's `canonical` provider id when one is set, model-resolver.ts):
+        the role's `order` and `allow_fallbacks: false` over whatever the body had; the rest of
+        its `provider` object (data_collection, zdr, only, ignore: each only narrows) kept.
+        Any other provider's body goes on byte for byte."""
+        if self.model.provider != privacy.OPENROUTER:
+            return raw
+        given = body.get("provider") if isinstance(body.get("provider"), dict) else {}
+        routing = privacy.routing(self.order)
+        if not self.order:  # none chosen (a gated --model start): no fallback all the same
+            routing.pop("order")
+        body["provider"] = {**given, **routing}
+        return json.dumps(body).encode()
 
     def health(self, state: str, why: str = "", until: float | None = None) -> None:
         try:
@@ -427,11 +495,76 @@ class Keyhole:
         except Exception:  # a hook's failure never fails a model request
             pass
 
+    def cooldown(self) -> float:
+        """The provider's rate limit as recorded in api-health.json (by any task's keyhole: three
+        API tasks of a provider share one account's limit): its `until`, or 0."""
+        try:
+            from . import models
+            row = models.api_health(self.model.provider)
+        except Exception:
+            return 0.0
+        if row and row.get("state") == "rate_limited" and isinstance(row.get("until"), (int, float)):
+            return float(row["until"])
+        return 0.0
+
+    def held(self, kind: str, code, wait: float | None, why: str = "") -> None:
+        """Status for a held answer or a queued stretch (#1020): `ratelimit_until` (now + the wait,
+        at least HOLD_FLOOR_S) and `ratelimit` {kind, provider, code, since, retry_after}, `since`
+        kept while the run goes on; `last` says it. Never the upstream body."""
+        if self.task is None:
+            return
+        now, p = time.time(), self.model.provider
+        with self._lock:
+            prev = self.task.status.get("ratelimit")
+            prev = prev if isinstance(prev, dict) else None
+            same = prev is not None and (prev.get("kind") == "queued") == (kind == "queued")
+            since = prev["since"] if same and isinstance(prev.get("since"), (int, float)) else now
+            row = {"kind": kind, "provider": p, "code": code, "since": since,
+                   "retry_after": None if wait is None else round(wait), **({"why": why} if why else {})}
+            if kind == "rate_limited":
+                last = f"rate-limited by {p} (HTTP {code}): waiting, retry in {wait:.0f} s"
+            elif kind == "outage":
+                last = f"{p} isn't answering ({f'HTTP {code}' if code else why}): waiting, retry in {wait:.0f} s"
+            else:
+                last = f"{p} holds the request in its queue: waiting for it to start"
+            self.task.set_status(ratelimit_until=now + max(wait or 0, HOLD_FLOOR_S), ratelimit=row,
+                                 last=last)
+            self._marked = True
+
+    def answered(self) -> None:
+        """The first data after a hold or a queue: both status keys cleared."""
+        if self.task is None or not self._marked:
+            return
+        with self._lock:
+            self._marked = False
+            self.task.set_status(ratelimit_until=None, ratelimit=None)
+
+    def quota(self, code: int) -> str:
+        """A spent balance or plan: `api_stop` (the runner stops the round, shared with #1019's
+        spend stop) and the text OpenCode is answered with."""
+        text = f"{self.model.provider} says the account is out of credit (HTTP {code})"
+        if self.task is not None:
+            self.task.set_status(api_stop={"guard": "quota", "text": text})
+        return text
+
     def usage(self, usage) -> None:
         try:
             self.on_usage(usage)
         except Exception:
             pass
+
+    def refusal(self, body: dict, size: int) -> str | None:
+        """Why this request isn't sent on, or None: the keyhole was closed with a reason, or
+        the meter's room for it is negative (the day cap, #1019)."""
+        if self.stopped:
+            return self.stopped
+        if self.room is None:
+            return None
+        try:
+            left = self.room(body, size)
+        except Exception:  # the meter's failure never fails a request
+            return None
+        return SPEND_REFUSED if left is not None and left < 0 else None
 
     def connection(self) -> http.client.HTTPConnection:
         """A fresh upstream connection (one per request: parallel requests never share one),
@@ -490,6 +623,48 @@ def _retry_after(value: str | None) -> float:
             except (TypeError, ValueError, IndexError):
                 pass
     return now + RATE_LIMIT_SECS
+
+
+def _after_secs(value: str | None) -> float | None:
+    """Retry-After as seconds from now (seconds or an HTTP date), or None without one."""
+    if not value:
+        return None
+    return max(0.0, _retry_after(value) - time.time())
+
+
+def _unreachable_why(kh: Keyhole, e: Exception) -> str:
+    if isinstance(e, ssl.SSLCertVerificationError):
+        return (f"its certificate didn't verify ({getattr(e, 'verify_message', '') or e})"
+                + ("; Python has no CA certificates: on macOS run its Install "
+                   "Certificates command" if sys.platform == "darwin" else ""))
+    if isinstance(e, socket.gaierror):
+        return f"no address for it ({e.strerror or e})"
+    return str(e) or type(e).__name__
+
+
+def _transient(e: Exception) -> bool:
+    """A failure that may pass on its own (refused, reset, DNS, TLS, a timeout): held. Not a
+    certificate that doesn't verify, nor a proxy refusing the tunnel: those are the setup's,
+    said at once."""
+    if isinstance(e, ssl.SSLCertVerificationError):
+        return False
+    return isinstance(e, (ConnectionError, socket.gaierror, socket.timeout, TimeoutError,
+                          ssl.SSLError, http.client.IncompleteRead))
+
+
+def _short_why(e: Exception) -> str:
+    """A transport failure in a few words, for status `ratelimit` and the stop's text."""
+    if isinstance(e, ConnectionRefusedError):
+        return "connection refused"
+    if isinstance(e, ConnectionResetError):
+        return "connection reset"
+    if isinstance(e, socket.gaierror):
+        return "no address"
+    if isinstance(e, ssl.SSLError):
+        return "TLS error"
+    if isinstance(e, (socket.timeout, TimeoutError)):
+        return "timed out"
+    return "no connection"
 
 
 def _handler(kh: Keyhole):
@@ -583,7 +758,9 @@ def _handler(kh: Keyhole):
             if "models" in body or asked != kh.model.name:  # a fallback list routes elsewhere
                 kh.refused("a fallback list" if "models" in body else str(asked))
                 return self.send_json(403, f"keyhole: this task may use only {kh.model.id}")
-            self.forward(raw)
+            if why := kh.refusal(body, len(raw)):  # a 400: OpenCode doesn't retry it (#1019)
+                return self.send_json(400, f"workbench: {_printable(why)}")
+            self.forward(kh.route_body(body, raw), body, len(raw))
 
         def do_PUT(self):
             self.refuse_path()
@@ -625,7 +802,11 @@ def _handler(kh: Keyhole):
                 return None
             return self.rfile.read(n)
 
-        def forward(self, raw: bytes):
+        def forward(self, raw: bytes, body: dict | None = None, size: int = 0):
+            """Send ``raw`` on, holding through rate limits and outages (#1020). ``body``, ``size``:
+            the request as asked, whose spend room (kh.refusal, #1019) is asked again before each
+            pass after the first: a hold once sent a request on after another task, or the wait,
+            had used the day's room up (wave 2's review)."""
             heads = {}
             named = {h.strip().lower() for h in (self.headers.get("Connection") or "").split(",")}
             for k, v in self.headers.items():
@@ -641,42 +822,101 @@ def _handler(kh: Keyhole):
             heads["Content-Length"] = str(len(raw))
             query = urllib.parse.urlsplit(self.path).query
             target = urllib.parse.urlsplit(self.path).path + (f"?{query}" if query else "")
-            conn = kh.connection()
-            try:
+            deadline = time.monotonic() + kh.hold
+            backoff = BACKOFF[0]
+            first = True
+            while True:
+                if not first and body is not None and (why := kh.refusal(body, size)):
+                    return self.send_json(400, f"workbench: {_printable(why)}")  # as do_POST's
+                first = False
+                # another task's 429 on this provider (api-health.json): wait it out first, within
+                # this request's hold
+                cool = kh.cooldown() - time.time()
+                if cool > 0 and (left := deadline - time.monotonic()) > 0:
+                    kh.held("rate_limited", 429, cool)
+                    if not self.nap(min(cool, left)):
+                        return self.drop()
+                conn = kh.connection()
                 try:
-                    conn.request("POST", target, body=raw, headers=heads)
-                    resp = conn.getresponse()
-                except Exception as e:
-                    if isinstance(e, (OSError, http.client.HTTPException)) and not isinstance(
-                            e, http.client.InvalidURL):
-                        return self.unreachable(e)
-                    # nothing was sent, and not the upstream's fault (InvalidURL, a ValueError or
-                    # UnicodeError from http.client): never `unreachable`, and only the type, since
-                    # putheader's ValueError quotes the header, the key in it (the reviews,
-                    # 2026-11-23)
-                    return self.send_json(502, f"keyhole: can't send this request on "
-                                               f"({type(e).__name__})", etype="api_error")
-                if 200 <= resp.status < 300:
-                    return self.stream(resp)
-                return self.relay_error(resp)
-            finally:
-                conn.close()
+                    try:
+                        conn.request("POST", target, body=raw, headers=heads)
+                        resp = conn.getresponse()
+                    except Exception as e:
+                        if isinstance(e, (OSError, http.client.HTTPException)) and not isinstance(
+                                e, http.client.InvalidURL):
+                            why = kh.redact(_unreachable_why(kh, e))
+                            kh.health("unreachable", why)
+                            how = (self.hold_on("outage", None, backoff, deadline, _short_why(e))
+                                   if _transient(e) else "pass")
+                            if how == "again":
+                                backoff = min(backoff * 2, BACKOFF[1])
+                                continue
+                            if how == "gone":
+                                return self.drop()
+                            return self.send_json(502, f"keyhole: can't reach {kh._up.hostname}: {why}",
+                                                  etype="api_error")
+                        # nothing was sent, and not the upstream's fault (InvalidURL, a ValueError or
+                        # UnicodeError from http.client): never `unreachable`, and only the type, since
+                        # putheader's ValueError quotes the header, the key in it (the reviews,
+                        # 2026-11-23)
+                        return self.send_json(502, f"keyhole: can't send this request on "
+                                                   f"({type(e).__name__})", etype="api_error")
+                    if 200 <= resp.status < 300:
+                        return self.stream(resp)
+                    # without Retry-After, the provider's cooldown is the backoff this keyhole
+                    # waits itself, not RATE_LIMIT_SECS: its own next pass reads it back (cooldown)
+                    status, sent, text, kind = self.read_error(
+                        resp, backoff if backoff <= deadline - time.monotonic() else None)
+                    if kind == "quota":  # no wait helps: the round stops, and OpenCode doesn't retry a 400
+                        return self.send_json(400, f"keyhole: {kh.quota(status)}: the round stops")
+                    if kind in ("rate_limited", "outage"):
+                        after = _after_secs(resp.getheader("Retry-After"))
+                        how = self.hold_on(kind, status, backoff if after is None else after, deadline)
+                        if how == "again":
+                            if after is None:
+                                backoff = min(backoff * 2, BACKOFF[1])
+                            continue
+                        if how == "gone":
+                            return self.drop()
+                    return self.send_error(status, sent, text)
+                finally:
+                    conn.close()
 
-        def unreachable(self, e: Exception):
-            host = kh._up.hostname
-            if isinstance(e, ssl.SSLCertVerificationError):
-                why = (f"its certificate didn't verify ({getattr(e, 'verify_message', '') or e})"
-                       + ("; Python has no CA certificates: on macOS run its Install "
-                          "Certificates command" if sys.platform == "darwin" else ""))
-            elif isinstance(e, socket.gaierror):
-                why = f"no address for it ({e.strerror or e})"
-            else:
-                why = str(e) or type(e).__name__
-            why = kh.redact(why)
-            kh.health("unreachable", why)
-            self.send_json(502, f"keyhole: can't reach {host}: {why}", etype="api_error")
+        def hold_on(self, kind: str, code, wait: float, deadline: float, why: str = "") -> str:
+            """A held answer: status written; "again" once ``wait`` has passed, "pass" when it
+            would run past the request's hold (the answer goes back to OpenCode), "gone" when
+            OpenCode hung up meanwhile (stopped, or steered)."""
+            kh.held(kind, code, wait, why)
+            if wait > deadline - time.monotonic():
+                return "pass"
+            return "again" if self.nap(wait) else "gone"
 
-        def relay_error(self, resp):
+        def nap(self, secs: float) -> bool:
+            """Sleep ``secs`` in short steps; False as soon as OpenCode hangs up or the keyhole
+            closes: a held request is dropped with its client, never sent on for no one. A spend
+            stop (close with a reason, #1019) ends a hold too: what it waited for may not go out."""
+            end = time.monotonic() + secs
+            while (left := end - time.monotonic()) > 0:
+                if kh.closed or kh.stopped or self.gone():
+                    return False
+                time.sleep(min(0.25, left))
+            return not (kh.closed or kh.stopped or self.gone())
+
+        def gone(self) -> bool:
+            try:
+                ready, _, _ = select.select([self.connection], [], [], 0)
+                return bool(ready) and not self.connection.recv(1, socket.MSG_PEEK)
+            except (OSError, ValueError):
+                return True
+
+        def drop(self):
+            self.close_connection = True
+
+        def read_error(self, resp, wait: float | None = None):
+            """(status, headers, redacted body, kind) of an upstream error: kind `quota`,
+            `rate_limited`, `outage` or None (HOLD_CODES, QUOTA), and the provider's health: a
+            rate limit until Retry-After, else ``wait`` (the hold's backoff) when given, else
+            RATE_LIMIT_SECS; any 5xx unreachable, held or not."""
             data = resp.read(ERROR_CAP + 1)
             text = data[:ERROR_CAP].decode("utf-8", "replace")
             if len(data) > ERROR_CAP:
@@ -685,19 +925,29 @@ def _handler(kh: Keyhole):
                 # as much as a key (twice: JSON may escape it) from the end
                 text = text[:-2 * max(len(kh._key.value), 64)]
             text = kh.redact(text)
-            out = text.encode()
-            if resp.status == 402 or "insufficient_quota" in text:
+            status = resp.status
+            kind = ("quota" if status == 402 or (status in (429, 403) and QUOTA.search(text))
+                    else HOLD_CODES.get(status))
+            if kind == "quota" or "insufficient_quota" in text:
                 kh.health("no_credit", _first_line(text))
-            elif resp.status == 429:
-                kh.health("rate_limited", _first_line(text), _retry_after(resp.getheader("Retry-After")))
-            elif resp.status >= 500:
-                kh.health("unreachable", f"{resp.status} {_first_line(text)}".strip())
-            self.send_response(resp.status)
-            for k, v in resp.getheaders():
-                lk = k.lower()
-                if lk in HOP or lk in ("content-length", "content-encoding", "connection"):
-                    continue
-                self.send_header(k, kh.redact(v))
+            elif kind == "rate_limited":
+                after = resp.getheader("Retry-After")
+                # a 429 without Retry-After read back as 60 s held every retry 60 s, never
+                # BACKOFF's 2, 4, 8 (the review of #1020, 2026-11-23)
+                kh.health("rate_limited", _first_line(text),
+                          time.time() + wait if wait is not None and not after else _retry_after(after))
+            elif kind == "outage" or status >= 500:  # a 501, a 505 or a 525: not held, still told
+                kh.health("unreachable", f"{status} {_first_line(text)}".strip())
+            sent = [(k, kh.redact(v)) for k, v in resp.getheaders()
+                    if k.lower() not in HOP and k.lower() not in ("content-length", "content-encoding",
+                                                                  "connection")]
+            return status, sent, text, kind
+
+        def send_error(self, status: int, sent, text: str):
+            out = text.encode()
+            self.send_response(status)
+            for k, v in sent:
+                self.send_header(k, v)
             self.send_header("Content-Length", str(len(out)))
             self.end_headers()
             self.wfile.write(out)
@@ -713,9 +963,11 @@ def _handler(kh: Keyhole):
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             sse = "event-stream" in (resp.getheader("Content-Type") or "")
+            self.used = {}  # this response's usage, merged: kh.usage once, before its last byte
             key = kh._key.value.encode()
             hold = bytearray()  # SSE: a partial line; else the last len(key) - 1 bytes
             whole = bytearray()
+            started, marked = False, time.monotonic()  # the first data; the queue's last mark
 
             def send(data: bytes):
                 if data:
@@ -735,7 +987,16 @@ def _handler(kh: Keyhole):
                         hold = bytearray(rest)
                         if done:
                             send(b"\n".join(self.data_line(ln) for ln in done) + b"\n")
+                        if not started and any(ln.strip() and not ln.startswith(b":") for ln in done):
+                            started = True  # an event, not a keep-alive comment: it has begun
+                            kh.answered()
+                        elif not started and time.monotonic() - marked >= QUEUED_AFTER_S:
+                            marked = time.monotonic()  # keep-alives only: the provider's queue
+                            kh.held("queued", resp.status, None)
                     else:  # the key never passes, even split across two pieces
+                        if not started:
+                            started = True
+                            kh.answered()
                         if len(whole) < SNIFF_CAP:
                             whole += piece
                         out = bytes(hold).replace(key, REDACTED.encode())
@@ -747,16 +1008,25 @@ def _handler(kh: Keyhole):
                 elif hold:
                     send(bytes(hold).replace(key, REDACTED.encode()))
                 hold = bytearray()
+                if not sse and whole:
+                    try:
+                        self.sniff(json.loads(whole))
+                    except ValueError:
+                        pass
+                # before the last byte: OpenCode prints the step's step_finish only once it has
+                # it, so the meter has booked the response by then (#1019)
+                self.flush_usage()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
             except (OSError, http.client.HTTPException):
                 self.close_connection = True  # the client or the upstream went away mid-answer
+                self.flush_usage()  # what the provider counted so far is still spent
                 return
-            if not sse and whole:
-                try:
-                    self.sniff(json.loads(whole))
-                except ValueError:
-                    pass
+
+        def flush_usage(self):
+            used, self.used = getattr(self, "used", None), {}
+            if used:
+                kh.usage(used)
 
         def data_line(self, ln: bytes) -> bytes:
             """One SSE line read for the model and usage, and as it goes on: with the key out,
@@ -792,9 +1062,26 @@ def _handler(kh: Keyhole):
                 kh.saw(served, obj.get("provider"))
             usage = obj.get("usage") or msg.get("usage") or res.get("usage")
             if isinstance(usage, dict) and usage:
-                kh.usage(usage)
+                # one response, one usage: Anthropic's message_start and message_delta each carry
+                # part, and some servers send a running total in every chunk (counts only grow)
+                self.used = _merged(getattr(self, "used", None) or {}, usage)
 
     return Handler
+
+
+def _merged(a: dict, b: dict) -> dict:
+    """Two usage objects of one response as one: numbers the larger, objects merged alike."""
+    out = dict(a)
+    for k, v in b.items():
+        old = out.get(k)
+        if isinstance(v, dict) and isinstance(old, dict):
+            out[k] = _merged(old, v)
+        elif isinstance(v, (int, float)) and not isinstance(v, bool) and \
+                isinstance(old, (int, float)) and not isinstance(old, bool):
+            out[k] = max(old, v)
+        elif v is not None or k not in out:
+            out[k] = v
+    return out
 
 
 class _Ambiguous(ValueError):
@@ -830,7 +1117,7 @@ def _strict_json(raw: bytes):
     return body
 
 
-def start(task, m, *, log=None, on_usage=None, on_health=None) -> Keyhole:
+def start(task, m, *, log=None, on_usage=None, on_health=None, room=None) -> Keyhole:
     """The keyhole for task ``task``'s API model ``m`` (models.Model: id, provider, name,
     base_url, and the catalog's provider package as ``package``): its key loaded (load_key), its
     protocol from the package, its upstream the catalog's base. Logs one line, no key and no
@@ -846,6 +1133,7 @@ def start(task, m, *, log=None, on_usage=None, on_health=None) -> Keyhole:
         raise KeyholeError(f"{m.id} has no API base in OpenCode's catalog")
     key = load_key(m.provider, package)
     kh = Keyhole(task, m, key, mirror_path(package, m.base_url), protocol, log=log,
-                 on_usage=on_usage, on_health=on_health)
+                 on_usage=on_usage, on_health=on_health, room=room,
+                 order=task.spec.get("order") if task is not None else None)  # #1021
     kh.log(f"keyhole: {m.provider} on 127.0.0.1:{kh.port} for {m.id}")
     return kh

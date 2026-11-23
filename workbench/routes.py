@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import store
+from .privacy import OPENROUTER  # the provider whose roles keep an `order` (#1021)
 
 ROLES = ("significant", "trivial", "writing")
 # how the pane names them (#1023); files and commands keep the role names
@@ -106,6 +107,13 @@ def normalize(doc) -> dict:
                 row[key] = e[key]
         if row["via"] == "api" and not row.get("api"):
             raise RoutesError(f"{r} is on API with no api model")
+        # an OpenRouter role's backends (wb route --order, #1021): the keyhole routes every
+        # request to them alone, and the start's where-note names them
+        if e.get("order") is not None:
+            order = e["order"]
+            if not isinstance(order, list) or not all(isinstance(b, str) and b.strip() for b in order):
+                raise RoutesError(f"{r}'s order is {order!r}, not a list of backend names")
+            row["order"] = list(order)
         for key in STAMPS:
             if key in e:
                 row[key] = e[key]
@@ -142,8 +150,16 @@ def busy_api_any(doc: dict) -> bool:
 def _busy_newly(doc: dict, new: dict) -> list:
     """The roles the busy opt-in can newly send to an API model (busy_api), one they didn't
     already run on: what a change opens to spending while `busy` stays api."""
-    return [r for r in ROLES if (mid := busy_api(new, r)) and mid != busy_api(doc, r)
-            and not (effective_via(doc, r) == "api" and doc["roles"][r].get("api") == mid)]
+    return [r for r in ROLES if (mid := busy_api(new, r)) and _sent(new, r, mid) != _sent(doc, r, busy_api(doc, r))
+            and not (effective_via(doc, r) == "api" and _sent(doc, r, doc["roles"][r].get("api")) == _sent(new, r, mid))]
+
+
+def _sent(doc: dict, role: str, mid: str | None) -> tuple:
+    """Where ``role``'s code goes on ``mid``: the model and, for an OpenRouter one, its backends
+    (`order`, #1021), which the keyhole routes every request by; new backends are a new place
+    (wave 2's merge with #1023: a busy role's order change read as nothing new)."""
+    order = doc["roles"][role].get("order") if mid and mid.split("/", 1)[0] == OPENROUTER else None
+    return mid, tuple(order or ())
 
 
 def busy_routed(doc: dict, role: str, m) -> dict:
@@ -152,7 +168,9 @@ def busy_routed(doc: dict, role: str, m) -> dict:
     from . import models
     row = doc["roles"][role]
     return {"via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
-            "thinking": row["thinking"], "said": row.get("said") or "", "said_ts": row.get("ts"), "busy": True}
+            "thinking": row["thinking"], "said": row.get("said") or "", "said_ts": row.get("ts"), "busy": True,
+            # an OpenRouter role's backends, as resolve's: the keyhole routes by them (wave 2's merge)
+            **({"order": list(row["order"])} if row.get("order") and m.provider == OPENROUTER else {})}
 
 
 def _busy_part(doc: dict, new: dict, cap) -> tuple[str, bool]:
@@ -253,6 +271,8 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str]) -> 
         clauses.append(f"{_side(old)} → {_side(row)}")
         if on_api:
             clauses += [f"your code goes to {who(row['api'])}", f"thinking {row['thinking']}"]
+            if row.get("order"):  # an OpenRouter role's backends (#1021): part of what is agreed to
+                clauses.append(f"backends {', '.join(row['order'])}")
             if cap is not None:
                 clauses.append(f"cap {money(cap)}/day")
         elif row.get("api"):
@@ -266,6 +286,9 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str]) -> 
     if old["thinking"] != row["thinking"] and not (moved and on_api):
         clauses.append(f"thinking {old['thinking']} → {row['thinking']}")
         gated |= on_api
+    if row.get("order") and old.get("order") != row["order"] and not (moved and on_api):
+        clauses.append(f"backends {', '.join(old.get('order') or ['none'])} → {', '.join(row['order'])}")
+        gated = True  # where the code goes, within OpenRouter (#1021)
     return clauses, gated
 
 
@@ -307,11 +330,13 @@ def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str]) -> tuple[
 def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None = None,
            api: str | None = None, thinking: str | None = None, day_usd=None,
            who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0], use: str | None = None,
-           busy: str | None = None) -> Change:
+           order: list[str] | None = None, busy: str | None = None) -> Change:
     """What a `wb route` does to ``doc``: ``role`` one of ROLES, "all" (``use``, the Agents
     switch, and ``thinking`` only) or None (the cap alone). ``who``: an API id's provider, as the
     user knows it (the catalog's name). Never writes. RoutesError for a change that can't be
-    made: `api` with no API model kept, and the first API role with no cap (NO_CAP)."""
+    made: `api` with no API model kept, and the first API role with no cap (NO_CAP). ``order``:
+    an OpenRouter role's backends (#1021), dropped when the role's API model is another
+    provider's."""
     new = copy.deepcopy(doc)
     new.setdefault("use", "both")
     if day_usd is not None:
@@ -335,6 +360,10 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
             row["gpu"] = gpu
         if thinking is not None:
             row["thinking"] = thinking
+        if order is not None:
+            row["order"] = list(order)
+        if row.get("order") and str(row.get("api") or "").split("/", 1)[0] != OPENROUTER:
+            row.pop("order")
         if via == "api" and not row.get("api"):
             raise RoutesError(f"{r} has no API model yet: wb route {r} <provider/model>")
         if via is not None:
@@ -539,7 +568,8 @@ def routed_line(model_id: str, routed: dict) -> str:
 
 def model_line(model_id: str, routed: dict) -> str:
     """wb start's model line for an API task: `model: <id> · API (<provider>) · trivial role, set by
-    you 11-20 · thinking off`. Child 11 adds spend today; a GPU task's line is as before roles."""
+    you 11-20 · thinking off`, which wb start ends with meter.tail (today's spend); a GPU task's
+    line is as before roles."""
     return (f"model: {model_id} · API ({routed.get('provider_name') or routed.get('provider')}) · "
             f"{said_part(routed)} · thinking {routed.get('thinking') or 'off'}")
 
@@ -552,8 +582,10 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
     `--model` is taken as asked (an API one through ``gate``, the user's yes); the role's side
     (effective_via): the GPU, its pin or the router's pick (router.choose as before roles), or
     the role's API model by its exact id. No fallback in either direction: a GPU role with no
-    GPU model never tries its stored API model, and an API role that can't run never the GPU."""
-    from . import models, router  # they import more than routes needs at its import
+    GPU model never tries its stored API model, and an API role that can't run never the GPU.
+    Either API path meets meter.refusal (no price, or today at the cap, #1019) first: the
+    `--model` one before the dialog, the role's (agreed to in `wb route`'s) before it starts."""
+    from . import meter, models, router  # they import more than routes needs at its import
     try:
         doc = read()
     except RoutesError as e:
@@ -565,6 +597,8 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
             raise Refused(str(e).strip('"'), 1) from None
         if m.kind != "api":
             return m, models.status(m), "asked for", {"via": "gpu", "role": role}
+        if why := meter.refusal(m):  # before the dialog: never ask for a start that is refused
+            raise Refused(why)
         if gate is not None:
             gate(m)
         approved = os.environ.get("CLAUDECODE") == "1"
@@ -580,6 +614,8 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
                 raise Refused(f"{role} role: its GPU model {row['gpu']} isn't found ({str(e).strip(chr(34))}). "
                               f"Ask the user: fix that, or let the router pick (wb route {role} --gpu auto)") from None
             return m, models.status(m), f"the {role} role's GPU model (wb route)", {"via": "gpu", "role": role}
+        # the writing role ranks on its own record (#1025), a coding role on its size's: choose
+        # reads that from the role, which also names it in the refusal's API choice (#1024)
         top, why = router.choose(size, stack, name, role=role)
         if top is None:
             raise Refused(why)
@@ -592,6 +628,13 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
         failed = models.hosted_error()
         raise Refused(cant_run(role, mid, "not in OpenCode's catalog now" + (
             f" (its read failed: {failed})" if failed else ""), "", doc))
+    # a role on an unpriced model ran with no cap at all once #1016's path skipped this (wave 2's review)
+    if why := meter.refusal(m, role):
+        raise Refused(why)
     routed = {"via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
               "thinking": row["thinking"], "said": row.get("said") or "", "said_ts": row.get("ts")}
+    # an OpenRouter role's backends (#1021): task.json's `order`, which the keyhole routes every
+    # request by; the user agreed to them in the dialog, and once they never reached the task
+    if row.get("order") and m.provider == OPENROUTER:
+        routed["order"] = list(row["order"])
     return m, models.status(m), routed_line(m.id, routed), routed
