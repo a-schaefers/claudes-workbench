@@ -24774,6 +24774,754 @@ class RealOpenCodeSkillFiles(Base):
         self.assertIn("CANARY-REFERENCE", answers[1])                         # and readable from the worktree
 
 
+class _Upstream(http.server.BaseHTTPRequestHandler):
+    """A provider for the keyhole's tests: records each request (method, path, headers, body) on
+    its server's `seen` and answers as its server's `mode` says: "ok" (an OpenAI SSE answer,
+    or Anthropic's for /messages), "status" (`status`, a body echoing part of the key the way
+    OpenAI's 401 does, `retry_after`), "chunks" (`chunks` SSE pieces `gap` s apart; the
+    Responses API's events for /responses), "raw" (`status`, `ctype`, then `pieces` sent as they
+    are, one chunk each), with `served` (the response's model) and `by` (OpenRouter's
+    provider)."""
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.server.seen.append({"method": "GET", "path": self.path, "headers": dict(self.headers)})
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        s = self.server
+        s.seen.append({"method": "POST", "path": self.path, "headers": dict(self.headers),
+                       "body": json.loads(raw)})
+        if s.mode == "raw":
+            self.send_response(s.status)
+            self.send_header("Content-Type", s.ctype)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for piece in s.pieces:
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(piece), piece))
+                self.wfile.flush()
+                time.sleep(0.05)
+            self.wfile.write(b"0\r\n\r\n")
+            return
+        if s.mode == "status":
+            body = json.dumps({"error": {"message": s.message, "code": s.status}}).encode()
+            self.send_response(s.status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            if s.retry_after:
+                self.send_header("Retry-After", s.retry_after)
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if "/messages" in self.path:
+            events = [{"type": "message_start", "message": {
+                "id": "msg_up", "type": "message", "role": "assistant", "model": s.served,
+                "content": [], "stop_reason": None, "usage": {"input_tokens": 7, "output_tokens": 1}}},
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "text",
+                                                                           "text": ""}},
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta",
+                                                                      "text": "ok"}},
+                {"type": "content_block_stop", "index": 0},
+                {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                 "usage": {"output_tokens": 2}},
+                {"type": "message_stop"}]
+        elif self.path.endswith("/responses"):
+            events = [{"type": "response.created", "sequence_number": 0, "response": {
+                "id": "resp_up", "object": "response", "model": s.served, "status": "in_progress",
+                "usage": None}},
+                {"type": "response.output_text.delta", "sequence_number": 1, "delta": "ok"},
+                {"type": "response.completed", "sequence_number": 2, "response": {
+                    "id": "resp_up", "object": "response", "model": s.served,
+                    "status": "completed", "usage": {"input_tokens": 9, "output_tokens": 4}}}]
+        else:
+            events = [{"model": s.served, **({"provider": s.by} if s.by else {}),
+                       "choices": [{"index": 0, "delta": {"content": f"part {i}"}}]}
+                      for i in range(s.chunks)]
+            events[-1]["usage"] = {"prompt_tokens": 7, "completion_tokens": 3}
+            events[-1]["choices"][0]["finish_reason"] = "stop"
+        for i, ev in enumerate(events):
+            if i:
+                time.sleep(s.gap)
+            line = f"data: {json.dumps(ev)}\n\n".encode()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(line), line))
+            self.wfile.flush()
+        done = b"data: [DONE]\n\n"
+        self.wfile.write(b"%x\r\n%s\r\n0\r\n\r\n" % (len(done), done))
+
+
+class _KeyholeTest(Base):
+    """What the keyhole's tests share: a canary key, an upstream that records, a task."""
+    # canary keys only: never a real one in a test
+    CANARY = "sk-canary-" + "K7q2" * 10 + "wxyz"
+
+    def setUp(self):
+        super().setUp()
+        from workbench import keyhole, models
+        self.kh_mod, self.models = keyhole, models
+        self.up = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
+        self.up.daemon_threads = True
+        self.up.seen, self.up.mode, self.up.status, self.up.message = [], "ok", 200, ""
+        self.up.retry_after, self.up.chunks, self.up.gap = None, 1, 0
+        self.up.served, self.up.by = "served-model", None
+        self.up.ctype, self.up.pieces = "application/json", []
+        threading.Thread(target=self.up.serve_forever, daemon=True).start()
+        self.addCleanup(self.up.server_close)
+        self.addCleanup(self.up.shutdown)
+        self.task = store.Task("t-kh")
+        self.task.dir.mkdir(parents=True)
+        store.write_json(self.task.dir / "task.json", {"silence_timeout": 900})
+        self.lines = []
+
+    def model(self, provider="deepinfra", name="deepseek-ai/DeepSeek-V4.1-Flash-1017",
+              path="/v1/openai", package="@opencode/ai/providers/deepinfra"):
+        m = self.models.Model(id=f"{provider}/{name}", provider=provider, name=name,
+                              base_url=f"http://127.0.0.1:{self.up.server_port}{path}",
+                              engine="api", label=name)
+        m.package = package  # child 5's field (#1013), set here until models.Model has it
+        return m
+
+    def keyhole(self, m=None, **kw):
+        m = m or self.model()
+        kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key(m.provider, self.CANARY), m.base_url,
+                                 self.kh_mod.protocol_of(m.package), log=self.lines.append, **kw)
+        self.addCleanup(kh.close)
+        return kh
+
+    def post(self, kh, path="/chat/completions", body=None, headers=None, method="POST",
+             raw=None):
+        """(status, headers, body) of a request to the keyhole, with its token unless
+        ``headers`` says otherwise."""
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+        self.addCleanup(conn.close)
+        heads = {"Authorization": f"Bearer {kh.token}", "Content-Type": "application/json"}
+        heads.update(headers or {})
+        heads = {k: v for k, v in heads.items() if v is not None}
+        data = raw if raw is not None else (None if method == "GET" else json.dumps(
+            body if body is not None else {"model": kh.model.name, "stream": True}).encode())
+        conn.request(method, urllib.parse.urlsplit(kh.base).path + path, body=data, headers=heads)
+        r = conn.getresponse()
+        return r.status, dict(r.getheaders()), r.read().decode()
+
+    def raw_request(self, kh, data: bytes) -> tuple[int, bytes]:
+        """(status, body) of ``data`` sent to the keyhole as it is, on a fresh socket: for what
+        http.client won't send."""
+        with socket.create_connection(("127.0.0.1", kh.port), timeout=30) as sock:
+            sock.sendall(data)
+            r = http.client.HTTPResponse(sock)
+            r.begin()
+            return r.status, r.read()
+
+    def assert_no_canary(self, *texts):
+        for t in texts:
+            self.assertNotIn(self.CANARY, t)
+            self.assertNotIn(self.CANARY[-12:], t)
+
+    def all_files(self, *dirs):
+        return "".join(p.read_text(errors="replace") for d in dirs for p in Path(d).rglob("*")
+                       if p.is_file())
+
+    def fake_auth(self, auth: dict):
+        """WB_OPENCODE_BIN: an `opencode auth export|list` that answers from FAKE_AUTH."""
+        script = Path(self.tmp.name) / "fake_auth.py"
+        script.write_text(textwrap.dedent("""\
+            import json, os, sys
+            auth = json.loads(os.environ["FAKE_AUTH"])
+            if sys.argv[1:3] == ["auth", "export"]:
+                p = auth.get(sys.argv[3], {})
+                if p.get("fail"):
+                    sys.stderr.write(p["fail"])
+                    sys.exit(1)
+                print(json.dumps(p.get("export", [])))
+            elif sys.argv[1:3] == ["auth", "list"]:
+                print(json.dumps([{"id": k, "name": k, "connections": v.get("list", [])}
+                                  for k, v in auth.items()]))
+            """))
+        os.environ["WB_OPENCODE_BIN"] = shlex.join([sys.executable, str(script)])
+        os.environ["FAKE_AUTH"] = json.dumps(auth)
+
+    def key_row(self, provider, value, active=True):
+        return {"id": "cred_1", "integrationID": provider, "label": "main", "active": active,
+                "value": value}
+
+
+class Keyhole(_KeyholeTest):
+    """The per-task key proxy (#1012), driven directly. The runner's start of it comes with API
+    models (#1013)."""
+
+    def test_upstream_gets_the_real_key_only_from_the_keyhole(self):
+        kh = self.keyhole()
+        code, _, body = self.post(kh, headers={"api-key": kh.token, "X-Api-Key": kh.token})
+        self.assertEqual(code, 200, body)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/v1/openai/chat/completions")   # the path OpenCode posts
+        self.assertEqual(req["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assertNotIn(kh.token, json.dumps(req))                       # the token stops here
+        self.assertEqual(req["headers"]["Host"], f"127.0.0.1:{self.up.server_port}")
+        self.assertEqual(req["headers"]["Accept-Encoding"], "identity")
+        opts = self.kh_mod.layer_options(kh)
+        self.assertEqual(opts, {"baseURL": kh.base, "apiKey": kh.token})
+        self.assertTrue(kh.base.startswith("http://127.0.0.1:"))          # never localhost (::1)
+        self.assert_no_canary(json.dumps(opts), repr(kh), str(kh), repr(kh._key), str(kh._key),
+                              "\n".join(self.lines), self.all_files(self.task.dir))
+        with self.assertRaises(TypeError):
+            __import__("pickle").dumps(kh._key)
+
+    def test_anthropic_gets_x_api_key(self):
+        kh = self.keyhole(self.model("anthropic", "claude-haiku-5-5", "/v1",
+                                     "@opencode/ai/providers/anthropic"))
+        self.assertTrue(kh.base.endswith("/v1"))
+        code, _, body = self.post(kh, "/messages?beta=true", headers={
+            "Authorization": None, "x-api-key": kh.token, "anthropic-version": "2023-06-01",
+            "anthropic-beta": "fine-grained-tool-streaming-2025-05-14"})
+        self.assertEqual(code, 200, body)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/v1/messages?beta=true")          # the query kept
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual(heads["x-api-key"], self.CANARY)
+        self.assertNotIn("authorization", heads)
+        self.assertEqual(heads["anthropic-version"], "2023-06-01")
+        self.assertIn("anthropic-beta", heads)
+        code, _, _ = self.post(kh, "/messages/count_tokens", headers={
+            "Authorization": None, "x-api-key": kh.token})
+        self.assertEqual((code, self.up.seen[-1]["path"]), (200, "/v1/messages/count_tokens"))
+
+    def test_another_model_id_is_refused(self):
+        kh = self.keyhole()
+        for body in ({"model": "deepseek-ai/DeepSeek-V4-Pro", "stream": True},
+                     {"model": kh.model.name, "models": [kh.model.name, "openai/gpt-x"]},
+                     {"messages": []}):
+            code, _, text = self.post(kh, body=body)
+            self.assertEqual(code, 403, body)
+            self.assertEqual(json.loads(text), {"error": {
+                "type": "invalid_request_error",
+                "message": f"keyhole: this task may use only {kh.model.id}"}})
+        self.post(kh, body={"model": "deepseek-ai/DeepSeek-V4-Pro"})   # logged once per model
+        self.assertEqual(self.up.seen, [])                                # nothing forwarded
+        self.assertEqual(self.lines.count(
+            f"keyhole: refused deepseek-ai/DeepSeek-V4-Pro (this task runs {kh.model.id})"), 1)
+        self.assertIn(f"keyhole: refused a fallback list (this task runs {kh.model.id})", self.lines)
+
+    def test_a_wrong_or_missing_token_is_refused(self):
+        kh = self.keyhole()
+        for heads in ({"Authorization": None}, {"Authorization": "Bearer nope"},
+                      {"Authorization": None, "x-api-key": kh.token[:-1] + "x"},
+                      {"Authorization": f"Basic {kh.token}"}):
+            code, _, text = self.post(kh, headers=heads)
+            self.assertEqual(code, 401, heads)
+            self.assertIn("keyhole: not this task's token", text)
+        code, _, _ = self.post(kh, "/models", method="GET", headers={"Authorization": None})
+        self.assertEqual(code, 401)
+        self.assertEqual(self.up.seen, [])
+
+    def test_only_model_paths_are_forwarded(self):
+        kh = self.keyhole()
+        # no segment between the base and a model path: the reviews, 2026-11-23, saw these go
+        # upstream with the key (OpenAI's Assistants endpoint among them)
+        for path in ("/files", "/../files/chat/completions", "/%2e%2e/chat/completions",
+                     "/chat/completions/x", "/embeddings", "/threads/thread_abc/messages",
+                     "/conversations/c1/responses", "/a/b/c/d/chat/completions",
+                     "/openai/chat/completions", "/x/models"):
+            code, _, text = self.post(kh, path)
+            self.assertEqual(code, 404, path)
+            self.assertIn("isn't a model request", text)
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)  # outside the base
+        conn.request("POST", "/v2/chat/completions", body=b"{}",
+                     headers={"Authorization": f"Bearer {kh.token}"})
+        self.assertEqual(conn.getresponse().status, 404)
+        conn.close()
+        code, _, text = self.post(kh, "/models", method="GET")
+        self.assertEqual(code, 200)
+        self.assertEqual([m["id"] for m in json.loads(text)["data"]], [kh.model.name])
+        code, _, _ = self.post(kh, "/responses")
+        self.assertEqual((code, self.up.seen[-1]["path"]), (200, "/v1/openai/responses"))
+        self.assertEqual([r["method"] for r in self.up.seen], ["POST"])   # no GET went upstream
+
+    def test_a_big_body_is_refused_unread(self):
+        kh = self.keyhole()
+        code, _, text = self.post(kh, raw=b"{}", headers={
+            "Content-Length": str(self.kh_mod.BODY_CAP + 1)})
+        self.assertEqual(code, 413)
+        self.assertEqual(self.up.seen, [])
+
+    def test_a_401_echoing_the_key_is_redacted(self):
+        kh = self.keyhole()
+        self.up.mode, self.up.status = "status", 401
+        self.up.message = (f"Incorrect API key provided: {self.CANARY[:5]}…{self.CANARY[-4:]}. "
+                           f"Also {self.CANARY} and {self.CANARY[:8]}")
+        code, _, text = self.post(kh)
+        self.assertEqual(code, 401)
+        msg = json.loads(text)["error"]["message"]
+        self.assertTrue(msg.startswith("Incorrect API key provided: [key redacted]"), msg)
+        self.assert_no_canary(text)
+        self.assertNotIn(self.CANARY[-4:], text)
+        self.assertNotIn(self.CANARY[:8], text)
+
+    def test_redact_covers_every_key_format(self):
+        r = self.kh_mod.redact
+        for key in ("sk-proj-" + "a1B2" * 12, "sk-ant-api03-" + "Zz9_" * 20, "sk-or-v1-" + "0f" * 32,
+                    "xai-" + "Q" * 60, "gsk_" + "x" * 52, "dsk-" + "7" * 40,
+                    "a" * 32, "8f2c" * 8):
+            out = r(f"bad key {key}, saw 'Bearer {key}'")
+            self.assertNotIn(key, out)
+            self.assertIn("[key redacted]", out)
+        self.assertEqual(r("Authorization: Bearer abc.def"), "Authorization: [key redacted]")
+        self.assertEqual(r("Incorrect API key provided: sk-ab…wxyz"),
+                         "Incorrect API key provided: [key redacted]")
+        self.assertEqual(r("rate limited, try in 20s", "zzzz-short"), "rate limited, try in 20s")
+        key = "plain-" + "Nn" * 4 + "tail"   # no known shape: the key's own text and its ends
+        self.assertEqual(r(f"{key} {key[:8]} {key[-4:]}", key), " ".join(["[key redacted]"] * 3))
+        self.assertEqual(r("desk-lamp and task-1234"), "desk-lamp and task-1234")
+
+    def test_responses_stream_through(self):
+        kh = self.keyhole()
+        self.up.chunks, self.up.gap = 3, 0.5
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+        self.addCleanup(conn.close)
+        conn.request("POST", "/v1/openai/chat/completions", headers={
+            "Authorization": f"Bearer {kh.token}"},
+            body=json.dumps({"model": kh.model.name, "stream": True}).encode())
+        r = conn.getresponse()
+        times = []
+        while line := r.readline():
+            if line.startswith(b"data: {"):
+                times.append(time.monotonic())
+        self.assertEqual(len(times), 3)
+        self.assertGreaterEqual(times[-1] - times[0], 0.8)
+
+    def test_the_served_model_is_recorded(self):
+        usage = []
+        kh = self.keyhole(on_usage=usage.append)
+        self.up.served, self.up.by = "coder-flash-1017", "relay-a"
+        for _ in range(2):
+            self.assertEqual(self.post(kh)[0], 200)
+        self.assertEqual(self.task.status["served"], {"model": "coder-flash-1017", "by": "relay-a"})
+        rows, _ = store.read_jsonl(self.task.dir / "events.jsonl")
+        self.assertEqual([(r["kind"], r["model"], r["by"], r["text"]) for r in rows],
+                         [("served", "coder-flash-1017", "relay-a",
+                           "the provider served coder-flash-1017 (via relay-a)")])
+        self.assertEqual(usage, [{"prompt_tokens": 7, "completion_tokens": 3}] * 2)
+        self.up.served, self.up.by = "coder-flash-1018", None          # a change: a new event
+        self.post(kh)
+        rows, _ = store.read_jsonl(self.task.dir / "events.jsonl")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(self.task.status["served"], {"model": "coder-flash-1018", "by": None})
+        ant = self.keyhole(self.model("anthropic", "claude-haiku-5-5", "/v1", "anthropic"))
+        self.up.served = "claude-haiku-5-5-20261101"                    # message_start's model
+        self.post(ant, "/messages?beta=true")
+        self.assertEqual(self.task.status["served"]["model"], "claude-haiku-5-5-20261101")
+        # the Responses API (OpenAI's package, xAI, OpenRouter) says it under `response`: the
+        # protocol review, 2026-11-23, saw neither recorded
+        usage.clear()
+        self.up.served = "gpt-up-1101"
+        self.assertEqual(self.post(kh, "/responses")[0], 200)
+        self.assertEqual(self.task.status["served"]["model"], "gpt-up-1101")
+        self.assertEqual(usage, [{"input_tokens": 9, "output_tokens": 4}])
+
+    def test_the_upstreams_answers_set_the_models_health(self):
+        seen = []
+        kh = self.keyhole(on_health=lambda *a: seen.append(a))
+        self.post(kh)
+        self.up.mode = "status"
+        cases = [(402, None, "no_credit"), (429, None, "rate_limited"),
+                 (429, "120", "rate_limited"), (503, None, "unreachable")]
+        for status, after, _ in cases:
+            self.up.status, self.up.retry_after, self.up.message = status, after, "nope"
+            self.post(kh)
+        self.up.status, self.up.message = 429, "You exceeded your quota: insufficient_quota"
+        self.post(kh)
+        self.assertEqual([s[0] for s in seen],
+                         ["ok"] + [c[2] for c in cases] + ["no_credit"])
+        now = time.time()
+        self.assertAlmostEqual(seen[2][2], now + 60, delta=5)          # no Retry-After: 60 s
+        self.assertAlmostEqual(seen[3][2], now + 120, delta=5)
+
+    def test_an_unreachable_upstream_is_a_502_that_says_so(self):
+        seen = []
+        m = self.model()
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            m.base_url = f"http://127.0.0.1:{sock.getsockname()[1]}/v1/openai"  # nothing listens
+        kh = self.keyhole(m, on_health=lambda *a: seen.append(a))
+        code, _, text = self.post(kh)
+        self.assertEqual(code, 502)
+        self.assertIn("keyhole: can't reach 127.0.0.1: ", json.loads(text)["error"]["message"])
+        self.assertEqual(seen[0][0], "unreachable")
+
+    def test_wbs_proxy_skips_a_loopback_upstream(self):
+        os.environ.update(http_proxy="http://127.0.0.1:9", https_proxy="http://127.0.0.1:9")
+        kh = self.keyhole()
+        self.assertEqual(self.post(kh)[0], 200)
+        self.assertEqual(len(self.up.seen), 1)
+
+    def test_wbs_https_proxy_carries_the_upstream_unless_no_proxy_says(self):
+        tunnels = []
+
+        class Proxy(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_CONNECT(self):
+                tunnels.append((self.path, self.headers.get("Proxy-Authorization")))
+                self.send_response(403)
+                self.end_headers()
+
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+        threading.Thread(target=proxy.serve_forever, daemon=True).start()
+        self.addCleanup(proxy.server_close)
+        self.addCleanup(proxy.shutdown)
+        os.environ["https_proxy"] = f"http://me:p%40ss@127.0.0.1:{proxy.server_port}"
+        m = self.model()
+        m.base_url = "https://api.example.invalid/v1/openai"
+        kh = self.keyhole(m)
+        code, _, text = self.post(kh)
+        self.assertEqual(code, 502)
+        self.assertIn("keyhole: can't reach api.example.invalid: ", text)
+        self.assertEqual(tunnels, [("api.example.invalid:443",
+                                    "Basic " + base64.b64encode(b"me:p@ss").decode())])
+        os.environ["no_proxy"] = ".example.invalid"
+        self.assertEqual(self.post(kh)[0], 502)
+        self.assertEqual(len(tunnels), 1)                                # straight to the host
+
+    def test_parallel_requests_each_get_their_own_connection(self):
+        kh = self.keyhole()
+        self.up.chunks, self.up.gap = 2, 0.5
+        start = time.monotonic()
+        threads = [threading.Thread(target=self.post, args=(kh,)) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        self.assertEqual(len(self.up.seen), 3)
+        self.assertLess(time.monotonic() - start, 1.4)                 # not one after another
+
+    def test_the_key_never_reaches_runner_log(self):
+        self.fake_auth({"deepinfra": {"export": [
+            self.key_row("deepinfra", {"type": "key", "key": "sk-old-" + "0" * 30}, active=False),
+            self.key_row("deepinfra", {"type": "key", "key": self.CANARY})]},
+            "broken": {"fail": f"error: bad store near {self.CANARY}\nsecond {self.CANARY}\n"}})
+        m = self.model()
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
+            kh = self.kh_mod.start(self.task, m)
+            self.addCleanup(kh.close)
+            self.assertEqual(self.post(kh)[0], 200)
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key("broken")
+        self.assertEqual(kh._key.value, self.CANARY)                    # the active one
+        self.assertEqual(out.getvalue().strip(),
+                         f"keyhole: deepinfra on 127.0.0.1:{kh.port} for {m.id}")
+        self.assertIn("opencode auth export exited 1: error: bad store near [key redacted]",
+                      str(e.exception))
+        self.assert_no_canary(out.getvalue(), str(e.exception), repr(kh._key),
+                              self.all_files(self.task.dir))
+        self.assertNotIn(kh.token, out.getvalue())
+
+    def test_oauth_and_env_keys_cant_run(self):
+        self.fake_auth({"oauthco": {"export": [self.key_row("oauthco", {
+                            "type": "oauth", "methodID": "m", "refresh": self.CANARY,
+                            "access": self.CANARY, "expires": 1})]},
+                        "xenv": {"list": [{"type": "env", "name": "XENV_API_KEY"}]},
+                        "nokey": {}})
+        need = "needs a key wb can hold outside the lane: "
+        for provider, why in (("oauthco", "OAuth"), ("xenv", "$XENV_API_KEY"),
+                              ("nokey", "no key stored"), ("amazon-bedrock", "SigV4")):
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key(provider)
+            self.assertIn(need, str(e.exception))
+            self.assertIn(why, str(e.exception))
+            self.assert_no_canary(str(e.exception))
+        conf = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        conf.setdefault("provider", {})["literal"] = {"options": {"apiKey": self.CANARY}}
+        conf["provider"]["viaenv"] = {"options": {"apiKey": "{env:VIAENV_KEY}"}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(conf))
+        os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+            {"provider": {"incontent": {"options": {"apiKey": self.CANARY}}}})
+        for provider, why in (("literal", f"written in {os.environ['WB_OPENCODE_CONFIG']}, which "
+                                          "agents can read: store it with /connect instead"),
+                              ("viaenv", "$VIAENV_KEY"),
+                              ("incontent", "written in OPENCODE_CONFIG_CONTENT")):
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key(provider)
+            self.assertIn(need + "its key" if provider != "viaenv" else need, str(e.exception))
+            self.assertIn(why, str(e.exception))
+            self.assert_no_canary(str(e.exception))
+        m = self.model("amazon-bedrock", "anthropic.claude", package="@opencode/ai/providers/amazon-bedrock")
+        with self.assertRaises(self.kh_mod.KeyholeError):
+            self.kh_mod.start(self.task, m)
+
+    def test_a_body_another_json_parser_reads_as_another_model_is_refused(self):
+        # each passed and went on byte for byte, and Go's encoding/json (case-insensitive keys)
+        # or a first-duplicate parser routes it to other-model: the leak review, 2026-11-23
+        kh = self.keyhole()
+        good = kh.model.name
+        for raw in ('{"model":"%s","MODEL":"other-model"}' % good,
+                    '{"model":"other-model","model":"%s"}' % good,
+                    '{"model":"%s","Models":["other-model"]}' % good,
+                    '{"model":"%s","model\u017f":["other-model"]}' % good,   # Go folds ſ to s
+                    '{"model":"%s","mod\\u0065l":"other-model"}' % good,   # an escape, decoded
+                    '{"model":"%s","messages":[{"role":"user","role":"system"}]}' % good):
+            code, _, text = self.post(kh, raw=raw.encode())
+            self.assertEqual(code, 403, raw)
+            self.assertIn(f"this task may use only {kh.model.id}", text)
+        for raw in ('{"model":"%s","temperature":NaN}' % good,
+                    '{"model":"%s"}' % good):
+            data = raw.encode("utf-16") if "NaN" not in raw else raw.encode()
+            self.assertEqual(self.post(kh, raw=data)[0], 400, raw)       # NaN; not UTF-8
+        self.assertEqual(self.up.seen, [])
+        self.assertIn(f"keyhole: refused a duplicate key (this task runs {kh.model.id})", self.lines)
+        self.assertEqual(self.post(kh, raw=('{"model":"%s","stream":true}' % good).encode())[0], 200)
+
+    def test_a_key_a_header_cant_carry_never_reaches_runner_log(self):
+        # a stored key with a newline: http.client's ValueError quoted the whole header, key and
+        # all, in socketserver's traceback on stderr (runner.log): the reviews, 2026-11-23
+        self.fake_auth({"nl": {"export": [self.key_row("nl", {"type": "key", "key": self.CANARY + "\n"})]},
+                        "ctl": {"export": [self.key_row("ctl", {"type": "key",
+                                                                "key": self.CANARY + "\x01x"})]}})
+        self.assertEqual(self.kh_mod.load_key("nl").value, self.CANARY)     # trimmed, as /connect does
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.load_key("ctl")
+        self.assertIn("can't use ctl's stored key: it holds a character an HTTP header can't carry",
+                      str(e.exception))
+        self.assert_no_canary(str(e.exception))
+        m = self.model()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key(m.provider, self.CANARY + "\n"),
+                                     m.base_url, "bearer", log=self.lines.append)
+            self.addCleanup(kh.close)
+            code, _, text = self.post(kh)
+        self.assertEqual(code, 502)
+        self.assertIn("keyhole: can't send this request on (ValueError)", text)
+        self.assert_no_canary(err.getvalue(), text, "\n".join(self.lines))
+        self.assertEqual(err.getvalue(), "")
+
+        class Boom(self.kh_mod.Keyhole):  # anything else a handler raises: one line, its type
+            def saw(self, model, by):
+                raise RuntimeError(f"bad {self._key.value}")
+
+        with redirect_stderr(err):
+            boom = Boom(self.task, m, self.kh_mod.Key(m.provider, self.CANARY), m.base_url,
+                        "bearer", log=self.lines.append)
+            self.addCleanup(boom.close)
+            try:
+                self.post(boom)
+            except (http.client.HTTPException, OSError):
+                pass
+            deadline = time.monotonic() + 10
+            while "keyhole: a request failed (RuntimeError)" not in self.lines:
+                self.assertLess(time.monotonic(), deadline, self.lines)
+                time.sleep(0.05)
+        self.assertEqual(err.getvalue(), "")
+        self.assert_no_canary("\n".join(self.lines))
+
+    def test_a_query_that_isnt_printable_ascii_is_a_400_and_never_unreachable(self):
+        # ?a=\x7f was a 502 that marked the model unreachable, ?a=\xe9 a traceback: the protocol
+        # review, 2026-11-23
+        seen = []
+        kh = self.keyhole(on_health=lambda *a: seen.append(a))
+        body = json.dumps({"model": kh.model.name}).encode()
+        for q in (b"a=\x7f", b"a=\xe9", b"a=\x01"):
+            code, out = self.raw_request(kh, b"POST /v1/openai/chat/completions?" + q
+                                         + b" HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer "
+                                         + kh.token.encode() + b"\r\nContent-Length: %d\r\n\r\n"
+                                         % len(body) + body)
+            self.assertEqual(code, 400, (q, out))
+            self.assertIn(b"a query that isn't printable ASCII", out)
+        self.assertEqual((seen, self.up.seen), ([], []))
+        self.assertEqual(self.post(kh, "/chat/completions?x=1")[0], 200)
+
+    def test_a_chunked_body_is_held_to_its_size_lines_and_the_cap(self):
+        # a size of -1 read to EOF past BODY_CAP and was forwarded; zz was a traceback: the
+        # reviews, 2026-11-23
+        kh = self.keyhole()
+        head = (b"POST /v1/openai/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer "
+                + kh.token.encode() + b"\r\nTransfer-Encoding: chunked\r\n\r\n")
+        body = json.dumps({"model": kh.model.name}).encode()
+        err = io.StringIO()
+        with redirect_stderr(err), mock.patch.object(self.kh_mod, "BODY_CAP", 1000):
+            for chunks, want in ((b"-1\r\n" + body + b" " * 5000, 400),
+                                 (b"zz\r\n" + body + b"\r\n0\r\n\r\n", 400),
+                                 (b"\r\n", 400),
+                                 (b"%x\r\n%s\r\n" % (len(body), body) + b"3e8\r\n" + b" " * 1000
+                                  + b"\r\n0\r\n\r\n", 413)):
+                code, out = self.raw_request(kh, head + chunks)
+                self.assertEqual(code, want, (chunks[:20], out))
+            self.assertEqual(self.up.seen, [])
+            code, out = self.raw_request(kh, head + b"%x;ext=1\r\n%s\r\n0\r\nX-T: 1\r\n\r\n"
+                                         % (len(body), body))
+            self.assertEqual(code, 200, out)
+        self.assertEqual(self.up.seen[0]["body"], {"model": kh.model.name})
+        self.assertEqual(err.getvalue(), "")
+
+    def test_a_cut_error_body_leaves_no_fragment_of_the_key(self):
+        # a key of no known shape, echoed across the 64 KB cut: 7 of its characters passed: the
+        # leak review, 2026-11-23
+        key = "AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+        m = self.model()
+        kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key(m.provider, key), m.base_url,
+                                 "bearer", log=self.lines.append)
+        self.addCleanup(kh.close)
+        self.up.mode, self.up.status = "raw", 401
+        for before in (7, 16, 31):
+            pad = self.kh_mod.ERROR_CAP - len(b'{"error":"') - before
+            self.up.pieces = [b'{"error":"' + b"x " * (pad // 2) + b"x" * (pad % 2)
+                              + key.encode() + b'"}']
+            code, _, text = self.post(kh)
+            self.assertEqual(code, 401)
+            self.assertNotIn(key[:7], text, before)
+            self.assertNotIn(key[7:15], text, before)
+            self.assertLessEqual(len(text), self.kh_mod.ERROR_CAP)
+
+    def test_an_error_inside_a_200_stream_is_redacted_and_the_key_never_passes(self):
+        # Anthropic's `event: error` and OpenRouter's `data: {"error": …}` arrive inside a 200,
+        # which went on raw: the leak review, 2026-11-23
+        kh = self.keyhole()
+        ident = "x" * 40                     # a long identifier in the model's output stays
+        ok = json.dumps({"model": "m", "choices": [{"delta": {"content": f"{ident} {self.CANARY}"}}]})
+        err = json.dumps({"error": {"message": f"bad key sk-other-{'Q' * 30} and {self.CANARY[:8]}"}})
+        stream = f"data: {ok}\n\nevent: error\ndata: {err}\n\ndata: [DONE]\n\n".encode()
+        cut = stream.index(self.CANARY.encode()) + 10            # the key split across two pieces
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [stream[:cut], stream[cut:]]
+        code, _, text = self.post(kh)
+        self.assertEqual(code, 200)
+        self.assert_no_canary(text)
+        self.assertNotIn("sk-other-", text)
+        self.assertNotIn(self.CANARY[:8], text)
+        self.assertIn(f"{ident} [key redacted]", text)
+        self.assertIn("event: error\n", text)
+        self.assertTrue(text.endswith("data: [DONE]\n\n"))
+        self.up.ctype = "application/json"                         # not SSE: the key still never passes
+        body = json.dumps({"model": "m", "text": f"{ident} {self.CANARY}"}).encode()
+        cut = body.index(self.CANARY.encode()) + 5
+        self.up.pieces = [body[:cut], body[cut:]]
+        code, _, text = self.post(kh)
+        self.assertEqual((code, json.loads(text)["text"]), (200, f"{ident} [key redacted]"))
+
+    def test_a_package_the_keyhole_cant_speak_cant_run(self):
+        # Google's x-goog-api-key and Gemini paths, Azure's api-key, Cohere's native /chat:
+        # every request was a 401 or 404 after a start that said nothing (the protocol review,
+        # 2026-11-23)
+        need = "needs a key wb can hold outside the lane: "
+        for provider, package in (("google", "@opencode/ai/providers/google"),
+                                  ("azure", "@opencode/ai/providers/azure"),
+                                  ("cohere", "@opencode/ai/providers/cohere"),
+                                  ("someco", "")):
+            self.assertIsNone(self.kh_mod.protocol_of(package))
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.start(self.task, self.model(provider, "m-1", "/v1", package))
+            self.assertIn(need + f"{provider} takes its key in a way the keyhole doesn't speak",
+                          str(e.exception))
+        with self.assertRaises(self.kh_mod.KeyholeError):
+            self.kh_mod.Keyhole(self.task, self.model(), self.kh_mod.Key("x", self.CANARY),
+                                self.model().base_url, None)
+        for package, want in (("@opencode/ai/providers/anthropic", "anthropic"),
+                              ("@opencode/ai/providers/meta/messages", "bearer"),
+                              ("@opencode/ai/providers/openai", "bearer"),
+                              ("@opencode/ai/providers/deepinfra", "bearer")):
+            self.assertEqual(self.kh_mod.protocol_of(package), want)
+
+    def test_deepinfras_appended_path_is_mirrored_so_no_segment_is_needed(self):
+        # a base without /openai: DeepInfra's package appends it, and the keyhole's base must
+        # mirror that, now that no segment may sit between the base and a model path
+        self.fake_auth({"deepinfra": {"export": [self.key_row("deepinfra", {
+            "type": "key", "key": self.CANARY})]}})
+        m = self.model(path="/v1")
+        with redirect_stdout(io.StringIO()):
+            kh = self.kh_mod.start(self.task, m)
+        self.addCleanup(kh.close)
+        self.assertTrue(kh.base.endswith("/v1/openai"), kh.base)
+        self.assertEqual(self.post(kh)[0], 200)
+        self.assertEqual(self.up.seen[-1]["path"], "/v1/openai/chat/completions")
+        self.assertEqual(self.kh_mod.mirror_path("@opencode/ai/providers/anthropic", "https://a/v1"),
+                         "https://a/v1")
+
+    def test_a_key_written_as_a_header_cant_run(self):
+        # options.headers.Authorization went unchecked: the agent could read it, and OpenCode
+        # sent it in place of the token (the leak review, 2026-11-23)
+        self.fake_auth({p: {"export": [self.key_row(p, {"type": "key", "key": self.CANARY})]}
+                        for p in ("hdr", "xkey", "viaenv", "plain")})
+        path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf = json.loads(path.read_text())
+        conf.setdefault("provider", {}).update({
+            "hdr": {"options": {"headers": {"Authorization": f"Bearer {self.CANARY}"}}},
+            "xkey": {"options": {"headers": {"X-Custom": f"Bearer {self.CANARY}"}}},
+            "viaenv": {"options": {"headers": {"x-api-key": "{env:HDR_KEY}"}}},
+            "plain": {"options": {"headers": {"HTTP-Referer": "https://example.invalid/app",
+                                              "X-Title": "my app"}}}})
+        path.write_text(json.dumps(conf))
+        for provider, why in (("hdr", f"its key is written in {path}, which agents can read"),
+                              ("xkey", f"its key is written in {path}"),
+                              ("viaenv", "$HDR_KEY")):
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key(provider)
+            self.assertIn(why, str(e.exception))
+            self.assert_no_canary(str(e.exception))
+        self.assertEqual(self.kh_mod.load_key("plain").value, self.CANARY)
+
+
+@unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+class RealOpenCodeAPI(_KeyholeTest):
+    """Real OpenCode, no network: a built-in API provider pointed at the keyhole."""
+
+    def run_opencode(self, kh, provider):
+        tmp = Path(self.tmp.name)
+        layer = tmp / f"layer-{provider}.json"
+        layer.write_text(json.dumps({"provider": {provider: {
+            "options": self.kh_mod.layer_options(kh)}}}))
+        # only what OpenCode needs: no key of the user's environment, scratch homes, no catalog
+        # fetch (the bundled snapshot serves it)
+        env = {"PATH": os.environ["PATH"], "HOME": str(tmp / "home"), "PWD": str(self.repo),
+               "OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_CONFIG": str(layer),
+               **{f"XDG_{d.upper()}_HOME": str(tmp / "xdg" / d)
+                  for d in ("config", "data", "state", "cache")}}
+        r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", kh.model.id,
+                            "--format", "json", "say ok"], cwd=self.repo, env=env,
+                           capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
+        self.assert_no_canary(layer.read_text(), json.dumps(env))
+
+    def test_the_keyhole_carries_the_key(self):
+        from workbench import keyhole
+        asked = []
+
+        class Spy(keyhole.Keyhole):  # what OpenCode itself sent the keyhole
+            def token_ok(self, headers):
+                asked.append({k.lower(): v for k, v in headers.items()})
+                return super().token_ok(headers)
+
+        for provider, name, path, package, header, want in (
+                ("deepinfra", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "/v1/openai",
+                 "@opencode/ai/providers/deepinfra", "authorization", f"Bearer {self.CANARY}"),
+                ("anthropic", "claude-haiku-5-5", "/v1", "@opencode/ai/providers/anthropic",
+                 "x-api-key", self.CANARY)):
+            self.up.seen.clear()
+            asked.clear()
+            m = self.model(provider, name, path, package)
+            kh = Spy(self.task, m, keyhole.Key(provider, self.CANARY), m.base_url,
+                     keyhole.protocol_of(package), log=self.lines.append)
+            self.addCleanup(kh.close)
+            self.run_opencode(kh, provider)
+            [req] = self.up.seen                                           # one request upstream
+            heads = {k.lower(): v for k, v in req["headers"].items()}
+            self.assertEqual(heads[header], want, provider)
+            self.assertNotIn(kh.token, json.dumps(req))
+            self.assertEqual(req["path"], {"deepinfra": "/v1/openai/chat/completions",
+                                           "anthropic": "/v1/messages?beta=true"}[provider])
+            [sent] = asked
+            self.assertIn(kh.token, sent[header])                          # OpenCode had the token
+            self.assert_no_canary(json.dumps(sent))                        # and never the key
 
 
 class Drift(unittest.TestCase):
