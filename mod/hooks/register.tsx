@@ -66,7 +66,7 @@ const SCOUT_NOTE =
   '7. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
   'Keep it short; if nothing is worth changing, say so in one line.'
 // Workbench mode: /workbench turns it on for the rest of the session and opens the pane, its sign.
-// The user then asks for things in plain words, and Claude hands the coding to local agents as
+// The user then asks for things in plain words, and Claude hands the coding to OpenCode agents as
 // the skill says. A fresh or compacted conversation is told the mode is still on and where the
 // skill is (`workbench-mode` block). Two slash commands end it: /workbench-quit stops this session's
 // agents at once (`wb stop --all --repo <cwd> --session <id>…`) and tells Claude so;

@@ -75,7 +75,7 @@ wb-python` against a second hand-over; with none, exit 78 and one line (the chat
 
 ## Why it's built this way
 
-- **Claude's tokens are scarce; local tokens are free.** The local model types; Claude specs and
+- **Claude's tokens are scarce; the agent's are free on the GPU and cheap on API.** The agent types; Claude specs and
   reviews; reports are short, logs stay in files.
 - **Small local models lose the thread** (repeat, plan for minutes, fill their window, compact
   lossily): tasks sized to the learned slice, guards, handovers to a fresh session, OpenCode's
@@ -3079,7 +3079,12 @@ stops at `SILENCE_MAX`, the GPU's own longest silence (900 × 1800 / 420 = 3857 
 tok/s gave 16448 s, and a request hung for good held the round and a provider slot 4.6 hours.
 Round is at least the silence (so at most 10285 s). With write 50 tok/s and TTFT 4 s: 274 s, so
 420/900/2400; at 20 tok/s 679/1703/3880; at 5, 1800/3857/10285. `thinking_stall` and its `wb
-doctor` line skip API models.
+doctor` line skip API models. Measured 2026-11-23 on a hosted flash model (four bench cases replayed by hand, two trivial and two
+significant, all passing their hidden checks in one round): write median 116 tok/s, TTFT p90 4.2 s,
+so think 121 s and the 420/900/2400 floor holds; rounds of 0.6-3.0 min (the GPU's 2.8-23 min), $0.005-0.04
+a task, the fullest session under a third of the 128K window, so the slice's guess stands. Its one
+compaction came inside a single step: six shell calls at once, each with pages of compiler errors,
+added 93K tokens, past `fresh_ceiling`'s one-step margin.
 
 **Managing the set.** `wb model add <provider/model> [--pull] [--context N]`: pulls, reads
 `/api/show`, writes `{name, tool_call, reasoning, limit: {context, input: ctx − ctx/8, output:
