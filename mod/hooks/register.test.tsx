@@ -195,6 +195,8 @@ engine.version = TESTED
 
 // A file's mtime where a test sets one (fakeTasks' fs.stat), else 0
 const mtimes: Record<string, number> = {}
+// symlinks fakeTasks resolves: their real paths, as $.fs.stat({ resolve }) gives them
+const links: Record<string, string> = {}
 
 function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], scouted = true, ui: string[] = [], ears = true) {
   on('session.version', () => {
@@ -216,6 +218,7 @@ function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], sc
   })
   on('fs.exists', (_: any, e: any) => ({ value: Object.keys(files).some(p => p.startsWith(e.path)) }))
   on('fs.stat', (_: any, e: any) => {
+    if (e.path in links) return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: true, realPath: links[e.path] } }
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: 'file', size: files[e.path].length, mtimeMs: mtimes[e.path] ?? 0, isLink: false } }
   })
@@ -1912,6 +1915,23 @@ test('an update is checked once a session is in use, and /workbench-update insta
   expect((await $.command.run({ command: 'workbench-update', args: '' })).text).toContain('already up to date')
 })
 
+test('#1005: local changes a marketplace update would wipe are toasted with nothing new upstream', async ($, on) => {
+  // 2026-11-22: the check's warning came alone, and only "update available" was toasted
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {}, [])
+  const said = 'local changes in the marketplace clone: wb update would refuse (Claude Code re-clones it); ' +
+    'wb patch init keeps them'
+  on('process.run', (_: any, e: any) => ({ value: { exitCode: 0, stdout: e.argv[1] === 'update' ? said : '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2000)
+  expect(toasts).toContain(`workbench: ${said}`)
+})
+
 test('a reply to a pair of screenshots reaches Claude with its task and step (#99)', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
@@ -3102,6 +3122,306 @@ test('Claude coding: its own edit in a task\'s worktree waits for the user\'s ye
   // a worktree nested for a sibling two levels up (#261, the audit of 1.2) is the task's too
   expect((await edit('/wb/tasks/fix-it/tree/apps/worktree/power.py')).deny).toContain('"Only when I say"')
   expect((await edit('/wb/tasks/fix-it/tree/shared/lib/power.py')).deny).toBeUndefined()   // a sibling's link
+})
+
+// The upstream gate's world (#1005): the patch clone, the user's project, a developer's own clone
+// of upstream, each with its origin; a dialog answered with `answer` (null: dismissed, or -p)
+const SLUG = 'a-schaefers/claudes-workbench'
+const SOURCE = '/home/u/.local/share/workbench/source'
+const MARKET = '/home/u/.claude/plugins/marketplaces/workbench'
+function upstreamWorld(on: any, files: Record<string, string>) {
+  const w = { cwd: SOURCE, answer: "Don't send" as string | null, asked: [] as string[], options: [] as unknown[], gits: [] as string[] }
+  files['/wb/patches.json'] = JSON.stringify({ source: SOURCE, upstream: SLUG })
+  const origins: Record<string, string> = {
+    [SOURCE]: `https://github.com/${SLUG}.git`,
+    '/home/u/project': 'git@github.com:u/project.git',
+    '/home/u/repos/workbench': `git@github.com:${SLUG}.git`,
+    [MARKET]: `https://github.com/${SLUG}.git`,                   // Claude Code's clone: the README's install
+    '/home/u/.claude/plugins/marketplaces/wb-renamed': `https://github.com/${SLUG}`,
+    '/home/u/.claude/plugins/marketplaces/other': 'https://github.com/u/other.git',
+  }
+  on('session.cwd', () => ({ value: w.cwd }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[0] === 'git' && e.argv[3] === 'remote') {
+      w.gits.push(e.argv[2])
+      const url = origins[e.argv[2]]
+      return { value: { exitCode: url ? 0 : 2, stdout: url ? `${url}\n` : '', stderr: url ? '' : 'error: No such remote' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('tool.call', (_: any, e: any) => {
+    if (e.tool !== 'AskUserQuestion') return { result: { stdout: '' }, text: '' }  // the engine's Bash
+    const q = e.questions[0]
+    w.asked.push(q.question)
+    w.options.push(q.options.map((o: any) => o.label))
+    if (w.answer === null) throw new Error('dismissed')
+    return { result: { questions: e.questions, answers: { [q.question]: w.answer } }, text: '' }
+  })
+  return w
+}
+
+test('#1005: every command that would send to workbench upstream waits for the user\'s yes to it, each time', async ($, on) => {
+  // 2026-11-22, the owner's rule: a user's Claude never forks, pushes, opens or comments upstream
+  // without the user's yes for that exact action; the skill saying so is advice, this is the gate
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  await $.session.start({ cwd: SOURCE, surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const bash = async (command: string) => ((await $.tool.call({ tool: 'Bash', command } as any)) as any).deny as string | undefined
+
+  // in the patch clone: each outward form asks, and "Don't send" sends nothing
+  const outward = [
+    'git push', 'git push -u origin local', 'git -c push.default=current push',
+    'gh pr create --fill', 'gh pr comment 12 --body "looks right"', 'gh pr edit 12 --title t', 'gh pr merge 12',
+    'gh pr review 12 --approve', 'gh pr close 12', 'gh pr reopen 12',
+    'gh issue create --title t --body-file b.md', 'gh issue comment 5 --body x', 'gh issue edit 5 --add-label bug',
+    'gh issue close 5', 'gh issue reopen 5', 'gh repo fork --remote',
+    'gh api -X POST repos/x/y/issues', 'gh api repos/x/y/issues -f title=t', 'gh api --method=PATCH repos/x/y/pulls/1',
+    'gh api repos/x/y/issues -F n=1', 'gh api repos/x/y/issues --raw-field body=x', 'gh api graphql --input q.json',
+    'gh api -XDELETE repos/x/y/issues/comments/3',
+    // as bash reads it: past wrappers, inside a compound line, `bash -c` and a `$(…)`
+    'cd lib && git push', 'timeout 60 gh pr create --fill', 'bash -lc "git push origin local"', 'echo "$(gh repo fork)"',
+  ]
+  for (const command of outward) {
+    const n = w.asked.length
+    const deny = await bash(command)
+    expect([command, deny]).toEqual([command, expect.stringContaining('not sent: the user did not approve it')])
+    expect(w.asked.slice(n)).toEqual([expect.stringContaining(`Claude wants to send this to GitHub (${SLUG}), publicly: ${command}`)])
+  }
+  expect(w.asked.every(q => q.endsWith('?'))).toBe(true)
+  expect(w.options.every(o => JSON.stringify(o) === JSON.stringify(['Send it', "Don't send"]))).toBe(true)
+
+  // "Send it" lets that one command go; the next asks again, nothing remembered
+  w.answer = 'Send it'
+  expect(await bash('git push')).toBeUndefined()
+  let n = w.asked.length
+  expect(await bash('git push')).toBeUndefined()
+  expect(w.asked.length).toBe(n + 1)
+  // anything else is no: the dialog's free text, or one dismissed (and `claude -p`, where it rejects)
+  w.answer = 'yes, send it'
+  expect(await bash('git push')).toContain('not sent')
+  w.answer = null
+  expect(await bash('git push')).toContain('not sent')
+  w.answer = "Don't send"
+
+  // from the user's own project: a `wb patch upstream` worktree, the clone by path, upstream by name
+  w.cwd = '/home/u/project'
+  for (const command of [
+    'cd /wb/upstream/fix-push && git push -u fork pr/fix-push', 'git -C /wb/upstream/fix-push push fork',
+    'git -C "$WB_HOME/upstream/fix-push" push fork', `git -C ~/.local/share/workbench/source push`,
+    `cd ${SOURCE} && gh pr create --fill`,
+    `gh pr create --repo ${SLUG} --head u:pr/fix-push --body-file /home/u/pr.md`,
+    `gh issue comment 5 -R ${SLUG} --body "same here"`, `gh api repos/${SLUG}/issues -f title=t`,
+    `gh repo fork ${SLUG} --clone=false`,
+  ]) {
+    n = w.asked.length
+    expect([command, await bash(command)]).toEqual([command, expect.stringContaining('not sent')])
+    expect(w.asked.length).toBe(n + 1)
+  }
+
+  // wb patch send: the dialog shows its title and the body's start, what goes public
+  files['/home/u/pr.md'] = Array.from({ length: 30 }, (_, i) => `body line ${i + 1}`).join('\n')
+  n = w.asked.length
+  expect(await bash('wb patch send fix-push --title "Fix the push; keep the patch" --body-file ../pr.md')).toContain('not sent')
+  const q = w.asked[n]!
+  expect(q).toContain(`Claude wants to send this to GitHub (${SLUG}), publicly: wb patch send fix-push`)
+  expect(q).toContain('Title: Fix the push; keep the patch')
+  expect([q.includes('body line 1\n'), q.includes('body line 20'), q.includes('body line 21')]).toEqual([true, true, false])
+  expect(q.endsWith('Send it?')).toBe(true)
+
+  // not upstream's: the user's own project, another repo, what only reads, what is only written down
+  for (const command of [
+    'git push', 'git push origin main', 'gh pr create --repo u/other --fill', `gh pr view 3 --repo ${SLUG}`,
+    `gh issue list -R ${SLUG} --state all --search "push"`, `gh api repos/${SLUG}/pulls`,
+    `gh api -X GET search/issues -f q="repo:${SLUG} push"`, `echo "gh pr create --repo ${SLUG}"`,
+    `cat <<'EOF'\ngh pr create --repo ${SLUG}\nEOF`, `git -C ${SOURCE} log --oneline -3`, 'ls /wb/upstream',
+  ]) {
+    n = w.asked.length
+    expect([command, await bash(command)]).toEqual([command, undefined])
+    expect([command, w.asked.length]).toEqual([command, n])
+  }
+
+  // a developer's own clone of upstream (the owner, a contributor): not gated there by name,
+  // and git is asked only once all else matched
+  w.cwd = '/home/u/repos/workbench'
+  w.gits.length = 0
+  n = w.asked.length
+  expect(await bash(`gh pr create --repo ${SLUG} --fill`)).toBeUndefined()
+  expect(await bash('git push -u origin fix')).toBeUndefined()
+  expect([w.asked.length, w.gits]).toEqual([n, ['/home/u/repos/workbench']])
+  expect(await bash(`git -C ${SOURCE} push`)).toContain('not sent')  // the patch clone still is
+  // and a clone elsewhere whose origin isn't upstream is no developer's: asked
+  w.cwd = '/home/u/project'
+  expect(await bash(`gh pr create --repo ${SLUG} --fill`)).toContain('not sent')
+  await clock.advance(1000)                                      // the poll the calls started ends here
+})
+
+test('#1005: with the user away on the web chat a send to upstream is refused without a dialog', async ($, on) => {
+  // 2026-11-22: the dialog would wait at an empty terminal; Claude is told it waits for them
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  const w = upstreamWorld(on, files)
+  w.answer = 'Send it'
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
+  w.cwd = SOURCE
+  const r = await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any
+  expect(r.deny).toContain('the user is away: it waits until they are at the terminal')
+  expect(w.asked).toEqual([])
+  w.cwd = '/home/u/project'
+  expect((await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any).deny).toBeUndefined()  // their own
+  await clock.advance(1000)                                      // the poll the calls started ends here
+})
+
+// The gate's world with a probe: each command's deny, and how many dialogs it opened
+async function gateProbe($: any, on: any) {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  w.cwd = '/home/u/project'
+  await $.session.start({ cwd: w.cwd, surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const call = async (input: Record<string, unknown>) => {
+    const n = w.asked.length
+    const deny = ((await $.tool.call(input as any)) as any).deny as string | undefined
+    return { deny, asked: w.asked.length - n, question: w.asked[n] ?? '' }
+  }
+  const bash = (command: string, cwd = w.cwd) => { w.cwd = cwd; return call({ tool: 'Bash', command }) }
+  return { clock, files, w, call, bash }
+}
+
+test('#1005: the marketplace install\'s own clone is gated, never taken for a developer\'s clone of upstream', async ($, on) => {
+  // the review of #1005, 2026-11-22 (its blocker): on the README's install, Claude Code's clone
+  // has upstream as its origin, so the developer-clone exemption let `gh issue create -R <slug>`
+  // through there, and a gh naming no repo (which takes origin's) and `git push` were never checked
+  const { clock, bash } = await gateProbe($, on)
+  for (const [command, cwd] of [
+    [`gh issue create -R ${SLUG} -t x -b y`, MARKET], ['gh issue create -t x -b y', MARKET], ['git push', MARKET],
+    [`cd ${MARKET} && gh issue create -R ${SLUG} -t x -b y`, '/home/u/project'],
+    ['git push', '/home/u/.claude/plugins/cache/workbench/workbench/abc123'],
+    ['gh pr comment 3 --body x', '/home/u/.claude/plugins/marketplaces/wb-renamed'],  // a marketplace renamed: by origin
+  ]) {
+    const r = await bash(command!, cwd)
+    expect([command, cwd, r.asked, r.deny]).toEqual([command, cwd, 1, expect.stringContaining('not sent')])
+  }
+  // another plugin's clone there, not upstream's: the user's own
+  expect(await bash('git push', '/home/u/.claude/plugins/marketplaces/other')).toEqual({ deny: undefined, asked: 0, question: '' })
+  await clock.advance(1000)
+})
+
+test('#1005: a line that names upstream anywhere, or feeds a send to a shell, is asked about', async ($, on) => {
+  // the review of #1005, 2026-11-22: the slug was looked for only in the outward command's own
+  // words, and heredoc or piped text a shell runs was dropped, so each of these went through
+  const { clock, bash } = await gateProbe($, on)
+  for (const [command, cwd] of [
+    [`export GH_REPO=${SLUG} && gh issue create --title t --body b`, '/home/u/project'],
+    [`R=${SLUG}; gh issue create -R $R --title t --body b`, '/home/u/project'],
+    [`gh repo set-default ${SLUG} && gh issue create -t x -b y`, '/home/u/project'],
+    [`bash <<'EOF'\ncd ${SOURCE} && git push\nEOF`, '/home/u/project'],
+    ['sh -s <<EOF\ngit push\nEOF', SOURCE],
+    ["echo 'git push' | bash", SOURCE],
+    [`python3 - <<EOF\nimport os; os.system("gh issue create -R ${SLUG} -t x -b y")\nEOF`, '/home/u/project'],
+    // the smaller gaps: wrappers, `cd --`, case, Python running wb, more gh writes
+    ['sudo git push', SOURCE], ['xargs -I{} git push', SOURCE], ['GIT push', SOURCE], ['Gh pr create --fill', SOURCE],
+    [`cd -- ${SOURCE} && git push`, '/home/u/project'],
+    [`gh pr update-branch -R ${SLUG} 3`, '/home/u/project'], [`gh issue develop -R ${SLUG} 3`, '/home/u/project'],
+    [`gh workflow run -R ${SLUG} check.yml`, '/home/u/project'],
+  ]) {
+    const r = await bash(command!, cwd)
+    expect([command, r.asked, r.deny]).toEqual([command, 1, expect.stringContaining('not sent')])
+  }
+  // the same piped into a shell in the user's own project pushes their project: not asked
+  expect((await bash("echo 'git push' | bash", '/home/u/project')).asked).toBe(0)
+  await clock.advance(1000)
+})
+
+test('#1005: a symlinked spelling of the patch clone is matched by its real path', async ($, on) => {
+  // the review of #1005, 2026-11-22: patches.json keeps the resolved path, and a link to it wasn't it
+  links['/home/u/wb-link'] = SOURCE
+  const { clock, bash } = await gateProbe($, on)
+  expect((await bash('git -C /home/u/wb-link push')).asked).toBe(1)
+  expect((await bash('cd /home/u/wb-link && git push')).asked).toBe(1)
+  expect((await bash('git -C /home/u/elsewhere push')).asked).toBe(0)
+  delete links['/home/u/wb-link']
+  await clock.advance(1000)
+})
+
+test('#1005: the dialog shows the outward command whole, and a send whose title or body it can\'t show is refused', async ($, on) => {
+  // the review of #1005, 2026-11-22: a line cut at 600 characters from its start hid the gh
+  // command and its inline body; `--tit`/`--body` (argparse took the abbreviations) sent a title
+  // and body the dialog called missing
+  const { clock, bash, files } = await gateProbe($, on)
+  const r = await bash(`echo ${'a'.repeat(620)} && gh issue create -R ${SLUG} -t x -b SECRETWORDS`)
+  expect(r.question).toContain(`publicly: gh issue create -R ${SLUG} -t x -b SECRETWORDS`)
+  files['/home/u/pr.md'] = 'the body\n'
+  for (const [command, why] of [
+    ['wb patch send fix-push --tit T --body /home/u/pr.md', 'no --title'],
+    ['wb patch send fix-push --title T --body /home/u/pr.md', 'no --body-file'],
+    ['wb patch send fix-push --title "$T" --body-file /home/u/pr.md', 'a $ or a backtick'],
+    ['wb patch send fix-push --title T --body-file /home/u/missing.md', "can't read /home/u/missing.md"],
+    ['bash <<EOF\nwb patch send fix-push --title T --body-file /home/u/pr.md\nEOF', 'it is inside text another program runs'],
+  ]) {
+    const got = await bash(command!)
+    expect([command, got.asked, got.deny]).toEqual([command, 0, expect.stringContaining(`can't show what it sends (${why}`)])
+  }
+  // Python running wb is a send too, its body shown
+  const py = await bash(`python3 ${SOURCE}/bin/wb patch send fix-push --title=T --body-file /home/u/pr.md`)
+  expect([py.asked, py.question.includes('Title: T\n\nBody:\nthe body')]).toEqual([1, true])
+  await clock.advance(1000)
+})
+
+test('#1005: "Send it" on wb patch send tells wb what was approved, and nothing else does', async ($, on) => {
+  // the review of #1005, 2026-11-22: without the mod nothing asked, and Claude's Bash sent; wb
+  // now refuses under Claude Code unless this file says the user approved that very send
+  const { clock, bash, files, w } = await gateProbe($, on)
+  files['/home/u/pr.md'] = 'line one\nline two\n'
+  const send = 'wb patch send fix-push --title "Fix the push" --body-file ../pr.md --draft'
+  const no = await bash(send)
+  expect([no.asked, no.deny]).toEqual([1, expect.stringContaining('the user did not approve it')])
+  expect('/wb/send-ok.json' in files).toBe(false)               // "Don't send": nothing approved
+  expect((await bash('git push', SOURCE)).deny).toContain('not sent')
+  w.answer = 'Send it'
+  expect((await bash('git push', SOURCE)).deny).toBeUndefined()
+  expect('/wb/send-ok.json' in files).toBe(false)               // only a send is told to wb
+  expect((await bash(send, '/home/u/project')).deny).toBeUndefined()
+  expect(JSON.parse(files['/wb/send-ok.json']!)).toEqual({ slug: 'fix-push', title: 'Fix the push', body_file: '/home/u/pr.md',
+    body: 'line one\nline two\n', draft: true, anyway: false, at: expect.any(Number) })
+  await clock.advance(1000)
+})
+
+test('#1005: Monitor\'s command and the GitHub MCP tools pass the same gate', async ($, on) => {
+  // the review of #1005, 2026-11-22: only Bash was gated; Monitor runs its script in the same
+  // shell, and the github plugin patching.md offers can open issues and pull requests itself
+  const { clock, call, w } = await gateProbe($, on)
+  w.cwd = SOURCE
+  expect((await call({ tool: 'Monitor', command: 'git push', description: 'x', timeout_ms: 1000 })).deny).toContain('not sent')
+  w.cwd = '/home/u/project'
+  const mcp = 'mcp__plugin_github_github__'
+  const issue = await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T', body: 'B' })
+  expect([issue.asked, issue.deny]).toEqual([1, expect.stringContaining('not sent')])
+  expect(issue.question).toContain(`Claude wants to send this to GitHub (${SLUG}), publicly: ${mcp}create_issue`)
+  expect(issue.question).toContain('"title": "T"')
+  expect((await call({ tool: `${mcp}push_files`, owner: 'someone', repo: 'claudes-workbench', branch: 'x', files: [] })).asked).toBe(1)
+  expect((await call({ tool: `${mcp}add_issue_comment`, url: `https://github.com/${SLUG}/issues/3`, body: 'x' })).asked).toBe(1)
+  for (const input of [
+    { tool: `${mcp}get_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', issue_number: 3 },   // a read
+    { tool: `${mcp}create_issue`, owner: 'u', repo: 'project', title: 'T' },                       // the user's own
+  ]) expect(await call(input)).toEqual({ deny: undefined, asked: 0, question: '' })
+  w.cwd = MARKET                                         // Claude Code's clone, upstream its origin: no developer's
+  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T' })).asked).toBe(1)
+  w.cwd = '/home/u/repos/workbench'                                                            // a developer's clone
+  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T' })).asked).toBe(0)
+  await clock.advance(1000)
 })
 
 test('a WB_HOME given with ~, relative or with a trailing slash is read where wb reads it (#454)', async ($, on) => {

@@ -488,6 +488,26 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   tokens, so run it only when the user says yes. `wb bench rm <case>` drops one that no longer
   tells models apart (its results stay).
 
+## When workbench itself has a bug
+When `wb` crashes (it then says `wb crashed: a bug in workbench`), reports something untrue, or its
+docs are wrong, offer the fix unprompted: "want me to patch it?" A local patch: `wb patch init`
+once (a marketplace install can't keep one: Claude Code re-clones it), then a commit on branch
+`local` with a `Scope: me` or `Scope: everybody` trailer and a test of its own; `wb update` keeps
+it, and drops it once upstream has it (its pull request merged, however reworded). On a closed
+pull request or a conflict, `wb patch check <sha>` says whether upstream fixed it another way;
+`wb patch drop` only on the user's yes. Then weigh it seriously: a bug, a false result or a change every user would want
+on any hardware and model is for everybody; a preference, a path or a taste is the user's alone.
+Tell them which and why, and only for everybody ask "want me to PR it upstream for everybody?".
+On a yes: `wb patch upstream <commit> --name <slug>`, the tests it prints, the body file it names
+filled from the template; then show the user exactly what goes public (the title and the whole
+body) and offer to redact paths, hostnames and project names; then the one `wb patch send` it
+printed, as a command of its own, `--title` and `--body-file` written out. The mod asks the user
+to approve that send in a dialog, and wb refuses one it didn't approve: never route around it, and
+nothing goes upstream any other way (not a GitHub MCP tool, not a script). A "Don't send" is a
+no: say it wasn't sent, and ask again only if they bring it up. gh missing or logged out: say wb's hint; installing it is
+the user's yes, and the login is theirs (`! gh auth login`). Read `reference/patching.md` beside
+this file first; you write the patch yourself.
+
 ## Report to the user
 Short and honest: what was built, on which model, rounds (automatic and review), test result,
 what you fixed, sent back or flagged, the branch. Report the agent's misses plainly; they are

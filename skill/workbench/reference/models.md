@@ -30,7 +30,8 @@ inside WSL for it.
 
 **Updating workbench.** The mod checks weekly and tells the user; `/workbench-update` is theirs.
 Asked to update it yourself: `wb update` (it refuses while tasks run; tell the user to restart
-Claude Code or run `/reload-plugins` after).
+Claude Code or run `/reload-plugins` after). A refusal over local changes in the marketplace
+clone, or a local patch that no longer applies: `reference/patching.md`.
 
 **The weekly model check.** Once a week the mod asks you (or the user runs `/workbench-models`)
 to check the local models against this machine. `wb scout` gives the facts: GPU and VRAM, RAM,

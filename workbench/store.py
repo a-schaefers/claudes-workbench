@@ -80,6 +80,8 @@ PARKS = ("review", "stuck", "failed")  # the phases a parked mark counts in (par
 PATH_VARS = ("WB_HOME", "WB_MODELS", "WB_SKILLS", "WB_IMAGES", "WB_AUDIO", "WB_COMMANDS", "WB_CHAT_TOKEN",
              "WB_CHAT_CONFIG", "WB_OPENCODE_CONFIG", "WB_SAVINGS", "OPENCODE_CONFIG",
              "CLAUDE_CONFIG_DIR", "WB_GPU_DIR",
+             # wb patch init's clone (#1005)
+             "WB_SOURCE",
              # where OpenCode's global config (and, XDG_DATA_HOME, its sessions) are: relative,
              # wb start found the model and the runner, which runs elsewhere, didn't (#650)
              "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME")

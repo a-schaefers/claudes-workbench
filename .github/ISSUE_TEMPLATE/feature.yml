@@ -1,0 +1,45 @@
+name: Feature request
+description: A change to what workbench does, for every user.
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Workbench runs on many machines and models. A preference or a setting that suits one
+        machine is a local patch (CONTRIBUTING.md, section 1), not a request here.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What goes wrong or costs too much today, with real output or numbers where you have them.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The proposal
+      description: What workbench should do instead. Name no model, server or machine.
+    validations:
+      required: true
+  - type: textarea
+    id: who
+    attributes:
+      label: "Who is this for: everybody, or just you?"
+      description: Why would users with other hardware and models want it?
+    validations:
+      required: true
+  - type: textarea
+    id: patch
+    attributes:
+      label: A local patch, if you have one
+      description: Its `wb patch list` line and diff, if you already run it.
+      render: diff
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched the existing issues, open and closed, for this one.
+          required: true
+        - label: Filed by an agent for its user, who has read it. (Leave unticked if you wrote it yourself.)

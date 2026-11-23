@@ -1,0 +1,32 @@
+name: Docs
+description: A doc says something the code doesn't do, or leaves out something it does.
+title: "docs: "
+labels: [documentation]
+body:
+  - type: textarea
+    id: wrong
+    attributes:
+      label: What is wrong or missing
+      description: The sentence as it stands, and what the code actually does (with the output or the line that shows it).
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where
+      description: The file and section, e.g. ARCHITECTURE.md, *Installing*; or skill/workbench/SKILL.md, line 181.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Workbench commit
+      description: 'git -C "$(dirname "$(readlink -f "$(command -v wb)")")/.." rev-parse --short HEAD'
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched the existing issues, open and closed, for this one.
+          required: true
+        - label: Filed by an agent for its user, who has read it. (Leave unticked if you wrote it yourself.)
