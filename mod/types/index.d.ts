@@ -5,6 +5,13 @@ export type WbTask = {
   round: number
   model: string
   label: string
+  /** task.json's via (#1016): 'api' for a task on an API model (its row's badge), else 'gpu' */
+  via: 'gpu' | 'api'
+  /** task.json's role ('' before roles) and its provider's name ('' for a GPU task) */
+  role: string
+  provider: string
+  /** task.json's route: how its model was chosen, the routing line ('' for none) */
+  routed: string
   tests: 'pass' | 'fail' | null
   last: string
   createdAt: number

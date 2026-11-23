@@ -110,6 +110,14 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn(said, stops[:stops.index("]\n")], "the pane's PROBE_STOPS on sentence")
         self.assertIn(said, " ".join(ARCH.split()), "ARCHITECTURE.md's pane row")
 
+    def test_wb_start_role_and_the_agents_switch_are_in_the_command_reference(self):
+        # #1016: the role Claude picks per task, and the user's Agents switch
+        ref = section(ARCH, "## Every `wb` command")
+        start = next(line for line in ref.splitlines() if line.startswith("| `wb start "))
+        self.assertIn("`--role significant\\|trivial\\|writing`", start)
+        self.assertIn("`wb route all gpu\\|api\\|both`", ref)
+        self.assertIn("--role", (ROOT / "skill/workbench/SKILL.md").read_text())
+
     def test_claude_md_stays_under_claude_codes_size_warning(self):
         # Claude Code warns past 40,000 characters, and every session that changes the code
         # loads this file (local agents too, when workbench delegates work on itself)

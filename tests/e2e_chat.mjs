@@ -461,6 +461,22 @@ async function run(engine, device) {
       await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('After the update.'))
     } finally { utimesSync(css, was.atime, was.mtime) }
   })
+  await check('the strip over the thread names each open task\'s model, GPU or API and whose (#1016)', async () => {
+    const t = join(home, 'state/tasks/fix-auth')
+    mkdirSync(t, { recursive: true })
+    writeFileSync(join(t, 'task.json'), JSON.stringify({ name: 'fix-auth', model: 'deepseek/deepseek-flash', via: 'api',
+      provider_name: 'DeepSeek', created_at: Date.now() / 1000 }))
+    writeFileSync(join(t, 'status.json'), JSON.stringify({ phase: 'running', round: 1, updated_at: Date.now() / 1000 }))
+    try {
+      wb('chat', 'reply', '--text', 'Started fix-auth.')  // a chat change wakes the stream
+      await until(async () => (await page.textContent('#tasks')) === 'Running: fix-auth · API deepseek-flash (DeepSeek)')
+      if (await page.locator('#tasks').isHidden()) throw new Error('the strip is hidden')
+      const width = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)
+      if (!width) throw new Error('the page scrolls sideways')
+    } finally { rmSync(t, { recursive: true, force: true }) }
+    wb('chat', 'reply', '--text', 'Done with fix-auth.')
+    await until(async () => await page.locator('#tasks').isHidden())
+  })
   await check("wb shot's pair: both images labelled, one above the other on a phone, a reply tied to their step", async () => {
     const d = join(home, 'state/tasks/fix-nav/shots/1')
     mkdirSync(d, { recursive: true })

@@ -6100,12 +6100,12 @@ class Watch(Base):
         self.assertEqual(len(exports), 1)
         self.assertTrue(all(len(x["t"]) <= transcript.JSON_LINE_CHARS for x in full))
         self.assertTrue(any(x["t"].endswith("…") for x in full))   # the note, cut
-        kept = ("meta", "activity", "clock")
+        kept = ("meta", "routed", "activity", "clock")                # routed: how its model was chosen (#1016)
         body = [x for x in full if x["s"] not in kept and x["t"] != transcript.PHASE_LINE["review"][1]]
-        self.assertEqual(tail[0]["s"], "meta")
-        self.assertEqual(tail[1:4], body[-3:])                       # the newest three, in order
-        self.assertEqual([x["s"] for x in tail[4:]],                 # then what is happening
-                         [x["s"] for x in full[-len(tail[4:]):]])  # (the clock ticks between)
+        self.assertEqual([x["s"] for x in tail[:2]], ["meta", "routed"])
+        self.assertEqual(tail[2:5], body[-3:])                       # the newest three, in order
+        self.assertEqual([x["s"] for x in tail[5:]],                 # then what is happening
+                         [x["s"] for x in full[-len(tail[5:]):]])  # (the clock ticks between)
 
     def test_a_watch_left_open_over_a_review_exports_the_session_once_and_skips_bench_replays(self):
         # #555: on a terminal, `wb watch` ran `opencode session export` every 1.5 s through review
@@ -27405,9 +27405,10 @@ class ApiDiscovery(Base):
         self.assertIn("--  ollama/gpt-oss:120b-cloud is an Ollama cloud model, an API model now: set a "
                       "role to use it", buf.getvalue())
 
-    def test_wb_start_refuses_an_api_model_by_model_flag(self):
+    def test_with_api_runs_off_wb_start_refuses_an_api_model_by_model_flag(self):
+        # cli.API_RUNS is on since #1016 (wb start --role): the off path, kept
         err = io.StringIO()
-        with self.assertRaises(SystemExit) as out, redirect_stderr(err):
+        with self.assertRaises(SystemExit) as out, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", False):
             run_wb("start", "t-api", "--spec", str(self.spec), "--repo", str(self.repo),
                    "--model", "acme/coder-flash")
         self.assertEqual(out.exception.code, 3)
@@ -27691,7 +27692,7 @@ class Routes(Base):
         self.assertIn("trivial      API deepseek/deepseek-flash (DeepSeek) · thinking off · set by you "
                       + time.strftime("%m-%d"), out)
         self.assertIn("day cap $5\n", out)
-        self.assertIn("wb start doesn't follow the roles yet", out)   # until wb start --role
+        self.assertNotIn("doesn't follow the roles", out)            # wb start does, since #1016
         self.assertEqual(routes.summary(routes.read()), "significant GPU (the router picks); trivial API "
                          "deepseek/deepseek-flash, thinking off; writing GPU (the router picks)")
         self.assertEqual(json.loads(self.route("--json")[1])["roles"]["trivial"]["api_status"]["why"], "API (DeepSeek)")
@@ -27738,34 +27739,96 @@ class Routes(Base):
         self.assertEqual(self.route("significant", "--gpu", "acme/coder-flash")[0], 3)  # never an API one there
         os.environ.pop("CLAUDECODE")
         self.route("significant", "anthropic/claude-haiku-5-5", "--day-usd", "5")
-        self.route("all", "gpu")
+        self.route("all", "gpu")                              # the Agents switch: the role's own kept
         row = self.doc()["roles"]["significant"]
-        self.assertEqual((row["via"], row["gpu"], row["api"]), ("gpu", "ollama/qwen3.8-27b", "anthropic/claude-haiku-5-5"))
+        self.assertEqual((row["via"], row["gpu"], row["api"]), ("api", "ollama/qwen3.8-27b", "anthropic/claude-haiku-5-5"))
+        self.assertEqual(routes.effective_via(routes.read(), "significant"), "gpu")
+        self.route("significant", "gpu")
         self.assertEqual(self.route("significant", "--gpu", "auto")[1],
                          "changed: significant: GPU model ollama/qwen3.8-27b → the router's pick\n")
 
-    def test_all_gpu_then_all_api_restores_each_roles_api_choice_and_a_role_with_none_stays_gpu(self):
+    def test_the_agents_switch_sets_use_alone_and_both_restores_each_roles_own(self):
+        # #1016 (the owner's request in #1023): wb route all gpu|api|both sets routes.json `use`,
+        # never a role's via, so Both restores the per-role mix
         self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.route("significant", "anthropic/claude-haiku-5-5")
+        own = {r: self.doc()["roles"][r]["via"] for r in routes.ROLES}
+        self.assertEqual(self.dry("all", "gpu"), {"change": "Agents: Both → GPU (every role on the GPU; each "
+                                                            "role's own choice is kept for Both)", "gate": False})
         code, out, _ = self.route("all", "gpu")
-        self.assertEqual((code, out), (0, "changed: significant: API anthropic/claude-haiku-5-5 → GPU · API kept: "
-                                          "anthropic/claude-haiku-5-5; trivial: API deepseek/deepseek-flash → GPU · "
-                                          "API kept: deepseek/deepseek-flash\n"))
-        self.assertEqual({r: self.doc()["roles"][r]["via"] for r in routes.ROLES}, dict.fromkeys(routes.ROLES, "gpu"))
-        self.assertIn("writing      GPU (the router picks)\n", self.route()[1])
-        self.assertIn("trivial      GPU (the router picks) · API kept: deepseek/deepseek-flash", self.route()[1])
-        code, out, _ = self.route("all", "api")
-        self.assertEqual(code, 0)
-        self.assertIn("significant: GPU → API anthropic/claude-haiku-5-5 · your code goes to Anthropic", out)
-        self.assertIn("trivial: GPU → API deepseek/deepseek-flash · your code goes to DeepSeek", out)
-        self.assertIn("writing: stays GPU (no API model set)", out)
+        self.assertEqual((code, out), (0, "changed: Agents: Both → GPU (every role on the GPU; each role's own "
+                                          "choice is kept for Both)\n"))
         doc = self.doc()
-        self.assertEqual({r: doc["roles"][r].get("api") for r in routes.ROLES},
-                         {"significant": "anthropic/claude-haiku-5-5", "trivial": "deepseek/deepseek-flash", "writing": None})
-        self.assertEqual(doc["roles"]["writing"]["via"], "gpu")   # never another role's model
+        self.assertEqual(doc["use"], "gpu")
+        self.assertEqual({r: doc["roles"][r]["via"] for r in routes.ROLES}, own)   # untouched
+        self.assertEqual({r: routes.effective_via(routes.read(), r) for r in routes.ROLES},
+                         dict.fromkeys(routes.ROLES, "gpu"))
+        shown = self.route()[1]
+        self.assertTrue(shown.startswith("Agents: GPU (every role runs on the GPU; wb route all both goes back to "
+                                         "each role's own below)\n"), shown)
+        self.assertEqual(json.loads(self.route("--json")[1])["use"], "gpu")
+        self.assertTrue(routes.summary(routes.read()).startswith("Agents GPU, over each role's own: significant API"))
+        line = ("Agents: GPU → Both (each role as set: significant API anthropic/claude-haiku-5-5, trivial API "
+                "deepseek/deepseek-flash, writing GPU; your code goes to Anthropic (significant), DeepSeek "
+                "(trivial); cap $5/day)")
+        self.assertEqual(self.dry("all", "both")["change"], line)
+        self.assertTrue(self.dry("all", "both")["gate"])      # it puts roles on API again
+        self.assertEqual(self.route("all", "both")[1], f"changed: {line}\n")
+        self.assertEqual({r: routes.effective_via(routes.read(), r) for r in routes.ROLES},
+                         {"significant": "api", "trivial": "api", "writing": "gpu"})
+        # both roles with an API model run on it already: nothing newly sent, still the user's yes
+        line = "Agents: Both → API (every role on its API model; writing has no API model and can't start)"
+        asked = self.dry("all", "api")
+        self.assertEqual((asked["change"], asked["gate"]), (line, True))
+        self.assertEqual(asked["approval"], {"argv": ["route", "all", "api"], "change": line})
+        self.route("all", "api")
+        self.assertEqual(self.doc()["use"], "api")
         self.assertEqual(self.route("all", "api")[1], f"unchanged: {routes.summary(routes.read())}\n")
+        back = self.dry("all", "both")
+        self.assertEqual(back["change"],
+                         "Agents: API → Both (each role as set: significant API anthropic/claude-haiku-5-5, trivial "
+                         "API deepseek/deepseek-flash, writing GPU)")
+        self.assertFalse(back["gate"])   # #1016's review: from API, Both sends no role's code anywhere new
         self.assertEqual(self.route("writing", "api")[0:3:2],
                          (3, "wb: writing has no API model yet: wb route writing <provider/model>\n"))
+
+    def test_under_claude_code_only_the_agents_switch_to_gpu_needs_no_dialog(self):
+        # the brief: a change that can newly put a role on API takes the yes; to GPU none
+        self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        os.environ["CLAUDECODE"] = "1"
+        self.assertEqual(self.route("all", "gpu")[0], 0)
+        self.assertEqual(self.doc()["roles"]["trivial"]["gpu_by"], "claude")
+        for target in ("both", "api"):
+            with self.subTest(target=target):
+                was = self.path.read_text()
+                code, out, err = self.route("all", target)
+                self.assertEqual((code, out), (3, ""))
+                self.assertIn("in Claude Code a role changes only through the workbench mod's dialog", err)
+                self.assertEqual(self.path.read_text(), was)
+        asked = self.dry("all", "both")
+        self.approve(asked["approval"])
+        self.assertEqual(self.route("all", "both")[0], 0)
+        row = self.doc()["roles"]["trivial"]
+        self.assertEqual((self.doc()["use"], row["by"], row["said"]), ("both", "dialog", asked["change"]))
+        # a role's own change while the switch holds it: said, never read as moved
+        self.approve(self.dry("all", "gpu").get("approval", {}))
+        os.environ.pop("CLAUDECODE")
+        self.route("all", "gpu")
+        self.assertEqual(self.route("trivial", "gpu")[1], "changed: trivial: API deepseek/deepseek-flash → GPU · API "
+                         "kept: deepseek/deepseek-flash; Agents is GPU, so this applies once Agents is Both (wb route "
+                         "all both)\n")
+
+    def test_the_agents_switch_to_api_needs_a_cap_and_an_api_model_somewhere(self):
+        self.assertEqual(self.route("all", "api")[0:3:2],
+                         (3, "wb: no role has an API model yet: wb route <role> <provider/model>\n"))
+        self.route("trivial", "--api", "deepseek/deepseek-flash")     # kept on the GPU: no cap asked
+        self.assertEqual(self.route("all", "api")[0:3:2], (3, f"wb: {routes.NO_CAP}\n"))
+        self.assertEqual(self.route("all", "api", "--day-usd", "5")[0], 0)
+        self.assertEqual(self.route("all", "nope")[0], 1)
+        self.path.write_text(json.dumps({**self.doc(), "use": "sometimes"}))
+        with self.assertRaises(routes.RoutesError) as e:
+            routes.read()
+        self.assertEqual(str(e.exception), "use is 'sometimes', not gpu, api or both")
 
     def test_a_fragment_a_gpu_id_and_an_id_with_no_key_wb_can_hold_are_refused(self):
         for argv, said in (
@@ -27801,11 +27864,14 @@ class Routes(Base):
                          f"changed: {DEEPSEEK_LINE}\n")
         self.assertEqual(self.route("cap", "7.5")[1], "changed: day cap $5 → $7.50/day\n")
 
-    def test_wb_start_on_an_api_model_is_refused_before_any_dialog_and_a_gpu_model_starts_as_before(self):
+    def test_with_api_runs_off_an_api_start_is_refused_before_any_dialog_and_a_gpu_model_starts_as_before(self):
         # 2026-11-23 review: the dialog asked the user to send their code to Acme for a start
-        # that, once allowed, refused with API_NOT_YET; until #1016 the dry run refuses it, so
+        # that, once allowed, refused with API_NOT_YET; with API_RUNS off the dry run refuses it, so
         # the mod lets the call through unasked and wb start refuses it the same way
         os.environ["CLAUDECODE"] = "1"
+        off = mock.patch.object(cli, "API_RUNS", False)  # #1016 turned it on: the off path, kept
+        off.start()
+        self.addCleanup(off.stop)
         argv = ["t-api", "--spec", str(self.spec), "--repo", str(self.repo), "--mod", "acme/coder-flash"]
         code, out, err = self.route("--dry-run", "--json", "--start", *argv)
         self.assertEqual((code, out, err), (3, "", f"wb: acme/coder-flash {cli.API_NOT_YET}\n"))
@@ -27824,15 +27890,15 @@ class Routes(Base):
         self.assertEqual(wait_phase("t-gpu", {"review"})["phase"], "review")
 
     def test_once_api_tasks_run_an_api_start_waits_for_the_dialogs_yes_to_exactly_it(self):
-        # the gate #1016 turns on (cli.API_RUNS): start_gate and the dry run's line, kept tested
+        # the gate #1016 turned on (cli.API_RUNS): start_gate and the dry run's line
+        self.assertTrue(cli.API_RUNS)
         os.environ["CLAUDECODE"] = "1"
         m = runner.models.resolve("acme/coder-flash")
         line = "start t-api on API acme/coder-flash (not a role's choice) · your code goes to Acme · thinking off"
         self.assertEqual(cli.start_line("t-api", m), line)
         approval = {"start": {"task": "t-api", "model": "acme/coder-flash"}, "change": line}
-        with mock.patch.object(cli, "API_RUNS", True):
-            self.assertEqual(self.dry("--start", "t-api", "--spec", str(self.spec), "--mod", "acme/coder-flash"),
-                             {"change": line, "gate": True, "approval": approval})
+        self.assertEqual(self.dry("--start", "t-api", "--spec", str(self.spec), "--mod", "acme/coder-flash"),
+                         {"change": line, "gate": True, "approval": approval})
         for wrong in ({}, {"start": {"task": "t-other", "model": "acme/coder-flash"}, "change": line},
                       {**approval, "at": time.time() - routes.ROUTE_OK_SECS - 1}):
             with self.subTest(wrong=wrong):
@@ -27915,11 +27981,20 @@ class Routes(Base):
     def test_a_kept_api_model_is_checked_again_when_its_role_goes_back_to_api(self):
         # ARCHITECTURE.md, *Roles*: the kept model must still be one the role may run
         self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.route("trivial", "gpu")
         self.route("all", "gpu")
         self.catalog(ROUTES_CATALOG, [r for r in ROUTES_AUTH if r["id"] != "deepseek"])
         runner.models.hosted(fresh=True)
         was = self.path.read_text()
-        for argv in (("trivial", "api"), ("all", "api")):
+        for argv in (("all", "api"),):
+            with self.subTest(argv=argv):
+                code, _, err = self.route(*argv)
+                self.assertEqual(code, 3)
+                self.assertIn("deepseek/deepseek-flash can't be a role's model: no key for deepseek", err)
+                self.assertEqual(self.path.read_text(), was)
+        self.route("all", "both")
+        was = self.path.read_text()
+        for argv in (("trivial", "api"),):
             with self.subTest(argv=argv):
                 code, _, err = self.route(*argv)
                 self.assertEqual(code, 3)
@@ -28004,12 +28079,12 @@ class Routes(Base):
 
 
 class _ApiTask:
-    """Starting an API task before roles land (#1016), whose `wb start --model` refuses an API
-    model: the test-only route. The test's catalog (WB_FAKE_CATALOG: the spike's DeepInfra and
-    Anthropic models, a key stored for each in `auth list`), the key the keyhole loads
-    (FAKE_AUTH_EXPORT: the canary), and cli.pick_model patched for the start alone to take the
-    API model as asked for. The runner is wb start's own (a process, `spawn=True`) or, for a test
-    that patches what it calls, drive run here (drive_here) after a start that spawns none."""
+    """Starting an API task: `wb start --model <API id>` outside Claude Code, which takes it as
+    asked for with no dialog since #1016 (cli.API_RUNS). The test's catalog (WB_FAKE_CATALOG: the
+    spike's DeepInfra and Anthropic models, a key stored for each in `auth list`) and the key the
+    keyhole loads (FAKE_AUTH_EXPORT: the canary). The runner is wb start's own (a process,
+    `spawn=True`) or, for a test that patches what it calls, drive run here (drive_here) after a
+    start that spawns none."""
     CANARY = "sk-canary-" + "K7q2" * 10 + "wxyz"
     catalog = ApiHarness.catalog
 
@@ -28021,13 +28096,7 @@ class _ApiTask:
 
     def start_api(self, name, scenario, *extra, model=FLASH, spawn=True):
         os.environ["FAKE_SCENARIO"] = scenario
-        from workbench import models
-
-        def pick(size, wanted, stack=(), name=None):  # what #1016's route will do
-            m = models.resolve(wanted)
-            return m, models.status(m), "asked for"
         with contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.object(cli, "pick_model", pick))
             if not spawn:
                 stack.enter_context(mock.patch.object(cli, "spawn_runner", lambda task: 0))
             return run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo),
@@ -28358,6 +28427,251 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.drive_here("api-health")
         health = self.models.api_health("deepinfra")
         self.assertEqual((health or {}).get("state"), "no_credit", health)
+
+
+ROLE_CATALOG = [*ROUTES_CATALOG, api_entry("openrouter", "deepseek/deepseek-v4.1-flash")]
+ROLE_AUTH = [*ROUTES_AUTH, key_row("openrouter", "OpenRouter", STORED)]
+
+
+class RoleResolution(Base):
+    """wb start --role (#1016): a role resolved to its model, GPU through the router or API to the
+    role's own model, never the other side; the choice shown at start, in task.json, wb status,
+    wb watch, the chat's snapshot; a model that leaves the catalog mid-task never replaced."""
+    catalog = ApiHarness.catalog
+
+    def setUp(self):
+        super().setUp()
+        self.catalog(ROLE_CATALOG, ROLE_AUTH)
+        self.routes = Path(os.environ["WB_ROUTES"])
+        p = mock.patch.object(cli, "spawn_runner", lambda task: 0)  # no runner: the start alone
+        p.start()
+        self.addCleanup(p.stop)
+
+    def wb(self, *argv):
+        """(exit code, stdout, stderr) of wb ARGV."""
+        out, err, code = io.StringIO(), io.StringIO(), 0
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                cli.main(list(argv))
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def begin(self, name, *extra):
+        return self.wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo), *extra)
+
+    def set_role(self, *argv):
+        code, _, err = self.wb("route", *argv)
+        self.assertEqual(code, 0, err)
+
+    def no_key_for(self, pid):
+        self.catalog(ROLE_CATALOG, [r for r in ROLE_AUTH if r["id"] != pid])
+        runner.models.hosted(fresh=True)
+
+    def test_an_unset_role_is_the_routers_gpu_pick_and_its_start_line_is_as_before(self):
+        code, out, err = self.begin("t-gpu")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-gpu").spec
+        self.assertEqual((sp["via"], sp["role"], sp["size"]), ("gpu", "significant", "significant"))
+        for key in ("provider", "provider_name", "thinking", "said", "said_ts"):
+            self.assertNotIn(key, sp)                          # API only
+        from workbench import router
+        top, why = router.choose("significant", sp["stack"], "t-gpu")
+        self.assertEqual((sp["model"], sp["route"]), (top.model.id, why))
+        self.assertIn(f"\nmodel: {why}\n", out)                # the router's line, byte for byte
+        self.assertTrue(out.startswith(f"started t-gpu on {top.model.label} · branch "), out)
+        self.assertNotIn("API", out)
+
+    def test_a_role_on_api_runs_its_api_model_and_says_so_everywhere(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        said = routes.read()["roles"]["trivial"]
+        code, out, err = self.begin("t-api", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-api").spec
+        self.assertEqual({k: sp[k] for k in ("model", "via", "role", "size", "provider", "provider_name",
+                                             "thinking", "said", "said_ts")},
+                         {"model": "deepseek/deepseek-flash", "via": "api", "role": "trivial", "size": "trivial",
+                          "provider": "deepseek", "provider_name": "DeepSeek", "thinking": "off",
+                          "said": said["said"], "said_ts": said["ts"]})
+        day = time.strftime("%m-%d", time.localtime(said["ts"]))
+        self.assertIn(f"\nmodel: deepseek/deepseek-flash · API (DeepSeek) · trivial role, set by you {day} · "
+                      "thinking off\n", out)                    # child 11 adds spend today
+        self.assertTrue(out.startswith("started t-api on deepseek/deepseek-flash (API) · branch "), out)
+        self.assertIn(f"\nnote: {self.repo.name}'s code goes to DeepSeek (the trivial role's model)\n", out)
+        # wb watch --json: a routed line naming the provider and the role, after the meta line
+        rows = [json.loads(x) for x in self.wb("watch", "t-api", "--json")[1].splitlines()]
+        self.assertEqual([r["s"] for r in rows[:2]], ["meta", "routed"])
+        self.assertEqual(rows[1]["t"], f"routed: API deepseek/deepseek-flash (DeepSeek) · trivial role, set by "
+                                       f"you {day} · thinking off")
+        self.assertIn(f"  routed: API deepseek/deepseek-flash (DeepSeek) · trivial role, set by you {day}",
+                      self.wb("watch", "t-api", "--once", "--no-color")[1])
+        # the chat's snapshot: the open task, its model and provider
+        from workbench import chat
+        self.assertIn({"name": "t-api", "phase": "queued", "model": "deepseek/deepseek-flash", "via": "api",
+                       "provider_name": "DeepSeek"}, chat.snapshot()["tasks"])
+        # a second task there for that provider: the repo's code went there already, no note
+        code, out, _ = self.begin("t-api2", "--role", "trivial")
+        self.assertEqual(code, 0)
+        self.assertNotIn("code goes to", out)
+
+    def test_wb_status_shows_via_and_never_cuts_the_provider(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.set_role("significant", "openrouter/deepseek/deepseek-v4.1-flash")
+        self.assertEqual(self.begin("t-or", "--role", "significant")[0], 0)
+        self.assertEqual(self.begin("t-ds", "--role", "trivial")[0], 0)
+        self.set_role("all", "gpu")
+        self.assertEqual(self.begin("t-gpu", "--role", "trivial")[0], 0)  # Agents GPU: never its API model
+        self.assertEqual(store.Task("t-gpu").spec["via"], "gpu")
+        out = self.wb("status")[1].splitlines()
+        self.assertRegex(out[0], r"^task +phase +rnd via model {20}")
+        rows = {line.split()[0]: line for line in out[1:]}
+        self.assertIn(" api openrouter/deepseek/dee… ", rows["t-or"])
+        self.assertIn(" api deepseek/deepseek-flash ", rows["t-ds"])
+        self.assertRegex(rows["t-gpu"], r" gpu \S+ ")
+        self.assertEqual(cli.status_model({"via": "api", "model": "averyveryverylongprovider/m-1"}),
+                         ("api", "averyveryverylongprovider/…"))  # the provider whole, the line longer
+
+    def test_an_api_role_that_cant_run_exits_3_with_one_line_and_never_the_gpu(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.no_key_for("deepseek")
+        chose = []
+        from workbench import router
+        with mock.patch.object(router, "choose", lambda *a, **k: chose.append(a) or (None, "x")):
+            code, out, err = self.begin("t-nokey", "--size", "trivial")
+        self.assertEqual((code, out), (3, ""))
+        self.assertEqual(err, "wb: trivial role: deepseek/deepseek-flash can't run: no key for deepseek: run "
+                              "/connect in OpenCode and add it. Ask the user: fix that, or put the role on the GPU "
+                              "(wb route trivial gpu)\n")
+        self.assertEqual(chose, [])                            # no fallback to the GPU
+        self.assertFalse(store.Task("t-nokey").dir.exists())
+        # --force is a --model's: a role's API model that can't run never starts anyway (#1016's review)
+        self.assertEqual(self.begin("t-forced", "--role", "trivial", "--force")[0:3:2], (3, err))
+        self.assertFalse(store.Task("t-forced").dir.exists())
+        # gone from the catalog: the same line's shape
+        self.catalog([e for e in ROLE_CATALOG if e["id"] != "deepseek-flash"], ROLE_AUTH)
+        runner.models.hosted(fresh=True)
+        code, _, err = self.begin("t-gone", "--role", "trivial")
+        self.assertEqual(code, 3)
+        self.assertTrue(err.startswith("wb: trivial role: deepseek/deepseek-flash can't run: not in OpenCode's "
+                                       "catalog now"), err)
+
+    def test_a_gpu_role_with_no_gpu_model_exits_3_and_never_tries_its_stored_api_model(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.set_role("trivial", "gpu")                        # the API model kept
+        looked = []
+        real = runner.models.lookup
+        with mock.patch.object(runner.models, "discover", lambda *a, **k: {}), \
+                mock.patch.object(runner.models, "lookup", lambda *a, **k: looked.append(a) or real(*a, **k)):
+            code, out, err = self.begin("t-nogpu", "--role", "trivial")
+        self.assertEqual((code, out), (3, ""))
+        self.assertTrue(err.startswith("wb: no local models: "), err)
+        self.assertNotIn("deepseek", err)
+        self.assertEqual(looked, [])
+        self.assertFalse(store.Task("t-nogpu").dir.exists())
+
+    def test_agents_on_api_with_a_role_that_has_no_api_model_exits_3_with_the_switchs_line(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.set_role("all", "api")
+        code, _, err = self.begin("t-none", "--role", "writing")
+        self.assertEqual((code, err), (3, "wb: writing role has no API model, and Agents is set to API: ask the user "
+                                          "to pick one (wb route writing --api <id>) or set Agents to Both or GPU "
+                                          "(wb route all both|gpu)\n"))
+        code, _, err = self.begin("t-sig", "--size", "significant")
+        self.assertEqual(code, 3)
+        self.assertIn("significant role has no API model, and Agents is set to API", err)
+        self.assertEqual(self.begin("t-triv", "--size", "trivial")[0], 0)   # its own model, by the switch
+        self.assertEqual(store.Task("t-triv").spec["via"], "api")
+        self.no_key_for("deepseek")
+        code, _, err = self.begin("t-nokey", "--role", "trivial")
+        self.assertEqual(code, 3)
+        self.assertTrue(err.rstrip().endswith("Ask the user: fix that, or set Agents to Both or GPU (wb route all "
+                                              "both|gpu)"), err)
+
+    def test_an_unreadable_routes_json_stops_the_start(self):
+        self.routes.write_text("{")
+        code, _, err = self.begin("t-broken")
+        self.assertEqual(code, 3)
+        self.assertIn("can't be read (not JSON: ", err)
+        self.assertFalse(store.Task("t-broken").dir.exists())
+
+    def test_role_and_size_fill_each_other_in(self):
+        self.assertEqual(self.begin("t-w", "--role", "writing")[0], 0)
+        self.assertEqual(self.begin("t-s", "--size", "trivial")[0], 0)
+        self.assertEqual(self.begin("t-b", "--role", "writing", "--size", "trivial")[0], 0)
+        got = {n: (store.Task(n).spec["role"], store.Task(n).spec["size"]) for n in ("t-w", "t-s", "t-b")}
+        self.assertEqual(got, {"t-w": ("writing", "significant"), "t-s": ("trivial", "trivial"),
+                               "t-b": ("writing", "trivial")})
+        self.assertEqual(routes.role_and_size(None, None), ("significant", "significant"))
+        self.assertEqual(routes.role_and_size("trivial", None), ("trivial", "trivial"))
+
+    def test_a_pinned_gpu_model_is_the_roles_never_the_routers_other_pick(self):
+        self.set_role("significant", "--gpu", "qwen")
+        code, out, err = self.begin("t-pin")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-pin").spec
+        self.assertEqual((sp["model"], sp["via"], sp["route"]),
+                         ("ollama/qwen3.8-27b", "gpu", "the significant role's GPU model (wb route)"))
+        self.assertIn("\nmodel: the significant role's GPU model (wb route)\n", out)
+
+    def test_a_model_asked_for_keeps_its_gpu_way_and_an_api_one_says_it_was_asked_for(self):
+        self.assertEqual(self.begin("t-mimo", "--model", "mimo")[0], 0)
+        self.assertEqual(store.Task("t-mimo").spec["via"], "gpu")
+        self.assertEqual(self.begin("t-frag", "--model", "flash")[0], 1)    # a fragment: never an API id
+        code, out, err = self.begin("t-asked", "--model", "deepseek/deepseek-v4-pro")
+        self.assertEqual(code, 0, err)                         # a terminal: no dialog
+        sp = store.Task("t-asked").spec
+        self.assertEqual((sp["via"], sp["said"], sp["role"]), ("api", "asked for", "significant"))
+        self.assertIn("\nmodel: deepseek/deepseek-v4-pro · API (DeepSeek) · asked for · thinking off\n", out)
+        self.assertIn("(asked for)\n", out)                    # the first-API note
+
+    def test_a_model_that_left_the_catalog_mid_task_is_never_replaced(self):
+        # robustness minor 5: a bare KeyError said `could not load <id>: '<id>'`
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.assertEqual(self.begin("t-left", "--role", "trivial")[0], 0)
+        task = store.Task("t-left")
+        task.set_status(phase="review")
+        self.catalog([e for e in ROLE_CATALOG if e["id"] != "deepseek-flash"], ROLE_AUTH)
+        runner.models.hosted(fresh=True)
+        line = ("task t-left: deepseek/deepseek-flash left OpenCode's catalog: workbench never switches a task's "
+                "model. wb takeover t-left to finish it, or wb discard t-left")
+        with mock.patch.object(cli, "_need_worktree", lambda t: None):
+            for argv in (("feedback", "t-left", "--text", "fix it"), ("next", "t-left", "--spec", str(self.spec), "-m", "feat: x")):
+                with self.subTest(argv=argv[0]):
+                    self.assertEqual(self.wb(*argv)[0:3:2], (3, f"wb: {line}\n"))
+                    self.assertFalse(task.round_dir(2).exists())
+            task.set_status(phase="failed")
+            self.assertEqual(self.wb("resume", "t-left")[0:3:2], (3, f"wb: {line}\n"))
+        task.set_status(phase="queued")
+        rounds = []
+        with mock.patch.object(runner, "run_round", lambda *a, **k: rounds.append(a)), \
+                redirect_stdout(io.StringIO()):
+            try:
+                runner.drive(task)
+            finally:
+                runner._end_agent(task)
+                task.set_status(pid=None)
+                runner.CURRENT.clear()
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st["infra"]), ("failed", line[:200], "model"))
+        self.assertEqual(st.get("failed_before"), "load")     # never ran: a discard counts nothing against it
+        self.assertEqual(rounds, [])
+        note = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r.get("task") == "t-left"][-1]
+        self.assertEqual(note["text"], line)
+
+    def test_a_catalog_that_cant_be_read_never_reads_as_the_model_having_left(self):
+        # #1016's review: a failed read lists nothing (models.hosted is {}), and the task was
+        # failed as "left OpenCode's catalog", sending the user to discard a task that would run
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.assertEqual(self.begin("t-unread", "--role", "trivial")[0], 0)
+        task = store.Task("t-unread")
+        task.set_status(phase="review")
+        line = ("task t-unread: deepseek/deepseek-flash can't be checked: OpenCode's catalog can't be read now "
+                "(opencode timed out). Try again once it reads (a failed task: wb resume t-unread)")
+        with mock.patch.object(runner.models, "lookup", lambda *a, **k: None), \
+                mock.patch.object(runner.models, "hosted_error", lambda: "opencode timed out"), \
+                mock.patch.object(cli, "_need_worktree", lambda t: None):
+            self.assertEqual(self.wb("feedback", "t-unread", "--text", "fix it")[0:3:2], (3, f"wb: {line}\n"))
+            self.assertFalse(task.round_dir(2).exists())
 
 if __name__ == "__main__":
     unittest.main()

@@ -577,7 +577,21 @@ def snapshot() -> dict:
             "push": {"key": _push_key_or_none(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
             "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
-            "now": store.now()}
+            "tasks": open_tasks(), "now": store.now()}
+
+
+def open_tasks() -> list[dict]:
+    """The open tasks for the page's strip over the thread (#1016): while away, the chat is all
+    the user sees, and it named no model (robustness minor 8). From task.json and status.json:
+    `{name, phase, model, via, provider_name}`; a bench replay is no one's task."""
+    out = []
+    for t in store.all_tasks():
+        sp, phase = t.spec, t.status.get("phase")
+        if not sp.get("name") or sp.get("bench") or phase in store.CLOSED:
+            continue
+        out.append({"name": t.name, "phase": phase or "queued", "model": sp.get("model") or "",
+                    "via": sp.get("via") or "gpu", "provider_name": sp.get("provider_name") or ""})
+    return out
 
 
 LATEST_BYTES = 1 << 20  # the messages' tail `latest` reads for Claude's last word

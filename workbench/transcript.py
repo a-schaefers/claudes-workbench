@@ -567,9 +567,20 @@ def header(task: store.Task, paint: Painter, data: dict | None = None) -> str:
     lines = [paint("head", f"task {task.name}") + f" · {plain(model_line(task, data or {}))}",
              paint("out", plain(f"  repo {sp.get('repo')} · branch {sp.get('branch')}"
                                 + (f" · tests `{sp['test_cmd']}`" if sp.get("test_cmd") else "")))]
-    if sp.get("route"):
-        lines.append(paint("out", plain(f"  routed: {sp['route']}")))
+    if routed := routed_text(task):
+        lines.append(paint("out", plain(f"  routed: {routed}")))
     return "\n".join(lines)
+
+
+def routed_text(task: store.Task) -> str:
+    """How the task's model was chosen (#1016): an API task's `API <id> (<provider>) · trivial
+    role, set by you 11-20 · thinking off` from task.json's keys, a GPU task's the router's why
+    (task.json `route`); '' for neither. wb watch's `routed:` line, and --json's `routed` row."""
+    from . import routes
+    sp = task.spec
+    if sp.get("via") == "api":
+        return routes.routed_line(sp.get("model", ""), sp)
+    return sp.get("route") or ""
 
 
 JSON_LINE_CHARS = 2000  # the pane cuts each line to this anyway (the mod's LINE_CHARS)
@@ -613,6 +624,8 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
     first = export(sid, task=task) if sid else {}
     if as_json:
         emit("meta", model_line(task, first), keep=True)
+        if routed := routed_text(task):  # the pane shows it under the task line (#1016)
+            emit("routed", f"routed: {routed}", keep=True)
     else:
         print(header(task, paint, first), file=out, flush=True)
     seen: set[str] = set()

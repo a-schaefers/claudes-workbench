@@ -90,7 +90,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-8',
+  shape: 'tasks-9',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -297,6 +297,12 @@ const speechOf = (focus: WbTask | undefined, doing: string, list: WbTask[], on: 
   return { pose: working ? 'work' : 'think', say: doing || focus.last || `${focus.phase}…`, more: '', color: COLOR[focus.phase] ?? 'claude' }
 }
 
+// A task's model as its row shows it: an API task's with its badge, `API · <model>` (the
+// provider's own id cut off, as the GPU's label is short), a GPU task's label (#1016)
+export function modelOf(t: Pick<WbTask, 'via' | 'model' | 'label'>): string {
+  return t.via === 'api' ? `API · ${t.model.split('/').pop()}` : t.label || t.model
+}
+
 // The frame a pose shows at a tick: a stroke of the wrench now and then while working, else a
 // blink now and then.
 const frameOf = (pose: Pose, tick: number): Pose => {
@@ -314,7 +320,7 @@ function pageParts(list: WbTask[], watched: WbLive, delegating: boolean, now: nu
   // The history is drawn, newest within HISTORY_CHARS: the engine scrolls the pane (arrows,
   // while focused) and follows the end as lines arrive. What the agent is doing now is the
   // apprentice's to say.
-  const all = watched.lines.filter(l => !['activity', 'clock', 'meta'].includes(l.s))
+  const all = watched.lines.filter(l => !['activity', 'clock', 'meta', 'routed'].includes(l.s))
   let from = all.length // (each line was cut to LINE_CHARS when read)
   for (let used = 0; from > 0 && used + (all[from - 1].t?.length ?? 0) + 1 <= HISTORY_CHARS; from--)
     used += (all[from - 1].t?.length ?? 0) + 1
@@ -322,11 +328,12 @@ function pageParts(list: WbTask[], watched: WbLive, delegating: boolean, now: nu
   const doing = watched.lines.find(l => l.s === 'activity')
   const clock = watched.lines.find(l => l.s === 'clock')
   const meta = watched.lines.find(l => l.s === 'meta')
+  const routed = watched.lines.find(l => l.s === 'routed') // how its model was chosen (#1016)
   const focus = focusOf(list, watched.task)
   const sp = speechOf(focus, doing?.t ?? '', list, delegating)
   const busy = sp.pose === 'work' || sp.pose === 'think'
   return {
-    when, from, history, meta, focus, sp, busy,
+    when, from, history, meta, routed, focus, sp, busy,
     // The bubble's inner width beside the apprentice (its columns, the mouth's, the border and
     // padding), or beside the face on one line; each line drawn whole, never squeezed.
     room: Math.max(10, pixels ? cols - COLUMNS - 1 - 4 : cols - 4),
@@ -361,7 +368,7 @@ export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, 
   let rows = 0
   for (const t of list) {
     rows += line(`${t.phase === 'running' ? spin : MARK[t.phase] ?? '•'} ${t.name} ${t.phase} · round ${t.round} · ` +
-      `${t.label || t.model}${t.tests ? ` · tests ${t.tests}` : ''} · ${page.when(t)}`)
+      `${modelOf(t)}${t.tests ? ` · tests ${t.tests}` : ''} · ${page.when(t)}`)
     for (const l of t.name === watched.task ? [] : t.recent) rows += line(`  ${clip(l, cols - 2)}`)
     if (t.allowed) for (const l of wrapWords(t.allowed, cols - 2)) rows += line(`  ${l}`)
     if (t.name !== watched.task && t.recent.length === 0) rows += line(`  ${clip(t.last, cols - 2)}`)
@@ -370,6 +377,7 @@ export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, 
   if (watched.task) {
     rows += line(clip(`── ${watched.task} · ↑↓ scrolls ` + '─'.repeat(cols), cols))
     if (page.meta) rows += line(page.meta.t)
+    if (page.routed) rows += line(page.routed.t)
     if (page.from > 0) rows += line(`… ${page.from} earlier lines: \`wb watch ${watched.task}\` has them all`)
     for (const l of page.history) rows += line(l.t || ' ')
   }
@@ -1624,9 +1632,9 @@ const money = (v: number) => Number.isInteger(v) ? `$${v}` : `$${v.toFixed(2)}`
 
 // The roles in one line, as routes.summary says it (Couplings: the two read alike)
 export function routesSummary(doc: Row): string {
-  const roles = (doc.roles ?? {}) as Record<string, Row>
-  return ROLES.map(r => {
-    const row = roles[r] ?? {}
+  const rows = (doc.roles ?? {}) as Record<string, Row>
+  const roles = ROLES.map(r => {
+    const row = rows[r] ?? {}
     const gpu = typeof row.gpu === 'string' && row.gpu ? row.gpu : 'auto'
     const thinking = row.thinking === 'on' ? 'on' : 'off'
     if (row.via === 'api') return `${r} API ${row.api}, thinking ${thinking}`
@@ -1634,7 +1642,10 @@ export function routesSummary(doc: Row): string {
     if (row.api) text += `, API kept: ${row.api}`
     if (thinking === 'on') text += ', thinking on'
     return text
-  }).join('; ')
+  })
+  // the Agents switch (#1016): routes.json `use`, over each role's own while it isn't Both
+  const use = doc.use === 'gpu' ? 'GPU' : doc.use === 'api' ? 'API' : ''
+  return (use ? `Agents ${use}, over each role's own: ` : '') + roles.join('; ')
 }
 
 // A document wb would read (routes.normalize's checks, in short): else it can't be read
@@ -1642,6 +1653,7 @@ function routesValid(doc: unknown): doc is Row {
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return false
   const d = doc as Row
   if (d.day_usd != null && !(typeof d.day_usd === 'number' && d.day_usd > 0)) return false
+  if (![undefined, 'gpu', 'api', 'both'].includes(d.use)) return false
   if (d.roles === undefined) return true
   if (!d.roles || typeof d.roles !== 'object' || Array.isArray(d.roles)) return false
   return Object.entries(d.roles as Row).every(([r, row]: [string, any]) => (ROLES as readonly string[]).includes(r) &&
@@ -1666,7 +1678,7 @@ async function readRoutes($: any): Promise<Routes> {
   if (!routesValid(doc)) return { said: 'routes.json can\'t be read (wb route says why)', api: false, cap: null }
   const rows = Object.values((doc.roles ?? {}) as Record<string, Row>)
   const cap = typeof doc.day_usd === 'number' ? doc.day_usd : null
-  const plain = cap === null && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
+  const plain = cap === null && (doc.use ?? 'both') === 'both' && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
     !r.api && (r.thinking ?? 'off') === 'off')
   return { said: plain ? '' : routesSummary(doc) + (cap !== null ? `. Day cap ${money(cap)}` : ''), api: rows.some(r => !!r.api), cap }
 }
@@ -2286,6 +2298,9 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
     list.push({
       name: sp.name, phase, round: Number(st.round ?? 1), model: String(sp.model ?? ''),
       label: String(sp.model_label ?? ''),
+      // how it was routed (#1016): task.json's via, role and provider, and its routing line
+      via: sp.via === 'api' ? 'api' : 'gpu', role: String(sp.role ?? ''), provider: String(sp.provider_name ?? sp.provider ?? ''),
+      routed: String(sp.route ?? ''),
       tests: st.tests ? (st.tests.ok ? 'pass' : 'fail') : null,
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
       tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
@@ -3989,7 +4004,7 @@ export const register: Register = (on, options) => {
     // cutting them off: the pane can't be made wider.
     const pixels = (e as Row).surface === 'terminal' && Number(props.scroll?.bodyRows ?? 24) >= 20 && cols >= 40
     const page = pageParts(list, watched, delegating, now, spin, cols, pixels)
-    const { when, from, history, meta, focus, sp, busy } = page
+    const { when, from, history, meta, routed, focus, sp, busy } = page
     const lines = (text: string, props: Record<string, unknown>) =>
       wrapWords(text, page.room).map(l => <Text {...props} wrap="truncate-end">{l}</Text>)
     const said = [
@@ -4040,7 +4055,7 @@ export const register: Register = (on, options) => {
               <Text bold>{t.name}</Text>
               <Text color={COLOR[t.phase] ?? 'text'}> {t.phase}</Text>
               <Text dimColor>
-                {' '}· round {t.round} · {t.label || t.model}
+                {' '}· round {t.round} · {modelOf(t)}
                 {t.tests ? ` · tests ${t.tests}` : ''} · {when(t)}
               </Text>
             </Text>
@@ -4057,6 +4072,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column">
             <Text dimColor>{clip(`── ${watched.task} · ↑↓ scrolls ` + '─'.repeat(cols), cols)}</Text>
             {meta && <Text dimColor>{meta.t}</Text>}
+            {routed && <Text dimColor>{routed.t}</Text>}
             {from > 0 && <Text dimColor>… {from} earlier lines: `wb watch {watched.task}` has them all</Text>}
             {history.map(l => (
               <Text {...(LINE_STYLE[l.s] ?? {})}>{l.t || ' '}</Text>

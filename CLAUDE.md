@@ -70,7 +70,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   `lease_for`: an API task's `NoLease` (provider slots, never the GPU). `routes.py`: the
   roles (`significant`, `trivial`, `writing`: GPU or API, each side's model, thinking; the day cap)
   in routes.json, the change line `wb route` prints and the mod's dialog shows, and the dialog's
-  one-shot approval (`approved`). `wb start` follows them only with `--role` (#1016).
+  one-shot approval (`approved`); `use`, the Agents switch (`effective_via`); `resolve`, wb start's model.
   `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
   notice).
@@ -89,7 +89,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 
 ## How a task runs
 Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change must not break:
-1. `wb start` checks (a committed CLAUDE.md, the model, GPU room, or for an API model a free
+1. `wb start` resolves the role (`--role`, else from `--size`): GPU through the router, API to the
+   role's model, never the other side (exit 3). It checks (a committed CLAUDE.md, the model, GPU room, or for an API model a free
    provider slot of `API_PARALLEL`: exit 4 unless `--queue`),
    writes round 1's prompt (spec plus `PROTOCOL`), spawns the runner and returns at once:
    anything slow (checkout, setup, base check) is the runner's, as Claude's Bash stops at 2 min.
@@ -127,7 +128,7 @@ API task's `catalog.json`, its `OPENCODE_MODELS_PATH`), `api/` (the provider slo
 `locks/` (`store.task_lock`) stay outside it (an agent once held the runner's lock: the 0.90 review). `wb patch` keeps `patches.json` (the
 clone install and its upstream, which the mod reads; the pull requests it sent), `send-ok.json` (the mod's yes to one send),
 `rescued/`, `upstream/` and `patches/` there; `route-ok.json` is the dialog's yes to one role change
-(`wb route`), or an API start once #1016 runs them. `~/.config/workbench/routes.json` (`$WB_ROUTES`) holds the roles: missing
+(`wb route`), or an API `--model` start. `~/.config/workbench/routes.json` (`$WB_ROUTES`) holds the roles: missing
 is all GPU, unreadable is an error (never read as all GPU).
 
 OpenCode's config is written only through `models.own_config`: one unlayered file without
@@ -145,7 +146,7 @@ Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`
 `WB_USER_PYTHONPATH`; `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), `CLAUDECODE` (under it `wb patch send`
 sends and `wb route` changes the API side only on the mod's dialog's yes: `send-ok.json`,
-`route-ok.json`; `wb start --model` refuses an API model before any dialog until #1016, `cli.API_RUNS`). Tests only: `WB_OPENCODE_BIN`,
+`route-ok.json`; `wb start --model` on an API model the same, `cli.start_gate`). Tests only: `WB_OPENCODE_BIN`,
 `WB_FAKE_MODELS`, `WB_FAKE_GPU_GB`, `WB_FAKE_CATALOG` (the fake's OpenCode catalog), `WB_FAKE_API`
 (an API model's state in the fake: `nokey`, `auth`, `quota`, `ratelimit`, `down`), `WB_TEST_SHARD`,
 `WB_TEST_HANG_SECS`.

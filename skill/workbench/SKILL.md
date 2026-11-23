@@ -159,12 +159,16 @@ Keep code out of the plan except those interfaces: the agents write it, you hold
 lives in your notes or the scratchpad, never in CLAUDE.md: an agent that loses its task takes up
 whatever CLAUDE.md says is next.
 
-## 1. Size it; the router picks the model
-| Size | Typical task |
+## 1. Pick the role; the user's roles pick the model
+| Role | Typical task |
 |---|---|
-| `--size significant` | new feature, multi-file change, refactor, non-obvious bug, design judgment, >~50 lines |
-| `--size trivial` | rename, string/config tweak, a test for existing code, small single-function change, boilerplate |
+| `--role significant` | new feature, multi-file change, refactor, non-obvious bug, design judgment, >~50 lines |
+| `--role trivial` | rename, string/config tweak, a test for existing code, small single-function change, boilerplate |
+| `--role writing` | prose: docs, a README, release notes, messages (it slices like significant) |
 
+Pick `--role` as you would `--size` (`--size trivial|significant` alone still works: its role is
+the size's name; both given, the role picks the model and the size the slice). The role runs
+where the user set it (`wb route`): on API, its API model; on the GPU, its pinned model, else
 `wb start` asks the router, which makes an educated guess and corrects it with real results:
 the largest model allowed significant work, the smallest allowed trivial work, unless a model's
 record of accepted tasks at that size is clearly worse, or another with as good a record has
@@ -179,11 +183,13 @@ and say the model in your reply.
 `trivial`, `writing`: GPU or API, each side's model, thinking, one day cap). Never pass `--model`
 for an API model or change a role without the user's yes; recommend only. When they ask for a
 change, run it as a command of its own (`wb route trivial <exact provider/model id>`, `wb route
-all gpu|api`, `wb route <role> --gpu <id|auto>`): the mod shows them the change in a dialog, and a
+all gpu|api|both`, `wb route <role> --gpu <id|auto>`): the mod shows them the change in a dialog, and a
 "not changed" means they said no, so say it wasn't changed and don't ask again. The first API role
 needs a day cap: ask them for one (suggest $5), then add `--day-usd N`. Exit 3 names the fix (a
-key to add with /connect, an exact id). `wb start` doesn't follow the roles yet: every task still
-runs on the GPU, the router choosing.
+key to add with /connect, an exact id). The user's **Agents** switch (`wb route all
+gpu|api|both`) puts every role on one side, or Both: each role as set. A role that can't run
+(no key, no GPU model, Agents on API with no API model for it) exits 3 with one line of choices:
+there is no fallback, so ask the user and never retry with another `--role` or `--model` to dodge it.
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
 add a model you judge fit only for small work, and otherwise change it only when the user asks.
 A newly added model has no record, so the router won't pick it over one with a good record:
@@ -276,7 +282,7 @@ music): the same with `wb audio --list`, but you can't hear: read `reference/aud
 
 ## 3. Dispatch
 ```
-wb start <kebab-name> --spec <file|-> --repo <repo> --size significant|trivial \
+wb start <kebab-name> --spec <file|-> --repo <repo> --role significant|trivial|writing \
    --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix 2]
 ```
 Put the project's compiler, typecheck or lint ahead of the tests in `--test` (`mypy && pytest`):
@@ -433,7 +439,7 @@ message: an assumption left unanswered comes back as a question, and the agent w
 When the fix is for something your spec missed, add `--spec-gap "…"` (checklist item it broke).
 **Max 3 review rounds.** Still wrong after that: make the small remaining fix yourself in the task's worktree
 (`wb status <name>` prints its path) and accept, or `wb discard <name> --reason …`.
-If a "trivial" task fails twice, it wasn't trivial: discard and restart it with `--size significant`.
+If a "trivial" task fails twice, it wasn't trivial: discard and restart it with `--role significant`.
 
 The base check, `wb verify`, and `wb shot` reuse the ignored files from the prepared worktree.
 Pass `--setup` to verify or shot when the comparison needs dependencies rebuilt for each revision.
@@ -523,7 +529,8 @@ the user's yes, and the login is theirs (`! gh auth login`). Read `reference/pat
 this file first; you write the patch yourself.
 
 ## Report to the user
-Short and honest: what was built, on which model, rounds (automatic and review), test result,
+Short and honest: what was built, on which model (GPU or API, and the role: `model:` at start,
+`routed:` in `wb watch`), rounds (automatic and review), test result,
 what you fixed, sent back or flagged, the branch. Report the agent's misses plainly; they are
 evidence about the model, and the router learns from accept and discard. Pass on the
 `claude:` line `wb accept` prints: what the task cost you, measured, beside the estimate of
