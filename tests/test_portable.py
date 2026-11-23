@@ -142,11 +142,14 @@ class Real(unittest.TestCase):
         self.env_before = dict(os.environ)
         tmp = Path(self.tmp.name)
         os.environ.pop("WB_FAKE_MODELS", None)
+        # the fake OpenCode: a model discovery misses is looked for in OpenCode's catalog
+        # (models.hosted, #1013), never the user's own OpenCode, its catalog and its keys
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
                           WB_MODELS=str(tmp / "models.json"), WB_COMMANDS=str(tmp / "commands.json"),
                           # OpenCode's credential store (models.auth_key): the fake's, never the
                           # user's own, and no OpenCode server started for each provider (#1010)
                           WB_OPENCODE_BIN=FAKE)
+        os.environ.pop("WB_FAKE_CATALOG", None)
         models._ENGINES.clear()
         models._AUTH.clear()
         models._EMULATORS.clear()
@@ -1177,29 +1180,37 @@ class Real(unittest.TestCase):
         self.assertIn("needs /v1", st["why"])
         self.assertIn("needs /v1", models.providers()["o"]["problem"])
 
-    def test_an_ollama_cloud_model_is_no_candidate_until_opted_in(self):
+    def test_an_ollama_cloud_model_is_an_api_model_never_a_gpu_candidate(self):
         # the 2026-11-16 audit: a cloud stub of 384 bytes was "the smallest model allowed trivial
-        # work", so trivial tasks' code went to ollama.com
+        # work", so trivial tasks' code went to ollama.com. Opted in with "local": true it was a
+        # remote GPU candidate the router could explore to; an API model now, whatever models.json
+        # says (#1013), which the router never reads
         ollama = self.server({"/api/version": {"version": "0.40.0"}, "/api/ps": {"models": []},
                               "/api/tags": {"models": [
                                   {"name": "coder:latest", "size": 14_000_000_000},
                                   {"name": "glm-5.1:cloud", "size": 384, "remote_host": "https://ollama.com:443"},
                                   {"name": "big:latest", "size": 400, "remote_model": "big"}]}})
         self.config({"o": {"options": {"baseURL": ollama + "/v1"},
-                           "models": {"coder": {}, "glm-5.1:cloud": {}, "big": {}}}})
+                           "models": {"coder": {}, "glm-5.1:cloud": {"limit": {"context": 131072}},
+                                      "big": {}}}})
         found = models.discover()
-        for mid in ("o/glm-5.1:cloud", "o/big"):
-            st = models.status(found[mid])
-            self.assertFalse(st["available"])
-            self.assertIn("Ollama cloud model", st["why"])
-            self.assertEqual(models.weights(found[mid]), 0)
+        self.assertNotIn("o/glm-5.1:cloud", found)   # by its name: not discovered at all
+        st = models.status(found["o/big"])           # by its tags row: discovered, never runs
+        self.assertFalse(st["available"])
+        self.assertIn("Ollama cloud model", st["why"])
+        self.assertEqual(models.weights(found["o/big"]), 0)
         self.assertEqual(router.choose("trivial")[0].model.id, "o/coder")
         self.assertEqual([x["name"] for x in models.ollama_installed(ollama) if x["cloud"]],
                          ["glm-5.1:cloud", "big:latest"])
-        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"o/glm-5.1:cloud": {"local": True}}))
-        m = models.resolve("o/glm-5.1:cloud")
-        self.assertTrue(m.remote)          # opted in: it holds no GPU lease here
-        self.assertTrue(models.status(m)["available"])
+        for opted in ({}, {"o/glm-5.1:cloud": {"local": True}}):
+            Path(os.environ["WB_MODELS"]).write_text(json.dumps(opted))
+            self.assertNotIn("o/glm-5.1:cloud", models.discover())
+            m = models.resolve("o/glm-5.1:cloud")
+            self.assertEqual((m.kind, m.key, m.label), ("api", "ollama", models.OLLAMA_CLOUD))
+            self.assertTrue(m.remote)          # it holds no GPU lease here
+            self.assertEqual(models.status(m), {"available": True, "resident": True,
+                                                "why": "API (Ollama cloud)"})  # this Ollama lists it
+            self.assertEqual(router.choose("trivial")[0].model.id, "o/coder")
 
     def test_a_server_that_wants_an_api_key_gets_the_providers_key_and_refuses_a_wrong_one(self):
         # the 2026-11-16 audit: a 401 read as "not running", and with a start command wb started a

@@ -594,6 +594,8 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
             ms = [models.resolve(x) for x in model_ids]
         except KeyError as e:  # a typo or a retired id: its one line, not a traceback (#737)
             raise RuntimeError(e.args[0]) from None
+        if api := [m.id for m in ms if getattr(m, "kind", "gpu") == "api"]:  # replays take the GPU lease (#1013)
+            raise RuntimeError(f"{api[0]} is an API model: wb bench replays on GPU models only")
     else:
         ms = [m for m in found.values() if models.status(m)["available"]]
     if not ms:

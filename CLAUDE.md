@@ -64,7 +64,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   `wb patch init` deletes the copy wb runs from.
 - `results.py`: results.jsonl rows; read them through `store.results()`, which leaves out trials.
 - `router.py`: the model per size, slices, budgets. `tuning.py`: learned knobs (a new one goes in
-  `KNOBS`, read with `tuning.value`). `models.py`: discovery, residency, `GpuLease`.
+  `KNOBS`, read with `tuning.value`). `models.py`: discovery (`discover`, GPU only; API models from
+  OpenCode's catalog, `hosted`, `lookup`, `note_api`), residency, `GpuLease`.
   `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
   notice).
@@ -123,7 +124,8 @@ OpenCode's config is written only through `models.own_config`: one unlayered fil
 comments, and a refusal names the change, never the config (it can hold an `apiKey`). Requests to
 this machine go through `models._open` (no HTTP proxy). Any OpenAI-compatible server works (`wb
 model add --url`): never steer a user to one. Which models count and what an entry needs:
-ARCHITECTURE.md, *Models: found, loaded, chosen*.
+ARCHITECTURE.md, *Models: found, loaded, chosen*. GPU paths and the router read `discover()` only;
+API models (Ollama cloud ones too) are `hosted()`'s, cached in `hosted.json`, named by exact id.
 
 Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`,
 `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR`,

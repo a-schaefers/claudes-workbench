@@ -22,7 +22,8 @@ another host that is the user's own server (WSL2's Windows host, a LAN box) need
 machine without it). Its server must listen on the LAN, firewalled to this machine (model servers
 have no login); plain HTTP carries the code unencrypted (Tailscale encrypts; its address still
 needs the flag). An Ollama there: `wb remote <host> [--context N]` does all of it, with the
-user's yes (`--remove` undoes it). Another machine adds a model beside this GPU's, never speed to one model. Ollama cloud models (`:cloud`) run off this machine: never register one without
+user's yes (`--remove` undoes it). Another machine adds a model beside this GPU's, never speed to one model. Ollama cloud models (`:cloud`) run off this machine: they are API models,
+never GPU candidates, run only through a role the user sets; never register one without
 the user's explicit yes. On WSL2, a server on Windows isn't reachable on 127.0.0.1 under the
 default NAT networking: `wb setup`/`wb scout` say when one answers at the Windows host, or give
 the two ways (mirrored networking, or 0.0.0.0 plus `wb remote`); don't propose a second server

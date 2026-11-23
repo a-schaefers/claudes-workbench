@@ -77,7 +77,9 @@ its own state before its provider's, and a `nokey` provider
 drops out of `api model.list`, `models` and `auth list`, as one OpenCode can't authenticate does.
 `api model.list` prints `{location, data}`; `models` prints `<provider>/<id>` lines and, like
 2.3.2, takes no provider argument; `auth list --format json` prints `[{id, name, connections:
-[{type: "credential", id, label, method: "key"}]}]` per provider. `run -m <provider>/<id>#<variant>`
+[{type: "credential", id, label, method: "key"}]}]` per provider. FAKE_CALLS, a file: each `api`,
+`models` and `auth` call appends its argv (how often wb read the catalog); FAKE_CATALOG_FAIL:
+`api model.list` and `models` print an error on stderr and exit 1. `run -m <provider>/<id>#<variant>`
 splits the provider at the first `/` and the variant at the first `#` after it; a catalog
 provider's unknown model is `nokey`'s error, its unknown variant (the catalog's and the config's
 `provider.<p>.models.<m>.variants`, from OPENCODE_CONFIG and OPENCODE_CONFIG_CONTENT) `Variant
@@ -121,6 +123,12 @@ def reachable() -> list:
             if api_state(e["providerID"], e["id"]) != "nokey"]
 
 
+if os.environ.get("FAKE_CALLS") and args[:1] in (["api"], ["models"], ["auth"]):
+    with open(os.environ["FAKE_CALLS"], "a") as fh:  # which catalog and key reads wb made (#1013)
+        fh.write(json.dumps(args) + "\n")
+if os.environ.get("FAKE_CATALOG_FAIL") and (args[:2] == ["api", "model.list"] or args[:1] == ["models"]):
+    print("Error: Unable to connect. Is the computer able to access the url?", file=sys.stderr)
+    sys.exit(1)
 if args[:2] == ["api", "model.list"]:  # with or without --standalone, as the real one takes
     print(json.dumps({"location": {"directory": os.getcwd()}, "data": reachable()}))
     sys.exit(0)

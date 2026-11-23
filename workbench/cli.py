@@ -595,6 +595,9 @@ def pick_model(size: str, wanted: str | None, stack=(), name: str | None = None)
             m = models.resolve(wanted)
         except KeyError as e:
             die(str(e).strip('"'))
+        if m.kind == "api":  # nothing runs one until the roles and their gate land (#1013)
+            die(f"{m.id} is an API model: wb start runs one only through a role you set (wb route), "
+                "not --model", 3)
         return m, models.status(m), "asked for"
     top, why = router.choose(size, stack, name)
     if top is None:
@@ -3644,6 +3647,9 @@ def cmd_scout(a):
         other = prov["engine"] != "ollama" and not models._fake() and \
             models._ask(f"{models.openai_base(prov['url'])}/models", prov["key"], timeout=1) is not None
         for name, e in prov["models"].items():
+            if prov["engine"] == "ollama" and models._cloud_name(name):  # off this machine (#1013)
+                print(f"  {pid}/{name}: an Ollama cloud model, an API model now (run only through a role)")
+                continue
             m = registered.get(f"{pid}/{name}")
             asked = served_name(name, e)  # the server's name for it: an alias's id (#588)
             disk = installed.get(asked) or installed.get(f"{asked}:latest") or {}
@@ -3672,7 +3678,8 @@ def cmd_scout(a):
             print(f"  installed in {pid} but not registered: " + ", ".join(
                 f"{x} ({hardware.size(installed[x]['size'])})" for x in local))
         if cloud := [x for x in extra if installed[x]["cloud"]]:  # stubs: ollama.com runs them
-            print(f"  Ollama cloud models in {pid} (off this machine, not candidates): " + ", ".join(cloud))
+            print(f"  Ollama cloud models in {pid} (off this machine: API models, not GPU candidates): "
+                  + ", ".join(cloud))
     if not provs:
         print("  none: " + models.why_none())
         if models.ollama_answers(root := models.ollama_root_here()):
@@ -4072,6 +4079,17 @@ def cmd_audio(a):
           "each spectrogram; for music or a voice's character, ask the user to listen")
 
 
+API_SIZES = "sizes are for GPU models; API models run by role"
+
+
+def _api_id(model_id: str) -> bool:
+    """Whether the id names an API model (hosted(), #1013), asked only when discover() lacks it
+    and it isn't the GPU side's (models.gpu_side: `wb model rename OLD`'s OLD is gone from the
+    config by definition, and asking the catalog for it cost two OpenCode starts, #1013's review)."""
+    return "/" in (model_id or "") and model_id not in models.discover() \
+        and not models.gpu_side(model_id) and model_id in models.hosted()
+
+
 def _model_rename(old: str, rest: list) -> None:
     """wb model rename OLD NEW: NEW carries on OLD's record (models.json `renamed_from`, #818)."""
     if len(rest or []) != 1:
@@ -4080,6 +4098,8 @@ def _model_rename(old: str, rest: list) -> None:
         m = models.resolve(rest[0])
     except KeyError as e:
         die(e.args[0] if e.args else f"no model {rest[0]}")
+    if m.kind == "api" or _api_id(old):
+        die(API_SIZES)
     if old == m.id:
         die(f"{old} is already its id")
     if old in models.discover():  # two configured ids on one record would count its tasks twice
@@ -4104,11 +4124,15 @@ def cmd_model(a):
         return _model_rename(a.id, a.sizes)
     if a.action != "sizes" and a.sizes:
         die(f"sizes ({' '.join(a.sizes)}) go with wb model sizes <id>")
+    if a.action == "retire" and _api_id(a.id):
+        die(API_SIZES)
     if a.action == "sizes":
         try:
             m = models.resolve(a.id)
         except KeyError as e:
             die(e.args[0] if e.args else f"no model {a.id}")
+        if m.kind == "api":
+            die(API_SIZES)
         bad = set(a.sizes or ()) - set(router.SIZES)
         if bad:
             die(f"sizes are {', '.join(router.SIZES)}")
@@ -4160,10 +4184,19 @@ def cmd_model(a):
             # (the 2026-11-16 audit)
             die(f"Ollama isn't answering at {prov['root']}: start it (ollama serve, or its "
                 "service or app), then retry")
-        if prov["engine"] == "ollama" and models.ollama_cloud(prov["root"], asked) \
-                and not models.cloud_allowed(a.id):
-            die(f"{a.id} is an Ollama cloud model: it runs on ollama.com, off this machine. To hand "
-                f"it work anyway, give it \"local\": true in {models.overrides_path()} first")
+        if prov["engine"] == "ollama" and models.ollama_cloud(prov["root"], asked):
+            if not models._cloud_name(asked):
+                # forwarded under a plain name, it stays in discover() and status refuses it for
+                # good: "local": true let it in, said it was an API model, and nothing could run
+                # it (#1013's review)
+                die(f"{a.id} is an Ollama cloud model under a plain name: it runs on ollama.com, "
+                    "off this machine, so it is never a GPU model, and only a cloud name (:cloud, "
+                    "-cloud) makes one an API model: add it by its cloud name")
+            if not models.cloud_allowed(a.id):
+                die(f"{a.id} is an Ollama cloud model: it runs on ollama.com, off this machine, so it "
+                    "would be an API model, run only through a role you set, never a GPU one the "
+                    f"router picks. To add it anyway, give it \"local\": true in "
+                    f"{models.overrides_path()} first")
         if a.pull:
             if prov["engine"] != "ollama":
                 die(f"{provider} is not an Ollama provider; install the model the server's own way")
@@ -5358,6 +5391,9 @@ def cmd_doctor(a):
             print(f"--  provider {pid}: {prov['engine_note']}")
         ollama = prov["engine"] == "ollama"
         for name, e in prov["models"].items():
+            if ollama and models._cloud_name(name):  # a GPU candidate before #1013: said once
+                print(f"--  {pid}/{name} is an Ollama cloud model, an API model now: set a role to use it")
+                continue
             said = (e.get("limit") or {}).get("context")
             asked = served_name(name, e)  # the server's name for it: an alias's id (#588)
             if not said and f"{pid}/{name}" in found:  # it passed, and the runner never handed

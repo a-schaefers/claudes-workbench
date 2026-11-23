@@ -199,7 +199,7 @@ def _rows(model: str, window) -> list[dict]:
     knobs learned on another model under the same id don't carry over, #726), under the ids it
     had before too (router.earlier: a renamed provider or alias started fresh, #818)."""
     from . import models, router  # router imports this module
-    m = models.discover().get(model)
+    m = models.lookup(model)  # an API task's model too (#1013)
     ids = {model, *(router.earlier(m) if m else [])}
     return router.same_weights([r for r in store.results() if r.get("model") in ids
                                 and r.get("window") == window], router.weights_now({model}))

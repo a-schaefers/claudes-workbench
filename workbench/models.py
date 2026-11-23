@@ -81,12 +81,22 @@ class Model:
     extra: dict = field(default_factory=dict)
     config: dict = field(default_factory=dict)  # OpenCode's entry: reasoning, limit, variants...
     remote: bool = False  # on another host (models.json "local": true): its VRAM isn't this GPU's
-    # An Ollama cloud model (`:cloud`, `-cloud`): Ollama forwards it to ollama.com, so it is no
-    # candidate unless models.json gives its id "local": true (cloud_ok; it is then remote).
+    # An Ollama cloud model (`:cloud`, `-cloud`): Ollama forwards it to ollama.com, so it is an API
+    # model (hosted(), kind "api"), never a GPU candidate, whatever models.json says (#1013)
     cloud: bool = False
-    cloud_ok: bool = False
     problem: str = ""  # a config mistake that would fail every request (url_problem)
     api_key: str = field(default="", repr=False)  # the provider's options.apiKey, resolved: never printed
+    # "gpu": discover()'s, on this machine's GPU or a box's that opted in; "api": hosted()'s, a
+    # provider's own servers (OpenCode's catalog, an off-machine provider, an Ollama cloud model).
+    # For an API model base_url is the catalog's settings.baseURL (the upstream), engine "api",
+    # name the id at the provider, config the catalog entry (limit, cost, variants, capabilities).
+    kind: str = "gpu"
+    # an API model's key source (never the key): "stored" (/connect saved one), "oauth",
+    # "env:<NAME>", "config" (an apiKey in a config file or OPENCODE_CONFIG_CONTENT), "signing"
+    # (SigV4/Vertex), "ollama" (Ollama's own login), "none" (a keyless free model), "" (no key)
+    key: str = ""
+    free: bool = False  # an OpenCode free model (opencode/*-free), or priced 0 with no key needed
+    package: str = ""   # the catalog provider's package (@opencode/ai/providers/<p>), or the npm
 
     @property
     def root(self) -> str:
@@ -427,8 +437,10 @@ def _own_addresses() -> frozenset:
 _own_addresses.cache_clear = _ADDRS.clear  # as the lru_cache it was, for the tests
 
 
-def _this_host(host: str | None) -> bool:
-    """Whether a baseURL's host is this machine: any loopback address, or this host's own name."""
+def _this_host(host: str | None, dns: bool = True) -> bool:
+    """Whether a baseURL's host is this machine: any loopback address, or this host's own name.
+    ``dns=False`` skips _named_here's lookup: the catalog's dozens of provider hosts would cost a
+    DNS lookup each, up to RESOLVE_WAIT, on every catalog read."""
     if not host:
         return False
     if host.lower() in LOCAL_HOSTS:
@@ -439,7 +451,7 @@ def _this_host(host: str | None) -> bool:
     except ValueError:
         me = socket.gethostname().lower()
         name = host.lower().rstrip(".")
-        return name in (me, me.split(".")[0], f"{me.split('.')[0]}.local") or _named_here(name)
+        return name in (me, me.split(".")[0], f"{me.split('.')[0]}.local") or (dns and _named_here(name))
 
 
 RESOLVE_WAIT = 1.0  # seconds a baseURL's host name gets to resolve; slower counts as another host
@@ -658,7 +670,8 @@ def _scan(cfg: dict, extra: dict, dirs: dict | None = None):
     """(provider id, its config, its baseURL resolved, why it is skipped or "", remote) for each
     provider with a baseURL, as OpenCode loads them: disabled_providers and enabled_providers
     followed (the router used to pick a provider OpenCode wouldn't load: the 2026-11-16 audit).
-    A provider with no baseURL is one of OpenCode's own cloud providers: not listed."""
+    A provider with no baseURL is one of OpenCode's catalog providers: not listed here, but in
+    hosted(), as is one off this machine (skipped here, with the `local: true` hint)."""
     enabled, disabled = cfg.get("enabled_providers"), set(cfg.get("disabled_providers") or [])
     dirs = _provider_dirs() if dirs is None else dirs
     for pid, prov in _providers_of(cfg).items():
@@ -717,6 +730,9 @@ def why_none() -> str:
     skipped = skipped_providers()
     if skipped:
         return "; ".join(f"provider {pid}: {why}" for pid, why in skipped)
+    if cloud := ollama_cloud_ids():  # an Ollama with only cloud models has no GPU model (#1013)
+        return (f"{', '.join(cloud)} {'is an Ollama cloud model' if len(cloud) == 1 else 'are Ollama cloud models'}"
+                ", an API model now (set a role to use it); wb model add ollama/<model> adds a local one")
     return (f"OpenCode has no local provider in {opencode_config_path()}: wb model add "
             "<provider>/<model> --url <baseURL> adds one for any OpenAI-compatible server on this "
             "machine (llama.cpp, LM Studio, vLLM, ...); with Ollama running, wb model add "
@@ -743,7 +759,19 @@ def _cloud_row(row: dict) -> bool:
 
 
 def cloud_allowed(model_id: str) -> bool:
+    """Whether `wb model add` may write this Ollama cloud model (models.json "local": true): it is
+    an API model either way, never a GPU candidate (#1013)."""
     return (_overrides().get(model_id) or {}).get("local") is True
+
+
+def ollama_cloud_ids() -> list[str]:
+    """The Ollama cloud models (`:cloud`, `-cloud`) OpenCode's config gives an Ollama provider on
+    this machine: API models now, left out of discover() (#1013). From the config alone: no
+    catalog read."""
+    extra, dirs = _overrides(), _provider_dirs()
+    return [f"{pid}/{name}" for pid, prov, _, engine, _ in _local_providers(read_config(), extra, dirs)
+            if engine == "ollama" for name in prov.get("models") or {}
+            if _cloud_name(name) and not (extra.get(f"{pid}/{name}") or {}).get("skip")]
 
 
 # What `opencode auth export <provider>` said, per process, a miss ("") included: each OpenCode
@@ -830,7 +858,9 @@ def stored_key(pid: str) -> str:
 
 
 def discover() -> dict[str, Model]:
-    """Every local model OpenCode knows, by OpenCode id, in config order."""
+    """Every GPU model OpenCode knows, by OpenCode id, in config order: never an API model
+    (hosted()), so the lease, residency, free_gpu, media and the router, which all read this,
+    stay on this machine's GPU (and the boxes opted in) without asking each model its kind."""
     extra, dirs = _overrides(), _provider_dirs()
     found: dict[str, Model] = {}
     for pid, prov, url, engine, remote in _local_providers(read_config(), extra, dirs):
@@ -849,22 +879,27 @@ def discover() -> dict[str, Model]:
         for name, spec in (prov.get("models") or {}).items():
             mid = f"{pid}/{name}"
             over = {**extra.get(pid, {}), **extra.get(mid, {})}
-            if over.get("skip"):
+            # an Ollama cloud model was routed trivial work as "the smallest" (the 2026-11-16
+            # audit); opted in with "local": true it was a remote GPU candidate the router could
+            # explore to, sending a task's code to ollama.com unchosen. An API model now (#1013)
+            if over.get("skip") or (engine == "ollama" and _cloud_name(name)):
                 continue
-            # an Ollama cloud model was routed trivial work as "the smallest" (the 2026-11-16 audit)
-            cloud = engine == "ollama" and _cloud_name(name)
-            cloud_ok = cloud and (extra.get(mid) or {}).get("local") is True
             found[mid] = Model(id=mid, provider=pid, name=str(spec.get("id") or name),
                                base_url=url, engine=engine,
                                label=over.get("label") or spec.get("name") or mid,
                                start=over.get("start"), stop=over.get("stop"), extra=over,
-                               config=spec, remote=remote or cloud_ok, cloud=cloud,
-                               cloud_ok=cloud_ok, problem=problem, api_key=key)
+                               config=spec, remote=remote, problem=problem, api_key=key)
     return found
 
 
+EXACT_ONLY = "API models are named by their exact id, as OpenCode lists them (opencode models)"
+
+
 def resolve(wanted: str) -> Model:
-    """An OpenCode id, a model's name at its server, or a fragment naming exactly one model."""
+    """A GPU model by its OpenCode id, its name at its server, or a fragment naming exactly one;
+    else an API model by its exact id only (#1013): with 40 or more catalog ids, `--model flash`
+    could have landed on a paid model nobody chose. hosted() is asked only after the GPU side
+    misses, and only for an id (it has a `/`), so no GPU path waits on OpenCode's catalog."""
     models = discover()
     if wanted in models:
         return models[wanted]
@@ -872,10 +907,485 @@ def resolve(wanted: str) -> Model:
     hits = exact or [m for m in models.values() if wanted.lower() in m.id.lower()]
     if len(hits) == 1:
         return hits[0]
-    known = ", ".join(models) or f"none ({why_none()})"
     if hits:
         raise KeyError(f"{wanted!r} matches {', '.join(m.id for m in hits)}; be more specific")
-    raise KeyError(f"unknown model {wanted!r}; known: {known}")
+    if "/" in wanted and not gpu_side(wanted) and (api := _hosted_exact(wanted)):
+        return api
+    known = ", ".join(models) or f"none ({why_none()})"
+    raise KeyError(f"unknown model {wanted!r}; known: {known}; {EXACT_ONLY}")
+
+
+def lookup(model_id: str, cached: bool = False) -> Model | None:
+    """The model behind a task's or a row's id, GPU or API: discover()'s, else hosted()'s. Only
+    where an API task's model must be found (the transcript's model line, the tuning rows,
+    router.expected); the GPU paths keep discover(). An id of the GPU side (gpu_side) never asks
+    the catalog. ``cached``: hosted.json as it is, never rebuilt (the pane's 5 s polls: a stale
+    cache cost two OpenCode starts inline, and a hung one up to CATALOG_TIMEOUT, #1013's review)."""
+    found = discover().get(model_id)
+    if found or "/" not in (model_id or "") or gpu_side(model_id):
+        return found
+    if cached:
+        return _models_of(_read_hosted(), only=model_id).get(model_id)
+    return hosted().get(model_id)
+
+
+def gpu_side(model_id: str) -> bool:
+    """Whether an id is the GPU side's whether or not discover() still lists it: its provider is
+    configured on this machine (or opted in) and its name is no Ollama cloud name. hosted() never
+    lists one (_build_hosted leaves those providers out), so a renamed or retired model, an old
+    task's id, `wb model rename OLD` or a typo asks no catalog: it cost two OpenCode starts on
+    every `wb watch --json` the pane polls, and on the runner's keep-warm (#1013's review)."""
+    pid, _, name = (model_id or "").partition("/")
+    return bool(name) and pid in _sides(read_config(), _overrides())[0] and not _cloud_name(name)
+
+
+def _hosted_exact(mid: str) -> Model | None:
+    """hosted()[mid], read again once on a miss when the cache is older than AUTH_FRESH_SECS and
+    its read didn't fail: the catalog lists only providers that can authenticate, and /connect
+    changes no stamp (the key goes to opencode.db), so a just-connected provider's ids read as
+    unknown for HOSTED_TTL (#1013's review). A failed read stays cached for DOWN_SECS."""
+    if found := hosted().get(mid):
+        return found
+    doc = _read_hosted()
+    ts = doc.get("ts")
+    if doc.get("error") or not isinstance(ts, (int, float)) or 0 <= time.time() - ts < AUTH_FRESH_SECS:
+        return None
+    return hosted(fresh=True).get(mid)
+
+
+# API models (#1013): OpenCode's catalog, read through OpenCode itself and cached in hosted.json
+HOSTED_TTL = 600         # seconds a catalog read stays fresh; a changed stamp rebuilds it at once
+CATALOG_TIMEOUT = 30     # a read past it fails, cached as one for DOWN_SECS
+OLLAMA_CLOUD = "Ollama cloud (ollama.com)"
+# Providers that sign each request with cloud credentials (SigV4, Vertex): no key wb can hold
+SIGNING = frozenset({"amazon-bedrock", "google-vertex", "google-vertex-anthropic"})
+API_STATES = ("no_credit", "rate_limited", "unreachable")
+RATE_LIMIT_SECS = 60     # a 429 without Retry-After: how long its provider reads rate-limited
+_HOSTED: dict = {}       # the last hosted.json read in this process: {"at": (mtime_ns, size), "doc"}
+_AUTH_FRESH: dict = {}   # state dir -> (monotonic, auth rows): status's no-key check, briefly kept
+AUTH_FRESH_SECS = 5
+
+
+def hosted_path() -> Path:
+    return store.home() / "hosted.json"
+
+
+def api_health_path() -> Path:
+    return store.home() / "api-health.json"
+
+
+def _stamp() -> dict:
+    """What a catalog read depends on: the OpenCode binary (each file of its command: its real
+    path, size and mtime), the mtimes of OpenCode's config files and models.json, and
+    OPENCODE_CONFIG_CONTENT's checksum. JSON-shaped, so a read-back compares equal."""
+    from . import runner  # runner imports this module
+    bins = []
+    for arg in runner.opencode_bin():
+        path = arg if os.sep in arg else shutil.which(arg)
+        if path and os.path.isfile(path):
+            st = os.stat(path)
+            bins.append([os.path.realpath(path), st.st_size, st.st_mtime_ns])
+    files = []
+    for path in [*opencode_config_files(), overrides_path()]:
+        try:
+            files.append([str(path), os.stat(path).st_mtime_ns])
+        except OSError:
+            pass
+    return {"opencode": bins, "configs": files,
+            "content": zlib.crc32((os.environ.get("OPENCODE_CONFIG_CONTENT") or "").encode())}
+
+
+def _opencode_json(*args: str):
+    """(parsed JSON stdout, "") of an OpenCode command, or (None, why: its first stderr line).
+    `--standalone`: wb's own environment, never the background service's (whose env keys and
+    config may differ), as every workbench call to OpenCode runs. The project config is shut out
+    as the agent's is (OPENCODE_DISABLE_PROJECT_CONFIG), and it runs in the state directory: a
+    repo's opencode.json under the caller's cwd must not add providers to the list."""
+    from . import runner  # runner imports this module
+    where = store.home()
+    where.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "PWD": str(where), "OPENCODE_DISABLE_PROJECT_CONFIG": "1"}
+    if os.environ.get("WB_OPENCODE_CONFIG"):
+        env["OPENCODE_CONFIG"] = os.environ["WB_OPENCODE_CONFIG"]
+    from .media import run_group  # media imports this module
+    cmd = [*runner.opencode_bin(), *args, "--standalone"]
+    try:
+        # its own session, killed whole: subprocess.run's timeout killed only the direct child, so
+        # OpenCode behind a wrapper (npm's node launcher) outlived a hung read (#1013's review)
+        r = run_group(cmd, CATALOG_TIMEOUT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                      text=True, cwd=where, env=env, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        return None, f"{cmd[0]} not found (OpenCode isn't installed)"
+    except subprocess.TimeoutExpired:
+        return None, f"opencode {' '.join(args)} took over {CATALOG_TIMEOUT} s"
+    except OSError as e:
+        return None, f"opencode {' '.join(args)}: {e.strerror or e}"
+    first = next((x.strip() for x in (r.stderr or "").splitlines() if x.strip()), "")
+    if r.returncode != 0:
+        return None, _redact(first or f"opencode {' '.join(args)} exited {r.returncode}")
+    try:
+        return json.loads(r.stdout or "null"), ""
+    except ValueError:
+        return None, f"opencode {' '.join(args)} printed no JSON"
+
+
+def _auth_rows() -> tuple[dict | None, str]:
+    """`opencode auth list --format json` by provider id: {pid: {"name", "connections"}}. It
+    never prints a secret (`auth export` does: never run)."""
+    rows, why = _opencode_json("auth", "list", "--format", "json")
+    if rows is None:
+        return None, why
+    out = {}
+    for r in rows if isinstance(rows, list) else []:
+        if isinstance(r, dict) and isinstance(r.get("id"), str):
+            out[r["id"]] = {"name": str(r.get("name") or r["id"]),
+                            "connections": [c for c in r.get("connections") or [] if isinstance(c, dict)]}
+    return out, ""
+
+
+def _config_key(prov: dict) -> str:
+    """The key source a config's provider entry names: "env:<NAME>" for a lone `{env:NAME}`
+    apiKey, "config" for any other (a literal, a `{file:}`), "" for none."""
+    raw = str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "").strip()
+    if not raw:
+        return ""
+    lone = re.fullmatch(r"\{env:([^}]*)\}", raw)
+    return f"env:{lone[1].strip()}" if lone else "config"
+
+
+def _key_source(pid: str, auth: dict, prov: dict | None) -> str:
+    """Where an API provider's key comes from (Model.key): a config apiKey first (OpenCode's
+    layer wins over a stored one), then what `auth list` says, a stored key before a login or an
+    environment variable; else "". A signing provider is "signing" whatever it holds. A provider's,
+    never a model's: a keyless free model's "none" is its own (_api_model), as one provider holds
+    free and paid models alike, and the first model seen made every sibling "none" (#1013's
+    review: a paid model with no key read available). Judged by the source the keyhole would use, never by the catalog listing:
+    an env key lists its provider's models for wb, but the agent never gets the variable
+    (runner.SECRET_ENV)."""
+    conns = (auth.get(pid) or {}).get("connections") or []
+    source = _config_key(prov or {})
+    if not source and any(c.get("type") == "credential" and c.get("method") == "key" for c in conns):
+        source = "stored"
+    if not source and any(c.get("type") == "credential" for c in conns):
+        source = "oauth"
+    if not source and (env := next((c for c in conns if c.get("type") == "env"), None)):
+        source = f"env:{env.get('name') or '?'}"
+    if source and pid in SIGNING:
+        return "signing"
+    return source
+
+
+def _is_free(pid: str, entry: dict) -> bool:
+    """An OpenCode free model: `opencode/*-free`, or every price 0 (marked only; child 13 warns
+    of its data use)."""
+    if pid == "opencode" and str(entry.get("id") or "").endswith("-free"):
+        return True
+    cost = entry.get("cost")
+    prices = [c for c in cost if isinstance(c, dict)] if isinstance(cost, list) else []
+    return bool(prices) and all(not c.get("input") and not c.get("output") for c in prices)
+
+
+def _sides(cfg: dict, extra: dict, dirs: dict | None = None) -> tuple[set, dict]:
+    """(the configured providers of the GPU side: on this machine or opted in, skipped or not;
+    {provider: (its config, its baseURL)} of those off this machine, whose models are API ones)."""
+    gpu, off = set(), {}
+    for pid, prov, url, _, _ in _scan(cfg, extra, dirs):
+        if _off_machine(pid, url, extra):
+            off[pid] = (prov, url)
+        else:
+            gpu.add(pid)  # GPU models: discover()'s, whatever their catalog entries
+    return gpu, off
+
+
+def _dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _off_machine(pid: str, url: str, extra: dict) -> bool:
+    """A configured provider whose baseURL is on another host and not opted in (`local: true`):
+    discovery skips it (with its hint), and its models are API models."""
+    host = urlparse(url).hostname
+    return bool(host) and not _this_host(host) and not (extra.get(pid) or {}).get("local")
+
+
+def _build_hosted() -> dict:
+    """hosted.json's document, read fresh: OpenCode's catalog (`api model.list`, only providers
+    that can authenticate, plus OpenCode's free models) less the providers configured on this
+    machine, the models of a configured provider off this machine, and each Ollama cloud model
+    of a provider on this machine; providers OpenCode wouldn't load left out, as _scan leaves
+    them. A failed read gives no models and its first stderr line."""
+    doc = {"v": 1, "ts": time.time(), "stamp": _stamp(), "error": "", "providers": {}, "models": {}}
+    listed, why = _opencode_json("api", "model.list")
+    auth, auth_why = _auth_rows() if listed is not None else (None, "")
+    if listed is None or auth is None:
+        doc["error"] = why or auth_why
+        return doc
+    cfg, extra, dirs = read_config(), _overrides(), _provider_dirs()
+    enabled, disabled = cfg.get("enabled_providers"), set(cfg.get("disabled_providers") or [])
+    loads = lambda pid: pid not in disabled and (not enabled or pid in enabled)  # noqa: E731
+    configured = _providers_of(cfg)
+    gpu, off = _sides(cfg, extra, dirs)
+    provs, found = doc["providers"], doc["models"]
+
+    def provider(pid, api, package, name=None, key=None):
+        if pid not in provs:
+            provs[pid] = {"name": name or (auth.get(pid) or {}).get("name") or pid,
+                          "key": key if key is not None else _key_source(pid, auth, configured.get(pid)),
+                          "package": package or "", "api": api or ""}
+        return provs[pid]
+
+    data = listed.get("data") if isinstance(listed, dict) else listed
+    for e in data if isinstance(data, list) else []:
+        if not (isinstance(e, dict) and isinstance(e.get("providerID"), str) and isinstance(e.get("id"), str)):
+            continue
+        pid = e["providerID"]
+        mid = f"{pid}/{e['id']}"
+        settings, caps = _dict(e.get("settings")), _dict(e.get("capabilities"))
+        api = str(settings.get("baseURL") or "")
+        # a server on this machine that OpenCode found by itself (2.3.2 lists a running Ollama at
+        # 127.0.0.1 with no config): GPU work, added through wb model add, never an API model that
+        # would be told to /connect (#1013's review). No DNS: a catalog lists dozens of hosts.
+        if pid in gpu or not loads(pid) or (extra.get(mid) or {}).get("skip") \
+                or _this_host(urlparse(api).hostname, dns=False):
+            continue
+        free = _is_free(pid, e)
+        variants = e.get("variants") if isinstance(e.get("variants"), list) else []
+        provider(pid, api, e.get("package") if isinstance(e.get("package"), str) else "")
+        # chosen fields only, never `settings`: it carries the key OpenCode holds for a layer or a
+        # free model (`settings.apiKey`, as 2.3.2 prints it), and hosted.json is a plain file
+        found[mid] = {"name": e["modelID"] if isinstance(e.get("modelID"), str) and e["modelID"] else e["id"],
+                      "limit": _dict(e.get("limit")),
+                      "cost": e.get("cost") if isinstance(e.get("cost"), list) else [],
+                      "variants": variants, "capabilities": caps,
+                      "reasoning": bool(variants) or None, "tool_call": caps.get("tools"),
+                      "family": e.get("family"), "status": e.get("status"), "free": free}
+    for pid, (prov, url) in off.items():  # its own entries, which the catalog may not list
+        if not loads(pid):
+            continue
+        provider(pid, url, prov.get("npm"), name=prov.get("name"))
+        for name, spec in (prov.get("models") or {}).items():
+            mid = f"{pid}/{name}"
+            if mid in found or (extra.get(mid) or {}).get("skip") or not isinstance(spec, dict):
+                continue
+            found[mid] = {**spec, "name": str(spec.get("id") or name), "free": False}
+    for pid, prov, url, engine, _ in _local_providers(cfg, extra, dirs):
+        if engine != "ollama":
+            continue
+        for name, spec in (prov.get("models") or {}).items():
+            mid = f"{pid}/{name}"
+            if not _cloud_name(name) or (extra.get(mid) or {}).get("skip") or not isinstance(spec, dict):
+                continue
+            provider(pid, url, prov.get("npm"), name=OLLAMA_CLOUD, key="ollama")
+            found[mid] = {**spec, "name": str(spec.get("id") or name), "free": False, "cloud": True}
+    return doc
+
+
+def _read_hosted() -> dict:
+    """hosted.json, parsed once per change of the file in this process; {} when missing or
+    foreign (never trusted for anything but listing)."""
+    path = hosted_path()
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    at = (st.st_mtime_ns, st.st_size)
+    if _HOSTED.get("at") == at and _HOSTED.get("path") == str(path):
+        return _HOSTED["doc"]
+    doc = store.read_json(path, {})
+    # a row of another shape crashed hosted(), so every resolve() miss (#1013's review)
+    ok = isinstance(doc, dict) and doc.get("v") == 1 and all(
+        isinstance(doc.get(k), dict) and all(isinstance(v, dict) for v in doc[k].values())
+        for k in ("providers", "models"))
+    doc = doc if ok else {}
+    _HOSTED.update(at=at, path=str(path), doc=doc)
+    return doc
+
+
+def hosted_doc(fresh: bool = False) -> dict:
+    """hosted.json's document, rebuilt when missing, foreign, past HOSTED_TTL (a failed read
+    past DOWN_SECS), its stamp changed, or ``fresh``. Two processes rebuilding at once both
+    write atomically: the last wins, equally fresh."""
+    doc = _read_hosted()
+    ts = doc.get("ts")
+    ttl = DOWN_SECS if doc.get("error") else HOSTED_TTL
+    if fresh or not isinstance(ts, (int, float)) or not 0 <= time.time() - ts < ttl \
+            or doc.get("stamp") != _stamp():
+        doc = _build_hosted()
+        try:
+            store.write_json(hosted_path(), doc)
+        except OSError:  # a read-only state directory: still answer
+            pass
+    return doc
+
+
+def hosted_error() -> str:
+    """Why the last catalog read failed, or "" (as why_none names a skipped provider)."""
+    return str(_read_hosted().get("error") or "")
+
+
+def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
+    pid = mid.split("/", 1)[0]
+    over = {**(extra.get(pid) or {}), **(extra.get(mid) or {})}
+    cloud = bool(entry.get("cloud"))
+    config = {k: v for k, v in entry.items() if k not in ("free", "cloud")}
+    return Model(id=mid, provider=pid, name=str(entry.get("name") or mid.split("/", 1)[1]),
+                 base_url=str(prov.get("api") or ""), engine="api",
+                 label=over.get("label") or (OLLAMA_CLOUD if cloud else f"{prov.get('name') or pid} (API)"),
+                 extra=over, config=config, remote=True, cloud=cloud, kind="api",
+                 key=str(prov.get("key") or ("none" if entry.get("free") else "")),
+                 free=bool(entry.get("free")),
+                 package=str(prov.get("package") or ""))
+
+
+def hosted(fresh: bool = False) -> dict[str, Model]:
+    """Every API model, by OpenCode id (provider split at the first `/`): OpenCode's catalog
+    less the providers on this machine, a configured provider off it, and the Ollama cloud
+    models (`kind == "api"` each). Cached in hosted.json for HOSTED_TTL; {} when the read
+    failed (hosted_error says why). Never runs `opencode auth export`. ``fresh``: read again."""
+    return _models_of(hosted_doc(fresh))
+
+
+def _models_of(doc: dict, only: str | None = None) -> dict[str, Model]:
+    extra, provs = _overrides(), _dict(doc.get("providers"))
+    return {mid: _api_model(mid, e, _dict(provs.get(mid.split("/", 1)[0])), extra)
+            for mid, e in _dict(doc.get("models")).items()
+            if isinstance(e, dict) and (only is None or mid == only)}
+
+
+def provider_name(m: Model) -> str:
+    """How a provider is named to the user: its name in OpenCode's auth list or config."""
+    if m.cloud:
+        return "Ollama cloud"
+    return m.label.removesuffix(" (API)") if m.label.endswith(" (API)") else m.provider
+
+
+# key-like text in a provider's error line: a bearer token, an sk-/xai-/gsk_-style key, a long
+# opaque token, a key=value pair (the upstream body comes through verbatim: the spike, #1009)
+_KEYISH = re.compile(r"(?i)(bearer\s+|api[-_ ]?key[\"'\s:=]+|token[\"'\s:=]+)[^\s\"',;]+"
+                     r"|\b(?:sk|xai|gsk|pk|rk|key)[-_][A-Za-z0-9_\-]{8,}"
+                     r"|\b[A-Za-z0-9_\-]{32,}\b")
+
+
+def _redact(text: str) -> str:
+    """The first line of ``text``, key-like strings replaced, at most 200 characters. A simple
+    local redaction; the keyhole's fuller one comes later (#1012)."""
+    line = next((x.strip() for x in str(text or "").splitlines() if x.strip()), "")
+    line = _KEYISH.sub(lambda mt: (mt.group(1) or "") + "[redacted]", line)
+    return line[:200]
+
+
+def note_api(pid: str, state: str, why: str = "", until: float | None = None) -> None:
+    """Record what a provider's last answer said (api-health.json, under its lock): `no_credit`
+    (402, a quota or plan limit), `rate_limited` (until Retry-After, else RATE_LIMIT_SECS),
+    `unreachable` (connect, DNS, TLS, a 5xx; for DOWN_SECS), or `ok` (a 2xx), which clears it.
+    ``why`` is kept redacted. status() reads it; an entry past its `until` reads as ok."""
+    if state not in ("ok", *API_STATES):
+        raise ValueError(f"note_api: state is one of ok, {', '.join(API_STATES)}, not {state!r}")
+    now = time.time()
+    if until is None:
+        until = now + RATE_LIMIT_SECS if state == "rate_limited" else \
+            now + DOWN_SECS if state == "unreachable" else None
+    path = api_health_path()
+    with store.locked(path.with_name(path.name + ".lock")):
+        doc = store.read_json(path, {})
+        doc = doc if isinstance(doc, dict) else {}
+        if state == "ok":
+            if pid not in doc:
+                return
+            doc.pop(pid)
+        else:
+            doc[pid] = {"state": state, "until": until, "why": _redact(why), "ts": now}
+        store.write_json(path, doc)
+
+
+def api_health(pid: str) -> dict | None:
+    """The provider's api-health.json entry while it holds: None when ok, or past its `until`."""
+    row = (store.read_json(api_health_path(), {}) or {})
+    row = row.get(pid) if isinstance(row, dict) else None
+    if not isinstance(row, dict) or row.get("state") not in API_STATES:
+        return None
+    until = row.get("until")
+    if isinstance(until, (int, float)) and until <= time.time():
+        return None
+    return row
+
+
+def _fresh_key(m: Model) -> tuple[str, str]:
+    """(key source, provider name) as `auth list` gives them now, ignoring the cache (a user who
+    just ran /connect must not be told to run it again), written back to hosted.json when the
+    key changed. One read per state directory each AUTH_FRESH_SECS: a pass over many models of a
+    provider without a key asks once."""
+    home = str(store.home())
+    hit = _AUTH_FRESH.get(home)
+    if not hit or time.monotonic() - hit[0] >= AUTH_FRESH_SECS:
+        hit = _AUTH_FRESH[home] = (time.monotonic(), _auth_rows()[0])
+    if hit[1] is None:
+        return m.key, provider_name(m)
+    key = _key_source(m.provider, hit[1], _providers_of(read_config()).get(m.provider))
+    name = (hit[1].get(m.provider) or {}).get("name") or provider_name(m)
+    doc = _read_hosted()
+    row = (doc.get("providers") or {}).get(m.provider)
+    if row is not None and key != row.get("key"):  # the provider's source: never a model's "none"
+        doc = json.loads(json.dumps(doc))
+        doc["providers"][m.provider].update(key=key, name=name)
+        try:
+            store.write_json(hosted_path(), doc)
+        except OSError:
+            pass
+    return key or ("none" if m.free else ""), name
+
+
+def _key_file(pid: str) -> str:
+    """The config layer that writes a provider's apiKey (the last that does: it wins)."""
+    def sets(layer: dict) -> bool:
+        prov = _providers_of(layer).get(pid)
+        return isinstance(prov, dict) and bool(_config_key(prov))
+    where = [str(path) for path, layer in _layers() if sets(layer)]
+    if sets(users_config_content()):
+        where.append(CONTENT)
+    return where[-1] if where else "OpenCode's config"
+
+
+def _api_status(m: Model, down=frozenset()) -> dict:
+    """status() for an API model, from the config, the key source and api-health.json only: no
+    network probe (no completion, no /models). wb models, scout, doctor and top call status for
+    every model: one request each would cost money or rate-limit budget, and seconds. An Ollama
+    cloud model still gets this machine's Ollama /api/tags check (not the network)."""
+    if not (m.config.get("limit") or {}).get("context"):
+        return _no("OpenCode's catalog gives no context window for it, so wb can't plan its handovers")
+    who = provider_name(m)
+    if m.cloud and not _fake():
+        tags = None if m.root in down else _get(f"{m.root}/api/tags")
+        if tags is None:
+            if isinstance(down, set):
+                down.add(m.root)
+            return _no("ollama is not answering")
+        if _tag_row(m.name, tags) is None:
+            return _no(f"{m.name} is not pulled")
+    key = m.key
+    if not key:
+        key, who = _fresh_key(m)
+    if not key:
+        return _no(f"no key for {who}: run /connect in OpenCode and add it")
+    if key == "oauth" or key == "signing" or key == "config" or key.startswith("env:"):
+        held = ("an OAuth login" if key == "oauth" else
+                "a cloud login that signs each request" if key == "signing" else
+                f"written in {_key_file(m.provider)}" if key == "config" else
+                f"from the environment, {key[4:]}")
+        return _no(f"can't run: needs a key wb can hold outside the lane ({who}'s is {held}): "
+                   "store an API key with /connect")
+    health = api_health(m.provider)
+    if health and health["state"] == "no_credit":
+        return _no(f"out of credit or quota at {who} ({health.get('why') or 'no detail'}): top it "
+                   "up, or wait for the plan's reset; wb never switches models")
+    if health and health["state"] == "rate_limited":
+        until = health.get("until")
+        at = datetime.fromtimestamp(until).strftime("%H:%M") if isinstance(until, (int, float)) else "it lifts"
+        return _no(f"rate-limited by {who} until {at}")
+    if health and health["state"] == "unreachable":
+        host = urlparse(m.base_url).hostname or who
+        return _no(f"can't reach {host} ({health.get('why') or 'no answer'})")
+    return {"available": True, "resident": True, "why": f"API ({who})"}
 
 
 def _get(url: str, timeout: float = 2.5):
@@ -971,8 +1481,12 @@ def _tag_row(name: str, tags: dict) -> dict | None:
     return next((x for x in tags.get("models") or [] if _matches(name, {x.get("name")})), None)
 
 
-CLOUD_WHY = ("an Ollama cloud model: it runs on ollama.com, off this machine (models.json "
-             "\"local\": true on {id} allows it)")
+# Said of an Ollama cloud model Ollama forwards under a plain name (its /api/tags row), which
+# discover() can't tell without a probe: never a GPU candidate, whatever `local: true` says
+# (#1013), and not an API model either, as hosted() knows cloud models by name only. It said "wb
+# counts it as an API model", which nothing could run (#1013's review).
+CLOUD_WHY = ("an Ollama cloud model under a plain name: it runs on ollama.com, off this machine, so "
+             "it is never a GPU model; add it by its cloud name (:cloud, -cloud) to use it as an API model")
 
 
 # The smallest window a task fits in: OpenCode's system prompt and tools, PROTOCOL and the
@@ -1029,10 +1543,10 @@ def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
         return _no(small_window_why(small))
     if m.config.get("tool_call") is False:  # the router used to hand it tasks (the 2026-11-16 audit)
         return _no("OpenCode's config says it can't call tools (tool_call: false): agent work needs them")
+    if m.kind == "api":
+        return _api_status(m, down)
     if m.problem:
         return _no(m.problem)
-    if m.cloud and not m.cloud_ok:
-        return _no(CLOUD_WHY.format(id=m.id))
     if _fake():
         return {"available": True, "resident": True, "why": "fake"}
     if m.engine == "ollama":
@@ -1045,8 +1559,8 @@ def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
         row = _tag_row(m.name, tags)
         if row is None:
             return _no(f"{m.name} is not pulled")
-        if _cloud_row(row) and not cloud_allowed(m.id):  # a cloud model by another name
-            return _no(CLOUD_WHY.format(id=m.id))
+        if _cloud_row(row):  # a cloud model under a plain name: never a GPU one (#1013)
+            return _no(CLOUD_WHY)
         resident = _matches(m.name, _ollama_names(m, "ps"))
         return {"available": True, "resident": resident, "why": "loaded" if resident else "pulled"}
     body = _catalog(m, catalog)
@@ -1113,6 +1627,18 @@ def remedy(m: Model, state: dict) -> str:
     wb start used to say only why, or offer --force for a model that could only fail to load
     (the 2026-11-16 audit)."""
     why = state.get("why", "")
+    if m.kind == "api":
+        who = provider_name(m)
+        if why.startswith("no key for "):
+            return f"run /connect in OpenCode and add an API key for {who}"
+        if why.startswith("can't run: needs a key"):
+            return f"store an API key for {who} with /connect in OpenCode"
+        if why.startswith("out of credit"):
+            return f"top up your {who} account, or wait for the plan's reset"
+        if why.startswith("rate-limited by "):
+            return f"wait for {who}'s limit to lift ({why.rpartition(' until ')[2]})"
+        if why.startswith("can't reach "):
+            return f"check the network to {urlparse(m.base_url).hostname or who}; it may come up"
     if why == "ollama is not answering":
         return f"start Ollama at {m.root} (ollama serve, or its service or app)"
     if why.endswith(" is not pulled"):
@@ -1128,7 +1654,8 @@ def may_come_up(state: dict) -> bool:
     """Whether a model that can't run now may by the time a queued task gets the GPU: its server
     is only down. Not pulled, or ruled out by the config, it would only fail to load."""
     return state.get("why", "") == "ollama is not answering" or \
-        state.get("why", "").startswith("not running, and no start command")
+        state.get("why", "").startswith(("not running, and no start command",
+                                         "rate-limited by ", "can't reach "))
 
 
 def weights(m: Model) -> int:
@@ -1137,6 +1664,8 @@ def weights(m: Model) -> int:
     figure is a stub's, so it says nothing."""
     if m.extra.get("weights_gb"):
         return int(float(m.extra["weights_gb"]) * 1e9)
+    if m.kind == "api":  # no weights here, and never a probe of a provider's servers (#1013)
+        return 0
     if m.engine == "ollama" and not m.cloud and not _fake():
         row = _tag_row(m.name, _get(f"{m.root}/api/tags") or {})
         if row and not _cloud_row(row):
@@ -1184,7 +1713,7 @@ def identity(m: Model | None) -> str | None:
     the bytes a server reports (`bytes:<n>`); None when nothing says. Recorded in each task and
     its results row: an id is an alias, and weights swapped under it (another GGUF behind
     llama-swap, a re-pulled moving tag) kept the old model's record, slice and knobs (#726)."""
-    if m is None or m.cloud or _fake():
+    if m is None or m.cloud or m.kind == "api" or _fake():  # an API model: never probed (#1013)
         return None
     key = (m.root, m.name)
     if (hit := _IDS.get(key)) and time.monotonic() - hit[0] < FACTS_TTL:
@@ -1356,7 +1885,7 @@ def keep_warm(m: Model) -> bool:
     model, and its next request loaded it cold, past free_gpu, and read the whole session again
     (#864). Never loads it: one already gone is left to the next round's make_resident. Not on
     another machine's GPU, where other clients share the box (box_others)."""
-    if _fake() or m.engine != "ollama" or (m.remote and not same_gpu(m)):
+    if _fake() or m.kind == "api" or m.engine != "ollama" or (m.remote and not same_gpu(m)):
         return False
     if not _matches(m.name, set(_ollama_loaded(m.root))):
         return False

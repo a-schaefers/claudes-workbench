@@ -2005,7 +2005,10 @@ The agent's `OPENCODE_CONFIG` is the task's layer, so `models.agent_providers()`
 `PROVIDER_KEYS` from `$WB_OPENCODE_CONFIG` and `$OPENCODE_CONFIG` into it, templates kept, `{file:}`
 made absolute, the layer 0600 (the 2026-11-19 audit: such a provider was "Model unavailable").
 
-**Discovery** (`discover`, `_scan`). A candidate is an entry under a provider (`provider`/`providers`,
+**Discovery** (`discover`, `_scan`) lists GPU models only (`kind == "gpu"`): about 60 call sites
+(the lease, residency, `free_gpu`, media, the router's `choose`/`rank`/`unproven`/`_cheaper`) read
+it, so none needs to ask a model its kind, and exploring can never reach an API model (#1013; a test
+pins that `discover()` never returns `kind == "api"`). A candidate is an entry under a provider (`provider`/`providers`,
 `options`/`settings` `baseURL`) that OpenCode loads (`disabled_providers`, `enabled_providers`) on
 this machine (`_this_host`): `localhost`, `0.0.0.0`, `host.docker.internal`, loopback, the host
 name, its first label, `<label>.local`, an own address (`_own_addresses`: `getaddrinfo`, `ip -o
@@ -2015,9 +2018,103 @@ or resolving to loopback or an own address within `RESOLVE_WAIT` 1 s; failures r
 with models.json `"local": true`, as `remote`. A baseURL's `{env:}`/`{file:}` resolve first
 (`_expand`; empty when unset, unreadable, or dropped from the agent's environment by
 `runner.SECRET_ENV`). Skipped providers and why: `skipped_providers()`, `why_none()` (in `wb
-models`, doctor, `wb model add`, `resolve`, the router's "no local models"); one with no baseURL is
-OpenCode's cloud, passed over silently. `resolve()`: exact id, exact model or provider name, or a
-unique case-insensitive substring.
+models`, doctor, `wb model add`, `resolve`, the router's "no local models"; an Ollama with only cloud
+models: "<id> is an Ollama cloud model, an API model now (set a role to use it)…",
+`ollama_cloud_ids`); one with no baseURL is a catalog provider, `hosted()`'s. `resolve()`: the GPU
+side first, as before: exact id, exact model or provider name, or a unique case-insensitive
+substring; then an API model by its exact id only (`hosted()[wanted]`, asked only for a miss with a
+`/` that isn't the GPU side's, `gpu_side`; an exact miss reads the catalog again once, `hosted(fresh=True)`,
+when the cache is older than `AUTH_FRESH_SECS` and its read didn't fail, `_hosted_exact`: the catalog
+lists only providers that can authenticate and `/connect` changes no stamp, so a just-connected
+provider's ids were unknown for `HOSTED_TTL`). A fragment matching nothing raises `unknown model '<x>'; known: <GPU ids>; API models are
+named by their exact id, as OpenCode lists them (opencode models)` (`EXACT_ONLY`), never listing
+catalog ids (#1013: with 40 or more, `--model flash` could have landed on a paid model nobody
+chose).
+
+**API models** (`hosted`, `lookup`, #1013). `models.hosted() -> {id: Model}` with `kind == "api"`:
+- *Where from.* `opencode api model.list --standalone` (JSON `{location, data}`: only providers that
+  can authenticate, plus OpenCode's free models; the spike's facts, *API models through OpenCode*)
+  and `opencode auth list --format json --standalone` for each provider's key source (it never
+  prints a secret; `auth export` is never run: only the keyhole reads keys, for a task). Both run in
+  the state directory with `OPENCODE_DISABLE_PROJECT_CONFIG=1` (a repo's opencode.json under the
+  caller's cwd must not add providers) and `OPENCODE_CONFIG=$WB_OPENCODE_CONFIG` when set
+  (`_opencode_json`). OpenCode's own catalog fetch is left alone. Ids split at the first `/` only
+  (`deepinfra/deepseek-ai/DeepSeek-V4.1-Flash-1017`: provider `deepinfra`, name the rest).
+- *Which.* Every catalog model whose provider has no configured entry on this machine (one that
+  `_scan` lists and isn't off it: those are `discover()`'s); the models of a configured provider
+  whose baseURL is off this machine and not `local: true` (`_off_machine`: `_scan` still skips it
+  with its `local: true` hint); the Ollama cloud models of an Ollama provider on this machine
+  (`:cloud`/`-cloud` by name, whatever their `local: true`: key `ollama`, label `Ollama cloud
+  (ollama.com)`, `cloud`). `disabled_providers`/`enabled_providers` and models.json `skip` are
+  followed. A catalog entry whose `settings.baseURL` is this machine (`_this_host` without its DNS
+  lookup: a catalog names dozens of hosts) is left out: a server OpenCode found by itself (2.3.2
+  lists a running Ollama at 127.0.0.1 with no config) is `wb model add`'s, not an API model told to
+  `/connect`. `gpu_side(id)`: the id's provider is one of the GPU side's (`_sides`: configured, on
+  this machine or opted in, skipped or not) and its name no cloud name, so `hosted()` can't hold it
+  whether or not `discover()` still does (a renamed or retired model, an old task's id, `wb model
+  rename OLD`, a typo): `resolve`, `lookup` and `cli._api_id` ask no catalog for one (it cost two
+  OpenCode starts on every `wb watch --json` the pane polls).
+- *The model.* `base_url` the catalog's `settings.baseURL` (the upstream; an off-machine or Ollama
+  provider's own baseURL), `engine` `api`, `name` the id at the provider (the entry's `modelID`, which
+  an alias's differs from, else its `id`), `label` `<Provider name>
+  (API)` (the auth list's name, else the id), `remote` true, `package` the catalog's (or the
+  config's `npm`), `config` the catalog entry (`limit`, `cost`, `variants` as the catalog's list,
+  `capabilities`, `tool_call` from `capabilities.tools`, `reasoning`, `family`, `status`; values
+  unchanged, a field of the wrong shape dropped; never `settings`, where 2.3.2 prints the key it
+  holds for a layer or a free model, `settings.apiKey`), `free` (`opencode/*-free`, or every price 0; only marked here). `key`, the source
+  (never the key): a config `apiKey` first (`env:<NAME>` for a lone `{env:NAME}`, else `config`),
+  then auth list's `credential` with `method: "key"` (`stored`), another credential (`oauth`), an
+  `env` connection (`env:<NAME>`); a signing provider (`SIGNING`: Bedrock, Vertex) is `signing`;
+  `ollama`; else `""` (`_key_source`, the provider's); a keyless free model is `none`, its own: a
+  provider holds free and paid models alike, and one source per provider made every sibling `none`.
+- *The cache*, `$WB_HOME/hosted.json` (*Files and formats*): fresh for `HOSTED_TTL` 600 s, rebuilt at
+  once when its `stamp` changes (the OpenCode command's files: real path, size, mtime; the mtimes of
+  `opencode_config_files()` and models.json; `OPENCODE_CONFIG_CONTENT`'s crc32), or when missing,
+  corrupt, of another version or another shape (`providers`/`models` not objects of objects;
+  `store.read_json(…, {})`; trusted for nothing but listing). A failed
+  read (OpenCode missing, exit not 0, `CATALOG_TIMEOUT` 30 s; each read runs in a session of its own,
+  `media.run_group`, killed whole, so a wrapper's OpenCode never outlives it) is cached for `DOWN_SECS`: `hosted()`
+  is `{}` and `hosted_error()` the first stderr line, redacted. Writes are `store.write_json`
+  (atomic: two rebuilding at once, the last wins). Parsed once per change of the file a process
+  (`_HOSTED`). `hosted()` never runs on a GPU path: `resolve` asks only after the GPU side misses,
+  `lookup` only for an id `discover()` lacks, both only for one `gpu_side` says isn't the GPU side's.
+- `lookup(model_id, cached=False)`: `discover().get(id)`, else `hosted().get(id)`. Only where an API
+  task's model must be found: `transcript.model_line` (which reads the catalog's variant list too),
+  `tuning._rows`, `router.expected`. The pane's two (`model_line`, `expected`) pass `cached=True`:
+  hosted.json as it is, never rebuilt, so a 5 s poll never waits on OpenCode. `transcript._server_live` keeps `discover()`: an API model is
+  never probed for `/metrics`; `identity` and `weights` say None and 0 for one, and `keep_warm` skips it.
+- *Status* (`_api_status`): no network probe (no completion, no `/models`): `wb models`, scout,
+  doctor and top call `status` for every model, and one request each would cost money or
+  rate-limit budget. The config's refusals first (`window_too_small`, `tool_call: false`), then no
+  `limit.context` ("OpenCode's catalog gives no context window for it, so wb can't plan its
+  handovers"), an Ollama cloud model's local `/api/tags` check (not answering, not pulled: this
+  machine's Ollama, not the network), the key, then `api-health.json`:
+
+  | State | `why` | `may_come_up` |
+  |---|---|---|
+  | no key (`key == ""`) | `no key for <Provider>: run /connect in OpenCode and add it` | no |
+  | `oauth`, `env:NAME`, `config`, `signing` | `can't run: needs a key wb can hold outside the lane (<Provider>'s is an OAuth login / from the environment, NAME / written in <file> / a cloud login that signs each request): store an API key with /connect` | no |
+  | `no_credit` | `out of credit or quota at <Provider> (<line, redacted>): top it up, or wait for the plan's reset; wb never switches models` | no |
+  | `rate_limited` | `rate-limited by <Provider> until HH:MM` | yes |
+  | `unreachable` | `can't reach <host> (<reason>)` | yes |
+  | ok | `{"available": True, "resident": True, "why": "API (<Provider>)"}` | |
+
+  A "no key" answer is checked fresh first (`_fresh_key`: `auth list` again, ignoring the cache, once
+  per state directory each `AUTH_FRESH_SECS` 5 s, written back to hosted.json): a user who just ran
+  `/connect` isn't told to run it again. `remedy` gives `/connect`, top up, or wait;
+  `may_come_up` follows the table (a queued task waits out a rate limit, never a missing key).
+- `note_api(pid, state, why="", until=None)` writes `$WB_HOME/api-health.json` under
+  `api-health.json.lock`: `no_credit` (402, a 429 saying `insufficient_quota` or a plan limit; no
+  `until`: it holds until an `ok`), `rate_limited` (until `Retry-After`, else `RATE_LIMIT_SECS` 60),
+  `unreachable` (connect, DNS, TLS, a 5xx: `DOWN_SECS`), `ok` (a 2xx) removes the entry. `why` is
+  its first line, key-like strings (bearer tokens, `sk-`-style keys, `api_key=…`, 32+ character
+  tokens) replaced by `[redacted]`, at most 200 characters (`_redact`, a simple local one; the
+  keyhole's comes later, #1012). An entry past its `until` reads as ok (`api_health`). The keyhole
+  calls it.
+- *Who may run one, for now.* Nothing: `wb start --model <api id>` exits 3 (`<id> is an API model: wb
+  start runs one only through a role you set (wb route), not --model`), `wb model sizes|retire|rename`
+  on an API id refuse (`sizes are for GPU models; API models run by role`, `cli.API_SIZES`), and `wb
+  bench --model` refuses one (replays take the GPU lease), until the roles and their gate land.
 
 `wb remote HOST` (`models.add_remote`, #114): checks `/api/version`, writes provider `ollama-<host>`
 (`remote_pid`; `remote_root` brackets IPv6, zone `%25`, read back as discovery reads it, #707)
@@ -2065,8 +2162,16 @@ true`; a cloud provider's key never reaches a layer. A `{env:NAME}` key the agen
 the model unavailable ("… add NAME to commands.json env").
 
 **Ollama cloud models** (`:cloud`, `-cloud`, a tags row with `remote_host`/`remote_model`) run on
-ollama.com: not candidates, `weights` 0, refused by `wb model add`, listed apart by scout, unless
-models.json marks the model's id `"local": true` (then `remote`).
+ollama.com, so they are API models (#1013), never GPU candidates, and `local: true` no longer makes
+one a candidate (it was a `remote` one the router could explore to, sending a task's code to
+ollama.com unchosen). By name, `discover()` leaves one out and `hosted()` lists it (`kind` api,
+`key` `ollama`, which needs no keyhole); one Ollama forwards under another name is known only by its
+tags row, so `discover()` still lists it and `status` refuses it (`CLOUD_WHY`: never a GPU model, and
+not an API model either, as `hosted()` knows them by name: add it by its cloud name), `weights` 0.
+`wb model add` refuses a cloud-named one unless models.json gives its id `"local": true`
+(`cloud_allowed`: the entry is then written, an API model still), and one under a plain name always
+(`local: true` let it in, as a model nothing could run); scout lists them apart; doctor says once `<id> is an Ollama cloud
+model, an API model now: set a role to use it`, skipping its other checks.
 
 **models.json** (`$WB_MODELS`, strict JSON, malformed breaks every command; `set_override` via
 `store.edit_config`): only what OpenCode can't say, keyed by provider or model id, model over
@@ -2089,9 +2194,9 @@ provider:
   A `bytes:` size is too weak to link.
 
 **Status** (`status` → {available, resident, why}). Config first (the fake models meet it too):
-`tool_call: false` (missing is capable), `url_problem` (an Ollama provider whose baseURL doesn't end
-in `/v1`, or an `apiKey` the agent won't get), a disallowed cloud model. Ollama: not answering / not
-pulled / cloud / pulled / loaded (`/api/tags`, `/api/ps`). A server (`GET <base>/models`): listing
+`tool_call: false` (missing is capable), then an API model's own path (*API models*), then
+`url_problem` (an Ollama provider whose baseURL doesn't end in `/v1`, or an `apiKey` the agent won't
+get). Ollama: not answering / not pulled / a cloud row (`CLOUD_WHY`) / pulled / loaded (`/api/tags`, `/api/ps`). A server (`GET <base>/models`): listing
 none is unavailable; listing several, it must list this name; a llama-server listing one
 (`owned_by: llamacpp` or `meta`) answers any name, any other listing one is strict ("the server
 serves <id>, not <name>: set the entry's id to <id>"; basename match, `_serves`, on llama-server
@@ -2294,7 +2399,9 @@ with none, refused (the 2026-11-16 audit: a 256K entry on a stock Ollama cut pro
 server: `server_facts`, `--context`, a sibling's or the entry's; none refuses (no window, no
 handovers or compaction). A `--context` past the server's gets a `--` line. An Ollama must answer
 first (`ollama_answers`); it merges into an existing entry and reads `providers` too. Refused: a
-`url_problem`, a disallowed cloud model, a down server of guessed engine with no `start`. First run:
+`url_problem`, an Ollama cloud model without `local: true` ("… so it would be an API model, run only
+through a role you set …"), one under a plain name always ("… only a cloud name (:cloud, -cloud)
+makes one an API model: add it by its cloud name"), a down server of guessed engine with no `start`. First run:
 no `ollama` provider and Ollama answering at `ollama_root_here()` → `add_ollama_provider` writes
 `{"npm": "@ai-sdk/openai-compatible", "name": "Ollama", "options": {"baseURL": "<root>/v1"}}`.
 `--url` (`add_server_provider`) writes the same for `<provider>`, refusing non-http(s) or off-machine
@@ -2391,7 +2498,7 @@ weren't needed. CI pins 2.3.0: not checked there.
   there's neither (`core/src/models-dev.ts`). A failed fetch doesn't slow a start (0.86 s). No file
   under `~/.cache/opencode` (only `bin/`).
 - **Reading it.** `opencode api model.list` prints JSON `{location, data: [...]}`, each entry with
-  `providerID`, `id`, `family`, `package`, `settings.baseURL` (never the key), `capabilities{tools,
+  `providerID`, `id`, `family`, `package`, `settings.baseURL` and `settings.apiKey` (a layer's or a free model's key: never copied, #1013), `capabilities{tools,
   input, output, temperature}`, `variants[{id, settings | body}]`, `cost[{input, output,
   cache{read, write}, tier?}]` (USD per million tokens; `tier: {type: "context", size}` prices past a
   size), `limit{context, output}` and `status`. It lists only providers that can authenticate (a stored
@@ -3949,7 +4056,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders), `--trial`, `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why, `next: wb wait <task>`. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders), `--trial`, `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), a `--model` naming an API model (exit 3, `<id> is an API model: wb start runs one only through a role you set (wb route), not --model`, #1013), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why, `next: wb wait <task>`. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps first. Review/stuck/failed with no live runner; refuses a moved repo (`wb relocate`), OpenCode 1.x (exit 3, `_opencode_again`, #866), empty text. Prompt: `FEEDBACK_HEAD` + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (re-run only with a test) + text; reviews+1. Warns past three reviews. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--include` (bulk additions, large binaries, ignored files the agent wrote), `--no-sign`, `--test` (replaces it, granted to the shell too), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Review only. Commits the step (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`; an empty step advances uncommitted, #507); prompt "Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL; advances round, steps, step_round, `reviews` reset, `step_base` the worktree's HEAD (#652), phase queued in one status write right before the spawn (#191: written earlier, an interrupt left the step under review with no runner). A retry after its commit landed (`cli._step_landed`) measures from `HEAD~1` (#85). Says `runner.fresh_reason`'s verdict. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` | `ask/<id>.answer` via `ask_mcp.write_answer`; the id into status `answered`. Refuses empty, over `ask_mcp.FILE_MAX` 256 KiB (`too_long`: never read, the agent waited out its timeout, #605), or closed, racing too (`answer_once`, #938). |
@@ -3987,12 +4094,12 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb models` | `--set-default` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*). `--set-default`: `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). |
-| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider never touched, one for another baseURL refuses; off this machine needs `local: true`); `--start`/`--stop` to models.json; refuses cloud models, unknown contexts, down servers. |
+| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider never touched, one for another baseURL refuses; off this machine needs `local: true`); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | *Optimize*; `start` detached, refused while a task holds the GPU, stopped by a task that wants it; `--bench` then runs `wb bench run`; `apply` adds the measured window as its own entry (`optimize.entry_name`; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>`, `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
-| `wb model retire <id>` | `--delete` | Not OpenCode's `model` or `small_model` (#708); keeps `variant_of`, `replaces` (#723); `--delete` drops Ollama's weights. |
-| `wb model rename <old id> <new id>` | | models.json `renamed_from` (#818); refused while the old id is configured. |
-| `wb model sizes <id> [trivial] [significant]` | | The sizes it's routed; another action's flag refused (#602). |
+| `wb model retire <id>` | `--delete` | Not OpenCode's `model` or `small_model` (#708); keeps `variant_of`, `replaces` (#723); `--delete` drops Ollama's weights; an API id refused (`cli.API_SIZES`, #1013). |
+| `wb model rename <old id> <new id>` | | models.json `renamed_from` (#818); refused while the old id is configured, or for an API id. |
+| `wb model sizes <id> [trivial] [significant]` | | The sizes it's routed; another action's flag refused (#602); an API id refused: `sizes are for GPU models; API models run by role`. |
 | `wb scout` | `--done [--notes "…"]` (`--notes` alone refused, #602), `--due` (7 days), `--watch "…"`, `--unwatch N` (1-based) | The weekly facts: `cli.gpu_line`, `cli.ollama_line`, `cli.server_lines` (`models.SERVER_COMMANDS`, `models.SERVER_PORTS`, `NEEDS_KEY`, `models.WSL_NAT`, `models.server_key`), `audio.coverage`, `cli.image_server_lines`. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill's history, the scan. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…`, `--reviewed RULE…` (never `scan.UNREVIEWABLE`) | Check, scan, copy, commit. |
@@ -4006,7 +4113,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb bench rm <case…>` | | `bench.remove`; rows stay; refused for an unknown case or while a run goes (#740). |
 | `wb bench list` / `wb bench report` / `wb bench stop` | `report`: `--run ID`, `--label TEXT` | Cases; per label and model results (`bench.use_lines`); stop the driver. |
 | `wb bench self <case>` | `--yes` (required), `--turns N` (40) | `claude -p` on the case; a row `arm: claude` and the cost ratio. |
-| `wb bench run` | `--model ID…`, `--case NAME…`, `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | A detached driver, one replay at a time behind real tasks, preempted by one; refused while another run runs; trims runs past `RUNS_KEPT` 20 (`bench.prune_runs`), `bench.sweep`s; skips what the label already passed or failed (an `error` runs again). |
+| `wb bench run` | `--model ID…`, `--case NAME…`, `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | A detached driver, one replay at a time behind real tasks, preempted by one; refused while another run runs; trims runs past `RUNS_KEPT` 20 (`bench.prune_runs`), `bench.sweep`s; skips what the label already passed or failed (an `error` runs again); an API `--model` refused (#1013). |
 | `wb backlog [NAME]` | `--json` | A `--backlog` batch, archived included: per task, then `savings.summary`; `--json` `{backlog, tasks, totals}`, unnamed `[{backlog, tasks, open}]`. Unknown: exit 1. |
 | `wb savings` | `--week` \| `--month` \| `--all`, `--json`, `--share`, `--card FILE.svg`, `--price X\|off` | `savings.totals`, trials out; `--json` `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price}` (the pane reads it); `--price` (positive, finite, else exit 1) writes savings.json `kwh_price` (`off`: `set_price(None)`, #609). |
 | `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (*The Stats feed*), `--all` | `set`: stats.json; `wb stats`: `stats.summary`, then results by model (`stats.STATS_MODEL_LINES` 3, #638); `tune`: the knobs; `trial`: closed tasks' rows marked, lessons dropped (an open task refused: it has no row). |
@@ -4028,7 +4135,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb patch upstream <commit> --name <slug>` | | A clone; the slug `[a-z0-9][a-z0-9-]*` (`patches.SLUG`); an existing `pr/<slug>` or worktree refused. Fetches the upstream's remote, `worktree add -b pr/<slug> $WB_HOME/upstream/<slug> <local@{u}>`, cherry-picks the commit (a conflict stays there for `git cherry-pick --continue`); a commit with no test file says `it has no test: add one before sending (upstream asks for one, and wb patch check needs it)` (`NO_TEST_SEND`); a `Scope: me` commit is flagged. Writes `patches.json`, its `prepared` row the picked commit's ident. Prints, under `next (none of this has run):`, the tests (and the plugin's two when `mod/` changed), the body file to fill (`upstream/<slug>.md`, a copy of `.github/pull_request_template.md` when it exists), the one `wb patch send <slug> --title "<the commit's subject>" --body-file <it>`, `patches.gh_line`, and that send needs the user's yes; off GitHub, that send works only there. |
 | `wb patch send <slug> --title T --body-file F` | `--draft`, `--anyway` (sends a `Scope: me` commit) | *Sending a patch upstream*. Refuses before any network (`patches._refuse_send`): no `pr/<slug>` in its worktree, a cherry-pick under way, uncommitted changes there, no commits over the target, an empty body or the template unchanged, a `Scope: me` commit without `--anyway`; then a remote off GitHub, gh not `ready` (`gh_line`), a `.github/workflows/` change over https without the token's `workflow` scope. Under Claude Code (`CLAUDECODE=1`) it then refuses unless the mod's dialog approved exactly this send (`patches._approved`, `send-ok.json`), saying the user may run it in a terminal of their own. Then `gh repo fork` (not when the login owns upstream) and which repository the fork is (`_fork_of`), the push to it in gh's protocol, `gh pr create`; prints `pushed …` and `opened <url>` (`opened <url> (already open)` when a pull request for the branch is open already); on both, `patches.json`'s `sent` row records it (`note_sent`), which `wb update` asks gh about. A failed step says what is done already (a rerun goes on from there). No abbreviated flags (`allow_abbrev=False`: the dialog reads `--title` and `--body-file` as written). The mod asks the user first (*The consent gate*). |
 | `wb patch check <commit>` | | *Local patches*. A clone; the commit one of `local@{u}..local` (else `isn't one of local's patches`, exit 1; `no such commit`, exit 1). Its test files (`is_test`) alone, as a diff, `git apply --3way` onto the upstream `wb update` last fetched, in a scratch worktree under `patches/` (removed afterwards, a failure too); then only what the patch added: each `def test_…` its diff adds, as `python -m unittest <module>.<Class>.<method>` (the class read from the file there with `ast`), run by `patches.RUN_TESTS` (a `-c` script, `python -m unittest`'s loader and cwd, telling apart exit 1 a failure or an error, 3 a skip, an expected failure, an unexpected success or no test run, 0 a pass), and `claude plugin test mod` when a `*.test.ts(x)` changed (its exit 0 a pass), with `WB_HOME` inside the scratch directory and `CHECK_SECS` 900 each (the process group killed past it, a failure). One verdict, exit 0, the first that holds: `upstream fails this patch's tests (<subject>): keep it` (any failure); `<subject>'s tests didn't all run here (<why>), so wb patch check can't tell: run them where they can (a skip is not a pass)` (`a test was skipped`, `no test class holds <names>`: an added `def test_…` `_test_ids` placed in no class, `claude isn't on PATH for the mod's tests`; joined by `; `), never a pass: a test skipped without Landlock or claude was called `already passes`, inviting a drop (#1005, 2026-11-22); `<subject> has no test of its own, so wb patch check can't tell: write one (upstream asks for one in a pull request too)` (no test file, or nothing it found to run); `upstream already passes this patch's tests (<subject>): it likely fixed the same thing. Drop it with the user's yes: wb patch drop <sha>`. Before any, `<subject>'s tests don't apply to upstream any more: compare by hand`. It drops nothing. No abbreviated flags. |
-| `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models, `limit.context`, `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`lane.gaps`, `context.interop_gap`, `context.home_gap`, `context.listening_daemons`), commands.json, `context.TOOLCHAINS`, `wb` on PATH, `cli.logout_stops`, `cli.awake_line`, `webpush.has_cas`, the mod (`cli._mod_behind`), then `patches.doctor_lines`: `ok  install: marketplace at P`, `your own clone at P, branch B (wb patch init)` (on `local`, or patches.json's `source`) or `developer clone at P, branch B`; `--  local patches: N (scopes)` (a clone on `local`; a marketplace clone: its local changes and `wb patch init`); `gh: ready as L over P` (`ok`) or `--  gh: <state>: <hint>`, asked only with patches or a `wb patch upstream` branch that hasn't landed upstream (`held`, `_landed_pr`, by the local refs alone); none sets the exit code. Then each experiment. |
+| `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models (an Ollama cloud one: `--  <id> is an Ollama cloud model, an API model now: set a role to use it`, #1013), `limit.context`, `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`lane.gaps`, `context.interop_gap`, `context.home_gap`, `context.listening_daemons`), commands.json, `context.TOOLCHAINS`, `wb` on PATH, `cli.logout_stops`, `cli.awake_line`, `webpush.has_cas`, the mod (`cli._mod_behind`), then `patches.doctor_lines`: `ok  install: marketplace at P`, `your own clone at P, branch B (wb patch init)` (on `local`, or patches.json's `source`) or `developer clone at P, branch B`; `--  local patches: N (scopes)` (a clone on `local`; a marketplace clone: its local changes and `wb patch init`); `gh: ready as L over P` (`ok`) or `--  gh: <state>: <hint>`, asked only with patches or a `wb patch upstream` branch that hasn't landed upstream (`held`, `_landed_pr`, by the local refs alone); none sets the exit code. Then each experiment. |
 
 ## Files and formats
 
@@ -4055,6 +4162,14 @@ $WB_HOME (~/.local/state/workbench)
   machines/<machine>/            on a network FS, one machine's own (store.machine_dir): GPU lease, optimize.json/.log, boxes.json, wsl-gpus.json, speed.json
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
   scout.json  watch.json         the weekly model check; the watch list
+  hosted.json                    API models (models.hosted, #1013): {v: 1, ts, stamp: {opencode: [[path, size, mtime_ns]…],
+                                 configs: [[path, mtime_ns]…], content: crc32}, error ("" or the failed read's first line),
+                                 providers: {<pid>: {name, key (its source: stored|oauth|env:<NAME>|config|signing|ollama|""),
+                                 package, api (its base URL)}}, models: {<id>: {name (at the provider: modelID), limit, cost, variants,
+                                 capabilities, reasoning, tool_call, family, status, free, cloud?}}}; fresh HOSTED_TTL 600 s
+                                 (an error DOWN_SECS), rebuilt on a changed stamp; never holds a key
+  api-health.json  .lock         each API provider's last bad answer (models.note_api): {<pid>: {state: no_credit|rate_limited|
+                                 unreachable, until (epoch or null), why (redacted), ts}}; ok removes it; past until reads as ok
   update.json                    wb update's last check
   patches.json                   {source (the clone install), upstream (owner/repo on GitHub, else null)}: patches.note_install, by wb patch init, upstream, send and wb update (not --check) on `local`; the mod's consent gate reads it.
                                  prepared {<slug>: {author, email, date (unix), subject}}: the local commit wb patch upstream picked;
@@ -4502,7 +4617,7 @@ on macOS runners (#950); not patched suite-wide, so `WebChat` still catches chat
 
 **The fixture** (`Base`): `WB_HOME=<tmp>/state`, `WB_OPENCODE_BIN` (the fake, `shlex`-split), `WB_FAKE_MODELS=1`,
 `WB_OPENCODE_CONFIG` (`ollama` on 127.0.0.1:11434 with `mimo-v2.6:9b-q8_0`, 32K, and `qwen3.8-27b` with no
-`limit.context`; `strata` on :8080; a remote `cloud` discovery drops), `WB_MODELS`, `WB_SKILLS`, `WB_COMMANDS`,
+`limit.context`; `strata` on :8080; a remote `cloud` discovery drops, `hosted()`'s as an API model), `WB_MODELS`, `WB_SKILLS`, `WB_COMMANDS`,
 `store.config_lock_dir` patched into the temp state; a repo on `main` with a committed CLAUDE.md and its own identity;
 the spec "Write the answer to answer.txt.", the test `grep -qx 42 answer.txt`. `self.start(name, scenario, *extra)` sets
 `FAKE_SCENARIO`, runs `wb start … --model mimo`. tearDown kills nothing: a test stops its own `hang`/`slow` tasks. Helpers: `run_wb` (in-process, returns stdout;
@@ -4549,7 +4664,11 @@ default, `FAKE_RETRY_EVERY` apart, each `{type: "retry", attempt, nextRetryAt, m
 (the no-route error); the upstream message (`FAKE_ERROR_BODY`) comes through verbatim in `message` and
 `response.body`. `WB_FAKE_API=<provider>[/<id>]=<state>,…` gives a model (its own entry first; a config model too) or a provider one
 of those states (or `ok`): its runs play that scenario, and a `nokey` provider drops out of `api model.list`, `models`
-and `auth list`, as one OpenCode can't authenticate does. Only the fake reads `WB_FAKE_API` and `WB_FAKE_CATALOG`.
+and `auth list`, as one OpenCode can't authenticate does. `FAKE_CALLS` (a file) logs each `api`, `models` and `auth`
+call's argv (`ApiDiscovery` counts catalog reads); `FAKE_CATALOG_FAIL` makes `api model.list` and `models` fail (stderr,
+exit 1). Only the fake reads `WB_FAKE_API` and `WB_FAKE_CATALOG`: discovery is driven through it, with no product-side
+fake (`ApiDiscovery`, #1013); `Real`'s fixture (`test_portable.py`) runs it too, so a lookup a test misses never reaches
+the user's own OpenCode.
 
 **Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`, `RealOpenCodeAPI`, `ApiHarness`'s
 `test_real_opencode_*`; skip without `opencode`, the
@@ -4702,6 +4821,12 @@ doc needs its own `!/` line).
 - **How OpenCode is invoked or read** (`run_round`'s argv, `normalize`'s fields, the export fields `context_state`,
   `measure_speed`, `transcript` read) → `tests/fake_opencode.py` in the same commit, `RealOpenCodeRun` for a new field,
   one real run (*The tests*).
+- **`Model.kind`** (#1013) → `pool()` (an API model's lease, until the child that makes `pool(api)` None), the
+  router reading `discover()` only (never an API model, so exploring and `_cheaper` can't reach one),
+  `cli.pick_model`'s refusal and `API_SIZES`, `bench`'s refusal, `identity`/`weights`/`keep_warm` (never a probe of a
+  provider). `note_api`'s states → the keyhole's mapping of provider answers → `_api_status`'s table, `remedy`,
+  `may_come_up` (*API models*). A `hosted.json` key → `_build_hosted`, `_api_model`, *Files and formats*; what a
+  catalog read depends on → `_stamp`.
 - **An OpenCode fact the API harness copies** (`api model.list`, `auth list`, `-m` ids and variants, `part.cost`,
   the `retry`/`error` shapes, each protocol's path and key header) → `tests/fake_opencode.py`, `tests/capture_llm.py`
   and `ApiHarness`'s `test_real_opencode_*` together (*The tests*).
