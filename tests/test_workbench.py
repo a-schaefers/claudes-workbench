@@ -26489,8 +26489,9 @@ SPIKE_IDS = {"deepinfra": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "anthropic": "
 
 def priced(entry: dict, tok: dict) -> float:
     """A step's cost as OpenCode 2.3 reckons it from the catalog (the spike for #1009): `input`
-    leaves out cache reads, reasoning is billed as output, a context tier applies past its size."""
-    used = tok["input"] + tok["cache"]["read"]
+    leaves out cache reads, reasoning is billed as output, a context tier applies past its size
+    (by input plus cache reads plus cache writes: 2.3.2's rule, #1019's review)."""
+    used = tok["input"] + tok["cache"]["read"] + tok["cache"]["write"]
     rate = [p for p in entry["cost"] if not p.get("tier") or used > p["tier"]["size"]][-1]
     return (tok["input"] * rate["input"] + (tok["output"] + tok["reasoning"]) * rate["output"]
             + tok["cache"]["read"] * rate["cache"]["read"]
@@ -27405,6 +27406,479 @@ class ApiDiscovery(Base):
         self.assertIn("ollama/gpt-oss:120b is an Ollama cloud model under a plain name", err.getvalue())
         self.assertIn("add it by its cloud name", err.getvalue())
         self.assertNotIn("local", err.getvalue())                 # local: true is no way in
+
+
+
+# #1019's priced models: $5000 per million input tokens, so FAKE_STEP_IN=100 is a $0.50 step
+SPEND_M, SPEND_FREE, SPEND_NONE, SPEND_GO = ("meterco/priced-1", "meterco/free-1", "meterco/noprice-1",
+                                             "opencode-go/plan-1")
+SPEND_TIER = "meterco/tiered-1"  # dearer past 100K of context, as Anthropic's long-context price
+SPEND_CATALOG = [
+    {"id": i.split("/", 1)[1], "providerID": i.split("/", 1)[0], "package": "@opencode/ai/providers/openai-compatible",
+     "settings": {"baseURL": "https://api.meterco.example/v1"}, "capabilities": {"tools": True},
+     "variants": [], "limit": {"context": 1000000, "output": 32768}, "status": "active", **extra}
+    for i, extra in ((SPEND_M, {"cost": [{"input": 5000, "output": 0, "cache": {"read": 50, "write": 0}}]}),
+                     (SPEND_FREE, {"cost": [{"input": 0, "output": 0, "cache": {"read": 0, "write": 0}}]}),
+                     (SPEND_NONE, {}),
+                     (SPEND_GO, {"cost": [{"input": 1, "output": 2, "cache": {"read": 0, "write": 0}}]}),
+                     (SPEND_TIER, {"cost": [{"input": 1, "output": 5, "cache": {"read": 0.1, "write": 1.25}},
+                                            {"input": 2, "output": 10, "cache": {"read": 0.2, "write": 2.5},
+                                             "tier": {"type": "context", "size": 100000}}]}))]
+
+
+class _KhStub:
+    """The keyhole as the runner holds it (CURRENT["keyhole"], #1015): what close was told."""
+    def __init__(self, calls):
+        self.calls = calls
+
+    def close(self, reason=None):
+        self.calls.append(("close", reason))
+
+
+class ApiSpend(Base):
+    """What an API task costs (#1019): the meter, the day's ledger, the cap at start, the spend
+    guard in and between rounds, the one check-in a day, plans, and the keyhole's part."""
+
+    def setUp(self):
+        super().setUp()
+        from workbench import meter
+        self.meter = meter
+        path = Path(self.tmp.name) / "catalog.json"
+        path.write_text(json.dumps(SPEND_CATALOG))
+        os.environ["WB_FAKE_CATALOG"] = str(path)
+        os.environ["WB_ROUTES"] = str(Path(self.tmp.name) / "routes.json")
+        self.cap(100)
+        meter._METERS.clear()
+        self.addCleanup(meter._METERS.clear)
+        self.addCleanup(runner.CURRENT.pop, "keyhole", None)
+
+    def cap(self, usd):
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": usd, "roles": {}})
+
+    def spent(self, usd, day=None, task="other"):
+        """A row of another task's in today's ledger (or ``day``'s)."""
+        store.append_jsonl(self.meter.ledger_path(), {
+            "ts": time.time(), "day": day or self.meter.day(), "kind": "step", "task": task,
+            "round": 1, "provider": "meterco", "model": SPEND_M, "usd": usd, "metered": usd,
+            "source": "opencode", "tok": {"in": 1, "out": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}})
+
+    def api_task(self, name, model=SPEND_M, scenario="ok", *extra, **env):
+        """A task on an API model, written as wb start will (#1016), for the runner to drive here."""
+        os.environ.update(FAKE_SCENARIO=scenario, **env)
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo",
+                   "--no-base-check", *extra)
+        task = store.Task(name)
+        store.write_json(task.dir / "task.json", {**task.spec, "model": model, "opencode_model": model,
+                                                  "via": "api", "provider": model.split("/")[0]})
+        return task
+
+    def rows(self, task=None, kind=None):
+        got, _ = store.read_jsonl(self.meter.ledger_path())
+        return [r for r in got if (task is None or r.get("task") == task) and (kind is None or r["kind"] == kind)]
+
+    def notices(self, name, kind):
+        got, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        return [r for r in got if r["task"] == name and r["kind"] == kind]
+
+    def test_each_step_books_opencodes_cost_and_the_round_end_brings_the_ledger_to_the_export(self):
+        task = self.api_task("t-cost", SPEND_M, "spend", FAKE_STEPS="2", FAKE_STEP_IN="100",
+                             FAKE_STEP_EVERY="0.05", FAKE_COST="1.75")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        steps = self.rows("t-cost", "step")
+        self.assertEqual([(r["usd"], r["source"], r["day"]) for r in steps],   # two reads, the answer
+                         [(0.5, "opencode", self.meter.day())] * 3)
+        self.assertEqual(steps[0]["tok"], {"in": 100, "out": 30, "cache_read": 0, "cache_write": 0,
+                                           "reasoning": 0})
+        rec = self.rows("t-cost", "reconcile")       # the export said $1.75: the title, uncounted live
+        self.assertEqual([(round(r["usd"], 6), r["source"]) for r in rec], [(0.25, "opencode")])
+        self.assertEqual(task.status["api"]["usd"], 1.75)
+        self.assertEqual(self.meter.today()["usd"], 1.75)
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertEqual([e["cost"] for e in ev if e["kind"] == "step"], [0.5] * 3)  # events.normalize
+
+    def test_steps_without_opencodes_cost_are_priced_from_the_catalog(self):
+        task = self.api_task("t-meter", SPEND_M, "ok", FAKE_STEP_IN="100", FAKE_STEP_COST="none")
+        runner.drive(task)
+        (row,) = self.rows("t-meter", "step")
+        self.assertEqual((row["usd"], row["metered"], row["source"]), (0.5, 0.5, "metered"))
+        m = runner.models.lookup(SPEND_M)  # cache reads at their own rate, as OpenCode
+        self.assertEqual(self.meter.metered(self.meter.price(m), {"in": 100, "cache_read": 1000000,
+                                                                  "cache_write": 0, "out": 0, "reasoning": 0}), 50.5)
+
+    def test_an_opencode_cost_of_0_for_a_priced_model_is_never_trusted(self):
+        task = self.api_task("t-zero", SPEND_M, "ok", FAKE_STEP_IN="100", FAKE_STEP_COST="0")
+        runner.drive(task)                                            # the export says 0 too
+        (row,) = self.rows("t-zero", "step")
+        self.assertEqual((row["usd"], row["source"]), (0.5, "metered (opencode said 0)"))
+        self.assertEqual(self.rows("t-zero", "reconcile"), [])
+        free = self.api_task("t-free", SPEND_FREE, "ok", FAKE_STEP_COST="0")
+        runner.drive(free)                                            # a free model's 0 is true
+        self.assertEqual([(r["usd"], r["source"]) for r in self.rows("t-free")], [(0.0, "opencode")])
+
+    def test_wb_start_refuses_an_api_model_at_the_day_cap_and_one_with_no_price(self):
+        self.cap(5)
+        self.spent(3.0)
+        self.spent(2.03)
+        self.spent(9.0, day="2000-01-01")                        # another day's: not today's
+        for model, said in ((SPEND_M, f"{SPEND_M}: API spend today is $5.03 of the $5 day cap (it "
+                                      "resets at local midnight). Ask the user: a higher cap (wb route cap "
+                                      "<usd>), the role on the GPU (wb route <role> gpu), or tomorrow"),
+                            (SPEND_NONE, f"{SPEND_NONE}: OpenCode's catalog gives no price for it, so the "
+                                         "day cap can't be kept")):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit) as e, redirect_stderr(err):
+                run_wb("start", "t-cap", "--spec", str(self.spec), "--repo", str(self.repo), "--model", model)
+            self.assertEqual(e.exception.code, 3)
+            self.assertIn(said, err.getvalue())
+            self.assertFalse(store.Task("t-cap").dir.exists())
+        m = runner.models.lookup(SPEND_M)
+        self.assertTrue(self.meter.refusal(m, "trivial").startswith(
+            "trivial role: API spend today is $5.03 of the $5 day cap"))
+        with mock.patch.object(cli, "spawn_runner"):          # a GPU model starts as ever
+            self.assertIn("started t-gpu", self.start("t-gpu", "ok"))
+        self.assertFalse(task_rows := self.rows("t-gpu"), task_rows)
+
+    def test_the_start_lines_spend_part_says_todays_spend_of_the_cap(self):
+        self.cap(5)
+        self.spent(0.30)
+        self.spent(0.12)
+        self.spent(4.0, day="2000-01-01")
+        m = runner.models.lookup(SPEND_M)
+        self.assertEqual(self.meter.tail(m), " · today $0.42 of $5")
+        self.assertEqual(self.meter.tail(runner.models.lookup("ollama/mimo-v2.6:9b-q8_0")), "")
+
+    def test_the_spend_guard_stops_the_round_within_a_tick_of_the_crossing_step(self):
+        self.cap(5)
+        self.spent(3.80)                                         # $1.20 left: the third step crosses
+        calls = []
+        runner.CURRENT["keyhole"] = _KhStub(calls)
+        real = runner._stop
+        task = self.api_task("t-guard", SPEND_M, "spend", FAKE_STEP_IN="100", FAKE_STEPS="50")
+        began = time.monotonic()
+        with mock.patch.object(runner, "_stop", side_effect=lambda p: (calls.append(("stop", None)), real(p))):
+            runner.drive(task)
+        self.assertLess(time.monotonic() - began, 30)            # far under the silence limit
+        st = task.status
+        self.assertEqual(st["phase"], "stuck")
+        self.assertEqual(len(self.rows("t-guard", "step")), 3)  # stopped at the crossing step
+        why = "the day's API spend cap is reached: $5.30 of $5 today"
+        self.assertEqual(st["last"], why)
+        self.assertEqual(calls[:2], [("close", why), ("stop", None)])  # the keyhole refuses first
+        (notice,) = self.notices("t-guard", "stuck")
+        self.assertEqual(notice["cause"], "spend")
+        from workbench import results
+        self.assertNotIn(notice["cause"], results.THE_STEP)       # the slice isn't shrunk for it
+        self.assertTrue(notice["text"].startswith(
+            "t-guard stopped: the day's API spend cap is reached ($5.30 of $5 today). Its work so far is "
+            "in the worktree. Ask the user: a higher cap (wb route cap <usd>), the role on the GPU, or "
+            "tomorrow; then wb resume t-guard."))
+
+    def test_the_cap_is_checked_before_every_round_drive_goes_on_to(self):
+        # #1017's _go_on: the in-round guard off, the cap reached in round 1 stops the auto-fix round
+        self.cap(1)
+        self.spent(0.6)
+        task = self.api_task("t-goon", SPEND_M, "fix", "--test", TEST_CMD, "--auto-fix", "2",
+                             FAKE_STEP_IN="100")
+        with mock.patch.object(runner, "_spend_guard"):
+            runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st["guard"], st["round"]), ("stuck", "spend", 2))
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertFalse([e for e in ev if e.get("round") == 2 and e["kind"] == "step"])  # never ran
+        (notice,) = self.notices("t-goon", "stuck")
+        self.assertEqual(notice["cause"], "spend")
+        self.assertIn("auto-fix didn't run", notice["text"])
+        # status `round` is already 2, which never ran: round 1's report goes with the notice
+        self.assertIn("Round 1's report (wb report t-goon --round 1):\n"
+                      + task.round_dir(1).joinpath("summary.md").read_text(), notice["text"])
+        self.cap(100)                                           # the user raised it: a GPU-like go on
+        self.assertTrue(runner._go_on(task, 2, "auto-fix"))
+
+    def test_half_the_cap_wakes_claude_once_a_day_across_every_task(self):
+        self.cap(2)
+        for name in ("t-half1", "t-half2", "t-half3"):          # $0.60 each: the second crosses $1
+            runner.drive(self.api_task(name, SPEND_M, "ok", FAKE_STEP_IN="120"))
+        self.assertEqual(len(self.rows(kind="checkin")), 1)
+        said = [n for t in ("t-half1", "t-half2", "t-half3") for n in self.notices(t, "checkin")]
+        self.assertEqual([n["task"] for n in said], ["t-half2"])
+        self.assertEqual(said[0]["text"], "API spend today has passed half the day cap: $1.20 of $2 "
+                                          "(t-half2 $0.60 so far). Nothing to do unless the user wants to change it.")
+        self.assertEqual(self.rows(kind="checkin")[0]["usd_today"], 1.2)
+
+    def test_a_plans_tokens_are_its_usage_never_dollars_nor_a_spend_stop(self):
+        self.cap(1)
+        self.spent(5.0)                                          # past the cap: a plan runs anyway
+        task = self.api_task("t-go", SPEND_GO, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        (row,) = self.rows("t-go")
+        self.assertEqual((row["usd"], row["plan"], row["tok"]["in"]), (None, "opencode-go", 120))
+        m = runner.models.lookup(SPEND_GO)
+        self.assertIsNone(self.meter.refusal(m))
+        self.assertTrue(self.meter.tail(m).startswith(" · plan usage ("))
+        self.assertTrue(self.meter.tail(m).endswith("): 150 tokens today"))
+        self.assertEqual(self.meter.today()["plan_tok"], {"opencode-go": 150})
+        self.assertEqual(self.meter.today()["usd"], 5.0)
+
+    def test_the_keyholes_usage_books_each_response_and_opencodes_figure_only_adds_what_it_lacks(self):
+        task = self.api_task("t-kh-meter", SPEND_M)
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_M))  # as drive makes it
+        mt.begin(1)
+        mt.on_usage({"prompt_tokens": 1100, "completion_tokens": 40,  # Chat Completions, a cache hit
+                     "prompt_tokens_details": {"cached_tokens": 1000},
+                     "completion_tokens_details": {"reasoning_tokens": 10}})
+        mt.on_usage({"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 2000,
+                     "cache_creation_input_tokens": 0})                  # Anthropic's
+        mt.on_usage({"input_tokens": 300, "output_tokens": 9, "cost": 0.0123})  # the provider's own
+        a, b, c = self.rows("t-kh-meter", "step")
+        self.assertEqual((a["tok"], a["usd"], a["source"]),
+                         ({"in": 100, "cache_read": 1000, "cache_write": 0, "out": 30, "reasoning": 10},
+                          (100 * 5000 + 1000 * 50) / 1e6, "keyhole"))
+        self.assertEqual(b["tok"]["cache_read"], 2000)
+        self.assertEqual((c["usd"], c["source"]), (0.0123, "provider"))
+        mt.step({"cost": 0.1, "tokens": {"input": 100}})       # OpenCode's says less: nothing booked
+        self.assertEqual(len(self.rows("t-kh-meter")), 3)
+        mt.step({"cost": 2.0, "tokens": {"input": 100}})       # more than all three: the difference
+        (rec,) = self.rows("t-kh-meter", "reconcile")
+        self.assertAlmostEqual(rec["usd"], 2.1 - (a["usd"] + b["usd"] + c["usd"]), places=9)
+        mt.step({"cost": 0.5, "tokens": {"input": 100}})       # after a reconcile: only its own
+        self.assertEqual([round(r["usd"], 9) for r in self.rows("t-kh-meter", "reconcile")][1:], [0.5])
+        self.assertEqual(self.meter.usage_tokens({"input_tokens": 50, "output_tokens": 20,  # Responses
+                                                  "input_tokens_details": {"cached_tokens": 30},
+                                                  "output_tokens_details": {"reasoning_tokens": 5}}),
+                         {"in": 20, "cache_read": 30, "cache_write": 0, "out": 15, "reasoning": 5})
+
+    def test_the_keyholes_room_refuses_a_request_that_could_pass_the_cap(self):
+        self.cap(5)
+        self.spent(4.0)
+        task = self.api_task("t-room", SPEND_M)
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_M))
+        body = {"model": "priced-1", "max_tokens": 1000}
+        self.assertAlmostEqual(mt.room(body, 400), 1 - 100 * 5000 / 1e6, places=9)
+        self.assertIsNone(task.status.get("api_stop"))
+        self.assertLess(mt.room(body, 4000), 0)                 # 1000 tokens at $5000/M: $5
+        self.assertEqual(task.status["api_stop"]["guard"], "spend")
+        self.assertTrue(self.meter.stop_reason(task).startswith(
+            "the day's API spend cap is reached: $4 of $5 today, and its next request could cost up to $5"))
+        out = {"stuck": None, "guard": None}
+        runner._spend_guard(task, out)
+        self.assertEqual(out["guard"], "spend")
+        mt.begin(2)                                              # a new round clears it
+        self.assertIsNone(task.status.get("api_stop"))
+        Path(os.environ["WB_ROUTES"]).unlink()                   # no cap at all: no room, a stop
+        self.assertLess(mt.room(body, 400), 0)
+        self.assertEqual(self.meter.stop_reason(task), self.meter.NO_CAP)
+        self.assertIsNone(self.meter.refusal(runner.models.lookup(SPEND_M)))  # #1014 refuses a role
+
+    def test_a_context_tier_is_picked_by_input_cache_reads_and_cache_writes_together(self):
+        # the review of #1019: the tier was picked by input and cache reads only, and a first turn
+        # writing a 150K context to the cache priced 5 times low (OpenCode 2.3.2 counts the writes)
+        prices = self.meter.price(runner.models.lookup(SPEND_TIER))
+        self.assertEqual([p["size"] for p in prices], [0.0, 100000.0])
+        tok = {"in": 10, "cache_read": 0, "cache_write": 150000, "out": 100, "reasoning": 0}
+        self.assertAlmostEqual(self.meter.metered(prices, tok), (10 * 2 + 150000 * 2.5 + 100 * 10) / 1e6, places=12)
+        tok = {"in": 60000, "cache_read": 50000, "cache_write": 0, "out": 0, "reasoning": 0}
+        self.assertAlmostEqual(self.meter.metered(prices, tok), (60000 * 2 + 50000 * 0.2) / 1e6, places=12)
+        tok = {"in": 1000, "cache_read": 0, "cache_write": 0, "out": 10, "reasoning": 0}   # under it
+        self.assertAlmostEqual(self.meter.metered(prices, tok), (1000 * 1 + 10 * 5) / 1e6, places=12)
+
+    def test_the_room_prices_a_request_at_the_dearest_tier(self):
+        self.cap(5)
+        self.spent(1.0)
+        task = self.api_task("t-room-tier", SPEND_TIER)
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_TIER))
+        body = {"model": "tiered-1", "max_tokens": 2000}
+        self.assertAlmostEqual(mt.room(body, 40000), 4 - (10000 * 2 + 2000 * 10) / 1e6, places=9)
+
+    def test_a_free_model_is_booked_but_never_refused_or_stopped_by_the_cap(self):
+        # the review of #1019: a model priced 0 met the cap, and with no cap every request it made
+        # was refused, though it costs nothing
+        self.cap(5)
+        self.spent(5.03)
+        m = runner.models.lookup(SPEND_FREE)
+        self.assertTrue(self.meter.is_free(m))
+        self.assertIsNone(self.meter.refusal(m))
+        task = self.api_task("t-free-cap", SPEND_FREE, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        self.assertEqual([(r["usd"], r["kind"]) for r in self.rows("t-free-cap")], [(0.0, "step")])
+        mt = self.meter.for_task(task)
+        self.assertIsNone(self.meter.stop_reason(task))
+        self.assertIsNone(mt.room({"model": "free-1"}, 400))
+        Path(os.environ["WB_ROUTES"]).unlink()                   # no cap at all: still nothing to keep
+        self.assertIsNone(self.meter.stop_reason(task))
+        self.assertIsNone(mt.room({"model": "free-1"}, 400))
+        self.assertIsNone(task.status.get("api_stop"))
+        ns = types.SimpleNamespace
+        self.assertTrue(self.meter.is_free(ns(free=True, config={})))  # OpenCode's free, unpriced
+        self.assertFalse(self.meter.is_free(ns(free=True, config={"cost": [{"input": 1, "output": 0}]})))
+        self.assertFalse(self.meter.is_free(ns(free=False, config={})))
+
+    def test_status_api_never_ends_under_the_ledger_when_two_threads_book_at_once(self):
+        # the review of #1019: the keyhole's thread built its total under the lock and wrote it
+        # after; the runner's newer total landed first and the older one last
+        task = self.api_task("t-race", SPEND_M)
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_M))
+        real, slow = store.Task.set_status, []
+
+        def set_status(t, **kw):
+            if "api" in kw and threading.current_thread() is not threading.main_thread() and not slow:
+                slow.append(1)
+                time.sleep(0.3)
+            return real(t, **kw)
+
+        with mock.patch.object(store.Task, "set_status", set_status):
+            th = threading.Thread(target=mt.on_usage, args=({"input_tokens": 200, "output_tokens": 0},))
+            th.start()
+            time.sleep(0.1)
+            mt.on_usage({"input_tokens": 100, "output_tokens": 0})
+            th.join()
+        self.assertEqual(slow, [1])
+        total = sum(r["usd"] for r in self.rows("t-race"))
+        self.assertAlmostEqual(total, 1.5, places=9)
+        self.assertAlmostEqual(store.Task("t-race").status["api"]["usd"], total, places=9)
+
+    def test_the_checkin_is_checked_again_under_its_lock(self):
+        # the review of #1019: another task's check-in landing between this one's look at today
+        # and its lock gave two rows and two wakes; only the look again under the lock stops it
+        self.cap(2)
+        task = self.api_task("t-half-lock", SPEND_M)
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_M))
+        self.spent(1.5)
+        store.append_jsonl(self.meter.ledger_path(), {"ts": time.time(), "day": self.meter.day(),
+                                                      "kind": "checkin", "task": "other",
+                                                      "usd_today": 1.5, "cap": 2})
+        real, looks = self.meter.today, []
+
+        def before_it_landed():                 # the two looks before the lock miss that row
+            looks.append(1)
+            return {**real(), "checkin": False} if len(looks) <= 2 else real()
+
+        with mock.patch.object(self.meter, "today", before_it_landed):
+            mt._checkin()
+        self.assertGreater(len(looks), 2)
+        self.assertEqual(len(self.rows(kind="checkin")), 1)
+        self.assertEqual(self.notices("t-half-lock", "checkin"), [])
+
+    def test_a_task_without_via_reads_as_a_gpu_one(self):
+        # the brief: every task before #1016 has no `via`, and reads as a GPU task (no meter)
+        runner.models.lookup(SPEND_M)                             # hosted.json, as a runner left it
+        task = self.api_task("t-novia", SPEND_M)
+        spec = {k: v for k, v in task.spec.items() if k != "via"}
+        store.write_json(task.dir / "task.json", spec)
+        self.assertIsNone(self.meter.for_task(store.Task("t-novia")))
+        self.meter._METERS.clear()
+        store.write_json(task.dir / "task.json", {**spec, "via": "api"})
+        self.assertIsNotNone(self.meter.for_task(task))           # with via api: its meter
+
+    def test_the_cap_stops_self_review_and_a_handover_before_they_run(self):
+        # the review of #1019: only auto-fix's _go_on was exercised; the in-round guard off, the
+        # cap reached in round 1, each next round is stopped by _go_on, the keyhole closed first
+        self.cap(1)
+        self.spent(0.6)
+        calls = []
+        runner.CURRENT["keyhole"] = _KhStub(calls)
+        task = self.api_task("t-goon-sr", SPEND_M, "ok", "--test", TEST_CMD, "--self-review", FAKE_STEP_IN="100")
+        with mock.patch.object(runner, "_spend_guard"):
+            runner.drive(task)
+        why = "the day's API spend cap is reached: $1.10 of $1 today"
+        self.assertEqual((task.status["phase"], task.status["guard"]), ("stuck", "spend"))
+        self.assertEqual(calls, [("close", why)])
+        (notice,) = self.notices("t-goon-sr", "stuck")
+        self.assertEqual(notice["cause"], "spend")
+        self.assertIn(f"self-review didn't run: {why}.", notice["text"])
+        self.assertFalse(task.round_dir(2).joinpath("summary.md").exists())
+        calls.clear()
+        real = runner.run_round
+
+        def full(t, n, keep=False):                               # round 1's session filled up
+            rnd = real(t, n, keep)
+            if n == 1:
+                rnd.update(full=900000, stuck=None, guard=None)
+            return rnd
+
+        task = self.api_task("t-goon-full", SPEND_M, "ok", FAKE_STEP_IN="100")
+        with mock.patch.object(runner, "_spend_guard"), mock.patch.object(runner, "run_round", full):
+            runner.drive(task)
+        why = "the day's API spend cap is reached: $1.60 of $1 today"
+        self.assertEqual((task.status["phase"], task.status["guard"], task.status["handovers"]),
+                         ("stuck", "spend", 1))
+        self.assertEqual(calls, [("close", why)])
+        (notice,) = self.notices("t-goon-full", "stuck")
+        self.assertIn(f"the handover didn't run: {why}.", notice["text"])
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertFalse([e for e in ev if e.get("round") == 2 and e["kind"] == "step"])
+
+
+class ApiSpendKeyhole(_KeyholeTest):
+    """The keyhole's part of the spend cap (#1019): one usage per response, close(reason), room."""
+
+    def test_close_with_a_reason_refuses_every_request_with_a_400_opencode_doesnt_retry(self):
+        kh = self.keyhole()
+        self.assertEqual(self.post(kh)[0], 200)
+        kh.close("the day's API spend cap is reached: $5.02 of $5 today")
+        code, _, body = self.post(kh)
+        self.assertEqual(code, 400)
+        self.assertEqual(json.loads(body)["error"]["message"],
+                         "workbench: the day's API spend cap is reached: $5.02 of $5 today")
+        self.assertEqual(len(self.up.seen), 1)                  # nothing more went upstream
+
+    def test_a_negative_room_refuses_the_request_before_it_goes_out(self):
+        asked = []
+        kh = self.keyhole(room=lambda body, size: (asked.append((body["model"], size)), -0.01)[1])
+        code, _, body = self.post(kh)
+        self.assertEqual((code, json.loads(body)["error"]["message"]),
+                         (400, "workbench: the day's API spend cap is reached"))
+        self.assertEqual(self.up.seen, [])
+        self.assertEqual(asked[0][0], kh.model.name)
+        ok = self.keyhole(room=lambda body, size: 3.0)
+        self.assertEqual(self.post(ok)[0], 200)
+
+    def test_each_response_gives_one_usage_however_many_chunks_carry_it(self):
+        usage = []
+        ant = self.keyhole(self.model("anthropic", "claude-haiku-5-5", "/v1", "anthropic"),
+                           on_usage=usage.append)
+        self.post(ant, "/messages?beta=true")                   # message_start, then message_delta
+        self.assertEqual(usage, [{"input_tokens": 7, "output_tokens": 2}])
+        usage.clear()
+        kh = self.keyhole(on_usage=usage.append)
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [f'data: {{"model": "m", "usage": {{"prompt_tokens": 9, "completion_tokens": {i}}}}}\n\n'
+                          .encode() for i in (1, 2, 3)] + [b"data: [DONE]\n\n"]
+        self.post(kh)                                           # a running total in every chunk
+        self.assertEqual(usage, [{"prompt_tokens": 9, "completion_tokens": 3}])
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_takes_the_spend_refusal_at_once_without_a_retry(self):
+        # the review of #1019: the spike checked 401, 402 and 403 for no retry, never the 400 the
+        # keyhole answers a spend stop with; through the keyhole itself, for both protocols
+        why = "the day's API spend cap is reached: $5.02 of $5 today"
+        tmp = Path(self.tmp.name)
+        for provider, name, path, package in (
+                ("deepinfra", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "/v1/openai",
+                 "@opencode/ai/providers/deepinfra"),
+                ("anthropic", "claude-haiku-5-5", "/v1", "@opencode/ai/providers/anthropic")):
+            kh = self.keyhole(self.model(provider, name, path, package))
+            kh.close(why)
+            layer = tmp / f"spend-layer-{provider}.json"
+            layer.write_text(json.dumps({"provider": {provider: {"options": self.kh_mod.layer_options(kh)}}}))
+            env = {"PATH": os.environ["PATH"], "HOME": str(tmp / "home"), "PWD": str(self.repo),
+                   "OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_CONFIG": str(layer),
+                   **{f"XDG_{d.upper()}_HOME": str(tmp / "xdg" / d) for d in ("config", "data", "state", "cache")}}
+            began = time.monotonic()
+            r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", kh.model.id,
+                                "--format", "json", "--", "say ok"], cwd=self.repo, env=env,
+                               capture_output=True, text=True, timeout=120)
+            rows = [json.loads(x) for x in r.stdout.splitlines() if x.startswith("{")]
+            self.assertEqual((r.returncode, [x["type"] for x in rows]), (1, ["step_start", "error"]),
+                             (provider, r.stdout[-2000:], r.stderr[-2000:]))
+            self.assertEqual((rows[-1]["error"]["type"], rows[-1]["error"]["status"]),
+                             ("provider.invalid-request", 400), provider)
+            self.assertIn(f"workbench: {why}", rows[-1]["error"]["message"], provider)
+            self.assertLess(time.monotonic() - began, 60, provider)   # no retry loop's backoff
+            self.assertEqual(self.up.seen, [], provider)               # nothing went upstream
 
 
 if __name__ == "__main__":

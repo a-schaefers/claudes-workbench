@@ -1101,6 +1101,27 @@ test('a shutdown\'s notice for one task says to resume it', async ($, on) => {
   expect(woken[0]).not.toContain('Steer it')
 })
 
+test('a stop at the day\'s API spend cap wakes Claude to ask the user, never to send feedback', async ($, on) => {
+  // the review of #1019: the stuck wake said "Steer it with wb feedback", and feedback runs a
+  // round that the cap stops again at once; the notice and the skill say to ask the user
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'a', 'stuck')
+  notice(files, { ts: ts0, task: 'a', kind: 'stuck', round: 1, cause: 'spend',
+    text: "a stopped: the day's API spend cap is reached ($5.02 of $5 today)." })
+  fakeTasks(on, files, ['a'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('Ask the user: a higher cap (`wb route cap <usd>`), the role on the GPU, or tomorrow; then `wb resume a`.')
+  expect(woken[0]).not.toContain('Steer it')
+  expect(woken[0]).not.toContain('wb feedback')
+})
+
 test('two wakes due in one turn both arrive, the second after the first one\'s turn', async ($, on) => {
   // the 2026-11-16 audit: the second report never came, only a rewake a minute later
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
@@ -3711,6 +3732,25 @@ test('the Stats tab draws the history, read from wb stats only while it is shown
   files['/wb/results.jsonl'] = '{}\n{}\n{}\n'
   await clock.advance(31_000)
   expect(reads.length).toBe(2)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
+test('the Stats tab names a spend stop in what stopped agents', async ($, on) => {
+  // #1019: the runner's `spend` guard (the day's API spend cap) read as a bare "spend"
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  const pane = fakeTasks(on, files, [])
+  on('process.run', (_: any, e: any) => e.argv[1] === 'stats' && e.argv[2] === '--json'
+    ? { value: { exitCode: 0, stdout: JSON.stringify({ ...FEED, guards: { spend: 2, silence: 1 } }), stderr: '' } }
+    : { value: { exitCode: 0, stdout: '', stderr: '' } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(10)
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts.some(t => t.includes("the day's API spend cap 2 · silence 1"))).toBe(true)
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })

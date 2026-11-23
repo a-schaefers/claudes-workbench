@@ -29,6 +29,7 @@ from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardwa
                transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
+from . import meter
 from .runner import PKG_ROOT
 
 PROTOCOL = """
@@ -595,6 +596,8 @@ def pick_model(size: str, wanted: str | None, stack=(), name: str | None = None)
             m = models.resolve(wanted)
         except KeyError as e:
             die(str(e).strip('"'))
+        if m.kind == "api" and (why := meter.refusal(m)):  # no price, or today at the cap (#1019)
+            die(why, 3)
         if m.kind == "api":  # nothing runs one until the roles and their gate land (#1013)
             die(f"{m.id} is an API model: wb start runs one only through a role you set (wb route), "
                 "not --model", 3)

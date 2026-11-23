@@ -524,6 +524,10 @@ const BATCH_NEXT = (names: string[]) => names.length > 1
 const batchOf = (row: Row): string[] | null =>
   Array.isArray(row.tasks) && row.tasks.length ? row.tasks.map(String) : null
 const RUNNING = new Set(['queued', 'running', 'testing'])
+// A stop at the day's API spend cap (#1019, cause `spend`) is the user's call: feedback would run
+// a round that stops again at once, so the wake asks for their decision, as the notice does.
+const SPEND_NEXT = (n: string) => 'Ask the user: a higher cap (`wb route cap <usd>`), the role on ' +
+  `the GPU, or tomorrow; then \`wb resume ${n}\`. Never retry it with feedback yourself.`
 
 // A question delivered into a running turn (#542): the engine frames it as another session's
 // message, so one line says whose it is and that it can't wait for the turn to end.
@@ -1565,6 +1569,7 @@ const GUARD_WORDS: Record<string, string> = {
   repeat: 'the same call repeated', errors: 'tool errors in a row', no_edit: 'no file changed',
   round: 'the round time limit', silence: 'silence', think: 'thinking with no tool call',
   handovers: 'handovers without finishing',
+  spend: "the day's API spend cap",
 }
 
 // stats.STATS_MODEL_LINES, kept here too: the mod tracks main while wb runs from the user's clone,
@@ -2955,7 +2960,8 @@ async function deliver($: any, now: number) {
       }
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
       // a batch's wake ends with its resume, not the failure's next step (#544)
-      const next = batch ? BATCH_NEXT(batch) : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
+      const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? SPEND_NEXT(name)
+        : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`
       const text = `[workbench] ${who}.\n\n${row.text}\n\n${next}`

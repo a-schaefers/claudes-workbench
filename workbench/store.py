@@ -78,7 +78,7 @@ PARKS = ("review", "stuck", "failed")  # the phases a parked mark counts in (par
 # package directory, found none and failed the task with "unknown model" (#328, the audit of 1.4);
 # and CLAUDE_CONFIG_DIR, which the runner reads for the lane and spend.py for the transcripts.
 PATH_VARS = ("WB_HOME", "WB_MODELS", "WB_SKILLS", "WB_IMAGES", "WB_AUDIO", "WB_COMMANDS", "WB_CHAT_TOKEN",
-             "WB_CHAT_CONFIG", "WB_OPENCODE_CONFIG", "WB_SAVINGS", "OPENCODE_CONFIG",
+             "WB_CHAT_CONFIG", "WB_OPENCODE_CONFIG", "WB_SAVINGS", "WB_ROUTES", "OPENCODE_CONFIG",
              "CLAUDE_CONFIG_DIR", "WB_GPU_DIR",
              # wb patch init's clone (#1005)
              "WB_SOURCE",

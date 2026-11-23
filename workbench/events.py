@@ -138,7 +138,10 @@ def normalize(raw: dict, round_no: int):
         return {"ts": ts, "round": round_no, "kind": "step",
                 "in": n(tok.get("input")), "out": n(tok.get("output")),
                 "cache": n(cache.get("read")) + n(cache.get("write")),
-                **({"reasoning": n(tok.get("reasoning"))} if n(tok.get("reasoning")) else {})}
+                **({"reasoning": n(tok.get("reasoning"))} if n(tok.get("reasoning")) else {}),
+                # OpenCode's own price of the step, from the catalog (the meter, #1019)
+                **({"cost": part["cost"]} if isinstance(part.get("cost"), (int, float))
+                   and not isinstance(part.get("cost"), bool) else {})}
     if kind == "error":
         return {"ts": ts, "round": round_no, "kind": "error", "text": _message(raw.get("error"))}
     if kind == "retry":  # a request OpenCode gave up on and sends again: not the model's output

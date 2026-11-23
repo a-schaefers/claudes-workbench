@@ -34,6 +34,7 @@ from pathlib import Path
 
 from . import (ask_mcp, context, gitguard, gitops, hardware, lane, lessons, models, progress, skills,
                stats, store, tuning)
+from . import meter
 from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize
 from .watch import Watcher
 
@@ -1210,6 +1211,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # session between two steps, and the agent worked on from its summary (#774).
     last_step: tuple = (None, 0)
     opened: dict = {}  # the questions open this round (ask_mcp.relay)
+    spend = _spend_round(task, n)  # an API task's meter (#1019), else None
     warmed = time.monotonic()  # the model's keep-alive, renewed while the round waits (#864)
     while True:
         try:  # woken by the agent's output or a steer note; the timeout runs the clocks below
@@ -1278,6 +1280,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 out["texts"].append(row["text"])
                 row["text"] = row["text"][:2000]
             elif row["kind"] == "step":
+                if spend:
+                    spend.step(raw.get("part") or {})  # the ledger, before the guard below
                 out["tok_in"] += row["in"]
                 out["tok_out"] += row["out"]
                 used = row["in"] + row.get("cache", 0) + row["out"] + row.get("reasoning", 0)  # #644
@@ -1400,6 +1404,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                     task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
                     f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
                     round=n)
+        if not out["stuck"] and spend:
+            _spend_guard(task, out)
         if out["stuck"]:
             task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": out["stuck"]})
             _stop(proc)
@@ -3283,6 +3289,72 @@ def _rejoin(task: store.Task, lease) -> None:
         lease.rejoin()
 
 
+def _spend_round(task: store.Task, n: int):
+    """An API task's meter for round n (meter.Meter: its live figures from 0), else None."""
+    if (spend := meter.for_task(task)) is not None:
+        spend.begin(n)
+    return spend
+
+
+def _spend_guard(task: store.Task, out: dict) -> None:
+    """The in-round spend guard (#1019), each tick: the keyhole's own stop (status `api_stop`,
+    its guard: the room it refused for, #1020's quota) or the day cap reached
+    (meter.stop_reason). The keyhole refuses at once (a 400 OpenCode doesn't retry), then the
+    round stops: no retry loop runs to the silence limit."""
+    stop = task.status.get("api_stop")
+    if isinstance(stop, dict) and stop.get("text"):
+        why, guard = str(stop["text"]), str(stop.get("guard") or "spend")
+    elif why := meter.stop_reason(task):
+        guard = "spend"
+    else:
+        return
+    if (kh := CURRENT.get("keyhole")) is not None:
+        kh.close(why)
+    out["stuck"], out["guard"] = why, guard
+
+
+def _spend_end(task: store.Task) -> None:
+    """An API task's round over: OpenCode's figure for its sessions, reconciled into the ledger."""
+    if (spend := meter.for_task(task)) is None or spend.plan:
+        return
+    from .transcript import export, finished_export
+    st = task.status
+    sessions = {}
+    try:
+        for sid in dict.fromkeys([*(st.get("sessions") or []), st.get("session")]):
+            if sid:
+                sessions[sid] = export(sid, task=task) if sid == st.get("session") \
+                    else finished_export(task, sid)
+        spend.end_round(sessions)
+    except Exception:  # a measurement: never a reason to stop the task
+        pass
+
+
+def _spend_lead(task: store.Task, rnd: dict) -> str:
+    """The stuck notice's first line for a spend stop: what to ask the user."""
+    return meter.stop_text(task) + "\n" if rnd.get("guard") == "spend" else ""
+
+
+def _go_on(task: store.Task, n: int, what: str) -> bool:
+    """Before each `continue` in drive (#1017, #1019): for an API task, today's spend under the
+    cap. At it, the task stops before ``what`` runs: phase `stuck`, status `guard` `spend`, a
+    `stuck` notice with cause `spend` (not the step's own: results.THE_STEP). A GPU task always
+    goes on, for nothing."""
+    if meter.for_task(task) is None or not (why := meter.stop_reason(task)):
+        return True
+    if (kh := CURRENT.get("keyhole")) is not None:
+        kh.close(why)
+    task.set_status(phase="stuck", last=why[:200], guard="spend")
+    task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": f"{why}: {what} didn't run"})
+    text = f"{meter.stop_text(task)}\n{what} didn't run: {why}."
+    # auto-fix and self-review have moved status `round` on to n + 1, which never ran: round n's
+    # report goes with the notice, and says where it is (wb report alone said "no report yet")
+    if (summary := task.round_dir(n) / "summary.md").exists():
+        text += f"\nRound {n}'s report (wb report {task.name} --round {n}):\n{summary.read_text()}"
+    task.notify("stuck", text, round=n, cause="spend")
+    return False
+
+
 def drive(task: store.Task) -> None:
     # infra: why the machine, not the agent, failed the task's last run (wb bench grades none of it)
     task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid(), infra=None,
@@ -3295,6 +3367,7 @@ def drive(task: store.Task) -> None:
     except KeyError as e:
         return _load_failed(task, e)
     CURRENT["remote"] = m.remote  # the GPU is not ours to measure when the model is remote
+    meter.for_task(task, m)  # an API task's meter (#1019): the ledger, the spend guard, the keyhole's hooks
     if m.remote:
         task.set_status(remote_gpu=True)  # so its savings say the energy wasn't measured (#117)
     if not gitops.repo_of(task.spec).is_dir():  # moved, renamed, or its git dir removed (#776)
@@ -3373,6 +3446,7 @@ def drive(task: store.Task) -> None:
             finally:  # before the lease is released: the GPU's next task must not meet our agent
                 _end_agent(task)
             measure_speed(task, began)
+            _spend_end(task)
             if (bound := read_bound(task, n, rnd, m)) and rnd["guard"] == "silence":
                 from . import router
                 rnd["stuck"] += (f" (it read at most ~{bound} tokens/s here: this task's next "
@@ -3383,6 +3457,8 @@ def drive(task: store.Task) -> None:
                 if handed <= HANDOVER_MAX:
                     _round_end(task, n, rnd, began)
                     _full_round(task, n, rnd, handed)
+                    if not _go_on(task, n, "the handover"):
+                        return
                     continue
                 rnd["guard"] = "handovers"
                 rnd["stuck"] = (f"handed over to a fresh session {HANDOVER_MAX} times in this "
@@ -3396,6 +3472,8 @@ def drive(task: store.Task) -> None:
             _round_end(task, n, rnd, began)
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])
+                if not _go_on(task, n, "Claude's note"):
+                    return
                 continue
             crashed = not rnd["stuck"] and rnd["exit"] not in (0, None)
             hushed = rnd["guard"] == "silence"  # OpenCode retrying a server that is gone
@@ -3418,9 +3496,11 @@ def drive(task: store.Task) -> None:
                         _wait_up(task, m)
                     except RuntimeError as e:
                         return _load_failed(task, e)
+                if not _go_on(task, n, "the round again"):
+                    return
                 continue
             if rnd["stuck"] or died(rnd):
-                text = summary_text(task, n, rnd, None) + _undelivered(task)
+                text = _spend_lead(task, rnd) + summary_text(task, n, rnd, None) + _undelivered(task)
                 task.round_dir(n).joinpath("summary.md").write_text(text)
                 phase = "stuck" if rnd["stuck"] else "failed"
                 # its server gone again after the round's one revive: the machine's, not the
@@ -3430,7 +3510,8 @@ def drive(task: store.Task) -> None:
                                 **({"infra": "model"} if server else {}))
                 # what stopped it, for results.step: a guard or the agent's own exit (#582)
                 task.notify(phase, text, round=n,
-                            cause="server" if server else "guard" if rnd["stuck"] else "agent")
+                            cause="server" if server else "spend" if rnd["guard"] == "spend"
+                            else "guard" if rnd["stuck"] else "agent")
                 return
             # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257.
             # Theirs is waited for (a peer's round, up to its timeout; this machine's pool for a
@@ -3444,12 +3525,16 @@ def drive(task: store.Task) -> None:
                 tests = run_tests(task, n)
             if pending_steer(task):  # a note that came in while the tests ran
                 _steer_round(task, n, False)
+                if not _go_on(task, n, "Claude's note"):
+                    return
                 continue
             text = summary_text(task, n, rnd, tests)
             if skip := not_the_code(task, tests):  # first: what Claude must do about it
                 text = f"auto-fix skipped: {skip}\n" + text
             if pending_steer(task):  # a note that came in while the report was written
                 _steer_round(task, n, False)
+                if not _go_on(task, n, "Claude's note"):
+                    return
                 continue
             task.round_dir(n).joinpath("summary.md").write_text(text)
             used = task.status.get("auto_fixes", 0)
@@ -3460,6 +3545,8 @@ def drive(task: store.Task) -> None:
                 task.set_status(round=n + 1, auto_fixes=used + 1, tests=tests)
                 task.event({"ts": store.now(), "round": n, "kind": "autofix",
                             "text": "tests failed; sent the output back to the agent"})
+                if not _go_on(task, n, "auto-fix"):
+                    return
                 continue
             if tests and tests["ok"] and not task.status.get("self_review_due"):
                 # self-review could run, whether or not it does: only such a task is evidence
@@ -3474,6 +3561,8 @@ def drive(task: store.Task) -> None:
                 task.set_status(round=n + 1, self_reviewed=mark, tests=tests)
                 task.event({"ts": store.now(), "round": n, "kind": "self_review",
                             "text": "tests pass; the agent reviews its own change first"})
+                if not _go_on(task, n, "self-review"):
+                    return
                 continue
             task.set_status(phase="review", tests=tests,
                             last="tests passed: Claude reviews next" if tests and tests["ok"]

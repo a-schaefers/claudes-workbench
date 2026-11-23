@@ -3903,3 +3903,14 @@ def write_entry(provider: str, name: str, entry: dict | None) -> None:
             entries[name] = {**old, **entry, "options": {**(old.get("options") or {}), **(entry.get("options") or {})}}
             if not entries[name]["options"]:
                 del entries[name]["options"]
+
+
+def is_api(model_id: str) -> bool:
+    """An API model (#1013's kind), from the cached catalog: never a network or OpenCode call."""
+    m = lookup(model_id, cached=True)
+    return bool(m and m.kind == "api")
+
+
+API_WINDOW = 131072   # the effective window an API task plans to (#1017; decision 10)
+API_OUTPUT = 32768    # output pinned for API tasks (#1017)
+API_PER_PROVIDER = 3  # API tasks at once per provider (#1015)

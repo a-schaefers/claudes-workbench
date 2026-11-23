@@ -87,6 +87,10 @@ unavailable for <id>: <v>`, exit 1. Every `step_finish` carries `part.cost` (USD
 catalog's first price, its context tier past `size`; FAKE_COST for a model with none, else 0) and
 `part.tokens{input, output, reasoning, cache{read, write}}`; `session export` gives each assistant
 message `cost` (FAKE_COST, else 0) and `tokens`, and `info.cost`, `info.tokens` their sums.
+FAKE_STEP_IN sets a step's input tokens (120), so a test prices it; FAKE_STEP_COST plays
+OpenCode's figure (a number, or `none`: no `part.cost`); scenario `spend` (#1019): a read and a
+priced `step_finish` every FAKE_STEP_EVERY seconds (0.3), FAKE_STEPS of them (50), then `ok`'s
+answer, as an API task spending until the spend guard stops it.
 """
 import json
 import os
@@ -225,10 +229,11 @@ PRICE = None  # the run's model's catalog prices, once -m is read
 
 def cost(tok: dict) -> float:
     """What OpenCode charges a step, from the catalog: `input` leaves out cache reads, reasoning
-    is billed as output, and a `tier: {type: "context", size}` price applies past its size."""
+    is billed as output, and a `tier: {type: "context", size}` price applies past its size, by
+    input plus cache reads plus cache writes (2.3.2's own rule)."""
     if not PRICE:
         return float(os.environ.get("FAKE_COST") or 0)
-    used = tok["input"] + tok["cache"]["read"]
+    used = tok["input"] + tok["cache"]["read"] + tok["cache"]["write"]
     rate = [p for p in PRICE if not p.get("tier") or used > p["tier"].get("size", 0)][-1]
     cache = rate.get("cache") or {}
     return round((tok["input"] * rate.get("input", 0) + (tok["output"] + tok["reasoning"])
@@ -241,6 +246,11 @@ def emit(kind, **part):
         tok = {"input": 0, "output": 0, "reasoning": 0, **part.get("tokens", {})}
         tok["cache"] = {"read": 0, "write": 0, **tok.get("cache", {})}
         part.update(tokens=tok, cost=cost(tok))
+        if (said := os.environ.get("FAKE_STEP_COST")) is not None:  # OpenCode's figure, played
+            if said == "none":
+                del part["cost"]
+            else:
+                part["cost"] = float(said)
     print(json.dumps({"type": kind, "timestamp": t(), "sessionID": session,
                       "part": {"sessionID": session, **part}}), flush=True)
 
@@ -285,8 +295,9 @@ def tool(name, inp, status="completed", error=None):
     emit("tool_use", tool=name, state=state)
 
 
-def finish():
-    emit("step_finish", reason="stop", tokens={"input": 120, "output": 30, "cache": {"read": 0}})
+def finish(reason="stop"):  # FAKE_STEP_IN: the step's input tokens (what it costs, #1019)
+    emit("step_finish", reason=reason, tokens={"input": int(os.environ.get("FAKE_STEP_IN") or 120),
+                                               "output": 30, "cache": {"read": 0}})
 
 
 if args and args[0] == "run" and args[-1].startswith("-") and args[-2:-1] != ["--"]:
@@ -411,6 +422,17 @@ elif scenario == "loop":
     finish()
 elif scenario == "hang":
     time.sleep(3600)
+elif scenario == "spend":  # an API task spending: a priced step every FAKE_STEP_EVERY s, then quiet
+    for i in range(int(os.environ.get("FAKE_STEPS") or 50)):
+        tool("read", {"filePath": os.path.abspath(f"part{i}.txt")})
+        finish("tool-calls")
+        emit("step_start")
+        time.sleep(float(os.environ.get("FAKE_STEP_EVERY") or 0.3))
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    emit("text", text="Wrote answer.txt = 42.")
+    finish()
 elif scenario == "chatter":  # a newer OpenCode's progress event, unknown here, ten times a second
     for _ in range(600):
         print(json.dumps({"type": "progress", "timestamp": t(), "sessionID": session}), flush=True)
