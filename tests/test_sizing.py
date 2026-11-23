@@ -386,7 +386,7 @@ class ApiSizing(Base):
         wait_phase("t-gpu", {"review"})
         state = {"available": True, "resident": True, "why": "API (DeepInfra)"}
         for name, extra, want in (("t-api", (), 1), ("t-api3", ("--auto-fix", "3"), 3)):
-            with mock.patch.object(tw.cli, "pick_model", lambda *a: (self.m, state, "asked for")), \
+            with mock.patch.object(tw.cli, "pick_model", lambda *a, **k: (self.m, state, "asked for")), \
                     mock.patch.object(tw.cli, "spawn_runner", lambda t: None), \
                     mock.patch.object(tw.cli, "_gpu_wait", lambda *a: ({}, False)):
                 out = run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo),

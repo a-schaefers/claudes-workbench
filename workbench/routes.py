@@ -32,6 +32,7 @@ LABELS = {"significant": "Complex coding", "trivial": "Trivial coding", "writing
 VIAS = ("gpu", "api")
 THINKING = ("off", "on")
 AUTO = "auto"  # the GPU model the router picks: today's behaviour, the default
+OPENROUTER = "openrouter"  # the provider whose roles keep an `order` (privacy.OPENROUTER, #1021)
 BY = ("dialog", "pane", "terminal", "claude")  # who made a role's last change (`by`, `gpu_by`)
 STAMPS = ("said", "by", "ts", "gpu_by", "gpu_ts")  # a role's record of its changes (stamp)
 DAY_USD_SUGGEST = 5  # the dialog's and the first run's suggestion only: there is no default cap
@@ -94,9 +95,8 @@ def normalize(doc) -> dict:
                 row[key] = e[key]
         if row["via"] == "api" and not row.get("api"):
             raise RoutesError(f"{r} is on API with no api model")
-        # an OpenRouter role's backends (#1021): the keyhole routes every request to them alone,
-        # and the start's where-note names them. Kept through every read and edit; wb route has
-        # no flag that sets it yet
+        # an OpenRouter role's backends (wb route --order, #1021): the keyhole routes every
+        # request to them alone, and the start's where-note names them
         if e.get("order") is not None:
             order = e["order"]
             if not isinstance(order, list) or not all(isinstance(b, str) and b.strip() for b in order):
@@ -191,6 +191,8 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str]) -> 
         clauses.append(f"{_side(old)} → {_side(row)}")
         if on_api:
             clauses += [f"your code goes to {who(row['api'])}", f"thinking {row['thinking']}"]
+            if row.get("order"):  # an OpenRouter role's backends (#1021): part of what is agreed to
+                clauses.append(f"backends {', '.join(row['order'])}")
             if cap is not None:
                 clauses.append(f"cap {money(cap)}/day")
         elif row.get("api"):
@@ -204,16 +206,21 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str]) -> 
     if old["thinking"] != row["thinking"] and not (moved and on_api):
         clauses.append(f"thinking {old['thinking']} → {row['thinking']}")
         gated |= on_api
+    if row.get("order") and old.get("order") != row["order"] and not (moved and on_api):
+        clauses.append(f"backends {', '.join(old.get('order') or ['none'])} → {', '.join(row['order'])}")
+        gated = True  # where the code goes, within OpenRouter (#1021)
     return clauses, gated
 
 
 def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None = None,
            api: str | None = None, thinking: str | None = None, day_usd=None,
-           who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0]) -> Change:
+           who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0],
+           order: list[str] | None = None) -> Change:
     """What a `wb route` does to ``doc``: ``role`` one of ROLES, "all" (``via`` and ``thinking``
     only) or None (the cap alone). ``who``: an API id's provider, as the user knows it (the
     catalog's name). Never writes. RoutesError for a change that can't be made: `api` with no
-    API model kept, and the first API role with no cap (NO_CAP)."""
+    API model kept, and the first API role with no cap (NO_CAP). ``order``: an OpenRouter role's
+    backends (#1021), dropped when the role's API model is another provider's."""
     new = copy.deepcopy(doc)
     if day_usd is not None:
         new["day_usd"] = _cap(day_usd)
@@ -228,6 +235,10 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
             row["gpu"] = gpu
         if thinking is not None:
             row["thinking"] = thinking
+        if order is not None:
+            row["order"] = list(order)
+        if row.get("order") and str(row.get("api") or "").split("/", 1)[0] != OPENROUTER:
+            row.pop("order")
         if via == "api" and not row.get("api"):
             if role != "all":
                 raise RoutesError(f"{r} has no API model yet: wb route {r} <provider/model>")

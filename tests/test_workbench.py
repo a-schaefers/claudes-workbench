@@ -27696,6 +27696,32 @@ class Routes(Base):
         with self.assertRaises(routes.RoutesError):
             routes.read()
 
+    def test_an_openrouter_role_needs_its_backends_and_the_line_names_them(self):
+        # #1021's `--order` on #1014's wb route (the wave 2 merge): one OpenRouter id is served by
+        # many backends, so a role never goes to one nobody chose
+        self.catalog([*ROUTES_CATALOG, api_entry("openrouter", "vendor/model-x")],
+                     [*ROUTES_AUTH, key_row("openrouter", "OpenRouter", STORED)])
+        runner.models.hosted(fresh=True)
+        code, out, err = self.route("trivial", "openrouter/vendor/model-x", "--day-usd", "5")
+        self.assertEqual((code, out), (3, ""))
+        self.assertIn("openrouter/vendor/model-x is served by many backends that differ in quantization and "
+                      "data policy: pick them with --order <name>[,<name>]", err)
+        self.assertFalse(self.path.exists())
+        os.environ["CLAUDECODE"] = "1"
+        asked = self.dry("trivial", "openrouter/vendor/model-x", "--day-usd", "5", "--order", "baseten, deepinfra/fp8")
+        self.assertIn("· backends baseten, deepinfra/fp8 ·", asked["change"])
+        self.assertEqual(asked["approval"]["argv"], ["route", "trivial", "openrouter/vendor/model-x", "--day-usd", "5",
+                                                     "--order", "baseten,deepinfra/fp8"])
+        self.approve(asked["approval"])
+        self.assertEqual(self.route("trivial", "openrouter/vendor/model-x", "--day-usd", "5", "--order",
+                                    "baseten,deepinfra/fp8")[0], 0)
+        self.assertEqual(self.doc()["roles"]["trivial"]["order"], ["baseten", "deepinfra/fp8"])
+        self.assertEqual(self.dry("trivial", "--order", "baseten")["change"],
+                         "trivial: backends baseten, deepinfra/fp8 → baseten")      # gated: the dialog
+        os.environ.pop("CLAUDECODE")
+        self.route("trivial", "deepseek/deepseek-flash")                           # another provider's
+        self.assertNotIn("order", self.doc()["roles"]["trivial"])
+
     def test_a_role_set_in_a_terminal_writes_the_plans_document_and_prints_the_change(self):
         code, out, err = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.assertEqual((code, out, err), (0, f"changed: {DEEPSEEK_LINE}\n", ""))
@@ -28046,7 +28072,7 @@ class _ApiTask:
         os.environ["FAKE_SCENARIO"] = scenario
         from workbench import models
 
-        def pick(size, wanted, stack=(), name=None):  # what #1016's route will do
+        def pick(size, wanted, stack=(), name=None, role=None):  # what #1016's route will do
             m = models.resolve(wanted)
             return m, models.status(m), "asked for"
         with contextlib.ExitStack() as stack:
@@ -28432,7 +28458,7 @@ class ApiThinking(Base):
         """wb start for an API model, as #1016's roles will run it (wb start refuses --model for
         one until then): the router's pick and the runner left out, the rest as it is."""
         m = self.models.hosted()[mid]
-        with mock.patch.object(cli, "pick_model", lambda *a: (m, self.models.status(m), "the role")), \
+        with mock.patch.object(cli, "pick_model", lambda *a, **k: (m, self.models.status(m), "the role")), \
                 mock.patch.object(cli, "_gpu_wait", lambda *a: ({}, False)), \
                 mock.patch.object(cli, "spawn_runner", lambda t: 0), \
                 mock.patch.object(runner, "with_thinking", lambda m, spec, f=runner.with_thinking:
@@ -30155,6 +30181,232 @@ class Privacy(_KeyholeTest):
         os.environ["OPENCODE_DISABLE_FREE_MODELS"] = "1"
         self.assertEqual(cli.privacy.free_note(), "")
         self.assertNotIn("free model", doctor())
+
+
+class Writing(Base):
+    """The writing role (#1025): prose under its own short handbook and protocol, not the coding
+    rules; self-review and probe off unless asked; `--test` optional; its record apart in the
+    router. Until #1016's `wb start --role` lands, the start parser gets the flag here."""
+
+    def setUp(self):
+        super().setUp()
+        real = cli.parser
+
+        def with_role():
+            ap = real()
+            start = next(a for a in ap._actions if hasattr(a, "choices") and isinstance(a.choices, dict)
+                         and "start" in a.choices).choices["start"]
+            if not any("--role" in a.option_strings for a in start._actions):  # #1016 has it
+                start.add_argument("--role", choices=["significant", "trivial", "writing"])
+            return ap
+        patch = mock.patch.object(cli, "parser", with_role)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.spec.write_text("Write the answer to answer.txt, for the README's readers.\n")
+
+    def protocol(self, task, protocol, test=None):
+        return protocol.format(branch=task.spec["branch"], test_line=cli.test_line(test),
+                               budget=task.spec["ask_budget"], experiment_protocol="")
+
+    def test_a_writing_task_gets_the_writing_handbook_and_protocol_and_a_coding_one_the_coding_ones(self):
+        for name, role, handbook, protocol in (("t-w", "writing", context.WRITING, cli.WRITING_PROTOCOL),
+                                               ("t-c", "significant", context.HANDBOOK, cli.PROTOCOL)):
+            self.start(name, "ok", "--role", role)
+            wait_phase(name, {"review"})
+            task = store.Task(name)
+            self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_bytes(), handbook.read_bytes())
+            self.assertEqual(task.round_dir(1).joinpath("prompt.md").read_text(),
+                             self.spec.read_text().rstrip() + self.protocol(task, protocol))
+        self.assertEqual(store.Task("t-w").spec["role"], "writing")
+        self.assertNotEqual(cli.WRITING_PROTOCOL, cli.PROTOCOL)
+        # fixed_prompt names it the handbook all the same (the file name is kept)
+        self.assertIn("the handbook", [label for label, _ in context.fixed_prompt(store.Task("t-w"))[1]])
+
+    def test_a_writing_prompt_keeps_the_fold_its_readers_split_on(self):
+        from workbench import bench
+        self.start("t-fold", "ok", "--role", "writing", "--test", "true")
+        wait_phase("t-fold", {"review"})
+        prompt = store.Task("t-fold").round_dir(1).joinpath("prompt.md").read_text()
+        brief = self.spec.read_text().rstrip()
+        self.assertIn("- This is a writing task:", prompt)
+        self.assertIn(bench.FOLD, prompt)
+        self.assertEqual(bench._spec_of(prompt), brief + "\n")
+        self.assertEqual(bench.TEST_LINE.search(prompt).group(1), "true")
+        head, lines = transcript._user_message(prompt, verbose=False)
+        self.assertEqual(head, "Claude → agent · spec")
+        shown = "\n".join(t for _, t in lines)
+        self.assertIn("(+ the workbench protocol; -v shows it)", shown)
+        self.assertNotIn("writing task", shown)
+        # runner.outline_section's split, on PROTOCOL's opening up to the branch
+        self.assertEqual(prompt.split(cli.PROTOCOL.split("{branch}")[0])[0], brief)
+        self.assertIn("Lesson: <the rule, and why>", prompt)  # lessons.LESSON reads the summary's
+
+    def test_a_writing_task_with_a_check_runs_it_on_the_base_and_sends_a_failure_back(self):
+        from workbench import bench
+        (self.repo / "Makefile").write_text("docs:\n\tgrep -qx 42 answer.txt\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "Makefile"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "docs check"], check=True)
+        self.start("t-check", "fix", "--role", "writing", "--test", "make docs")
+        st = wait_phase("t-check", {"review"})
+        task = store.Task("t-check")
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL, "make docs")))
+        self.assertEqual(bench.TEST_LINE.search(prompt).group(1), "make docs")
+        self.assertIs(st["base_check"]["ok"], False)                     # run on the base
+        self.assertEqual((st["round"], st["auto_fixes"]), (2, 1))         # 41 sent back as auto-fix
+        self.assertTrue(st["tests"]["ok"])
+        self.assertIn("acceptance tests fail", task.round_dir(2).joinpath("prompt.md").read_text())
+
+    def test_a_writing_task_with_no_check_goes_straight_to_review(self):
+        out = self.start("t-nocheck", "ok", "--role", "writing")
+        self.assertNotIn("base check", out)
+        self.assertNotIn("--test", out)                                   # no note asking for one
+        st = wait_phase("t-nocheck", {"review"})
+        self.assertEqual((st["round"], st.get("auto_fixes")), (1, 0))
+        self.assertNotIn("base_check", st)
+        self.assertIsNone(st.get("tests"))
+        task = store.Task("t-nocheck")
+        self.assertFalse((task.dir / "base-tests.txt").exists())
+        self.assertTrue(task.round_dir(1).joinpath("prompt.md").read_text().endswith(
+            self.protocol(task, cli.WRITING_PROTOCOL)))
+        self.assertFalse(task.round_dir(2).exists())                      # no auto-fix, no self-review
+
+    def test_wb_next_on_a_writing_task_keeps_the_writing_protocol(self):
+        self.start("t-next", "ok", "--role", "writing")
+        wait_phase("t-next", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now the changelog line.\n")
+        run_wb("next", "t-next", "--spec", str(step2), "-m", "docs: the answer")
+        task = store.Task("t-next")
+        prompt = task.round_dir(2).joinpath("prompt.md").read_text()
+        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL)))
+        self.assertNotIn("No unrelated refactors", prompt)
+        wait_phase("t-next", {"review"})
+
+    def test_self_review_is_off_for_a_writing_task_unless_asked(self):
+        (Path(self.tmp.name) / "state" / "tuning.json").write_text('{"self_review": 1}')  # pinned on
+        for name, want, *flags in (("t-sr0", 0, "writing"), ("t-sr1", 1, "writing", "--self-review"),
+                                   ("t-src", 1, "significant")):
+            self.start(name, "ok", "--role", *flags)
+            self.assertEqual(wait_phase(name, {"review"})["tuned"]["self_review"], want, name)
+        self.assertIs(store.Task("t-sr0").spec["self_review"], False)
+        self.assertIsNone(store.Task("t-src").spec["self_review"])        # the tuning's, as before
+        # off by its role, a writing row is no evidence of the knob (a coding row with it off is)
+        from workbench import tuning
+        row = {"model": "m", "window": 1, "outcome": "accepted", "ran": True, "self_review_due": True,
+               "tuned": {"self_review": 0}}
+        self.assertTrue(tuning.acted("self_review", row))
+        self.assertFalse(tuning.acted("self_review", {**row, "role": "writing"}))
+
+    def test_probe_is_off_for_a_writing_task_and_says_why(self):
+        fake_probe(Path(self.tmp.name))
+        long_code(self.repo)                                              # where probe would be on
+        run_wb("experiment", "probe", "on")
+        for name, role in (("t-probe", "writing"), ("t-probe-c", "significant")):
+            self.start(name, "ok", "--role", role)
+            wait_phase(name, {"review"})
+        task = store.Task("t-probe")
+        self.assertEqual(task.spec["experiments"], {"probe": False})
+        self.assertEqual(task.spec["experiments_off"], {"probe": "a writing task"})
+        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_bytes(), context.WRITING.read_bytes())
+        self.assertNotIn(context.EXPERIMENT_PROTOCOL["probe"], task.round_dir(1).joinpath("prompt.md").read_text())
+        self.assertIn("probe: off for this task (a writing task)", run_wb("status", "t-probe"))
+        self.assertEqual(store.Task("t-probe-c").spec["experiments"], {"probe": "on"})  # coding: as before
+
+    def test_the_router_counts_a_models_writing_record_apart_from_its_coding_one(self):
+        from workbench import router
+        m = cli.models.resolve("mimo")
+        rows = [{"model": m.id, "size": "significant", "role": "writing", "outcome": "accepted",
+                 "ran": True, "active_minutes": 5},
+                {"model": m.id, "size": "significant", "role": "significant", "outcome": "accepted",
+                 "ran": True, "active_minutes": 30},
+                {"model": m.id, "size": "significant", "outcome": "discarded", "ran": True,
+                 "active_minutes": 40},                                   # before the roles: its size
+                {"model": m.id, "size": "trivial", "outcome": "accepted", "ran": True}]
+        for r in rows:
+            store.append_jsonl(store.home() / "results.jsonl", r)
+        writing = router.score(m, "significant", role="writing")
+        self.assertEqual((writing.tries, writing.wins), (1, 1))
+        for coding in (router.score(m, "significant"), router.score(m, "significant", role="significant")):
+            self.assertEqual((coding.tries, coding.wins), (2, 1))
+        self.assertEqual(router.score(m, "trivial").tries, 1)
+        self.assertEqual(router.expected(m.id, "significant", role="writing"), (5, 1))
+        self.assertEqual(router.expected(m.id, "significant"), (35, 2))
+        top, why = router.choose("significant", role="writing")
+        self.assertIn("the best record on writing work", why)
+        self.assertEqual(top.model.id, m.id)
+        # the results row carries the role the router reads
+        self.start("t-row", "ok", "--role", "writing")
+        wait_phase("t-row", {"review"})
+        run_wb("discard", "t-row")
+        self.assertEqual([r for r in store.results() if r.get("task") == "t-row"][-1]["role"], "writing")
+
+    def record(self, model, role, outcome, n, minutes=2.0):
+        for _ in range(n):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": model, "size": "significant", "outcome": outcome, "ran": True,
+                "minutes": minutes, "active_minutes": minutes, **({"role": role} if role else {})})
+
+    def test_wb_start_routes_a_writing_task_on_its_writing_record_and_a_coding_one_on_its_coding_one(self):
+        # the review of #1025: the router's role filter was tested only by calling it, and
+        # dropping `role` from wb start's pick_model or router.choose call still passed. #1016's
+        # routes.resolve must pass it too: this start fails when it doesn't
+        from workbench import router
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({
+            "ollama/qwen3.8-27b": {"weights_gb": 13}, "ollama/mimo-v2.6:9b-q8_0": {"weights_gb": 9.7},
+            "strata": {"weights_gb": 55}}))
+        writer, coder = "ollama/qwen3.8-27b", "ollama/mimo-v2.6:9b-q8_0"  # neither the largest
+        self.record("strata/strata", "writing", "discarded", 3)
+        self.record("strata/strata", "significant", "discarded", 3)
+        self.record(writer, "writing", "accepted", 4)
+        self.record(writer, "significant", "discarded", 3)
+        self.record(coder, "writing", "discarded", 3)
+        self.record(coder, None, "accepted", 4)                           # before the roles: its size
+        os.environ["FAKE_SCENARIO"] = "ok"
+        for name, role, model, work in (("t-rw", "writing", writer, "writing"),
+                                        ("t-rcode", "significant", coder, "significant")):
+            self.assertFalse(router.explores(name), name)                 # the record decides
+            run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo),
+                   "--size", "significant", "--role", role)
+            spec = store.Task(name).spec
+            self.assertEqual(spec["model"], model, name)
+            self.assertIn(f"the best record on {work} work", spec["route"])
+            run_wb("stop", name)
+
+    def test_a_writing_tasks_time_estimates_come_from_its_writing_record(self):
+        # the review of #1025: progress.typical, the check-in's ETA and wb watch's clock line
+        # each read the role, and dropping it from any one still passed. 12 minutes a prose
+        # step against 40 a coding one on the same model
+        from workbench import progress
+        m = cli.models.resolve("mimo").id
+        self.record(m, "writing", "accepted", 3, minutes=12.0)
+        self.record(m, "significant", "accepted", 3, minutes=40.0)
+        self.start("t-eta", "ok", "--role", "writing")
+        wait_phase("t-eta", {"review"})
+        task = store.Task("t-eta")
+        self.assertEqual(progress.typical(task.spec), (12.0, "measured"))
+        self.assertEqual(progress.typical({**task.spec, "role": None}), (40.0, "measured"))
+        task.set_status(phase="running")                                  # an ETA only while it works
+        self.assertIn("(typically 12m)", transcript.clock_line(task))
+        self.assertIn("(typically 12m)", runner.checkin_text(task, 1, {"texts": []}, since=0, active=0))
+
+    def test_prose_steps_leave_the_coding_rows_speed_reward_alone(self):
+        # the review of #1025: tuning.record set each row's speed against the median step of its
+        # size, and a writing task is significant: four 4-minute prose steps made 30-minute coding
+        # steps slow, 1.0 to 0.85, and pushed the coding pick off fresh_at 0.5
+        from workbench import tuning
+        row = lambda mins, val, role=None: {  # noqa: E731
+            "model": "m", "window": 32768, "outcome": "accepted", "ran": True, "size": "significant",
+            "active_minutes": mins, "tuned": {"fresh_at": val}, **({"role": role} if role else {})}
+        coding = [row(30, 0.5), row(30, 0.5), row(30, 0.6)]
+        prose = [row(4, 0.6, "writing") for _ in range(4)]
+        recs = []
+        for rows in (coding, coding + prose):
+            with mock.patch.object(tuning, "_rows", lambda model, window, rows=rows: rows):
+                recs.append(tuning.record("fresh_at", "m", 32768))
+        self.assertEqual(recs[0][0.5], recs[1][0.5])                       # coding alone: unmoved
+        self.assertEqual(recs[1][0.6][:1], recs[0][0.6])
+        self.assertEqual(len(recs[1][0.6]), 5)                             # prose still counts, at its own pace
 
 
 if __name__ == "__main__":

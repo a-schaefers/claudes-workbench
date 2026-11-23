@@ -46,7 +46,7 @@ or comment without the user's yes for it.
 No dependencies, no packaging: it runs from the clone, on Linux, WSL2 and macOS (Landlock only on
 Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `store.py`: task files, atomic JSON, locked JSONL, `Task`. Every other part talks through them.
-- `cli.py`: `wb` and `PROTOCOL` (the agent's rules). `runner.py`: the detached per-task driver,
+- `cli.py`: `wb` and `PROTOCOL` (the agent's rules; `WRITING_PROTOCOL`, the writing role's, same fold). `runner.py`: the detached per-task driver,
   and OpenCode's environment (`opencode_env`: the task's home, the shell shim).
   `events.py`: OpenCode's events, the stuck detector. `ask_mcp.py`: `ask_reviewer`, both sides.
 - `context.py`: what the agent knows and may do (instructions, denies, the shell allowlist, the
@@ -84,7 +84,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   tab, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
   inotify and pidfd waits. `chat.py` + `chat_static/`, `webpush.py`: the web chat. `try/`:
   `wb try`'s sample.
-- `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time).
+- `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time). `agent/WRITING.md`:
+  the writing role's, in its place in every writing prompt: keep it short too (under 3,000 bytes).
 - `skill/workbench/`: the `/workbench` procedure. `mod/`: the plugin (`hooks/register.tsx`, with
   the consent gates on sends to upstream and on the roles; `plugin.json` has no version, so installs track main).
   `bin/`: the launchers. `tests/`: ARCHITECTURE.md's *The tests*. `.github/`, `scripts/`: CI and `ship.sh` (*Shipping to main*).
