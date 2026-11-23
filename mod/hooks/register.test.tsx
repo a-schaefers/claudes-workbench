@@ -5485,6 +5485,7 @@ test('#1041: Dynamic workflows reach the conversation: a dynamic-workflows block
   const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'dynamic-workflows')
   expect(block?.text).toContain('you may split a request into several tasks that run at once')
   expect(block?.text).toContain('say the plan in one line before you start them')
+  expect(block?.text).toContain('pass it as `--group <prefix>` on each `wb start`')  // #1048: the pane's header
   expect(block?.text).toContain('merge logic first, then tests, then UI or docs')
   await clock.advance(31_000)
   const before = rows.length

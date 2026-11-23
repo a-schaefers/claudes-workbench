@@ -176,8 +176,9 @@ if you can, and start nothing until the plan is approved; then write the first s
 - **Fan-out** (only with Dynamic workflows on): independent steps may run at once as separate
   tasks, mixing roles and the GPU and API sides; each runs on its own role's model, never one
   you pick. Each task is a step as above (spec, size, role, acceptance command); give them one
-  name prefix (`auth-logic`, `auth-tests`, `auth-docs`) and say the plan in one line before the
-  first `wb start`. The GPU and the provider slots decide what runs together: `--queue` the rest
+  name prefix (`auth-logic`, `auth-tests`, `auth-docs`), pass `--group <prefix>` (`--group auth`)
+  on each `wb start` so the pane draws them under one header, and say the plan in one line before
+  the first `wb start`. The GPU and the provider slots decide what runs together: `--queue` the rest
   (exit 4). Review each result on its own; accept logic first, then tests, then UI or docs.
 - **What stays yours**, marked apart: git, CLAUDE.md, choices and setup only the user can make
   (downloads, licences, public repos), and the checks you run at review (a screenshot to look at,

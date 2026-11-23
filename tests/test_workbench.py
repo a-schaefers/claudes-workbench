@@ -306,6 +306,61 @@ class Lifecycle(Base):
         rows, _ = store.read_jsonl(store.home() / "results.jsonl")
         self.assertEqual(rows[-1]["outcome"], "accepted")
 
+    def test_a_feedback_round_says_feedback_in_round_for(self):
+        # #1048: the pane's stage says why a round runs (`round 2 · feedback 1`); the round number
+        # alone told a feedback round from an auto-fix, a steer or a fresh session by nothing
+        self.start("t-rfb", "fix", "--test", TEST_CMD, "--auto-fix", "0")
+        first = wait_phase("t-rfb", {"review"})
+        self.assertEqual((first["round"], first["round_for"]), (1, "start"))
+        run_wb("feedback", "t-rfb", "--text", "1. The answer is 42.")
+        st = wait_phase("t-rfb", {"review"})
+        self.assertEqual((st["round"], st["reviews"], st["round_for"]), (2, 1, "feedback"))
+
+    def test_a_self_review_a_next_step_and_a_resume_each_say_why_in_round_for(self):
+        # #1048: the rest of the round kinds the pane names (`self-review`, `step 2`, `resumed`)
+        self.start("t-rself", "ok", "--test", TEST_CMD, "--no-base-check", "--self-review")
+        st = wait_phase("t-rself", {"review"})
+        self.assertEqual((st["round"], st["round_for"]), (2, "self_review"))
+        self.start("t-rkind", "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+        wait_phase("t-rkind", {"review"})
+        run_wb("next", "t-rkind", "--spec", str(self.spec), "-m", "feat: step one")
+        st = wait_phase("t-rkind", {"review"})
+        self.assertEqual((st["steps"], st["round"], st["round_for"]), (2, 2, "next"))
+        task = store.Task("t-rkind")
+        task.set_status(phase="stuck", last="stopped by the reviewer")    # as wb stop leaves it
+        run_wb("resume", "t-rkind")
+        st = wait_phase("t-rkind", {"review"})
+        self.assertEqual((st["round"], st["round_for"]), (3, "resume"))
+
+    def test_a_task_resumed_before_its_first_round_says_resume_in_round_for(self):
+        # #1048: wb resume's other path (it never ran a round: round 1 again) names its round too
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-rfirst", "ok", "--no-self-review")
+        with mock.patch.object(runner, "_down", return_value=True), \
+                mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+            runner.drive(store.Task("t-rfirst"))
+        self.assertEqual(store.Task("t-rfirst").status["round_for"], "start")
+        with mock.patch.object(cli, "spawn_runner"):
+            self.assertIn("its first round, which it never ran", run_wb("resume", "t-rfirst"))
+        st = store.Task("t-rfirst").status
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("queued", 1, "resume"))
+
+    def test_a_round_start_records_the_typical_length_and_how_many_tasks_back_it(self):
+        # #1048: the pane sets a task's active work against its typical length (`~6m left`) with
+        # no read of results.jsonl of its own, and only when enough timed tasks back it
+        model = "ollama/mimo-v2.6:9b-q8_0"
+        for mins in (12, 14, 30):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": model, "size": "significant", "outcome": "accepted", "active_minutes": mins})
+        self.start("t-typ", "ok")
+        st = wait_phase("t-typ", {"review"})
+        self.assertEqual(store.Task("t-typ").spec["model"], model)
+        self.assertEqual(st["typical"], {"min": 14, "n": 3})
+
+    def test_no_history_writes_no_typical(self):
+        self.start("t-notyp", "ok")
+        self.assertNotIn("typical", wait_phase("t-notyp", {"review"}))
+
     def test_start_refuses_when_opencode_isnt_on_path_and_leaves_nothing(self):
         # the 2026-11-16 audit: the runner emptied the GPU, then the round died as "opencode exited 1"
         os.environ["WB_OPENCODE_BIN"] = "wb-no-such-opencode run"
@@ -3295,6 +3350,13 @@ class AutoFix(Base):
             f"auto-fix skipped: the lane refused {dev}: wb allow t-kvm --path {dev}, then "
             "wb feedback, if the tests need it"))
 
+    def test_an_auto_fix_round_says_fix_in_round_for(self):
+        # #1048: the pane's stage reads `round 2 · fix 1/2` from it
+        self.start("t-rfix", "fix", "--test", TEST_CMD, "--no-base-check")
+        st = wait_phase("t-rfix", {"review", "stuck", "failed"})
+        self.assertEqual((st["phase"], st["round"], st["auto_fixes"], st["round_for"]),
+                         ("review", 2, 1, "fix"))
+
     def test_the_code_s_own_failure_still_goes_back_to_the_agent(self):
         self.start("t-own", "fix", "--test", TEST_CMD, "--no-base-check")
         st = wait_phase("t-own", {"review", "stuck", "failed"})
@@ -4171,6 +4233,13 @@ class Context(Base):
         self.assertIn("42", store.Task("t-c4").worktree.joinpath("answer.txt").read_text())
         self.assertIn("reached 76% of its window", run_wb("watch", "t-c4", "--once", "--no-color"))
 
+    def test_a_full_windows_fresh_session_says_fresh_in_round_for(self):
+        # #1048: the pane's stage reads `round 2 · fresh session` from it
+        self.start("t-rfresh", "fill", "--test", TEST_CMD, "--no-self-review")
+        st = wait_phase("t-rfresh", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["handovers"], st["round"], st["round_for"]),
+                         ("review", 1, 2, "fresh"))
+
     def test_a_session_opencode_compacted_between_two_steps_hands_over_at_once(self):
         # #774 (the second 2026-11-21 audit): one tool result past the margin before OpenCode's
         # compaction compacted the session between two steps, which `run --format json` doesn't
@@ -4914,6 +4983,26 @@ class StartChecks(Base):
             self.assertIn("isn't UTF-8", err.getvalue())
         self.assertEqual(store.Task("t-l3").status["phase"], "review")
 
+    def test_a_start_with_group_writes_it_to_task_json(self):
+        # #1048: the pane draws a request's fan-out under one header, from task.json `group`
+        self.start("t-grp", "ok", "--group", "hiscore")
+        self.assertEqual(store.Task("t-grp").spec["group"], "hiscore")
+        wait_phase("t-grp", {"review"})
+        self.start("t-nogrp", "ok")
+        self.assertNotIn("group", store.Task("t-nogrp").spec)     # none given: none guessed
+        wait_phase("t-nogrp", {"review"})
+
+    def test_a_group_that_is_not_a_name_is_refused_before_anything_is_made(self):
+        for bad in ("Hiscore", "_x", "a b", "", "x" * 33, "ok\n"):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err):
+                self.start("t-badgrp", "ok", "--group", bad)
+            self.assertIn("a group name is lowercase letters, digits and hyphens, at most 32",
+                          err.getvalue(), repr(bad))
+            self.assertFalse((store.tasks_dir() / "t-badgrp").exists())
+        self.start("t-badgrp", "ok", "--group", "x" * 32)                 # 32 is a name
+        wait_phase("t-badgrp", {"review"})
+
     def test_a_task_named_in_another_spelling_is_refused_and_its_live_runner_left_alone(self):
         # #782: 'foo/' opened tasks/foo, but the runner's command line says 'foo', so its live
         # runner read as dead: reap failed the task under a notice no reader takes, and discard
@@ -5118,6 +5207,15 @@ class Steering(Base):
         self.assertEqual(st["round"], 2)
         self.assertEqual([r["kind"] for r in rows].count("tests"), 1)  # once, after the note
         self.assertTrue(self.sent()[-1].startswith(runner.NOTE_HEAD))
+
+    def test_a_steer_round_says_steer(self):
+        # #1048: the pane's stage reads `round 2 · steered` from it
+        os.environ["FAKE_SLEEP"] = "2"
+        self.start("t-rst", "ok", "--test", TEST_CMD)
+        self.wait_session("t-rst")
+        run_wb("steer", "t-rst", "--text", "Mention the answer.")
+        st = wait_phase("t-rst", {"review"}, timeout=30)
+        self.assertEqual((st["round"], st["round_for"]), (2, "steer"))
 
     def test_a_plain_note_sent_while_queued_goes_with_the_first_rounds_prompt(self):
         # #452: run_round acted only on --now notes, so a plain note sent while the task waited
@@ -17238,6 +17336,22 @@ class DynamicWorkflows(Base):
             except SystemExit as e:
                 code = e.code
         return code, out.getvalue(), err.getvalue()
+
+    def test_a_fan_out_passes_one_group(self):
+        # #1048: the skill and the mod's rule say to pass the shared prefix as --group on each
+        # start, and the tasks so started carry the one group the pane draws under one header
+        skill = (Path(__file__).parent.parent / "skill/workbench/SKILL.md").read_text()
+        fan = " ".join(skill.split("- **Fan-out**")[1].split("\n- **")[0].split())  # any wrap
+        self.assertIn("pass `--group <prefix>` (`--group auth`) on each `wb start`", fan)
+        mod = (Path(__file__).parent.parent / "mod/hooks/register.tsx").read_text()
+        rule = mod.split("const WORKFLOWS_RULE = ")[1].split("\nconst ")[0]
+        self.assertIn("pass it as `--group <prefix>` on each `wb start`", rule)
+        with mock.patch.object(cli, "spawn_runner", lambda task: 0):
+            for name in ("auth-logic", "auth-tests", "auth-docs"):
+                run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo),
+                       "--model", "mimo", "--group", "auth")
+        self.assertEqual({t.name: t.spec.get("group") for t in store.all_tasks()},
+                         {"auth-logic": "auth", "auth-tests": "auth", "auth-docs": "auth"})
 
     def test_a_fan_out_runs_gpu_tasks_on_separate_cards_together_queues_an_api_task_past_its_slots_and_names_each_role(self):
         # #1041's acceptance: three tasks started at once, one per role, nothing run that

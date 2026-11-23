@@ -627,7 +627,8 @@ const CODING_RULES: Record<string, string> = {
 const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb workflows` shows it): you may split a ' +
   'request into several tasks that run at once, mixing roles and the GPU and API sides; each runs on its own ' +
   'role\'s model, never one you pick. Plan the fan-out as a handoff plan (each task its own spec, size, role and ' +
-  'acceptance command), name its tasks with one shared prefix, and say the plan in one line before you start them. ' +
+  'acceptance command), name its tasks with one shared prefix and pass it as `--group <prefix>` on each `wb start` ' +
+  '(the pane draws them under one header), and say the plan in one line before you start them. ' +
   'The GPU lease and the provider slots decide what runs together (`--queue` the rest). Review each result on its ' +
   'own merits; merge logic first, then tests, then UI or docs.'
 const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb workflows` shows it): run one task ' +
