@@ -24,7 +24,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from . import audio, chat, gitops, hardware, images, lane, models, skills, store
+from . import audio, chat, gitops, hardware, images, lane, models, routes, skills, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 HANDBOOK = PKG_ROOT / "agent" / "HANDBOOK.md"
@@ -1389,11 +1389,12 @@ def lane_refusal(raw: str) -> str | None:
 def private_paths() -> set[str]:
     """Workbench's own files, real paths, which no agent reads or writes: the state directory
     (the rules, notify.jsonl, the chat log, other tasks) but the task's own files (readable), and
-    the config (the chat token, commands.json). The 2026-11-16 audit read the chat token from a
-    lane, which would let an agent post to Claude as the user."""
+    the config (the chat token, commands.json, routes.json). The 2026-11-16 audit read the chat
+    token from a lane, which would let an agent post to Claude as the user."""
     paths = [store.home(), Path.home() / ".config" / "workbench", commands_path(),
              chat.token_path(), chat.config_path(), models.overrides_path(), images.config_path(),
-             audio.config_path(), models.lease_dir()]  # a shared GPU lease too: flock on it wedges every account's (#393)
+             audio.config_path(), models.lease_dir(),  # a shared GPU lease too: flock on it wedges every account's (#393)
+             routes.path()]  # the roles, wherever WB_ROUTES puts them (#1014)
     whole = {"/", os.path.realpath(Path.home())}
     return {r for r in map(os.path.realpath, paths) if r not in whole}
 

@@ -61,8 +61,10 @@ export type WbStats = { key: string; feed: Record<string, any> | null }
 export type WbTop = { snap: Record<string, any> | null; busy: Record<string, number[]> }
 
 /** What this conversation was told of the rules that depend on the state (#540): the user's
- * notes, that wakes are off, the Claude-coding rule; null before its first context block. */
-export type WbSaid = { notes: string; wakeOff: boolean; coding: string }
+ * notes, that wakes are off, the Claude-coding rule, the roles (#1014: routes.summary and
+ * `. Day cap $N`, '' while every role is the default and no cap is set); null before its first
+ * context block. */
+export type WbSaid = { notes: string; wakeOff: boolean; coding: string; routes: string }
 
 declare module 'claude-code' {
   interface PluginState {

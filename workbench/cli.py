@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons,
-               media, models, optimize, patches, progress, results, router, savings, scan, skills, spend, stats, store,
+               media, models, optimize, patches, progress, results, router, routes, savings, scan, skills, spend, stats, store,
                transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
@@ -595,9 +595,10 @@ def pick_model(size: str, wanted: str | None, stack=(), name: str | None = None)
             m = models.resolve(wanted)
         except KeyError as e:
             die(str(e).strip('"'))
-        if m.kind == "api":  # nothing runs one until the roles and their gate land (#1013)
-            die(f"{m.id} is an API model: wb start runs one only through a role you set (wb route), "
-                "not --model", 3)
+        if m.kind == "api":
+            if API_RUNS:  # the user's yes first, in the mod's dialog (#1014)
+                start_gate(name or "", m)
+            die(f"{m.id} {API_NOT_YET}", 3)  # the runner's side comes with wb start --role
         return m, models.status(m), "asked for"
     top, why = router.choose(size, stack, name)
     if top is None:
@@ -1041,6 +1042,10 @@ def cmd_start(a):
     # the package first: its stack is the task's, not the whole monorepo's (#820). Read again
     # below, after the base is checked; a base that names no commit finds none here
     stack = gitops.stack(repo, _package(repo, Path(a.repo).resolve(), a.base))
+    try:  # never read as all GPU: that would move the user off their API choice unsaid (#1014)
+        routes.read()
+    except routes.RoutesError as e:
+        die(routes.unreadable(e), 3)
     m, state, why = pick_model(a.size, a.model, stack, a.name)
     if not state["available"] and not a.force:
         fix = models.remedy(m, state)
@@ -2453,6 +2458,277 @@ def cmd_splash(a):
         store.write_json(store.home() / "splash.json", {"on": a.state == "on", "ts": store.now()})
     print("opening animation: " + ("Enabled (default): the first /workbench of a session plays it; "
                                    "any key skips it" if splash_on() else "Off: the Tasks page opens at once"))
+
+
+# The roles (#1014): wb route
+ROUTE_CATALOG = "not in OpenCode's catalog: wb models lists the API models"
+NOT_FOLLOWED = ("wb start doesn't follow the roles yet: every task runs on the GPU, the router "
+                "choosing (wb start --role comes next)")
+API_NOT_YET = ("is an API model, and this workbench doesn't start tasks on API models yet: wb "
+               "route sets a role's (wb start --role, which runs it, comes next)")
+HEALTH = ("out of credit", "rate-limited by ", "can't reach ")  # passing states: a role may name it
+# whether wb start runs a task on an API model (#1016 turns it on). Until then such a start is
+# refused before any dialog: the dialog asked the user to send their code to a provider for a
+# start that then refused (2026-11-23 review)
+API_RUNS = False
+
+
+def gate_refusal(what: str, command: str) -> str:
+    """The refusal under Claude Code when the mod's dialog approved none of this (#1014), as
+    patches' for a send (#1005): nothing Claude can type is the user's yes."""
+    return (f"in Claude Code {what} only through the workbench mod's dialog, and the user approved "
+            f"none for this change, so nothing changed (is the mod loaded? wb doctor says). Or the "
+            f"user runs it in a terminal of their own: {command}")
+
+
+def _route_api(mid: str, role: str) -> models.Model:
+    """The API model a role may name: OpenCode's exact id (fragments never match an API id), of
+    kind api, with a key wb can hold (stored by /connect: the keyhole holds it outside the lane);
+    else exit 3 with discovery's why."""
+    m = models.lookup(mid)
+    if m is None:
+        why = models.hosted_error()
+        die(ROUTE_CATALOG + (f" (its read failed: {why})" if why else ""), 3)
+    if m.kind != "api":
+        die(f"{mid} is a GPU model: wb route {role} --gpu {mid} pins it", 3)
+    st = models.status(m)
+    if m.key != "stored" or (not st["available"] and not st["why"].startswith(HEALTH)):
+        why = st["why"] if not st["available"] else (
+            f"can't run: needs a key wb can hold outside the lane ({models.provider_name(m)}'s is "
+            + ("none: a free model takes no key" if m.key == "none" else
+               "Ollama's own login" if m.key == "ollama" else m.key or "not stored") + ")")
+        fix = models.remedy(m, st) if not st["available"] else \
+            f"store an API key for {models.provider_name(m)} with /connect in OpenCode"
+        die(f"{mid} can't be a role's model: {why}" + (f": {fix}" if fix and fix not in why else ""), 3)
+    return m
+
+
+def _route_gpu(wanted: str, role: str) -> str:
+    """A role's GPU model: auto, or a GPU model as wb start --model takes one (a fragment too)."""
+    if wanted == routes.AUTO:
+        return wanted
+    try:
+        m = models.resolve(wanted)
+    except KeyError as e:
+        die(str(e).strip('"'), 3)
+    if m.kind == "api":
+        die(f"{m.id} is an API model: wb route {role} --api {m.id} sets it", 3)
+    return m.id
+
+
+def _who(mid: str) -> str:
+    m = models.lookup(mid)
+    return models.provider_name(m) if m is not None and m.kind == "api" else mid.split("/", 1)[0]
+
+
+def _route_argv(role, target, gpu, api, thinking, day) -> list[str]:
+    """The change as one canonical command (after `wb`): what the dialog approved and the gate
+    compares, whatever spelling (an abbreviation, `--flag=value`) Claude used."""
+    out = ["route", *([role] if role else []), *([str(target)] if target is not None else [])]
+    for flag, v in (("--gpu", gpu), ("--api", api), ("--thinking", thinking),
+                    ("--day-usd", f"{day:g}" if day is not None else None)):
+        if v is not None:
+            out += [flag, v]
+    return out
+
+
+def start_line(name: str, m: models.Model) -> str:
+    """The dialog's line for `wb start --model <API id>` (#1014)."""
+    return f"start {name} on API {m.id} (not a role's choice) · your code goes to " \
+           f"{models.provider_name(m)} · thinking off"
+
+
+def start_gate(name: str, m: models.Model) -> None:
+    """Under Claude Code an API --model starts only on the mod's dialog's yes (#1014); exit 3
+    otherwise. GPU models pass as before."""
+    if m.kind != "api" or os.environ.get("CLAUDECODE") != "1":
+        return
+    if not routes.approved({"start": {"task": name, "model": m.id}, "change": start_line(name, m)}):
+        die(gate_refusal("an API model starts", f"wb start {name} … --model {m.id}"), 3)
+
+
+def _route_start(a) -> None:
+    """`wb route --dry-run --json --start <wb start's args>`: the dialog line for that start on an
+    API model, or none (a GPU model, no --model, args wb start would refuse). Parsed by wb
+    start's own parser, so the mod never guesses the task's name or an abbreviated --model."""
+    empty = {"change": "", "gate": False}
+    try:
+        with redirect_stderr(io.StringIO()):
+            ns = parser().parse_args(["start", *a.start])
+    except SystemExit:
+        ns = None
+    m = None
+    if ns is not None and ns.model:
+        try:
+            m = models.resolve(ns.model)
+        except KeyError:
+            m = None
+    if m is None or m.kind != "api":
+        print(json.dumps(empty) if a.json else "")
+        return
+    if not API_RUNS:  # exit 3: the mod lets the call through, and wb start refuses it, unasked
+        die(f"{m.id} {API_NOT_YET}", 3)
+    line = start_line(ns.name, m)
+    print(json.dumps({"change": line, "gate": True,
+                      "approval": {"start": {"task": ns.name, "model": m.id}, "change": line}})
+          if a.json else line)
+
+
+def _route_show(as_json: bool) -> None:
+    try:
+        doc = routes.read()
+    except routes.RoutesError as e:
+        die(routes.unreadable(e), 3)
+    if as_json:
+        out = {**doc, "summary": routes.summary(doc), "roles": {}}
+        for r in routes.ROLES:
+            row = doc["roles"][r]
+            m = models.lookup(row["api"]) if row.get("api") else None
+            api = None if not row.get("api") else \
+                {"available": False, "resident": False, "why": "not in OpenCode's catalog now"} \
+                if m is None else models.status(m)
+            out["roles"][r] = {**row, "label": routes.LABELS[r], "api_status": api,
+                               "gpu_found": None if row["gpu"] == routes.AUTO else row["gpu"] in models.discover()}
+        print(json.dumps(out, indent=2))
+        return
+    width = max(map(len, routes.ROLES)) + 2
+    for r in routes.ROLES:
+        row = doc["roles"][r]
+        gone = row.get("api") and models.lookup(row["api"]) is None
+        if row["via"] == "api":
+            bits = [f"API {row['api']} ({_who(row['api'])})" + (" (not in OpenCode's catalog now)" if gone else ""),
+                    f"thinking {row['thinking']}"]
+        else:
+            bits = ["GPU (the router picks)" if row["gpu"] == routes.AUTO else f"GPU {row['gpu']} (pinned)"]
+            if row.get("api"):
+                bits.append(f"API kept: {row['api']}" + (" (not in OpenCode's catalog now)" if gone else ""))
+            if row["thinking"] == "on":
+                bits.append("thinking on")
+        # on API: who sent its code there (the gated change), a GPU pin since never replacing
+        # it; on the GPU: the newer of the two records
+        keys = (("ts", "by"),) if row["via"] == "api" else (("ts", "by"), ("gpu_ts", "gpu_by"))
+        made = [(row[t], row.get(b)) for t, b in keys if isinstance(row.get(t), (int, float))]
+        if made:
+            ts, by = max(made, key=lambda x: x[0])
+            bits.append(f"set by {'Claude' if by == 'claude' else 'you'} {time.strftime('%m-%d', time.localtime(ts))}")
+        print(f"{r:<{width}}" + " · ".join(bits))
+    if doc["day_usd"] is not None:
+        print(f"day cap {routes.money(doc['day_usd'])}")
+    elif routes.any_api(doc):
+        print(f"no day cap yet (asked when the first role goes to API; suggest ${routes.DAY_USD_SUGGEST})")
+    if doc != routes.normalize({}):
+        print(NOT_FOLLOWED)
+
+
+def cmd_route(a):
+    """Show or change the roles: which model each kind of work goes to (#1014). Under Claude
+    Code a change to the API side (a role's selector, API model, thinking on API, the cap) takes
+    the user's yes in the mod's dialog (route-ok.json); a GPU model pin needs none."""
+    if a.start is not None:
+        if not a.dry_run:
+            die("--start goes with --dry-run (the mod's dialog for wb start --model)")
+        return _route_start(a)
+    what, target = a.what, a.target
+    if what is None:
+        if any(v is not None for v in (target, a.gpu, a.api, a.thinking, a.day_usd)):
+            die("name a role: wb route <role> gpu|api|<provider/model>, wb route all gpu|api, or wb route cap <usd>")
+        if a.dry_run:
+            print(json.dumps({"change": "", "gate": False}) if a.json else "")
+            return
+        return _route_show(a.json)
+    role, via, api, gpu, day = None, None, a.api, a.gpu, a.day_usd
+    if what == "cap":
+        if a.gpu or a.api or a.thinking or a.day_usd is not None:
+            die("wb route cap <usd> takes only the amount")
+        try:
+            day = float(target) if target is not None else None
+        except ValueError:
+            day = None
+        if day is None or not day > 0 or day == float("inf"):
+            die(f"wb route cap <usd>: a day cap in dollars, such as {routes.DAY_USD_SUGGEST}")
+    elif what == "all":
+        role = "all"
+        if a.gpu or a.api:
+            die("--gpu and --api name one role's model: wb route <role> --gpu|--api <id>")
+        if target not in (None, "gpu", "api") or (target is None and a.thinking is None):
+            die("wb route all gpu|api: every role on the GPU, or every role with an API model on it")
+        via = target
+    elif what in routes.ROLES:
+        role = what
+        if target in ("gpu", "api"):
+            via = target
+        elif target is not None:
+            if a.api is not None and a.api != target:
+                die(f"two API models: {target} and --api {a.api}")
+            api, via = target, "api"
+    else:
+        die(f"no role {what!r}: the roles are {', '.join(routes.ROLES)} (or all, or cap)")
+    if api is not None:
+        api = _route_api(api, role).id
+    if gpu is not None:
+        gpu = _route_gpu(gpu, role)
+    if what == "cap":
+        argv = _route_argv("cap", f"{day:g}", None, None, None, None)
+    else:  # an API id as resolved, given as the positional or --api
+        argv = _route_argv(what, target if target in (None, "gpu", "api") else api, gpu,
+                           api if a.api is not None and target in (None, "gpu", "api") else None,
+                           a.thinking, a.day_usd)
+
+    def changed(doc) -> routes.Change:
+        if role == "all" and via == "api" and not routes.any_api(doc):
+            die("no role has an API model yet: wb route <role> <provider/model>", 3)
+        if via == "api" and api is None:  # a role's kept API model must still be one it may run
+            for r in (routes.ROLES if role == "all" else (role,)):
+                if kept := doc["roles"][r].get("api"):
+                    _route_api(kept, r)
+        try:
+            ch = routes.change(doc, None if what == "cap" else role, via=via, gpu=gpu, api=api,
+                               thinking=a.thinking, day_usd=day, who=_who)
+        except routes.RoutesError as e:
+            die(str(e), 3)
+        return ch
+
+    def noted(ch: routes.Change, broken: str) -> routes.Change:
+        if broken and ch.line:  # never a silent start over: the line (the dialog) says it
+            ch.line = f"routes.json couldn't be read ({broken}), so every role starts over on the GPU: {ch.line}"
+            ch.gated = True
+        return ch
+
+    if a.dry_run:
+        broken = ""
+        try:
+            doc = routes.read()
+        except routes.RoutesError as e:
+            doc, broken = routes.normalize({}), str(e)
+        ch = noted(changed(doc), broken)
+        if a.json:
+            print(json.dumps({"change": ch.line, "gate": ch.gated,
+                              **({"approval": {"argv": argv, "change": ch.line}} if ch.gated else {})}))
+        else:
+            print(ch.line or "unchanged")
+        return
+    by = "claude" if os.environ.get("CLAUDECODE") == "1" else "terminal"
+    try:
+        with routes.editing(lenient=True) as held:  # the gate compares the line computed under the lock
+            ch = noted(changed(held[0]), held[1])
+            if not ch.line:
+                print(f"unchanged: {routes.summary(held[0])}")
+                raise _Unchanged
+            if ch.gated and by == "claude":
+                ok = routes.approved({"argv": argv, "change": ch.line})
+                if not ok:
+                    die(gate_refusal("a role changes", "wb " + shlex.join(argv)), 3)
+                by = "pane" if ok.get("by") == "pane" else "dialog"
+            new = routes.stamp(ch, by)
+            held[0].clear()
+            held[0].update(new)
+    except _Unchanged:
+        return
+    print(f"changed: {ch.line}")
+
+
+class _Unchanged(Exception):
+    """Nothing to write: leaves routes.editing without a write."""
 
 
 def cmd_coding(a):
@@ -4881,6 +5157,13 @@ def cmd_try(a):
     """A sample task that proves the setup: a tiny project copied into try_dir()/<n>, set up
     as wb init sets any project up, its spec started as a trivial trial (never the router's
     evidence), and the hidden check printed for Claude to run at review (#112)."""
+    if a.model:  # before any copy: an API start meets a dialog the mod can't show for try-<n>
+        try:
+            m = models.resolve(a.model)
+        except KeyError:
+            m = None  # wb start says why
+        if m is not None and m.kind == "api":
+            die(f"{m.id} is an API model: wb try runs on GPU models only", 3)
     base = try_dir()
     n = 1 + max((int(p.name) for p in base.glob("*") if p.name.isdigit()), default=0)
     while store.Task(f"try-{n}").exists:  # task names are never reused
@@ -5446,6 +5729,12 @@ def cmd_doctor(a):
             elif said and served and served > said:
                 print(f"--  {pid}/{name}: Ollama serves {served // 1024}K, the entry says {said // 1024}K; "
                       f"wb model add {pid}/{name} --context {served} lets its tasks grow")
+    try:  # the roles (#1014): one that can't be read stops every wb start
+        doc = routes.read()
+        if doc != routes.normalize({}):
+            print(f"--  roles: {routes.summary(doc)} (wb route)")
+    except routes.RoutesError as e:
+        line(False, routes.unreadable(e))
     try:  # every wb command makes it: a fresh home has no ~/.local/state yet (the 2026-11-16 audit)
         store.home().mkdir(parents=True, exist_ok=True)
         why = "" if os.access(store.home(), os.W_OK | os.X_OK) else "not writable"
@@ -5909,6 +6198,27 @@ def parser() -> argparse.ArgumentParser:
                    "(e.g. the next try still gets the units wrong)")
     s.add_argument("--did", help="used: what Claude changed under the allowance")
     s.set_defaults(f=cmd_coding)
+    s = sub.add_parser("route", help="the roles: which model each kind of work goes to (show, or "
+                       "change one on the user's yes)")
+    s.add_argument("what", nargs="?", metavar="role|all|cap",
+                   help="significant, trivial, writing; all (every role's selector); cap (the day cap)")
+    s.add_argument("target", nargs="?", metavar="gpu|api|<provider/model>|<usd>",
+                   help="gpu or api flips the selector; an API model's exact id sets it and goes to API; "
+                   "cap: the day cap in dollars")
+    s.add_argument("--gpu", metavar="ID|auto", help="the role's GPU model (a fragment will do), or auto: "
+                   "the router picks (the default)")
+    s.add_argument("--api", metavar="ID", help="the role's API model, its exact OpenCode id; the "
+                   "selector stays as it is")
+    s.add_argument("--thinking", choices=routes.THINKING, help="the role's thinking (off by default)")
+    s.add_argument("--day-usd", type=float, metavar="N", help="the day cap in dollars (asked when "
+                   f"the first role goes to API; suggest {routes.DAY_USD_SUGGEST})")
+    s.add_argument("--json", action="store_true", help="show: the roles as JSON, each API model's "
+                   "status; --dry-run: the change, whether it needs the dialog, and its approval")
+    s.add_argument("--dry-run", action="store_true", help="print the change line and write nothing "
+                   "(the mod's dialog reads it)")
+    s.add_argument("--start", nargs=argparse.REMAINDER, metavar="ARGS",
+                   help="with --dry-run: the dialog line for wb start ARGS on an API --model (the mod's)")
+    s.set_defaults(f=cmd_route)
     s = sub.add_parser("experiment", help="the experiments (changes measured before they are "
                        "supported): list them, or turn one on or off for the tasks started from now")
     s.add_argument("name", nargs="?")

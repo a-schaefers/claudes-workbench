@@ -65,7 +65,10 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `results.py`: results.jsonl rows; read them through `store.results()`, which leaves out trials.
 - `router.py`: the model per size, slices, budgets. `tuning.py`: learned knobs (a new one goes in
   `KNOBS`, read with `tuning.value`). `models.py`: discovery (`discover`, GPU only; API models from
-  OpenCode's catalog, `hosted`, `lookup`, `note_api`), residency, `GpuLease`.
+  OpenCode's catalog, `hosted`, `lookup`, `note_api`), residency, `GpuLease`. `routes.py`: the
+  roles (`significant`, `trivial`, `writing`: GPU or API, each side's model, thinking; the day cap)
+  in routes.json, the change line `wb route` prints and the mod's dialog shows, and the dialog's
+  one-shot approval (`approved`). `wb start` follows them only with `--role` (#1016).
   `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
   notice).
@@ -77,7 +80,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   `wb try`'s sample.
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time).
 - `skill/workbench/`: the `/workbench` procedure. `mod/`: the plugin (`hooks/register.tsx`, with
-  the consent gate on sends to upstream; `plugin.json` has no version, so installs track main).
+  the consent gates on sends to upstream and on the roles; `plugin.json` has no version, so installs track main).
   `bin/`: the launchers. `tests/`: ARCHITECTURE.md's *The tests*. `.github/`, `scripts/`: CI and `ship.sh` (*Shipping to main*).
   `systemd/`, `launchd/`: keep the chat up. `docs/`: images (a replaced one gets a new name, for
   GitHub's cache), the release checklist and notes.
@@ -118,7 +121,9 @@ writes only `tasks/<task>/worktree/`, `ask/` and `opencode/` (its OpenCode's own
 its lane: *What the agent knows*); `rules/<task>/` (with the shell shim, `shell/<name>`) and
 `locks/` (`store.task_lock`) stay outside it (an agent once held the runner's lock: the 0.90 review). `wb patch` keeps `patches.json` (the
 clone install and its upstream, which the mod reads; the pull requests it sent), `send-ok.json` (the mod's yes to one send),
-`rescued/`, `upstream/` and `patches/` there.
+`rescued/`, `upstream/` and `patches/` there; `route-ok.json` is the dialog's yes to one role change
+(`wb route`), or an API start once #1016 runs them. `~/.config/workbench/routes.json` (`$WB_ROUTES`) holds the roles: missing
+is all GPU, unreadable is an error (never read as all GPU).
 
 OpenCode's config is written only through `models.own_config`: one unlayered file without
 comments, and a refusal names the change, never the config (it can hold an `apiKey`). Requests to
@@ -130,11 +135,12 @@ API models (Ollama cloud ones too) are `hosted()`'s, cached in `hosted.json`, na
 Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`,
 `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR`,
 `WB_OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`, `WB_SOURCE` (`wb patch init`'s clone, else
-`~/.local/share/workbench/source`) (relative or `~` allowed: a new one joins
+`~/.local/share/workbench/source`), `WB_ROUTES` (the roles) (relative or `~` allowed: a new one joins
 `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; the agent's `WB_TASK`, `WB_RUN`,
 `WB_USER_PYTHONPATH`; `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), `CLAUDECODE` (under it `wb patch send`
-sends only what the mod's dialog approved: `send-ok.json`). Tests only: `WB_OPENCODE_BIN`,
+sends and `wb route` changes the API side only on the mod's dialog's yes: `send-ok.json`,
+`route-ok.json`; `wb start --model` refuses an API model before any dialog until #1016, `cli.API_RUNS`). Tests only: `WB_OPENCODE_BIN`,
 `WB_FAKE_MODELS`, `WB_FAKE_GPU_GB`, `WB_FAKE_CATALOG` (the fake's OpenCode catalog), `WB_FAKE_API`
 (an API model's state in the fake: `nokey`, `auth`, `quota`, `ratelimit`, `down`), `WB_TEST_SHARD`,
 `WB_TEST_HANG_SECS`.

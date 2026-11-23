@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, pageShape, parsePrice, priceOf, quietForJobs, savedLine, spark, splashTarget, statsLines, wrapParts, wrapWords } from './register.js'
+import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, savedLine, spark, splashTarget, statsLines, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
@@ -2927,7 +2927,7 @@ test('after a reload the mod still tells the conversation of a rule change, such
   fakeTasks(on, files)
   let reloaded = false
   on('state.get', (_: any, e: any, next: any) => e.key === 'said' && e.plugin === 'workbench' && !reloaded   // the earlier load's
-    ? (reloaded = true, { value: { value: { shape: 'said-1', value: { notes: '', wakeOff: false, coding: 'decide' } }, version: 0 } }) : next(e))
+    ? (reloaded = true, { value: { value: { shape: 'said-2', value: { notes: '', wakeOff: false, coding: 'decide', routes: '' } }, version: 0 } }) : next(e))
   on('ui.toast', () => ({ value: undefined }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
   const rows: string[] = []
@@ -4886,4 +4886,279 @@ test('a short line stands after the name; a long one scrolls by blit alone, and 
   expect(w.blits.filter(k => k === 'ticker').length).toBe(b)              // no timer of it left
   void n
   await ui.unmount()
+})
+
+// The roles' consent gate (#1014): `wb route` and `wb start --model <API id>` under the mod
+const ROUTE_LINE = 'trivial: GPU → API deepseek/deepseek-flash · your code goes to DeepSeek · thinking off · cap $5/day'
+const ROUTE_ARGV = ['route', 'trivial', 'deepseek/deepseek-flash', '--day-usd', '5']
+function routeWorld(on: any, files: Record<string, string>) {
+  const w = {
+    asked: [] as string[], options: [] as string[][], answer: "Don't" as string | null, dry: [] as string[][], code: 0,
+    reply: { change: ROUTE_LINE, gate: true, approval: { argv: ROUTE_ARGV, change: ROUTE_LINE } } as Record<string, unknown>,
+  }
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'route' && e.argv[2] === '--dry-run') {
+      w.dry.push(e.argv.slice(1))
+      return { value: { exitCode: w.code, stdout: w.code ? '' : JSON.stringify(w.reply), stderr: w.code ? 'wb: no day cap yet' : '' } }
+    }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  on('tool.call', (_: any, e: any) => {
+    if (e.tool !== 'AskUserQuestion') return { result: { stdout: '' }, text: '' }  // the engine's Bash
+    const q = e.questions[0]
+    w.asked.push(q.question)
+    w.options.push(q.options.map((o: any) => o.label))
+    if (w.answer === null) throw new Error('dismissed')
+    return { result: { questions: e.questions, answers: { [q.question]: w.answer } }, text: '' }
+  })
+  return w
+}
+
+async function routeProbe($: any, on: any, files: Record<string, string> = {}) {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, files, [])
+  const w = routeWorld(on, files)
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const call = async (input: Record<string, unknown>) => {
+    const n = w.asked.length, d = w.dry.length
+    const deny = ((await $.tool.call(input as any)) as any).deny as string | undefined
+    return { deny, asked: w.asked.length - n, question: w.asked[n] ?? '', dry: w.dry.slice(d) }
+  }
+  const bash = (command: string) => call({ tool: 'Bash', command })
+  return { clock, files, w, call, bash }
+}
+
+test('#1014: a role change asks the user with wb\'s own change line; Allow writes the one-shot approval and lets it run, Don\'t refuses it', async ($, on) => {
+  // the owner's rule (2026-11-22): Claude never changes an API route without the user's yes
+  const { clock, bash, files, w } = await routeProbe($, on)
+  const no = await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')
+  expect(no).toEqual({ deny: expect.stringContaining('workbench: not changed: the user did not approve it in the dialog'),
+    asked: 1, question: ROUTE_LINE, dry: [['route', '--dry-run', '--json', 'trivial', 'deepseek/deepseek-flash', '--day-usd', '5']] })
+  expect(w.options[0]).toEqual(['Allow', "Don't"])
+  expect('/wb/route-ok.json' in files).toBe(false)              // "Don't": nothing approved
+  w.answer = null                                                // the dialog dismissed: no yes either
+  expect((await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')).deny).toContain('not changed')
+  w.answer = 'Allow'
+  const yes = await bash('cd /home/u/project && wb route trivial deepseek/deepseek-flash --day-usd 5')
+  expect([yes.deny, yes.asked]).toEqual([undefined, 1])
+  expect(JSON.parse(files['/wb/route-ok.json']!)).toEqual({ argv: ROUTE_ARGV, change: ROUTE_LINE, at: expect.any(Number) })
+  // as bash reads it: inside `bash -c`, through Python, and Monitor's command
+  for (const command of ['bash -lc "wb route all api"', 'python3 /home/u/src/bin/wb route trivial api', 'timeout 30 wb route cap 9']) {
+    w.answer = "Don't"
+    expect([command, (await bash(command)).asked]).toEqual([command, 1])
+  }
+  expect((await call_({ tool: 'Monitor', command: 'wb route writing api', description: 'x', timeout_ms: 1000 })).asked).toBe(1)
+  async function call_(input: Record<string, unknown>) {
+    const n = w.asked.length
+    await $.tool.call(input as any)
+    return { asked: w.asked.length - n }
+  }
+  await clock.advance(1000)
+})
+
+test('#1014: a GPU-only change, a show and a dry run pass without a dialog; a refused dry run is left to wb', async ($, on) => {
+  const { clock, bash, w } = await routeProbe($, on)
+  w.reply = { change: "significant: GPU model the router's pick → ollama/qwen3.8-27b", gate: false }
+  expect(await bash('wb route significant --gpu qwen')).toEqual({ deny: undefined, asked: 0, question: '',
+    dry: [['route', '--dry-run', '--json', 'significant', '--gpu', 'qwen']] })
+  for (const command of ['wb route', 'wb route --json', 'wb route --dry-run trivial api', 'wb status', 'echo "wb route trivial api"']) {
+    expect([command, await bash(command)]).toEqual([command, { deny: undefined, asked: 0, question: '', dry: [] }])
+  }
+  w.code = 3                                                     // wb refuses it (no cap): no dialog, its own line says why
+  w.reply = { change: ROUTE_LINE, gate: true }
+  expect((await bash('wb route trivial deepseek/deepseek-flash')).asked).toBe(0)
+  await clock.advance(1000)
+})
+
+test('#1014: wb start --model on an API model asks first once wb gates it; refused by wb, a GPU --model and a start without one ask nothing', async ($, on) => {
+  const { clock, bash, w } = await routeProbe($, on)
+  w.code = 3                                                     // until #1016 wb's dry run refuses an API start
+  expect((await bash('wb start fix --spec s.md --model acme/coder-flash'))).toEqual(expect.objectContaining({ deny: undefined, asked: 0 }))
+  w.code = 0                                                     // the gate #1016 turns on (cli.API_RUNS)
+  const line = "start fix on API acme/coder-flash (not a role's choice) · your code goes to Acme · thinking off"
+  w.reply = { change: line, gate: true, approval: { start: { task: 'fix', model: 'acme/coder-flash' }, change: line } }
+  const r = await bash('wb start fix --spec s.md --mod acme/coder-flash')
+  expect([r.asked, r.question, r.deny]).toEqual([1, line, expect.stringContaining('not changed')])
+  expect(r.dry).toEqual([['route', '--dry-run', '--json', '--start', 'fix', '--spec', 's.md', '--mod', 'acme/coder-flash']])
+  w.reply = { change: '', gate: false }                         // wb's dry run: a GPU model
+  expect(await bash('wb start fix --spec s.md --model mimo')).toEqual(expect.objectContaining({ deny: undefined, asked: 0 }))
+  expect((await bash('wb start fix --spec s.md --size trivial')).dry).toEqual([])
+  await clock.advance(1000)
+})
+
+test('#1014: a route change hidden in text another program runs, or two in one line, is refused unasked', async ($, on) => {
+  const { clock, bash } = await routeProbe($, on)
+  for (const command of ['bash <<EOF\nwb route trivial api\nEOF', 'wb route trivial api && wb route writing api',
+    'python3 - <<EOF\nimport os; os.system("wb start x --spec s --model acme/coder-flash")\nEOF']) {
+    const r = await bash(command)
+    expect([command, r.asked, r.deny]).toEqual([command, 0, expect.stringContaining('run wb route (or wb start --model) as a command of its own')])
+  }
+  expect(routeCalls('wb route && wb route trivial api').calls).toEqual([[], ['trivial', 'api']])
+  expect((await bash('wb route && wb route trivial api')).asked).toBe(1)  // a show beside it is no second change
+  await clock.advance(1000)
+})
+
+test('#1014: away on the web chat a role change is refused without a dialog', async ($, on) => {
+  const files: Record<string, string> = chatOn({})
+  const { clock, bash } = await routeProbe($, on, files)
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
+  await clock.advance(3000)                                     // a web message: the user is away
+  const r = await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')
+  expect([r.asked, r.deny]).toEqual([0, expect.stringContaining('the user is away: say in the web chat what you\'d change')])
+  expect('/wb/route-ok.json' in files).toBe(false)
+  await clock.advance(1000)
+})
+
+test('#1014: routes.json and route-ok.json are never Claude\'s to edit, and no command writes the approval', async ($, on) => {
+  const { clock, call, bash, files } = await routeProbe($, on)
+  for (const input of [
+    { tool: 'Edit', file_path: '/home/u/.config/workbench/routes.json', old_string: 'gpu', new_string: 'api' },
+    { tool: 'Write', file_path: '/home/u/.config/workbench/routes.json', content: '{}' },
+    { tool: 'Write', file_path: '/wb/route-ok.json', content: '{"argv": [], "change": "", "at": 1800000000}' },
+    { tool: 'MultiEdit', file_path: '../.config/workbench/routes.json', edits: [] },
+  ]) expect([input.file_path, (await call(input)).deny]).toEqual([input.file_path, expect.stringContaining('the roles change only through wb route')])
+  expect('/wb/route-ok.json' in files).toBe(false)
+  // through a link to it, by real path (2026-11-23 review: no test reached that branch)
+  links['/home/u/dots/routes.json'] = '/home/u/.config/workbench/routes.json'
+  links['/home/u/dots/ok.json'] = '/wb/route-ok.json'
+  try {
+    for (const file_path of ['/home/u/dots/routes.json', '/home/u/dots/ok.json'])
+      expect([file_path, (await call({ tool: 'Edit', file_path, old_string: 'gpu', new_string: 'api' })).deny])
+        .toEqual([file_path, expect.stringContaining('the roles change only through wb route')])
+  } finally {
+    delete links['/home/u/dots/routes.json']
+    delete links['/home/u/dots/ok.json']
+  }
+  // a forged approval through Bash, by any spelling of the state directory
+  for (const command of [`echo '{"argv": ["route"], "change": "x", "at": 1800000000}' > /wb/route-ok.json`,
+    'cp ok.json "$WB_HOME/route-ok.json"', 'cd /wb && tee route-ok.json < x']) {
+    expect([command, (await bash(command)).deny]).toEqual([command, expect.stringContaining("route-ok.json is the mod's dialog's to write")])
+  }
+  expect((await bash('grep -rn route-ok.json workbench/')).deny).toBeUndefined()  // the code that names it
+  expect((await call({ tool: 'Write', file_path: '/home/u/project/notes.md', content: 'x' })).deny).toBeUndefined()
+  await clock.advance(1000)
+})
+
+test('#1014: the roles reach the conversation: a block while delegating with an API role, and one row per change however made', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const at = '/home/u/.config/workbench/routes.json'
+  const files: Record<string, string> = {
+    [at]: JSON.stringify({ v: 1, day_usd: 5, roles: { trivial: { via: 'api', api: 'deepseek/deepseek-flash', thinking: 'off' } } }),
+  }
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const skill = await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  expect(skill.text).toContain('Roles (the user\'s, wb route): significant GPU')  // said with the skill's text
+  const names = (await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)
+  expect(names).not.toContain('workbench-routes')               // not twice
+  // a fresh conversation's (a /clear's, a compaction's) first block says them
+  const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'workbench-routes')
+  expect(block?.text).toBe('Roles (the user\'s, wb route): significant GPU (the router picks); trivial API deepseek/deepseek-flash, ' +
+    'thinking off; writing GPU (the router picks). Day cap $5. Never pass --model for an API model or change a role without ' +
+    'the user\'s yes (the mod asks them in a dialog); recommend only.')
+  await clock.advance(31_000)
+  const before = rows.length
+  // a change between polls, however made (here a hand edit): one row, then nothing more
+  files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: { trivial: { via: 'gpu', api: 'deepseek/deepseek-flash' } } })
+  await clock.advance(31_000)
+  const changed = rows.slice(before).filter(r => r.includes('The roles changed'))
+  expect(changed).toEqual(['[workbench] The roles changed: significant GPU (the router picks); trivial GPU (the router picks), ' +
+    'API kept: deepseek/deepseek-flash; writing GPU (the router picks). Day cap $5. Never pass --model for an API model or ' +
+    'change a role without the user\'s yes (the mod asks them in a dialog); recommend only.'])
+  await clock.advance(31_000)
+  expect(rows.slice(before).filter(r => r.includes('roles'))).toHaveLength(1)   // once per change
+  // the cap alone (2026-11-23 review: it was in no summary, so Claude kept the old cap)
+  const capped = rows.length
+  files[at] = JSON.stringify({ v: 1, day_usd: 10, roles: { trivial: { via: 'gpu', api: 'deepseek/deepseek-flash' } } })
+  await clock.advance(31_000)
+  await clock.advance(31_000)
+  expect(rows.slice(capped).filter(r => r.includes('roles'))).toEqual([expect.stringContaining('writing GPU (the router ' +
+    'picks). Day cap $10. Never pass')])
+  files[at] = '{"roles": '                                       // broken: said, never read as all GPU
+  await clock.advance(31_000)
+  expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')
+  // JSON that wb's normalize refuses reads the same (routesValid), never as ordinary roles
+  for (const bad of [{ roles: { trivail: {} } }, { roles: { trivial: { via: 'api' } } }, { day_usd: -1 }]) {
+    files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: {} })
+    await clock.advance(31_000)
+    expect(rows.at(-1)).toContain('The roles changed: significant GPU (the router picks)')
+    files[at] = JSON.stringify(bad)
+    await clock.advance(31_000)
+    expect([bad, rows.at(-1)]).toEqual([bad, expect.stringContaining('The roles changed: routes.json can\'t be read (wb route says why)')])
+  }
+})
+
+test('#1014: with no role on an API model the conversation gets no roles block', async ($, on) => {
+  // 2026-11-23 review: nothing checked the block waits for an API model (a GPU pin alone isn't one)
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {
+    '/home/u/.config/workbench/routes.json': JSON.stringify({ roles: { significant: { gpu: 'ollama/x' } } }),
+  }
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await $.prompt.context({ blocks: [] })
+  const names = (await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)
+  expect(names).toContain('workbench-mode')                     // delegating: the blocks were read
+  expect(names).not.toContain('workbench-routes')
+  await clock.advance(1000)
+})
+
+async function reloadedWith($: any, on: any, shape: string, value: Record<string, unknown>) {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {
+    '/home/u/.config/workbench/routes.json': JSON.stringify({ roles: { significant: { gpu: 'ollama/qwen3.8-27b' } } }),
+  }
+  task(files, 'fix-it', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })
+  fakeTasks(on, files)
+  let reloaded = false
+  on('state.get', (_: any, e: any, next: any) => e.key === 'said' && e.plugin === 'workbench' && !reloaded   // the earlier load's
+    ? (reloaded = true, { value: { value: { shape, value }, version: 0 } }) : next(e))
+  on('ui.toast', () => ({ value: undefined }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(31_000)
+  return rows.filter(r => /Roles \(|roles changed/.test(r))  // either: a first note, or a change
+}
+
+test('#1014: the said-2 atom from a reload keeps the roles said, so a change made meanwhile is one row', async ($, on) => {
+  const was = 'significant GPU (the router picks); trivial GPU (the router picks); writing GPU (the router picks)'
+  expect(await reloadedWith($, on, 'said-2', { notes: '', wakeOff: false, coding: 'decide', routes: was }))
+    .toEqual([expect.stringContaining('The roles changed: significant GPU ollama/qwen3.8-27b; trivial GPU')])
+})
+
+test('#1014: a stored said-1 (no roles in it) is declined: nothing is taken as said, and no row comes on a guess', async ($, on) => {
+  // accepted, it would say the roles as a first note (ROUTES_NOTE), which a filter on "The roles
+  // changed" alone let pass (2026-11-23 review): every row that names the roles is counted
+  expect(await reloadedWith($, on, 'said-1', { notes: '', wakeOff: false, coding: 'decide' })).toEqual([])
+})
+
+test('#1014: the mod\'s summary of the roles reads as routes.summary does', () => {
+  // Couplings: the context block and the echo say this; tests.test_workbench.Routes checks wb's
+  expect(routesSummary({})).toBe('significant GPU (the router picks); trivial GPU (the router picks); writing GPU (the router picks)')
+  expect(routesSummary({ roles: { trivial: { via: 'api', api: 'deepseek/deepseek-flash', thinking: 'off' },
+    writing: { via: 'gpu', gpu: 'ollama/x', api: 'anthropic/claude-haiku-5-5', thinking: 'on' } } }))
+    .toBe('significant GPU (the router picks); trivial API deepseek/deepseek-flash, thinking off; writing GPU ollama/x, ' +
+      'API kept: anthropic/claude-haiku-5-5, thinking on')
 })
