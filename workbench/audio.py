@@ -14,7 +14,8 @@ the CPU, without the GPU lease, so beside a task; a url on another host is off t
 true), "voices", "seconds" (the default length),
 "unload" (a URL POSTed after a batch, so a server lets its GPU memory go), "key" (a url
 engine's API key), "ref_arg", "model",
-"label", "notes" (the licence: shown to Claude), "timeout" (s). Placeholders: {text} {out} {seed}
+"label", "notes" (the licence: shown to Claude), "timeout" (s); "default_speech", "default_sfx",
+"default_music": the engine of that kind used without --engine, else its first (#1047). Placeholders: {text} {out} {seed}
 {seconds} {voice} {lyrics}, and {in} for a listener, which prints its transcript on stdout. No
 model is named here: the user installs one and describes it.
 """
@@ -62,8 +63,44 @@ def engines() -> dict[str, dict]:
     return media.load(config_path())
 
 
+def default_of(kind: str, makers: dict[str, dict] | None = None) -> str | None:
+    """The engine of ``kind`` used without --engine: audio.json's "default_<kind>" when it names
+    an engine of that kind (#1047), else the first of that kind; None when there is none."""
+    makers = engines() if makers is None else makers
+    of = [k for k, e in makers.items() if kind_of(e) == kind]
+    named = media.named_default(config_path(), f"default_{kind}")
+    return named if named in of else next(iter(of), None)
+
+
+def set_default(name: str) -> str:
+    """`wb audio --default NAME` (#1047): the engine's own kind picks the key."""
+    have = engines()
+    if name not in have:
+        raise KeyError(f"no audio engine {name!r} (have: "
+                       + ", ".join(f"{k} ({kind_of(e)})" for k, e in have.items()) + ")" if have
+                       else f"no audio engine: describe one in {config_path()}")
+    kind = kind_of(have[name])
+    if kind == "listen":
+        raise KeyError(f"{name} is the listener (it checks speech): a default is a speech, sfx or "
+                       "music engine")
+    if kind not in KINDS:
+        raise KeyError(f"{name}'s kind {kind!r} isn't one of {', '.join(KINDS)}")
+    media.set_default(config_path(), f"default_{kind}", name)
+    return f"default {kind} engine: {name}"
+
+
+def choices() -> dict:
+    """The pane's Audio rows (#1047, `wb models --json`'s media): per kind its default and each
+    engine, with whether it needs this GPU (media.on_gpu)."""
+    have = engines()
+    return {k: {"default": default_of(k, have),
+                "engines": [{"name": n, "gpu": media.on_gpu(e)} for n, e in have.items() if kind_of(e) == k]}
+            for k in KINDS}
+
+
 def engine(name: str | None, kind: str | None) -> tuple[str, dict]:
-    """The named engine, or the first of ``kind``, or the first that makes audio."""
+    """The named engine, or ``kind``'s default (default_of), or the first engine's kind's: the
+    first that makes audio, unless its kind names another."""
     have = engines()
     makers = {k: e for k, e in have.items() if kind_of(e) != "listen"}
     if not makers:
@@ -74,9 +111,8 @@ def engine(name: str | None, kind: str | None) -> tuple[str, dict]:
         if kind and kind_of(makers[name]) != kind:
             raise KeyError(f"audio engine {name} makes {kind_of(makers[name])}, not {kind}")
         return name, makers[name]
-    for k, e in makers.items():
-        if kind is None or kind_of(e) == kind:
-            return k, e
+    if found := default_of(kind or kind_of(next(iter(makers.values()))), makers):
+        return found, makers[found]
     raise KeyError(f"no {kind} engine in {config_path()} (have: "
                    + ", ".join(f"{k} ({kind_of(e)})" for k, e in makers.items()) + ")")
 
@@ -613,10 +649,12 @@ def summary(found: dict, seconds: float | None) -> str:
 
 def lines() -> list[str]:
     """Each engine for `wb audio --list` and `wb scout`: its kind, whether it's ready, its notes."""
-    out = []
-    for name, e in engines().items():
+    out, have = [], engines()
+    marked = {n for k in KINDS if (n := media.named_default(config_path(), f"default_{k}")) in have
+              and kind_of(have[n]) == k}  # the user's picks (#1047); none: the listing as before
+    for name, e in have.items():
         why = ready(e)
-        out.append(f"  {name} ({kind_of(e)}{'' if media.on_gpu(e) else ', CPU'}): "
+        out.append(f"  {name} ({kind_of(e)}{'' if media.on_gpu(e) else ', CPU'}{', default' if name in marked else ''}): "
                    f"{str(e.get('label') or e.get('command') or e.get('url') or '')[:60]}"
                    f" · {'ready' if not why else why}"
                    + (" · a server: it holds its GPU memory while it runs"
