@@ -29272,5 +29272,285 @@ class RoleResolution(Base):
             self.assertEqual(self.wb("feedback", "t-unread", "--text", "fix it")[0:3:2], (3, f"wb: {line}\n"))
             self.assertFalse(task.round_dir(2).exists())
 
+
+class SettingsRoles(Base):
+    """The pane's Settings tab reads wb (#1023): `wb route --json` carries the busy opt-in, spend
+    today and each provider's key state; `wb models --json` lists the GPU models (window, sizes,
+    cards) and the API models wb can run, asking no server; `wb route busy wait|api` is the busy
+    row's command, to api only on the dialog's yes under Claude Code."""
+    catalog = ApiHarness.catalog
+
+    def setUp(self):
+        super().setUp()
+        self.catalog(ROLE_CATALOG, ROLE_AUTH)
+        self.routes = Path(os.environ["WB_ROUTES"])
+        self.ok = store.home() / "route-ok.json"
+
+    wb = RoleResolution.wb
+
+    def set_role(self, *argv):
+        code, _, err = self.wb("route", *argv)
+        self.assertEqual(code, 0, err)
+
+    def test_wb_route_json_carries_busy_spend_today_and_each_providers_key_state(self):
+        self.set_role("trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")
+        hosted = runner.models.hosted_path()                       # a stale catalog: never rebuilt for the pane
+        store.write_json(hosted, {**json.loads(hosted.read_text()), "ts": time.time() - 100_000})
+        day = time.strftime("%Y-%m-%d")
+        ledger = store.home() / "spend-api.jsonl"
+        for row in ({"day": day, "kind": "step", "provider": "deepseek", "usd": 0.30},
+                    {"day": day, "kind": "reconcile", "provider": "deepseek", "usd": 0.12},
+                    {"day": day, "kind": "step", "provider": "anthropic", "usd": 0.05},
+                    {"day": day, "kind": "checkin", "provider": "deepseek", "usd": 9},     # not spend
+                    {"day": "2000-01-01", "kind": "step", "provider": "deepseek", "usd": 7},  # another day
+                    {"day": day, "kind": "step", "provider": "opencode-go", "usd": None, "plan": "opencode-go"}):
+            store.append_jsonl(ledger, row)
+        with mock.patch.object(runner.models, "_build_hosted", side_effect=AssertionError("a catalog rebuild")):
+            shown = json.loads(self.wb("route", "--json")[1])
+        self.assertEqual((shown["busy"], shown["day_usd"]), ("wait", 5))
+        self.assertEqual(shown["roles"]["trivial"]["api_status"]["why"], "API (DeepSeek)")
+        self.assertEqual(shown["spend_today"], {"usd": 0.47, "by_provider": {"deepseek": 0.42, "anthropic": 0.05}})
+        p = shown["providers"]
+        self.assertEqual(p["deepseek"], {"name": "DeepSeek", "key": "stored"})
+        self.assertEqual((p["xenv"]["key"], p["xenv"]["why"]),
+                         ("env", "can't run: needs a key wb can hold outside the lane (key in XENV_API_KEY)"))
+        self.assertEqual(p["oauthco"]["key"], "oauth")
+        self.assertIn("needs a key wb can hold outside the lane (an OAuth login)", p["oauthco"]["why"])
+        ledger.unlink()
+        self.assertEqual(json.loads(self.wb("route", "--json")[1])["spend_today"], {"usd": 0, "by_provider": {}})
+
+    def test_wb_models_json_lists_gpu_models_with_sizes_and_the_runnable_api_models_asking_no_server(self):
+        runner.models.hosted(fresh=True)
+        gpu_ids = list(runner.models.discover())
+        self.assertTrue(gpu_ids)
+        self.assertEqual(self.wb("model", "sizes", gpu_ids[0], "trivial")[0], 0)
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        task_dir = store.tasks_dir() / "old-api"
+        task_dir.mkdir(parents=True)
+        store.write_json(task_dir / "task.json", {"name": "old-api", "via": "api", "model": "acme/coder-pro",
+                                                  "created_at": time.time()})
+        asked = []
+        with mock.patch.object(runner.models, "_get", side_effect=lambda *a, **k: asked.append(a)), \
+                mock.patch.object(runner.models, "status", side_effect=AssertionError("a status probe")), \
+                mock.patch.object(runner.models, "_build_hosted", side_effect=AssertionError("a catalog rebuild")):
+            code, out, err = self.wb("models", "--json")
+        self.assertEqual((code, err, asked), (0, "", []))              # no server asked
+        doc = json.loads(out)
+        gpu = {g["id"]: g for g in doc["gpu"]}
+        self.assertEqual(set(gpu), set(gpu_ids))
+        self.assertEqual(gpu[gpu_ids[0]]["sizes"], ["trivial"])
+        self.assertTrue(all(g["sizes"] == [] for i, g in gpu.items() if i != gpu_ids[0]))
+        self.assertTrue(all(isinstance(g["label"], str) and "window" in g and g["cards"] is None for g in gpu.values()))
+        api = {x["id"]: x for x in doc["api"]}
+        self.assertIn("deepseek/deepseek-flash", api)
+        self.assertEqual(api["deepseek/deepseek-flash"]["provider_name"], "DeepSeek")
+        self.assertEqual(api["deepseek/deepseek-flash"]["price"], {"input": 0.2, "output": 0.6})
+        self.assertIsInstance(api["deepseek/deepseek-flash"]["window"], int)
+        for kept_out in ("oauthco/chat-1", "xenv/grok-9", "opencode/big-pickle-free"):  # no key wb can hold
+            self.assertNotIn(kept_out, api)
+        self.assertEqual(doc["used"], ["acme/coder-pro"])
+        self.assertTrue(doc["free_line"])
+        self.assertEqual(set(doc["optimize"]), {"done_at", "models", "running"})
+
+    def test_a_gpu_models_cards_are_the_numbers_its_ollama_sees_and_none_when_unknown(self):
+        cards = [{"uuid": f"GPU-{i}", "discrete": True} for i in range(4)]
+        with mock.patch.object(runner.models, "server_devices", lambda root: frozenset({"GPU-2", "GPU-3"})), \
+                mock.patch.object(runner.models.hardware, "gpus", lambda windows=True: cards):
+            self.assertEqual(runner.models.card_numbers("http://127.0.0.1:11435"), [2, 3])
+        with mock.patch.object(runner.models, "server_devices", lambda root: None):
+            self.assertIsNone(runner.models.card_numbers("http://127.0.0.1:11434"))
+
+    def test_busy_is_wait_when_missing_and_anything_but_wait_or_api_is_an_error(self):
+        self.assertEqual(routes.read()["busy"], "wait")
+        for bad in ("API", "queue", None, 1):
+            with self.subTest(bad=bad):
+                self.routes.write_text(json.dumps({"busy": bad}))
+                with self.assertRaisesRegex(routes.RoutesError, "busy is"):
+                    routes.read()
+        self.routes.write_text(json.dumps({"busy": "api", "day_usd": 5}))
+        self.assertEqual(routes.read()["busy"], "api")
+        self.assertTrue(routes.summary(routes.read()).endswith(
+            "; when the GPU is busy, a role with an API model runs on it"))
+
+    def test_wb_route_busy_api_takes_the_dialogs_yes_and_a_cap_while_wait_takes_none(self):
+        code, _, err = self.wb("route", "busy", "api")              # a terminal, but no cap yet
+        self.assertEqual(code, 3)
+        self.assertIn("no day cap yet", err)
+        self.set_role("trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")  # kept on the GPU
+        os.environ["CLAUDECODE"] = "1"
+        code, out, err = self.wb("route", "--dry-run", "--json", "busy", "api")
+        asked = json.loads(out)
+        self.assertEqual((asked["gate"], asked["approval"]["argv"]), (True, ["route", "busy", "api"]))
+        self.assertEqual(asked["change"], "When the GPU is busy: wait → the role's API model (a role with an "
+                                          "API model (trivial) starts on it while the GPU is busy; cap $5/day)")
+        code, out, err = self.wb("route", "busy", "api")
+        self.assertEqual(code, 3)                                     # no yes: unchanged
+        self.assertIn("approved none for this change", err)
+        self.assertEqual(routes.read()["busy"], "wait")
+        store.write_json(self.ok, {**asked["approval"], "at": time.time(), "by": "pane"})
+        code, out, err = self.wb("route", "busy", "api")
+        self.assertEqual((code, out), (0, f"changed: {asked['change']}\n"), err)
+        self.assertEqual(routes.read()["busy"], "api")
+        self.assertIn("When the GPU is busy: a role with an API model starts on it", self.wb("route")[1])
+        back = json.loads(self.wb("route", "--dry-run", "--json", "busy", "wait")[1])
+        self.assertEqual((back["gate"], back["change"]),
+                         (False, "When the GPU is busy: the role's API model → wait (queue, as before)"))
+        code, out, err = self.wb("route", "busy", "wait")             # no dialog to stop spending
+        self.assertEqual((code, routes.read()["busy"]), (0, "wait"), err)
+        self.assertEqual(self.wb("route", "busy", "maybe")[0], 1)
+
+    def test_wb_route_cap_off_clears_the_cap_only_while_nothing_can_spend_on_api(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        code, _, err = self.wb("route", "cap", "off")               # trivial runs on API
+        self.assertEqual(code, 3)
+        self.assertIn("the day cap stays while trivial can spend on API", err)
+        self.set_role("trivial", "gpu")
+        self.set_role("busy", "api")
+        code, _, err = self.wb("route", "cap", "off")               # the busy opt-in can send it there
+        self.assertEqual(code, 3)
+        self.assertIn("the day cap stays while busy can spend on API", err)
+        self.set_role("busy", "wait")
+        os.environ["CLAUDECODE"] = "1"
+        asked = json.loads(self.wb("route", "--dry-run", "--json", "cap", "off")[1])
+        self.assertEqual((asked["change"], asked["approval"]["argv"]), ("day cap $5 → none", ["route", "cap", "off"]))
+        store.write_json(self.ok, {**asked["approval"], "at": time.time(), "by": "pane"})
+        code, out, err = self.wb("route", "cap", "off")
+        self.assertEqual((code, out), (0, "changed: day cap $5 → none\n"), err)
+        self.assertIsNone(routes.read()["day_usd"])
+        self.assertEqual(self.wb("route", "cap", "nothing")[0], 1)
+
+    def test_with_busy_on_a_change_that_lets_a_role_spend_on_api_takes_the_yes_and_a_cap(self):
+        # 2026-11-23 review: Agents back from GPU re-enabled the opt-in with no dialog, and an API
+        # model set on a GPU role after `cap off` could spend with no cap
+        self.set_role("trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.set_role("busy", "api")
+        self.set_role("all", "gpu")                                 # nothing can spend
+        os.environ["CLAUDECODE"] = "1"
+        asked = json.loads(self.wb("route", "--dry-run", "--json", "all", "both")[1])
+        self.assertTrue(asked["gate"])
+        self.assertIn("when the GPU is busy, trivial starts on its API model (your code goes to DeepSeek (trivial); "
+                      "cap $5/day)", asked["change"])
+        code, _, err = self.wb("route", "all", "both")
+        self.assertEqual(code, 3)                                   # no yes: Agents stays GPU
+        self.assertIn("approved none for this change", err)
+        self.assertEqual(routes.read()["use"], "gpu")
+        del os.environ["CLAUDECODE"]
+        self.set_role("all", "both")
+        self.set_role("trivial", "--api", "deepseek/deepseek-v4-pro")    # stays gated: a new model to send to
+        self.set_role("busy", "wait")
+        self.routes.write_text(json.dumps({"busy": "api", "day_usd": 5}))   # the opt-in, no API model yet
+        self.set_role("cap", "off")                                 # nothing can spend: allowed
+        code, _, err = self.wb("route", "trivial", "--api", "deepseek/deepseek-flash")
+        self.assertEqual(code, 3)
+        self.assertIn("no day cap yet", err)
+        self.assertNotIn("api", routes.read()["roles"]["trivial"])
+
+
+class BusyGpu(Base):
+    """The busy-GPU opt-in at wb start (#1023): with routes.json `busy` api, a start that would
+    wait for a busy GPU runs on the role's API model instead, says so, and never anything else."""
+    catalog = ApiHarness.catalog
+    wb = RoleResolution.wb
+    begin = RoleResolution.begin
+
+    def setUp(self):
+        super().setUp()
+        self.catalog(ROLE_CATALOG, ROLE_AUTH)
+        for p in (mock.patch.object(cli, "spawn_runner", lambda task: 0),
+                  mock.patch.object(cli, "_gpu_wait", lambda m, me=None: (
+                      {"gpu0": {"task": "other", "model": m.id}}, self.busy))):
+            p.start()
+            self.addCleanup(p.stop)
+        self.busy = True
+
+    def opt_in(self, role="trivial"):
+        for argv in ((role, "--api", "deepseek/deepseek-flash", "--day-usd", "5"), ("busy", "api")):
+            code, _, err = self.wb("route", *argv)
+            self.assertEqual(code, 0, err)
+
+    def test_a_busy_gpu_starts_the_role_on_its_api_model_when_the_user_opted_in(self):
+        self.opt_in()
+        code, out, err = self.begin("t-busy", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-busy").spec
+        self.assertEqual({k: sp.get(k) for k in ("model", "via", "role", "provider", "busy")},
+                         {"model": "deepseek/deepseek-flash", "via": "api", "role": "trivial",
+                          "provider": "deepseek", "busy": True})
+        self.assertIn(f"\n{routes.BUSY_LINE}\n", out)
+        self.assertTrue(out.startswith("started t-busy on deepseek/deepseek-flash (API) · "), out)
+        self.assertIn(routes.BUSY_LINE, sp["route"])
+        self.assertNotIn("waits as queued", out)
+        self.assertEqual(store.Task("t-busy").status["phase"], "queued")
+
+    def test_with_busy_wait_the_default_a_busy_gpu_exits_4_as_before(self):
+        code, _, err = self.wb("route", "trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.begin("t-wait", "--role", "trivial")
+        self.assertEqual((code, out), (4, ""))
+        self.assertIn("can't run beside it", err)
+
+    def test_it_never_applies_with_agents_on_gpu_a_model_asked_for_or_a_free_gpu(self):
+        self.opt_in()
+        self.assertEqual(self.wb("route", "all", "gpu")[0], 0)
+        self.assertEqual(self.begin("t-agents", "--role", "trivial")[0], 4)   # Agents GPU: nothing spends
+        self.assertEqual(self.wb("route", "all", "both")[0], 0)
+        gpu = next(iter(runner.models.discover()))
+        self.assertEqual(self.begin("t-asked", "--role", "trivial", "--model", gpu)[0], 4)  # Claude named it
+        self.busy = False
+        code, out, err = self.begin("t-free", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(store.Task("t-free").spec["via"], "gpu")   # never API while the GPU has room
+        self.assertNotIn(routes.BUSY_LINE, out)
+
+    def test_a_role_with_no_api_model_queues_or_exits_4_as_before(self):
+        self.opt_in("trivial")
+        self.assertEqual(self.begin("t-none", "--role", "significant")[0], 4)
+        code, out, err = self.begin("t-queued", "--role", "significant", "--queue")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(store.Task("t-queued").spec["via"], "gpu")
+        self.assertIn("waits as queued", out)
+
+    def test_an_api_model_that_cant_run_leaves_the_start_as_before_and_says_why(self):
+        self.opt_in()
+        self.catalog(ROLE_CATALOG, [r for r in ROLE_AUTH if r["id"] != "deepseek"])
+        runner.models.hosted(fresh=True)
+        code, out, err = self.begin("t-nokey", "--role", "trivial")
+        self.assertEqual(code, 4)
+        self.assertIn("note: the GPU is busy, and the trivial role's API model deepseek/deepseek-flash can't "
+                      "take it: no key for deepseek", out)
+
+    def test_a_task_kept_local_with_local_only_never_goes_to_api_when_the_gpu_is_busy(self):
+        # 2026-11-23 review: wave 2's --local-only is checked against the role's side before the
+        # GPU wait, so the busy opt-in, after it, must refuse it too
+        self.opt_in()
+        asked = types.SimpleNamespace(model=None, local_only=True)
+        self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
+                         "the GPU is busy, and the trivial role's API model deepseek/deepseek-flash can't take it: "
+                         "this task is kept local (--local-only)")
+        self.assertIsInstance(cli._busy_api("trivial", types.SimpleNamespace(model=None), self.repo, None), tuple)
+
+    def test_full_slots_a_spent_cap_or_a_repo_kept_local_leave_the_start_as_before_and_say_why(self):
+        # wave 2's meter.refusal and privacy.local_only by the package's attribute, as `from .
+        # import` finds them: these hold before and after it lands (2026-11-23 review)
+        import workbench
+        self.opt_in()
+        why = "the GPU is busy, and the trivial role's API model deepseek/deepseek-flash can't take it: "
+        asked = types.SimpleNamespace(model=None)
+        with mock.patch.object(cli.models, "api_slots_free", lambda provider: False):
+            self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
+                             why + f"every one of deepseek's {cli.models.API_PARALLEL} slots is taken")
+        spent = types.SimpleNamespace(refusal=lambda m, role: f"{role} role: API spend today is $5 of the $5 day cap")
+        with mock.patch.object(workbench, "meter", spent, create=True):
+            self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
+                             why + "trivial role: API spend today is $5 of the $5 day cap")
+        kept = types.SimpleNamespace(local_only=lambda repo, sub: str(repo))
+        with mock.patch.object(workbench, "privacy", kept, create=True):
+            self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
+                             why + f"{self.repo.name} is kept local ({self.repo})")
+            code, out, err = self.begin("t-local", "--role", "trivial")
+        self.assertEqual(code, 4)                                    # exit 4 as before, after the note
+        self.assertIn(f"note: {why}{self.repo.name} is kept local", out)
+
+
 if __name__ == "__main__":
     unittest.main()

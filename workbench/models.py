@@ -4180,3 +4180,18 @@ def write_entry(provider: str, name: str, entry: dict | None) -> None:
             entries[name] = {**old, **entry, "options": {**(old.get("options") or {}), **(entry.get("options") or {})}}
             if not entries[name]["options"]:
                 del entries[name]["options"]
+
+
+def card_numbers(root: str | None, seen: dict | None = None) -> list[int] | None:
+    """The cards the Ollama at ``root`` sees, as numbers in nvidia-smi's order (the discrete
+    cards, as named_cards counts them): the pane's `GPU 2+3` beside a model (#1023). None when
+    server_devices can't tell (one server, a container's, another host's, gpu_gb set by hand).
+    ``seen``: root -> the answer, for one pass."""
+    seen = {} if seen is None else seen
+    if root not in seen:
+        cards = server_devices(root)
+        devs = hardware.gpus(windows=False) if cards else []
+        if any(g.get("discrete") for g in devs):
+            devs = [g for g in devs if g.get("discrete")]
+        seen[root] = [i for i, g in enumerate(devs) if _card(g) in cards] or None if cards else None
+    return seen[root]

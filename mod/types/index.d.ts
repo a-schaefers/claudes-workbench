@@ -54,9 +54,35 @@ export type WbLive = { task: string; lines: WbLine[] }
 export type WbChat = { key: string; delegating: boolean; url: string; web: boolean }
 
 /** The pane's view: its tab ('tasks', 'stats' or 'settings'), the settings row open ('' none,
- * 'coding', 'chat', 'record', 'live', 'every', 'progress', 'splash', 'probe'), the option the focus ring is on ('' none),
+ * 'coding', 'chat', 'record', 'live', 'every', 'progress', 'splash', 'probe', and #1023's 'agents', 'busy',
+ * 'workflows', 'role-<role>', 'gpu-<role>', 'size-<model id>', 'api-<role>', 'think-<role>'), the option the focus ring is on ('' none),
  * so its sentence shows, and whether the user closed it (a strip above the prompt stands in for it). */
 export type WbPane = { tab: string; open: string; focus: string; minimized: boolean }
+
+/** `wb route --json` as the Settings tab reads it (#1023): routes.json normalized (`use` the Agents
+ * switch, `busy` the busy-GPU opt-in, the day cap, each role's selector and both models), spend
+ * today from the day ledger, and each API provider's key state (only `stored` runs). */
+export type WbRoutes = {
+  v: 1
+  use: 'gpu' | 'api' | 'both'
+  busy: 'wait' | 'api'
+  day_usd: number | null
+  roles: Record<'significant' | 'trivial' | 'writing', { via: 'gpu' | 'api'; gpu: string; api?: string;
+    thinking: 'off' | 'on'; label: string }>
+  spend_today: { usd: number; by_provider: Record<string, number> }
+  providers: Record<string, { name: string; key: 'stored' | 'env' | 'oauth' | 'none'; why?: string }>
+}
+
+/** `wb models --json` (#1023): the GPU models (cards: the numbers its Ollama sees, null unknown),
+ * the API models wb can run (stored keys only), those tasks ran on, optimize's state. */
+export type WbModels = {
+  gpu: { id: string; label: string; window: number | null; sizes: string[]; cards: number[] | null }[]
+  api: { id: string; name: string; provider: string; provider_name: string; window: number | null;
+    price: { input: number | null; output: number | null } | null; free: boolean }[]
+  used: string[]
+  free_line: string
+  optimize: { done_at: number | null; models: number; running: boolean }
+}
 
 /** The Stats tab's history: `wb stats --json` as last read (null before the first read), and the
  * key of the files it was read from (results.jsonl, stats.json, optimize.json, bench/runs.jsonl,

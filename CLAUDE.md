@@ -70,7 +70,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   `lease_for`: an API task's `NoLease` (provider slots, never the GPU). `routes.py`: the
   roles (`significant`, `trivial`, `writing`: GPU or API, each side's model, thinking; the day cap)
   in routes.json, the change line `wb route` prints and the mod's dialog shows, and the dialog's
-  one-shot approval (`approved`); `use`, the Agents switch (`effective_via`); `resolve`, wb start's model.
+  one-shot approval (`approved`); `use`, the Agents switch (`effective_via`); `busy`, the busy-GPU
+  opt-in (`busy_api`); `resolve`, wb start's model.
   `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
   notice).
