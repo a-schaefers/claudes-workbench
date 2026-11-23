@@ -1478,7 +1478,7 @@ skips the title request: OpenCode sends nothing to another model. An upstream er
 `events.jsonl` only as the keyhole redacted it, and a round that died on one says it in status
 `last` (`opencode exited 1: <error>`, API tasks only); a refused key or a spent balance the
 keyhole saw ends the round first as the provider's `auth` or `quota` stop, whose line names it
-(`<provider> refused the API key (HTTP 401)`, *The provider's wait*, #1020).
+(`<provider> refused the API key (HTTP 401)`, *The hold*, #1020).
 
 *The task's own catalog* (`rules/<task>/catalog.json`, #1013's comment, #1015). The agent's
 OpenCode fetches no catalog (#1010), so a model newer than its binary's bundled snapshot was
