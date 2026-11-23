@@ -112,7 +112,7 @@ skill library in `$WB_SKILLS` (`~/.local/share/workbench/skills`, its own git re
 key and format: ARCHITECTURE.md, *Files and formats*. Inside `$WB_HOME` the agent's lane
 writes only `tasks/<task>/worktree/` and `ask/` (the rest of its lane: *What the agent knows*); `rules/<task>/` and `locks/` (`store.task_lock`) stay outside
 it (an agent once held the runner's lock: the 0.90 review). `wb patch` keeps `patches.json` (the
-clone install and its upstream, which the mod reads), `send-ok.json` (the mod's yes to one send),
+clone install and its upstream, which the mod reads; the pull requests it sent), `send-ok.json` (the mod's yes to one send),
 `rescued/`, `upstream/` and `patches/` there.
 
 OpenCode's config is written only through `models.own_config`: one unlayered file without

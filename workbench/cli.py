@@ -5018,6 +5018,16 @@ def cmd_update(a):
              ["claude", "plugin", "update", "workbench@workbench"]]
     behind = None  # a marketplace copy is one commit deep: its news can't be counted beforehand
     rebased = None  # a clone's patches on `local`, rebased onto the news (#1005)
+    settled = patches.Settled(set(), [], [], [])  # what became of the pull requests wb patch send opened
+    # what wb update says of them once the update is said: the mod reloads the plugin only on output
+    # that starts "updated", and these lines first hid that (#1005, 2026-11-22)
+    later = []
+
+    def say_later():  # before a refusal too, so a line isn't lost to it
+        if later:
+            print("\n".join(later))
+        later.clear()
+
     if kind == "clone":  # a clone is its own marketplace: pull, then let Claude Code re-read it
         if gitops.git(PKG_ROOT, "status", "--porcelain", "--untracked-files=no").strip():
             die(f"{PKG_ROOT} has uncommitted changes: commit or stash them, then wb update")
@@ -5037,20 +5047,40 @@ def cmd_update(a):
         diverged = behind and subprocess.run(["git", "-C", str(PKG_ROOT), "merge-base", "--is-ancestor",
                                               "HEAD", "@{u}"], capture_output=True,
                                              stdin=subprocess.DEVNULL).returncode
-        if diverged and patches.branch(PKG_ROOT) == patches.PATCH_BRANCH:
+        on_local = patches.branch(PKG_ROOT) == patches.PATCH_BRANCH
+        if on_local:  # a squashed or reworded merge of the user's own pull request: its patch would
+            # conflict or double up, so it is left out of the rebase (#1005, 2026-11-22)
+            try:
+                settled = patches.settle_sent(PKG_ROOT)
+            except gitops.GitError as e:
+                later.append(f"couldn't check the pull requests wb patch send opened: {e}")
+            later += settled.lines
+        if on_local and (diverged or settled.skip):
             # the user's patches (#1005): rebased in a scratch worktree now, before any task is
             # stopped, so a conflict refuses with nothing changed; the live branch moves below
-            rebased = patches.rebase_patches(PKG_ROOT)
-            patches.check_move(PKG_ROOT, rebased.tip)  # an untracked file in the way: refused now
+            try:
+                rebased = patches.rebase_patches(PKG_ROOT, settled.skip)
+                patches.check_move(PKG_ROOT, rebased.tip)  # an untracked file in the way: refused now
+            except patches.PatchError:
+                # a pull request closed unmerged whose patch also conflicts was never said: the
+                # refusal came before closed_lines (#1005, 2026-11-22). Nothing has moved, so
+                # HEAD's shas are the ones to name
+                try:
+                    later += patches.closed_lines(PKG_ROOT, settled)
+                except gitops.GitError:
+                    pass
+                say_later()
+                raise
         elif diverged:
             die(f"{PKG_ROOT} has commits its upstream hasn't: a fast-forward pull can't update it "
                 "(push or rebase them, then wb update)")
         elif behind:  # nothing to pull: no task needs stopping, the plugin steps still run
             steps.insert(0, ["git", "-C", str(PKG_ROOT), "pull", "-q", "--ff-only"])
-    live = [t for t in store.all_tasks() if runner_alive(t)] if behind != 0 else []
+    live = [t for t in store.all_tasks() if runner_alive(t)] if behind != 0 or rebased else []
     if live and not a.stop:  # a pull would change the git shim, the lane and the ask server under them
         # whose each is: the advice was an unscoped `wb stop --all`, which parked other live
         # sessions' agents and acknowledged their news, so no wake ever came there (#694)
+        say_later()
         die(f"tasks are running ({_running(live, a)}): update when they finish, or wb update --stop "
             "(stops them; each one's session is told to wb resume it)")
     stopped = ""
@@ -5068,6 +5098,7 @@ def cmd_update(a):
         try:
             patches.move_branch(PKG_ROOT, rebased.old, rebased.tip)
         except (patches.PatchError, gitops.GitError) as e:
+            say_later()
             die(f"{e}{stopped}")
         store.write_json(path, {"checked_at": time.time(), "behind": 0, "kind": kind})
         pulled = done
@@ -5078,6 +5109,9 @@ def cmd_update(a):
         except (OSError, subprocess.TimeoutExpired) as e:
             err = str(e)
         if err is not None:
+            if rebased:  # the branch moved: what it dropped is said now or never (#1005, 2026-11-22)
+                print("\n".join([*settled.dropped, *patches.landed_lines(rebased)]))
+            say_later()
             die(f"{' '.join(step[:4])} failed: {err}" + pulled + stopped)
         if step[0] == "git":  # landed: the count is 0 whatever the claude steps do next
             store.write_json(path, {"checked_at": time.time(), "behind": 0, "kind": kind})
@@ -5102,10 +5136,12 @@ def cmd_update(a):
         print(f"updated {kind} {before[:7]}..{after[:7]}{n}; /reload-plugins or a restart picks up "
               "the pane")
         if rebased:
-            print("\n".join(patches.landed_lines(rebased)))
+            print("\n".join([*settled.dropped, *patches.landed_lines(rebased)]))
+    say_later()
     if kind == "clone":  # a pull request merged: its pr/ branch, worktree and body go (#1005)
         try:
-            for line in patches.retire_landed(PKG_ROOT):
+            for line in [*patches.closed_lines(PKG_ROOT, settled), *patches.retire_sent(PKG_ROOT),
+                         *patches.retire_landed(PKG_ROOT)]:
                 print(line)
         except gitops.GitError as e:
             print(f"couldn't check the upstream branches (wb patch list): {e}")
@@ -5132,6 +5168,8 @@ def cmd_patch(a):
         patches.drop(PKG_ROOT, kind, a.commit)
     elif a.action == "send":  # the mod's consent gate asks the user about this command (#1005)
         patches.send(PKG_ROOT, kind, a.slug, a.title, a.body_file, draft=a.draft, anyway=a.anyway)
+    elif a.action == "check":
+        patches.check(PKG_ROOT, kind, a.commit)
     else:
         patches.upstream(PKG_ROOT, kind, a.commit, a.name)
 
@@ -6080,7 +6118,7 @@ def parser() -> argparse.ArgumentParser:
                    "session is told to wb resume it")
     s.set_defaults(f=cmd_update)
     s = sub.add_parser("patch", help="your own fixes to workbench, kept across wb update: init, list, "
-                       "drop, upstream, send")
+                       "drop, upstream, send, check")
     ss = s.add_subparsers(dest="action", required=True)
     x = ss.add_parser("init", help="move a marketplace install to a clone of your own, its changes "
                       "carried over as patches")
@@ -6103,6 +6141,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--body-file", required=True, help="its body: .github/pull_request_template.md, filled in")
     x.add_argument("--draft", action="store_true", help="open it as a draft")
     x.add_argument("--anyway", action="store_true", help="send a commit whose Scope trailer is me")
+    x = ss.add_parser("check", help="run one patch's own tests on plain upstream: has upstream fixed it "
+                      "another way? (drops nothing)", allow_abbrev=False)
+    x.add_argument("commit", help="one of branch local's patches")
     s.set_defaults(f=cmd_patch)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
     return ap

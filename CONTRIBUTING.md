@@ -37,13 +37,19 @@ A patch is a commit on branch `local`, with a scope trailer:
 git -C <the clone> commit -a -m "Short subject" --trailer "Scope: me"        # or "Scope: everybody"
 wb patch list            # each patch, oldest first, with its scope; uncommitted changes; pr/ branches
 wb patch drop <commit>   # remove one (nothing changes if the others no longer apply without it)
+wb patch check <commit>  # its own tests on plain upstream: has upstream fixed it another way?
 ```
 
 `wb update` keeps them: it fetches upstream and rebases `local` onto it in a scratch worktree,
 never in the live tree. A patch upstream already has is dropped and reported as `landed upstream,
-dropped from local`. A patch that no longer applies changes nothing: `wb update` names it, and
+dropped from local`, and one whose own pull request merged (`wb patch send` recorded it; `wb
+update` asks GitHub) as `your pull request #<n> merged: dropped the local patch`, however it was
+reworded or squashed. A patch that no longer applies changes nothing: `wb update` names it, and
 you resolve it by hand or drop it, and so does an untracked file on a path the rebased patches
-add. The tip before each rebase is kept at `refs/workbench/before-update`, its reflog listing the
+add. `wb patch check <commit>` applies only the patch's tests to plain upstream and runs the ones
+it added: when they pass there (a skipped one is no pass), upstream likely fixed the same thing
+another way, and you may drop it (it drops nothing itself). So give every patch a test: `wb patch list` marks one without
+` (no test)`. The tip before each rebase is kept at `refs/workbench/before-update`, its reflog listing the
 earlier ones. A change under `mod/` reaches Claude Code
 only once committed, through `wb update` (it copies the clone's HEAD into the plugin cache), then
 `/reload-plugins`.
@@ -75,7 +81,8 @@ only once committed, through `wb update` (it copies the clone's HEAD into the pl
    uncommitted changes, the body is empty or still the template, or a commit's trailer is
    `Scope: me` (`--anyway` overrides that one). A failed step says what is done already; running
    it again goes on from there. The commit message's body carries `Closes #N`. Once it merges,
-   the next `wb update` drops the local patch and removes `pr/<slug>`, its worktree and its body.
+   the next `wb update` drops the local patch and removes `pr/<slug>`, its worktree and its body;
+   closed unmerged, it keeps the patch and says so once.
 
 **The consent dialog.** In Claude Code the workbench plugin holds every command that would send
 something to this repository (an issue, a comment, a fork, a push, a pull request, `wb patch

@@ -492,8 +492,10 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
 When `wb` crashes (it then says `wb crashed: a bug in workbench`), reports something untrue, or its
 docs are wrong, offer the fix unprompted: "want me to patch it?" A local patch: `wb patch init`
 once (a marketplace install can't keep one: Claude Code re-clones it), then a commit on branch
-`local` with a `Scope: me` or `Scope: everybody` trailer; `wb update` keeps it, and drops it once
-upstream has it. Then weigh it seriously: a bug, a false result or a change every user would want
+`local` with a `Scope: me` or `Scope: everybody` trailer and a test of its own; `wb update` keeps
+it, and drops it once upstream has it (its pull request merged, however reworded). On a closed
+pull request or a conflict, `wb patch check <sha>` says whether upstream fixed it another way;
+`wb patch drop` only on the user's yes. Then weigh it seriously: a bug, a false result or a change every user would want
 on any hardware and model is for everybody; a preference, a path or a taste is the user's alone.
 Tell them which and why, and only for everybody ask "want me to PR it upstream for everybody?".
 On a yes: `wb patch upstream <commit> --name <slug>`, the tests it prints, the body file it names

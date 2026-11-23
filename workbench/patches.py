@@ -13,13 +13,16 @@ Every git call here runs without hooks (a hook of the user's ran from wb's own c
 an auditor's pre-push hook broke ship.sh, 2026-11-21) and without a terminal, so nothing prompts.
 Everything this module needs is imported at the top: `wb patch init` deletes the copy wb runs
 from (Claude Code removes the old marketplace clone), and nothing may be imported from it after."""
+import ast
 import json
 import os
 import platform
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -220,6 +223,27 @@ def _subject(root, sha) -> str:
     return _out(root, "log", "-1", "--format=%h %s", sha)
 
 
+TEST_NAME = re.compile(r"(?:^|/)(?:test_[^/]*\.py|[^/]*\.test\.tsx?)$")
+
+
+def is_test(path) -> bool:
+    """A patch's test file: under tests/, or a test_*.py, *.test.ts or *.test.tsx anywhere."""
+    return path.startswith("tests/") or bool(TEST_NAME.search(path))
+
+
+def _touched(root, sha) -> list[str]:
+    out = _git(root, "diff-tree", "-r", "-z", "--no-commit-id", "--name-only", "--no-renames", "--root", sha)
+    return [p for p in out.stdout.decode("utf-8", "surrogateescape").split("\0") if p]
+
+
+def has_test(root, sha) -> bool:
+    return any(is_test(p) for p in _touched(root, sha))
+
+
+NO_TEST_SEND = ("it has no test: add one before sending (upstream asks for one, and wb patch check "
+                "needs it)")
+
+
 @contextmanager
 def scratch(root, at):
     """A detached worktree of ``root`` at ``at``, under $WB_HOME, gone afterwards, also on a failure."""
@@ -236,11 +260,11 @@ def scratch(root, at):
         _git(root, "worktree", "prune", check=False)
 
 
-def _rebase(root, at, *args) -> tuple[str | None, str | None]:
+def _rebase(root, at, *args, env=None) -> tuple[str | None, str | None]:
     """`git rebase *args` in a scratch worktree at ``at``: (the new tip, None), or (None, the
     patch that stopped it, "<short sha> <subject>"), aborted. The live tree is never touched."""
     with scratch(root, at) as wt:
-        r = _git(wt, *REBASE_PLAIN, "rebase", "-q", "--no-autosquash", *args, check=False)
+        r = _git(wt, *REBASE_PLAIN, "rebase", "-q", "--no-autosquash", *args, check=False, env=env)
         if not r.returncode:
             return _out(wt, "rev-parse", "HEAD"), None
         stopped = _out(wt, "rev-parse", "-q", "--verify", "REBASE_HEAD", check=False)
@@ -256,6 +280,40 @@ def _ident_rows(root, span) -> list:
                             "--format=%an%x00%ae%x00%at%x00%s", span, "--").splitlines() if r]
 
 
+def _sha_rows(root, span) -> list[tuple[str, str]]:
+    """(sha, its _ident_rows row) of ``span``'s commits, oldest first."""
+    rows = _out(root, "log", "--reverse", "--no-merges", "--format=%H%x00%an%x00%ae%x00%at%x00%s", span, "--")
+    return [tuple(r.split("\0", 1)) for r in rows.splitlines() if r]
+
+
+def _ident(root, sha) -> dict:
+    """A commit's ident as patches.json keeps it: what a rebase or a cherry-pick leaves as it was."""
+    author, email, date, subject = _out(root, "log", "-1", "--format=%an%x00%ae%x00%at%x00%s", sha).split("\0", 3)
+    return {"author": author, "email": email, "date": int(date), "subject": subject}
+
+
+def _ident_row(ident) -> str | None:
+    """``ident`` (patches.json's) as an _ident_rows row; None when it isn't one."""
+    try:
+        return "\0".join((str(ident["author"]), str(ident["email"]), str(int(ident["date"])), str(ident["subject"])))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+# git runs it on the todo of the rebase that leaves out a merged pull request's patch: each
+# `pick <sha>` of a skipped commit becomes `drop` (the shas come first, the todo's path last)
+DROP_EDITOR = """import sys
+*skip, todo = sys.argv[1:]
+with open(todo, encoding="utf-8", errors="surrogateescape") as f:
+    rows = f.read().split("\\n")
+def gone(row):
+    w = row.split()
+    return len(w) > 1 and w[0] in ("pick", "p") and any(s.startswith(w[1]) for s in skip)
+with open(todo, "w", encoding="utf-8", errors="surrogateescape") as f:
+    f.write("\\n".join("drop " + r.split(None, 1)[1] if gone(r) else r for r in rows))
+"""
+
+
 class Rebased(NamedTuple):
     old: str
     upstream: str
@@ -264,21 +322,34 @@ class Rebased(NamedTuple):
     kept: int
 
 
-def rebase_patches(root) -> Rebased:
+def rebase_patches(root, skip=frozenset()) -> Rebased:
     """The patches on PATCH_BRANCH (@{u}..HEAD) onto the fetched upstream, in a scratch worktree.
     A patch upstream already has (a clean cherry-pick of one, or one that comes out empty) is
-    dropped by the rebase; a conflict raises PatchError naming the patch, nothing changed."""
+    dropped by the rebase; a conflict raises PatchError naming the patch, nothing changed. The
+    commits in ``skip`` (full shas: patches whose own pull request merged, `settle_sent`) are left
+    out, so a squashed or reworded merge doesn't conflict with them (#1005, 2026-11-22); they
+    aren't counted in `landed`, whose line is upstream's own match."""
     old = _out(root, "rev-parse", "HEAD")
     up = _upstream(root)
     if not up:
         raise PatchError(f"branch {branch(root)} of {root} has no upstream: git -C {root} branch -u origin/main")
-    tip, stopped = _rebase(root, old, up)
+    mine = _sha_rows(root, f"{up}..{old}")
+    skip = {sha for sha, _ in mine if sha in skip}
+    if skip:  # an interactive rebase whose todo drops them; nothing else differs
+        editor = shlex.join([sys.executable, "-I", "-c", DROP_EDITOR, *sorted(skip)])
+        tip, stopped = _rebase(root, old, "-i", "--empty=drop", up,
+                               env={"GIT_SEQUENCE_EDITOR": editor, "GIT_EDITOR": "true"})
+    else:
+        tip, stopped = _rebase(root, old, up)
     if stopped:
+        sha = stopped.split()[0]
         raise PatchError(
             f"the local patch {stopped} no longer applies on upstream's {up[:7]}: nothing changed. "
             f"Either rework it by hand (rebase {PATCH_BRANCH} onto @{{u}} in a scratch worktree, never "
-            f"the live tree) or drop it (wb patch drop {stopped.split()[0]}), then wb update")
-    before, after = _ident_rows(root, f"{up}..{old}"), _ident_rows(root, f"{up}..{tip}")
+            f"the live tree) or drop it (wb patch drop {sha}), then wb update "
+            f"(wb patch check {sha} first: if upstream fixed it another way, drop it)")
+    before = [row for sha, row in mine if sha not in skip]
+    after = _ident_rows(root, f"{up}..{tip}")
     landed, i = [], 0
     for row in before:  # the rebase keeps each patch's author, date, message and order
         if i < len(after) and after[i] == row:
@@ -372,8 +443,8 @@ def list_patches(root, kind) -> None:
     print(f"{root}: branch {b}" + (f", tracking {up}" if up else ", no upstream")
           + ("" if b == PATCH_BRANCH else f" (patches belong on {PATCH_BRANCH}: wb update rebases only that one)"))
     rows = _patches(root) if up else []
-    for sha, subject, scope in rows:
-        print(f"{sha}  {subject}  [{scope or 'no Scope trailer'}]")
+    for sha, subject, scope in rows:  # the nudge: wb patch check can't judge one with no test (#1005)
+        print(f"{sha}  {subject}  [{scope or 'no Scope trailer'}]" + ("" if has_test(root, sha) else " (no test)"))
     if up and not rows:
         print("no patches: the branch is upstream's")
     dirty = _out(root, "status", "--porcelain", "--untracked-files=all").splitlines()
@@ -402,6 +473,131 @@ def drop(root, kind, commit) -> None:
           "wb update refreshes the mod")
 
 
+# --- wb patch check: has upstream fixed it another way? (#1005, 2026-11-22) ---------------------
+CHECK_SECS = 900  # a patch's own tests: the added methods alone, or the mod's suite
+TEST_DEF = re.compile(r"^\+\s*(?:async\s+)?def\s+(test\w*)\s*\(")
+
+
+def _added_tests(root, sha, paths) -> dict[str, list[str]]:
+    """{test_*.py path: the test methods ``sha``'s diff adds there}, from its `+def test_…` lines."""
+    out = {}
+    for path in paths:
+        if not path.endswith(".py"):
+            continue
+        diff = _git(root, *DIFF_PLAIN, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "-U0",
+                    f"{sha}^", sha, "--", path, env={"GIT_LITERAL_PATHSPECS": "1"}).stdout.decode("utf-8", "replace")
+        names = [m.group(1) for line in diff.splitlines() if (m := TEST_DEF.match(line))]
+        if names:
+            out[path] = list(dict.fromkeys(names))
+    return out
+
+
+def _test_ids(wt, added) -> tuple[list[str], list[str]]:
+    """unittest's ids (module.Class.method) of the added methods, their classes read from the file
+    as it stands in ``wt``, and the added names placed in no class there (a file that doesn't
+    parse places none): those didn't run, so the check can't call the patch's tests passed."""
+    ids, lost = [], []
+    for path, names in added.items():
+        try:
+            tree = ast.parse((wt / path).read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            lost += names
+            continue
+        module = path.removesuffix(".py").replace("/", ".")
+        found = set()
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                defs = {f.name for f in node.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
+                ids += [f"{module}.{node.name}.{n}" for n in names if n in defs]
+                found |= defs
+        lost += [n for n in names if n not in found]
+    return ids, lost
+
+
+# the added methods, run as `python -m unittest` runs them (cwd on sys.path: no -I), but told
+# apart: 1 a failure or an error, 3 a skip, an expected failure, an unexpected success or no test
+# at all, else 0. A skip is not a pass: a test skipped without Landlock or claude was called
+# "upstream already passes" (#1005, 2026-11-22)
+RUN_TESTS = """import sys, unittest
+suite = unittest.defaultTestLoader.loadTestsFromNames(sys.argv[1:])
+r = unittest.TextTestRunner(stream=sys.stderr, verbosity=0).run(suite)
+sys.exit(1 if r.failures or r.errors else
+         3 if r.skipped or r.expectedFailures or r.unexpectedSuccesses or not r.testsRun else 0)
+"""
+
+
+def _passes(argv, cwd, env, skipped=None) -> str:
+    """"pass", "fail" or "skipped": ``argv``'s exit within CHECK_SECS (0, else ``skipped`` when it
+    names that exit, else a failure); on the timeout, a failure, its whole process group gone."""
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        code = proc.wait(timeout=CHECK_SECS)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.wait()
+        return "fail"
+    return "pass" if code == 0 else "skipped" if skipped is not None and code == skipped else "fail"
+
+
+def check(root, kind, commit) -> None:
+    """wb patch check: ``commit``'s own tests, and only them, on plain upstream (the one wb update
+    last fetched), in a scratch worktree removed afterwards. A pull request upstream merged after
+    rewording or editing it, or a fix of upstream's own, left the local patch to conflict or
+    double up (#1005, 2026-11-22): its tests passing there say upstream likely fixed the same
+    thing. It only says so: dropping the patch is the user's yes, through wb patch drop."""
+    _need_clone(kind)
+    sha = _out(root, "rev-parse", "-q", "--verify", f"{commit}^{{commit}}", check=False)
+    if not sha:
+        raise PatchError(f"{commit}: no such commit")
+    up = _upstream(root, PATCH_BRANCH)
+    if not up or sha not in _out(root, "rev-list", f"{up}..refs/heads/{PATCH_BRANCH}").split():
+        raise PatchError(f"{commit} isn't one of {PATCH_BRANCH}'s patches (wb patch list)")
+    subject, short = _out(root, "log", "-1", "--format=%s", sha), _out(root, "rev-parse", "--short", sha)
+    no_test = (f"{subject} has no test of its own, so wb patch check can't tell: write one (upstream asks "
+               "for one in a pull request too)")
+    tests = [p for p in _touched(root, sha) if is_test(p)]
+    if not tests:
+        print(no_test)
+        return
+    diff = _git(root, *DIFF_PLAIN, "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames",
+                f"{sha}^", sha, "--", *tests, env={"GIT_LITERAL_PATHSPECS": "1"}).stdout
+    added = _added_tests(root, sha, tests)
+    with scratch(root, up) as wt:
+        (wt.parent / "tests.diff").write_bytes(diff)
+        if _git(wt, "apply", "--3way", "--whitespace=nowarn", str(wt.parent / "tests.diff"),
+                check=False).returncode:
+            print(f"{subject}'s tests don't apply to upstream any more: compare by hand")
+            return
+        env = {**os.environ, "WB_HOME": str(wt.parent / "home")}  # never the user's state
+        verdicts, why = [], []  # why: what didn't run, so a pass can't be told (#1005, 2026-11-22)
+        ids, lost = _test_ids(wt, added)
+        if ids:
+            verdicts.append(_passes([sys.executable, "-c", RUN_TESTS, *ids], wt, env, skipped=3))
+            if verdicts[-1] == "skipped":
+                why.append("a test was skipped")
+        if lost:
+            why.append(f"no test class holds {', '.join(lost)}")
+        if any(p.endswith((".test.tsx", ".test.ts")) for p in tests):
+            if shutil.which("claude") is None:
+                why.append("claude isn't on PATH for the mod's tests")
+            else:
+                verdicts.append(_passes(["claude", "plugin", "test", "mod"], wt, env))
+    if "fail" in verdicts:
+        print(f"upstream fails this patch's tests ({subject}): keep it")
+    elif why:
+        print(f"{subject}'s tests didn't all run here ({'; '.join(why)}), so wb patch check can't tell: "
+              "run them where they can (a skip is not a pass)")
+    elif not verdicts:
+        print(no_test)
+    else:
+        print(f"upstream already passes this patch's tests ({subject}): it likely fixed the same thing. "
+              f"Drop it with the user's yes: wb patch drop {short}")
+
+
 def _owner_repo(url) -> str | None:
     m = re.match(r"(?:[a-z+]+://(?:[^@/]+@)?github\.com/|[^@/]+@github\.com:)([^/]+/[^/]+?)(?:\.git)?/?$", url)
     return m.group(1) if m else None
@@ -419,10 +615,43 @@ def _tracked(root) -> tuple[str, str]:
     return "origin", head.removeprefix("origin/") or "main"
 
 
+def noted_path() -> Path:
+    return store.home() / "patches.json"
+
+
+@contextmanager
+def _noting():
+    """patches.json to change, under its lock, written back atomically when the block ends
+    without an error. Each writer changes only its own keys: note_install's `source` and
+    `upstream` (the mod's), `prepared` (wb patch upstream), `sent` (wb patch send, wb update)."""
+    path = noted_path()
+    with store.locked(path.with_name(path.name + ".lock")):
+        noted = store.read_json(path, {})
+        noted = noted if isinstance(noted, dict) else {}
+        yield noted
+        store.write_json(path, noted)
+
+
+def _table(noted, key) -> dict:
+    """patches.json's ``key``, a dict made when missing or not one."""
+    if not isinstance(noted.get(key), dict):
+        noted[key] = {}
+    return noted[key]
+
+
 def note_install(root) -> None:
     """$WB_HOME/patches.json: the clone install and its upstream on GitHub, for the mod (#1005)."""
     url = _out(root, "config", "--get", f"remote.{_tracked(root)[0]}.url", check=False)
-    store.write_json(store.home() / "patches.json", {"source": str(root), "upstream": _owner_repo(url)})
+    with _noting() as noted:
+        noted.update(source=str(root), upstream=_owner_repo(url))
+
+
+def _forget(slug) -> None:
+    """A retired pr/<slug>'s rows in patches.json: what wb patch upstream picked and its pull request."""
+    with _noting() as noted:
+        for key in ("prepared", "sent"):
+            if isinstance(noted.get(key), dict):
+                noted[key].pop(slug, None)
 
 
 # --- gh, GitHub's CLI: the one way wb sends a patch upstream (#1005) ---------------------------
@@ -681,9 +910,13 @@ def upstream(root, kind, commit, slug) -> None:
     else:
         print(f"{pr} from {remote}'s {up[:7]} in {wt}, with {what}")
         mod = _git(wt, "diff", "--quiet", up, "HEAD", "--", "mod", check=False).returncode != 0
+    if not has_test(root, sha):
+        print(NO_TEST_SEND)
     if scope == "me":
         print("its Scope trailer is me: a personal patch. Offer it upstream only if it helps everybody")
     note_install(root)
+    with _noting() as noted:  # the local commit wb update later drops when its pull request merges
+        _table(noted, "prepared")[slug] = _ident(root, sha)
     print("next (none of this has run):")
     print(f"  cd {wt} && python3 -m unittest" + (" && claude plugin validate mod && claude plugin test mod"
                                                  if mod else ""))
@@ -904,7 +1137,155 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
     else:
         print(f"opened {links[-1] if links else scrub(r.stdout) or 'the pull request'}"
               + (" (a draft)" if draft else ""))
+    if links:
+        note_sent(root, slug, repo, links[-1])
     print("once it merges, the next wb update drops the local patch")
+
+
+def note_sent(root, slug, repo, url) -> None:
+    """patches.json's `sent` row for pr/<slug>'s pull request: its repository, number and URL,
+    and the ident of the local commit it carries, which wb update drops once it merged (a
+    squashed, reworded or edited merge left the patch to conflict or double up: #1005,
+    2026-11-22). The ident is wb patch upstream's `prepared` row; a branch prepared before it
+    kept one, the first commit pr/<slug> got after its cut."""
+    number = int(url.rsplit("/", 1)[-1])
+    with _noting() as noted:
+        ident = (noted.get("prepared") or {}).get(slug) if isinstance(noted.get("prepared"), dict) else None
+        if _ident_row(ident) is None:
+            log = _out(root, "log", "-g", "--format=%H", f"refs/heads/pr/{slug}", "--", check=False).splitlines()
+            first = _out(root, "rev-list", "--reverse", f"{log[-1]}..refs/heads/pr/{slug}", check=False).split() if log else []
+            ident = _ident(root, first[0]) if first else None
+        if ident is not None:
+            _table(noted, "sent")[slug] = {"repo": repo, "pr": number, "url": url,
+                                           **{k: ident[k] for k in ("author", "email", "date", "subject")}}
+
+
+# --- what became of a sent pull request (#1005, 2026-11-22) -------------------------------------
+class Settled(NamedTuple):
+    skip: set      # the local commits whose pull request merged: rebase_patches leaves them out
+    lines: list    # said at once: GitHub not asked
+    dropped: list  # said once the branch moved: "your pull request #<n> merged: dropped …"
+    closed: list   # (slug, number, subject, ident row): closed unmerged, said by `closed_lines`
+
+
+def _pr_state(repo, number, up, root) -> tuple[str | None, str]:
+    """gh pr view's state of ``repo``'s pull request ``number``: MERGED, CLOSED, OPEN, PENDING (merged,
+    but its merge commit isn't in the fetched upstream ``up`` yet: dropping the patch then left the
+    user without the fix until the next fetch), or None with why GitHub wasn't asked, scrubbed."""
+    if shutil.which("gh") is None:
+        return None, "gh isn't installed"
+    try:
+        r = _gh("pr", "view", str(number), "-R", repo, "--json", "state,mergeCommit", timeout=GH_SECS)
+    except subprocess.TimeoutExpired:
+        return None, f"no answer in {GH_SECS}s"
+    except OSError as e:
+        return None, scrub(str(e))[:120]
+    info = _json(r.stdout) if not r.returncode else None
+    state = info.get("state") if isinstance(info, dict) else None
+    if state not in ("MERGED", "CLOSED", "OPEN"):
+        return None, (scrub(r.stderr or r.stdout) or f"exit {r.returncode}")[:120]
+    merge = info.get("mergeCommit")
+    oid = merge.get("oid") if isinstance(merge, dict) else None
+    if state == "MERGED" and isinstance(oid, str) and oid and not (up and _git(
+            root, "merge-base", "--is-ancestor", oid, up, check=False).returncode == 0):
+        return "PENDING", ""
+    return state, ""
+
+
+def settle_sent(root) -> Settled:
+    """wb update, on PATCH_BRANCH, before the rebase (never --check: the mod runs that on a timer,
+    and it never asks GitHub): each pull request wb patch send opened, asked of gh once,
+    GH_SECS at most. Merged: its local commit (by ident) goes in ``skip``, and the row is marked
+    merged so a later run needn't ask again; `retire_sent` removes it once the commit is gone.
+    Closed: said once, after the move (`closed_lines`). Open: nothing. Not asked: one line, the
+    patch kept."""
+    sent = store.read_json(noted_path(), {})
+    sent = sent.get("sent") if isinstance(sent, dict) else None
+    if not isinstance(sent, dict) or not sent:
+        return Settled(set(), [], [], [])
+    up = _upstream(root)
+    mine = _sha_rows(root, f"{up}..HEAD") if up else []
+    skip, lines, dropped, closed, marks = set(), [], [], [], {}
+    for slug, row in sent.items():
+        ident = _ident_row(row) if isinstance(row, dict) else None
+        if ident is None or not isinstance(row.get("pr"), int) or not isinstance(row.get("repo"), str):
+            continue
+        n, subject = row["pr"], row["subject"]
+        sha = next((s for s, r in mine if r == ident), None)
+        if not row.get("merged"):
+            state, why = _pr_state(row["repo"], n, up, root)
+            if state is None:
+                lines.append(f"couldn't ask GitHub about pull request #{n} ({why}): kept the local patch")
+                continue
+            if state in ("OPEN", "PENDING"):
+                if row.get("closed_said"):  # reopened: a later close is said again
+                    marks[slug] = {"closed_said": False}
+                continue
+            if state == "CLOSED":
+                if not sha:  # no local patch left to keep: nothing to say, nothing to watch
+                    marks[slug] = None
+                elif not row.get("closed_said"):
+                    closed.append((slug, n, subject, ident))
+                continue
+            marks[slug] = {"merged": True}
+        if sha:
+            skip.add(sha)
+            dropped.append(f"your pull request #{n} merged: dropped the local patch {subject}")
+    if marks:
+        with _noting() as noted:
+            table = _table(noted, "sent")
+            for slug, change in marks.items():
+                if change is None:
+                    table.pop(slug, None)
+                elif isinstance(table.get(slug), dict):
+                    table[slug].update(change)
+    return Settled(skip, lines, dropped, closed)
+
+
+def closed_lines(root, settled) -> list[str]:
+    """wb update's end: each pull request closed unmerged, said once (`closed_said`), naming its
+    patch's sha as it is now: the one settle_sent saw was gone after the rebase, and wb patch
+    check refused it (#1005, 2026-11-22)."""
+    up = _upstream(root)
+    mine = _sha_rows(root, f"{up}..HEAD") if up and settled.closed else []
+    lines, said = [], []
+    for slug, n, subject, ident in settled.closed:
+        sha = next((s for s, r in mine if r == ident), None)
+        if sha:
+            lines.append(f"your pull request #{n} was closed without merging: kept the local patch {subject} "
+                         f"(wb patch check {_out(root, 'rev-parse', '--short', sha)} tells whether upstream "
+                         "fixed it another way)")
+            said.append(slug)
+    if said:
+        with _noting() as noted:
+            table = _table(noted, "sent")
+            for slug in said:
+                if isinstance(table.get(slug), dict):
+                    table[slug]["closed_said"] = True
+    return lines
+
+
+def retire_sent(root) -> list[str]:
+    """wb update's end: each merged pull request (`settle_sent` marked it) whose local commit is
+    gone from PATCH_BRANCH forgotten, its pr/<slug> retired as retire_landed does. Only after the
+    branch moved: a run that died before (another patch's conflict) left the row to drop the
+    commit next time, where forgetting it first would have left it to conflict for good."""
+    sent = store.read_json(noted_path(), {})
+    sent = sent.get("sent") if isinstance(sent, dict) else None
+    if not isinstance(sent, dict):
+        return []
+    up = _upstream(root, PATCH_BRANCH)
+    mine = {r for _, r in _sha_rows(root, f"{up}..refs/heads/{PATCH_BRANCH}")} if up else set()
+    held_here, lines = dict(held(root)), []
+    for slug, row in list(sent.items()):
+        if not (isinstance(row, dict) and row.get("merged")) or _ident_row(row) in mine:
+            continue
+        if slug in held_here:
+            lines.append(_retire(root, slug, held_here[slug], f"pull request #{row.get('pr')} merged"))
+        else:
+            body_path(slug).unlink(missing_ok=True)
+            _forget(slug)
+    return lines
 
 
 def doctor_lines(root, kind) -> list[str]:
@@ -989,23 +1370,25 @@ def retire_landed(root) -> list[str]:
     they stayed for good, wb patch list showing them and doctor asking gh for them, and the slug
     refused (#1005, 2026-11-22). A worktree with changes of its own is kept, and said."""
     up = f"refs/remotes/{'/'.join(_tracked(root))}"
-    lines = []
-    for slug, wt in held(root):
-        if not _landed_pr(root, slug, up):
-            continue
-        if wt and wt.is_dir():
-            if _out(wt, "status", "--porcelain", check=False) or _out(
-                    wt, "rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD", check=False):
-                lines.append(f"pr/{slug} landed upstream; {wt} has changes of its own, so it is kept")
-                continue
-            if _git(root, "worktree", "remove", str(wt), check=False).returncode:
-                lines.append(f"pr/{slug} landed upstream; git couldn't remove {wt}, so it is kept")
-                continue
-        _git(root, "worktree", "prune", check=False)
-        _git(root, "branch", "-q", "-D", f"pr/{slug}", check=False)
-        body_path(slug).unlink(missing_ok=True)
-        lines.append(f"landed upstream, removed pr/{slug}, its worktree and its body file")
-    return lines
+    return [_retire(root, slug, wt, "landed upstream") for slug, wt in held(root) if _landed_pr(root, slug, up)]
+
+
+def _retire(root, slug, wt, why) -> str:
+    """pr/<slug>'s worktree, branch and body file removed, and its patches.json rows; a worktree
+    with changes of its own (or one git won't remove) is kept, and said."""
+    if wt and wt.is_dir():
+        if _out(wt, "status", "--porcelain", check=False) or _out(
+                wt, "rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD", check=False):
+            _forget(slug)
+            return f"pr/{slug} {why}; {wt} has changes of its own, so it is kept"
+        if _git(root, "worktree", "remove", str(wt), check=False).returncode:
+            _forget(slug)
+            return f"pr/{slug} {why}; git couldn't remove {wt}, so it is kept"
+    _git(root, "worktree", "prune", check=False)
+    _git(root, "branch", "-q", "-D", f"pr/{slug}", check=False)
+    body_path(slug).unlink(missing_ok=True)
+    _forget(slug)
+    return f"{why}, removed pr/{slug}, its worktree and its body file"
 
 
 def _same_origin(a: str, b: str) -> bool:

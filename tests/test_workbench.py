@@ -17454,8 +17454,10 @@ class Update(Base):
 # gh for LocalPatches (#1005): records argv and GH_PROMPT_DISABLED, answers auth status from
 # FAKE_GH_AUTH, makes the fork (a bare repo at FAKE_GH_FORK), prints a pull request's URL; FAKE_GH_FAIL
 # names a step that fails with a token in its message ("exists": the pull request is open already);
-# gh api answers from FAKE_GH_API ({endpoint: [exit, stdout]}), else someone's fork of upstream, else 404
-FAKE_GH = r"""import json, os, subprocess, sys
+# gh api answers from FAKE_GH_API ({endpoint: [exit, stdout]}), else someone's fork of upstream, else 404;
+# gh pr view answers FAKE_GH_PR_STATE (MERGED, CLOSED, OPEN; "fail": an error with a token; "hang":
+# no answer) and FAKE_GH_PR_MERGE as the merge commit's oid (#1005, 2026-11-22)
+FAKE_GH = r"""import json, os, subprocess, sys, time
 a = sys.argv[1:]
 with open(os.environ["FAKE_GH_CALLS"], "a") as f:
     f.write(json.dumps({"argv": a, "prompt": os.environ.get("GH_PROMPT_DISABLED")}) + "\n")
@@ -17482,6 +17484,14 @@ elif a[:2] == ["pr", "create"]:
         sys.exit('a pull request for branch "someone:pr/fix-thing" into branch "main" already exists:\n'
                  "https://github.com/a-schaefers/claudes-workbench/pull/1")
     print("https://github.com/a-schaefers/claudes-workbench/pull/7")
+elif a[:2] == ["pr", "view"]:
+    state = os.environ.get("FAKE_GH_PR_STATE", "OPEN")
+    if state == "fail":
+        sys.exit("HTTP 502: Bad Gateway (https://api.github.com/graphql) token ghp_abcDEF123456")
+    if state == "hang":
+        time.sleep(60)
+    merge = os.environ.get("FAKE_GH_PR_MERGE")
+    print(json.dumps({"state": state, "mergeCommit": {"oid": merge} if merge else None}))
 else:
     sys.exit("fake gh: " + " ".join(a))
 """
@@ -17528,7 +17538,8 @@ class LocalPatches(Base):
         self.fork = tmp / "fork.git"
         os.environ.update(FAKE_GH_CALLS=str(self.gh_calls), FAKE_GH_AUTH=str(tmp / "gh-auth.json"),
                           FAKE_GH_FORK=str(self.fork), FAKE_GH_API=str(tmp / "gh-api.json"))
-        os.environ.pop("FAKE_GH_FAIL", None)
+        for k in ("FAKE_GH_FAIL", "FAKE_GH_PR_STATE", "FAKE_GH_PR_MERGE"):
+            os.environ.pop(k, None)
         self.gh_auth()
         # every github.com URL leads nowhere unless a test maps it (the longest insteadOf wins):
         # a wrong push URL fails here, never reaching GitHub
@@ -17709,6 +17720,8 @@ class LocalPatches(Base):
         self.assertIn(f"the local patch {mine[:7]} a local fix no longer applies", out)
         self.assertIn("nothing changed", out)
         self.assertIn(f"wb patch drop {mine[:7]}", out)
+        # #1005, 2026-11-22: upstream may have fixed it another way; the patch's own tests say
+        self.assertIn(f"wb update (wb patch check {mine[:7]} first: if upstream fixed it another way, drop it)", out)
         self.assertEqual(self.g(self.copy, "rev-parse", "HEAD"), mine)
         self.assertEqual(self.g(self.copy, "status", "--porcelain"), "")
         self.assertEqual((self.copy / "README.md").read_text(), "mine\n")
@@ -17813,8 +17826,8 @@ class LocalPatches(Base):
         out = self.wb("patch", "list")
         self.assertIn("branch local, tracking origin/main", out)
         lines = out.splitlines()
-        self.assertLess(lines.index(f"{a[:7]}  fix the thing  [everybody]"),
-                        lines.index(f"{b[:7]}  my preference  [no Scope trailer]"))   # oldest first
+        self.assertLess(lines.index(f"{a[:7]}  fix the thing  [everybody] (no test)"),
+                        lines.index(f"{b[:7]}  my preference  [no Scope trailer] (no test)"))   # oldest first
         self.assertIn("uncommitted: ?? scratch.txt", out)
         self.wb("patch", "upstream", a, "--name", "fix-thing")
         self.assertIn(f"upstream branch pr/fix-thing  {store.home() / 'upstream/fix-thing'}",
@@ -17876,8 +17889,11 @@ class LocalPatches(Base):
         self.assertIn("the next wb update drops the local patch", out)
         self.assertEqual(self.gh_argv(), [])                    # gh's state read, nothing done
         self.assertEqual(self.g(self.origin, "branch", "--list", "pr/*"), "")   # nothing pushed
-        self.assertEqual(store.read_json(store.home() / "patches.json"),
-                         {"source": str(self.copy), "upstream": "a-schaefers/claudes-workbench"})
+        noted = store.read_json(store.home() / "patches.json")
+        self.assertEqual((noted["source"], noted["upstream"]), (str(self.copy), "a-schaefers/claudes-workbench"))
+        self.assertEqual(noted["prepared"], {"fix-thing": {
+            "author": "t", "email": "t@t", "subject": "fix the thing",
+            "date": int(self.g(self.copy, "log", "-1", "--format=%at", fix))}})   # what wb update drops later
         self.assertIn("already prepared", self.wb("patch", "upstream", fix, "--name", "fix-thing"))
         self.assertIn("lowercase letters", self.wb("patch", "upstream", fix, "--name", "Fix_It"))
 
@@ -18072,8 +18088,8 @@ class LocalPatches(Base):
                 self.assertEqual(self.g(self.copy, "remote"), "origin")          # the user's remotes as they were
                 self.assertEqual(self.g(self.copy, "config", "remote.origin.url"), self.URL)
                 self.assertEqual(self.g(self.origin, "branch", "--list", "pr/*"), "")
-        self.assertEqual(store.read_json(store.home() / "patches.json"),
-                         {"source": str(self.copy), "upstream": "a-schaefers/claudes-workbench"})
+        noted = store.read_json(store.home() / "patches.json")       # the mod's keys kept as they were
+        self.assertEqual((noted["source"], noted["upstream"]), (str(self.copy), "a-schaefers/claudes-workbench"))
 
     def prepared_again(self, slug):
         """A second pr/<slug> from the same clone (prepared() already made it a clone install)."""
@@ -18408,6 +18424,304 @@ class LocalPatches(Base):
         self.g(self.copy, "branch", "pr/mine", "origin/main~1")
         self.assertEqual(patches.retire_landed(self.copy), [])
         self.assertIn("pr/mine", self.g(self.copy, "branch", "--list", "pr/*"))
+
+    # --- what became of the user's pull request, and wb patch check (#1005, 2026-11-22): a
+    # squashed, reworded or edited merge left the local patch in place, to conflict or double up
+
+    def sent_pr(self):
+        """prepared(), then sent as the owner (pushed to origin, no fork): pull request #7."""
+        wt, body = self.prepared()
+        self.gh_auth(login="a-schaefers")
+        self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/7", self.send(body))
+        self.gh_calls.unlink(missing_ok=True)
+        return wt, body
+
+    def noted_sent(self):
+        return (store.read_json(store.home() / "patches.json") or {}).get("sent", {})
+
+    def pr_views(self):
+        return [c for c in self.gh_argv() if c[:2] == ["pr", "view"]]
+
+    def test_patch_send_records_its_pull_request_on_the_new_and_the_already_open_paths(self):
+        # #1005, 2026-11-22: wb update learns of the merge from this row
+        for case in ("new", "exists"):
+            with self.subTest(case):
+                slug = f"fix-{case}"
+                wt, body = self.prepared(slug=slug) if case == "new" else self.prepared_again(slug)
+                self.gh_auth(login="a-schaefers")
+                if case == "exists":
+                    os.environ["FAKE_GH_FAIL"] = "exists"
+                self.send(body, slug=slug)
+                fix = self.g(wt, "rev-parse", "HEAD")
+                n = 7 if case == "new" else 1
+                self.assertEqual(self.noted_sent()[slug], {
+                    "repo": "a-schaefers/claudes-workbench", "pr": n,
+                    "url": f"https://github.com/a-schaefers/claudes-workbench/pull/{n}",
+                    "author": "t", "email": "t@t", "subject": self.g(wt, "log", "-1", "--format=%s"),
+                    "date": int(self.g(wt, "log", "-1", "--format=%at", fix))})
+        noted = store.read_json(store.home() / "patches.json")
+        self.assertEqual((noted["source"], noted["upstream"]), (str(self.copy), "a-schaefers/claudes-workbench"))
+
+    def test_a_squash_merged_pull_request_drops_its_local_patch_and_retires_its_branch(self):
+        # #1005, 2026-11-22: upstream squashed it, reworded and edited, so neither a clean
+        # cherry-pick nor an empty result told the rebase it was in: the patch conflicted
+        wt, body = self.sent_pr()
+        old = self.g(self.copy, "rev-parse", "HEAD")
+        self.commit(self.origin, "mine.txt", "mine\nand better\n", "Fix the thing, reworded (#7)")
+        os.environ["FAKE_GH_PR_STATE"] = "MERGED"
+        out = self.wb("update")
+        self.assertIn("your pull request #7 merged: dropped the local patch fix the thing\n", out)
+        self.assertNotIn("no longer applies", out)
+        self.assertNotIn("landed upstream, dropped", out)       # said once, as the merge
+        self.assertIn("pull request #7 merged, removed pr/fix-thing, its worktree and its body file", out)
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD"), self.g(self.origin, "rev-parse", "HEAD"))
+        self.assertEqual((self.copy / "mine.txt").read_text(), "mine\nand better\n")
+        self.assertEqual(self.noted_sent(), {})
+        self.assertFalse(wt.exists() or body.exists())
+        self.assertEqual(self.g(self.copy, "branch", "--list", "pr/*"), "")
+        self.assertIn(old, self.g(self.copy, "reflog", "show", "--format=%H", patches.BEFORE).splitlines())
+        self.assertEqual(self.pr_views(), [["pr", "view", "7", "-R", "a-schaefers/claudes-workbench",
+                                            "--json", "state,mergeCommit"]])
+        self.assertEqual(self.worktrees(), 1)
+        self.assertIn("already up to date", self.wb("update"))  # nothing left to ask about
+        self.assertEqual(self.pr_views(), [["pr", "view", "7", "-R", "a-schaefers/claudes-workbench",
+                                            "--json", "state,mergeCommit"]])
+
+    def test_a_merge_not_in_the_fetched_upstream_yet_keeps_the_patch_until_it_is(self):
+        # #1005, 2026-11-22: dropping it then left the user without the fix until the next fetch
+        wt, body = self.sent_pr()
+        self.commit(self.origin, "other.txt", "x\n", "other news")
+        os.environ.update(FAKE_GH_PR_STATE="MERGED", FAKE_GH_PR_MERGE="f" * 40)
+        out = self.wb("update")
+        self.assertNotIn("pull request #7", out)
+        self.assertEqual(self.g(self.copy, "log", "--format=%s", "@{u}..HEAD"), "fix the thing")
+        self.assertNotIn("merged", self.noted_sent()["fix-thing"])
+        merge = self.commit(self.origin, "mine.txt", "mine\nsquashed\n", "Fix the thing (#7)")
+        os.environ["FAKE_GH_PR_MERGE"] = merge
+        self.assertIn("your pull request #7 merged: dropped the local patch fix the thing", self.wb("update"))
+        self.assertEqual(self.g(self.copy, "rev-list", "--count", "@{u}..HEAD"), "0")
+
+    def test_a_pull_request_closed_unmerged_keeps_the_patch_and_is_said_once(self):
+        wt, body = self.sent_pr()
+        os.environ["FAKE_GH_PR_STATE"] = "CLOSED"
+        out = self.wb("update")
+        sha = self.g(self.copy, "rev-parse", "--short", "HEAD")
+        self.assertIn("your pull request #7 was closed without merging: kept the local patch fix the thing "
+                      f"(wb patch check {sha} tells whether upstream fixed it another way)", out)
+        self.assertIn("updated clone", out)
+        self.assertEqual(self.g(self.copy, "log", "--format=%s", "@{u}..HEAD"), "fix the thing")
+        self.assertTrue(self.noted_sent()["fix-thing"]["closed_said"])
+        self.assertTrue(wt.exists())                            # its branch stays: the user may rework it
+        self.assertNotIn("closed without merging", self.wb("update"))
+        self.assertEqual(len(self.pr_views()), 2)               # asked each time, said once
+
+    def test_an_open_pull_request_is_quiet_and_keeps_the_patch(self):
+        self.sent_pr()
+        os.environ["FAKE_GH_PR_STATE"] = "OPEN"
+        out = self.wb("update")
+        self.assertNotIn("pull request #7", out)
+        self.assertIn("1 local patch(es) on top of upstream", out)
+        self.assertIn("fix-thing", self.noted_sent())
+        self.assertEqual(len(self.pr_views()), 1)
+
+    def test_gh_failing_or_hanging_keeps_the_patch_in_one_line_and_the_update_still_succeeds(self):
+        self.sent_pr()
+        for state, why in (("fail", "HTTP 502: Bad Gateway"), ("hang", "no answer in 1s")):
+            with self.subTest(state):
+                os.environ["FAKE_GH_PR_STATE"] = state
+                self.commit(self.origin, f"{state}.txt", "x\n", f"news, {state}")
+                began = time.monotonic()
+                with mock.patch.object(patches, "GH_SECS", 1):
+                    out = self.wb("update")
+                self.assertLess(time.monotonic() - began, 30)
+                self.assertIn(f"couldn't ask GitHub about pull request #7 ({why}", out)
+                self.assertIn("): kept the local patch\n", out)
+                self.assertNotIn("ghp_", out)
+                self.assertIn("updated clone", out)
+                self.assertEqual(self.g(self.copy, "log", "--format=%s", "@{u}..HEAD"), "fix the thing")
+        self.assertIn("fix-thing", self.noted_sent())
+
+    def wb_split(self, *a):
+        """(stdout, stderr, exit code) of wb ``a``."""
+        buf, err, code = io.StringIO(), io.StringIO(), 0
+        try:
+            with redirect_stdout(buf), redirect_stderr(err):
+                cli.main(list(a))
+        except SystemExit as e:
+            code = e.code
+        return buf.getvalue(), err.getvalue(), code
+
+    def test_update_says_updated_first_so_the_mods_update_still_reloads_the_plugin(self):
+        # #1005, 2026-11-22: the couldn't-ask line came ahead of "updated", and /workbench-update
+        # (register.tsx: out.startsWith('updated')) skipped /reload-plugins
+        self.sent_pr()
+        os.environ["FAKE_GH_PR_STATE"] = "fail"
+        self.commit(self.origin, "more.txt", "x\n", "more news")
+        out, err, code = self.wb_split("update")
+        self.assertEqual((code, err), (0, ""))
+        self.assertTrue(out.startswith("updated clone "), out)
+        self.assertIn("couldn't ask GitHub about pull request #7 (HTTP 502: Bad Gateway", out)
+
+    def test_a_closed_pull_request_whose_patch_conflicts_is_said_beside_the_refusal_once(self):
+        # #1005, 2026-11-22: the rebase refused before closed_lines, so the close was never said
+        # and Claude never learned to wb patch check the conflicting patch
+        self.sent_pr()
+        self.commit(self.origin, "mine.txt", "theirs\n", "upstream's own mine.txt")
+        os.environ["FAKE_GH_PR_STATE"] = "CLOSED"
+        sha = self.g(self.copy, "rev-parse", "--short", "HEAD")
+        head = self.g(self.copy, "rev-parse", "HEAD")
+        out, err, code = self.wb_split("update")
+        self.assertEqual(code, 1)
+        self.assertIn("your pull request #7 was closed without merging: kept the local patch fix the thing "
+                      f"(wb patch check {sha} tells whether upstream fixed it another way)", out)
+        self.assertIn("the local patch", err)
+        self.assertIn("no longer applies on upstream's", err)
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD"), head)     # nothing moved
+        self.assertTrue(self.noted_sent()["fix-thing"]["closed_said"])
+        out, err, code = self.wb_split("update")                           # refused again, not said again
+        self.assertEqual(code, 1)
+        self.assertNotIn("closed without merging", out)
+        self.assertIn("no longer applies on upstream's", err)
+
+    def test_a_plugin_step_failing_after_the_move_still_says_which_patches_were_dropped(self):
+        # #1005, 2026-11-22 (the sandbox run): the branch had moved, the merged pull request's
+        # patch gone from local, but a failed claude step died before the report, and no later
+        # run said it: the patch left local unsaid
+        wt, body = self.sent_pr()
+        self.commit(self.origin, "mine.txt", "mine\nand better\n", "Fix the thing, reworded (#7)")
+        os.environ["FAKE_GH_PR_STATE"] = "MERGED"
+        (Path(self.tmp.name) / "fakebin" / "claude").write_text(
+            '#!/bin/sh\ncase "$*" in "plugin marketplace update"*) echo offline >&2; exit 1;; esac\n')
+        out, err, code = self.wb_split("update")
+        self.assertEqual(code, 1)
+        self.assertIn("claude plugin marketplace update failed: offline; the pull is done", err)
+        self.assertIn("your pull request #7 merged: dropped the local patch fix the thing\n", out)
+        self.assertIn("0 local patch(es) on top of upstream (local)", out)
+        self.assertEqual(self.g(self.copy, "rev-parse", "HEAD"), self.g(self.origin, "rev-parse", "HEAD"))
+
+    def test_update_check_never_asks_github_about_a_sent_pull_request(self):
+        # the mod runs --check on a timer: it never asks GitHub
+        self.sent_pr()
+        os.environ["FAKE_GH_PR_STATE"] = "MERGED"
+        self.commit(self.origin, "mine.txt", "mine\nsquashed\n", "Fix the thing (#7)")
+        self.assertIn("update available", self.wb("update", "--check"))
+        self.assertEqual(self.pr_views(), [])
+        self.assertEqual(self.g(self.copy, "log", "--format=%s", "@{u}..HEAD"), "fix the thing")
+        self.assertNotIn("merged", self.noted_sent()["fix-thing"])
+
+    CALC_TESTS = ("import unittest\n\nimport calc\n\n\nclass Calc(unittest.TestCase):\n"
+                  "    def test_add_takes_two_numbers(self):\n        calc.add(1, 2)\n")
+
+    def calc(self):
+        """A clone install on local whose upstream has calc.add, wrong (a - b), and a test class for
+        it; then a patch on local that fixes it and adds its own test."""
+        self.as_clone()
+        (self.origin / "tests").mkdir(exist_ok=True)
+        (self.origin / "tests/__init__.py").write_text("")
+        (self.origin / "tests/test_calc.py").write_text(self.CALC_TESTS)
+        (self.origin / "calc.py").write_text("def add(a, b):\n    return a - b\n")
+        self.g(self.origin, "add", "-A"); self.g(self.origin, "commit", "-qm", "calc")
+        self.g(self.copy, "fetch", "-q", "origin")
+        self.g(self.copy, "reset", "-q", "--hard", "origin/main")
+        (self.copy / "tests/test_calc.py").write_text(
+            self.CALC_TESTS + "\n    def test_add_adds(self):\n        self.assertEqual(calc.add(2, 3), 5)\n")
+        (self.copy / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+        self.g(self.copy, "add", "-A"); self.g(self.copy, "commit", "-qm", "add adds")
+        return self.g(self.copy, "rev-parse", "--short", "HEAD")
+
+    def upstream_commits(self, name, text, msg):
+        self.commit(self.origin, name, text, msg)
+        self.g(self.copy, "fetch", "-q", "origin")
+
+    def check(self, commit):
+        """wb patch check's output, and that it exited 0."""
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            cli.main(["patch", "check", commit])                # a SystemExit here fails the test
+        return buf.getvalue()
+
+    def test_patch_check_says_whether_upstream_already_passes_the_patchs_own_tests(self):
+        # #1005, 2026-11-22: a conflict or a closed pull request left Claude no way to tell a fix
+        # upstream made another way from one it still lacks
+        fix = self.calc()
+        self.assertEqual(self.check(fix), "upstream fails this patch's tests (add adds): keep it\n")
+        self.upstream_commits("calc.py", "def add(a, b):\n    return sum((a, b))\n", "add, fixed another way")
+        self.assertEqual(self.check(fix), "upstream already passes this patch's tests (add adds): it likely "
+                                          f"fixed the same thing. Drop it with the user's yes: wb patch drop {fix}\n")
+        self.assertEqual(self.g(self.copy, "log", "--format=%s", "@{u}..HEAD"), "add adds")   # dropped nothing
+        self.assertEqual(self.worktrees(), 1)
+        self.assertEqual(list((store.home() / "patches").iterdir()), [])
+        # its test hunk no longer applies: upstream rewrote the lines it adds after
+        self.upstream_commits("tests/test_calc.py", self.CALC_TESTS.replace("add(1, 2)", "add(2, 1)"),
+                              "upstream's own test change")
+        self.assertEqual(self.check(fix), "add adds's tests don't apply to upstream any more: compare by hand\n")
+        self.assertEqual(self.worktrees(), 1)
+        self.assertEqual(list((store.home() / "patches").iterdir()), [])
+
+    def test_patch_check_never_calls_a_skipped_or_unrun_test_a_pass(self):
+        # #1005, 2026-11-22: a test skipped here (no Landlock, say), or the mod's tests with claude
+        # missing, exited 0 and was called "upstream already passes ... Drop it": a skip is not a pass
+        fix = self.calc()
+        skipped = ("\n    @unittest.skip('needs Landlock')\n    def test_add_adds_in_the_lane(self):\n"
+                   "        self.assertEqual(calc.add(2, 3), 5)\n")
+        real_which = shutil.which
+        for case in ("skipped", "mod without claude", "no class"):
+            with self.subTest(case):
+                self.g(self.copy, "reset", "-q", "--hard", fix)
+                text = (self.copy / "tests/test_calc.py").read_text()
+                if case == "skipped":
+                    (self.copy / "tests/test_calc.py").write_text(text + skipped)
+                    why = "a test was skipped"
+                elif case == "mod without claude":
+                    (self.copy / "mod/hooks").mkdir(parents=True, exist_ok=True)
+                    (self.copy / "mod/hooks/calc.test.tsx").write_text("test('x', () => {})\n")
+                    why = "claude isn't on PATH for the mod's tests"
+                else:
+                    (self.copy / "tests/test_calc.py").write_text(
+                        text + "\n\ndef test_add_adds_as_a_function():\n    assert calc.add(2, 3) == 5\n")
+                    why = "no test class holds test_add_adds_as_a_function"
+                self.g(self.copy, "add", "-A"); self.g(self.copy, "commit", "-q", "--amend", "--no-edit")
+                head = self.g(self.copy, "rev-parse", "--short", "HEAD")
+                # upstream fixed it another way: the one test that runs passes there
+                self.upstream_commits("calc.py", "def add(a, b):\n    return sum((a, b))\n", f"fixed, {case}")
+                with mock.patch.object(patches.shutil, "which",
+                                       lambda n, *a, **k: None if n == "claude" else real_which(n, *a, **k)):
+                    out = self.check(head)
+                self.g(self.origin, "reset", "-q", "--hard", "HEAD~1")    # upstream wrong again
+                self.g(self.copy, "fetch", "-q", "--force", "origin")
+                self.assertEqual(out, f"add adds's tests didn't all run here ({why}), so wb patch check can't "
+                                      "tell: run them where they can (a skip is not a pass)\n")
+                self.assertNotIn("already passes", out)
+        # a failure still wins over a test that didn't run: upstream lacks the fix, so the patch stays
+        self.assertEqual(self.check(head), "upstream fails this patch's tests (add adds): keep it\n")
+
+    def test_patch_check_of_a_patch_with_no_test_says_it_cant_tell_and_the_mods_test_runs_through_claude(self):
+        self.as_clone()
+        plain = self.g(self.copy, "rev-parse", "--short", self.commit(self.copy, "mine.txt", "mine\n", "a fix"))
+        self.assertEqual(self.check(plain), "a fix has no test of its own, so wb patch check can't tell: write "
+                                            "one (upstream asks for one in a pull request too)\n")
+        (self.copy / "mod/hooks").mkdir(parents=True)
+        mod = self.g(self.copy, "rev-parse", "--short", self.commit(
+            self.copy, "mod/hooks/register.test.tsx", "test('x', () => {})\n", "the pane's fix"))
+        self.calls.unlink(missing_ok=True)
+        self.assertIn("upstream already passes this patch's tests (the pane's fix)", self.check(mod))
+        self.assertEqual(self.calls.read_text().splitlines(), ["plugin test mod"])
+        for bad, said in (("nosuch", "nosuch: no such commit"), (self.base, "isn't one of local's patches")):
+            with self.subTest(bad):
+                self.assertIn(said, self.wb("patch", "check", bad))
+                with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+                    cli.main(["patch", "check", bad])
+                self.assertEqual(e.exception.code, 1)
+
+    def test_patch_upstream_of_a_commit_with_no_test_asks_for_one(self):
+        self.as_clone()
+        fix = self.commit(self.copy, "mine.txt", "mine\n", "a fix")
+        self.assertIn("it has no test: add one before sending (upstream asks for one, and wb patch check "
+                      "needs it)", self.wb("patch", "upstream", fix, "--name", "no-test"))
+        (self.copy / "tests").mkdir(exist_ok=True)
+        tested = self.commit(self.copy, "tests/test_mine.py", "x = 1\n", "a fix with a test")
+        self.assertNotIn("it has no test", self.wb("patch", "upstream", tested, "--name", "tested"))
+        self.assertIn(f"{tested[:7]}  a fix with a test  [no Scope trailer]\n", self.wb("patch", "list"))
 
     def test_a_crash_prints_its_traceback_then_how_to_get_it_fixed(self):
         # #1005: a bug's traceback alone left the user's Claude no path to a fix the user keeps

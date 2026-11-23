@@ -24,24 +24,48 @@ Decide before you offer anything, and tell the user which and why in a line.
    Then the user runs `/reload-plugins`. On a clone the user already owns, it says so: work on
    branch `local` there (`git -C <root> switch -c local`).
 2. Write the fix yourself, in the clone, imitating the code around it and following its CLAUDE.md
-   (docs in the same commit, a test that fails without the fix). Don't delegate it: a task's
+   (docs in the same commit, a test that fails without the fix: it is how `wb patch check` later
+   tells whether upstream fixed the same thing). Don't delegate it: a task's
    runner, git shim and lane run from this very clone. `wb` runs from it too, so edit while no
    task runs (`wb status`) and run the tests you touched before committing.
 3. Commit on `local` with its scope: `git -C <root> commit -a -m "<subject>" --trailer "Scope: me"`
    (or `"Scope: everybody"`). A change under `mod/` reaches Claude Code through `wb update` (it
    copies the committed HEAD into the plugin cache), then `/reload-plugins`.
 4. `wb patch list` shows each patch, its scope, uncommitted changes and prepared `pr/` branches;
+   a row ending ` (no test)` has no test of its own: write one before it goes upstream.
    `wb patch drop <commit>` removes one.
 
 `wb update` keeps the patches: it rebases `local` onto upstream in a scratch worktree, reports a
 patch upstream already has as `landed upstream, dropped from local: <subject>`, and moves the
-live branch only when all apply. A patch that no longer applies changes nothing: it names the
-patch; offer to resolve it by hand or to `wb patch drop` it. By hand, never in the live tree
-(mid-conflict every `wb` call fails): `git -C <root> worktree add --detach <scratch> local`, rebase
-there onto `local@{u}` and resolve, `git -C <root> reset --keep <its HEAD>`, then remove the
-worktree. The previous tip stays at `refs/workbench/before-update` (its reflog: the earlier ones).
-An untracked file on a path the rebased patches add refuses too, before any task is stopped:
-move it, then `wb update` again.
+live branch only when all apply. A pull request `wb patch send` opened is asked of GitHub first:
+once merged, however upstream reworded or squashed it, the patch goes by itself (`your pull
+request #<n> merged: dropped the local patch <subject>`); nothing to do. A patch that no longer
+applies changes nothing: it names the patch and `wb patch check <sha>`; run that first. An
+untracked file on a path the rebased patches add refuses too, before any task is stopped: move
+it, then `wb update` again. The previous tip stays at `refs/workbench/before-update` (its
+reflog: the earlier ones).
+
+### Has upstream fixed it another way?
+On `your pull request #<n> was closed without merging`, or a patch that no longer applies, run
+`wb patch check <sha>`: it applies only the patch's tests to plain upstream, in a scratch tree,
+and runs only the tests it added. It drops nothing.
+- `upstream already passes this patch's tests (…)`: upstream likely fixed the same thing. Tell the
+  user, and only on their yes run the `wb patch drop <sha>` it printed, then `wb update`.
+- `upstream fails this patch's tests (…): keep it`: upstream still lacks it. Offer to resolve the
+  conflict by hand (below) or, after a closed pull request, ask the user what they want.
+- `… tests didn't all run here (…), so wb patch check can't tell …`: a test was skipped here (no
+  Landlock, say), placed in no class, or the mod's tests need claude. A skip is not a pass: never
+  offer the drop on it. Run them where they can run (`wb doctor` says what is missing), or
+  compare by hand as below.
+- `… has no test of its own …` or `… tests don't apply to upstream any more: compare by hand`:
+  compare the patch with upstream's code yourself, then tell the user what you found; offer to
+  write the missing test.
+`couldn't ask GitHub about pull request #<n> (…): kept the local patch` is harmless: the next
+`wb update` asks again.
+
+Resolving a conflict by hand, never in the live tree (mid-conflict every `wb` call fails):
+`git -C <root> worktree add --detach <scratch> local`, rebase there onto `local@{u}` and resolve,
+`git -C <root> reset --keep <its HEAD>`, then remove the worktree.
 
 ## Upstream ("want me to PR it upstream for everybody?")
 Only for a patch that is for everybody, and only on the user's yes. The mod holds every send to
@@ -58,7 +82,10 @@ dialog: tell them there what it would send; it waits until they are back at the 
    Show it to the user before filing it, and tick "filed by an agent" only once they have read it.
    Without a browser: `gh issue create --title … --label … --body-file <f>`, the form's fields in
    its order under its labels as `### ` headings.
-2. `wb patch upstream <commit> --name <slug>`: branch `pr/<slug>` from fresh upstream, in its own
+2. A patch with no test gets one first (a commit on `local`, with the fix's): upstream asks for it,
+   and `wb patch check` needs it. `wb patch upstream` says `it has no test: add one before
+   sending` when it lacks one.
+   `wb patch upstream <commit> --name <slug>`: branch `pr/<slug>` from fresh upstream, in its own
    worktree under `$WB_HOME/upstream/`, the commit cherry-picked. On a conflict, resolve it there,
    then `git cherry-pick --continue`. It prints the tests, the body file
    (`$WB_HOME/upstream/<slug>.md`, a copy of `.github/pull_request_template.md`), the one `wb patch
@@ -79,9 +106,10 @@ dialog: tell them there what it would send; it waits until they are back at the 
    `--anyway`: it is a sign the patch is theirs, not everybody's. Never `scripts/ship.sh`: it is
    the owner's.
 5. Tell the user what happens next: CI waits for the owner to approve the run, the owner reviews
-   and merges, and the next `wb update` drops the local patch by itself, and its `pr/<slug>`
-   branch, worktree and body file. If the owner reworked it, `wb patch list` may still show it:
-   `wb patch drop` it then.
+   and merges, and the next `wb update` drops the local patch by itself, however the owner
+   reworded or squashed it, and its `pr/<slug>` branch, worktree and body file. If it is closed
+   instead, `wb update` says so once and keeps the patch: then *Has upstream fixed it another
+   way?* above.
 
 ## gh, GitHub's CLI
 `wb patch upstream`, `wb patch send` and `wb doctor` say gh's state (`gh: ready as <login> over
