@@ -29720,7 +29720,7 @@ class ApiDiscovery(Base):
 
 
 
-ROUTES_CATALOG =[*DISCOVERY_CATALOG, api_entry("deepseek", "deepseek-flash"),
+ROUTES_CATALOG = [*DISCOVERY_CATALOG, api_entry("deepseek", "deepseek-flash"),
                   api_entry("deepseek", "deepseek-v4-pro"), API_CATALOG[1]]
 ROUTES_AUTH = [*DISCOVERY_AUTH, key_row("deepseek", "DeepSeek", STORED), key_row("anthropic", "Anthropic", STORED)]
 DEEPSEEK_LINE = ("trivial: GPU → API deepseek/deepseek-flash · your code goes to DeepSeek · thinking off · "

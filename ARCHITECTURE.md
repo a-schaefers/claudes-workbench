@@ -1804,9 +1804,12 @@ mistral, moonshot, openai, openai-compatible(-responses), openrouter, togetherai
 and zai-coding-plan take `Authorization: Bearer`. A config provider's V1 npm `@ai-sdk/<name>` (the
 form OpenCode's docs give a custom provider: `@ai-sdk/openai-compatible`, `@ai-sdk/anthropic`) reads
 as `<name>` (`AI_SDK_PREFIX`, as `PACKAGE_PREFIX`): OpenCode 2.3.2 runs it as its own
-`@opencode/ai/providers/<name>`, and read as its scope, `@ai-sdk`, every such provider was refused
-(#1137); an unknown `@ai-sdk/foo` (OpenCode's `aisdk:@ai-sdk/foo`, an npm package it loads) still
-reads as none. Any other package (Google's `x-goog-api-key` and
+`@opencode/ai/providers/<name>` where it has one (openai-compatible, anthropic, openai, deepinfra,
+…), and read as its scope, `@ai-sdk`, every such provider was refused (#1137); an unknown
+`@ai-sdk/foo` (OpenCode's `aisdk:@ai-sdk/foo`, an npm package it loads) still reads as none. A raw
+`@ai-sdk/deepseek` reads as bearer although OpenCode loads that one from npm too (its
+`aisdk:@ai-sdk/deepseek`); it posts Bearer to the base plus `/chat/completions` as well, not
+checked on real OpenCode. Any other package (Google's `x-goog-api-key` and
 `/models/<id>:streamGenerateContent`, Azure's `api-key`, Cohere's native `/chat`, gateways with
 their own paths or headers, none at all) can't run: `start` raises "needs a key wb can hold
 outside the lane: <provider> takes its key in a way the keyhole doesn't speak" rather than a 401
