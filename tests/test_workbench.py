@@ -235,7 +235,11 @@ class Base(unittest.TestCase):
                           # the roles (#1014): the test's own, never the user's routes.json
                           WB_ROUTES=str(tmp / "routes.json"),
                           # the GPU lease in the test's own state, never a machine's shared one (#393)
-                          WB_GPU_DIR=str(tmp / "state"))
+                          WB_GPU_DIR=str(tmp / "state"),
+                          # the user's file for agents (#1102, 2026-11-23): theirs went into the
+                          # tests' prompts, and in an agent's lane, which hides it, every test
+                          # that started a task failed on its read
+                          WB_AGENTS_MD=str(tmp / "wb-config" / "AGENTS.md"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
         runner.models._AUTH.clear()  # OpenCode's stored keys, per process (models.auth_key)
         runner.models._STORED.clear()
@@ -720,12 +724,29 @@ class Lifecycle(Base):
         store.write_json(Path(self.tmp.name) / "x.json", {"left_out": ["donn\udce9es"]})
         self.assertEqual(store.read_json(Path(self.tmp.name) / "x.json"), {"left_out": ["donn\udce9es"]})
 
+    def test_the_suite_reads_its_own_agents_md_never_the_users(self):
+        # #1102 (2026-11-23): Base left the user's ~/.config/workbench/AGENTS.md in reach, so it
+        # went into the tests' prompts, and in an agent's lane (which hides it, as this chmod
+        # does) every test that started a task failed with a PermissionError on its read
+        home = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix="home-"))
+        os.environ["HOME"] = str(home)
+        users = home / ".config" / "workbench" / "AGENTS.md"
+        users.parent.mkdir(parents=True)
+        users.write_text("the user's own rules\n")
+        users.chmod(0)
+        self.assertEqual(context.user_agents_md(), Path(self.tmp.name) / "wb-config" / "AGENTS.md")
+        self.start("t-1102", "ok")
+        st = wait_phase("t-1102", {"review", "stuck", "failed"})
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertFalse((context.rules_dir(store.Task("t-1102")) / "AGENTS.md").exists())
+
     def test_a_users_agents_md_that_isnt_utf8_starts_the_task_all_the_same(self):
         # #784: ~/.claude/CLAUDE.md edited from Windows (a CP1252 apostrophe, 0x92) failed every
         # wb start with a traceback after the task was written, and every round's config layer;
         # the user's file for agents is ~/.config/workbench/AGENTS.md now (#1061)
         home = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix="home-"))
         os.environ["HOME"] = str(home)
+        os.environ.pop("WB_AGENTS_MD", None)  # its default place, under this HOME (#1102)
         (home / ".config" / "workbench").mkdir(parents=True)
         (home / ".config" / "workbench" / "AGENTS.md").write_bytes(b"Don\x92t guess.\n")
         self.start("t-784b", "ok")
@@ -7159,6 +7180,7 @@ class AgentContext(Base):
         from workbench import context, runner
         tmp = Path(self.tmp.name)
         os.environ["HOME"] = str(tmp / "home")
+        os.environ.pop("WB_AGENTS_MD", None)  # its default place, under this HOME (#1102)
         synced = tmp / "home" / ".claude" / "skills" / "synced" / "bucket" / "docx"
         synced.mkdir(parents=True)
         (synced / "SKILL.md").write_text("---\nname: docx\n---\n")
@@ -7209,6 +7231,7 @@ class AgentContext(Base):
         # ~/.config/workbench/AGENTS.md, in the user CLAUDE.md's old place, its imports followed
         home = Path(self.tmp.name) / "home"
         os.environ["HOME"] = str(home)
+        os.environ.pop("WB_AGENTS_MD", None)  # its default place, under this HOME (#1102)
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
         claude, config = home / ".claude", home / ".config" / "workbench"
         for d in (claude / "rules" / "lang", config, home / ".ssh"):
@@ -7708,6 +7731,7 @@ class RealOpenCode(Base):
         home = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-imports-test-"))  # outside a temp root
         self.addCleanup(shutil.rmtree, home, True)
         os.environ["HOME"] = str(home)
+        os.environ.pop("WB_AGENTS_MD", None)  # its default place, under this HOME (#1102)
         for v in ("CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
             os.environ.pop(v, None)
         claude, config = home / ".claude", home / ".config" / "workbench"   # both hidden from the lane
@@ -8797,6 +8821,72 @@ class GitGuard(unittest.TestCase):
                 self.assertIn("read-only", shim(*argv, **e).stderr, argv)
             self.assertNotIn("name = x", (repo / ".git" / "config").read_text())
 
+    def test_the_shim_refuses_a_global_config_write_to_the_users_own_gitconfig(self):
+        # #1120 (2026-11-23): without a lane (macOS) `git config --global user.name "Test Bot"`
+        # exited 0 and rewrote the user's ~/.gitconfig; a fixture's temp HOME still writes (#794)
+        from workbench import gitguard
+        with tempfile.TemporaryDirectory() as d:
+            d, repo = Path(os.path.realpath(d)), Path(os.path.realpath(d)) / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            home, fixture = d / "home", d / "fixture-home"
+            home.mkdir()
+            fixture.mkdir()
+            (home / ".gitconfig").write_text("[user]\n\tname = Real User\n")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")}
+            env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"))
+            with mock.patch.dict(os.environ, env, clear=True):   # the user's, at install
+                env.update(gitguard.install(d / "bin", repo, ROOT, os.environ["PATH"], repo))
+            shim = lambda *a, **e: subprocess.run([str(d / "bin" / "git"), *a], cwd=repo,  # noqa
+                                                  env={**env, **e}, capture_output=True, text=True)
+            for argv in (("config", "--global", "user.name", "Test Bot"),
+                         ("config", "--global", "--add", "safe.directory", "*"),
+                         ("config", "-f", str(home / ".gitconfig"), "user.name", "Test Bot")):
+                out = shim(*argv)
+                self.assertEqual(out.returncode, 1, argv)
+                self.assertIn("read-only", out.stderr, argv)
+            self.assertEqual((home / ".gitconfig").read_text(), "[user]\n\tname = Real User\n")
+            self.assertFalse((home / ".config" / "git" / "config").exists())
+            out = shim("config", "--global", "user.name")                    # a read
+            self.assertEqual((out.returncode, out.stdout), (0, "Real User\n"), out.stderr)
+            out = shim("config", "--global", "user.name", "t", HOME=str(fixture),
+                       XDG_CONFIG_HOME=str(fixture / ".config"))            # a fixture's own
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("name = t", (fixture / ".gitconfig").read_text())
+
+    def test_a_fixture_that_moves_home_alone_writes_its_own_gitconfig_though_the_user_exports_xdg(self):
+        # #1120's review (2026-11-23): both --global candidates were judged, the user's exported
+        # $XDG_CONFIG_HOME/git/config among them, so pytest's monkeypatch.setenv('HOME', tmp) got
+        # the refusal (#794 again); git writes the fixture's ~/.gitconfig, and the XDG file only
+        # when it alone exists
+        from workbench import gitguard
+        with tempfile.TemporaryDirectory() as d:
+            d, repo = Path(os.path.realpath(d)), Path(os.path.realpath(d)) / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            home, fixture = d / "home", d / "fixture-home"
+            home.mkdir()
+            fixture.mkdir()
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")}
+            env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"))
+            with mock.patch.dict(os.environ, env, clear=True):   # the user's, at install
+                env.update(gitguard.install(d / "bin", repo, ROOT, os.environ["PATH"], repo))
+            shim = lambda *a: subprocess.run([str(d / "bin" / "git"), *a], cwd=repo,  # noqa: E731
+                                             env={**env, "HOME": str(fixture)},
+                                             capture_output=True, text=True)
+            out = shim("config", "--global", "user.name", "t")
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("name = t", (fixture / ".gitconfig").read_text())
+            self.assertFalse((home / ".config" / "git").exists())
+            # and with the user's XDG file there and no fixture ~/.gitconfig, git would write the
+            # user's: refused
+            (fixture / ".gitconfig").unlink()
+            (home / ".config" / "git").mkdir(parents=True)
+            (home / ".config" / "git" / "config").write_text("[user]\n\tname = Real User\n")
+            out = shim("config", "--global", "user.name", "t")
+            self.assertEqual(out.returncode, 1, out.stderr)
+            self.assertIn("read-only", out.stderr)
+            self.assertEqual((home / ".config" / "git" / "config").read_text(), "[user]\n\tname = Real User\n")
+            self.assertFalse((fixture / ".gitconfig").exists())
+
     def test_protected_repositories(self):
         from workbench import gitguard
         with tempfile.TemporaryDirectory() as d:
@@ -9258,6 +9348,25 @@ class Lane(Base):
                                        context.readable(task), *extra),
                              capture_output=True, text=True, timeout=20)
         return out.stdout.split() or [out.stderr]
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_config_home_outside_the_dotfiles_stays_readable_but_its_secrets_dont(self):
+        # #1103 (2026-11-23): with XDG_CONFIG_HOME=~/conf the agent's OpenCode couldn't read its
+        # global opencode.json, and a provider there failed every task as an unknown model
+        home = self.fake_home()
+        conf = home / "conf"
+        for rel, text in (("opencode/opencode.json", "{}"), ("git/config", "[user]\n"),
+                          ("gh/hosts.yml", "token")):
+            (conf / rel).parent.mkdir(parents=True)
+            (conf / rel).write_text(text)
+        (home / "letters").mkdir()
+        (home / "letters" / "a.txt").write_text("private")
+        os.environ["XDG_CONFIG_HOME"] = str(conf)
+        task = self.bare_task("t-xdgconf", self.repo)
+        self.assertEqual(self.reads_in_lane(task, [conf / "opencode" / "opencode.json", conf / "git" / "config",
+                                                   conf / "gh" / "hosts.yml", home / "letters" / "a.txt"]),
+                         ["read", "read", "refused", "refused"])
 
     @home_outside_the_lane
     def test_toolchain_bins_user_site_and_a_repo_under_gopath_stay_out_of_the_lane(self):
@@ -17972,6 +18081,7 @@ class Setup(Base):
                           FAKE_VERSION="opencode v2.3.0",
                           PATH=os.pathsep.join([str(home / ".local/bin"), os.environ["PATH"]]))
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        os.environ.pop("WB_AGENTS_MD", None)  # its default place, under this HOME (#1102)
         note = ("note: agents no longer get your ~/.claude/CLAUDE.md or ~/.claude/rules/: what they "
                 "should follow in every project goes in ~/.config/workbench/AGENTS.md\n")
         said = lambda: [note in self.setup(cmd=c)[1] for c in ("setup", "doctor")]  # noqa: E731
@@ -31806,10 +31916,7 @@ class Privacy(_KeyholeTest):
         os.environ["WB_ROUTES"] = str(self.routes)
         self.claude = Path(self.tmp.name) / "claude-home"   # no ~/.claude files unless a test says
         os.environ["CLAUDE_CONFIG_DIR"] = str(self.claude)
-        self.agents_md = Path(self.tmp.name) / "wb-config" / "AGENTS.md"   # never the user's own
-        patcher = mock.patch.object(context, "user_agents_md", lambda: self.agents_md)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.agents_md = Path(os.environ["WB_AGENTS_MD"])                  # never the user's own (Base)
 
     def api_model(self, mid=FLASH, label="DeepInfra (API)", free=False):
         pid, name = mid.split("/", 1)
@@ -32163,6 +32270,152 @@ class Privacy(_KeyholeTest):
             self.assertIn("in its lane Gradle and dotnet stop on every run, and Hex installs from a "
                           "private registry fail", context.api_hidden_note())
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_the_hugging_face_token_is_out_of_an_api_lane_and_its_cache_stays_writable(self):
+        # #1092 (2026-11-23): SECRET_ENV dropped HF_TOKEN, but `cat ~/.cache/huggingface/token`
+        # sent the same token to the provider; Ollama's account key was readable in every lane
+        home = Lane.fake_home(self)
+        for v in ("HF_HOME", "HF_TOKEN_PATH", "HF_STORED_TOKENS_PATH"):
+            os.environ.pop(v, None)
+        hf = home / ".cache" / "huggingface"
+        (hf / "hub").mkdir(parents=True)
+        (hf / "token").write_text("hf_FAKEFAKEFAKE")                # a bare token: no key to match
+        (hf / "stored_tokens").write_text("[default]\nhf_token = hf_FAKEFAKEFAKE\n")
+        (home / ".cache" / "app").mkdir()
+        (home / ".ollama").mkdir()
+        (home / ".ollama" / "id_ed25519").write_text("OLLAMAKEY")
+        (home / ".ollama" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA")
+        script = ("import os, sys\nfor f in sys.argv[1:5]:\n    try:\n        open(f).read(); print('read')\n"
+                  "    except PermissionError:\n        print('refused')\n"
+                  "for d in sys.argv[5:]:\n    os.makedirs(d, exist_ok=True)\n"
+                  "    open(os.path.join(d, 'x'), 'w').write('x'); print('wrote')\n")
+        files = [hf / "token", hf / "stored_tokens", home / ".ollama" / "id_ed25519",
+                 home / ".ollama" / "id_ed25519.pub"]
+        dirs = [hf / "hub" / "models--x", hf / "xet", home / ".cache" / "pip", home / ".cache" / "app"]
+        for via, want in (("api", ["refused", "refused", "refused", "read"]),
+                          ("gpu", ["read", "read", "refused", "read"])):
+            task = self.bare(f"t-hf-{via}", via)
+            out = subprocess.run(lane.wrap(context.writable(task),
+                                           [sys.executable, "-c", script, *map(str, files + dirs)],
+                                           context.readable(task)),
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.stdout.split(), want + ["wrote"] * len(dirs), (via, out.stderr))
+        self.assertIn("Hugging Face's gated and private models don't download", context.api_hidden_note())
+        (hf / "token").write_text("")                               # logged out: nothing to hide
+        (hf / "stored_tokens").unlink()
+        self.assertEqual(context.api_hidden_paths(), set())
+        # and where HF_HOME moves it, the home split around it with what the libraries make there
+        moved = home / "hf-home"
+        moved.mkdir()
+        (moved / "token").write_text("hf_FAKEFAKEFAKE")
+        os.environ["HF_HOME"] = str(moved)
+        api = context.writable(self.bare("t-hf-moved", "api"))
+        self.assertIn(os.path.realpath(moved / "token"), context.api_hidden_paths())
+        self.assertNotIn(str(moved), api)
+        self.assertIn(str(moved / "hub"), api)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_cache_split_by_something_else_makes_no_hugging_face_home(self):
+        # #1092's review (2026-11-23): HISTFILE in ~/.cache splits it on the GPU too, and that
+        # made ~/.cache/huggingface/{hub,xet,...} on machines that never used Hugging Face;
+        # the common tools' caches are still made, so their first run isn't refused
+        home = Lane.fake_home(self)
+        for v in ("HF_HOME", "HF_TOKEN_PATH", "HF_STORED_TOKENS_PATH"):
+            os.environ.pop(v, None)
+        (home / ".cache" / "zsh").mkdir(parents=True)
+        (home / ".cache" / "zsh" / "history").write_text("ls\n")
+        os.environ["HISTFILE"] = str(home / ".cache" / "zsh" / "history")
+        for via in ("gpu", "api"):
+            lane_dirs = context.writable(self.bare(f"t-hist-{via}", via))
+            self.assertNotIn(str(home / ".cache"), lane_dirs, via)    # split around the history
+            self.assertFalse((home / ".cache" / "huggingface").exists(), via)
+            self.assertTrue((home / ".cache" / "uv").is_dir(), via)
+        # and where XDG_CACHE_HOME moves Hugging Face's home, split around its token, its caches
+        cache = home / "xdg-cache"
+        (cache / "huggingface").mkdir(parents=True)
+        (cache / "huggingface" / "token").write_text("hf_FAKEFAKEFAKE")
+        os.environ["XDG_CACHE_HOME"] = str(cache)
+        api = context.writable(self.bare("t-hf-xdg", "api"))
+        self.assertNotIn(str(cache / "huggingface"), api)
+        self.assertIn(str(cache / "huggingface" / "hub"), api)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_an_api_lane_reads_the_repos_git_dir_but_not_its_checkouts_ignored_files(self):
+        # #1091 (2026-11-23): `cat <checkout>/.env` in an API lane sent the live key it holds to
+        # the provider, though wb start refuses to copy it unless it is named
+        home = Lane.fake_home(self)
+        repo = home / "proj" / "repo"
+        repo.mkdir(parents=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,  # noqa: E731
+                                      capture_output=True)
+        g("init", "-q", "-b", "main")
+        (repo / ".gitignore").write_text(".env\nCLAUDE.local.md\n")
+        (repo / "CLAUDE.md").write_text("# repo\n")
+        # and a tracked .gitconfig the repo's config includes: unread, every git call in an API
+        # lane died "bad config line" (#1091's review, 2026-11-23)
+        (repo / ".gitconfig").write_text("[alias]\n\tst = status\n")
+        g("config", "include.path", "../.gitconfig")
+        g("add", ".")
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+        (repo / ".env").write_text("STRIPE_KEY=sk_live_FAKE\n")
+        (repo / "CLAUDE.local.md").write_text("my local notes\n")
+        script = ("import subprocess, sys\ntry:\n    open(sys.argv[1]).read(); print('read')\n"
+                  "except PermissionError:\n    print('refused')\n"
+                  "print(open(sys.argv[2]).read().strip())\n"
+                  "r = subprocess.run(['git', '-C', sys.argv[3], 'log', '--format=%s'], capture_output=True, text=True)\n"
+                  "print(r.stdout.strip() or r.stderr)\n")
+        for via, want in (("api", "refused"), ("gpu", "read")):
+            task = store.Task(f"t-co-{via}")
+            task.dir.mkdir(parents=True)
+            (task.dir / "task.json").write_text(json.dumps({"name": task.name, "repo": str(repo), "via": via}))
+            g("worktree", "add", "-q", "-b", f"delegate/{task.name}", str(task.worktree))
+            files, _ = context.instruction_files(task)
+            local = next(f for f in files if f.name == "CLAUDE.local.md")
+            self.assertEqual(local == repo / "CLAUDE.local.md", via == "gpu", local)
+            out = subprocess.run(lane.wrap(context.writable(task),
+                                           [sys.executable, "-c", script, str(repo / ".env"), str(local),
+                                            str(task.worktree)], context.readable(task)),
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.stdout.split("\n")[:3], [want, "my local notes", "init"], (via, out.stderr))
+            self.assertIn(("CLAUDE.local.md", 3), context.fixed_prompt(task)[1])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_a_test_refused_on_an_api_hidden_file_names_no_grant(self):
+        # #1093 (2026-11-23): the report said `wb allow --path ~/.m2/settings.xml`, wb allow saved
+        # it, and the paid feedback round was refused the same way: api_hidden wins over a grant
+        home = Path(self.tmp.name) / "home"
+        (home / ".m2").mkdir(parents=True)
+        settings = home / ".m2" / "settings.xml"
+        settings.write_text("<settings><servers><server><id>r</id><password>p</password>"
+                            "</server></servers></settings>")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for v in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+                os.environ.pop(v, None)
+            api, gpu = self.bare("t-hid-api", "api"), self.bare("t-hid-gpu", "gpu")
+            out = f"[ERROR] Non-readable settings {settings}: Permission denied"
+            self.assertEqual(runner.lane_refused(api, out), [str(settings)])
+            self.assertIsNone(runner.lane_grant(str(settings), api))
+            line = runner.not_the_code(api, {"ok": False, "exit": 1, "lane": [str(settings)]})
+            self.assertIn(f"the lane refused {settings}: an API task's lane hides it (it holds a "
+                          "credential, which would reach the provider), so no grant reaches it", line)
+            self.assertNotIn("wb allow", line)
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()) as err:
+                run_wb("allow", "t-hid-api", "--path", str(settings))
+            self.assertIn("an API task's lane hides it", err.getvalue())
+            self.assertNotIn(str(settings), context.lane_paths(api))
+            # the agent's own request for it names no grant either
+            notice = runner.ask_mcp.notice(api, "q1", {"question": "need Maven's settings", "command": "",
+                                                       "path": str(settings), "context": ""})
+            self.assertIn("No grant reaches it", notice)
+            self.assertNotIn("wb allow", notice)
+            # a GPU task's lane reads it: a refusal there is the grant's to fix
+            self.assertEqual(runner.lane_grant(str(settings), gpu), str(settings))
+            self.assertIn(f"wb allow t-hid-gpu --path {settings}",
+                          runner.not_the_code(gpu, {"ok": False, "exit": 1, "lane": [str(settings)]}))
+
     def test_the_start_says_which_token_files_an_api_lane_hides_and_a_gpu_start_doesnt(self):
         home = Path(self.tmp.name) / "home"
         home.mkdir()
@@ -32183,6 +32436,54 @@ class Privacy(_KeyholeTest):
                           context.api_hidden_note())
             self.assertNotIn("can't read ~/.npmrc", self.start("t-dn2", "ok"))
             wait_phase("t-dn2", ("review",))
+
+    def test_an_api_start_names_a_remote_url_that_holds_a_token(self):
+        # #1072 (2026-11-23): `git remote -v` in an API lane printed origin's token, or one from
+        # a ~/.gitconfig insteadOf rule; git needs both files, so the start says so instead
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa: E731
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for v in ("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"):
+                os.environ.pop(v, None)
+            g("remote", "add", "origin", "ssh://git@gitlab.example.com/team/app.git")
+            g("remote", "set-url", "--push", "origin", "git@gitlab.example.com:team/app.git")
+            self.assertEqual(context.git_url_note(self.repo), "")      # an SSH user is no login
+            g("remote", "add", "mirror", "https://oauth2:glpat-FAKEFAKE1234@gitlab.example.com/team/app.git")
+            out = self.start_api("t-url1")
+            self.assertIn(f"note: an API task can read the login in a git URL in {self.repo}/.git/config "
+                          "(`git remote -v`, which would send it to the provider): keep the token in a "
+                          "credential helper instead", out)
+            self.assertNotIn("glpat-FAKEFAKE1234", out)
+            g("remote", "remove", "mirror")
+            (home / ".gitconfig").write_text('[url "https://glpat-GLOBALFAKE@gitlab.example.com/"]\n'
+                                             "\tinsteadOf = https://gitlab.example.com/\n")
+            self.assertIn("in a git URL in ~/.gitconfig (", context.git_url_note(self.repo))
+            out = self.start("t-url2", "ok")                           # a GPU start: nothing leaves
+            self.assertNotIn("git URL", out)
+            wait_phase("t-url2", ("review",))
+
+    def test_an_account_name_in_a_clone_url_is_no_login(self):
+        # #1072's review (2026-11-23): any http(s) user counted, so Azure DevOps' and Bitbucket's
+        # default clone URLs got a false "keep the token in a credential helper" on every API start
+        login = context.GIT_URL_LOGIN.search
+        for url in ("https://contoso@dev.azure.com/contoso/app/_git/app",
+                    "https://contoso-engineering-team-eu@dev.azure.com/contoso-engineering-team-eu/app",
+                    "https://jsmith@bitbucket.org/team/app.git", "ssh://git@gitlab.example.com/team/app.git"):
+            self.assertIsNone(login(url), url)
+        for url in ("https://ghp_" + "Ab1" * 12 + "@github.com/team/app.git",
+                    "https://glpat-FAKEFAKE@gitlab.example.com/", "https://x-access-token:FAKE@github.com/t/a",
+                    "https://" + "k3x" * 18 + "@dev.azure.com/contoso/app",     # an Azure PAT as the user
+                    "https://jsmith:app-password@bitbucket.org/team/app.git"):
+            self.assertIsNotNone(login(url), url)
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for v in ("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"):
+                os.environ.pop(v, None)
+            subprocess.run(["git", "-C", str(self.repo), "remote", "add", "origin",
+                            "https://contoso@dev.azure.com/contoso/app/_git/app"], check=True)
+            self.assertEqual(context.git_url_note(self.repo), "")
 
     # 8, 9: OpenRouter
 

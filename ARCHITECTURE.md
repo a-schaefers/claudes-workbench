@@ -1170,7 +1170,7 @@ An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's w
   compaction keeps the system prompt and drops the spec, which a session that only read never got
   back (#1071); then any experiment's note;
 - the user's own file for agents, `~/.config/workbench/AGENTS.md` (`context.USER_AGENTS_MD`,
-  `user_agents_md`), when it exists: copied to `rules/<task>/AGENTS.md` (the lane can't read the
+  `user_agents_md`; `$WB_AGENTS_MD` moves it, which `Base` points at the test's own, #1102), when it exists: copied to `rules/<task>/AGENTS.md` (the lane can't read the
   config directory), as bytes (#784), its imports followed, counted in `fixed_prompt` as
   `~/.config/workbench/AGENTS.md`, its copy removed once the file is. Never Claude's
   `~/.claude/CLAUDE.md` (`$CLAUDE_CONFIG_DIR`), its imports or `~/.claude/rules/**`, GPU or API:
@@ -1188,7 +1188,9 @@ An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's w
   `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` (that file alone; RealOpenCode's
   `test_opencode_without_the_lane_reads_no_claude_md_of_the_users`);
 - the repo's `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`: the worktree's (committed) copy,
-  else the checkout's, so an uncommitted edit to a committed file isn't seen;
+  else the checkout's, so an uncommitted edit to a committed file isn't seen; an API task, whose lane
+  doesn't read the checkout, gets the checkout's as a copy in `rules/<task>/checkout/` (`_checkout_copies`,
+  made afresh each round, labelled by its path in `fixed_prompt`; #1091), as it does the package's and an import's there;
 - in a monorepo package (task.json `subdir`, `cli._package`: the nearest directory below the top,
   from `--repo` up, with a committed `CLAUDE.md`/`.claude/CLAUDE.md` or a gitignored one in the
   checkout, `cli._local_package_md`: `wb start` notes `<package>'s CLAUDE.md is gitignored: the
@@ -1456,12 +1458,16 @@ deliberately hostile process.
   if it exists or is under `/dev`, else the nearest existing directory, the toolchain home it falls
   in (`context.tool_home_of`, made by `wb allow --path`, #824) or a whole RubyGems home
   (`context.gem_home_of`), then the next directory down while the place is split; never `/`, home,
-  a secret or the repo. Only a refusal the lane made (#773): none without Landlock, nor one the
+  a secret or the repo. A file an API task's lane hides (`api_hidden`) is named with no grant, its
+  line `context.API_HIDDEN_WHY` (the credential by an environment reference, or the GPU), in the
+  report, the auto-fix check (`not_the_code`), a setup's failure and a permission request's notice
+  (`context.api_hidden_refusal`, `lane_grant(path, task)`): a grant was saved and the paid feedback
+  round refused the same way (#1093). Only a refusal the lane made (#773): none without Landlock, nor one the
   runner shares (`runner_may`: the user's own permissions).
 - *Reads.* Everything but credentials and the user's records: `context.SECRETS` under `$HOME`
   (`.ssh`, `.gnupg`, `.netrc`, `.git-credentials`, `.config/gh`, keyrings, the cloud CLIs'
   (`.aws`, `.config/gcloud`, `.kube`, `.docker`…), `.android/adbkey`, registry and deploy logins
-  (#992, #999), OpenCode's `service.json` (its service runs outside the lane), OpenCode's data and
+  (#992, #999), Ollama's account key (`.ollama/id_ed25519`, which its server signs with, #1092), OpenCode's `service.json` (its service runs outside the lane), OpenCode's data and
   state homes whole (`.local/share/opencode`, `.local/state/opencode`: the database and its
   `-wal`/`-shm`, a release channel's, the legacy `auth.json`, `snapshot/`, `tool-output/`,
   `worktree/`, `repos/`, `prompt-history.jsonl`; and a user's own `OPENCODE_DB`, #1010: no file there
@@ -1476,7 +1482,8 @@ deliberately hostile process.
   Readable on purpose (an unreadable one ends the install): the files a build reads its
   repositories and logins from (`.npmrc`, `.yarnrc.yml`, `.m2/settings.xml`,
   `.gradle/gradle.properties`, `NuGet.Config`, poetry's `auth.toml`, composer's `auth.json`, pub's
-  `pub-tokens.json`, `.hex/hex.config`, `pip.conf`, `.bundle/config`, `.bunfig.toml`; an API task's
+  `pub-tokens.json`, `.hex/hex.config`, `pip.conf`, `.bundle/config`, `.bunfig.toml`; and Hugging
+  Face's `token`, for a test that downloads a gated model; an API task's
   lane hides each that holds a credential: *API lanes hide the token files that hold a credential*,
   below). Where a tool stops on a hidden file the agent gets its own
   (*Its environment*); Vercel's and the Firebase CLI don't run in the lane (Firebase's emulators do
@@ -1487,7 +1494,12 @@ deliberately hostile process.
   Of the home directory's own entries only dotfiles and `HOME_READABLE` (`bin`, `go`, `R`, `perl5`)
   are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`, `/media`, `/run/media`, `/run/user`, `/home`,
   WSL's drives) nothing, beyond: OpenCode's global directory (`OPENCODE_CONFIG_DIR`, #370), the
-  task's repo (its secrets still out), its `siblings` and git common directory (read-only),
+  config home where `XDG_CONFIG_HOME` moves it (`~/conf`: OpenCode's global config, git's, every
+  tool's; its secrets still out, #1103), the
+  task's repo (its secrets still out; an API task's lane reads its git directory alone, `read_repo_dirs`:
+  a gitignored `.env` in the checkout was one `cat` away, #1091; and each file its `.git/config`
+  includes, `_config_includes`, from `git config --local --includes --show-origin`: with
+  `include.path = ../.gitconfig` every git call died "bad config line"), its `siblings` and git common directory (read-only),
   workbench itself, the lane, the programs the agent runs (`tool_roots`: each PATH directory, its
   prefix under home or under an `ONLY_KEPT` root short of a user's home or a drive, the install a
   home `bin` link points into, the running Python, conda's by `CONDA_VARS`, #827; never `/`, home or
@@ -1527,11 +1539,16 @@ deliberately hostile process.
   Support/pypoetry`), composer's `auth.json` (`.config/composer`, `.composer`), pub's
   `pub-tokens.json` (`.config/dart`, macOS `Library/Application Support/dart`), Hex's `hex.config`
   (`.hex`, `MIX_XDG`'s `.config/hex`), pip's `pip.conf` (`.config/pip`, the legacy `.pip`),
-  Bundler's `.bundle/config`, bun's `.bunfig.toml`; under `XDG_CONFIG_HOME` when set, and where
+  Bundler's `.bundle/config`, bun's `.bunfig.toml`, Hugging Face's login (`.cache/huggingface/token`
+  and `stored_tokens`, #1092: `SECRET_ENV` drops `HF_TOKEN`, but huggingface_hub reads the file by
+  itself; the `token` file is the token alone, so it holds one when not empty, `API_HIDDEN_BARE`,
+  and with it unreadable only a gated or private model's download fails, `API_HIDDEN_FAILS`; on the
+  GPU a test's `login()` or `logout()` can still rewrite it, as any file in `~/.cache`); under `XDG_CONFIG_HOME` when set, and where
   `API_HIDDEN_VARS` (each with its file inside and its tool) move them (`NPM_CONFIG_USERCONFIG`,
   `GRADLE_USER_HOME`, `POETRY_CONFIG_DIR`, `COMPOSER_HOME`, `HEX_HOME`, `PIP_CONFIG_FILE`,
-  `BUNDLE_CONFIG`, `BUNDLE_USER_CONFIG`, `BUNDLE_USER_HOME`, and `XDG_CONFIG_HOME` for bun's
-  `.bunfig.toml`). The trade is more than private installs: with its file there but unreadable,
+  `BUNDLE_CONFIG`, `BUNDLE_USER_CONFIG`, `BUNDLE_USER_HOME`, `XDG_CONFIG_HOME` for bun's
+  `.bunfig.toml`, and `HF_HOME`, `HF_TOKEN_PATH`, `HF_STORED_TOKENS_PATH`, `XDG_CACHE_HOME` for
+  Hugging Face's). The trade is more than private installs: with its file there but unreadable,
   Yarn Berry, Maven, Gradle, NuGet (every dotnet restore, build and test), poetry, composer,
   `dart pub get` and Bundler (`Settings#load_config`: EACCES is a `PermissionError`) stop on every
   run (`API_HIDDEN_STOPS`, each from its source, 2026-11-23), so in an API lane they don't run at
@@ -1542,11 +1559,23 @@ deliberately hostile process.
   `API_HIDDEN_TOOL`, by name or by folder and name for `.bundle/config`): `note: an API task can't
   read ~/.m2/settings.xml, ~/.npmrc (each holds a credential, which would reach the provider): in
   its lane Maven stops on every run, and npm installs from a private registry fail` (`it holds` for
-  one). The writable homes `.m2`, `.gradle`, `.hex` and `.nuget` are split around a hidden one,
+  one). A git URL with a login can't be hidden (git reads `.git/config` and `~/.gitconfig` to
+  run), so `wb start` names the files that hold one instead (`context.git_url_note`, #1072): `git
+  config --show-origin --get-regexp` over `GIT_URL_KEYS` (remotes' `url`/`pushurl`, `url.*.insteadOf`),
+  matched by `GIT_URL_LOGIN` (any URL with a password, or an http(s) one whose user alone looks
+  like a token, a known prefix such as `ghp_` or `glpat-`, or 20 or more letters, digits and `_`
+  with a digit; not an account name, Azure DevOps' `https://<org>@dev.azure.com` or Bitbucket's
+  `https://<user>@bitbucket.org`, nor `ssh://git@`): `note: an API task can read the login in a git URL in
+  <repo>/.git/config (`git remote -v`, which would send it to the provider): keep the token in a
+  credential helper instead (…)`, never the URL. The writable homes `.m2`, `.gradle`, `.hex` and `.nuget` are split around a hidden one,
   what each makes at its top made first (`SPLIT_MADE`: Gradle's `caches/`, `daemon/`, `native/`,
   `wrapper/`, `jdks/`, `notifications/`, `.tmp/`, `build-scan-data/`; Hex's `packages/`; NuGet's
-  `packages/`, since dotnet writes `NuGet.Config` on first use), and the same where
-  `GRADLE_USER_HOME` and `HEX_HOME` move them (`SPLIT_MADE_VARS`); with no credential there the
+  `packages/`, since dotnet writes `NuGet.Config` on first use; `~/.cache` around Hugging Face's
+  token, or anything hidden there, `HISTFILE` on the GPU too: `CACHE_MADE`'s; Hugging Face's own
+  home, only when split around its token: `HF_MADE`'s `hub/`, `xet/`, `assets/`, `datasets/`,
+  `modules/`; another tool's first new entry there refused and named with its grant, #1092), and
+  the same where `GRADLE_USER_HOME`, `HEX_HOME`, `XDG_CACHE_HOME` (and its `huggingface/`) and
+  `HF_HOME` move them (`SPLIT_MADE_VARS`); with no credential there the
   home is granted whole, as on the GPU. The agent's environment
   already drops the matching variables (`SECRET_ENV`).
 - *The kernel's side* (`lane.py`, Landlock, no root): the runner starts OpenCode as `python -I
@@ -3691,7 +3720,7 @@ local.cfg (--copy), ../shared (--sibling)`), and the line's OpenRouter and free 
 (else `wb gc` would bring it back) has that repo and provider; not results.jsonl, whose rows before #1022 don't say a
 task was on API, and every closed task's directory stays, archived. Task.json's
 `order` (the role's, `cli._routed_keys`), the one the keyhole routes by, gives the backends. The token files the lane hides (each that holds a credential) are a note on
-every API start (*What the agent knows*, `API_HIDDEN`).
+every API start (*What the agent knows*, `API_HIDDEN`), and so is a git URL with a login in it (`context.git_url_note`, #1072).
 
 **local_only.** commands.json `repos.<path>.local_only: true` (a bool, else `commands_conf` refuses it), read by the
 nearest entry that states it (*Files and formats*), or `wb start --local-only` (task.json `local_only`) for one task.
@@ -4305,7 +4334,12 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   (builds that init their own submodules went red, #885). Reads run with `GIT_OPTIONAL_LOCKS=0` (no
   index refresh while Claude diffs) and the pins. A write is refused with `REFUSAL` in the task's
   repository (`protected`; a `config --global|--system|-f` write judged by its file,
-  `config_files`) or any repository outside the temp roots, the worktree and the lane's writable
+  `config_files`, the one git writes, so `--global` is `~/.gitconfig` unless only the XDG file
+  exists: refused on the user's own `~/.gitconfig`, `$XDG_CONFIG_HOME/git/config`,
+  `GIT_CONFIG_GLOBAL` or system file, `user_configs` as the environment named them at install,
+  which only the lane kept out of reach: without one, macOS, `git config --global user.name` rewrote
+  the user's, #1120; a fixture's temp `HOME` still writes, #794, with the user's `XDG_CONFIG_HOME`
+  exported too, #1120's review) or any repository outside the temp roots, the worktree and the lane's writable
   dirs; outside any repository it passes, and throwaway repos there pass (test suites, #444;
   pre-commit, uv, Go, Bazel caches, #665). The roots are fixed at install, so `TMPDIR` can't make a
   project scratch. `init`/`clone` are judged by where the repo lands (`new_repo`, `nested`, else
@@ -5432,7 +5466,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps first. Review/stuck/failed with no live runner; refuses a moved repo (`wb relocate`), OpenCode 1.x (exit 3, `_opencode_again`, #866), an API task whose model left OpenCode's catalog, has no price or meets today's day cap (exit 3, `_model_still_listed`, #1016, #1118; next and resume too), an API task whose repo became local-only (exit 3, `_local_only_since`, #1021), empty text. Prompt: `FEEDBACK_HEAD` + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (re-run only with a test) + text; reviews+1. Warns past three reviews. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--include` (bulk additions, large binaries, ignored files the agent wrote), `--no-sign`, `--test` (replaces it, granted to the shell too), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Review only; an API task whose repo became local-only exits 3 (`_local_only_since`, #1021). Commits the step (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`; an empty step advances uncommitted, #507); prompt "Step N of this task is done and committed (<sha>). The next step:" + spec + the task's protocol (`cli.protocol_for`: a writing task keeps `WRITING_PROTOCOL`); advances round, steps, step_round, `reviews` reset, `step_base` the worktree's HEAD (#652), phase queued in one status write right before the spawn (#191: written earlier, an interrupt left the step under review with no runner). A retry after its commit landed (`cli._step_landed`) measures from `HEAD~1` (#85). Says `runner.fresh_reason`'s verdict. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` | `ask/<id>.answer` via `ask_mcp.write_answer`; the id into status `answered`. Refuses empty, over `ask_mcp.FILE_MAX` 256 KiB (`too_long`: never read, the agent waited out its timeout, #605), or closed, racing too (`answer_once`, #938). |
-| `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` (the whole answer checked against `FILE_MAX` before any grant, #605) | Into `rules/<task>/grants.json` (`--always`: commands.json, once `context.commands_conf` passes); answers the oldest permission request (else the question) "Claude allowed … for this task. Run it again now and carry on." (`from now on` with `--always`), sent to a live agent as a `--now` steer. `--path` through `_lane_dir` (no link; not what `lane_refusal` or `kept_out` refuses, #912; not in the task's repo or its git dir, where a planted hook runs outside the lane; a missing path named like a file refused, #670; made if missing); `*` turns the lane off. |
+| `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` (the whole answer checked against `FILE_MAX` before any grant, #605) | Into `rules/<task>/grants.json` (`--always`: commands.json, once `context.commands_conf` passes); answers the oldest permission request (else the question) "Claude allowed … for this task. Run it again now and carry on." (`from now on` with `--always`), sent to a live agent as a `--now` steer. `--path` through `_lane_dir` (no link; not what `lane_refusal` or `kept_out` refuses, #912, nor a file the task's API lane hides, `api_hidden_refusal`, #1093; not in the task's repo or its git dir, where a planted hook runs outside the lane; a missing path named like a file refused, #670; made if missing); `*` turns the lane off. |
 | `wb progress [on\|off]` | `--after MIN` (default the task's typical length on its model; refused with `off` or while off, #602; `0` clears) | The opt-in to *Progress checks*. |
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (opens with `STEP_NOTE`: a `smaller` intervention after a progress check, else a `hint`) | Queued/running/testing/asking with a live runner only. steer.jsonl, delivered when the run ends, before the tests; `--now` at once. |
 | `wb note <task> --text "…"` | | A `captain` event. |
@@ -5587,7 +5621,8 @@ $WB_HOME (~/.local/state/workbench)
                                  turns.jsonl ({ids, ended, by}: the mod's turn ends, wb chat ended; #1042)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md, AGENTS.md (the user's ~/.config/workbench/AGENTS.md, copied: #1061),
                                  project-rules/<path> (a rule a link takes outside the repo: context.project_rules),
-                                 imports/<n>/<name> (an import from outside the repo: context.import_files), bin/git (the shim), grants.json (what Claude allowed: {"allow", "paths", "test_tools"}),
+                                 imports/<n>/<name> (an import from outside the repo: context.import_files),
+                                 checkout/<path> (an API task's instruction file only the checkout holds: context._checkout_copies, #1091), bin/git (the shim), grants.json (what Claude allowed: {"allow", "paths", "test_tools"}),
                                  shell/<name> (OpenCode's $SHELL, named as the shell it runs: the user's XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL back, then that shell: runner.write_shell_shim, #1010),
                                  gitdir.json (the real git dir, the .git's text: {"gitdir", "dotgit"}), submodules.json ([{"path", "src" (the user's checkout), "sha", "index"}]), submodule-<n>.index,
                                  catalog.json (an API task's own models.dev v2 catalog: runner.write_catalog, models.catalog_doc; OPENCODE_MODELS_PATH, #1015);
@@ -5638,6 +5673,7 @@ $WB_HOME (~/.local/state/workbench)
   chat-token ($WB_CHAT_TOKEN)    mode 600
   chat-agents.json               beside chat-token, mode 600: {"agents": {"<name>": {"sha256", "ts"}}} (wb chat token; *Other agents*, #1042)
   savings.json ($WB_SAVINGS)     {"kwh_price": N} (wb savings --price; off removes it; other keys kept)
+  AGENTS.md ($WB_AGENTS_MD)      the user's own file for agents, every project's (*What the agent knows*, #1061); wb only reads it
   routes.json ($WB_ROUTES)       the roles (*Roles*, #1014): {"v": 1, "use": "gpu"|"api"|"both" (the Agents switch, #1016; missing: both),
                                  "busy": "wait"|"api" (when the GPU is busy, #1023; missing: wait), "day_usd": N|null, "roles": {"significant"|"trivial"|"writing":
                                  {"via": "gpu"|"api", "gpu": "<id>"|"auto", "api": "<exact id>" (kept on the GPU), "thinking": "off"|"on",
@@ -5666,7 +5702,7 @@ unnamed (*Setting the worktree up*).
 
 **Store primitives** (`workbench/store.py`). `home()` is `$WB_HOME`, else `~/.local/state/workbench`. `PATH_VARS`
 (`WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
-`WB_OPENCODE_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR`, `WB_SOURCE`, `WB_ROUTES`, and the user's `OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`,
+`WB_OPENCODE_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR`, `WB_SOURCE`, `WB_ROUTES`, `WB_AGENTS_MD`, and the user's `OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`,
 `OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`) take `~` and relative paths: `absolute_env()`, first in
 `cli.main` and the runner, makes them absolute against wb's cwd (not resolved), so every child sees one place (a
 relative one had wb and the runner, which runs from the package dir, disagree: the 2026-11-16 audit, #328, #650); the
@@ -6063,6 +6099,8 @@ on macOS runners (#950); not patched suite-wide, so `WebChat` still catches chat
 **The fixture** (`Base`): `WB_HOME=<tmp>/state`, `WB_OPENCODE_BIN` (the fake, `shlex`-split), `WB_FAKE_MODELS=1`,
 `WB_OPENCODE_CONFIG` (`ollama` on 127.0.0.1:11434 with `mimo-v2.6:9b-q8_0`, 32K, and `qwen3.8-27b` with no
 `limit.context`; `strata` on :8080; a remote `cloud` discovery drops, `hosted()`'s as an API model), `WB_MODELS`, `WB_SKILLS`, `WB_COMMANDS`,
+`WB_AGENTS_MD` (`<tmp>/wb-config/AGENTS.md`, not there: the user's own went into the tests' prompts, and in an agent's lane,
+which hides it, every test that started a task failed on its read, #1102; a test of its default place pops it),
 `store.config_lock_dir` patched into the temp state; a repo on `main` with a committed CLAUDE.md and its own identity;
 the spec "Write the answer to answer.txt.", the test `grep -qx 42 answer.txt`. `self.start(name, scenario, *extra)` sets
 `FAKE_SCENARIO`, runs `wb start … --model mimo`. tearDown kills nothing: a test stops its own `hang`/`slow` tasks. Helpers: `run_wb` (in-process, returns stdout;
@@ -6273,7 +6311,7 @@ on port 0 (only `chat.tailscale` and Hardware's probes are mocked); a regression
 names `t-<slug>`; OpenCode-dependent tests through `run_calls`; kernel ones `@unittest.skipUnless(lane.abi(), …)`;
 reuse helpers by import or assignment, never by subclassing a class with tests; new classes above `__main__`.
 
-**Not hermetic.** The real HOME (`~/.config/workbench/AGENTS.md`; the lane tests' `~/.wb-sec-test-*`, `~/.wb-lane-test-*`,
+**Not hermetic.** The real HOME (the lane tests' `~/.wb-sec-test-*`, `~/.wb-lane-test-*`,
 `~/.wb-sock-*`; `/tmp/wb-run-*`), OpenCode's own session storage, 127.0.0.1:11434, real hardware. Never the real state
 directory, gpu.lock or a model: safe beside running tasks.
 
@@ -6328,7 +6366,8 @@ doc needs its own `!/` line).
   ProbeWhereItHelps.
 - **`context.API_HIDDEN`** and `SECRETS`' comment on what stays readable (the `.npmrc` trade) change together; a file
   added to either side → the API lane test in `Privacy` and #992's in `Lane`, `API_HIDDEN_TOOL` (its tool) and, when
-  that tool stops on an unreadable one, `API_HIDDEN_STOPS`; a new file's credential syntax →
+  that tool stops on an unreadable one, `API_HIDDEN_STOPS` (or `API_HIDDEN_FAILS`, what fails for one that installs
+  nothing); a file that is a token alone → `API_HIDDEN_BARE`; a new file's credential syntax →
   `privacy.holds_credential`'s matcher and `Privacy.WITH_AND_WITHOUT` (a file with one and without); a hidden file in a writable tool home → `SPLIT_MADE`, and
   `SPLIT_MADE_VARS` when a variable moves that home. **`privacy.OPENROUTER_SLUGS`** follows OpenRouter's provider list
   (`/api/v1/providers`: a display name that doesn't fold to its slug). **The where-line** (`privacy.where`'s `line`, `PRIVACY_PAGES`) is the start's where-note (`cli._api_notes`); the

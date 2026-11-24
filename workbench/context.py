@@ -1333,6 +1333,13 @@ CARGO_MADE = ("registry/", "git/", ".package-cache", ".package-cache-mutate", ".
 # needs a first `nimble refresh` from Claude.
 NIMBLE_MADE = ("pkgs2/", "pkgcache/", "buildtemp/", "packages_temp.json", "nimbledata2.json")
 MADE_TEXT = {"nimbledata2.json": '{"version": 1, "reverseDeps": {}}\n'}
+# What the common tools make in a cache home split around an active venv (poetry's, from
+# `poetry shell` or direnv), made first so the split grants them: Landlock can only allow, so a
+# split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825)
+CACHE_MADE = ("uv", "pip", "go-build", "pre-commit")
+# and what Hugging Face's libraries make at their home's top (huggingface_hub's and datasets'
+# constants: HF_HUB_CACHE, HF_XET_CACHE, HF_ASSETS_CACHE, HF_DATASETS_CACHE, HF_MODULES_CACHE)
+HF_MADE = ("hub/", "xet/", "assets/", "datasets/", "modules/")
 # and what a tool makes at the top of its home when a secret inside splits it (SECRETS): with
 # Maven's master password in ~/.m2, a first build couldn't make repository/ there, nor the
 # wrapper (./mvnw, its base ~/.m2) its wrapper/ (#992, 2026-11-22)
@@ -1344,13 +1351,19 @@ SPLIT_MADE = {".m2": ("repository/", "wrapper/"),
               # restore couldn't make packages/)
               ".gradle": ("caches/", "daemon/", "native/", "wrapper/", "jdks/", "notifications/",
                           ".tmp/", "build-scan-data/"),
-              ".hex": ("packages/",), ".nuget": ("packages/",)}
-# and the same homes where the user moved them (API_HIDDEN_VARS hides the file inside those too)
-SPLIT_MADE_VARS = {"GRADLE_USER_HOME": ".gradle", "HEX_HOME": ".hex"}
-# and what the common tools make in a cache home split around an active venv (poetry's, from
-# `poetry shell` or direnv), made first so the split grants them: Landlock can only allow, so a
-# split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825)
-CACHE_MADE = ("uv", "pip", "go-build", "pre-commit")
+              ".hex": ("packages/",), ".nuget": ("packages/",),
+              # and ~/.cache, split around Hugging Face's token (#1092) or anything hidden there
+              # (HISTFILE=~/.cache/zsh/history, on the GPU too): its common tools' caches, and in
+              # Hugging Face's home, split only around its own token, its caches. Keyed apart:
+              # under ".cache" a GPU task made ~/.cache/huggingface/* on machines that never used
+              # it (#1092's review, 2026-11-23). Another tool's first new entry is refused, the
+              # report naming its grant
+              ".cache": tuple(f"{n}/" for n in CACHE_MADE), ".cache/huggingface": HF_MADE}
+# and the same homes where the user moved them, (variable, below it, SPLIT_MADE's key):
+# API_HIDDEN_VARS hides the file inside those too
+SPLIT_MADE_VARS = (("GRADLE_USER_HOME", "", ".gradle"), ("HEX_HOME", "", ".hex"),
+                   ("XDG_CACHE_HOME", "", ".cache"), ("HF_HOME", "", ".cache/huggingface"),
+                   ("XDG_CACHE_HOME", "huggingface", ".cache/huggingface"))
 # The device nodes builds use, not /dev: the user's terminals, input devices (/dev/uinput) and
 # security keys were open to the agent (the 2026-11-16 audit). /dev/shm stays, a trade-off:
 # multiprocessing's semaphores, Chromium and many test runners need it, and Landlock can't tell
@@ -1445,9 +1458,15 @@ def repo_dirs(task: store.Task) -> set[str]:
     2026-11-16 audit: GOPATH=~/src, or ~/go with the repo in ~/go/src). A removed linked
     worktree's: the repository's main worktree and its git dir (gitops.repo_of), not the removed
     path and a `.git` under it (#776)."""
+    checkout, git = _repo_parts(task)
+    return checkout | git
+
+
+def _repo_parts(task: store.Task) -> tuple[set[str], set[str]]:
+    """repo_dirs as (the checkout, the git directory), real paths."""
     repo = task.spec.get("repo")
     if not repo:
-        return set()
+        return set(), set()
     real = gone = os.path.realpath(repo)
     if not os.path.isdir(real):
         real = os.path.realpath(gitops.repo_of(task.spec))
@@ -1456,8 +1475,42 @@ def repo_dirs(task: store.Task) -> set[str]:
             _COMMON[real] = os.path.realpath(os.path.join(real, gitops.git(
                 Path(real), "rev-parse", "--git-common-dir").strip()))
         except (gitops.GitError, OSError):
-            return {gone, real, os.path.join(real, ".git")}
-    return {gone, real, _COMMON[real]}
+            return {gone, real}, {os.path.join(real, ".git")}
+    return {gone, real}, {_COMMON[real]}
+
+
+def read_repo_dirs(task: store.Task) -> set[str]:
+    """What the lane reads of the task's repo (readable): the checkout and its git directory, or
+    for an API task the git directory and the files its config includes (_config_includes),
+    which the worktree's git needs. Every file an API agent reads goes to the provider, and a
+    gitignored .env in the checkout was one `cat` away, though wb start refuses to copy it unless
+    it is named (#1091, 2026-11-23); the instruction files only the checkout holds go as copies
+    (instruction_files)."""
+    checkout, git = _repo_parts(task)
+    return git | _config_includes(checkout, git) if task.spec.get("via") == "api" else checkout | git
+
+
+def _config_includes(checkout: set[str], git: set[str]) -> set[str]:
+    """The files the repo's own git config includes outside its git directory, real paths: with
+    `include.path = ../.gitconfig` (a tracked .gitconfig of aliases, filters or merge drivers)
+    every git call in an API lane, which reads no checkout, died "bad config line" (#1091's
+    review, 2026-11-23). git's own `--show-origin` names them, relative to the top."""
+    found: set[str] = set()
+    for top in sorted(checkout):
+        if not os.path.isdir(top):
+            continue
+        try:
+            out = os.fsdecode(gitops.git_bytes(Path(top), "config", "--local", "--includes",
+                                               "--list", "--show-origin", "-z"))
+        except (gitops.GitError, OSError):
+            continue
+        for origin in out.split("\0")[::2]:
+            if origin.startswith("file:"):
+                f = os.path.realpath(os.path.join(top, origin[len("file:"):]))
+                if not any(f == g or _under(f, g) for g in git):
+                    found.add(f)
+        break
+    return found
 
 
 # What a task's directory holds beside its worktree: a sibling's link (`../<name>` from the
@@ -1666,8 +1719,9 @@ def writable(task: store.Task) -> list[str] | None:
         c = os.path.realpath(home / d)
         if os.path.isdir(c) and any(_under(h, c) for h in hidden):
             _make_first(c, names)
-    for v, d in SPLIT_MADE_VARS.items():  # GRADLE_USER_HOME's, HEX_HOME's (#1021's review)
-        c = os.path.realpath(os.environ[v]) if os.path.isabs(os.environ.get(v) or "") else ""
+    for v, sub, d in SPLIT_MADE_VARS:  # GRADLE_USER_HOME's, HEX_HOME's (#1021's review)
+        c = os.environ.get(v) or ""
+        c = os.path.realpath(os.path.join(c, sub)) if os.path.isabs(c) else ""
         if c and os.path.isdir(c) and any(_under(h, c) for h in hidden):
             _make_first(c, SPLIT_MADE[d])
     for k, n in MADE_FIRST.items():  # ~/.rustup's toolchains/, ~/.nimble's bin/ (#911)
@@ -2074,7 +2128,10 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            # (`semgrep login`'s token; under XDG_CONFIG_HOME's .semgrep when that is set) and
            # Rush's cloud build cache credentials (`rush update-cloud-credentials`)
            ".config/configstore/firebase-tools.json", ".semgrep/settings.yml",
-           ".config/.semgrep/settings.yml", ".rush-user/credentials.json")
+           ".config/.semgrep/settings.yml", ".rush-user/credentials.json",
+           # #1092 (2026-11-23): Ollama's account key, which signs its ollama.com requests:
+           # the server uses it, outside the lane, and the agent's `ollama` talks to the server
+           ".ollama/id_ed25519")
 # The sockets inside a secret that a grant may still reach, to connect only (unix_paths): Docker
 # Desktop's, under ~/.docker beside the registry logins in config.json, so `wb allow --path` was
 # refused and only turning the lane off let a Testcontainers suite run (#441, the audit of 1.8)
@@ -2104,6 +2161,10 @@ SECRET_VARS = ("GNUPGHOME", "PASSWORD_STORE_DIR", "GH_CONFIG_DIR", "DOCKER_CONFI
 # Library/Application Support on macOS), Hex's home and its MIX_XDG config, pip's user config
 # (pip's configuration.py: the XDG one and the legacy ~/.pip), Bundler's global config
 # (Settings#global_config_file) and bun's global bunfig (bunfig's get_home_config_path).
+# And Hugging Face's login (#1092, 2026-11-23: huggingface_hub's constants.py, HF_HOME's `token`
+# and `stored_tokens`): SECRET_ENV drops HF_TOKEN, but the library reads the same token from the
+# file by itself, and `cat` sent it to the provider; on the GPU it stays readable for a test that
+# downloads a gated model (a test's login() or logout() can rewrite it, as any file in ~/.cache).
 API_HIDDEN = (".npmrc", ".yarnrc.yml", ".m2/settings.xml", ".gradle/gradle.properties",
               ".nuget/NuGet/NuGet.Config", ".config/NuGet/NuGet.Config", ".nuget/config",
               ".config/NuGet/config", ".config/pypoetry/auth.toml",
@@ -2111,7 +2172,10 @@ API_HIDDEN = (".npmrc", ".yarnrc.yml", ".m2/settings.xml", ".gradle/gradle.prope
               ".composer/auth.json", ".config/dart/pub-tokens.json",
               "Library/Application Support/dart/pub-tokens.json", ".hex/hex.config",
               ".config/hex/hex.config", ".config/pip/pip.conf", ".pip/pip.conf", ".bundle/config",
-              ".bunfig.toml")
+              ".bunfig.toml", ".cache/huggingface/token", ".cache/huggingface/stored_tokens")
+# the ones that are a token and nothing else, by name or by the variable that moves it, which
+# holds_credential's key and value matcher can't see: one there holds one unless empty (#1092)
+API_HIDDEN_BARE = ("token", "HF_TOKEN_PATH")
 # where the user moved them: (variable, the file inside, or "" for a file named by the variable,
 # and its tool, or None for API_HIDDEN_TOOL's by the file's name); bun reads
 # $XDG_CONFIG_HOME/.bunfig.toml in place of ~/.bunfig.toml
@@ -2120,13 +2184,19 @@ API_HIDDEN_VARS = (("NPM_CONFIG_USERCONFIG", "", "npm"), ("npm_config_userconfig
                    ("COMPOSER_HOME", "auth.json", None), ("HEX_HOME", "hex.config", None),
                    ("PIP_CONFIG_FILE", "", "pip"), ("BUNDLE_CONFIG", "", "Bundler"),
                    ("BUNDLE_USER_CONFIG", "", "Bundler"), ("BUNDLE_USER_HOME", "config", "Bundler"),
-                   ("XDG_CONFIG_HOME", ".bunfig.toml", None))
+                   ("XDG_CONFIG_HOME", ".bunfig.toml", None),
+                   # Hugging Face's home: HF_HOME, else XDG_CACHE_HOME's huggingface (#1092)
+                   ("HF_HOME", "token", "Hugging Face"), ("HF_HOME", "stored_tokens", "Hugging Face"),
+                   ("HF_TOKEN_PATH", "", "Hugging Face"), ("HF_STORED_TOKENS_PATH", "", "Hugging Face"),
+                   ("XDG_CACHE_HOME", "huggingface/token", "Hugging Face"),
+                   ("XDG_CACHE_HOME", "huggingface/stored_tokens", "Hugging Face"))
 # which tool reads each, by its name, or its folder's and its name (~/.bundle/config)
 API_HIDDEN_TOOL = {".npmrc": "npm", ".yarnrc.yml": "Yarn", "settings.xml": "Maven",
                    "gradle.properties": "Gradle", "NuGet.Config": "dotnet", "config": "dotnet",
                    "auth.toml": "poetry",
                    "auth.json": "Composer", "pub-tokens.json": "dart pub get", "hex.config": "Hex",
-                   "pip.conf": "pip", ".bundle/config": "Bundler", ".bunfig.toml": "bun"}
+                   "pip.conf": "pip", ".bundle/config": "Bundler", ".bunfig.toml": "bun",
+                   "huggingface/token": "Hugging Face", "huggingface/stored_tokens": "Hugging Face"}
 # and the tools that stop on every run while theirs is there but unreadable, so in an API lane
 # they don't run at all (#1021's review, 2026-11-23, each from its source): Yarn Berry
 # (Configuration.findFolderRcFile rethrows all but ENOENT), Maven (DefaultSettingsBuilder:
@@ -2141,6 +2211,9 @@ API_HIDDEN_TOOL = {".npmrc": "npm", ".yarnrc.yml": "Yarn", "settings.xml": "Mave
 # token: a private registry's install.
 API_HIDDEN_STOPS = frozenset({"Yarn", "Maven", "Gradle", "dotnet", "poetry", "Composer", "dart pub get",
                               "Bundler"})
+# and what fails for a tool that installs nothing (#1092): huggingface_hub takes a token file it
+# can't read as no token, so only a gated or private model's download fails
+API_HIDDEN_FAILS = {"Hugging Face": "Hugging Face's gated and private models don't download"}
 # Of the home directory's own entries, the dotfiles (tools' configs, caches, toolchains) stay
 # readable, and these (R's and Perl's user libraries); the user's documents and other projects
 # don't, beyond the task's repo, workbench itself, the programs on PATH and what Claude allowed.
@@ -2508,17 +2581,26 @@ def api_hidden_paths() -> set[str]:
 def _api_hidden_tools() -> dict[str, str]:
     """api_hidden_paths, each with the tool that reads it (API_HIDDEN_TOOL)."""
     home = Path.home()
-    paths = [(home / h, None) for h in API_HIDDEN]
+    paths = [(home / h, None, None) for h in API_HIDDEN]
     if os.environ.get("XDG_CONFIG_HOME"):
-        paths += [(Path(os.environ["XDG_CONFIG_HOME"]) / h[len(".config/"):], None)
+        paths += [(Path(os.environ["XDG_CONFIG_HOME"]) / h[len(".config/"):], None, None)
                   for h in API_HIDDEN if h.startswith(".config/")]
     for var, inside, tool in API_HIDDEN_VARS:
         if (v := os.environ.get(var)) and os.path.isabs(os.path.expanduser(v)):
-            paths.append((Path(v).expanduser() / inside, tool))
+            paths.append((Path(v).expanduser() / inside, tool, var))
     whole = {"/", os.path.realpath(home)}
     return {r: tool or API_HIDDEN_TOOL.get(f"{p.parent.name}/{p.name}") or API_HIDDEN_TOOL.get(p.name, "npm")
-            for p, tool in paths
-            if (r := os.path.realpath(p)) not in whole and privacy.holds_credential(r)}
+            for p, tool, var in paths
+            if (r := os.path.realpath(p)) not in whole and (privacy.holds_credential(r) or (
+                (p.name in API_HIDDEN_BARE or var in API_HIDDEN_BARE) and _filled(r)))}
+
+
+def _filled(real: str) -> bool:
+    """Whether the file ``real`` is there and not empty: a token file alone (API_HIDDEN_BARE)."""
+    try:
+        return os.path.isfile(real) and os.path.getsize(real) > 0
+    except OSError:
+        return True
 
 
 def api_hidden(task: store.Task) -> set[str]:
@@ -2526,10 +2608,27 @@ def api_hidden(task: store.Task) -> set[str]:
     return api_hidden_paths() if task.spec.get("via") == "api" else set()
 
 
+# Why no grant reaches a file api_hidden keeps out: readable() and writable() hide it over any
+# grant, so a test refused on ~/.m2/settings.xml named `wb allow --path` for it, wb allow saved
+# it, and the paid feedback round was refused the same way (#1093, 2026-11-23)
+API_HIDDEN_WHY = ("an API task's lane hides it (it holds a credential, which would reach the "
+                  "provider), so no grant reaches it: name the credential by an environment "
+                  "reference in it instead, or run the task on the GPU")
+
+
+def api_hidden_refusal(task: store.Task, raw: str) -> str | None:
+    """Why ``raw`` can't join ``task``'s lane when it is (in) a file its API lane hides
+    (api_hidden, API_HIDDEN_WHY), else None."""
+    real = os.path.realpath(Path(raw).expanduser())
+    if any(real == h or _under(real, h) for h in api_hidden(task)):
+        return f"{raw}: {API_HIDDEN_WHY}"
+    return None
+
+
 def api_hidden_note() -> str:
     """wb start's note for an API task when a file API_HIDDEN names holds a credential, else '': the files,
-    then the tools that don't run in its lane (API_HIDDEN_STOPS) and those whose private-registry
-    installs fail."""
+    then the tools that don't run in its lane (API_HIDDEN_STOPS), those whose private-registry
+    installs fail and what else fails (API_HIDDEN_FAILS: Hugging Face's gated models, #1092)."""
     home = os.path.realpath(Path.home())
     tools = _api_hidden_tools()
     there = sorted(tools)  # each there and holding a credential (a file, or NuGet's config/)
@@ -2539,15 +2638,57 @@ def api_hidden_note() -> str:
     more = f" and {len(there) - 4} more" if len(there) > 4 else ""
     used = list(dict.fromkeys(tools[p] for p in there))
     stop = [t for t in used if t in API_HIDDEN_STOPS]
-    fail = [t for t in used if t not in API_HIDDEN_STOPS]
+    fail = [t for t in used if t not in API_HIDDEN_STOPS and t not in API_HIDDEN_FAILS]
 
     def both(xs):
         return xs[0] if len(xs) == 1 else f"{', '.join(xs[:-1])} and {xs[-1]}"
     said = ([f"{both(stop)} stop{'s' if len(stop) == 1 else ''} on every run"] if stop else []) + \
-        ([f"{both(fail)} installs from a private registry fail"] if fail else [])
+        ([f"{both(fail)} installs from a private registry fail"] if fail else []) + \
+        [API_HIDDEN_FAILS[t] for t in used if t in API_HIDDEN_FAILS]
     held = "it holds a credential" if len(there) == 1 else "each holds a credential"
     return (f"an API task can't read {names}{more} ({held}, which would reach the provider): "
             f"in its lane {', and '.join(said)}")
+
+
+# A git URL with a login in it: any with a password, or an http(s) one whose user alone looks
+# like a token (https://<token>@host): a known prefix, or 20 or more letters, digits and _ with
+# a digit among them. Not an account name: Azure DevOps' https://<org>@dev.azure.com and
+# Bitbucket's https://<user>@bitbucket.org, their default clone URLs, got the note on every API
+# start (#1072's review, 2026-11-23); nor ssh://git@host
+GIT_URL_LOGIN = re.compile(r"\bhttps?://(?:(?:gh[pousr]_|github_pat_|glpat-|x-access-token|oauth2)"
+                           r"[^\s/@:]*|(?=[^\s/@:]*\d)\w{20,})@|\b[a-z][\w+.-]*://[^\s/@:]*:[^\s/@]+@",
+                           re.I | re.A)
+# the git config keys that hold a URL: remotes' and insteadOf rules' (the URL is in the key)
+GIT_URL_KEYS = r"^(remote\..*\.(push)?url|url\..*\.(push)?insteadof)$"
+
+
+def git_url_note(repo) -> str:
+    """wb start's note for an API task when the repo's git config or the user's holds a URL with
+    a login (GIT_URL_LOGIN), else '': `git remote -v` or `git config -l` in its lane would send
+    it to the provider, and git needs those files to run, so no lane hides them (#1072,
+    2026-11-23: a token in origin's URL, or in a ~/.gitconfig insteadOf rule, came out of
+    `git remote -v`). Names the files, never the URL."""
+    try:
+        out = gitops.git(Path(repo), "config", "--show-origin", "--get-regexp", GIT_URL_KEYS,
+                         check=False)
+        top = gitops.git(Path(repo), "rev-parse", "--show-toplevel").strip() if out else ""
+    except (gitops.GitError, OSError):
+        return ""
+    home = os.path.realpath(Path.home())
+    files = []
+    for line in out.splitlines():
+        where, _, entry = line.partition("\t")
+        if where.startswith("file:") and GIT_URL_LOGIN.search(entry):  # .git/config: the top's
+            f = os.path.realpath(os.path.join(top, where[len("file:"):]))
+            name = "~" + f[len(home):] if f.startswith(home + os.sep) else f
+            if name not in files:
+                files.append(name)
+    if not files:
+        return ""
+    return (f"an API task can read the login in a git URL in {', '.join(files)} (`git remote -v`, "
+            "which would send it to the provider): keep the token in a credential helper instead "
+            "(`git config --global credential.helper store` puts it in ~/.git-credentials, which no "
+            "lane reads)")
 
 
 # where conda, mamba and micromamba say their install is, with or without an env activated
@@ -2626,7 +2767,9 @@ def tool_roots(hidden: set[str]) -> set[str]:
 
 def readable(task: store.Task) -> list[str] | None:
     """What the agent's processes may read: the system, the home directory's dotfiles but
-    SECRETS, the task's repo and its git directory, its lane and the programs it runs. None with the lane off. Landlock
+    SECRETS, the task's repo (an API task's: its git directory and config includes alone,
+    read_repo_dirs) and its git
+    directory, its lane and the programs it runs. None with the lane off. Landlock
     only allows, so this lists the entries beside each excluded one; lane.py adds the lane
     (writable) itself."""
     lane = writable(task)
@@ -2634,7 +2777,7 @@ def readable(task: store.Task) -> list[str] | None:
         return None
     home = os.path.realpath(Path.home())
     hidden = secret_paths() | private_paths() | api_hidden(task)  # API_HIDDEN: an API task's (#1021)
-    keep = {os.path.realpath(p) for p in (task.spec.get("repo"), PKG_ROOT, *lane,  # PKG_ROOT:
+    keep = {os.path.realpath(p) for p in (PKG_ROOT, *lane,                     # PKG_ROOT:
                                           *lane_paths(task), *siblings(task))  # the git shim,
             if p}                                                              # the ask server
     keep |= tool_roots(hidden) | sdk_roots(hidden) | search_roots(hidden)
@@ -2642,9 +2785,15 @@ def readable(task: store.Task) -> list[str] | None:
     # agent's OpenCode loads it itself (#370, the audit of 1.6)
     if os.environ.get("OPENCODE_CONFIG_DIR"):
         keep.add(os.path.realpath(Path(os.environ["OPENCODE_CONFIG_DIR"]).expanduser()))
+    # and the config home where XDG_CONFIG_HOME moves it, a non-dot directory under the home
+    # (~/conf): its OpenCode config, git's and every tool's were unreadable, and a provider in
+    # the global opencode.json failed every task as an unknown model (#1103, 2026-11-23); its
+    # secrets stay hidden (secret_paths and _api_hidden_tools follow XDG_CONFIG_HOME)
+    if os.path.isabs(xdg := os.environ.get("XDG_CONFIG_HOME") or "") and os.path.realpath(xdg) != home:
+        keep.add(os.path.realpath(xdg))
     # the git directory too, outside the repo when it is a linked worktree: git failed there
     # ("gitfile does not point to a valid repository", the 0.90 review); writable() keeps it out
-    keep |= repo_dirs(task)
+    keep |= read_repo_dirs(task)  # the checkout too, but on an API task (#1091)
     # Inside a hidden directory, only these come out: workbench itself (the marketplace install
     # puts it in ~/.claude/plugins, the 2026-11-16 audit), and of workbench's state the task's own
     # directory (its prompts, the ask server's spec) and its rules (its OpenCode config, its
@@ -2653,7 +2802,7 @@ def readable(task: store.Task) -> list[str] | None:
     # a clone in bench/runs/<run>/<task>/repo, so in every replay the agent's `git status` and
     # `git diff` failed, "gitfile does not point to a valid repository", and the agent spent its
     # round's calls on a git it took for broken (found in the probe pilot, 2026-11-21, #858)
-    own = (PKG_ROOT, task.dir, rules_dir(task), *repo_dirs(task))
+    own = (PKG_ROOT, task.dir, rules_dir(task), *read_repo_dirs(task))
     inner = {r for r in map(os.path.realpath, own) if r not in hidden
              and any(_under(r, h) for h in hidden)}
     only_kept = {os.path.realpath(p) for p in ONLY_KEPT}
@@ -2812,8 +2961,10 @@ USER_AGENTS_MD = Path(".config") / "workbench" / "AGENTS.md"
 
 
 def user_agents_md() -> Path:
-    """The user's file for agents: ~/.config/workbench/AGENTS.md (USER_AGENTS_MD)."""
-    return Path.home() / USER_AGENTS_MD
+    """The user's file for agents: $WB_AGENTS_MD, else ~/.config/workbench/AGENTS.md
+    (USER_AGENTS_MD). The variable is the tests' own file: the user's went into their prompts,
+    and in an agent's lane, which hides it, every test that started a task failed (#1102)."""
+    return Path(os.environ.get("WB_AGENTS_MD") or Path.home() / USER_AGENTS_MD)
 
 
 def _digest(path: Path) -> str:
@@ -3075,11 +3226,34 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
         if d not in seen:
             seen.add(d)
             files.append(p)
+    files = _checkout_copies(task, files)
     nested = [p for p in _tracked(wt, "*CLAUDE.md", "*AGENTS.md")
               if "/" in p and Path(p).name in ("CLAUDE.md", "AGENTS.md")
               and not p.startswith(".claude/") and Path(p).parent.as_posix() != sub
               and wt / p not in agents]
     return files, nested
+
+
+def _checkout_copies(task: store.Task, files: list[Path]) -> list[Path]:
+    """For an API task, each of ``files`` the user's checkout holds and the worktree doesn't
+    (CLAUDE.local.md, a gitignored package CLAUDE.md, one not committed yet, an import there) as a
+    copy in rules/<task>/checkout/, which its lane reads: it doesn't read the checkout
+    (read_repo_dirs, #1091). A GPU task's as they are. Copies made afresh each call."""
+    copies = rules_dir(task) / "checkout"
+    shutil.rmtree(copies, ignore_errors=True)
+    if task.spec.get("via") != "api":
+        return files
+    repo, wt = os.path.realpath(task.spec["repo"]), os.path.realpath(task.worktree)
+    out = []
+    for p in files:
+        real = os.path.realpath(p)
+        if _under(real, repo) and not (real == wt or _under(real, wt)):
+            copy = copies / os.path.relpath(real, repo)
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_bytes(Path(real).read_bytes())
+            p = copy
+        out.append(p)
+    return out
 
 
 # Where OpenCode found a project's AGENTS.md, skills and config itself: the directory it runs in
@@ -3176,6 +3350,8 @@ def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
             continue
         if p.is_relative_to(rules / "project-rules"):
             named[p] = f".claude/rules/{p.relative_to(rules / 'project-rules')}"
+        elif p.is_relative_to(rules / "checkout"):  # an API task's copy (#1091)
+            named[p] = str(p.relative_to(rules / "checkout"))
         label = named.get(p) or ("the spec" if p.name == "prompt.md" else
                                  str(p.relative_to(wt)) if p.is_relative_to(wt) else p.name)
         parts.append((label, n))
