@@ -6456,9 +6456,13 @@ def cmd_remote(a):
         out, err = io.StringIO(), io.StringIO()
         try:
             with redirect_stdout(out), redirect_stderr(err):
+                # every flag of wb model's parser: #1135's price flags, missing here, made
+                # every wb remote die on an AttributeError (caught integrating, 2026-11-23)
                 cmd_model(argparse.Namespace(action="add", id=f"{pid}/{name}", sizes=[], pull=False,
                                              url=None, start=None, stop=None, label=None,
-                                             context=a.context, delete=False))
+                                             context=a.context, delete=False, price_in=None,
+                                             price_out=None, cache_read=None, cache_write=None,
+                                             clear=False))
             print(out.getvalue().splitlines()[0])
         except SystemExit:  # die: why this one wasn't registered, and the rest go on
             print(f"--  {pid}/{name}: {err.getvalue().strip().removeprefix('wb: ')}")
