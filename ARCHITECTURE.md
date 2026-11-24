@@ -4746,8 +4746,10 @@ address (#534).
   phase, model, via, provider_name}]` for each open task, no bench replay and none parked (`store.parked`,
   as `wb status`, #1097); the page's strip over the thread, `Running: fix-auth · API deepseek-flash
   (DeepSeek)`, hidden for none or an older server; more than one kind or `TASKS_SHOWN` 3 counts them
-  apart, `2 running, 1 waiting on Claude, 22 queued: …`, names the running first, then those waiting
-  on Claude, then the queued, three at most, then `+N more`, and `.tasks` is clamped to three lines: a
+  apart, `2 running, 1 waiting on Claude, 22 queued: …`, names the running first (`running`,
+  `testing`), then those waiting on Claude (`asking` among them, `store.NEEDS_CLAUDE`: counted
+  running, a task blocked on its question read as nothing needing Claude, the #1097 review), then
+  the queued, three at most, then `+N more`, and `.tasks` is clamped to three lines: a
   25-task backlog took the screen from the thread on a phone, the queued read as running (#1097); the
   stream sends it when the chat directory wakes it, or at the hub's idle bump (`IDLE_BUMP_S`, 60 s), not on a
   task's own status write), now}`. `build`

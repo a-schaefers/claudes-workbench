@@ -298,8 +298,10 @@
   // GPU or API and whose, as the pane's row says it. A server without `tasks` (an older wb): none.
   // At most TASKS_SHOWN named, the running first, then those waiting on Claude, then the queued,
   // with the counts said apart: a 25-task backlog was 22 lines of "Running: …", the queued read
-  // as running, and the thread a sliver on a phone (#1097, 2026-11-23)
-  const RUNNING = ['running', 'testing', 'asking'], TASKS_SHOWN = 3
+  // as running, and the thread a sliver on a phone (#1097, 2026-11-23). `asking` waits on Claude
+  // (store.NEEDS_CLAUDE): counted running, a task blocked on its question told the away user that
+  // nothing needed Claude (the #1097 review, 2026-11-23)
+  const RUNNING = ['running', 'testing'], TASKS_SHOWN = 3
   function tasksLine(tasks) {
     if (!Array.isArray(tasks) || !tasks.length) return ''
     const rank = t => RUNNING.includes(t.phase) ? 0 : t.phase === 'queued' ? 2 : 1
@@ -307,7 +309,7 @@
     const named = all.slice(0, TASKS_SHOWN).map(t => {
       const short = String(t.model || '').split('/').pop()
       const on = t.via === 'api' ? `API ${short}${t.provider_name ? ` (${t.provider_name})` : ''}` : `GPU ${short}`
-      return `${t.name}${RUNNING.includes(t.phase) && t.phase !== 'asking' ? '' : ` (${t.phase})`} · ${on}`
+      return `${t.name}${RUNNING.includes(t.phase) ? '' : ` (${t.phase})`} · ${on}`
     })
     if (all.length > TASKS_SHOWN) named.push(`+${all.length - TASKS_SHOWN} more`)
     const n = r => all.filter(t => rank(t) === r).length

@@ -489,7 +489,8 @@ async function run(engine, device) {
   })
   await check('a backlog on the strip names three, counts the queued apart and leaves the thread the screen (#1097)', async () => {
     // 25 open tasks were 22 lines of "Running: …" on an iPhone, the queued read as running, and
-    // the thread a 36 px sliver; a task wb stop --all parked stays off it (chat.open_tasks)
+    // the thread a 36 px sliver; a task wb stop --all parked stays off it (chat.open_tasks); one
+    // asking waits on Claude, never counted running (the #1097 review)
     const made = []
     const task = (name, phase, i, status = {}) => {
       const t = join(home, 'state/tasks', name)
@@ -499,13 +500,13 @@ async function run(engine, device) {
           : { model: 'qwen3-coder-30b' }) }))
       writeFileSync(join(t, 'status.json'), JSON.stringify({ phase, round: 1, updated_at: Date.now() / 1000, ...status }))
     }
-    for (let i = 0; i < 25; i++) task(`backlog-step-${String(i).padStart(2, '0')}`, i < 3 ? 'queued' : i < 5 ? 'running' : 'queued', i)
+    for (let i = 0; i < 25; i++) task(`backlog-step-${String(i).padStart(2, '0')}`, i < 3 ? 'queued' : i < 5 ? 'running' : i === 5 ? 'asking' : 'queued', i)
     task('old-parked', 'review', -1, { parked: Date.now() / 1000 })
     try {
       wb('chat', 'reply', '--text', 'Started the backlog.')
-      await until(async () => (await page.textContent('#tasks')).startsWith('2 running, 23 queued: backlog-step-03 · '))
+      await until(async () => (await page.textContent('#tasks')).startsWith('2 running, 1 waiting on Claude, 22 queued: backlog-step-03 · '))
       const text = await page.textContent('#tasks')
-      if (!text.endsWith('; +22 more') || text.includes('old-parked') || !text.includes('backlog-step-00 (queued)'))
+      if (!text.endsWith('; +22 more') || text.includes('old-parked') || !text.includes('; backlog-step-05 (asking) · '))
         throw new Error('the strip says: ' + text)
       const got = await page.evaluate(() => ({ strip: document.getElementById('tasks').getBoundingClientRect().height,
         thread: document.getElementById('scroll').getBoundingClientRect().height, height: innerHeight, line: parseFloat(getComputedStyle(document.getElementById('tasks')).lineHeight) || 18 }))
