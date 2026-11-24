@@ -274,19 +274,35 @@ def _session_cost(data: dict) -> float | None:
     return float(sum(costs)) if costs else None
 
 
+def served_model(asked: str, got) -> str | None:
+    """The model a response said served it (status `served.model`, the keyhole's), when it isn't
+    the one asked for; None when it is or none was said. Providers echo the id with or without a
+    provider prefix (OpenRouter's `deepseek/x` for `openrouter/deepseek/x`), so only the last part
+    is compared, any case: a dated snapshot for an alias is a different model, and recorded. Only
+    `served.by` reached the row, so a provider's swap was gone from results once the task closed
+    (#1122, 2026-11-23)."""
+    if not isinstance(got, str) or not got:
+        return None
+    last = lambda s: s.rsplit("/", 1)[-1].lower()  # noqa: E731
+    return None if last(got) == last(asked) else got
+
+
 def api_usage(task: store.Task) -> dict | None:
     """An API task's money at its close, for its row's `api`: {cost, tokens, source}.
     Summed over every session it had (status `sessions` and `session`: handovers, revives and wb
     next each start one), and `backend`, OpenRouter's served provider (status `served.by`, the
-    keyhole's), when known. `source`: "opencode" (OpenCode's own cost, from every session's
+    keyhole's), when known, and `served_model`, the model the response named when it isn't the
+    one asked for (`served_model`). `source`: "opencode" (OpenCode's own cost, from every session's
     export), "mixed" (the sessions that exported, the rest filled from the meter), "metered"
     (the runner's meter when it counted more than every export: the day cap's figure, #1019; else,
     with no full export, the runner's meter or the step events' cost: a floor, both miss
-    OpenCode's title and compaction requests), "plan" (a quota: no dollars), "unknown" (no price anywhere). `cost` is
+    OpenCode's title and compaction requests), "plan" (a quota: no dollars; the meter's status
+    `api.plan` too), "none" (nothing sent or billed: $0), "unknown" (no price anywhere),
+    "unrecorded" (a priced model, no figure came back). `cost` is
     None unless known, never 0 for a missing price: a 0 from OpenCode for a model the catalog
     prices isn't trusted. None for a GPU task. The order: every session's export, then some
     sessions' plus the meter's remainder, then the meter, then the step events' sum (both floors,
-    `metered`), then a free model's 0."""
+    `metered`), then a free model's 0, then nothing sent's 0."""
     spec, st = task.spec, task.status
     if task_kind(spec) != "api":
         return None
@@ -304,7 +320,13 @@ def api_usage(task: store.Task) -> dict | None:
     served = st.get("served") if isinstance(st.get("served"), dict) else {}
     if isinstance(served.get("by"), str) and served["by"]:  # OpenRouter's backend, the last seen
         out["backend"] = served["by"]
-    if (plan := _plan(model)) is not None:
+    if (got := served_model(model, served.get("model"))) is not None:
+        out["served_model"] = got
+    # the meter's own `api.plan` too: an Ollama cloud model hosted.json no longer lists at close
+    # read as no price where the meter had counted it as plan usage (#1106, 2026-11-23)
+    booked = st.get("api") if isinstance(st.get("api"), dict) else {}
+    if (plan := _plan(model) or (booked.get("plan") if isinstance(booked.get("plan"), str)
+                                 and booked["plan"] else None)) is not None:
         return {**out, "source": "plan", "plan": plan}
     price = catalog_price(model)
     cur = st.get("session")
@@ -341,7 +363,15 @@ def api_usage(task: store.Task) -> dict | None:
         return {**out, "cost": round(meter, 6), "source": "metered"}
     if price == 0:
         return {**out, "cost": 0.0, "source": "opencode"}
-    return out
+    # nothing came back to bill: no session cost above 0, no meter, no token and no response that
+    # named its model (status `served`). A bad --setup, a discard while queued, a key or quota
+    # refused: these read "paid: unknown (no price for this model)" for a priced model, and the
+    # week's spend "1 with no price" (#1106, 2026-11-23). A cut-off answer that named its model
+    # stays unknown: it may have been billed
+    if not ran(task) or (sum(said) == 0 and not any(tokens.values()) and not served.get("model")):
+        return {**out, "cost": 0.0, "source": "none"}
+    # a figure missing for a model the catalog prices is not "no price" (#1106)
+    return out if price is None else {**out, "source": "unrecorded"}
 
 
 def row_cost(row: dict) -> float | None:
@@ -355,15 +385,20 @@ def row_cost(row: dict) -> float | None:
 
 def paid_cell(rows: list[dict]) -> str:
     """The tables' `paid`: the mean dollars a task over the rows with a known cost; `-` for GPU
-    rows, `?` when none is known, `~$0.12` when some are unknown."""
+    rows, `plan` when every API row is plan usage, `?` when none is known, `~$0.12` when some are
+    unknown (plan rows aside: a quota is no unknown price, and they read `?`, #1106)."""
     api = [r for r in rows if api_row(r)]
     if not api:
         return "-"
-    known = [c for r in api if (c := row_cost(r)) is not None]
+    priced = [r for r in api if not any(isinstance(r.get(k), dict) and r[k].get("source") == "plan"
+                                        for k in ("api", "paid"))]  # a bench row's is `paid`
+    if not priced:
+        return "plan"
+    known = [c for r in priced if (c := row_cost(r)) is not None]
     if not known:
         return "?"
     from .savings import usd
-    return ("~" if len(known) < len(api) else "") + usd(sum(known) / len(known))
+    return ("~" if len(known) < len(priced) else "") + usd(sum(known) / len(known))
 
 
 def _apart(steps: list[dict], key: str, fields: tuple) -> dict:

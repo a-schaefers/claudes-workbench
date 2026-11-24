@@ -402,8 +402,9 @@ def _paid(row: dict) -> str:
     if api.get("source") == "plan":
         return f"plan usage ({api.get('plan') or pid})"
     cost = row_cost(row)
-    if cost is None:
-        return "paid: unknown (no price for this model)"
+    if cost is None:  # by its cause: a priced model whose figure never came back has a price (#1106)
+        return ("paid: unknown (no figure recorded)" if api.get("source") == "unrecorded"
+                else "paid: unknown (no price for this model)")
     return f"paid {provider_label(pid)} {usd(cost)} ({row.get('model')})"
 
 

@@ -456,7 +456,8 @@ out, `$0.0041`, `$0.00004`, never `4e-05`, and 0.009999 as `$0.01`; a free model
 with no price`, never `$0.00`; a plan model's (`opencode-go`, an Ollama cloud model) as `on plan
 usage`. `line(row)` gives an API row `api_line`: `claude: 56K · writing it yourself: ~59K
 (estimate) · paid DeepSeek $0.12 (deepseek/deepseek-flash)` (the name from hosted.json,
-`provider_labels`), `· paid: unknown (no price for this model)` or `· plan usage (opencode-go)`;
+`provider_labels`), `· paid: unknown (no price for this model)` (`unrecorded`: `· paid: unknown
+(no figure recorded)`, #1106) or `· plan usage (opencode-go)`;
 so `wb accept`, `wb discard` and `wb backlog` print it. `wb savings` adds, when the period has API
 rows, `api: 6 task(s) · $1.27 (deepseek $0.84, anthropic $0.43) + 1 with no price · claude 210K ·
 writing it yourself ~520K (estimate)` (`api_summary`); `--json` gains `api` (api_totals), which the
@@ -489,9 +490,16 @@ exported and some didn't (or had no cost), the exported ones' sum plus the meter
 (the meter less that sum, never below 0) fills the rest, `source: "mixed"`: dropping the whole sum
 for one failed export threw away what the others said (the engineer's call, #1022). With no meter
 to fill from, that sum would be a false, low figure, so it isn't used. Then the meter alone, `source:
-"metered"`. Then a free model's 0, else `source: "unknown"`, `cost: null`, never 0. `tokens` sums the step events (`cache_read`/
+"metered"`. Then a free model's 0. Then nothing sent: a task that never ran (`ran`: no session,
+no token: a bad `--setup`, a discard while queued), or one whose sessions said no cost above 0
+with no meter, no token and no response that named its model (status `served`: a key or quota
+refused), is `source: "none"`, `cost: 0` (it read `no price for this model` for a priced model,
+#1106). Else `source: "unknown"` (no price: `catalog_price` None) or `"unrecorded"` (the model is
+priced, no figure came back), `cost: null`, never 0. A plan is also the meter's status `api.plan`
+when `_plan` finds none (a cloud model hosted.json no longer lists at close, #1106). `tokens` sums the step events (`cache_read`/
 `cache_write`, a row from before the split by its `cache`); `backend` is status `served.by`
-(OpenRouter's served provider, the keyhole's), the last seen. Live, `results.live_spend` is the
+(OpenRouter's served provider, the keyhole's), the last seen, and `served_model` status
+`served.model` when it isn't the id asked for (#1122). Live, `results.live_spend` is the
 meter, else the steps' summed `cost`, else 0 for a free model, else unknown (`spend_so_far` for the
 round report, every step of events.jsonl; `wb top` keeps a running sum, below).
 
@@ -1725,7 +1733,10 @@ runner.log); no request is logged, and no line holds the key or the token. Accep
 shell can reach the keyhole too, holding the token (the layer is readable), and spend on the task's
 model only, while the runner lives. Without Landlock the user's OpenCode store is readable
 anyway; API tasks run there all the same, with no warning (the owner's call on #1008 and #1012:
-it just works). Not yet wired: status `served` reaching the results.
+it just works). Status `served` reaches the results row's `api` (`results.api_usage`): `by` as
+`backend`, and `model` as `served_model` when it isn't the id asked for (`results.served_model`:
+the last part of the id compared, any case, since providers echo it with or without a prefix; a
+dated snapshot is recorded; #1122). Both are the last seen; the `served` events keep each change.
 
 *How the runner uses it* (#1015). `drive` resolves the model and, for an API one that needs a
 key (`runner.needs_keyhole`: not an Ollama cloud model, whose `key` is `ollama`, nor a free
@@ -5353,7 +5364,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb bench run` | `--model ID…` (default: every GPU model that can run and takes the case's size), `--case NAME…`, `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | A detached driver, one replay at a time behind real tasks, preempted by one; refused while another run runs; trims runs past `RUNS_KEPT` 20 (`bench.prune_runs`), `bench.sweep`s; skips what the label already passed or failed (an `error` runs again); an API `--model` refused (#1013). |
 | `wb backlog [NAME]` | `--json` | A `--backlog` batch, archived included: per task, then `savings.summary`; `--json` `{backlog, tasks, totals}`, unnamed `[{backlog, tasks, open}]`. Unknown: exit 1. |
 | `wb savings` | `--week` \| `--month` \| `--all`, `--json`, `--share`, `--card FILE.svg`, `--price X\|off`, `--api` | `savings.totals`, trials out, then the `api:` line when the period has API tasks; `--json` `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price, api}` (the pane reads it); `--api`: the API money by provider and day, trials and bench replays in, `--json` api_totals plus `bench` (*What a task saved*, #1022); `--price` (positive, finite, else exit 1) writes savings.json `kwh_price` (`off`: `set_price(None)`, #609). |
-| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (*The Stats feed*), `--all` | `set`: stats.json; `wb stats`: `stats.summary`, then results by model, kind and role (a row before roles by size; the model column as wide as the longest id, never cut, the role cut to 11) with columns `tasks`, `accepted`, `rounds`, `autofix`, `reviews`, `min`, `claude`; with an API row shown also `kind`, `role`, `agent tok` and `paid` (mean $ a task over the known costs: `-` GPU, `?` none known, `~$0.12` some unknown; `results.paid_cell`), within 120 columns for ids up to 30 (`stats.STATS_MODEL_LINES` 3, #638, #1022); a GPU-only table is as before #1022: `size` (`role` once a writing row shows) and `local tok`; `tune`: the knobs; `trial`: closed tasks' rows marked, lessons dropped (an open task refused: it has no row). |
+| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (*The Stats feed*), `--all` | `set`: stats.json; `wb stats`: `stats.summary`, then results by model, kind and role (a row before roles by size; the model column as wide as the longest id, never cut, the role cut to 11) with columns `tasks`, `accepted`, `rounds`, `autofix`, `reviews`, `min`, `claude`; with an API row shown also `kind`, `role`, `agent tok` and `paid` (mean $ a task over the known costs: `-` GPU, `plan` all plan usage, `?` none known, `~$0.12` some unknown, plan rows aside, #1106; `results.paid_cell`), within 120 columns for ids up to 30 (`stats.STATS_MODEL_LINES` 3, #638, #1022); a GPU-only table is as before #1022: `size` (`role` once a writing row shows) and `local tok`; `tune`: the knobs; `trial`: closed tasks' rows marked, lessons dropped (an open task refused: it has no row). |
 | `wb gc` | `--days N` (`ARCHIVE_DAYS` 30) | `cli.gc`, writing `gc.json`: archives tasks closed N days (`store.archive`); old handled notices to `notify.old.jsonl` (`_rotate_notices`; `_cap_old_notices` at `NOTIFY_OLD_MAX` 8 MiB); rules of gone tasks (`RULES_GRACE` 1 h); `context.drop_stale_runtime_dirs`; `store.SCRATCH_PREFIXES` scratches (named `<prefix><maker's pid>.<start tag>.<machine tag>-` by `store.scratch`; `wb bench add`'s `.<case>.<pid>.tmp`) `SCRATCH_AGE` old whose maker is gone (`_drop_scratches`, `_maker_alive`: a reused pid with another start is gone, #532; `_scratch_homes`, #589; another machine's after `FAR_SCRATCH_AGE`, as its pid isn't in this process table, #876); half-made starts (`_dead_start`, `_drop_start`: worktree unlocked and removed, and the branch only when `starting.json` says this start made it and it still points at `branch_at`, `delete_branch(at=)`, #416, #376); chat uploads (`chat.drop_old_uploads`); landed `delegate/` branches (`_merged_branches`, `gitops.drop_landed_branch`, never one checked out, `gitops.checked_out_in`, nor one moved past the recorded tip, #930; status `branch_gone`, #686; one squash-merged elsewhere holds commits its target lacks and stays); accepted refs (`_released_refs`, `gitops.drop_accepted`, `accepted_ref_gone`: deleted when the tip is in `base_branch`, else moved into `steps.bundle` first; a `steps.bundle` stays as long as its task, #940); archived tasks past `store.SLIM_DAYS` 90 slimmed (`store.slim_archive`, `SLIM_GLOBS`: logs, test outputs, old exports, shot PNGs with shots.json marked `pruned` first, #821; task.json, status, prompts, summaries, events and asks stay: names stay taken, bench add and the lessons read them); `_drop_leftovers` (old `imports/`, dead `claude-sessions/<pid>`). Then (not in `cli.gc`) `bench.sweep` (#511). Accept and discard run it without the branches once per `GC_EVERY`. |
 
 ### Other
@@ -5669,7 +5680,7 @@ calls, input, cache_write_5m, cache_write_1h, cache_read, output}`), `gpu_wh`, `
 `kind` (`gpu`|`api`, task.json `via`; a row without it is GPU, an old `:cloud` one too), `role` (task.json `role`, or null),
 `provider` (task.json `provider`, else the model id before its first `/`), and for an API row `api` (`results.api_usage`:
 `{cost (USD or null, never 0 for no price), tokens {in, out, cache_read, cache_write, reasoning}, source (opencode | mixed |
-metered | plan | unknown), plan?, backend?}`) and no `gpu_wh` or `remote_gpu` (#1022),
+metered | plan | none | unknown | unrecorded), plan?, backend?, served_model?}`) and no `gpu_wh` or `remote_gpu` (#1022),
 `probe_long` (task.json `probe_files` named any; old rows' `probe_level`, `probe_setting`, `probe_aggressive`: unread); stats recording on
 (`results.for_stats`): `started_at`, `load_secs`, `setup_secs`, `nudges`, `asks` (`{questions, permissions, refused,
 answered}`), `guards`, `speed` (medians of status `speeds`), `gpu_w` (`{mean, peak}`); `commit`, `merged`, `merge_refused` on accept, `reason` on

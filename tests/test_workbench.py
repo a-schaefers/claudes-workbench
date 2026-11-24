@@ -30662,6 +30662,52 @@ class ApiSpend(Base):
         ev, _ = store.read_jsonl(task.dir / "events.jsonl")
         self.assertFalse([e for e in ev if e.get("round") == 2 and e["kind"] == "step"])
 
+    def test_an_api_task_that_never_sent_a_request_records_0_not_no_price(self):
+        # #1106 (2026-11-23): a bad --setup, or a key the provider refused, on a priced model
+        # closed as "paid: unknown (no price for this model)", and the week as "1 with no price"
+        from workbench import results, savings
+        runner.models.hosted(fresh=True)
+        self.assertEqual(results.catalog_price(SPEND_M), 1.0)
+        setup = self.api_task("t-nosetup", SPEND_M, "ok", "--setup", "false")
+        runner.drive(setup)
+        self.assertFalse(results.ran(setup))
+        refused = self.api_task("t-refused", SPEND_M, "ok", WB_FAKE_API="meterco=auth")
+        runner.drive(refused)
+        self.assertTrue(results.ran(refused))
+        for t in (setup, refused):
+            self.assertEqual(results.api_usage(t)["cost"], 0.0, t.name)
+            self.assertEqual(results.api_usage(t)["source"], "none", t.name)
+            out = run_wb("discard", t.name, "--reason", "test")
+            self.assertNotIn("no price", out, t.name)
+        a = savings.api_totals(store.results(trials=True))
+        self.assertEqual((a["tasks"], a["unknown"], a["cost"]), (2, 0, 0.0))
+        self.assertNotIn("no price", run_wb("savings", "--api"))
+
+    def test_a_priced_model_whose_figure_never_came_back_says_so_not_no_price(self):
+        # #1106: a response named its model (it may have been billed), yet no figure reached the
+        # meter or the steps: unknown, but the model has a price
+        from workbench import results, savings
+        runner.models.hosted(fresh=True)
+        t = self.api_task("t-cut", SPEND_M, "ok")
+        t.set_status(session="ses_x", served={"model": "priced-1", "by": None})
+        with mock.patch("workbench.transcript.export", return_value={}):
+            u = results.api_usage(t)
+        self.assertEqual((u["cost"], u["source"]), (None, "unrecorded"))
+        row = {"kind": "api", "provider": "meterco", "model": SPEND_M, "api": u}
+        self.assertEqual(savings.line(row), "paid: unknown (no figure recorded)")
+
+    def test_a_plan_task_whose_model_left_hosted_json_stays_plan_usage(self):
+        # #1106: _plan read only the id and hosted.json; the meter had booked it as plan usage
+        from workbench import results
+        t = self.api_task("t-gone", "ollama-cloud/left-1", "ok")
+        t.set_status(session="ses_x", api={"usd": None, "metered": 0.0, "source": "opencode",
+                                           "tok": {"in": 5}, "plan": "ollama-cloud"})
+        u = results.api_usage(t)
+        self.assertEqual((u["source"], u["plan"], u["cost"]), ("plan", "ollama-cloud", None))
+        plan = {"kind": "api", "api": {"cost": None, "source": "plan", "plan": "ollama-cloud"}}
+        self.assertEqual(results.paid_cell([plan, plan]), "plan")             # not `?`
+        self.assertEqual(results.paid_cell([plan, {"kind": "api", "api": {"cost": 0.2}}]), "$0.20")
+
 
 class ApiSpendKeyhole(_KeyholeTest):
     """The keyhole's part of the spend cap (#1019): one usage per response, close(reason), room."""
@@ -31588,6 +31634,17 @@ class ApiStats(Base):
         self.assertTrue(all(len(x) <= 120 for x in out.splitlines() if x.startswith(("model ", "ollama/"))))
         self.assertIn("api this week: 5 task(s), $0.44 (deepseek $0.24, zen $0.20), 2 with no price", out)
 
+    def test_a_served_model_other_than_the_one_asked_reaches_the_results_row(self):
+        # #1122 (2026-11-23): only `served.by` reached the row, so a provider's swap was lost at close
+        from workbench import results
+        t = self.api_task("t-drift", {"served": {"model": "x-0901", "by": "Fireworks"}},
+                          model="prov/x", provider="prov")
+        u = results.api_usage(t)
+        self.assertEqual((u["served_model"], u["backend"]), ("x-0901", "Fireworks"))
+        for same in ("x", "prov/x", "vendor/X"):                     # an echo of the id asked for
+            t.set_status(served={"model": same, "by": None})
+            self.assertNotIn("served_model", results.api_usage(t), same)
+
     def test_the_stats_feed_has_the_weeks_api_money_by_provider_and_energy_leaves_api_rows_out(self):
         self.rows(self.gpu_row(gpu_wh=30.0), self.api_row(gpu_wh=500.0),   # a stray reading: not ours
                   self.api_row(cost=0.1, trial=True))                     # money spent is spent
@@ -31633,7 +31690,8 @@ class ApiStats(Base):
         t = self.api_task("t-two", {"sessions": ["ses_first"], "session": "ses_second"})
         self.assertEqual(results.api_usage(t)["cost"], 0.42)       # the handover's session counted too
         os.environ["FAKE_COST"] = "0"                               # OpenCode said 0, no catalog price
-        t = self.api_task("t-zero", {"session": "ses_zero"})
+        # a response came back (it named its model): with none, nothing was sent, $0 (#1106)
+        t = self.api_task("t-zero", {"session": "ses_zero", "served": {"model": "deepseek-flash", "by": None}})
         self.assertEqual(results.api_usage(t), {"cost": None, "source": "unknown",
                                                 "tokens": dict.fromkeys(results.TOKEN_KEYS, 0)})
         t.set_status(api={"usd": 0.05}, served={"model": "x", "by": "baseten"})  # the meter (#1019)
@@ -31870,9 +31928,10 @@ class ApiStats(Base):
         free = results.api_usage(self.api_task("t-free0", {"session": "ses_f"}, model="opencode/big-pickle-free",
                                                provider="opencode"))
         self.assertEqual((free["cost"], free["source"]), (0.0, "opencode"))   # a true 0
-        priced = results.api_usage(self.api_task("t-priced0", {"session": "ses_p"}, model="acme/coder-flash",
-                                                 provider="acme"))
-        self.assertEqual((priced["cost"], priced["source"]), (None, "unknown"))  # never a false 0
+        priced = results.api_usage(self.api_task("t-priced0", {"session": "ses_p", "served": {"model": "coder-flash"}},
+                                                 model="acme/coder-flash", provider="acme"))
+        # never a false 0; unknown, though not for want of a price (#1106)
+        self.assertEqual((priced["cost"], priced["source"]), (None, "unrecorded"))
 
     def test_a_session_whose_export_fails_is_filled_from_the_meter_beside_the_ones_that_exported(self):
         # #1022's review: one failed export dropped the whole sum, the sessions that exported
