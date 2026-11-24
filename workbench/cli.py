@@ -745,7 +745,8 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
     if why is None and (kept := privacy.local_only(repo, sub)):  # commands.json's (#1021)
         why = f"{repo.name} is kept local ({kept})"
     if why is None:  # commands.json's standing copy/siblings, unnamed (#1021), as an API start's
-        why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m), repo, sub) or None
+        why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m), repo, sub,
+                            role, advice=False) or None
     if why is None:  # no price, or today at the day cap (#1019), without an API start's advice:
         # the role is on the GPU and this start only waits for it (wave 2's merge)
         why = meter.refusal(m, role, advice=False,  # round 1's input too (#1173)
@@ -1009,7 +1010,8 @@ CACHE_DIRS = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".to
               ".cache", ".idea", ".vscode")
 
 
-def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", where: str = "") -> dict:
+def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", where: str = "",
+                    role: str | None = None) -> dict:
     """The task's `setup`, `copy` and `siblings`: commands.json's `repos` entry for the repo,
     with --setup in its place and --copy/--sibling added, each checked (#201, the 2026-11-19
     audit). A copied path must be ignored in the checkout (else it shows in the review diff) and
@@ -1017,7 +1019,7 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", whe
     the repo the lane may read."""
     conf = context.repo_conf(repo, sub)  # the package's entry, not the repo's first (#778)
     if via == "api":  # nothing standing goes to a provider unnamed (#1021)
-        _standing_refusal(conf, a, where, repo, sub)
+        _standing_refusal(conf, a, where, repo, sub, role)
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
     for raw, given in [*((x, False) for x in conf.get("copy", [])), *((x, True) for x in a.copy or [])]:
@@ -1109,26 +1111,32 @@ def _copy_path(repo: Path, raw: str, sub: str | None) -> str:
     return p
 
 
-def _standing_refusal(conf: dict, a, where: str, repo: Path, sub: str | None) -> None:
+def _standing_refusal(conf: dict, a, where: str, repo: Path, sub: str | None,
+                      role: str | None = None) -> None:
     """An API task takes commands.json's standing `copy` and `siblings` only when this command
     line names them too: a `.env.local` copied into every worktree, or a `../shared` the lane
     reads, would reach the provider unasked (#1021). Exit 3, the entry and how to name it."""
-    if why := _standing_gap(conf, a, where, repo, sub):
+    if why := _standing_gap(conf, a, where, repo, sub, role):
         die(why, 3)
 
 
-def _standing_gap(conf: dict, a, where: str, repo: Path, sub: str | None) -> str:
+def _standing_gap(conf: dict, a, where: str, repo: Path, sub: str | None,
+                  role: str | None = None, advice: bool = True) -> str:
     """_standing_refusal's line, or '': also the busy opt-in's (#1023), which moves a GPU start to
-    an API model after _worktree_setup checked it as a GPU one (wave 2's merge). A --copy names
-    the path it copies, from a package the package's (_copy_path, #1158)."""
+    an API model after _worktree_setup checked it as a GPU one (wave 2's merge), and the mod's
+    dry run's (_route_start). A --copy names the path it copies, from a package the package's
+    (_copy_path, #1158). Its other way out is the role's, or a GPU model for a --model start
+    (privacy.standing_refusal, #1227)."""
+    asked = bool(getattr(a, "model", None))
     named_copy = {_copy_path(repo, x, sub).rstrip("/") for x in a.copy or []}
     named_sib = {x.strip().rstrip("/").removeprefix("../") for x in a.sibling or []}
     for raw in conf.get("copy", []):
         if (entry := os.path.normpath(raw.strip()).rstrip("/")) not in named_copy:
-            return privacy.standing_refusal("copy", raw, where, _copy_name(repo, entry, sub))
+            return privacy.standing_refusal("copy", raw, where, _copy_name(repo, entry, sub),
+                                            role, asked, advice)
     for raw in conf.get("siblings", []):
         if raw.strip().rstrip("/").removeprefix("../") not in named_sib:
-            return privacy.standing_refusal("siblings", raw, where)
+            return privacy.standing_refusal("siblings", raw, where, None, role, asked, advice)
     return ""
 
 
@@ -1452,7 +1460,7 @@ def cmd_start(a):
         print(f"package: {sub} (its own CLAUDE.md): the agent, the setup and the tests run there")
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
-    setup = _worktree_setup(repo, a, sub, m.kind, models.provider_name(m))
+    setup = _worktree_setup(repo, a, sub, m.kind, models.provider_name(m), role)
     checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
@@ -3221,6 +3229,11 @@ def _route_start(a) -> None:
         die(_cant_run(m, state), 3)
     if repo is not None and (why := _no_base(repo, ns.base)):
         die(why)
+    # commands.json's standing copy/siblings this start doesn't name: wb start's exit 3, here
+    # before the dialog, which had the user approve a start wb start then refused (#1227)
+    if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), ns,
+                                                  models.provider_name(m), repo, sub)):
+        die(why, 3)
     if not ns.queue and not _api_slots_free(m, ns.name):
         die(_slots_full(m, ns.name), 4)
     line = start_line(ns.name, m)

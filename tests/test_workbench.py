@@ -35766,12 +35766,13 @@ class Privacy(_KeyholeTest):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
         (self.repo / "local.cfg").write_text("db=dev\n")
         self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["local.cfg"]}}}))
+        self.role(via="api", api=FLASH)                          # the start's role, on API
         with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
             self.start_api("t-cp1")
         self.assertEqual(cm.exception.code, 3)
         self.assertIn('commands.json "repos" copies local.cfg into every task, and this one is on '
-                      "API (DeepInfra): name it (--copy local.cfg) to send it, or put the role on "
-                      "the GPU", err.getvalue())
+                      "API (DeepInfra): name it (--copy local.cfg) to send it, or put significant on "
+                      "the GPU (wb route significant gpu)\n", err.getvalue())
         out = self.start_api("t-cp2", None, "--copy", "local.cfg")
         self.assertIn("and local.cfg (--copy) to DeepInfra", out)
         self.assertEqual(store.Task("t-cp2").spec["copy"], ["local.cfg"])
@@ -35802,8 +35803,10 @@ class Privacy(_KeyholeTest):
         (self.repo / "node_modules" / "root-only").mkdir(parents=True)
         (app / "node_modules" / "app-only").mkdir(parents=True)
         self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["node_modules"]}}}))
+        self.role(via="api", api=FLASH)
         refusal = ('commands.json "repos" copies node_modules into every task, and this one is on API '
-                   "(DeepInfra): name it (--copy ../../node_modules) to send it, or put the role on the GPU")
+                   "(DeepInfra): name it (--copy ../../node_modules) to send it, or put significant on "
+                   "the GPU (wb route significant gpu)")
         for name, extra in (("t-pk1", ()), ("t-pk2", ("--copy", "node_modules"))):  # the package's
             with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
                 self.start_api(name, None, *extra, repo=app)
@@ -37521,6 +37524,41 @@ class RoleResolution(Base):
         self.routes.write_text("{")                                      # unreadable: the role's own, as before
         self.assertEqual(routes.off_api("trivial")[2], "wb route trivial gpu")
 
+    def test_a_standing_copy_refusal_names_a_way_off_api_that_works_and_the_dry_run_refuses_it_before_the_dialog(self):
+        # #1227 (2026-11-24, #1218's fix missed it): the refusal of a standing commands.json copy
+        # always said "or put the role on the GPU", a no-op under Agents API and for a --model
+        # start, so the retry was refused the same way; and the mod's dry run never checked it,
+        # so the dialog asked the user to approve a start wb start then refused
+        (self.repo / ".gitignore").write_text("data/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore data"], check=True)
+        (self.repo / "data").mkdir()
+        (self.repo / "data" / "f").write_text("x\n")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"copy": ["data"]}}}))
+        self.set_role("trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")  # its own side: GPU
+        self.set_role("all", "api")
+        code, _, err = self.begin("t-role", "--role", "trivial")
+        self.assertEqual((code, err), (3, 'wb: commands.json "repos" copies data into every task, and this one '
+                                          "is on API (DeepSeek): name it (--copy data) to send it, or set Agents "
+                                          "to Both or GPU (wb route all both|gpu)\n"))
+        os.environ["CLAUDECODE"] = "1"
+        argv = ["t-m", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "deepseek/deepseek-v4-pro"]
+        line = ('wb: commands.json "repos" copies data into every task, and this one is on API (DeepSeek): '
+                "name it (--copy data) to send it, or a GPU model\n")
+        self.assertEqual(self.wb("route", "--dry-run", "--json", "--start", *argv), (3, "", line))  # no dialog
+        ok = store.home() / "route-ok.json"
+        m = runner.models.lookup("deepseek/deepseek-v4-pro")
+        store.write_json(ok, {"start": {"task": "t-m", "model": m.id}, "change": cli.start_line("t-m", m),
+                              "at": time.time()})
+        self.assertEqual(self.wb("start", *argv), (3, "", line))
+        self.assertTrue(ok.exists())                                      # the yes never used up
+        self.assertFalse(store.Task("t-m").exists)
+        for said in (err, line):
+            self.assertNotIn("wb route trivial gpu", said)
+        code, out, err = self.wb("route", "--dry-run", "--json", "--start", *argv, "--copy", "data")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["gate"])                          # named: the dialog, as before
+
     def test_an_unreadable_routes_json_stops_the_start(self):
         self.routes.write_text("{")
         code, _, err = self.begin("t-broken")
@@ -38460,6 +38498,8 @@ class BusyGpu(Base):
             line = cli._busy_api("trivial", self.asked(), self.repo, None)
             self.assertIsInstance(line, str)
             self.assertIn("can't take it: commands.json \"repos\" copies .env.local into every task", line)
+            # no way off API for a role on the GPU already: "or put the role on the GPU" was one (#1227)
+            self.assertTrue(line.endswith("name it (--copy .env.local) to send it"), line)
             self.assertIsInstance(cli._busy_api("trivial", self.asked(copy=[".env.local"]), self.repo, None), tuple)
 
     def test_a_busy_start_on_an_openrouter_role_carries_its_backends(self):

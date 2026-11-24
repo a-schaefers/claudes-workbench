@@ -731,7 +731,7 @@ saying so, never NO_CAP's advice; an unpriced model that started anyway is stopp
 room negative and `stop_reason` the NO_PRICE line): `trivial role: API spend today is ≈$5.03 of the $5 day cap (it resets at local midnight).
 Ask the user: a higher cap (wb route cap <usd>), the role on the GPU (wb route trivial gpu), or
 tomorrow` (the busy opt-in's note, `advice=False`, ends at `midnight)`: its role is on the GPU, the start only
-waits). **The way off API** in this advice, the local-only refusal, the spend stop's notice and the provider's
+waits). **The way off API** in this advice, the local-only and standing-copy refusals, the spend stop's notice and the provider's
 advice is `routes.off_api(role)`'s, from routes.json as it is now, never a fixed `wb route <role> gpu`: under
 Agents API `Agents on GPU (wb route all gpu)` (`Agents on Both or GPU (wb route all both|gpu)` when the role's
 own side is the GPU and `busy` is wait); for a role on the GPU that the busy opt-in sends to API, `waiting for
@@ -1351,8 +1351,13 @@ everywhere). In order:
 - For an API task, a standing `copy` or `siblings` entry of commands.json's `repos` that this
   command line doesn't name too is refused, exit 3 (`cli._standing_refusal`, its line
   `cli._standing_gap`, `privacy.standing_refusal`; #1021): `commands.json "repos" copies local.cfg into every task, and
-  this one is on API (DeepInfra): name it (--copy local.cfg) to send it, or put the role on the
-  GPU`; a sibling alike (`links ../shared beside every task`). From a package the advice is the
+  this one is on API (DeepInfra): name it (--copy local.cfg) to send it, or put significant on the
+  GPU (wb route significant gpu)`; a sibling alike (`links ../shared beside every task`). The other way
+  out is `privacy.local_only_line`'s: the role's `routes.off_api(role)` (under Agents API `set Agents to
+  GPU (wb route all gpu)`, or `… Both or GPU (wb route all both|gpu)`), for a `--model` start `or a GPU
+  model`, and none in the busy opt-in's note (`advice=False`); a fixed `or put the role on the GPU` was a
+  no-op there, the retry refused the same way (#1227). The dialog's dry run (`cli._route_start`) refuses
+  it too, exit 3 before any dialog line (#1227). From a package the advice is the
   `--copy` that reads back as the entry (`cli._copy_name`): `--copy ../../node_modules` for the root's
   `node_modules` when the package has its own, as `--copy node_modules` names the package's and
   never consents to the root's (#1158's review: the refusal advised it and refused it again). A copied file and a sibling the lane
@@ -4232,7 +4237,7 @@ asks before `wb start` runs, from `wb route --dry-run --start <its args>` (`cli.
 `--repo` (else the command's cwd) and `--local-only`, and exits 3 with `cli.local_only_refusal`'s line in
 place of a dialog line, so the user is never asked to approve a start that would be refused; so it does for
 Agents on GPU (`routes.agents_gpu()`, exit 3, wb start's own line, #1213), `meter.refusal`, a model that can't run (`cli._cant_run`, a rate limit or outage passing), a `--base` naming no
-commit (`cli._no_base`, exit 1) and, without `--queue`, the provider's slots full (`cli._slots_full`, exit 4) (#1104). A linked worktree of a local-only repo is that repo
+commit (`cli._no_base`, exit 1), a standing commands.json `copy`/`siblings` the start doesn't name (`cli._standing_gap`, exit 3, #1227) and, without `--queue`, the provider's slots full (`cli._slots_full`, exit 4) (#1104). A linked worktree of a local-only repo is that repo
 (the git-dir match). `wb next`, `wb feedback` and `wb resume` on an API task whose repo became local-only since it started
 exit 3 (`cli._local_only_since`, `_local_only_now`, by `runner.api_task`: a task with no `via` by its model's kind, #1111): `this repo is local-only now; the task's model is API (<provider>):
 wb takeover <t> or wb discard <t>` (the model is fixed per task); `wb resume --all` prints that line for such a task and
@@ -7254,4 +7259,4 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.
 - **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → the mod's `GUARD_WORDS`, *Stats recording*'s list.
-- **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin; its input `runner.first_tokens` ↔ what `run_round` sends: status `live_used`, `handoff_prompt`, `PROMPT_ARG_MAX`, #1173) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, keeping its `worst` for `runner._spend_lead` ↔ `meter.stop_text(task, worst)`, #1150, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`; its `guard` `agents` (`runner.AGENTS`) ↔ the mod's `AGENTS_NEXT`, and `routes.AGENTS_GPU`/`AGENTS_STOPS` ↔ the mod's `AGENTS_STOPS` text (#1213). The way off API (#1218): `routes.off_api` ↔ `routes.effective_via` and `busy_api` ↔ its users, `meter._ask`, `meter.stop_text`, `privacy.local_only_line`, `runner.provider_remedy` and `routes.cant_run` under Agents API: a new remedy that offers the GPU asks it.
+- **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin; its input `runner.first_tokens` ↔ what `run_round` sends: status `live_used`, `handoff_prompt`, `PROMPT_ARG_MAX`, #1173) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, keeping its `worst` for `runner._spend_lead` ↔ `meter.stop_text(task, worst)`, #1150, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`; its `guard` `agents` (`runner.AGENTS`) ↔ the mod's `AGENTS_NEXT`, and `routes.AGENTS_GPU`/`AGENTS_STOPS` ↔ the mod's `AGENTS_STOPS` text (#1213). The way off API (#1218): `routes.off_api` ↔ `routes.effective_via` and `busy_api` ↔ its users, `meter._ask`, `meter.stop_text`, `privacy.local_only_line`, `privacy.standing_refusal` (#1227), `runner.provider_remedy` and `routes.cant_run` under Agents API: a new remedy that offers the GPU asks it.
