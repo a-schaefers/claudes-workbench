@@ -19033,6 +19033,22 @@ class Try(Base):
             wait_phase(f"try-{n}", {"review"})
             run_wb("discard", f"try-{n}")
 
+    def test_wb_try_starts_the_sample_whatever_commit_hooks_the_users_git_runs(self):
+        # #1254 (bar loop round 6): wb init's initial commit ran the user's global hooks, so a
+        # core.hooksPath commit-msg policy (Conventional Commits) failed wb try on every retry
+        hooks = Path(self.tmp.name) / "policy-hooks"
+        hooks.mkdir()
+        for name in ("pre-commit", "commit-msg"):
+            (hooks / name).write_text("#!/bin/sh\necho 'not a Conventional Commit' >&2\nexit 1\n")
+            (hooks / name).chmod(0o755)
+        cfg = Path(self.tmp.name) / "hooks.gitconfig"
+        cfg.write_text(f"[user]\n\temail = t@t\n\tname = t\n[core]\n\thooksPath = {hooks}\n")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(cfg), GIT_CONFIG_NOSYSTEM="1", FAKE_SCENARIO="ok")
+        out = run_wb("try", "--model", "mimo")
+        self.assertIn("hidden check, at review: ", out)
+        self.assertEqual(gitops.git(cli.try_dir() / "1", "log", "--format=%s").strip(), "Initial commit")
+        wait_phase("try-1", {"review"})
+
     def test_the_hidden_check_reports_a_sample_its_python_cannot_read(self):
         # #530: it caught only ImportError, so a SyntaxError crashed it with a traceback
         work = Path(self.tmp.name) / "unreadable"

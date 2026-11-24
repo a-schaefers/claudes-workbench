@@ -6059,9 +6059,12 @@ def cmd_init(a):
     if not has_commits:
         gitops.git(d, "add", "-A")  # the agents work from commits: the project as it is now
         n = len(gitops.git(d, "diff", "--cached", "--name-only", "-z").split("\0")) - 1
-        try:  # signed as accept's are, or unsigned for wb try: a locked key hung it (#1226)
-            gitops.commit(d, "commit", "-q", "--allow-empty", "-m", "Initial commit",
-                          sign=not a.no_sign)
+        # signed as accept's are, or unsigned for wb try: a locked key hung it (#1226). No hooks,
+        # as no commit of wb's runs them: a global core.hooksPath's commit-msg policy failed wb
+        # try on every retry, and a hook reading /dev/tty could hang it (#1254, 2026-11-24)
+        try:
+            gitops.commit(d, *gitops.NO_HOOKS, "commit", "-q", "--allow-empty", "-m",
+                          "Initial commit", sign=not a.no_sign)
         except gitops.GitError as e:  # left staged: wb init again, once unlocked, commits it
             die(f"{d}: {e}")
         did.append(f"initial commit of the {n} file(s) here (git show --stat to check)" if n
