@@ -519,7 +519,8 @@ coding choice is the user's (`wb coding`), never changed by a check.
   A `spend` stop (cause `spend`: the day's API spend cap is reached, or too near it for the next
   request) is the user's call, never a retry: ask them, as the notice says (it names a cap that
   would do). A higher cap or tomorrow: `wb resume <name>` once it allows. `wb feedback`, `next`
-  or `resume` refused at the cap (exit 3) is the same call.
+  or `resume` refused at the cap (exit 3) is the same call. API tasks queued behind it send no
+  stop of their own: they wait as queued and go on once the cap is raised or at midnight.
   The notice's route change is for the next tasks; this one keeps its API model (resume never
   re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
   With Agents on GPU the same stop says `Agents is GPU, so nothing spends`: API tasks already

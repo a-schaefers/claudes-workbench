@@ -4919,6 +4919,65 @@ def _stop_before(task: store.Task, n: int, what: str, why: str, lead: str, guard
     task.notify("stuck", text, round=n, cause=SPEND, **({"guard": guard} if guard != SPEND else {}))
 
 
+def _midnight(after: bool = False) -> float:
+    """Today's local midnight (``after``: tomorrow's), when the day cap resets (meter.day)."""
+    lt = time.localtime()
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + after, 0, 0, 0, 0, 0, -1))
+
+
+def _cap_told(task: store.Task) -> str:
+    """Another task whose spend stop has told Claude of today's cap, still standing, else '':
+    phase `stuck`, status `infra` `spend` (not the Agents switch's `guard`), its newest notice
+    (`noticed`) today and since routes.json last changed (a cap raised since is a new question)."""
+    since = _midnight()
+    with contextlib.suppress(OSError):
+        since = max(since, os.stat(routes.path()).st_mtime)
+    with contextlib.suppress(OSError):
+        for d in store.tasks_dir().iterdir():
+            if d.name == task.name or not (d / "task.json").is_file():
+                continue
+            st = store.Task(d.name).status
+            if st.get("phase") != "stuck" or st.get("infra") != SPEND or st.get("guard") == AGENTS:
+                continue
+            try:
+                if float((d / "noticed").read_text() or 0) >= since:
+                    return d.name
+            except (OSError, ValueError):
+                continue
+    return ""
+
+
+def _cap_wait(task: store.Task, lease) -> bool:
+    """Before the first round this runner sends (#1249, 2026-11-24): an API task at the day cap,
+    or within its first request of it, while another task's spend stop has told Claude so
+    (_cap_told), waits as queued, its provider slot let go (taken again after), until the cap is
+    raised (a watch on routes.json's directory), local midnight or that stop no longer stands
+    (looked at every API_WAIT's 30 s). A backlog queued behind the cap each took its slot, ran
+    round 1 into the guard and woke Claude with the same stop, one ask of the user per task, as
+    #1178's 402. With no such stop it goes on, and its own stop is the notice Claude gets: never
+    a wait untold. True when it waited (the caller looks again)."""
+    if meter.for_task(task) is None:
+        return False
+    waited, said = False, None
+    with Watcher(routes.path().parent) as w:
+        while True:
+            why = meter.stop_reason(task, ahead=True, tokens=first_tokens(task))
+            if not why or not why.startswith((meter.STOP, meter.NEAR)) or not (told := _cap_told(task)):
+                break
+            if not waited:
+                lease.__exit__(None, None, None)  # the slot, for a task the cap lets run
+                waited = True
+            msg = (f"waiting: {why}; {told}'s stop has asked the user: it goes on once the cap is "
+                   f"raised (wb route cap <usd>) or at local midnight (wb stop gives up)")
+            if msg != said:
+                task.set_status(phase="queued", last=msg)
+                said = msg
+            w.wait(min(max(_midnight(after=True) - time.time(), 0.1), models.API_WAIT[1]))
+    if waited:
+        lease.__enter__()
+    return waited
+
+
 # #1215: a repo marked local-only after its API task started (wb start's where-note invites it on
 # the first one) had wb next, feedback and resume refuse the task, but the runner sent the repo to
 # the provider all the same, and billed it: round 1 after a slot wait or the setup, and every round
@@ -5040,8 +5099,15 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
         n = task.status.get("round", 1)
-        if _agents_gpu(task, n, f"round {n}"):  # a queued task's slot came after the switch (#1213)
-            return
+        while True:
+            if _agents_gpu(task, n, f"round {n}"):  # a queued task's slot came after the switch (#1213)
+                return
+            if not _cap_wait(task, lease):  # behind a spend stop Claude was told of (#1249)
+                break
+            try:  # its slot taken again after the wait: the provider's credit, as before a round
+                _load(task, lease, m)
+            except (KeyError, RuntimeError, OSError) as e:
+                return _load_failed(task, e)
         handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)
         first = True
         revived = None  # the round run again after its server went away under it
