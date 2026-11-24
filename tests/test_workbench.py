@@ -25253,6 +25253,22 @@ class WebChat(Base):
         self.assertEqual([x["text"] for x in self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["replies"]],
                          ["Refactoring foo now."])
 
+    def test_an_agents_message_queued_behind_a_turn_leaves_the_next_wakes_plain_report_to_the_user(self):
+        # #1212, 2026-11-24: the mid-turn send refused, the mod acked it `queued`, then `now` as
+        # that turn ended, so the next wake turn's report went to the agent alone. It acks `into`
+        tok = self._agent("hermes")
+        self._listening()
+        mid = self.call("/api/send", {"text": "please refactor foo"}, token=tok)[1]["message"]["id"]
+        run_wb("chat", "claim", mid, "--by", "s1")
+        run_wb("chat", "ack", mid, "--by", "s1", "--how", "queued")       # refused mid-turn: queued
+        run_wb("chat", "ack", mid, "--by", "s1", "--how", "into")         # that turn ended
+        self.assertEqual(self.chat.taken(), [])
+        run_wb("chat", "reply", "--text", "task fix-login is ready for review")
+        r = self.chat.thread()[-1]
+        self.assertEqual((r.get("re"), r.get("to")), (None, None))            # the user's, pushed
+        self.assertIn(r["id"], self.chat.news(store.now() + 20))
+        self.assertEqual(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["replies"], [])
+
     def test_an_agents_stream_never_pushes_the_users_page_out(self):
         tok, user = self._agent(), self.chat.token()
         self.srv.RequestHandlerClass.streams = threading.BoundedSemaphore(1)

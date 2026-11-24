@@ -2695,6 +2695,74 @@ test('#1175: an agent\'s message delivered into a running turn is acked into, so
   expect(runs.filter(r => r.includes('chat ack u1'))).toEqual([expect.stringMatching(/ --how now$/)])  // the user's: now
 })
 
+test('#1212: an agent\'s message queued behind a running turn is acked into once that turn ends, never now', async ($, on) => {
+  // #1212, 2026-11-24: the mid-turn send refused, readQueued acked it `now`, so the next wake
+  // turn's plain report to the away user went to the agent alone, pushed to no phone
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.send', () => ({ isDelivered: false, reason: 'busy' }))  // refused: a queued prompt instead
+  const runs: string[] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv.join(' ')); return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'a long review', turnId: 't1' })
+  await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })  // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: 1_800_000_000, from: 'hermes', role: 'agent', text: 'please refactor foo' }) + '\n' +
+    JSON.stringify({ id: 'u1', ts: 1_800_000_001, from: 'user', text: 'status?' }) + '\n'
+  await clock.advance(3000)
+  expect(asked.some(a => a.startsWith('[agent hermes] please refactor foo'))).toBe(true)
+  const acks = (id: string) => runs.filter(r => r.includes(`chat ack ${id} `)).map(r => r.split(' --how ')[1])
+  expect([acks('a1'), acks('u1')]).toEqual([['queued'], ['queued']])
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(3000)
+  expect([acks('a1'), acks('u1')]).toEqual([['queued', 'into'], ['queued', 'now']])  // the user's: now
+})
+
+test('#1212: an agent\'s message submitted behind a task\'s wake is acked into, alone it is acked now', async ($, on) => {
+  // #1212, 2026-11-24: behind a wake submitted in the same poll it was acked `now` at once, so
+  // the wake's turn's plain report to the away user went to the agent alone
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project', session: 'sess-1' })
+  fakeTasks(on, files)
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const runs: string[] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv.join(' ')); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const acks = (id: string) => runs.filter(r => r.includes(`chat ack ${id} `)).map(r => r.split(' --how ')[1])
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  notice(files, { ts: ts0 + 40, task: 'fix-it', kind: 'review', text: 'REPORT-fix-it' })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: ts0 + 40, from: 'hermes', role: 'agent', text: 'please refactor foo' }) + '\n'
+  await clock.advance(31_000)                                    // one poll: the wake, then the message
+  const at = (needle: string) => asked.findIndex(a => a.includes(needle))
+  expect(at('[agent hermes] please refactor foo')).toBeGreaterThan(at('REPORT-fix-it'))
+  expect(at('REPORT-fix-it')).toBeGreaterThanOrEqual(0)
+  expect(acks('a1')).toEqual(['into'])
+  await turn('t1')                                               // the wake's turn
+  await turn('t2', 'wb chat reply --to a1 --text "On it."')     // the agent's, answered: no follow-up
+  files['/wb/chat/messages.jsonl'] += JSON.stringify({ id: 'a2', ts: ts0 + 50, from: 'hermes', role: 'agent', text: 'and bar' }) + '\n'
+  await clock.advance(31_000)                                    // nothing ahead of it: its own turn
+  expect(acks('a2')).toEqual(['now'])
+})
+
 test('a web message queued behind a running turn reads as read once that turn ends', async ($, on) => {
   // 2026-11-21: three messages Claude had read and acted on said "Queued for Claude" on the phone for good
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

@@ -2231,7 +2231,7 @@ const mem = {
   chatSent: new Set<string>(), // web messages submitted by this load, awaiting their receipt
   chatRetry: new Map<string, number>(), // a web message whose prompt was dropped: tried again from then
   chatExpired: new Set<string>(), // web messages wb said are too old to pass on (#536): not asked again
-  chatQueued: new Map<string, string>(), // web messages whose receipt says queued (id → by): read once a turn ends
+  chatQueued: new Map<string, { by: string; how: string }>(), // web messages whose receipt says queued: acked `how` once a turn ends
   chatOwed: new Map<string, Owed>(), // web messages passed to Claude with no reply in the chat yet (#767)
   chatTurn: new Map<string, number>(), // web messages given to Claude: turn ends to skip before theirs (#1042)
   chatTurnSize: Promise.resolve(-1), // messages.jsonl's size when the turn started, once read: grown, it may hold a reply (#1042)
@@ -3733,15 +3733,19 @@ async function listen($: any, now: number) {
       // reply` isn't its answer. A wake turn's report to the away user went to the agent alone,
       // pushed to no phone (#1175, 2026-11-24); AGENT_NOTE says to answer it with `--to <id>`.
       // The user's stays `now`: a plain reply in an agent's turn is theirs (the #1042 review).
+      // Refused, it is queued: it enters this turn at a step or opens a later one, maybe after a
+      // wake's, so an agent's is `into` once read too: acked `now`, the next wake turn's report to
+      // the away user went to the agent alone, pushed to no phone (#1212, 2026-11-24).
       if (r.isDelivered) await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', agentOf(m) ? 'into' : 'now'])
-      else void sendWeb($, id, text, 'queued', st.key)
+      else void sendWeb($, id, text, 'queued', st.key, agentOf(m) ? 'into' : 'now')
       mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, nudged: false }) // queued: maybe the next turn's
     } else {
       // behind a prompt submitted this poll (a wake, a queued turn, another web message) whose
       // turn hasn't started yet, it enters only the turn after: that turn's end, Claude not yet
-      // having seen it, sent the follow-up for a message Claude then answered (#837)
+      // having seen it, sent the follow-up for a message Claude then answered (#837). An agent's
+      // is `now` only with nothing ahead: behind a wake, the wake's report went to it (#1212).
       mem.chatOwed.set(id, { at: now, grace: mem.submitted ? 1 : 0, nudged: false })
-      void sendWeb($, id, text, 'now', st.key)
+      void sendWeb($, id, text, agentOf(m) && mem.submitted ? 'into' : 'now', st.key)
     }
     mem.chatTurn.set(id, mem.chatOwed.get(id)?.grace ?? 0) // its turn's end goes to turns.jsonl (#1042)
     if (agentOf(m)) { mem.agentTurn.set(id, agentOf(m)); $.ui.toast(`workbench: a message from agent ${agentOf(m)}`); continue } // never the user away
@@ -3777,7 +3781,8 @@ async function unread($: any, dir: string): Promise<Row[]> {
 
 // A web message as a prompt of its own; the receipt only once it entered. A dropped one had a
 // "read" receipt for a message Claude never got (the 2026-11-16 audit): it is tried again.
-async function sendWeb($: any, id: string, text: string, how: string, by: string) {
+// `read`: what a `queued` receipt becomes once the running turn ends (readQueued).
+async function sendWeb($: any, id: string, text: string, how: string, by: string, read = 'now') {
   mem.submitted = true
   const r = await $.prompt.submit({ text, asUser: true }).catch((err: unknown) => ({ drop: String(err) }))
   if (r?.drop) {
@@ -3790,7 +3795,7 @@ async function sendWeb($: any, id: string, text: string, how: string, by: string
   }
   const { ok, out } = await runWb($, ['chat', 'ack', id, '--by', by, '--how', how])
   if (!ok) warnOnce($, 'chat-ack', `wb chat ack failed: ${brief(out)}`)
-  else if (how === 'queued') mem.chatQueued.set(id, by)
+  else if (how === 'queued') mem.chatQueued.set(id, { by, how: read })
 }
 
 // A web message Claude was given and hasn't answered in the chat (#767): the skill and WEB_NOTE
@@ -3868,11 +3873,12 @@ async function chatTurnEnd($: any) {
 
 // A queued web message enters at the running turn's next step or as the next turn, so once that
 // turn ends Claude has it: its receipt becomes read. The phone said "Queued for Claude" for good
-// on messages Claude had read and acted on (2026-11-21).
+// on messages Claude had read and acted on (2026-11-21). The user's becomes `now`, an agent's
+// `into`: which turn took it is unknown, and `now` made it the next wake turn's (#1212).
 async function readQueued($: any) {
-  for (const [id, by] of [...mem.chatQueued]) {
+  for (const [id, { by, how }] of [...mem.chatQueued]) {
     mem.chatQueued.delete(id)
-    await runWb($, ['chat', 'ack', id, '--by', by, '--how', 'now'])
+    await runWb($, ['chat', 'ack', id, '--by', by, '--how', how])
   }
 }
 
