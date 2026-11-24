@@ -1540,7 +1540,7 @@ def cmd_start(a):
     measured = None if api else (optimize.state().get("models") or {}).get(m.id)
     if measured and (fit := optimize.advice(m.id, measured)):
         print(f"note: {fit} (ask the user first: it adds to their OpenCode config)")
-    if gap := runner.handover_warning(m.config):  # #595
+    if gap := runner.handover_warning(m.config, api=api):  # #595; an API model's own words (#1073)
         print(f"note: {m.id}: {gap}")
     print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
 

@@ -2191,7 +2191,10 @@ are never tried; a window under `models.MIN_WINDOW` (16K) is refused. An output 
 ceiling under every value makes the ceiling the only value, or the smallest when the ceiling isn't
 positive (#595: the smallest stood, past compaction, so every long step compacted); `runner.handover_warning` says
 so in `wb start` (`note:`) and `wb doctor` ("its output cap … puts OpenCode's compaction at N% of
-the window…", or "no handover fits" at `HANDOVER_ROOM` or under), and `optimize.budget` cuts such a
+the window…", or "no handover fits" at `HANDOVER_ROOM` or under; for an API model, `api=True`,
+"its catalog limits (limit.input …) put …: a model with a larger input limit has room", since
+`api_limits` already bounds its output and "lower limit.output" was advice that changed nothing,
+#1073), and `optimize.budget` cuts such a
 cap to a quarter of the window. Trials aren't evidence. `wb tune` shows the record;
 `$WB_HOME/tuning.json` pins (`{"fresh_at": 0.6}`, used as given). A new knob: add it to `KNOBS`,
 read it with `tuning.value(task, name)`.
@@ -2726,7 +2729,8 @@ read as a wrong id, Claude hunted for the "right" one).
   `runner.fresh_ceiling` at or above the lowest `fresh_at` (`window × (1 − lo − max(STEP_GROWTH /
   window, CEILING_MARGIN)) − STEP_GROWTH`: 1638 at 16K, 11468 at 32K, 31129 at 64K, past
   `API_OUTPUT` from about 70K; a 32K/32K catalog entry put the compaction point below zero and the
-  note told the user to lower a catalog's limits, #1073), and `options.max_tokens` that output (DeepSeek honours only
+  note told the user to lower a catalog's limits, #1073; only a small catalog `limit.input` is left to
+  cause the note, which then says so, `handover_warning(api=True)`), and `options.max_tokens` that output (DeepSeek honours only
   `max_tokens`, and 384K out put the compaction point below zero; one reply alone can cost dollars).
   An entry's own `options.max_tokens` under those is kept, for both: the user's entries (a provider
   off this machine, an Ollama cloud model) come through here too, and raising theirs to 32768 spent

@@ -336,6 +336,25 @@ class ApiSizing(Base):
         self.assertEqual(models.api_limits({"limit": {"context": 131072, "output": 131072}})["limit"]["output"],
                          models.API_OUTPUT)                         # a large window: the cap as before
 
+    def test_a_small_catalog_input_limit_gets_a_note_that_names_it_not_the_output(self):
+        # #1073: with the output bounded by api_limits, only a small catalog limit.input leaves no
+        # room for a handover, and wb start still said "lower limit.output and options.max_tokens",
+        # which changes nothing and isn't the user's to do for a catalog model
+        self.catalog([{**tw.API_CATALOG[0], "limit": {"context": 1048576, "input": 16384, "output": 384000}}])
+        m = models.hosted(fresh=True)[tw.FLASH]
+        routed = {"via": "api", "role": "trivial", "provider": m.provider, "provider_name": m.provider,
+                  "thinking": "off", "said": ""}
+        with mock.patch.object(tw.cli, "pick_model", lambda *a, **k: (m, models.status(m), "the role", routed)), \
+                mock.patch.object(tw.cli, "spawn_runner", lambda t: 0):
+            out = run_wb("start", "t-input", "--spec", str(self.spec), "--repo", str(self.repo))
+        self.assertIn(f"note: {tw.FLASH}: its catalog limits (limit.input 16384, limit.output 32768 of a 128K "
+                      "window) put OpenCode's compaction at 9% of the window", out)
+        self.assertIn("no handover fits, so long steps compact; a catalog's limits aren't wb's or yours to "
+                      "change: a model with a larger input limit has room", out)
+        self.assertNotIn("lower limit.output", out)
+        gpu = {"limit": {"context": 32768, "output": 32768}}                   # a GPU entry: as before
+        self.assertTrue(runner.handover_warning(gpu).endswith("; lower limit.output and options.max_tokens"))
+
     def test_an_api_tasks_layer_pins_the_capped_window_and_waits_600_s_for_headers(self):
         self.start("t-gpu", "ok")
         wait_phase("t-gpu", {"review"})
