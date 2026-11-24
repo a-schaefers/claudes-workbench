@@ -42183,6 +42183,18 @@ class FallbackMoves(Base):
         self.assertFalse(ev["moved"])
         self.assertIn(f"the significant role's fallback {FB_OTHER} can't run: ", ev["text"])
 
+    def test_a_task_with_images_never_moves_to_a_fallback_that_doesnt_say_it_takes_them(self):
+        # #1196 met #1199 in the 2.1 merges: the fallback's fresh session sends every image again,
+        # and a model that takes none fails each request, so the provider's stop stands
+        self.roles(FB_OTHER)
+        task = self.api_task("t-images", FB_PRIMARY, "ok", WB_FAKE_API="meterco=quota")
+        task.set_status(images=[{"file": "1-mockup.png", "round": 1}])
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.spec["model"]), ("stuck", FB_PRIMARY))
+        [ev] = self.events(task, "fallback")
+        self.assertFalse(ev["moved"])
+        self.assertIn(f"the significant role's fallback {FB_OTHER} doesn't take image input", ev["text"])
+
     def test_a_round_held_again_after_its_revive_moves_to_the_roles_gpu_fallback(self):
         os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5")
         gpu = sorted(runner.models.discover())
@@ -42201,6 +42213,12 @@ class FallbackMoves(Base):
         self.assertTrue(self.events(task, "fallback")[0]["moved"])
         self.assertFalse(runner.catalog_path(task).exists())             # the GPU's: no API catalog
         self.assertIsNone(st.get("api_entry"))
+        # the lane keeps the fallback's server port open, not the first model's (#1197 met
+        # #1196 in the 2.1 merges: a fallback on a DAEMON_PORTS port was refused to OpenCode)
+        self.assertEqual(runner.CURRENT["model"].id, other)
+        port = next(iter(runner.context.DAEMON_PORTS))
+        with mock.patch.object(runner.context, "url_port", lambda url: port):
+            self.assertNotIn(port, runner.lane_ports(task))
 
     def test_a_task_whose_provider_went_out_of_credit_after_its_start_moves_before_its_round_rather_than_wait(self):
         # the review of #1196 (2026-11-24): it waited in NoLease.load on credit_turn, so a --queue

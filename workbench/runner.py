@@ -4827,6 +4827,14 @@ def _fallback_move(task: store.Task, n: int, rnd: dict, before: bool = False) ->
             stays(got)
         return None
     fm, _, why, routed = got
+    # a task with --image's pictures (#1199) sends them all again in the fallback's fresh session
+    # (attachments): a model that doesn't say it takes images would fail every request of it, as
+    # wb start refuses one (cli._images_fit). #1196 and #1199 met only in the 2.1 merges
+    if any(isinstance(r, dict) and r.get("file") for r in task.status.get("images") or ()) \
+            and models.takes_images(fm) is not True:
+        stays(f"the {role} role's fallback {fm.id} doesn't take image input, and this task's "
+              "images go with its fresh session")
+        return None
     limits = router.budgets(fm, models.identity(fm))
     given = set(spec.get("timeouts_given") or [])
     new = with_thinking(fm, {
@@ -4854,6 +4862,10 @@ def _fallback_move(task: store.Task, n: int, rnd: dict, before: bool = False) ->
     write_catalog(task)  # the fallback's alone, or none on the GPU
     meter.for_task(task, fm)  # its meter: the ledger is the task's, whatever the model
     pin_api(task, fm)
+    # the fallback's server port is the one the lane keeps open now (lane_ports, #1197): the
+    # 1196 and 1197 merge left the first model's there, and a GPU fallback served on a port of
+    # DAEMON_PORTS was refused to the agent's OpenCode
+    CURRENT["model"] = fm
     CURRENT["api"] = fm.kind == "api"
     CURRENT["remote"] = fm.remote and fm.kind != "api"
     fresh = not before or bool(task.status.get("session"))  # before round 1 there is no session to leave

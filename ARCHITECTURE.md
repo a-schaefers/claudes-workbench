@@ -4556,12 +4556,14 @@ catalog, on another provider, able to run, within the day cap; the GPU one found
   the role's thinking, `route`, the routing keys, the fallback's own budgets but those Claude gave;
   `MODEL_KEYS` dropped), the keyhole closed and started again for the fallback (it still serves one
   model, never the pair), the catalog written again (none for the GPU), the meter and `api_entry`
-  renewed, a `fallback` event (`{moved, from, to}`), status `fallback_moved` (`{round, from, to,
+  renewed, `CURRENT["model"]` the fallback (whose server port `runner.lane_ports` keeps open), a `fallback` event (`{moved, from, to}`), status `fallback_moved` (`{round, from, to,
   why}`, a `fallback:` line in each report), then the round runs again in a fresh session
   (`_start_fresh` with `FALLBACK_SAID`, never counted as an overflow handover: the window, catalog
   and variants differ, so the session never carries over), under the fallback's own lease
   (`runner._leased`: a provider slot, or the GPU's, queued for it), after `_go_on`'s day-cap check.
-  A fallback that can't take it (or whose keyhole can't start: task.json put back) leaves the
+  A fallback that can't take it (or whose keyhole can't start: task.json put back; or, for a task
+  with `--image`'s pictures, which its fresh session sends again, one `models.takes_images` doesn't
+  say yes to) leaves the
   provider's stop as before, a `fallback {moved: false}` event saying why.
 - **Before a round** (`runner._credit_move`, the first round too, before the provider slot, again
   once in it, and before each later round): a task whose provider api-health.json marks `no_credit`
@@ -7985,6 +7987,9 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `SIZE_STOPS`; #1047's `mediaStops`) ↔ `wb route`'s and `wb model sizes`' choices (`routes.USES`, `routes.BUSY`, `VIAS`, `THINKING`, `AUTO`,
   `router.SIZES`); `parseUsd` ↔ `wb route cap`'s parser (the same forms); **`wb route --json`** and **`wb models --json`**
   → the `WbRoutes`/`WbModels` types (`media`: `WbMedia`, #1047) and `rolesNow`; `routes.BUSY`/`busy` → `routesValid`, `readRoutes`, `routesSummary`; a role's `fallback` (#1196) → `routesValid`, `readRoutes`' plain check and `routesSummary`.
+- **A fallback and `--image`** (#1196, #1199): `runner._fallback_move`'s `models.takes_images` check ↔
+  `cli._images_fit` (wb start's): a task's pictures go only to a model that says it takes them; the
+  move also sets `CURRENT["model"]`, which `runner.lane_ports` reads (#1197).
 - **The first run for API roles** (#1024): **the router's refusal** (`router.choose`'s `no GPU model…`,
   `api_choice`) ↔ the skill's first-run trigger ("no role can run") and `wb setup`'s API keys line
   (`cli.api_key_lines`, `models.connected`); **SCOUT_NOTE's opening** (`[workbench] The weekly model check is
