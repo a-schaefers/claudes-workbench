@@ -34594,7 +34594,7 @@ class ApiSpend(Base):
         self.spent(9.0, day="2000-01-01")                        # another day's: not today's
         for model, said in ((SPEND_M, f"{SPEND_M}: API spend today is ≈$5.03 of the $5 day cap (it "
                                       "resets at local midnight). Ask the user: a higher cap (wb route cap "
-                                      "<usd>), the role on the GPU (wb route <role> gpu), or tomorrow"),
+                                      "<usd>), a GPU model, or tomorrow"),  # a --model start's (#1233)
                             (SPEND_NONE, f"{SPEND_NONE}: OpenCode's catalog gives no price for it, so the "
                                          "day cap can't be kept")):
             err = io.StringIO()
@@ -34610,6 +34610,33 @@ class ApiSpend(Base):
         with mock.patch.object(cli, "spawn_runner"):          # a GPU model starts as ever
             self.assertIn("started t-gpu", self.start("t-gpu", "ok"))
         self.assertFalse(task_rows := self.rows("t-gpu"), task_rows)
+
+    def test_a_model_start_at_or_near_the_day_cap_offers_a_gpu_model_never_a_role_change(self):
+        # #1233 (2026-11-24): a --model start's advice was routes.off_api(None)'s placeholder,
+        # `wb route <role> gpu`: with the role on the GPU already, or under Agents API (#1218), it
+        # changed nothing for this start, and the retry was refused with the same line
+        argv = ("t-mcap", "--spec", str(self.spec), "--repo", str(self.repo), "--model", SPEND_M,
+                "--no-base-check")
+        for use in ("both", "api"):
+            store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "use": use, "day_usd": 5, "roles": {
+                "trivial": {"via": "gpu", "api": SPEND_M}}})
+            self.meter.ledger_path().unlink(missing_ok=True)
+            for spent, more in ((4.99, "a cap of at least $"), (0.01, "a higher cap")):  # near it, then at it
+                self.spent(spent)
+                for args in (("route", "--dry-run", "--json", "--start", *argv), ("start", *argv)):
+                    err = io.StringIO()
+                    with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+                          mock.patch.object(cli, "API_RUNS", True), mock.patch.object(cli, "spawn_runner") as spawned):
+                        run_wb(*args)
+                    said = err.getvalue()
+                    self.assertEqual(e.exception.code, 3, (use, spent, args[0], said))
+                    self.assertIn(f"{SPEND_M}: API spend today is", said)
+                    self.assertIn(f". Ask the user: {more}", said)
+                    self.assertIn(" (wb route cap <usd>), a GPU model, or tomorrow", said)
+                    self.assertNotIn("wb route <role>", said)
+                    self.assertNotIn("wb route all", said)
+                    spawned.assert_not_called()
+                    self.assertFalse(store.Task("t-mcap").dir.exists())
 
     def test_a_role_on_an_unpriced_model_is_refused_at_start_and_stopped_however_it_started(self):
         # wave 2's review: #1016's routes.resolve never asked meter.refusal for a role's API model,

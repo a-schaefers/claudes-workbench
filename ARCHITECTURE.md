@@ -741,7 +741,10 @@ a busy GPU (wb route busy wait)`; for a role off API already (a `--model` task's
 just moved), nothing: a running task's advice is then `… or wb takeover <task> or wb discard <task> (it keeps its
 API model)`. No role, or routes.json unreadable: `wb route <role> gpu`, as before. Under Agents API
 `wb route trivial gpu` changed nothing, the user's yes was spent, and the retry was refused with the same
-line (#1218, 2026-11-24). And within one request at its worst of it (#1150: it passed, and the room refused the first request
+line (#1218, 2026-11-24). A `--model` start's (`refusal(…, asked=True)`: `routes.resolve` and the dialog's dry
+run, `cli._route_start`) is `<id>: … Ask the user: a higher cap (wb route cap <usd>), a GPU model, or tomorrow`,
+as the local-only refusal's: it runs on the model it names whatever the roles say, so `wb route <role> gpu`
+there changed nothing for it and the retry was refused with the same line (#1233, 2026-11-24). And within one request at its worst of it (#1150: it passed, and the room refused the first request
 after the checkout, setup and base check, a wake for nothing): `meter.request_floor(m, tokens)`, the
 round's first request at its worst as the room reckons it, at the dearest tier's prices: its input `tokens`
 at the input price and the model's pinned output (`options.max_tokens`, else `limit.output`, else
