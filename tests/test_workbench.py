@@ -11650,16 +11650,52 @@ class Lane(Base):
 
     def seatbelt_writes(self, text, params, path):
         """Whether the Seatbelt profile ``text`` with ``params`` lets `path` be written: its
-        file-write* rules in order, the last match winning."""
+        file-write* rules in order, the last match winning; a `literal` filter is the path
+        alone, a `subpath` one the path and what is beneath it."""
         values = dict(p[2:].split("=", 1) for p in params)
         real, ok = os.path.realpath(path), False
         for line in text.splitlines():
             if line.startswith(("(allow file-write*", "(deny file-write*")):
-                names = re.findall(r'\(param "([^"]+)"\)', line)
-                if not names or any(real == values[n] or real.startswith(values[n].rstrip("/") + "/")
-                                    for n in names):
+                refs = re.findall(r'\((subpath|literal) \(param "([^"]+)"\)\)', line)
+                if not refs or any(real == values[n] or kind == "subpath" and
+                                   real.startswith(values[n].rstrip("/") + "/")
+                                   for kind, n in refs):
                     ok = line.startswith("(allow")
         return ok
+
+    @home_outside_the_lane
+    def test_with_seatbelt_a_lane_root_holding_a_denied_place_cant_be_renamed_or_replaced(self):
+        # #1194's third review (2026-11-24): with Seatbelt the lane keeps ~/.cargo, ~/.dotnet
+        # and Library/Caches whole and denies only bin/, tools/ and com.apple.python by path, but
+        # a subpath allow takes in the root itself: `mv ~/.cargo $TMPDIR/old`, a ~/.cargo made
+        # in the temp directory with a planted bin/cargo, then moved into its place, ran as the
+        # user at their next cargo, every rename on an allowed path. A rename's source and
+        # destination are writes on their paths: the root's own path, and each directory down
+        # to the place, are refused, what is in them is not
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry", ".dotnet/tools", "Library/Caches/com.example"):
+            (home / d).mkdir(parents=True)
+        task = self.bare_task("t-1194-rename", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            text, params = lane.profile(w, context.read_rules(task), [], context.write_denied(w))
+        real = {os.path.realpath(p) for p in w}
+        for root in (".cargo", ".dotnet", "Library/Caches"):
+            self.assertIn(os.path.realpath(home / root), real, root)         # whole, as before
+            self.assertFalse(self.seatbelt_writes(text, params, home / root), root)
+        for f in (".cargo/bin/x", ".cargo/bin", ".dotnet/tools/x", "Library/Caches/com.apple.python"):
+            self.assertFalse(self.seatbelt_writes(text, params, home / f), f)
+        for f in (".cargo/registry/x", ".cargo/new", ".cargo/registry", ".dotnet/x",
+                  "Library/Caches/com.example/x", "Library/Caches/golangci-lint"):
+            self.assertTrue(self.seatbelt_writes(text, params, home / f), f)
+        # a grant above the root: each directory between it and the place too, made or not
+        work = Path(os.path.realpath(self.tmp.name)) / "grant"
+        (work / "a").mkdir(parents=True)
+        text, params = lane.profile([str(work)], [], [], [str(work / "a" / "b" / "c")])
+        for f in (work, work / "a", work / "a" / "b", work / "a" / "b" / "c" / "x"):
+            self.assertFalse(self.seatbelt_writes(text, params, f), f)
+        for f in (work / "x", work / "a" / "x", work / "a" / "b" / "x"):
+            self.assertTrue(self.seatbelt_writes(text, params, f), f)
 
     @home_outside_the_lane
     def test_with_seatbelt_apples_python_bytecode_is_denied_inside_a_whole_library_caches(self):
@@ -11839,6 +11875,8 @@ class Lane(Base):
         (home / ".config" / "tool").mkdir(parents=True)
         (home / ".config" / "tool" / "conf").write_text("conf")
         (home / "Library" / "Caches").mkdir(parents=True)
+        (home / ".cargo" / "bin").mkdir(parents=True)
+        (home / ".cargo" / "registry").mkdir()
         task = self.bare_task("t-1194-mac", self.repo)
         task.worktree.mkdir()
         d = Path(os.path.realpath(tempfile.mkdtemp(prefix="wb-1194-")))
@@ -11861,6 +11899,13 @@ class Lane(Base):
             caches = os.path.join(home, "Library", "Caches")
             say("write-cache", lambda: os.makedirs(os.path.join(caches, "golangci-lint", "x")))
             say("write-pyc", lambda: os.makedirs(os.path.join(caches, "com.apple.python", "x")))
+            # #1194's third review: a root holding a denied place can't be moved aside, into
+            # the temp directory the lane writes
+            import tempfile
+            aside = tempfile.mkdtemp()
+            say("mv-caches", lambda: os.rename(caches, os.path.join(aside, "caches")))
+            say("mv-cargo", lambda: os.rename(os.path.join(home, ".cargo"),
+                                              os.path.join(aside, "cargo")))
             say("read-secret", lambda: open(os.path.join(home, ".ssh", "id_ed25519")).read())
             say("read-dotfile", lambda: open(os.path.join(home, ".config", "tool", "conf")).read())
             say("socket-outside", lambda: socket.socket(socket.AF_UNIX).connect(sock))
@@ -11874,7 +11919,8 @@ class Lane(Base):
         said = dict(ln.split(" ", 1) for ln in out.stdout.splitlines())
         no = f"refused {errno.EPERM}"   # Seatbelt's, which REFUSAL reads: not sudo's own failure
         self.assertEqual(said, {"write-outside": no, "write-worktree": "ok", "write-cache": "ok",
-                                "write-pyc": no, "read-secret": no,
+                                "write-pyc": no, "mv-caches": no, "mv-cargo": no,
+                                "read-secret": no,
                                 "read-dotfile": "ok", "socket-outside": no, "signal-outside": no,
                                 "sudo": no}, out.stderr)
         self.assertFalse((home / "planted").exists())

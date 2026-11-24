@@ -1887,7 +1887,11 @@ deliberately hostile process.
   `sandbox-exec -p <profile> -DW0=<path>… -- <cmd>`; every path is a `-D` parameter (`(subpath
   (param "W0"))`, its real path: `/tmp` is `/private/tmp`), so none is quoted into the text. The
   profile: `(allow default)`; `(deny file-write*)` then the lane allowed (chmod, utimes and xattrs
-  too, which Landlock leaves free), then `deny_write` denied after it (`-DN…`); `(deny file-link)`
+  too, which Landlock leaves free), then `deny_write` denied after it (`-DN…`), and by its own
+  path alone (`(literal (param "L…"))`, `lane._between`) each lane root holding a `deny_write`
+  place and each directory down to it, made or not: a subpath allow takes in the root itself,
+  and `mv ~/.cargo $TMPDIR/old` then a ~/.cargo with a planted `bin/cargo` moved into its place
+  ran outside the lane at the user's next cargo (#1194's third review); `(deny file-link)`
   but within the lane (a hard link would carry a file in), `deny_write` again denied; reads as the read walk's complement, `(deny file-read-data …)`/`(allow …)` ancestors
   first, the last match winning (contents and listings only: a stat or realpath through the hidden
   state directory to the worktree works), then the lane and `lane.SEATBELT_DEVICES` (`/dev/fd`,
@@ -1906,7 +1910,8 @@ deliberately hostile process.
   (tmux's, the SSH agent's); one refused there is named with its grant like ABI 9's. The write
   lane gains `Library/Caches` (`TOOL_HOMES`: macOS's `~/.cache`), whole, so any tool's first cache
   folder is made (golangci-lint's, pipenv's, Homebrew's), and Apple's Python bytecode in it,
-  `com.apple.python` (`NOT_WRITABLE`), denied by path, made or not (`--deny-write`, #1194's second
+  `com.apple.python` (`NOT_WRITABLE`), denied by path, made or not, and `Library/Caches` itself
+  can't be renamed or replaced, nor `~/.cargo` or `~/.dotnet` when whole (`--deny-write`, #1194's second
   review: split around it, every tool's first folder there but a listed few was refused; the
   file tools' `edit` is denied there too, `read_only`), and the per-user cache beside the
   temp directory (`context.darwin_cache`, `/var/folders/…/C`: clang's module cache, xcrun's).
@@ -7002,7 +7007,7 @@ doc needs its own `!/` line).
   on the nightly macOS job; `readable`'s walk → `read_rules` with it (the Lane tests compare the two); what Seatbelt can't hold → `SEATBELT_GAPS`; the
   protocol's lane line, the handbook. What it leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`), what WSL's interop
   runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes* and *Reads*, `wb doctor`. A `NOT_WRITABLE` place → Landlock's split
-  (`MADE_FIRST` where the tool makes it later) and Seatbelt's `write_denied`, read by `read_only` too. A secret in a `TOOL_HOMES` entry → `SPLIT_MADE`; one a
+  (`MADE_FIRST` where the tool makes it later) and Seatbelt's `write_denied` (its roots' own paths `lane.profile`'s literal denies), read by `read_only` too. A secret in a `TOOL_HOMES` entry → `SPLIT_MADE`; one a
   tool opens at every start (helm, k6) → its path in `agent_env`.
 - **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → register.tsx's `checkUpdate`
   (toasts only `update available` and `LOCAL_CHANGES`, the opening of `patches.CHECK_LINE`) and `UPDATE` (reloads only

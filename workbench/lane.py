@@ -233,18 +233,26 @@ def profile(writable: list[str], reads: list[tuple[str, str]] | None = None,
     Everything is allowed but what is named: Seatbelt applies the last rule that matches."""
     params: list[str] = []
 
-    def ref(prefix: str, path: str, real: bool = True) -> str:
+    def ref(prefix: str, path: str, real: bool = True, kind: str = "subpath") -> str:
         name = f"{prefix}{len(params)}"
         params.append(f"-D{name}={os.path.realpath(path) if real else path}")
-        return f'(subpath (param "{name}"))'
+        return f'({kind} (param "{name}"))'
 
     def lines(effect: str, ops: str, refs: list[str]) -> list[str]:
         return [f"({effect} {ops} {' '.join(refs)})"] if refs else []
 
     write = [ref("W", p) for p in dict.fromkeys(writable)]
     # and what is refused inside the lane, after it (the last match wins), made or not: Apple's
-    # Python bytecode in the whole Library/Caches (#1194's second review)
-    denied = [ref("N", p) for p in dict.fromkeys(deny_write or [])]
+    # Python bytecode in the whole Library/Caches (#1194's second review); and by its own path
+    # (literal, not what is in it) each lane root holding one and each directory between: a
+    # subpath allow takes in the root itself, so `mv ~/.cargo $TMPDIR/old`, then a ~/.cargo
+    # made in the temp directory with a planted bin/cargo moved into its place, ran as the
+    # user at their next cargo, every rename on an allowed path (#1194's third review)
+    no = list(dict.fromkeys(os.path.realpath(p) for p in deny_write or []))
+    denied = [ref("N", p) for p in no] + [
+        ref("L", d, False, "literal") for d in dict.fromkeys(
+            d for p in no for w in dict.fromkeys(map(os.path.realpath, writable))
+            for d in _between(w, p))]
     text = ["(version 1)", "(allow default)",
             # writes: the lane alone; file-write* takes in chmod, utimes and xattrs, which
             # Landlock leaves alone
@@ -269,6 +277,20 @@ def profile(writable: list[str], reads: list[tuple[str, str]] | None = None,
              "(deny process-info*)", "(allow process-info* (target same-sandbox))"]
     text += [f"(deny process-exec {' '.join(ref('X', p, False) for p in SEATBELT_REFUSED)})"]
     return "\n".join(text) + "\n", params
+
+
+def _between(root: str, place: str) -> list[str]:
+    """The directories from ``root`` down to ``place`` (real paths), ``root`` included and
+    ``place`` not; [] when ``place`` isn't strictly under ``root``."""
+    if not place.startswith(root.rstrip("/") + "/"):
+        return []
+    out, d = [], os.path.dirname(place)
+    while len(d) >= len(root):
+        out.append(d)
+        if d == root:
+            break
+        d = os.path.dirname(d)
+    return out[::-1]
 
 
 def die_with_parent() -> None:
