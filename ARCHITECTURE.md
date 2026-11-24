@@ -1687,8 +1687,17 @@ deliberately hostile process.
   make one, Landlock's split granted one already there; macOS's `Library/Caches/com.apple.python`, where Apple's
   `/usr/bin/python3` keeps its stdlib's bytecode, `sys.pycache_prefix`, and loads a planted `.pyc`
   at every later python3, #1194's review; and `VAR_NOT_WRITABLE` under the variables), made or not
-  (`not_writable_paths`; with Seatbelt denied by path inside a whole home instead of split out,
-  `context.write_denied`, so nothing is made first for it); the user's active Python environments (`context.python_envs`:
+  (`not_writable_paths`). With Seatbelt each is denied by path inside a whole home instead of split
+  out (`context.write_denied`, so nothing is made first for it), by its real path and by its own
+  name, its directory resolved but not itself: a `~/.cargo/config.toml` linked into `~/dotfiles`
+  or `/nix/store` (stow, home-manager) was denied only at its target, outside the lane, so the
+  agent could unlink the link and write its own (#1194's fifth review). With Landlock a cargo
+  home (`~/.cargo`, `CARGO_HOME`) is split always, around its `VAR_NOT_WRITABLE` places made or
+  not, so a new `bin/`, `env` or config there is refused: a distro's cargo (Arch's, Debian's,
+  Fedora's) makes only `registry/`, and a split only when one was there granted `~/.cargo` whole
+  and let the agent make a `config.toml` (#1194's fifth review); rustup's and nimble's are made
+  first (`MADE_FIRST`); the rest are split around once made (`.dotnet/tools`, `.cabal/bin`,
+  `.ghcup/bin` not made yet can be made there, their homes kept whole until then); the user's active Python environments (`context.python_envs`:
   `VIRTUAL_ENV`, `CONDA_PREFIX`, each PATH `bin` beside `pyvenv.cfg` or `conda-meta`, #490). So
   `cargo install`, a new rustup toolchain, a pip install into the user's env are Claude's: no grant
   reaches them (`context.kept_out`, #912).
@@ -1697,8 +1706,8 @@ deliberately hostile process.
   entries one by one and refuses every new top-level one. So what the tool makes there is made
   first, never replacing an entry (`_make_first`): `CACHE_MADE` in a cache home holding an active
   env (#825), `MADE_FIRST` (so the split holds before the tool makes them), `CARGO_MADE` (a fresh
-  rustup install refused every build with a dependency, the 0.90 review; made whenever one of
-  `VAR_NOT_WRITABLE`'s cargo places is there, a lone `config.toml` too), `NIMBLE_MADE` with
+  rustup install refused every build with a dependency, the 0.90 review; made in every cargo
+  home that exists, which Landlock always splits, #1194's fifth review), `NIMBLE_MADE` with
   `MADE_TEXT` (nimble parses its data file, #911; its first `nimble refresh` is Claude's),
   `SPLIT_MADE` (`~/.m2`). The agent's poetry and pipenv make their venv in the worktree.
   A home kept whole is a documented trade, like `/tmp`: it can hold a program the user's tools run
@@ -1885,14 +1894,15 @@ deliberately hostile process.
   either holds, the question doctor, setup, `lane_refused`, `python_installs` and the API note ask.
   The runner and the test runner reach it through `context.lane_wrap(task)`, which hands lane.py
   Landlock's lists or Seatbelt's: `--write P…`, `--deny-write P…` (`context.write_denied`: the
-  `NOT_WRITABLE` places inside the lane, made or not; Landlock's lane is split around them
-  instead), `--hide P`/`--show P` in order (`context.read_rules`) and `--unix P…`
+  `NOT_WRITABLE` places inside the lane, made or not, each by its real path and its own name,
+  a link unresolved; Landlock's lane is split around them instead), `--hide P`/`--show P` in order (`context.read_rules`) and `--unix P…`
   (`context.socket_places`). lane.py's `main` then builds `lane.profile(writable, reads, unix,
   deny_write)` fresh each time, no file and no setup step, tries it on `/usr/bin/true`, and execs
   `sandbox-exec -p <profile> -DW0=<path>… -- <cmd>`; every path is a `-D` parameter (`(subpath
   (param "W0"))`, its real path: `/tmp` is `/private/tmp`), so none is quoted into the text. The
   profile: `(allow default)`; `(deny file-write*)` then the lane allowed (chmod, utimes and xattrs
-  too, which Landlock leaves free), then `deny_write` denied after it (`-DN…`), and by its own
+  too, which Landlock leaves free), then `deny_write` denied after it (`-DN…`, only its
+  directory resolved: a linked place is unlinked or replaced on its own path), and by its own
   path alone (`(literal (param "L…"))`, `lane._between`) each lane root holding a `deny_write`
   place and each directory down to it, made or not: a subpath allow takes in the root itself,
   and `mv ~/.cargo $TMPDIR/old` then a ~/.cargo with a planted `bin/cargo` moved into its place

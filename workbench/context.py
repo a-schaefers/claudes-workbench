@@ -1739,11 +1739,13 @@ def writable(task: store.Task) -> list[str] | None:
     temps = {os.path.realpath(t) for t in (tempfile.gettempdir(), *TEMP_ROOTS)}
     guard = repo_dirs(task)  # a repo kept in /tmp is the user's choice: the temp dirs stay
     cargo = os.environ.get("CARGO_HOME")
-    for c in {os.path.realpath(c) for c in (home / ".cargo", cargo) if c}:
-        # split whenever one of its NOT_WRITABLE places is there: a ~/.cargo with only the
-        # user's config.toml (a distro's cargo) refused registry/ at the first build else
-        if os.path.isdir(c) and any(os.path.lexists(os.path.join(c, n))
-                                    for n in VAR_NOT_WRITABLE["CARGO_HOME"]):
+    cargos = {os.path.realpath(c) for c in (home / ".cargo", cargo) if c}
+    for c in cargos:
+        # every cargo home is split, its own entries made first: #1194's fifth review
+        # (2026-11-24): split only when bin/, env or a config was there, a distro's cargo
+        # (Arch's rust, Debian's, Fedora's), which makes only registry/, left ~/.cargo whole,
+        # and the agent made a config.toml whose build.rustc-wrapper ran at the next build
+        if os.path.isdir(c):
             _make_first(c, CARGO_MADE)
     nimble = os.environ.get("NIMBLE_DIR")
     for c in {os.path.realpath(c) for c in (home / ".nimble", nimble) if c and os.path.isabs(c)}:
@@ -1769,8 +1771,11 @@ def writable(task: store.Task) -> list[str] | None:
     # the user's active Python environments too: a venv in a tool home (poetry's, pipenv's,
     # WORKON_HOME) was the agent's to install into (#490)
     envs = set(python_envs())
-    # Seatbelt denies NOT_WRITABLE's places by path inside the lane (write_denied): no split
-    out_of = hidden | envs | (set() if lane.kind() == "seatbelt" else not_writable())
+    # Seatbelt denies NOT_WRITABLE's places by path inside the lane (write_denied): no split.
+    # Landlock splits around those made, and a cargo home's made or not, so its split refuses
+    # a new bin/, env or config there (#1194's fifth review)
+    out_of = hidden | envs | (set() if lane.kind() == "seatbelt" else not_writable() | {
+        os.path.join(c, n) for c in cargos for n in VAR_NOT_WRITABLE["CARGO_HOME"]})
     cache = os.path.realpath(os.environ.get("XDG_CACHE_HOME") or home / ".cache")
     if any(_under(e, cache) for e in envs):  # (#825)
         for n in CACHE_MADE:
@@ -1797,7 +1802,8 @@ def writable(task: store.Task) -> list[str] | None:
 
 
 def write_denied(places: list[str]) -> list[str]:
-    """With Seatbelt, NOT_WRITABLE's places (made or not, real paths) inside the lane's
+    """With Seatbelt, NOT_WRITABLE's places (made or not, real paths and their own names, a link
+    unresolved) inside the lane's
     writable ``places``: its profile denies their writes after the lane's allows, the last match
     winning, and a path rule holds before the tool makes the place, so nothing is made first.
     Landlock can only allow, so there writable() splits around them instead, and this is [].
@@ -1807,8 +1813,13 @@ def write_denied(places: list[str]) -> list[str]:
     if lane.kind() != "seatbelt":
         return []
     real = {os.path.realpath(p) for p in places}
-    return sorted(p for p in not_writable(made_only=False)
-                  if any(p == w or _under(p, w) for w in real))
+    # and each by its own name, its directory resolved but not the place: a ~/.cargo/config.toml
+    # linked into ~/dotfiles or /nix/store (stow, home-manager) was denied only at its target,
+    # outside the lane and dropped, so the agent could unlink the link and write its own config
+    # (#1194's fifth review, 2026-11-24)
+    named = {p for q in not_writable_paths() for p in (
+        os.path.realpath(q), os.path.join(os.path.realpath(q.parent), q.name))}
+    return sorted(p for p in named if any(p == w or _under(p, w) for w in real))
 
 
 def darwin_cache() -> list[str]:

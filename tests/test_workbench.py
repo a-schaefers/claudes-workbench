@@ -11648,12 +11648,15 @@ class Lane(Base):
         self.assertFalse(self.seatbelt_reads(rules, writable, root / "Backup" / "photos.jpg"))
         self.assertTrue(self.seatbelt_reads(rules, writable, root / "Macintosh HD" / "etc" / "hosts"))
 
-    def seatbelt_writes(self, text, params, path):
+    def seatbelt_writes(self, text, params, path, link=False):
         """Whether the Seatbelt profile ``text`` with ``params`` lets `path` be written: its
         file-write* rules in order, the last match winning; a `literal` filter is the path
-        alone, a `subpath` one the path and what is beneath it."""
+        alone, a `subpath` one the path and what is beneath it. ``link``: the path's own name,
+        its directory resolved (an unlink or a rename of a link)."""
         values = dict(p[2:].split("=", 1) for p in params)
-        real, ok = os.path.realpath(path), False
+        real = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path)) \
+            if link else os.path.realpath(path)
+        ok = False
         for line in text.splitlines():
             if line.startswith(("(allow file-write*", "(deny file-write*")):
                 refs = re.findall(r'\((subpath|literal) \(param "([^"]+)"\)\)', line)
@@ -11730,6 +11733,50 @@ class Lane(Base):
             self.assertIsNotNone(context.kept_out(str(f)), f)       # no grant reaches it
         self.assertIn(str(home / ".cargo/registry"), w)
         self.assertIn(str(moved / "registry"), w)                   # made first, then granted
+
+    @home_outside_the_lane
+    def test_with_landlock_a_distros_cargo_home_is_split_so_no_config_can_be_made(self):
+        # #1194's fifth review (2026-11-24): a distro's cargo (Arch's rust, Debian's, Fedora's)
+        # makes only registry/, and writable() split a cargo home only when bin/, env or a
+        # config was there, so ~/.cargo (and a CARGO_HOME like it) was granted whole and the
+        # agent made a config.toml whose build.rustc-wrapper cargo ran at the user's next build
+        home = self.fake_home()
+        (home / ".cargo/registry").mkdir(parents=True)
+        moved = home / "moved-cargo"
+        (moved / "registry").mkdir(parents=True)
+        os.environ["CARGO_HOME"] = str(moved)
+        task = self.bare_task("t-1194-distro-cargo", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+        for c in (home / ".cargo", moved):
+            self.assertNotIn(str(c), w)                      # split, never whole
+            for n in ("config.toml", "config", "bin", "env"):
+                f = c / n
+                self.assertFalse([q for q in w if q == str(f) or str(f).startswith(q + "/")], f)
+            for n in ("registry", "git", ".package-cache"):  # cargo's own, made first
+                self.assertIn(str(c / n), w)
+
+    @home_outside_the_lane
+    def test_with_seatbelt_a_linked_cargo_config_is_denied_by_its_own_name(self):
+        # #1194's fifth review (2026-11-24): ~/.cargo/config.toml linked into ~/dotfiles (stow;
+        # home-manager links it into /nix/store) was denied only at its target, outside the lane
+        # and dropped, so the agent could unlink the link inside the whole ~/.cargo and write a
+        # config.toml whose build.rustc-wrapper ran as the user at their next build
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry", "dotfiles"):
+            (home / d).mkdir(parents=True)
+        (home / ".cargo/env").write_text("export PATH")
+        (home / "dotfiles/cargo.toml").write_text("[build]\n")
+        (home / ".cargo/config.toml").symlink_to(home / "dotfiles/cargo.toml")
+        task = self.bare_task("t-1194-linked-config", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            denied = context.write_denied(w)
+            text, params = lane.profile(w, context.read_rules(task), [], denied)
+        link = home / ".cargo/config.toml"
+        self.assertIn(os.path.join(os.path.realpath(home / ".cargo"), "config.toml"), denied)
+        self.assertFalse(self.seatbelt_writes(text, params, link, link=True))  # rm, mv onto it
+        self.assertTrue(self.seatbelt_writes(text, params, home / ".cargo/registry/x"))
 
     @home_outside_the_lane
     def test_with_seatbelt_apples_python_bytecode_is_denied_inside_a_whole_library_caches(self):
@@ -11911,6 +11958,9 @@ class Lane(Base):
         (home / "Library" / "Caches").mkdir(parents=True)
         (home / ".cargo" / "bin").mkdir(parents=True)
         (home / ".cargo" / "registry").mkdir()
+        (home / "dotfiles").mkdir()                    # a stowed config, #1194's fifth review
+        (home / "dotfiles" / "cargo.toml").write_text("[build]\n")
+        (home / ".cargo" / "config.toml").symlink_to(home / "dotfiles" / "cargo.toml")
         task = self.bare_task("t-1194-mac", self.repo)
         task.worktree.mkdir()
         d = Path(os.path.realpath(tempfile.mkdtemp(prefix="wb-1194-")))
@@ -11940,6 +11990,8 @@ class Lane(Base):
             say("mv-caches", lambda: os.rename(caches, os.path.join(aside, "caches")))
             say("mv-cargo", lambda: os.rename(os.path.join(home, ".cargo"),
                                               os.path.join(aside, "cargo")))
+            # #1194's fifth review: a linked config is unlinked on its own path
+            say("rm-linked-config", lambda: os.unlink(os.path.join(home, ".cargo", "config.toml")))
             say("read-secret", lambda: open(os.path.join(home, ".ssh", "id_ed25519")).read())
             say("read-dotfile", lambda: open(os.path.join(home, ".config", "tool", "conf")).read())
             say("socket-outside", lambda: socket.socket(socket.AF_UNIX).connect(sock))
@@ -11954,10 +12006,11 @@ class Lane(Base):
         no = f"refused {errno.EPERM}"   # Seatbelt's, which REFUSAL reads: not sudo's own failure
         self.assertEqual(said, {"write-outside": no, "write-worktree": "ok", "write-cache": "ok",
                                 "write-pyc": no, "mv-caches": no, "mv-cargo": no,
-                                "read-secret": no,
+                                "rm-linked-config": no, "read-secret": no,
                                 "read-dotfile": "ok", "socket-outside": no, "signal-outside": no,
                                 "sudo": no}, out.stderr)
         self.assertFalse((home / "planted").exists())
+        self.assertTrue((home / ".cargo" / "config.toml").is_symlink())
         self.assertEqual(runner.lane_refused(task, f"connect {sock}: Operation not permitted\n"),
                          [str(sock)])
 

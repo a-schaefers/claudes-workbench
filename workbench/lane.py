@@ -248,8 +248,11 @@ def profile(writable: list[str], reads: list[tuple[str, str]] | None = None,
     # subpath allow takes in the root itself, so `mv ~/.cargo $TMPDIR/old`, then a ~/.cargo
     # made in the temp directory with a planted bin/cargo moved into its place, ran as the
     # user at their next cargo, every rename on an allowed path (#1194's third review)
-    no = list(dict.fromkeys(os.path.realpath(p) for p in deny_write or []))
-    denied = [ref("N", p) for p in no] + [
+    # Each by its own name, only its directory resolved: a denied place that is a link (a
+    # stowed ~/.cargo/config.toml) is unlinked or replaced on its own path (#1194's fifth review)
+    no = list(dict.fromkeys(os.path.join(os.path.realpath(os.path.dirname(p)), os.path.basename(p))
+                            for p in deny_write or []))
+    denied = [ref("N", p, False) for p in no] + [
         ref("L", d, False, "literal") for d in dict.fromkeys(
             d for p in no for w in dict.fromkeys(map(os.path.realpath, writable))
             for d in _between(w, p))]
