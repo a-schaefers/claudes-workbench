@@ -807,6 +807,43 @@ class Lifecycle(Base):
         shutil.rmtree(task.worktree / "pkg")                 # gone from the worktree: the base's
         self.assertIsNone(runner.missing_command(line, task))
 
+    def test_a_python_module_a_setup_venv_lacks_checks_in_once_and_skips_auto_fix(self):
+        # #1181's review (2026-11-24): with a --setup .venv (which GIVE_TOOL itself recommends) the
+        # base check ran its scratch checkout's .venv/bin/python3 and the rounds the worktree's, so
+        # the no-module lines never matched: one check-in, yet round 1 and both auto-fix rounds
+        # ran on correct code, the issue's symptom again
+        self.start("t-venv", "ok", "--setup", "python3 -m venv --without-pip .venv",
+                   "--test", "python3 -m nosuch_module_1181v -q", "--auto-fix", "2", "--no-self-review")
+        st = wait_phase("t-venv", {"review"}, timeout=120)
+        task = store.Task("t-venv")
+        self.assertRegex(st["base_check"]["tail"], r"/\.venv/bin/python3?: No module named nosuch_module_1181v")
+        self.assertNotIn(str(task.worktree), st["base_check"]["tail"])  # the scratch checkout's
+        self.assertEqual(st["round"], 1)
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r for r in store.notices() if r["task"] == "t-venv" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: "), summary)
+
+    def test_a_package_only_the_worktree_holds_is_the_repos_own_though_the_spec_names_neither(self):
+        # #1181's review (2026-11-24): own_module's worktree check had no test; the base commit's
+        # covered every case tried. A package a --setup generates (gitignored `gen/`) is in the
+        # worktree alone, and without it `python3 -m gen.newsvc` checked in falsely, "no round
+        # can fix that", with pip install advice, and its auto-fix was skipped
+        (self.repo / ".gitignore").write_text("gen/\n")
+        for a in (("add", "."), ("commit", "-qm", "ignore gen")):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)
+        self.spec.write_text("Give the service a command-line entry point that prints 42.\n")
+        self.start("t-gen", "ok", "--no-base-check", "--no-self-review")
+        wait_phase("t-gen", {"review"})
+        task = store.Task("t-gen")
+        line = {"exit": 1, "tail": "/usr/bin/python3: No module named gen.newsvc"}
+        self.assertEqual(runner.missing_command(line, task), line["tail"])   # nowhere yet: a tool
+        (task.worktree / "gen").mkdir()
+        (task.worktree / "gen" / "__init__.py").write_text("")
+        self.assertIsNone(runner.missing_command(line, task))
+
     def test_a_command_not_found_reads_the_same_in_every_shell_and_a_path_is_never_a_missing_tool(self):
         # nightly run 45362198509 (2026-11-24): under WSL's Debian $SHELL is /bin/sh, dash, which
         # says `/bin/sh: 1: x: not found`, so the check-in read differently from bash's; and dash

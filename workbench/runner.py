@@ -3049,6 +3049,15 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     return None
 
 
+def _missing_key(line: str | None) -> str | None:
+    """What a missing_command line says is missing, for the base's and a round's to compare: a
+    Python module's name, as the line starts with the interpreter's path, the base check's in its
+    scratch checkout (a --setup .venv there) and a round's in the worktree, which never matched,
+    and auto-fix ran on correct code (#1181's review, 2026-11-24); else the line itself."""
+    m = NO_MODULE.fullmatch(line or "")
+    return f"module {m['m'] or m['d']}" if m else line
+
+
 # Where a prompt's spec ends and the protocol begins (cli.PROTOCOL, cli.WRITING_PROTOCOL; bench.FOLD).
 PROTOCOL_FOLD = "\n---\nHow to work"
 
@@ -3808,7 +3817,8 @@ def not_the_code(task: store.Task, tests) -> str:
                 "start a slow suite's task with a larger --test-timeout")
     base = task.status.get("base_check") or {}
     cmd = task.spec.get("test_cmd")
-    if (line := missing_command(tests, task)) and base.get("cmd") == cmd and line == missing_command(base, task):
+    if (line := missing_command(tests, task)) and base.get("cmd") == cmd \
+            and _missing_key(line) == _missing_key(missing_command(base, task)):
         # the same command (or Python module, #1181) not found as on the base: auto-fix rounds
         # told "the system works; the bug is in this change" each failed the same way, before
         # Claude heard (#1152, 2026-11-24). A command the step makes says something else once made.

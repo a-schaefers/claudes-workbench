@@ -375,7 +375,7 @@ this machine's GPU even when the model is on a wb remote box; without it they se
 `wb verify` and `wb shot` wait for the GPU alone too.
 A suite slower than 15 minutes: `--test-timeout <secs>` above its time, or
 narrow the command; a run past it isn't sent back to the agent (nor one the lane refused a
-device, nor a command or Python module (`python3 -m pytest`, not one of the repo's own or the spec's) not found as on the base, which checks in before round 1, or a command a `wb next --test` command itself names), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
+device, nor a command or Python module (`python3 -m pytest`, not one of the repo's own, nor one whose file or dotted name the spec gives; a bare name such as `greet` still counts as a tool) not found as on the base, which checks in before round 1, or a command a `wb next --test` command itself names), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
 command in a quarter of the limit: then it's the change's hang, and auto-fix gets it.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
