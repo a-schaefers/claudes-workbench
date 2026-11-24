@@ -5228,6 +5228,28 @@ class Context(Base):
         self.assertTrue(runner.compacted_between(("s", 9900), "s", 4900, 0.5 * 32768, 32768, pending=12000))
         self.assertFalse(runner.compacted_between(("s", 9900), "s", 4900, 0.5 * 32768, 32768))
 
+    def test_a_compaction_whose_kept_tail_leaves_over_half_the_context_still_hands_over(self):
+        # #1185 (2026-11-24): OpenCode 2.4.1 keeps a verbatim tail beside its summary, so a session
+        # came back from a compaction at 41% of a 40K window from 70%, over half, and the rule
+        # "under half of the last step" missed 156 of 242 such compactions offline
+        os.environ["FAKE_COMPACT_KEPT"] = "1"
+        store.home().joinpath("tuning.json").write_text('{"fresh_at": 0.6}')  # not an explored 0.5
+        self.start("t-1185", "compact", "--test", TEST_CMD, "--no-self-review")
+        st = wait_phase("t-1185", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["handovers"]), ("review", 1), st.get("last"))
+        self.assertTrue(self.runs()[1]["prompt"].startswith(
+            "You are picking this task up in a fresh session (OpenCode had to compact the last session"),
+            self.runs()[1]["prompt"][:200])
+        w = 40960
+        self.assertTrue(runner.compacted_between(("s", int(0.70 * w)), "s", int(0.41 * w), 0.6 * w, w))
+        self.assertFalse(runner.compacted_between(("s", int(0.70 * w)), "t", int(0.41 * w), 0.6 * w, w))
+        # a step's growth or less is no compaction, nor the last step's reasoning the next
+        # request leaves out, nor a drop far below the handover point
+        self.assertFalse(runner.compacted_between(("s", 25000), "s", 21000, 0.6 * w, w))
+        self.assertTrue(runner.compacted_between(("s", 25000), "s", 18000, 0.6 * w, w))
+        self.assertFalse(runner.compacted_between(("s", 25000, 8000), "s", 18000, 0.6 * w, w))
+        self.assertFalse(runner.compacted_between(("s", 12000), "s", 4000, 0.6 * w, w))
+
     def test_a_session_compacted_mid_round_with_no_room_for_a_successor_is_said_and_carries_on(self):
         # #774: with its reading near the handover point, a successor would have no room: it
         # carries on, and an event says it was compacted
@@ -9500,6 +9522,39 @@ class RealOpenCodeRun(Base):
             self.assertIn("If your context holds only a summary of it", system)
             self.assertNotIn("Write the answer to answer.txt", json.dumps(  # the spec itself: gone
                 [m for m in r["messages"] if m.get("role") != "system"]))
+
+    def test_a_real_compaction_keeps_a_tail_a_tenth_of_the_window_not_15k(self):
+        # #1185 (2026-11-24): OpenCode keeps the newest 15K tokens verbatim beside its summary
+        # whatever the window. 2.3.2 starts that tail at a user message (so a one-prompt round
+        # kept none); 2.4.1 at any message, and a 32-40K session came back next to the
+        # compaction point. The layer's compaction.keep is a tenth of the window: 3276 here
+        task, st = self.answered([WRITE_42])
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["compaction"]["keep"], {"tokens": 3276})
+        env = {**runner.opencode_env(task), "PWD": str(task.worktree)}
+        def turn(text):
+            subprocess.run(lane.wrap(context.writable(task), [
+                "opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                "--session", st["session"], "--", text]), cwd=task.worktree, env=env,
+                capture_output=True, timeout=180)
+        # about 8.8K tokens each by OpenCode's estimate (4 characters a token): both inside its
+        # default 15K, neither inside 3276
+        older, newer = "OLDER-1185 " * 3200, "NEWER-1185 " * 3200
+        turn(older)                                                # 1 token read: no compaction
+        self.server.kill()
+        self.server.wait()
+        self.serve([], read=31_000)                                # now every request fills 32K
+        turn(newer)
+        before = len(self.requests.read_text().splitlines())
+        turn("Go on.")                                             # OpenCode compacts first
+        self.assertEqual(runner.context_state(task)["compactions"], 1)
+        later = self.requests.read_text().splitlines()[before:]
+        agent = [r for r in later if "<template>" not in r]        # not the summary request
+        self.assertTrue(agent and len(agent) < len(later), [r[:300] for r in later])
+        self.assertNotIn("OLDER-1185", agent[-1])                  # 2.3.2's 15K kept it from there
+        ver = subprocess.run(["opencode", "--version"], capture_output=True, text=True).stdout
+        if tuple(int(n) for n in re.findall(r"\d+", ver)[:2]) >= (2, 4):
+            self.assertNotIn("NEWER-1185", agent[-1])              # 2.4.1's 15K kept it
 
     def test_no_compaction_summary_is_written_ahead_of_the_handover_point(self):
         # #661 (checked on OpenCode 2.3.2): its background compaction forked a full-context
@@ -28793,6 +28848,21 @@ class Drift(unittest.TestCase):
                              runner.compaction_point(cfg), lim)
             self.assertLess(runner.fresh_ceiling(cfg), runner.compaction_point(cfg))  # #644's margin
         self.assertEqual(runner.compaction_buffer({"limit": {"context": 32768, "output": 16384}}), 20480)
+
+    def test_the_tail_a_compaction_keeps_is_a_tenth_of_the_window_not_opencodes_fixed_15k(self):
+        # #1185 (2026-11-24): OpenCode 2.4.1 keeps up to 15K of the newest messages verbatim
+        # whatever the window, so a 40K session came back from a compaction next to the
+        # compaction point again; 2.3.2 kept none in a one-prompt round
+        self.assertEqual(runner.compaction_keep({"limit": {"context": 40960, "output": 4096}}), 4096)
+        self.assertEqual(runner.compaction_keep({"limit": {"context": 32768, "input": 16384}}),
+                         runner.KEEP_MIN)            # a tenth of the 16K input is 1638
+        self.assertEqual(runner.compaction_keep({"limit": {"context": 131072, "output": 32768}}), 13107)
+        self.assertIsNone(runner.compaction_keep({"limit": {"output": 4096}}))
+        for ctx in (16384, 32768, 40960, 65536, 131072):
+            cfg = {"limit": {"context": ctx, "output": 4096}}
+            # the kept tail and a step's growth alone never put a session back at the point
+            self.assertLess(runner.compaction_keep(cfg) + runner.STEP_GROWTH,
+                            runner.compaction_point(cfg) * ctx, ctx)
 
     def test_outside_spec_names_files_the_spec_never_mentions(self):
         with tempfile.TemporaryDirectory() as d:

@@ -368,6 +368,7 @@ class ApiSizing(Base):
         self.assertEqual(prov["options"]["headerTimeout"], 600_000)
         self.assertEqual(layer["compaction"]["buffer"], 36864)
         content = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(content["compaction"]["keep"], {"tokens": 13107})  # restated (#1185)
         self.assertEqual(content["provider"]["deepinfra"]["options"]["headerTimeout"], 600_000)
         self.assertEqual(content["provider"]["deepinfra"]["models"], prov["models"])
         self.assertEqual(runner.provider_timeouts(task)["provider"]["deepinfra"]["options"],
@@ -486,7 +487,8 @@ class ApiSizing(Base):
         layer = json.loads(runner.write_config_layer(task).read_text())
         self.assertEqual(layer["provider"]["deepinfra"], before["provider"]["deepinfra"])
         self.assertEqual(layer["provider"]["deepinfra"]["options"]["headerTimeout"], 600_000)
-        self.assertEqual(layer["compaction"], {"background": False, "auto": True, "buffer": 36864})
+        self.assertEqual(layer["compaction"], {"background": False, "auto": True, "buffer": 36864,
+                                               "keep": {"tokens": 13107}})  # a tenth of 128K (#1185)
         content = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
         self.assertEqual(content["provider"]["deepinfra"]["models"],
                          {"deepseek-ai/DeepSeek-V4.1-Flash-1017": task.status["api_entry"]})

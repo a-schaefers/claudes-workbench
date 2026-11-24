@@ -25,7 +25,9 @@
          hour; a fresh session handed the task behaves like ok. FAKE_COMPACT_READ: it reads
          before writing, its first step at 50%. FAKE_COMPACT_BURST: its step before is at 30%,
          then three reads whose 16 KB outputs (`state.output`) take it past the point (#1086).
-         FAKE_COMPACT_DONE: it writes "42" and its step at 15% ends its turn (reason stop, #1151)
+         FAKE_COMPACT_DONE: it writes "42" and its step at 15% ends its turn (reason stop, #1151).
+         FAKE_COMPACT_KEPT: its step after is at 34%, over half the one before: the tail OpenCode
+         2.4.1 keeps verbatim beside the summary (#1185)
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
   refill every session changes a file, then fills 76% and works on for an hour
   explore  FAKE_READS (41) reads of different files, each a small step, then FAKE_EXPLORE_PAUSE
@@ -845,7 +847,8 @@ elif scenario == "compact":  # #774: a tool result past the margin compacted it 
         tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
         emit("text", text="Done: answer.txt = 42.")
     emit("step_finish", reason="stop" if os.environ.get("FAKE_COMPACT_DONE") else "tool-calls",
-         tokens={"input": 4000, "output": 900, "cache": {"read": 0}})  # 4900: 15%
+         tokens={"input": 4000, "output": 900,  # 4900: 15%; or 11000, 34%: a kept tail (#1185)
+                 "cache": {"read": 6100 if os.environ.get("FAKE_COMPACT_KEPT") else 0}})
     if os.environ.get("FAKE_COMPACT_DONE"):
         pass  # its turn is over: the run ends
     elif os.environ.get("FAKE_COMPACT_READ"):  # a session that carries on: it finishes the work

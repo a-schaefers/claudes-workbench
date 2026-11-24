@@ -167,6 +167,25 @@ def compaction_buffer(cfg: dict) -> int | None:
     return max(usable + reply - window, 0) + STEP_GROWTH
 
 
+# What OpenCode's compaction keeps verbatim beside its summary (`compaction.keep.tokens`), as a
+# share of usable_input, at least KEEP_MIN. Its own default is 15,000 tokens whatever the window.
+# OpenCode 2.3.2 started that tail only at a user message after the first, so a one-prompt round
+# kept nothing; 2.4.1 starts it at any message, and a 32-40K window came back from a compaction
+# at about 64% (floor, 15K of tail and the summary), next to the compaction point again: of 242
+# compactions in 40K bench rounds, 109 would have compacted again on the next step (#1185, the
+# study for #1134, 2026-11-24). At a tenth of the window it came back at about 41%, none that close.
+KEEP_SHARE = 0.10
+KEEP_MIN = 2048
+
+
+def compaction_keep(cfg: dict) -> int | None:
+    """The tail OpenCode's compaction keeps verbatim, in tokens; None without a window."""
+    lim = cfg.get("limit") or {}
+    if not lim.get("context"):
+        return None
+    return max(KEEP_MIN, int(KEEP_SHARE * usable_input(lim)))
+
+
 def compaction_point(cfg: dict) -> float | None:
     """Where OpenCode's compaction sits, as a share of the window."""
     lim, buf = cfg.get("limit") or {}, compaction_buffer(cfg)
@@ -319,8 +338,10 @@ def write_config_layer(task: store.Task) -> Path:
         # background: OpenCode 2.3.2's summary written ahead (on by default; 2.3.0 ignores the
         # key) is a full-context request on the agent's own server, below the handover point,
         # queued ahead of the agent's next step on a one-slot server and evicting its cache,
-        # then thrown away at the handover (#661)
-        "compaction": {"background": False, **({"auto": True, "buffer": buffer} if buffer else {})},
+        # then thrown away at the handover (#661); keep: the tail sized to the window, not
+        # OpenCode's fixed 15K (#1185)
+        "compaction": {"background": False, **({"auto": True, "buffer": buffer,
+                                                 "keep": {"tokens": compaction_keep(cfg)}} if buffer else {})},
         # with probe on, one tool call's output sized to the window (output_cap)
         **({"tool_output": output_cap(cfg)} if context.experiment(task, "probe") else {}),
         "mcp": {"servers": {**users_servers_off(), "workbench": {  # 2.x shape: mcp.servers.<name>
@@ -1673,8 +1694,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
            "answered": False}
     window = st.get("window")
     fresh_at = tuning.value(task, "fresh_at")
-    # The last step's (session, context): a later step in it carrying under half of one that was
-    # near the handover point is OpenCode's compaction, which `run --format json` doesn't print.
+    # The last step's (session, context, reasoning): a later step in it carrying a step's growth
+    # less than one that was near the handover point is OpenCode's compaction (compacted_between),
+    # which `run --format json` doesn't print.
     # One tool result bigger than the margin before it (a long file, a test log) compacted the
     # session between two steps, and the agent worked on from its summary (#774).
     last_step: tuple = (None, 0)
@@ -1793,7 +1815,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                                             + ("its turn ended there" if turn_over else
                                                "it works on from its own summary")})
                 if used:
-                    last_step, pending = (sid, used), 0
+                    last_step, pending = (sid, used, row.get("reasoning", 0)), 0
                 if floor is None and window:
                     changed = marks != {gitops.mark(task.worktree)}
                     if changed:
@@ -4723,13 +4745,18 @@ HANDOVER_ROOM = 0.25
 
 
 def compacted_between(last: tuple, sid, used: int, point: float, window: int, pending: int = 0) -> bool:
-    """Whether OpenCode compacted the session between the last step (`last`: its session and
-    context) and this one: in the same session, this step carries under half of what the last
-    did, and the last, with the tool output since (``pending``, tokens: OpenCode compacts with
-    it counted in, #1086), was within one step's growth (fresh_ceiling's margin) of the handover
-    point, where only OpenCode's compaction shrinks a context (#774)."""
+    """Whether OpenCode compacted the session between the last step (`last`: its session,
+    context and, if given, reasoning tokens) and this one: in the same session, this step carries
+    less than the last did by more than one step's growth (fresh_ceiling's margin), or than the
+    last step's reasoning if more (the next request needn't send it again), and the last, with the tool
+    output since (``pending``, tokens: OpenCode compacts with it counted in, #1086), was within
+    that margin of the handover point, where only OpenCode's compaction shrinks a context (#774).
+    Under half of the last, the rule until #1185, missed a compaction whose kept tail
+    (compaction_keep) brought the context back above it: 156 of 242 offline at a tenth of the
+    window on OpenCode 2.4.1, 234 at its 15K default (2026-11-24)."""
     margin = max(STEP_GROWTH, tuning.CEILING_MARGIN * window)
-    return bool(sid) and last[0] == sid and 0 < used < last[1] / 2 and last[1] + pending >= point - margin
+    drop = max(margin, last[2] if len(last) > 2 else 0)
+    return bool(sid) and last[0] == sid and 0 < used < last[1] - drop and last[1] + pending >= point - margin
 
 
 def _reading_full(task: store.Task, n: int, used: int, window: int,

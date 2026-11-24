@@ -1097,8 +1097,11 @@ Claude read the diff.
   ends the agent's turn (`step_finish` reason `stop`, `turn_over`): it is done, so the round ends
   as it would and the between-rounds check starts any next round fresh (#1151: a finished agent
   was killed there and a fresh session paid to redo the round). A compaction between steps
-  (`compacted_between`, #774: `run --format json` prints none, so a step under half the last
-  one's, which was within `fresh_ceiling`'s margin with the tool output since counted in, each
+  (`compacted_between`, #774: `run --format json` prints none, so a step in the same session
+  under the last one's by more than that margin, or the last step's reasoning if more (the next
+  request needn't resend it): under half, the rule until #1185, missed most compactions whose kept
+  tail brought the context back over half, 156 of 242 offline on OpenCode 2.4.1; the last
+  step within `fresh_ceiling`'s margin of the handover point with the tool output since counted in, each
   tool row's `part.state.output` at `context.CHARS_PER_TOKEN` a token, as OpenCode compacts with
   it in: parallel reads from a step well under the point went unseen, #1086) hands over given a change and room (the floor,
   or the last step's context when nothing changed before it; status `full_compacted`, reason
@@ -1155,14 +1158,20 @@ folds a text after an unrun round's prompt (and its `instructions.md`) and there
 `_early_notes` and wb feedback's unsent round (#1180).
 
 **OpenCode's own compaction** is a small model's summary that can lose the task. The layer sets
-`compaction: {auto: true, buffer, background: false}`, `buffer = max(usable + reply − window, 0) +
+`compaction: {auto: true, buffer, keep: {tokens}, background: false}`, `buffer = max(usable + reply − window, 0) +
 STEP_GROWTH` (`compaction_buffer`; usable `runner.usable_input`: min of `limit.input` and the
 window, as OpenCode compacts at usable − buffer; never context − output, #675; reply `options.max_tokens`, else `limit.output`;
 `STEP_GROWTH` 4096), so it compacts only past the handover point with room for a full reply.
 `compaction_point` is that share of the window (62.5% on 32K, 4K output, 8K cap); `fresh_ceiling`
 sits `STEP_GROWTH` (or `tuning.CEILING_MARGIN`, if more) before it, the tuner's limit: the runner
 checks at a step's end, OpenCode before the next request with its tool results in (#644). Both
-count reasoning tokens. No `limit.context`: no mid-round handover, `auto`/`buffer` or ceiling.
+count reasoning tokens. `keep.tokens` (`compaction_keep`) is the tail OpenCode keeps verbatim beside its
+summary, restated with the rest of `compaction`: `KEEP_SHARE` 0.10 of usable, at least `KEEP_MIN` 2048 (4096 on 40K, 13107 on 128K). OpenCode's
+default is 15,000 whatever the window; 2.3.2 starts the tail only at a user message after the first
+(a one-prompt round kept none), 2.4.1 at any message, so a 32–40K session came back from a compaction
+at about 64%, next to the point again (109 of 242 40K compactions offline; about 41% at a tenth: #1185,
+2026-11-24; `RealOpenCodeRun`'s `test_a_real_compaction_keeps_*` checks both). No `limit.context`:
+no mid-round handover, `auto`/`buffer`/`keep` or ceiling.
 `background: false` everywhere (`RESTATED` repeats it in `OPENCODE_CONFIG_CONTENT`): 2.3.2's
 precomputed summary queued the agent's step on its own server and evicted its cache (#661;
 `RealOpenCodeRun` checks); 2.3.0 ignores the key. Below `models.MIN_WINDOW` (16K: OpenCode's prompt and tools, PROTOCOL and
@@ -6573,7 +6582,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
-`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
+`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
 `retry` (`FAKE_RETRY_EVERY`), `say`, `stay` (as `ok`, then open and silent: #1160), `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of
@@ -6701,7 +6710,7 @@ with it shut out (#994), and the instructions: the user's `~/.config/workbench/A
 it (#513, #1061). `run_calls(name, calls, *start_flags)` runs `opencode run --auto` through `agent_env` and
 `lane.wrap`; refusals read `permission.rejected`, `external_directory` or `Permission denied`. `RealOpenCodeRun` is the
 runner on real OpenCode (`wb start --model cap`): argv, `run --format json` events (a `tool_use`'s `state.output`, #1086), `session export`
-(`context_state`), `session list` (`find_session`), `--session`, a real compaction, the task's own OpenCode home
+(`context_state`), `session list` (`find_session`), `--session`, a real compaction (and the tail it keeps, `compaction.keep`, #1185), the task's own OpenCode home
 (no credentials in it, the user's store given no session, its commands seeing the user's `XDG_DATA_HOME`, #1010)
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
 `ApiThinking`'s `test_real_opencode_*` is one too (#1018): a `wb-off` body variant and the catalog's `none` reach a DeepSeek-shaped server as `thinking: {type: disabled}` in the agent's request, and the npm provider's V1 `wb-off`.

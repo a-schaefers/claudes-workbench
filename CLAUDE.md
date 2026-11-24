@@ -214,6 +214,9 @@ what: ARCHITECTURE.md, *The tests*; the detail: *The runner, inside*, *What the 
 - `OPENCODE_DB` moves only the db (the data dir's `auth.json` is still imported into it);
   `XDG_DATA_HOME` moves the whole data dir (`opencode debug paths`), so agents get the task's.
   It picks a command's flags by `$SHELL`'s name (zsh's `+o nomatch`): the shim bears its shell's.
+- A compaction keeps the newest `compaction.keep.tokens` (15,000 by default) verbatim beside its
+  summary: 2.3.2 from a user message after the first, 2.4.1 from any message, so the layer sizes
+  it to the window (`runner.compaction_keep`, #1185), and a drop of a step's growth, not half, is one.
 - The user's global MCP servers start even when `"enabled": false`, and a provider's
   `headerTimeout`/`chunkTimeout` cut a slow request: the layer undoes both (an API provider's
   header wait is 600 s, not none).
