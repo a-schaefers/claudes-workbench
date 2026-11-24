@@ -3058,6 +3058,13 @@ def _missing_key(line: str | None) -> str | None:
     return f"module {m['m'] or m['d']}" if m else line
 
 
+def _missing_word(line: str) -> str | None:
+    """The word of the acceptance command a missing_command line names: the command, or the
+    module `-m` named (`python3 -m mypy`, #1181), for not_the_code to find in command_words."""
+    m = NO_MODULE.fullmatch(line)
+    return (m["m"] or m["d"]) if m else missing_name(line)
+
+
 # Where a prompt's spec ends and the protocol begins (cli.PROTOCOL, cli.WRITING_PROTOCOL; bench.FOLD).
 PROTOCOL_FOLD = "\n---\nHow to work"
 
@@ -3805,9 +3812,9 @@ def not_the_code(task: store.Task, tests) -> str:
     and the agent edited code that may well have been right, nothing naming the limit; a device
     the lane refused (lane_refused, #331) was named only after both auto-fix rounds, and so was a
     command the agent's environment lacks (missing_command, #1152; a Python module, #1181; one a
-    later step's --test names, #1172). The part before the first colon is the cause, for
-    status.last. "" when the failure may be the code's (a dropped proxy may be either: its auto-fix
-    prompt says so, auto_fix_prompt)."""
+    later step's --test names, #1172, or one a failing base check never reached, #1208). The
+    part before the first colon is the cause, for status.last. "" when the failure may be the
+    code's (a dropped proxy may be either: its auto-fix prompt says so, auto_fix_prompt)."""
     if not tests or tests["ok"]:
         return ""
     if tests["exit"] == "timeout" and not tests.get("hang"):  # a hang is the change's (#779)
@@ -3824,13 +3831,16 @@ def not_the_code(task: store.Task, tests) -> str:
         # Claude heard (#1152, 2026-11-24). A command the step makes says something else once made.
         return (f"the acceptance command can't run in the agent's environment: {line} (exit "
                 f"{tests['exit']}, as on the base); {GIVE_TOOL}")
-    if line and base.get("cmd") != cmd and missing_name(line) in command_words(cmd):
+    if line and not (base.get("cmd") == cmd and base.get("ok")) \
+            and _missing_word(line) in command_words(cmd):
         # no base check ran this command (wb next --test, --no-base-check), and the tool it names
         # itself isn't on the agent's PATH: both auto-fix rounds went to edits that couldn't help
-        # (#1172, 2026-11-24). Not one a script it runs names: the step may write that script.
-        # (A module line names no command: missing_name is None, never a command word.)
-        return (f"the acceptance command can't run in the agent's environment: {line} (exit 127, "
-                f"a tool the command itself names); {GIVE_TOOL}")
+        # (#1172, 2026-11-24). Nor did one that failed before reaching it (`pytest && ruff check
+        # .`, the feature not there yet), which says no not-found line of its own (#1208, bar
+        # round 3, 2026-11-24): only a base that passed found the tool. Not one a script it runs
+        # names: the step may write that script.
+        return (f"the acceptance command can't run in the agent's environment: {line} (exit "
+                f"{tests['exit']}, a tool the command itself names); {GIVE_TOOL}")
     if nodes := tests.get("lane"):
         # the grant that reaches each, as the report names it: the path itself, when it was a
         # file not made yet, sent Claude's `wb allow --path` to make a directory of that name (#670)

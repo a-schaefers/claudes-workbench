@@ -371,9 +371,9 @@ at ~36 tokens/s; slower models get longer ones, never shorter (*Budgets and spee
 don't weaken tests, check its own expected values by hand, never blame the compiler: 2026-11-18)
 without waking Claude. `not_the_code` (#496: a timeout, a lane-refused device, `lane_refused`,
 #331; a command or Python module not found, `missing_command` (not the repo's own, `own_module`: a `<top>/` or `<top>.py` in the worktree, which a `--setup` may generate, or at the base commit, or one whose file or dotted name the spec gives; a bare name the spec gives, `greet`, still counts as a tool, as `pytest` would), with the same line as the base check's (wb's `<name>: command not found` in every shell; for a Python module the same module, `_missing_key`, as the line starts with the interpreter's path, a `--setup` .venv's in the base check's scratch checkout and in the worktree, #1181's review) for the same
-command, #1152, #1181, or, when no base check ran the command (`wb next --test`, `--no-base-check`), a
-tool the command itself names, `missing_name` in `command_words`, not one a script it runs names,
-which the step may write, #1172; its fix `GIVE_TOOL`) gets none: review, status `last` the cause, the report led by `auto-fix skipped: <cause>`
+command, #1152, #1181, or, unless a base check passed the same command (when none ran it, `wb next --test`, `--no-base-check`, #1172, or it failed before reaching the tool, an `&&` chain's first command, #1208), a
+tool or `-m` module the command itself names, `_missing_word` in `command_words`, not one a script it runs names,
+which the step may write; its fix `GIVE_TOOL`) gets none: review, status `last` the cause, the report led by `auto-fix skipped: <cause>`
 with the fix (`wb allow --path` of `lane_grant`'s grant, `shlex.quote`d, #670). Except `hang`
 (tests `hang {base, limit}`): a timeout where the base check passed the same command in
 `HANG_SHARE` (a quarter) of the limit or less is the change's, sent back saying so (#779). A

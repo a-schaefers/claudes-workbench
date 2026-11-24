@@ -703,6 +703,29 @@ class Lifecycle(Base):
         self.assertEqual((st["steps"], st["round"], st["auto_fixes"]), (3, 5, 2))
         self.assertIn("nosuch-inner-1172: ", st["tests"]["tail"])  # bash's or dash's line
 
+    def test_a_tool_the_failing_base_check_never_reached_skips_auto_fix(self):
+        # #1208 (bar round 3 of 2.0): the base check stopped at the && chain's first command (the
+        # feature not there yet), so it showed no not-found line, and as it ran this same command
+        # #1172's branch didn't apply either: both auto-fix rounds went to correct code
+        for name, cmd, line in (
+                ("t-nfr", f"{TEST_CMD} && nosuch-tool-1208 --check",
+                 "nosuch-tool-1208: command not found (exit 127, "),
+                ("t-nmr", f"{TEST_CMD} && python3 -m nosuch_module_1208 -q",
+                 "No module named nosuch_module_1208 (exit 1, ")):
+            self.start(name, "ok", "--test", cmd, "--auto-fix", "2", "--no-self-review")
+            st = wait_phase(name, {"review"})
+            self.assertEqual((st["base_check"]["exit"], st["base_check"]["cmd"]), (2, cmd))
+            self.assertEqual((st["round"], st.get("auto_fixes", 0)), (1, 0))
+            summary = (store.Task(name).round_dir(1) / "summary.md").read_text()
+            self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run "
+                                               "in the agent's environment: "), summary)
+            self.assertIn(line + "a tool the command itself names); no round can fix that", summary)
+        # a base that passed found the tool: a round's not-found is the change's, and goes back
+        passed = {"ok": True, "exit": 0, "cmd": "tool-1208"}
+        task = types.SimpleNamespace(status={"base_check": passed}, spec={"test_cmd": "tool-1208"})
+        failed = {"ok": False, "exit": 127, "tail": "bash: line 1: tool-1208: command not found"}
+        self.assertEqual(runner.not_the_code(task, failed), "")
+
     def test_a_python_module_not_found_on_the_base_checks_in_at_once_and_skips_auto_fix(self):
         # #1181 (bar round 2 of 2.0): `python3 -m pytest` without pytest printed `No module named
         # pytest` (exit 1, not #1152's 127), and round 1 and both auto-fix rounds ran on correct code
