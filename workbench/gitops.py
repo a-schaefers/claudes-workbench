@@ -9,6 +9,7 @@ import hashlib
 import os
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -18,7 +19,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Callable
 
-from . import store
+from . import models, store
 
 
 class GitError(RuntimeError):
@@ -196,31 +197,75 @@ def _case_folds(d: str) -> bool | None:
 
 
 def _run(cwd, args, env=None, check=True, timeout=None, input=None,
-         detach=False) -> subprocess.CompletedProcess:
+         detach=False, started: Callable[[int], None] | None = None) -> subprocess.CompletedProcess:
     """``detach``: git in a session of its own, with no controlling terminal, for the calls that
     may sign (with NO_TERMINAL): ssh-keygen opens /dev/tty when it can, and on WSL2, where wb has
     one, it prompted there for a passphrase nobody would type, so wb accept waited COMMIT_SECS
     and wb start SIGN_SECS before refusing (#933). Detached, it fails at once. And it outlives a
     SIGKILL of wb, so its output goes to files, not pipes: a signed merge's git whose wb was
     killed made the commit, then died of SIGPIPE printing it, before removing MERGE_HEAD
-    (#1231)."""
+    (#1231). ``started(pid)``, called once it runs, is how a retry finds that git (#1246); a
+    timeout or an interruption ends its whole session (end_session), the signer too."""
     argv = ["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args]
-    kw = dict(env=_env(env), timeout=timeout, input=input, start_new_session=detach,
+    kw = dict(env=_env(env), start_new_session=detach,
               stdin=subprocess.DEVNULL if timeout and input is None else None)
     try:
         if not detach:
-            r = subprocess.run(argv, capture_output=True, **kw)
+            r = subprocess.run(argv, capture_output=True, timeout=timeout, input=input, **kw)
         else:
+            assert input is None, "a detached git reads nothing"
             with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-                r = subprocess.run(argv, stdout=out, stderr=err, **kw)
+                p = subprocess.Popen(argv, stdout=out, stderr=err, **kw)
+                try:
+                    if started:
+                        started(p.pid)
+                    p.wait(timeout=timeout)
+                except BaseException:
+                    end_session(p.pid, gone=lambda: p.poll() is not None)
+                    p.wait()
+                    raise
                 out.seek(0), err.seek(0)
-                r.stdout, r.stderr = out.read(), err.read()
+                r = subprocess.CompletedProcess(argv, p.returncode, out.read(), err.read())
     except subprocess.TimeoutExpired:
         raise GitError(f"git {' '.join(args)}: no answer in {timeout}s") from None
     if check and r.returncode:
         err = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
         raise GitError(f"git {' '.join(args)}: {err}")
     return r
+
+
+END_SECS = 5  # for a git sent SIGTERM to go before SIGKILL, and for a SIGKILLed one to go
+
+
+def end_session(pid: int, start: str | None = None, gone: Callable[[], bool] | None = None) -> None:
+    """End the detached session git ``pid`` leads (``_run``'s detach: git and its signer), and
+    wait for git to go: SIGTERM first, on which git removes its lock files (a SIGKILLed one's
+    stay, and refuse the next git that takes them), SIGKILL past END_SECS, then SIGKILL for what
+    is left of the group. ``gone`` says when git has gone (our child: polled), else it is
+    models._alive's ``pid`` and ``start``; with neither start nor ``gone``, a pid that may be
+    another's now is left alone. A retry of a SIGKILLed merge backed it out while that git still
+    waited on its signer, which, answered later, landed the merge on the user's branch over the
+    unmerged index and files: every file the task changed staged as reverted, and wb said not
+    merged (#1246, bar round 5)."""
+    if gone is None:
+        if not start:
+            return
+        def gone():
+            return not models._alive(pid, start)
+    if gone():
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + END_SECS
+        while not gone() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if gone():
+            break
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, signal.SIGKILL)  # the signer, if it outlived git
 
 
 def git(cwd, *args, check=True, env=None) -> str:
@@ -1982,7 +2027,8 @@ def merge_lock(repo: Path, say=None):
 
 
 def merge(repo: Path, task: str, into: str | None = None, base: str | None = None,
-          *, tip: str | None = None, how: str = "merge", sign: bool = True) -> str:
+          *, tip: str | None = None, how: str = "merge", sign: bool = True,
+          started: Callable[[int], None] | None = None) -> str:
     """Merge the task's branch into ``into`` (the branch it started from: task.json's
     base_branch), which the main checkout must have out, clean and not mid-merge; a conflict, an
     ignored file in the way, or a merge git left unfinished is backed out, leaving the repo as it
@@ -1996,7 +2042,8 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     user signs, unsigned when ``sign`` is False (--no-sign); a timeout, a failure or an
     interruption (a SIGTERM, raised by the caller) backs the checkout out to where it was: a
     pinentry nobody answered hung accept until it was killed, leaving MERGE_HEAD and the staged
-    merge in the user's checkout, and --no-sign's merge still signed (#420, the audit of 1.8)."""
+    merge in the user's checkout, and --no-sign's merge still signed (#420, the audit of 1.8).
+    ``started(pid)``: the pid of each git that may sign, once it runs, for clear_killed_merge."""
     dirty, submodules = _uncommitted(repo)
     if dirty:
         raise GitError(f"{repo} has uncommitted changes ({_listed(dirty)}); merge "
@@ -2039,7 +2086,8 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     secs = COMMIT_SECS if signed and how != "ff" else None
 
     def committing(args):  # the step that makes a commit, so may sign
-        r = _run(repo, [*unsigned, *args], NO_TERMINAL, check=False, timeout=secs, detach=signed)
+        r = _run(repo, [*unsigned, *args], NO_TERMINAL, check=False, timeout=secs, detach=signed,
+                 started=started if signed else None)
         if r.returncode:
             said = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
             raise GitError(f"git {' '.join(args)}: {said}")
@@ -2179,7 +2227,8 @@ def _back_out(repo: Path, before: str, source: str | None = None, how: str = "me
         git(repo, "reset", "-q", "--merge", to, check=False)
 
 
-def clear_killed_merge(repo: Path, before: str, tip: str, how: str = "merge") -> None:
+def clear_killed_merge(repo: Path, before: str, tip: str, how: str = "merge",
+                       merge_git: list | None = None) -> None:
     """What an earlier accept's merge of ``tip`` onto ``before`` left in the user's checkout when
     it was SIGKILLed, which no handler sees, so merge()'s backout never ran: MERGE_HEAD at the
     tip, or a staged squash whose SQUASH_MSG names it. A merge whose commit was made (HEAD holds
@@ -2187,7 +2236,12 @@ def clear_killed_merge(repo: Path, before: str, tip: str, how: str = "merge") ->
     for the retry to merge again. Killed while the signer waited, the retry called wb's own
     staged merge "uncommitted changes" and closed the task unmerged; with the commit made, it
     said merged with the checkout still mid-merge, and the user's next commit became a merge
-    (#1231, bar round 4). Anything else, a merge of another tip, is left alone."""
+    (#1231, bar round 4). Anything else, a merge of another tip, is left alone. First the killed
+    try's own git, ``merge_git`` ([pid, start], merge()'s ``started``), detached so it outlived
+    wb, is ended if it still waits on its signer: backed out under it, the merge it landed later
+    left the index and files unmerged (#1246). Only then is what it left read."""
+    if merge_git:
+        end_session(*merge_git)
     if how == "merge" and _merging(repo):
         if git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).strip() != tip:
             return

@@ -9,6 +9,7 @@ loops, errors repeatedly, goes silent or runs too long. After a clean round the 
 command runs in the worktree, in the agent's lane; a failure goes back to the agent on its own while auto-fix rounds remain, so
 Claude is only woken for work that passes, or for a task that has run out of road.
 """
+import configparser
 import contextlib
 import ctypes
 import hashlib
@@ -26,6 +27,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import traceback
 import uuid
 import zlib
@@ -1930,8 +1932,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 task.set_status(last=f"OpenCode retries a request: {row['text']}"[:200])
             task.event(row)
             why = detector.feed({**row, "sig": sig}) if sig else None
-            if why and detector.since_edit >= detector.no_edit:
-                if (m := gitops.mark(task.worktree)) != edit_mark:  # it edited through the shell
+            if why:
+                m = gitops.mark(task.worktree)
+                if detector.guard == "no_edit" and m != edit_mark:  # a shell edit: an edit, not a repeat
                     edit_mark, detector.since_edit, why = m, 0, None
                 elif m == green_tree(task, began):
                     # A self-review round is reads and runs by design (break a check, see a test
@@ -1939,7 +1942,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                     # guard stopped it as stuck, so a green task woke Claude as stuck and its
                     # step was recorded stuck (#1168, 2026-11-24). On the tree those tests
                     # passed on, it ends as the agent's finish: the tests, then review. A tree
-                    # it changed is stopped as before.
+                    # it changed is stopped as before. Any of the detector's guards, not only
+                    # the explore guard: a 9B's self-review that ran the acceptance command
+                    # four times in a row on the green tree met the repeat guard, stuck again
+                    # (#1250, 2026-11-24); a string of failing calls there is no less its finish.
                     out["settled"], why = why, None
             if why:
                 out["stuck"], out["guard"] = why, detector.guard
@@ -3101,7 +3107,9 @@ CHECKOUT_SPARE = 2 * 10**9
 
 def _checkout_failed(task: store.Task, what: str, fix: str) -> bool:
     task.set_status(phase="failed", last=what[:200])
-    task.notify("failed", f"task {task.name}: {what}, before any round. {fix}")
+    # a `cause` outside results.THE_STEP, as every stop with its remedy in the text: the mod's
+    # wake then says to do as the notice says, never the failed wake's wb feedback (#1247)
+    task.notify("failed", f"task {task.name}: {what}, before any round. {fix}", cause="checkout")
     return False
 
 
@@ -3286,7 +3294,7 @@ def _prepare_now(task: store.Task) -> bool:
     # resume, not discard and start again: the agent never ran, and wb resume sets up again (#581)
     task.notify("failed", f"task {task.name}: {what} before any round "
                 f"({task.dir / 'setup.txt'}):\n{tail}{proxy}\nfix it, then wb resume {task.name}: "
-                "it sets the worktree up again (the agent never ran)")
+                "it sets the worktree up again (the agent never ran)", cause="setup")  # #1247
     return False
 
 
@@ -3369,24 +3377,38 @@ NO_MODULE = re.compile(r"(?P<py>\S*python[\w.]*): (No module named (?P<m>[\w.]+)
                        r"specification for '(?P<d>[\w.]+)' \(ModuleNotFoundError: No module named "
                        r"'[\w.]+'\))")
 # Where an install puts its tools (a venv's, npm's, Composer's), at any depth: ignored, so never
-# in a task's worktree (cli._missing_dirs says so at start), and never what a step makes, unlike
-# a build's output (`cargo build && target/debug/newbin`) or a script (`./check.sh`). A --test of
+# in a task's worktree but for a --setup's (cli._missing_dirs says so at start), and never what a
+# step makes but for its own console script (own_command, #1244), unlike a build's output (`cargo
+# build && target/debug/newbin`) or a script (`./check.sh`). A --test of
 # `.venv/bin/pytest` or `node_modules/.bin/jest`, as Claude runs it in the user's checkout, said
 # `No such file or directory` there, read as a script the step makes, and ran round 1 and both
 # auto-fix rounds on correct code, each told the bug was the change's (#1206, 2026-11-24).
 TOOL_DIRS = (".venv/bin", "venv/bin", "node_modules/.bin", "vendor/bin")
 # bash's and zsh's line for a path that isn't there (dash's and ksh's is NOT_FOUND's)
 NO_SUCH = re.compile(r"no such file or directory: (?P<z>.+)$|(?P<n>[^:]+): No such file or directory$")
-# A task runner's own lines after its recipe's output: GNU make's `make: *** [Makefile:2: test]
-# Error 127` (it exits 2), a sub-make's `Leaving directory`, -k's `Target … not remade`, and
-# just's `error: Recipe `test` failed on line 2 with exit code 127`. Read as the last line, they
-# hid the shell's not-found line under `make test`, and round 1 and both auto-fix rounds ran on
-# correct code, each told the bug was the change's, where `npm test` checked in (#1229, bar
-# round 4, 2026-11-24). `make` or `just` is the recipe's exit, the first one up a sub-make's,
-# not its parent's Error 2.
-RUNNER_TAIL = re.compile(r"g?make(?:\[\d+\])?: (?:\*\*\* .*?(?: Error (?P<make>\d+))?|Leaving directory .*"
-                         r"|Target .* not remade because of errors\.)"
-                         r"|error: Recipe `[^`]*` failed (?:on line \d+ )?with exit code (?P<just>\d+)")
+# A task runner's own lines after its recipe's output, each runner's in one entry, its group (if
+# any) the recipe's exit: GNU make's `make: *** [Makefile:2: test] Error 127` (it exits 2), a
+# sub-make's `Leaving directory`, -k's `Target … not remade`; just's `error: Recipe `test` failed
+# on line 2 with exit code 127`. Read as the last line, they hid the shell's not-found line under
+# `make test`, and round 1 and both auto-fix rounds ran on correct code, each told the bug was the
+# change's, where `npm test` checked in (#1229, bar round 4, 2026-11-24). The package managers'
+# run wrappers did the same (#1243, bar round 5, 2026-11-24, on pnpm 9.15, yarn 1.22, npm 12):
+# pnpm's ` ELIFECYCLE  Test failed.`, ` ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  …` (`-r`, `--filter`:
+# after a `<dir>:` line, before `spawn ENOENT`) and ` WARN  … node_modules missing …`, which exit
+# 1 and say no code; yarn 1's `error Command failed with exit code 127.` and `info Visit
+# https://yarnpkg.com/…`; npm's in a workspace (`-w`), `npm error code 127` among its `npm error`
+# lines (npm 6's `npm ERR!`). A runner's next spelling is one more entry. Its code is the first
+# one up, a sub-make's, not its parent's Error 2; one that says none (pnpm) is the shell's, from
+# its not-found line (missing_command).
+RUNNER_LINES = (
+    r"g?make(?:\[\d+\])?: (?:\*\*\* .*?(?: Error (?P<make>\d+))?|Leaving directory .*"
+    r"|Target .* not remade because of errors\.)",
+    r"error: Recipe `[^`]*` failed (?:on line \d+ )?with exit code (?P<just>\d+)",
+    r"(?:ELIFECYCLE|ERR_PNPM_\w+|WARN)\s.*|/[^:]*:|spawn ENOENT",
+    r"error Command failed with exit code (?P<yarn>\d+)\.|info Visit https://yarnpkg\.com/\S* .*",
+    r"npm (?:error|ERR!)(?: (?:code|errno) (?P<npm>\d+)| .*)?",
+)
+RUNNER_TAIL = re.compile("|".join(RUNNER_LINES))
 # make's own line for a recipe it runs without a shell (no shell syntax in it) that execvp can't
 # find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229)
 MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
@@ -3408,25 +3430,40 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     (#1206); or Python's no-module line for `-m` at exit 1 (#1181). A tool the
     agent's environment lacks (one outside the agent's PATH, which python_env and agent_path
     trim), which no edit in a round can give it; else None. A module of ``task``'s own code
-    (own_module) is none: the step may make it. Under a task runner (`make test`, RUNNER_TAIL),
-    the recipe's exit and the line before the runner's own (#1229)."""
+    (own_module) is none: the step may make it; nor is a console script of its own
+    (own_command), by name with the worktree's venv there, or by its path in a TOOL_DIRS
+    directory the worktree has (#1244). Under a task runner (`make test`, `pnpm test`,
+    RUNNER_TAIL), the recipe's exit and the line before the runner's own (#1229, #1243)."""
     if not r:
         return None
     code, lines, inner = r.get("exit"), (r.get("tail") or "").strip().splitlines(), None
+    wrapped = False
     while isinstance(code, int) and code and lines and (m := RUNNER_TAIL.fullmatch(lines[-1].strip())):
-        inner = m["make"] or m["just"] or inner
+        inner = m["make"] or m["just"] or m["yarn"] or m["npm"] or inner
+        wrapped = True
         lines.pop()
     code = int(inner) if inner else code
+    if wrapped and not inner and lines and NOT_FOUND.search(lines[-1]):
+        code = 127  # pnpm exits 1 and names no code: the shell's not-found line is its 127 (#1243)
     if code not in (1, 127):
         return None
     line = lines[-1].strip() if lines else ""
     if code == 127:
         name = missing_name(line) or ((m := MAKE_EXEC.fullmatch(line)) and m["n"].strip())
         if name and "/" not in name:
-            return f"{name}: command not found"
+            # one the step's reinstall puts in the worktree's venv, first on the agent's PATH (#1244)
+            return None if task and context.own_venv(task) and own_command(task, name) \
+                else f"{name}: command not found"
         # a path: a script the step may make, but not a tool an install puts there (#1206)
         path = name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip())
         if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
+            s = f"/{path}"
+            where, tool = s[1:s.find(f"/{top}/") + 1 + len(top)], path.rsplit("/", 1)[-1]
+            # an install dir the setup made in the worktree: never "never checked out", and a
+            # console script the step adds to it is the step's own (#1244, bar round 5, 2026-11-24)
+            if task and not os.path.isabs(path) and (task.workdir / where).is_dir():
+                return None if own_command(task, tool) else \
+                    f"{path}: not in the worktree ({where}/ is there, without {tool})"
             return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
         return None
     if code == 1 and (m := NO_MODULE.fullmatch(line)):
@@ -3477,14 +3514,8 @@ def own_module(task: store.Task, module: str, python: str = "python3") -> bool:
             return True
     except (gitops.GitError, KeyError, OSError):
         pass
-    try:
-        spec = current_task_prompt(task)
-    except OSError:
+    if (spec := step_spec(task)) is None:
         return False
-    # the spec alone: the protocol after it names the acceptance command (cli.test_line), so
-    # every dotted `-m` of --test read as the repo's own, and a tool the agent's environment
-    # lacks never checked in nor skipped auto-fix (#1181's second review, 2026-11-24)
-    spec = re.sub(r"The acceptance command is `[^`\n]*`", "", spec.split(PROTOCOL_FOLD, 1)[0])
     path = module.replace(".", "/")
     if any(f"/{p}".endswith(f"/{path}.py") or f"/{path}/" in f"/{p}"
            for p in context.spec_paths(spec)):  # pkg/newcli.py, pkg/newcli/__main__.py
@@ -3497,6 +3528,87 @@ def own_module(task: store.Task, module: str, python: str = "python3") -> bool:
     # counted whenever the spec named it, "with pytest tests" on a machine without pytest ran
     # round 1 and both auto-fix rounds on correct code again, #1181's incident (#1209, 2026-11-24)
     return spec_makes(spec, top) and not user_imports(top, python)
+
+
+def step_spec(task: store.Task) -> str | None:
+    """The step's spec, without the acceptance command: the spec alone, as the protocol after it
+    names the acceptance command (cli.test_line), so every dotted `-m` of --test read as the
+    repo's own, and a tool the agent's environment lacks never checked in nor skipped auto-fix
+    (#1181's second review, 2026-11-24). None when the prompt can't be read."""
+    try:
+        spec = current_task_prompt(task)
+    except OSError:
+        return None
+    return re.sub(r"The acceptance command is `[^`\n]*`", "", spec.split(PROTOCOL_FOLD, 1)[0])
+
+
+def own_command(task: store.Task, name: str) -> bool:
+    """Whether command ``name`` (`mycli`) is a console script of the step's own, which a round's
+    `pip install -e .` puts in the worktree's venv: declared where the tests run, in the package
+    or at the top (declared_scripts), or one the spec makes (spec_makes_command) that isn't on
+    the user's own PATH either. Counted as a tool the agent lacks, `--setup 'python3 -m venv .venv
+    && .venv/bin/pip install -e .' --test 'mycli check'` for a step adding it checked in before
+    round 1 with a false "no round can fix that ... or wb discard", and when round 1 hadn't
+    reinstalled, skipped the auto-fix round that would have (#1244, bar round 5, 2026-11-24)."""
+    if any(name in declared_scripts(d) for d in dict.fromkeys((task.workdir, task.worktree))):
+        return True
+    spec = step_spec(task)
+    return bool(spec) and spec_makes_command(spec, name) and not shutil.which(name)
+
+
+# A console-script line (`mycli = "pkg.cli:main"`, setup.py's `"mycli=pkg.cli:main"`): its name
+SCRIPT_LINE = re.compile(r"(?<![\w.-])[`'\"]?(?P<n>[\w.-]+)[`'\"]?\s*=\s*[`'\"]?[\w.]+\s*:\s*[\w.]+")
+
+
+def declared_scripts(where: Path) -> set[str]:
+    """The console scripts the Python project in ``where`` declares: pyproject.toml's
+    [project.scripts], [project.gui-scripts] and [tool.poetry.scripts], setup.cfg's and
+    setup.py's console_scripts and gui_scripts. Nothing for a file that isn't there or won't
+    parse."""
+    names: set[str] = set()
+    try:
+        data = tomllib.loads((where / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # tomllib.TOMLDecodeError, UnicodeDecodeError
+        data = {}
+    project, tool = data.get("project"), data.get("tool")
+    tables = [project.get(k) for k in ("scripts", "gui-scripts")] if isinstance(project, dict) else []
+    if isinstance(tool, dict) and isinstance(poetry := tool.get("poetry"), dict):
+        tables.append(poetry.get("scripts"))
+    names.update(k for t in tables if isinstance(t, dict) for k in t)
+    cfg = configparser.ConfigParser(interpolation=None)
+    try:
+        cfg.read_string((where / "setup.cfg").read_text(encoding="utf-8"))
+        for key in ("console_scripts", "gui_scripts"):
+            names.update(m["n"] for m in SCRIPT_LINE.finditer(
+                cfg.get("options.entry_points", key, fallback="")))
+    except (OSError, ValueError, configparser.Error):
+        pass
+    try:
+        setup = (where / "setup.py").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        setup = ""
+    if "_scripts" in setup:
+        names.update(m["n"] for m in SCRIPT_LINE.finditer(setup))
+    return names
+
+
+# What a console script is called in a spec, for spec_makes_command
+COMMAND_NOUN = (r"(?:console[ -]scripts?|scripts?|commands?|entry[ -]points?|executables?|CLIs?|"
+                r"binar(?:y|ies))")
+
+
+def spec_makes_command(spec: str, name: str) -> bool:
+    """Whether the spec presents command ``name`` as one the step makes: its console-script line
+    (`mycli = "pkg.cli:main"`), or the name beside a command's noun in a sentence that makes
+    something ("Add the `mycli` console script", "add a command named mycli"). Not merely named
+    ("make `mycli check` pass", "add a script that runs pytest")."""
+    if any(m["n"] == name for m in SCRIPT_LINE.finditer(spec)):
+        return True
+    n, q = re.escape(name), r"[`'\"]?"
+    named = re.compile(rf"\b{COMMAND_NOUN}\s+(?:(?:called|named)\s+)?{q}{n}{q}(?![\w-]|\.\w)|"
+                       rf"(?<![\w./-]){q}{n}{q}\s+{COMMAND_NOUN}\b", re.I)
+    return any(named.search(s) and re.search(MAKING, s, re.I)
+               for s in re.split(r"(?<=[.!?])\s+|\n", spec))
 
 
 # Words that say a sentence makes something, for spec_makes.
@@ -4426,7 +4538,9 @@ def _repo_gone(task: store.Task) -> None:
     text = (f"{task.spec['repo']} moved or was deleted: wb relocate {task.name} --repo <its new "
             "path>, then wb resume")
     task.set_status(phase="failed", last=text[:200])
-    task.notify("failed", f"task {task.name}: {text}")
+    # its cause, so the mod's wake names the notice's relocate, not wb feedback: a runner that
+    # fails at once on the moved repo and wakes Claude again (the bar loop, #1247, 2026-11-24)
+    task.notify("failed", f"task {task.name}: {text}", cause="repo")
 
 
 def left_catalog(task: store.Task) -> str:
@@ -4449,7 +4563,10 @@ def _left_catalog(task: store.Task) -> None:
     text = left_catalog(task)
     task.set_status(phase="failed", last=text[:200], infra="model",
                     **({} if ran(task) else {"failed_before": "load"}))
-    task.notify("failed", text)
+    # its cause, so the mod's wake names the notice's takeover or discard: it ended "wb feedback
+    # … or wb discard", and wb feedback, next and resume refuse the task with exit 3 (the bar
+    # loop, #1247, 2026-11-24). An unread catalog's line names its own remedy, resume, as well.
+    task.notify("failed", text, cause="catalog")
 
 
 def _load_failed(task: store.Task, e: Exception, api: bool = False) -> None:
@@ -4472,7 +4589,8 @@ def _load_failed(task: store.Task, e: Exception, api: bool = False) -> None:
                 + (f"\nthe agent never ran: once the model can, wb resume {task.name} starts it"
                    if never else
                    f"\nround {n} never reached the agent: once the model can run, wb feedback "
-                   f"{task.name} --text \"carry on\" sends its prompt" if not reached(task, n) else ""))
+                   f"{task.name} --text \"carry on\" sends its prompt" if not reached(task, n) else ""),
+                cause="model")  # the remedy is the text's, not the failed wake's feedback (#1247)
 
 
 # The keyhole (#1012): an API model's key stays in the runner, and OpenCode gets the keyhole's
@@ -4919,6 +5037,65 @@ def _stop_before(task: store.Task, n: int, what: str, why: str, lead: str, guard
     task.notify("stuck", text, round=n, cause=SPEND, **({"guard": guard} if guard != SPEND else {}))
 
 
+def _midnight(after: bool = False) -> float:
+    """Today's local midnight (``after``: tomorrow's), when the day cap resets (meter.day)."""
+    lt = time.localtime()
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + after, 0, 0, 0, 0, 0, -1))
+
+
+def _cap_told(task: store.Task) -> str:
+    """Another task whose spend stop has told Claude of today's cap, still standing, else '':
+    phase `stuck`, status `infra` `spend` (not the Agents switch's `guard`), its newest notice
+    (`noticed`) today and since routes.json last changed (a cap raised since is a new question)."""
+    since = _midnight()
+    with contextlib.suppress(OSError):
+        since = max(since, os.stat(routes.path()).st_mtime)
+    with contextlib.suppress(OSError):
+        for d in store.tasks_dir().iterdir():
+            if d.name == task.name or not (d / "task.json").is_file():
+                continue
+            st = store.Task(d.name).status
+            if st.get("phase") != "stuck" or st.get("infra") != SPEND or st.get("guard") == AGENTS:
+                continue
+            try:
+                if float((d / "noticed").read_text() or 0) >= since:
+                    return d.name
+            except (OSError, ValueError):
+                continue
+    return ""
+
+
+def _cap_wait(task: store.Task, lease) -> bool:
+    """Before the first round this runner sends (#1249, 2026-11-24): an API task at the day cap,
+    or within its first request of it, while another task's spend stop has told Claude so
+    (_cap_told), waits as queued, its provider slot let go (taken again after), until the cap is
+    raised (a watch on routes.json's directory), local midnight or that stop no longer stands
+    (looked at every API_WAIT's 30 s). A backlog queued behind the cap each took its slot, ran
+    round 1 into the guard and woke Claude with the same stop, one ask of the user per task, as
+    #1178's 402. With no such stop it goes on, and its own stop is the notice Claude gets: never
+    a wait untold. True when it waited (the caller looks again)."""
+    if meter.for_task(task) is None:
+        return False
+    waited, said = False, None
+    with Watcher(routes.path().parent) as w:
+        while True:
+            why = meter.stop_reason(task, ahead=True, tokens=first_tokens(task))
+            if not why or not why.startswith((meter.STOP, meter.NEAR)) or not (told := _cap_told(task)):
+                break
+            if not waited:
+                lease.__exit__(None, None, None)  # the slot, for a task the cap lets run
+                waited = True
+            msg = (f"waiting: {why}; {told}'s stop has asked the user: it goes on once the cap is "
+                   f"raised (wb route cap <usd>) or at local midnight (wb stop gives up)")
+            if msg != said:
+                task.set_status(phase="queued", last=msg)
+                said = msg
+            w.wait(min(max(_midnight(after=True) - time.time(), 0.1), models.API_WAIT[1]))
+    if waited:
+        lease.__enter__()
+    return waited
+
+
 # #1215: a repo marked local-only after its API task started (wb start's where-note invites it on
 # the first one) had wb next, feedback and resume refuse the task, but the runner sent the repo to
 # the provider all the same, and billed it: round 1 after a slot wait or the setup, and every round
@@ -5040,8 +5217,15 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
         n = task.status.get("round", 1)
-        if _agents_gpu(task, n, f"round {n}"):  # a queued task's slot came after the switch (#1213)
-            return
+        while True:
+            if _agents_gpu(task, n, f"round {n}"):  # a queued task's slot came after the switch (#1213)
+                return
+            if not _cap_wait(task, lease):  # behind a spend stop Claude was told of (#1249)
+                break
+            try:  # its slot taken again after the wait: the provider's credit, as before a round
+                _load(task, lease, m)
+            except (KeyError, RuntimeError, OSError) as e:
+                return _load_failed(task, e)
         handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)
         first = True
         revived = None  # the round run again after its server went away under it
@@ -5659,7 +5843,8 @@ def main():
                             infra="disk full" if full else "crash")
             task.notify("failed", f"task {task.name}: the disk is full ({store.home()}); free "
                         f"some, then wb resume {task.name}" if full else
-                        f"task {task.name}: the runner crashed\n{err[-1500:]}")
+                        f"task {task.name}: the runner crashed\n{err[-1500:]}",
+                        **({"cause": "disk"} if full else {}))  # its remedy is the text's (#1247)
         except OSError as again:
             # no room even for this: wb's reap fails the task, naming the disk, once it can
             # write (#342, the audit of 1.4)
