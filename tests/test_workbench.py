@@ -994,6 +994,35 @@ class Lifecycle(Base):
         step = results.step(task, True)
         self.assertEqual((tuning.agent_reviews(step), router._went(step)), (1, "well"))
 
+    def test_a_stuck_or_failed_round_after_the_env_skip_feedback_is_the_models_own_stop(self):
+        # #1257's review: only drive's clear at the runner's start drops env_skip from a stop the
+        # next round makes stuck or failed (a guard, an opencode exit); kept, the feedback after a
+        # real stuck stop counted no review, and the discard read as the environment's, so tuning
+        # left out a step the model really failed
+        from workbench import tuning
+        for name, scenario, phase in (("t-envs", "loop", "stuck"), ("t-envf", "crash", "failed")):
+            with self.subTest(phase=phase):
+                os.environ["FAKE_SCENARIO"] = "ok"
+                self.start(name, "ok", "--test", "answercheck-1257", "--no-self-review")
+                self.assertTrue(wait_phase(name, {"review"})["env_skip"])
+                task = store.Task(name)
+                os.environ["FAKE_SCENARIO"] = scenario
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb("feedback", name, "--text", "The tool is in the worktree now.")
+                runner.drive(task)
+                st = task.status
+                self.assertEqual((st["phase"], st["reviews"]), (phase, 0))
+                self.assertIsNone(st.get("env_skip"))
+                self.assertIsNone(st.get("infra"))  # the model's stop, not the machine's
+                with mock.patch.object(cli, "spawn_runner"):
+                    out = run_wb("feedback", name, "--text", "1. Run the command once.")
+                self.assertNotIn("no review round is counted", out)
+                self.assertEqual(task.status["reviews"], 1)
+                run_wb("discard", name)
+                row = store.results()[-1]
+                self.assertEqual((row["task"], row["outcome"], row.get("infra")), (name, "discarded", None))
+                self.assertFalse(tuning.stopped_outside(row))
+
     def test_the_discard_a_skipped_auto_fix_offers_is_not_the_models_rejected_work(self):
         # #1257: GIVE_TOOL's other way out, wb discard and start again with a --setup, is a
         # stop from outside the step as an infra stop's discard is (#1245)
