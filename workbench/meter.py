@@ -12,22 +12,26 @@ that doesn't say its cache reads prices them as input, a missing cache price is 
 Two views of the same requests, each kept as high as the other says (never under):
 - the keyhole's (`Meter.on_usage`, its thread): each upstream response's `usage`, every request
   the task's model got (titles and compaction too, which no `step_finish` carries). A
-  provider's own `usage.cost` (OpenRouter's) wins over the catalog;
+  provider's own figure (OpenRouter's `usage.cost`, DeepInfra's `usage.estimated_cost`) wins
+  over the catalog;
 - OpenCode's: live, each `step_finish.part.cost` (`Meter.step`); at each round's end the
   sessions' exported `info.cost` (`Meter.end_round`). With the keyhole metering, these only add
-  a `reconcile` row when OpenCode says more than the ledger has; without it (no usage in the
-  answers, the suite's fake), each step books its own row, OpenCode's cost or the metered one.
+  a `reconcile` row when OpenCode says more than the keyhole saw, each at the same prices (a
+  provider's own figure compared at the catalog's, `at_catalog`: never topped up to it); without
+  it (no usage in the answers, the suite's fake), each step books its own row, OpenCode's cost or
+  the metered one.
 An OpenCode cost of 0 for a model whose price isn't 0 is never trusted (never a false 0).
 
 The ledger is `$WB_HOME/spend-api.jsonl` (store.append_jsonl, locked): `step`, `reconcile` and
 `checkin` rows, each with its local `day`; a row at the user's own prices (wb model price,
 models.json `cost`) says `prices: "yours"`.
 
-Every figure is an estimate unless the user set the model's prices: the catalog's can be about
-twice a provider's bill (DeepInfra's, #1135, 2026-11-23). `basis` says which a figure is:
-"catalog" (shown `≈$0.42 … (catalog prices)`), "yours" (`$0.42 … (your prices)`) or "provider"
-(the provider's own `usage.cost`: plain). A plan (OpenCode Go, an Ollama cloud model) is a
-quota, not dollars: its rows have `usd: null` and `plan`, and never count against the cap."""
+Every figure is an estimate unless the provider says its own or the user set the model's prices:
+the catalog's can be about twice a provider's bill (DeepInfra's, #1135, 2026-11-23). `basis`
+says which a figure is: "catalog" (shown `≈$0.42 … (catalog prices)`), "yours" (`$0.42 … (your
+prices)`) or "provider" (the provider's own `usage.cost` or `usage.estimated_cost`: plain). A plan
+(OpenCode Go, an Ollama cloud model) is a quota, not dollars: its rows have `usd: null` and
+`plan`, and never count against the cap."""
 
 from __future__ import annotations
 
@@ -290,6 +294,13 @@ def _task_rows(name: str) -> list[dict]:
             and r.get("kind") in ("step", "reconcile") and _num(r.get("usd"))]
 
 
+def _at_catalog(usd_: float, source, mtr) -> float:
+    """A booked figure as OpenCode's own estimate prices it, to compare the two: a provider's own
+    (`source: provider`) at its metered one, the catalog's (or the user's, which the task's
+    catalog.json gives OpenCode too); any other as booked (#1165, 2026-11-24)."""
+    return float(mtr) if source == PROVIDER and _num(mtr) else usd_
+
+
 def task_total(name: str) -> float:
     """Everything the ledger books for one task, any day."""
     return round(sum(r["usd"] for r in _task_rows(name)), 10)
@@ -483,6 +494,10 @@ class Meter:
         self.lock = threading.Lock()
         rows = _task_rows(task.name)  # booked for the task, any day, this runner's too
         self.total = round(sum(r["usd"] for r in rows), 10)
+        # the ledger as OpenCode's figure prices it: a provider's own row at its catalog figure
+        # (`metered`), which is what OpenCode's estimate is compared with (#1165, 2026-11-24)
+        self.at_catalog = round(sum(_at_catalog(r["usd"], r.get("source"), r.get("metered"))
+                                    for r in rows), 10)
         self.bases = {row_basis(r) for r in rows}
         self.metered_total = 0.0
         self.tok = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}
@@ -524,6 +539,7 @@ class Meter:
         with self.lock:
             if _num(row["usd"]):
                 self.total += row["usd"]
+                self.at_catalog += _at_catalog(row["usd"], source, mtr)
                 self.bases.add(row_basis(row))
             if _num(mtr):
                 self.metered_total += mtr
@@ -564,19 +580,27 @@ class Meter:
             return
         tok = usage_tokens(usage)
         mtr = metered(self.prices, tok)
-        own = usage.get("cost")  # the provider's own figure (OpenRouter's usage.cost)
+        # the provider's own figure: OpenRouter's usage.cost, DeepInfra's usage.estimated_cost (in
+        # its last, `choices: []` chunk, at its own rate: dropped, every DeepInfra figure and the
+        # day cap ran at the catalog's, about 2x the bill, #1165, 2026-11-24)
+        own = usage.get("cost")
+        if not _num(own):
+            own = usage.get("estimated_cost")
         if _num(own) and own >= 0 and not (own == 0 and (mtr or 0) > 0):
-            value, source = float(own), "provider"
+            value, source = float(own), PROVIDER
         else:
             value, source = mtr, "keyhole"
         with self.lock:
             self.keyhole = True
-            self.round_kh += value or 0
+            # what the keyhole saw at the prices OpenCode's step figure uses (_at_catalog)
+            self.round_kh += _at_catalog(value or 0, source, mtr)
         self._book("step", value, source, tok, mtr)
 
     def step(self, part: dict) -> None:
         """A `step_finish` (the runner's thread): its own row, or OpenCode's figure reconciling
-        what the keyhole booked."""
+        what the keyhole saw. Compared at the same prices (round_kh: a provider's own figure at
+        its catalog one): against what was booked, OpenCode's catalog estimate topped every
+        DeepInfra and OpenRouter row back up to the catalog's (#1165, 2026-11-24)."""
         if not isinstance(part, dict):
             return
         tok = step_tokens(part)
@@ -601,9 +625,10 @@ class Meter:
     def end_round(self, sessions: dict) -> None:
         """At a round's end: OpenCode's figure for the whole task, the `info.cost` of each of its
         sessions (``sessions``: id -> export), which counts the title requests no step carries.
-        More than the ledger has: one `reconcile` row with the difference. Never less (the
-        keyhole's view is what went out), never from a 0 for a priced model, never from a
-        session that didn't export."""
+        More than the ledger has, a provider's own rows at their catalog figure (at_catalog, as in
+        step: #1165): one `reconcile` row with the difference. Never less (the keyhole's view is
+        what went out), never from a 0 for a priced model, never from a session that didn't
+        export."""
         if self.plan or not sessions:
             return
         costs = [(e.get("info") or {}).get("cost") if isinstance(e, dict) else None
@@ -612,7 +637,7 @@ class Meter:
             return
         said = sum(costs)
         with self.lock:
-            extra = said - self.total
+            extra = said - self.at_catalog
         if said == 0 or extra <= EPS:
             return
         self._book("reconcile", extra, "opencode")

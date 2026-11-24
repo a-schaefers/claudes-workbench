@@ -32442,9 +32442,9 @@ class ApiSpend(Base):
         self.assertEqual((c["usd"], c["source"]), (0.0123, "provider"))
         mt.step({"cost": 0.1, "tokens": {"input": 100}})       # OpenCode's says less: nothing booked
         self.assertEqual(len(self.rows("t-kh-meter")), 3)
-        mt.step({"cost": 2.0, "tokens": {"input": 100}})       # more than all three: the difference
-        (rec,) = self.rows("t-kh-meter", "reconcile")
-        self.assertAlmostEqual(rec["usd"], 2.1 - (a["usd"] + b["usd"] + c["usd"]), places=9)
+        mt.step({"cost": 3.0, "tokens": {"input": 100}})       # more than all three: the difference,
+        (rec,) = self.rows("t-kh-meter", "reconcile")          # the provider's own row at its catalog figure (#1165)
+        self.assertAlmostEqual(rec["usd"], 3.1 - (a["usd"] + b["usd"] + c["metered"]), places=9)
         mt.step({"cost": 0.5, "tokens": {"input": 100}})       # after a reconcile: only its own
         self.assertEqual([round(r["usd"], 9) for r in self.rows("t-kh-meter", "reconcile")][1:], [0.5])
         self.assertEqual(self.meter.usage_tokens({"input_tokens": 50, "output_tokens": 20,  # Responses
@@ -32965,6 +32965,47 @@ class ApiSpendKeyhole(_KeyholeTest):
                           .encode() for i in (1, 2, 3)] + [b"data: [DONE]\n\n"]
         self.post(kh)                                           # a running total in every chunk
         self.assertEqual(usage, [{"prompt_tokens": 9, "completion_tokens": 3}])
+
+    def test_deepinfras_own_estimated_cost_is_booked_and_opencodes_catalog_figure_tops_nothing_up(self):
+        # #1165 (2026-11-24): DeepInfra sends its own cost as usage.estimated_cost, in a last
+        # `choices: []` chunk (checked with one real request that day: 10 in, 2 out, 1.568e-6, its
+        # 0.098/0.294 rate), and the meter read only usage.cost: every DeepInfra row was booked at
+        # the catalog's 0.2/0.6, and OpenCode's step and export figures topped any provider's own
+        # row back up to them, so figures and the day cap ran about 2x the bill
+        from workbench import meter, results
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        m = self.model()
+        m.config = {"cost": [{"input": 0.2, "output": 0.6, "cache": {"read": 0.006, "write": 0}}]}
+        mt = meter.Meter(self.task, m)
+        mt.begin(1)
+        kh = self.keyhole(m, on_usage=mt.on_usage)
+        chunk = lambda choices, usage: f'data: {json.dumps({"model": m.name, "choices": choices, "usage": usage})}\n\n'.encode()  # noqa: E731
+        tok = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000,
+               "prompt_tokens_details": {"cached_tokens": 0}}
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [chunk([{"index": 0, "delta": {"content": "hi"}}], None),
+                          chunk([{"index": 0, "delta": {}, "finish_reason": "stop"}], {**tok, "estimated_cost": None}),
+                          chunk([], {**tok, "estimated_cost": 0.392}), b"data: [DONE]\n\n"]
+        self.assertEqual(self.post(kh)[0], 200)
+        (row,) = store.read_jsonl(meter.ledger_path())[0]
+        self.assertEqual((row["usd"], row["source"], round(row["metered"], 9)), (0.392, "provider", 0.8))
+        mt.step({"cost": 0.8, "tokens": {"input": 1_000_000, "output": 1_000_000}})   # the catalog's
+        mt.end_round({"s1": {"info": {"cost": 0.8}}})
+        rows, _ = store.read_jsonl(meter.ledger_path())
+        self.assertEqual([r["kind"] for r in rows], ["step"])                         # no top-up
+        self.assertEqual((round(mt.total, 9), self.task.status["api"]["prices"]), (0.392, "provider"))
+        self.assertEqual(meter.money(meter.today()["usd"], meter.today()["basis"]), "$0.39")
+        store.write_json(self.task.dir / "task.json", {**self.task.spec, "via": "api", "model": m.id})
+        with mock.patch.object(results, "_session_cost", return_value=0.8):       # the export's figure
+            self.task.set_status(session="ses_1")
+            self.assertEqual({k: results.api_usage(self.task)[k] for k in ("cost", "source", "prices")},
+                             {"cost": 0.392, "source": "metered", "prices": "provider"})
+        mt.on_usage({**tok, "cost": 0.5})          # OpenRouter's usage.cost, under its catalog figure
+        mt.step({"cost": 0.8, "tokens": {"input": 1_000_000, "output": 1_000_000}})
+        self.assertEqual([r["kind"] for r in store.read_jsonl(meter.ledger_path())[0]], ["step"] * 2)
+        mt.step({"cost": 0.3, "tokens": {"input": 1}})   # a response the keyhole never saw: booked
+        self.assertEqual([round(r["usd"], 9) for r in store.read_jsonl(meter.ledger_path())[0]
+                          if r["kind"] == "reconcile"], [0.3])
 
     @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
     def test_real_opencode_takes_the_spend_refusal_at_once_without_a_retry(self):

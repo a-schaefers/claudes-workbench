@@ -515,7 +515,10 @@ it wins over its assistant messages' `cost` summed, the fallback; `_session_cost
 session's sum is `source: "opencode"` when above 0, or 0 for a model the catalog says is free,
 unless the runner's meter counted more: then the meter, `source: "metered"` (it adds the
 provider's own `usage.cost` and the usage of answers a steer or stop cut short, which OpenCode
-doesn't bill; the row is never below the ledger the day cap counted nor the round report);
+doesn't bill; the row is never below the ledger the day cap counted nor the round report). Before
+the sessions, a meter whose every row is the provider's own figure (status `api.prices`
+`provider`) is the cost, `source: "metered"`, `prices: provider`: OpenCode's export at the
+catalog's ran about 2x DeepInfra's bill in every closed task's `paid` (#1165, 2026-11-24);
 OpenCode's 0 for a model the catalog prices (`catalog_price`: hosted.json as it is, `None` with no
 price, `0.0` when the model is `free` or every price is 0, a tier's `size` not counted, else `1.0`)
 isn't trusted. The meter is the runner's (`metered`: status `api.usd`, #1019's), else the step
@@ -588,27 +591,40 @@ the last byte, and a provider sending that byte late had the response booked twi
 `cache_creation_input_tokens`, `output_tokens_details.thinking_tokens` as reasoning), told by its
 cache fields first: its `message_delta` carries `output_tokens_details` too, read as the Responses
 API with every cache read and write 0 (#1081). It sees every request the model gets, titles and compaction too
-(which no `step_finish` carries), and a provider's own `usage.cost` (OpenRouter's) wins over the
-catalog (`source: provider`). OpenCode's (`Meter.step`, `step_finish.part.cost`, which
+(which no `step_finish` carries), and a provider's own figure wins over the catalog (`source:
+provider`): `usage.cost` (OpenRouter's), else `usage.estimated_cost` (DeepInfra's, in its last,
+`choices: []` chunk, at its own rate; the keyhole's `_merged` keeps it over the finish chunk's
+null), under the same guard (never a 0 for tokens the catalog prices). Read only as `cost`, every
+DeepInfra row was booked at the catalog's, about 2x the bill, and the day cap stopped tasks at about
+half the real spend (#1165, 2026-11-24). OpenCode's (`Meter.step`, `step_finish.part.cost`, which
 `events.normalize` keeps as the step row's `cost`): with the keyhole metering, only a `reconcile`
-row when OpenCode's sum for the round passes the keyhole's and the round's earlier reconciles;
+row when OpenCode's sum for the round passes what the keyhole saw, at the same prices, and the
+round's earlier reconciles (a provider's own row counts at its catalog figure, its `metered`:
+`meter._at_catalog`, `round_kh`; compared with what was booked, OpenCode's catalog estimate topped
+every DeepInfra row, and an OpenRouter one under its catalog price, back up to the catalog's, #1165);
 without it (answers with no usage, the suite's fake), each step books its own row, OpenCode's
 cost (`source: opencode`) or the metered one (`metered`). At each round's end (`runner._spend_end`,
 after `measure_speed`) the task's sessions' exported `info.cost` (status `sessions` and `session`,
 each once; `transcript.finished_export` for old ones), which counts the title request, adds one
-`reconcile` row when it is more than the ledger holds for the task. Never less: what the keyhole saw
-is what went out, so the ledger is the higher of the two. **Never a false 0:** an OpenCode cost of
+`reconcile` row when it is more than the ledger holds for the task, a provider's own rows at their
+catalog figure (`Meter.at_catalog`, the same comparison as the steps', #1165). Never less: what the
+keyhole saw is what went out, so the ledger is the higher of the two, and a provider's own figure
+is never topped up to the catalog's. **Never a false 0:** an OpenCode cost of
 0 for tokens whose price isn't 0 is not trusted (the step keeps the metered figure, `source:
 "metered (opencode said 0)"`; an export saying 0 reconciles nothing), and an export that failed
 reconciles nothing. What isn't counted: a response cut before its usage arrived, by either view.
 Without the keyhole's view (a model `runner.needs_keyhole` starts none for: an Ollama cloud
 model, a keyless free one), OpenCode's compaction requests count only as far as its `info.cost` does. A catalog price below a backend's
-(an OpenRouter endpoint priced over its listing, without `usage.cost`) meters under.
+(an OpenRouter endpoint priced over its listing, without `usage.cost`) meters under. The day cap's
+room (`Meter.room`) prices a request's worst case at the catalog's (or the user's) prices, whatever
+the provider's own figure later says: it errs high.
 
 **Estimates or your prices** (#1135, 2026-11-23). The catalog's price can be far off a provider's
 bill: DeepInfra's flash model at $0.20/$0.60 per M where DeepInfra billed $0.098/$0.294, so every
-figure read 2x high (Anthropic's matched). DeepInfra puts no cost in `usage`. So by default nothing
-changes but the labels: every API money figure says it is an estimate, `≈$0.42` and `catalog
+figure read 2x high (Anthropic's matched). DeepInfra does put its own cost in `usage`
+(`estimated_cost`), which wb dropped until #1165 (2026-11-24): its rows are now the provider's own
+(`source: provider`, plain `$`), and only a model with no provider figure reads at the catalog's.
+For those nothing changes by default but the labels: every API money figure says it is an estimate, `≈$0.42` and `catalog
 prices`; nothing to set, nothing asked, and wb never fetches or guesses a price. Opt in: **`wb model
 price <exact id> --input X --output Y [--cache-read Z] [--cache-write W]`** (dollars per M, as the
 provider bills) writes models.json `cost` (`[{input, output, cache?: {read?, write?}}]`,
@@ -622,7 +638,7 @@ agrees and `reconcile` books no difference back. `--clear` goes back to the cata
 id not in the catalog, a plan, a free model, one `catalog_doc` can't carry (its OpenCode would
 price from elsewhere), or prices all 0 (that is `meter.is_free`: the day cap would stop counting it,
 the review's catch). The basis (`meter.basis`): `catalog` (shown `≈`), `yours` (`your prices`, no
-`≈`) or `provider` (OpenRouter's `usage.cost`, plain); a ledger row at the user's prices says
+`≈`) or `provider` (OpenRouter's `usage.cost`, DeepInfra's `usage.estimated_cost`, plain); a ledger row at the user's prices says
 `prices: "yours"` (`meter.row_basis`: `source: provider` first; none, `catalog`), any catalog one
 makes a sum an estimate, `$0` gets no `≈` (`meter.money`, `savings.money`). Status `api.prices`,
 `meter.today()`'s `basis`, results `api.prices`, `bench.paid`'s, api_totals', `spent`'s and the
@@ -5848,7 +5864,7 @@ $WB_HOME (~/.local/state/workbench)
                                  runner holding it, its task's name inside (models.api_holders); never in gpu.json
   spend-api.jsonl  .lock .checkin.lock  the API ledger (meter.py, #1019; *Spend*), one row each, every row {ts, day (local
                                  %Y-%m-%d)}: step {task, round, provider, model, usd (null: a plan or unpriced), metered,
-                                 source (keyhole|provider|opencode|metered|metered (opencode said 0)), plan?, prices? ("yours":
+                                 source (keyhole|provider (the provider's own usage.cost or estimated_cost, #1165)|opencode|metered|metered (opencode said 0)), plan?, prices? ("yours":
                                  at wb model price's, #1135), tok {in, out,
                                  cache_read, cache_write, reasoning}}; reconcile {task, round, provider, model, usd (OpenCode
                                  said more), source opencode, prices?}; checkin {task, usd_today, cap}: today's one check-in at half
@@ -6451,7 +6467,9 @@ naming its role and model (the runners are the test's: the leases taken as a run
 **The spend cap's tests** (#1019): `ApiSpend` writes a task the way `wb start` will (#1016: started on a GPU model with
 `spawn_runner` patched, task.json then naming the API model) and runs `runner.drive` in the test's process, the keyhole `drive`
 starts (#1015) recording each `close` told a reason (`record_closes`); `ApiSpendKeyhole` drives the keyhole's `close(reason)`, `room` and one usage per
-response against `_KeyholeTest`'s upstream, and its `test_real_opencode_*` runs the real OpenCode through a closed
+response against `_KeyholeTest`'s upstream (DeepInfra's own stream shape too, from a real request on
+2026-11-24: `usage: null` until a last `choices: []` chunk with `estimated_cost`, its raw `pieces`
+into a real `Meter`, then OpenCode's catalog figure booking no top-up, #1165), and its `test_real_opencode_*` runs the real OpenCode through a closed
 keyhole (the 400, not retried). The room's stop under the cap is driven whole too: the fake's `http` scenario's request
 through the keyhole, refused for its input alone (a model with no output price, `request_floor` 0), and the notice's
 lead says too near with the room's `worst` (#1150's review).

@@ -4,6 +4,8 @@ from statistics import median
 
 from . import context, gitops, meter, skills, spend, stats, store
 
+PROVIDER = meter.PROVIDER  # _api_usage's local `meter` shadows the module there
+
 
 def step(task: store.Task, landed: bool, since: str = "HEAD", gaps=None) -> dict:
     """The step closing now (committed by wb next or accept, or dropped): its size and how it
@@ -302,7 +304,8 @@ def api_usage(task: store.Task) -> dict | None:
     keyhole's), when known, and `served_model`, the model the response named when it isn't the
     one asked for (`served_model`). `source`: "opencode" (OpenCode's own cost, from every session's
     export), "mixed" (the sessions that exported, the rest filled from the meter), "metered"
-    (the runner's meter when it counted more than every export: the day cap's figure, #1019; else,
+    (the runner's meter when every row it booked is the provider's own figure, #1165, or when it
+    counted more than every export: the day cap's figure, #1019; else,
     with no full export, the runner's meter or the step events' cost: a floor, both miss
     OpenCode's title and compaction requests), "plan" (a quota: no dollars; the meter's status
     `api.plan` too), "none" (nothing sent or billed: $0), "unknown" (no price anywhere),
@@ -356,6 +359,11 @@ def _api_usage(task: store.Task) -> dict | None:
                                  and booked["plan"] else None)) is not None:
         return {**out, "source": "plan", "plan": plan}
     price = catalog_price(model)
+    # every row the meter booked is the provider's own figure (DeepInfra's estimated_cost,
+    # OpenRouter's cost): that, over OpenCode's export at catalog prices, which ran about 2x
+    # DeepInfra's bill in every closed task's `paid` (#1165, 2026-11-24)
+    if live_basis(st) == PROVIDER and (live := metered(st)) is not None:
+        return {**out, "cost": round(live, 6), "source": "metered"}
     cur = st.get("session")
     sids = list(dict.fromkeys([*(s for s in st.get("sessions") or [] if s), *([cur] if cur else [])]))
     costs = []
