@@ -7186,7 +7186,7 @@ class AgentContext(Base):
         loaded = layer["instructions"]
         self.assertEqual(loaded[0], str(task.worktree / "AGENTS.md"))  # first, as OpenCode put it (#994)
         self.assertEqual(loaded[1], str(context.rules_dir(task) / "HANDBOOK.md"))  # a copy
-        self.assertEqual(Path(loaded[1]).read_text(), context.HANDBOOK.read_text())
+        self.assertEqual(Path(loaded[1]).read_text(), context.HANDBOOK.read_text() + context.spec_note(task))
         mine = context.rules_dir(task) / "AGENTS.md"   # a copy: the config directory is unreadable
         self.assertEqual(loaded[2], str(mine))
         self.assertEqual(mine.read_text(), "user rules\n")
@@ -8463,6 +8463,34 @@ class RealOpenCodeRun(Base):
         self.assertEqual(runner.context_state(task)["compactions"], 1)
         self.assertEqual(runner.fresh_reason(task), runner.COMPACTED)
         self.assertIn("OpenCode compacted", run_wb("watch", "t-run", "--once", "--no-color"))
+
+    def test_after_a_real_compaction_the_agent_still_reads_where_its_spec_is(self):
+        # #1071 (checked on OpenCode 2.3.2): a compaction leaves [system, checkpoint summary], the
+        # spec gone from every later request, and the handbook says to trust no summary. The
+        # handbook copy names the spec's file, and the system prompt keeps it
+        task, st = self.answered([WRITE_42])
+        spec = str(store.round_prompt(task, 1))
+        self.server.kill()
+        self.server.wait()
+        self.serve([], read=31_000)                                # every request fills the window
+        env = {**runner.opencode_env(task), "PWD": str(task.worktree)}
+        runner.write_config_layer(task)
+        before = len(self.requests.read_text().splitlines())
+        for text in ("Go on.", "Go on again."):                    # OpenCode compacts before the second
+            subprocess.run(lane.wrap(context.writable(task), [
+                "opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                "--session", st["session"], text]), cwd=task.worktree, env=env,
+                capture_output=True, timeout=180)
+        self.assertEqual(runner.context_state(task)["compactions"], 1)
+        later = [json.loads(x) for x in self.requests.read_text().splitlines()[before:]]
+        summarised = [r for r in later if "conversation-checkpoint" in json.dumps(r.get("messages"))]
+        self.assertTrue(summarised, [json.dumps(r)[:300] for r in later])
+        for r in summarised:
+            system = json.dumps([m for m in r["messages"] if m.get("role") == "system"])
+            self.assertIn(spec, system)
+            self.assertIn("If your context holds only a summary of it", system)
+            self.assertNotIn("Write the answer to answer.txt", json.dumps(  # the spec itself: gone
+                [m for m in r["messages"] if m.get("role") != "system"]))
 
     def test_no_compaction_summary_is_written_ahead_of_the_handover_point(self):
         # #661 (checked on OpenCode 2.3.2): its background compaction forked a full-context
@@ -26868,7 +26896,8 @@ class ProbeExperiment(Base):
         task = store.Task("t-default")
         self.assertEqual(task.spec["experiments"], {"probe": False})
         self.assertEqual(self.probe_rules(task), [])
-        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(), context.HANDBOOK.read_text())
+        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(),
+                         context.HANDBOOK.read_text() + context.spec_note(task))
         self.assertNotIn("probe", task.round_dir(1).joinpath("prompt.md").read_text())
         self.assertNotIn("PROBE_MAX_TOKENS", runner.agent_env(task))
 
@@ -26910,7 +26939,8 @@ class ProbeExperiment(Base):
         task = store.Task("t-noprobe")
         self.assertEqual(task.spec["experiments"], {"probe": False})
         self.assertEqual(self.probe_rules(task), [])
-        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(), context.HANDBOOK.read_text())
+        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(),
+                         context.HANDBOOK.read_text() + context.spec_note(task))
 
     def test_turned_off_it_changes_only_the_tasks_started_after(self):
         self.fake_probe()
@@ -27031,7 +27061,8 @@ class ProbeOn(Base):
         task = store.Task("t-off")
         self.assertEqual(task.spec["experiments"], {"probe": False})
         self.assertFalse({k for k in task.spec if k.startswith("probe_")})
-        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_bytes(), context.HANDBOOK.read_bytes())
+        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(),
+                         context.HANDBOOK.read_text() + context.spec_note(task))
         prompt = task.round_dir(1).joinpath("prompt.md").read_text()
         self.assertEqual(prompt, self.spec.read_text().rstrip() + cli.PROTOCOL.format(
             branch=task.spec["branch"], test_line=cli.test_line(None), budget=task.spec["ask_budget"],
@@ -27356,8 +27387,8 @@ class ProbeWhereItHelps(Base):
         same = lambda text: text.replace("t-cant", "t-none")  # noqa: E731: the names, equally long
         prompt = lambda t: t.round_dir(1).joinpath("prompt.md").read_text()  # noqa: E731
         self.assertEqual(same(prompt(cant)), prompt(plain))                          # the prompt
-        self.assertEqual((context.rules_dir(cant) / "HANDBOOK.md").read_bytes(),    # the handbook
-                         (context.rules_dir(plain) / "HANDBOOK.md").read_bytes())
+        self.assertEqual(same((context.rules_dir(cant) / "HANDBOOK.md").read_text()),  # the handbook
+                         (context.rules_dir(plain) / "HANDBOOK.md").read_text())
         self.assertEqual(same(json.dumps(context.shell_rules(cant))), json.dumps(context.shell_rules(plain)))
         self.assertEqual(same(runner.write_config_layer(cant).read_text()),         # the layer, its cap
                          runner.write_config_layer(plain).read_text())
@@ -31503,7 +31534,8 @@ class Writing(Base):
             self.start(name, "ok", "--role", role)
             wait_phase(name, {"review"})
             task = store.Task(name)
-            self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_bytes(), handbook.read_bytes())
+            self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(),
+                             handbook.read_text() + context.spec_note(task))
             self.assertEqual(task.round_dir(1).joinpath("prompt.md").read_text(),
                              self.spec.read_text().rstrip() + self.protocol(task, protocol))
         self.assertEqual(store.Task("t-w").spec["role"], "writing")
@@ -31597,7 +31629,8 @@ class Writing(Base):
         task = store.Task("t-probe")
         self.assertEqual(task.spec["experiments"], {"probe": False})
         self.assertEqual(task.spec["experiments_off"], {"probe": "a writing task"})
-        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_bytes(), context.WRITING.read_bytes())
+        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(),
+                         context.WRITING.read_text() + context.spec_note(task))
         self.assertNotIn(context.EXPERIMENT_PROTOCOL["probe"], task.round_dir(1).joinpath("prompt.md").read_text())
         self.assertIn("probe: off for this task (a writing task)", run_wb("status", "t-probe"))
         self.assertEqual(store.Task("t-probe-c").spec["experiments"], {"probe": "on"})  # coding: as before

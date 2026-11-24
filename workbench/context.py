@@ -3014,6 +3014,17 @@ def handbook_for(task: store.Task) -> Path:
     return WRITING if task.spec.get("role") == "writing" else HANDBOOK
 
 
+def spec_note(task: store.Task) -> str:
+    """The handbook copy's last section: where the step's spec is (store.round_prompt of its
+    first round, readable in the lane: the rounds' prompts). OpenCode's mid-round compaction keeps
+    the system prompt and only a summary of the spec, and the handbook tells the agent to trust
+    no summary: a session that only read never got the spec back, and the agent asked Claude for
+    it or built from the summary (#1071, 2026-11-23). Rewritten each round, for the step's."""
+    path = store.round_prompt(task, task.status.get("step_round") or 1)
+    return (f"\n## Your task\nIn full, it is Claude's spec in `{path}`. If your context holds only "
+            f"a summary of it (OpenCode compacted your session), read that file again first.\n")
+
+
 def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     """(files OpenCode should load, nested CLAUDE.md paths the agent reads when it works there).
     Before the runner has checked the worktree out (wb start's fixed_prompt, #529), the user's
@@ -3023,7 +3034,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     # the agent's own copy: OpenCode shows each instruction file's path, and a path into the
     # workbench repo once led a freshly started agent to go looking there for plans
     handbook = rules_dir(task) / "HANDBOOK.md"
-    handbook.write_text(handbook_for(task).read_text() + "".join(
+    handbook.write_text(handbook_for(task).read_text() + spec_note(task) + "".join(
         note for name, note in EXPERIMENT_NOTES.items() if experiment(task, name)))
     roots: list[tuple[Path, Path, bool]] = []  # (what OpenCode loads, read from, the user's own)
     # the user's AGENTS.md, never Claude's CLAUDE.md or rules (#1061, USER_AGENTS_MD); a copy: the

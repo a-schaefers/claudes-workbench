@@ -931,7 +931,7 @@ the catalog's own numbers would compact at 1M and ask for 256K out (OpenCode cap
 `min(limit.output, 256000)`; it asks less as the window's room runs out). `rules_env` restates
 them, as it does a GPU model's. So the buffer is 131072 + 32768 − 131072 + 4096 = 36864, the
 compaction point 71.9% (about 94K tokens, the backstop for a session that only reads, which never
-hands over mid-round), `fresh_ceiling` 66.9% (`fresh_at` 0.4–0.6 allowed, 0.7 and 0.8 not), and
+hands over mid-round: the handbook copy's `## Your task` names its spec's file, #1071), `fresh_ceiling` 66.9% (`fresh_at` 0.4–0.6 allowed, 0.7 and 0.8 not), and
 `handover_warning` says nothing. The real-OpenCode check: `ApiSizing`'s `test_real_opencode_*`,
 which sees 32768 out and a compaction at 100K tokens only with the pins. The header wait: an API
 provider's `headerTimeout` is `runner.API_HEADER_S` (600 s) instead of `false`, since an API reads
@@ -1132,7 +1132,11 @@ An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's w
 - `agent/HANDBOOK.md`, copied fresh each round to `rules/<task>/HANDBOOK.md` (a path into the
   workbench repo once sent an agent looking for plans). Every prompt carries it: keep it short
   (about 1.3K tokens). A writing task (task.json `role: writing`) gets `agent/WRITING.md` there
-  instead, under the same name (`context.handbook_for`, *The writing role*);
+  instead, under the same name (`context.handbook_for`, *The writing role*). The copy ends with
+  `context.spec_note`, `## Your task`: the step's spec file (`store.round_prompt` of `step_round`,
+  readable in the lane) to read again when the context holds only a summary: OpenCode's mid-round
+  compaction keeps the system prompt and drops the spec, which a session that only read never got
+  back (#1071); then any experiment's note;
 - the user's own file for agents, `~/.config/workbench/AGENTS.md` (`context.USER_AGENTS_MD`,
   `user_agents_md`), when it exists: copied to `rules/<task>/AGENTS.md` (the lane can't read the
   config directory), as bytes (#784), its imports followed, counted in `fixed_prompt` as
@@ -4355,7 +4359,7 @@ Off, it isn't run at all (a non-UTF-8 `--help` failed a start, #518; read with `
 On:
 - shell rules allow only `context.PROBE_READS` (`symbols`, `extract`, `search`, `grep`, `query`) and
   refuse `--lsp`: `probe *` let the agent start `lsp` and change `config` (2026-11-21);
-- the handbook copy ends with `EXPERIMENT_NOTES["probe"]` (`agent/HANDBOOK.md` unchanged): extract
+- the handbook copy ends with `EXPERIMENT_NOTES["probe"]`, after `spec_note` (`agent/HANDBOOK.md` unchanged): extract
   from `PROBE_FILE_LINES` (1500) lines, `--allow-tests`, search `--dry-run -o plain`, never re-spell
   a search, `grep -n` after two misses, never pipe into `head` (0.6.0 aborts on EPIPE), what "File
   too large" means, how to page a long `read`;
