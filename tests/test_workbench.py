@@ -33991,15 +33991,18 @@ class Writing(Base):
 
     def test_a_writing_task_with_a_check_runs_it_on_the_base_and_sends_a_failure_back(self):
         from workbench import bench
-        (self.repo / "Makefile").write_text("docs:\n\tgrep -qx 42 answer.txt\n")
-        subprocess.run(["git", "-C", str(self.repo), "add", "Makefile"], check=True)
+        # a script in the repo, not `make docs`: WSL's Debian has no make, and its base check's
+        # `make: not found` (exit 127) rightly skipped the auto-fix this test is about (nightly
+        # run 45362198509, 2026-11-24)
+        (self.repo / "check-docs.sh").write_text("grep -qx 42 answer.txt\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "check-docs.sh"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "docs check"], check=True)
-        self.start("t-check", "fix", "--role", "writing", "--test", "make docs")
+        self.start("t-check", "fix", "--role", "writing", "--test", "sh check-docs.sh")
         st = wait_phase("t-check", {"review"})
         task = store.Task("t-check")
         prompt = task.round_dir(1).joinpath("prompt.md").read_text()
-        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL, "make docs")))
-        self.assertEqual(bench.TEST_LINE.search(prompt).group(1), "make docs")
+        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL, "sh check-docs.sh")))
+        self.assertEqual(bench.TEST_LINE.search(prompt).group(1), "sh check-docs.sh")
         self.assertIs(st["base_check"]["ok"], False)                     # run on the base
         self.assertEqual((st["round"], st["auto_fixes"]), (2, 1))         # 41 sent back as auto-fix
         self.assertTrue(st["tests"]["ok"])
