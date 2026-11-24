@@ -496,6 +496,30 @@ class Lifecycle(Base):
             asked=runner.ASKED.format(lessons.FEEDBACK_HEAD + " Make exactly these changes:\n\n" + fb),
             last="> x")), [])
 
+    def test_feedback_added_to_a_resume_round_never_sent_is_gathered_once(self):
+        # #1180's review (2026-11-24): round_feedback reads a round whose prompt isn't a feedback
+        # (a resume's, a handover's) only for what wb feedback added to it (notes.md); no test
+        # read that branch, and without it this review item was never gathered at all
+        from workbench import lessons
+        name = "t-lresunsent"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        task.set_status(phase="stuck")
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("resume", name)
+        self.assertTrue(store.round_prompt(task, 2).read_text().startswith(runner.RESUME[:60]))
+        with mock.patch.object(runner, "_down", return_value=True), \
+                mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+            runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status["infra"], task.status["round"]), ("failed", "model", 2))
+        self.assertFalse(runner.reached(task, 2))
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", name, "--text", "1. Use tabs for the indent.")
+        self.assertEqual(task.status["round"], 2)
+        self.assertEqual([(x["round"], x["text"]) for x in lessons.gather(task) if x["kind"] == "feedback"],
+                         [(2, "Use tabs for the indent.")])
+
     def test_a_round_start_records_the_typical_length_and_how_many_tasks_back_it(self):
         # #1048: the pane sets a task's active work against its typical length (`~6m left`) with
         # no read of results.jsonl of its own, and only when enough timed tasks back it
