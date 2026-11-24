@@ -1370,13 +1370,13 @@ by prefix; rewording one silently changes those:
 | `Lesson:` lines in the agent's summary | the protocol asks for them | `lessons` |
 | `Review feedback from the senior reviewer` (`lessons.FEEDBACK_HEAD`) | `wb feedback` | `lessons` (feedback items), `round_asks` (stops there, but not at a round marked `resumed`, #1169), `transcript` (label) |
 | `The acceptance tests fail` | the auto-fix round | `transcript` |
-| `Before Claude reviews this` (`SELF_REVIEW`) | the self-review round | `transcript` |
+| `Before Claude reviews this` (`SELF_REVIEW`) | the self-review round | `transcript`, the fake OpenCode (`selfreads`) |
 | `You are picking this task up in a fresh session` | `handoff_prompt` | `transcript`, the fake OpenCode (`fill`, `compact`, `compactfail`) |
 | `Step N of this task is done and committed` | `wb next` | `transcript` |
 | `INTERRUPT_HEAD`, `NOTE_HEAD` | `_steer_round` | `transcript` |
 | `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's) |
 | `Claude picked these skills`, `Claude handed you more skills`, `Claude took back:` | `skills_note` | `transcript.SKILLS_HEADS` (skips the note to label what follows) |
-| `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`), `lessons.feedback` (none of their copied feedback) |
+| `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`), `lessons.feedback` (none of their copied feedback), the fake OpenCode (`selfreads`, `FAKE_SELF_FILL`) |
 | `agent's summary:` | `summary_text` | `lessons` |
 | `--title "wb: <task>"` | `run_round` | `transcript.find_session` |
 | `Outline of <file> (from probe symbols):` (`context.OUTLINE_HEAD`), `… N more: `+"`probe symbols <file>`"+` (`OUTLINE_MORE`) | `runner.add_outline`, after round 1's protocol (probe on, *Experiments*) | nothing by prefix: being after the protocol, `transcript`'s fold and `bench._spec_of` leave it out of the spec (a replay makes its own) |
