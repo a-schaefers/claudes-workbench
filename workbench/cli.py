@@ -1088,7 +1088,9 @@ def local_only_refusal(repo: Path, sub: str | None, role: str, model: str | None
 def _local_only_now(task: store.Task) -> str:
     """For an API task whose repo became local-only after it started, the line wb next, feedback
     and resume refuse it with (takeover or discard: its model is fixed per task), else ''."""
-    if privacy.is_api_task(task) and privacy.local_only(task.spec["repo"], task.spec.get("subdir")):
+    # runner.api_task: a task from before #1016 on an API model has no `via` until its runner
+    # writes one (runner.settle_via), and its first round after the upgrade went too (#1111)
+    if runner.api_task(task) and privacy.local_only(task.spec["repo"], task.spec.get("subdir")):
         return privacy.since_start_line(task)
     return ""
 

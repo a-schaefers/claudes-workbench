@@ -29143,6 +29143,37 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(said["gpu-q"][:3], ("waiting for the GPU", "Waiting for the GPU…", ["■ waiting for the GPU"]))
         self.assertIn("waiting for the GPU", said["gpu-q"][3])
 
+    def test_a_task_from_before_roles_on_an_api_model_is_recorded_and_checked_as_the_api_task_it_runs_as(self):
+        # #1111: a 1.91 task (no `via`) on an opted-in Ollama `:cloud` model ran as an API task
+        # (provider slots, the meter) while results, privacy's local_only and the lane's token
+        # hiding read it as GPU by `via` alone. Its runner writes `via` once; a GPU one gets its own
+        from workbench import privacy, results
+        self.start("old-gpu", "ok")
+        wait_phase("old-gpu", {"review"})
+        self.start_api("old-api", "ok", spawn=False)
+        for name in ("old-gpu", "old-api"):
+            t = store.Task(name)
+            store.write_json(t.dir / "task.json", {k: v for k, v in t.spec.items()
+                                                   if k not in ("via", "role", "provider")})
+        old = store.Task("old-api")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"local_only": True}}}))
+        self.assertTrue(cli._local_only_now(old))            # refused before its runner writes `via`
+        Path(os.environ["WB_COMMANDS"]).write_text("{}")
+        for name in ("old-gpu", "old-api"):
+            with mock.patch.object(runner, "_drive", lambda *a: None):
+                self.drive_here(name)
+        old = store.Task("old-api")
+        self.assertEqual((old.spec["via"], old.spec["provider"]), ("api", FLASH.split("/")[0]))
+        self.assertEqual((results.task_kind(old.spec), privacy.is_api_task(old), runner.api_task(old)),
+                         ("api", True, True))
+        self.assertEqual(context.api_hidden(old), context.api_hidden_paths())
+        gpu = store.Task("old-gpu")
+        self.assertEqual((gpu.spec["via"], "provider" in gpu.spec, results.task_kind(gpu.spec)),
+                         ("gpu", False, "gpu"))
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"local_only": True}}}))
+        self.assertTrue(cli._local_only_now(old))
+        self.assertEqual(cli._local_only_now(gpu), "")
+
     def test_a_runners_first_line_says_what_it_waits_for_before_the_model_is_looked_up(self):
         # the review of #1015 (2026-11-23): `last` came only after models.resolve, which may read
         # the catalog, and a GPU task sent back by wb feedback showed "Claude reviews next" as

@@ -1283,6 +1283,19 @@ def api_task(task: store.Task) -> bool:
         return False
 
 
+def settle_via(task: store.Task, api: bool) -> None:
+    """task.json `via` (and an API model's `provider`) written once, from the model drive resolved,
+    for a task from before #1016 that has none. A 1.91 task on an opted-in Ollama `:cloud` model ran
+    as an API task (lease, meter, keyhole) while results, privacy's local_only and the lane's
+    token hiding read it as GPU by `via` alone (#1111, 2026-11-23): now every reader agrees."""
+    if task.spec.get("via") in ("gpu", "api"):
+        return
+    spec = {**task.spec, "via": "api" if api else "gpu"}
+    if api:
+        spec.setdefault("provider", provider_of(task))
+    store.write_json(task.dir / "task.json", spec)
+
+
 def provider_of(task: store.Task) -> str:
     """The task's provider id: task.json `provider` (#1016), else its model id before the first /."""
     return str(task.spec.get("provider") or (task.spec.get("model") or "").partition("/")[0])
@@ -3947,6 +3960,7 @@ def drive(task: store.Task) -> None:
             return _left_catalog(task)
         return _load_failed(task, e)
     api = m.kind == "api"
+    settle_via(task, api)
     # an API task waits for no GPU (#1015): its first line says so
     task.set_status(last="starting" if api else "waiting for the GPU")
     CURRENT["api"] = api  # no GPU power to sample, no keep-alive to renew (run_round)

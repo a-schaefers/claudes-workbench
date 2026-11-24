@@ -161,7 +161,9 @@ never tries its stored API model; an API role whose model can't run exits 3 with
 the role on the GPU (wb route trivial gpu)`, or `… set Agents to Both or GPU (wb route all
 both|gpu)` under Agents API) and never the GPU; Agents on API with a role that has no API model
 exits 3 too (`routes.no_api_model`). The choice is fixed in task.json (`via`, `role`, an API
-model's `provider`, `thinking`, `said`; a task from before #1016 has none, and reads as GPU): feedback, next and resume never resolve again, so a role
+model's `provider`, `thinking`, `said`; a task from before #1016 has none, and reads as GPU until its runner writes
+`via` (and an API model's `provider`) once from the model it resolves, `runner.settle_via`, #1111:
+a 1.91 task on an opted-in `:cloud` model ran as API yet was recorded as GPU): feedback, next and resume never resolve again, so a role
 changed mid-task applies to the next new task only. **A model gone from the catalog mid-task**:
 the runner fails an API task whose `models.resolve` raises (`runner._left_catalog`, `infra`
 "model", before any round) with `runner.left_catalog`'s line, `task <t>: <id> left OpenCode's
@@ -507,7 +509,7 @@ limit (robustness M1). Now every API task is metered live into one ledger, and o
 every API provider together: routes.json `day_usd` (the user's, #1014; read by `meter.cap`
 through `routes.read()`, `$WB_ROUTES`, again only when the file's mtime or size changes), for the
 local calendar day, reset at local midnight. A GPU task writes nothing here and costs nothing: `meter.for_task` is None for it (a
-task.json without `via` reads as GPU, as every task before #1016 does; drive hands it the model,
+task.json without `via` reads as GPU, as every task before #1016 does, until `runner.settle_via` writes one; drive hands it the model,
 else the cached catalog's, `models.lookup(cached=True)`).
 
 **The price** (`meter.price(m)`): the catalog's `cost` from hosted.json (`Model.config`: a list of
@@ -3576,7 +3578,7 @@ asks before `wb start` runs, from `wb route --dry-run --start <its args>` (`cli.
 `--repo` (else the command's cwd) and `--local-only`, and exits 3 with `cli.local_only_refusal`'s line in
 place of a dialog line, so the user is never asked to approve a start that would be refused. A linked worktree of a local-only repo is that repo
 (the git-dir match). `wb next`, `wb feedback` and `wb resume` on an API task whose repo became local-only since it started
-exit 3 (`cli._local_only_since`, `_local_only_now`): `this repo is local-only now; the task's model is API (<provider>):
+exit 3 (`cli._local_only_since`, `_local_only_now`, by `runner.api_task`: a task with no `via` by its model's kind, #1111): `this repo is local-only now; the task's model is API (<provider>):
 wb takeover <t> or wb discard <t>` (the model is fixed per task); `wb resume --all` prints that line for such a task and
 goes on with the rest, as for a worktree problem. `wb route all api` is global and reads no repo: the check is per start.
 Only the user lifts one: the mod's tool.call hook refuses Claude's Edit, MultiEdit or Write of commands.json
@@ -5562,7 +5564,7 @@ mod's `absolutePath` does the same for `WB_HOME`, `CLAUDE_CONFIG_DIR`, `WB_SAVIN
 the directory rule adopts the task), `claude_start` (`models._started`, against a recycled pid), `claude_machine` (a process on another
 machine is never gone here, `cli._gone`, nor checked by the mod's `noteClaude`: two machines adopted each other's tasks,
 #922), `base` (full sha), `base_ref`, `base_branch` (where `--merge` lands: `HEAD`'s branch, or `--base` naming a local one; null on a detached HEAD, tag or commit),
-`branch`, `model`, `model_label`, `opencode_model` (`<id>#<variant>` for an API task's thinking, `runner.with_thinking`), `weights_id` (`models.identity`), `route` (the router's why; an API task's routing line), `via` (`gpu`|`api`) and `role` (#1016, always; `writing`: *The writing role*; a task from before it has neither, and reads as GPU),
+`branch`, `model`, `model_label`, `opencode_model` (`<id>#<variant>` for an API task's thinking, `runner.with_thinking`), `weights_id` (`models.identity`), `route` (the router's why; an API task's routing line), `via` (`gpu`|`api`) and `role` (#1016, always; `writing`: *The writing role*; a task from before it has neither, and reads as GPU until its next runner writes `via` from its model, `runner.settle_via`, #1111),
 `provider`, `provider_name` (the catalog's), `thinking` (`off`|`on`, the role's, default off), `said` (the role's `said`, or `asked for[, approved in the dialog]` for a `--model`), and `said_ts` (the role's `ts`) (API only, fixed at start as `model` is), `thinking_shown` (what it does: `thinking off`, `thinking at its lowest effort (it can't turn off)`, `thinking as the model's default (it lists no lower setting)`…), `thinking_off` (`wb-off`'s `{settings}` or `{body}`, #1018), `size`, `stack`, `trial`, `backlog`,
 `group` (`--group`: the tasks one request fanned out to, #1048; missing: no group),
 `bench` (`{case, run, label}`), `test_cmd`, `no_base_check`, `unload_for_tests`, `sign` (false: `--no-sign`), `subdir` (a monorepo package), `setup`,
