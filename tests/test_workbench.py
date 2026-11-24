@@ -34636,13 +34636,15 @@ class ApiStats(Base):
     def test_the_row_never_records_less_than_the_meter_the_day_cap_and_the_round_report_counted(self):
         # wave 2's review: every session exported at $0.30 (OpenCode's estimate) while the keyhole's
         # meter booked $0.50 (the provider's own usage.cost): the ledger and the round report said
-        # $0.50, the results row $0.30
+        # $0.50, the results row $0.30. The catalog prices the same tokens at OpenCode's $0.30, as
+        # OpenCode's estimate is the catalog's (#1165: the export tops up only what the meter, at
+        # catalog prices, didn't see)
         from workbench import meter, models, results
         os.environ["FAKE_COST"] = "0.30"
         t = self.api_task("t-or", {"session": "ses_one"})
         m = models.Model(id="deepseek/deepseek-flash", provider="deepseek", name="deepseek-flash",
                          base_url="http://127.0.0.1:9/v1", engine="api", label="x", kind="api",
-                         config={"cost": [{"input": 0.2, "output": 0.6}]})
+                         config={"cost": [{"input": 290, "output": 1000}]})
         meter.Meter(t, m).on_usage({"prompt_tokens": 1000, "completion_tokens": 10, "cost": 0.50})
         t = store.Task("t-or")
         self.assertEqual((meter.task_total("t-or"), results.spend_so_far(t)), (0.5, 0.5))
