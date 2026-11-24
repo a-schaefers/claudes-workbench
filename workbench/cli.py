@@ -4180,8 +4180,9 @@ def _set_on(ts) -> str:
         return ""
 
 
-def _held(key: str) -> str:
-    """A provider's key source as wb models says it (Model.key, #1013)."""
+def _key_held(key: str) -> str:
+    """A provider's key source as wb models says it (Model.key, #1013). Not ``_held``:
+    that name is discard's, and a second def of it replaced the first (#1090, 2026-11-23)."""
     if key == "stored":
         return "stored"
     if key == "ollama":
@@ -4243,7 +4244,7 @@ def _api_section(gpu: bool) -> tuple[list[str], bool]:
                 lines.append(f"  {role:12} gpu " + (
                     ("(the router's pick above)" if gpu else "(no local model: none can run)")
                     if pick == "auto" else pick) + (f" · API kept: {r['api']}" if r.get("api") else "") + when)
-    lines.append("  keys: " + (", ".join(f"{pid} ({_held(k)})" for pid, k in keys.items())
+    lines.append("  keys: " + (", ".join(f"{pid} ({_key_held(k)})" for pid, k in keys.items())
                                or "none: /connect in OpenCode stores one"))
     lines.append(f"  {catalog}")
     if listed:

@@ -1,6 +1,7 @@
 """End-to-end tests: real git, real runner processes, a fake opencode. Run: python3 -m unittest"""
 import ast
 import base64
+import collections
 import contextlib
 import dataclasses
 import errno
@@ -13903,6 +13904,28 @@ class Cleanup(Base):
         self.assertIn("1 merged branch(es)", run_wb("gc"))
         self.assertNotEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-out").returncode, 0)
         self.assertEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-moved").returncode, 0)
+
+    def test_discard_keeps_a_branch_another_worktree_has_out_and_says_where(self):
+        # #1090 (audit 1 of 2.0): wb models' key helper was a second def _held, replacing
+        # discard's, so a branch discard couldn't delete crashed it with a TypeError mid-way
+        self.start("t-held", "ok")
+        wait_phase("t-held", {"review"})
+        other = Path(self.tmp.name) / "other"
+        self.assertEqual(self.git("worktree", "add", "-f", "-q", str(other),
+                                  "delegate/t-held").returncode, 0)
+        out = run_wb("discard", "t-held", "--reason", "x")
+        self.assertIn(f"kept: it is checked out in {other}", out)
+        self.assertEqual(store.Task("t-held").status["phase"], "discarded")
+        self.assertEqual(self.git("rev-parse", "--verify", "-q",
+                                  "refs/heads/delegate/t-held").returncode, 0)
+
+    def test_no_two_top_level_definitions_in_a_module_share_a_name(self):
+        # #1090: the later def wins at import, silently, and every call to the earlier one breaks
+        for path in sorted((ROOT / "workbench").rglob("*.py")):
+            seen = collections.Counter(
+                n.name for n in ast.parse(path.read_text()).body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+            self.assertEqual([k for k, v in seen.items() if v > 1], [], path)
 
     def test_old_closed_tasks_are_archived_and_still_found(self):
         # every wb wait wake, wb events minute and wb start read all 101 tasks' files
