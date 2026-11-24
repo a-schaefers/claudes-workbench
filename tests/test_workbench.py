@@ -351,6 +351,74 @@ class Lifecycle(Base):
         st = store.Task("t-rfirst").status
         self.assertEqual((st["phase"], st["round"], st["round_for"]), ("queued", 1, "resume"))
 
+    def test_feedback_after_a_stop_before_the_round_began_still_sends_that_rounds_prompt(self):
+        # #1180 (the 2.0 bar loop, round 2, 2026-11-24): wb next's step, or a review's feedback,
+        # failed before it reached the agent (the GPU server down); the notice named no next step,
+        # and wb feedback "carry on" wrote round 3 from its text alone: the agent was never told
+        # the step, and a round and a review went on "files changed: (none)"
+        prompts = Path(self.tmp.name) / "prompts.jsonl"
+        os.environ["FAKE_PROMPTS"] = str(prompts)
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Step two: write 43 to second.txt.\n")
+        for name, then, want, step_round, for_ in (
+                ("t-unext", ("next", "--spec", str(step2), "-m", "feat: step one"),
+                 "Step two: write 43 to second.txt.", 2, "next"),
+                ("t-ufb", ("feedback", "--text", "1. Rename x to answer."),
+                 "1. Rename x to answer.", 1, "feedback")):
+            with self.subTest(name=name):
+                self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+                wait_phase(name, {"review"})
+                task = store.Task(name)
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb(then[0], name, *then[1:])
+                with mock.patch.object(runner, "_down", return_value=True), \
+                        mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+                    runner.drive(task)
+                st = task.status
+                self.assertEqual((st["phase"], st["infra"], st["round"]), ("failed", "model", 2))
+                note = [r for r in store.notices() if r["task"] == name][-1]
+                self.assertIn(f'round 2 never reached the agent: once the model can run, wb feedback '
+                              f'{name} --text "carry on" sends its prompt', note["text"])
+                reviews = st.get("reviews", 0)
+                with mock.patch.object(cli, "spawn_runner"):
+                    out = run_wb("feedback", name, "--text", "carry on")
+                self.assertIn("after round 2's own prompt, which never reached the agent (model), "
+                              "so no review round is counted", out)
+                st = task.status
+                self.assertEqual((st["round"], st["reviews"], st.get("step_round") or 1, st["round_for"]),
+                                 (2, reviews, step_round, for_))
+                runner.drive(task)
+                self.assertEqual(task.status["phase"], "review", task.status.get("last"))
+                sent = json.loads(prompts.read_text().splitlines()[-1])
+                self.assertIn(want, sent)                          # the round's own, then the new text
+                self.assertIn("carry on", sent)
+                self.assertGreater(sent.index("carry on"), sent.index(want))
+                self.assertEqual(task.status["round"], 2)
+
+    def test_feedback_added_to_a_round_never_sent_is_gathered_as_lessons_apart_from_the_rounds_own(self):
+        # #1180 (its review, 2026-11-24): wb feedback's text after an unsent feedback round's own
+        # prompt was read as part of its body, and "Also write 7 to extra.txt Review feedback from
+        # the senior reviewer. Make exactly these changes, …: carry on" became a lesson of its own
+        from workbench import lessons
+        for name, then, want in (
+                ("t-lcarry", "carry on", ["Also write 7 to extra.txt"]),
+                ("t-lreal", "Keep the number on a line of its own.",
+                 ["Also write 7 to extra.txt", "Keep the number on a line of its own."])):
+            with self.subTest(name=name):
+                self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+                wait_phase(name, {"review"})
+                task = store.Task(name)
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb("feedback", name, "--text", "Also write 7 to extra.txt")
+                with mock.patch.object(runner, "_down", return_value=True), \
+                        mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+                    runner.drive(task)
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb("feedback", name, "--text", then)
+                runner.add_to_round(task, 2, runner.steer_prompt([{"text": "Mind the tabs."}], False))
+                self.assertEqual(task.status["round"], 2)
+                self.assertEqual([x["text"] for x in lessons.gather(task) if x["kind"] == "feedback"], want)
+
     def test_a_round_start_records_the_typical_length_and_how_many_tasks_back_it(self):
         # #1048: the pane sets a task's active work against its typical length (`~6m left`) with
         # no read of results.jsonl of its own, and only when enough timed tasks back it

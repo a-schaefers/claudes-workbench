@@ -93,6 +93,21 @@ def items(feedback: str) -> list[str]:
     return [x[:600] for x in out if len(x) > 8]
 
 
+def feedback(prompt: str) -> list[str]:
+    """The body of each review feedback a round's prompt holds, on its own. A round that never
+    reached the agent gets wb feedback's text after its own prompt (runner.add_to_round), and a
+    note sent before a round began goes after it too (_early_notes): read as one body from the
+    first blank line on, the second feedback's head and its "carry on" were joined to the last
+    item, a garbled lesson of its own (#1180, 2026-11-24). So each FEEDBACK_HEAD paragraph opens
+    a feedback, wherever it is (a wb next step's unsent round's too), and a folded note ends it."""
+    from .runner import NOTE_HEAD  # runner imports this module
+    out = []
+    for part in re.split(r"\n\n(?=" + re.escape(FEEDBACK_HEAD) + ")", prompt):
+        if part.startswith(FEEDBACK_HEAD):
+            out.append(part.split("\n\n", 1)[-1].split("\n\n" + NOTE_HEAD, 1)[0])
+    return out
+
+
 def gather(task: store.Task, outcome: str | None = None) -> list[dict]:
     """Every lesson candidate the task's files hold (outcome: how it closed, if it has)."""
     spec, st = task.spec, task.status
@@ -107,8 +122,7 @@ def gather(task: store.Task, outcome: str | None = None) -> list[dict]:
     for d in sorted(task.dir.glob("rounds/*"), key=lambda p: int(p.name) if p.name.isdigit() else 0):
         rnd = int(d.name) if d.name.isdigit() else 0
         prompt = store.round_prompt(task, rnd)  # a fresh session's handoff took prompt.md's place
-        if prompt.is_file() and prompt.read_text().startswith(FEEDBACK_HEAD):
-            body = prompt.read_text().split("\n\n", 1)[-1]
+        for body in feedback(prompt.read_text()) if prompt.is_file() else ():
             for item in items(body):
                 add("feedback", rnd, item)
         summary = d / "summary.md"
