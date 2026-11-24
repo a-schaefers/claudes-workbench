@@ -32699,18 +32699,19 @@ class ApiSpend(Base):
         self.cap(5)
         self.spent(4.8)
         m = runner.models.lookup(SPEND_TIER)
-        worst = m.config["options"]["max_tokens"] * 10 / 1e6        # the pinned output, the dearest tier
+        # the pinned output and a fresh session's least input (#1173), at the dearest tier
+        worst = (m.config["options"]["max_tokens"] * 10 + self.meter.FIRST_TOKENS * 2) / 1e6
         self.assertAlmostEqual(self.meter.request_floor(m), worst, places=9)
         need = -(-(self.meter.today()["usd"] + worst) * 100 // 1) / 100  # up to the cent
         line = ("trivial role: API spend today is ≈$4.80 of the $5 day cap, and one request on it can cost "
-                f"up to $0.33 (it resets at local midnight). Ask the user: a cap of at least ${need:.2f} "
+                f"up to $0.36 (it resets at local midnight). Ask the user: a cap of at least ${need:.2f} "
                 "(wb route cap <usd>), the role on the GPU (wb route trivial gpu), or tomorrow")
         self.assertEqual(self.meter.refusal(m, "trivial"), line)
         err = io.StringIO()
         with self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True):
             run_wb("start", "t-near2", "--spec", str(self.spec), "--repo", str(self.repo), "--model", SPEND_TIER)
         self.assertEqual(e.exception.code, 3)
-        self.assertIn("and one request on it can cost up to $0.33", err.getvalue())
+        self.assertIn("and one request on it can cost up to $0.36", err.getvalue())
         self.assertFalse(store.Task("t-near2").dir.exists())
         rnd = task.status["round"]
         nxt = Path(self.tmp.name) / "next.md"
@@ -32756,19 +32757,161 @@ class ApiSpend(Base):
         (notice,) = self.notices("t-near-room", "stuck")
         self.assertEqual(notice["cause"], "spend")
         self.assertIn("auto-fix didn't run: too near the day's API spend cap", notice["text"])
-        self.assertIn("a cap of at least $5.13", notice["text"])
-        self.cap(5.13)
+        # the room's 400 bytes above; before round 2, its first request's input too (#1173)
+        need = float(re.search(r"a cap of at least \$([\d.]+) ", notice["text"])[1])
+        self.assertGreaterEqual(need, 5.17)
+        self.cap(need)
         self.assertTrue(runner._go_on(task, 2, "auto-fix"))
+
+    def test_the_cap_a_near_cap_refusal_names_lets_the_rounds_first_request_through(self):
+        # #1173 (2026-11-24): #1150's look ahead (request_floor) left the next request's input out,
+        # so near the cap wb next, drive's _go_on and wb start passed, and the room refused the
+        # round's first request at once; the cap the refusal named was refused again there. The
+        # bodies are the issue's: a carried session's 120K and 80K tokens, round 1's ~16K (65 KB)
+        m = runner.models.lookup(SPEND_TIER)
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        task = self.api_task("t-cap-next", SPEND_TIER, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        # wb next on a warm session: the step's first request carries the session's 120K tokens
+        task.set_status(live_used={"session": task.status["session"], "used": 120_000})
+        self.cap(5)
+        self.spent(4.6)
+        nxt = Path(self.tmp.name) / "next.md"
+        nxt.write_text("step two\n")
+        rnd = task.status["round"]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("next", "t-cap-next", "--spec", str(nxt), "-m", "step one")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.assertFalse(task.round_dir(rnd + 1).exists())
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("next", "t-cap-next", "--spec", str(nxt), "-m", "step one")
+        spawned.assert_called_once()
+        prompt = len(task.round_dir(rnd + 1).joinpath("prompt.md").read_bytes())
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 480_000 + prompt), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+        # between rounds (_go_on): the carried session's 80K tokens
+        task.set_status(live_used={"session": task.status["session"], "used": 80_000})
+        self.cap(5)
+        self.assertFalse(runner._go_on(task, rnd + 1, "auto-fix"))
+        (notice,) = self.notices("t-cap-next", "stuck")
+        self.cap(need(notice["text"]))
+        self.assertTrue(runner._go_on(task, rnd + 1, "auto-fix"))
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 320_000 + prompt), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+        # wb start: round 1's first request, a fresh session's
+        self.cap(5)
+        self.spent(0.2)                                          # today $4.80
+        first = runner.first_tokens(prompt=self.spec.read_text())
+        self.cap(need(self.meter.refusal(m, "trivial", tokens=first)))
+        self.assertIsNone(self.meter.refusal(m, "trivial", tokens=first))
+        fresh = self.api_task("t-cap-start", SPEND_TIER)
+        self.assertGreaterEqual(self.meter.for_task(fresh, m).room({"max_tokens": 32768}, 65_000), 0)
+        self.assertIsNone(fresh.status.get("api_stop"))
+
+    def test_a_large_spec_counts_in_wb_starts_look_ahead_so_the_cap_it_names_lets_round_1_through(self):
+        # #1173's review (2026-11-24): a fresh session's least (FIRST_TOKENS, 65,536 bytes) covers a
+        # small spec, so only a large one tells whether wb start, and the dialog's dry run before
+        # it, count round 1's prompt: left out, the cap they named was short of what the room asks
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        big = Path(self.tmp.name) / "big-spec.md"
+        big.write_text("Make the parser take every case below.\n" + "- a case of the parser's, one line\n" * 2300)
+        size = len(big.read_bytes())
+        self.assertGreater(size, 78_000)
+        m = runner.models.lookup(SPEND_TIER)
+        self.cap(5)
+        self.spent(4.8)
+        start = ("start", "t-big", "--spec", str(big), "--repo", str(self.repo), "--model", SPEND_TIER,
+                 "--no-base-check")
+        # the dialog's dry run (_route_start) first, then wb start itself
+        for args in (("route", "--dry-run", "--json", "--start", *start[1:]), start):
+            self.cap(5)
+            err = io.StringIO()
+            with (self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True),
+                  mock.patch.object(cli, "spawn_runner") as spawned):
+                run_wb(*args)
+            self.assertEqual(e.exception.code, 3, args[0])
+            self.assertIn("a cap of at least", err.getvalue())
+            spawned.assert_not_called()
+            self.assertFalse(store.Task("t-big").dir.exists())
+            self.cap(need(err.getvalue()))
+            room = self.meter.for_task(self.api_task(f"t-big-{args[0]}", SPEND_TIER), m)
+            self.assertGreaterEqual(room.room({"max_tokens": 32768}, 65_000 + size), 0, args[0])
+        with mock.patch.object(cli, "API_RUNS", True), mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb(*start)                                    # the cap it named: it starts
+        spawned.assert_called_once()
+
+    def test_feedbacks_text_and_a_resumes_handoff_count_in_the_look_ahead(self):
+        # #1173's review (2026-11-24): feedback's first request carries its text on the session's
+        # context, a resume's (a fresh session) the handoff with the work so far; either left out,
+        # the cap the refusal named was short of what the room asks of that request
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        m = runner.models.lookup(SPEND_TIER)
+        task = self.api_task("t-cap-fb", SPEND_TIER, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        task.set_status(live_used={"session": task.status["session"], "used": 20_000})
+        text = "1. take each of these cases too:\n" + "- a case of the parser's, one line\n" * 2300
+        self.cap(5)
+        self.spent(4.6)
+        rnd = task.status["round"]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("feedback", "t-cap-fb", "--text", text)
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("feedback", "t-cap-fb", "--text", text)
+        spawned.assert_called_once()
+        prompt = len(task.round_dir(rnd + 1).joinpath("prompt.md").read_bytes())
+        self.assertGreater(prompt, 78_000)
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 20_000 * 4 + prompt), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+        # wb resume: a fresh session's handoff, the uncommitted work so far in it
+        task = self.api_task("t-cap-resume", SPEND_TIER, "ok")
+        runner.drive(task)
+        task.set_status(phase="stuck", window=1_000_000)
+        (task.worktree / "cases.txt").write_text("a case of the parser's, one line\n" * 1600)
+        self.assertGreater(len(runner.handoff_prompt(task, "", runner.RESUME)), 50_000)  # the diff is in it
+        rnd = task.status["round"]
+        self.cap(5)
+        self.spent(0.2)                                          # today $4.80
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("resume", "t-cap-resume")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("resume", "t-cap-resume")
+        spawned.assert_called_once()
+        sent = runner.handoff_prompt(task, "resumed by the reviewer",
+                                     task.round_dir(rnd + 1).joinpath("prompt.md").read_text())
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 65_000 + len(sent.encode())), 0)
+        self.assertIsNone(task.status.get("api_stop"))
 
     def test_a_round_the_room_stopped_under_the_cap_says_too_near_with_the_rooms_worst(self):
         # #1150's review (2026-11-24): the round's stop (_ProviderWait.stop) consumed `api_stop` at
         # its tick, before stop_text wrote the notice, so the room's `worst` was never read: with
         # request_floor (no input) short of the cap, the notice said "the cap is reached" under it,
-        # and resume ran into the same refusal. Here the floor is 0 (no output price): only the
-        # request's input tips it over
+        # and resume ran into the same refusal. Here the floor without input is 0 (no output
+        # price): only the request's input tips it over
         self.cap(5)
         self.spent(4.8)
-        self.assertEqual(self.meter.request_floor(runner.models.lookup(SPEND_M)), 0)
+        self.assertEqual(self.meter.request_floor(runner.models.lookup(SPEND_M), 0), 0)
         task = self.api_task("t-near-drive", SPEND_M, "http")
         runner.drive(task)
         self.assertEqual(task.status["phase"], "stuck")
@@ -35887,7 +36030,8 @@ class BusyGpu(Base):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + f"every one of deepseek's {cli.models.API_PARALLEL} slots is taken")
         with mock.patch.object(cli.meter, "refusal",
-                               lambda m, role, advice=True: f"{role} role: API spend today is $5 of the $5 day cap"):
+                               lambda m, role, advice=True, tokens=None:  # round 1's input (#1173)
+                               f"{role} role: API spend today is $5 of the $5 day cap"):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + "trivial role: API spend today is $5 of the $5 day cap")
         with mock.patch.object(cli.privacy, "local_only", lambda repo, sub: str(repo)):

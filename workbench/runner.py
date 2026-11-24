@@ -4197,13 +4197,49 @@ def _spend_lead(task: store.Task, rnd: dict) -> str:
     return meter.stop_text(task, rnd.get("worst")) + "\n" if rnd.get("guard") == "spend" else ""
 
 
+def first_tokens(task: store.Task | None = None, prompt: str | None = None,
+                 fresh: bool | None = None) -> int:
+    """What the next round's first request carries, in tokens as the keyhole's room counts a
+    body (its bytes / 4), for the day cap's look ahead (meter.request_floor). Left out, a day
+    within that request's input of the cap passed wb start, feedback, next, resume and _go_on,
+    and the room refused the request at once; raised to the cap the refusal named, it was
+    refused again (#1173, 2026-11-24). A continued session carries its context (status
+    `live_used`, its last step's), a fresh one OpenCode's own (meter.FIRST_TOKENS); then the
+    round's prompt (``prompt``, else the round's own: store.round_prompt), in a fresh session
+    after an earlier one inside its handoff (handoff_prompt), never past PROMPT_ARG_MAX, past
+    which it goes as a file the agent reads. ``task`` None: wb start's, round 1's prompt.
+    ``fresh``: as the caller knows it (wb resume's, --fresh), else from the status alone, not
+    fresh_reason's export: a full session carried on counts its context, more than a handoff."""
+    st = task.status if task is not None else {}
+    if prompt is None:
+        path = store.round_prompt(task, st.get("round", 1)) if task is not None else None
+        prompt = path.read_text() if path is not None and path.is_file() else ""
+    if fresh is None:
+        fresh = st.get("context") in ("fresh", "full") or not st.get("session") or old_store(st)
+    live = st.get("live_used") or {}
+    carried = live.get("used") if st.get("session") and live.get("session") == st.get("session") else 0
+    carried = int(carried) if isinstance(carried, (int, float)) and carried > 0 else 0
+    base = meter.FIRST_TOKENS if fresh else max(carried, meter.FIRST_TOKENS)
+    size = len(prompt.encode())
+    if fresh and task is not None and (st.get("session")
+                                       or (st.get("step_round") or 1) < st.get("round", 1)):
+        try:  # what _start_fresh will send: the task, the work so far, then the prompt
+            size = len(handoff_prompt(task, "", prompt).encode())
+        except Exception:  # an estimate: never a reason to refuse, so the most argv can carry
+            size = PROMPT_ARG_MAX
+    return base + -(-min(size, PROMPT_ARG_MAX) // 4)
+
+
 def _go_on(task: store.Task, n: int, what: str) -> bool:
     """Before each `continue` in drive (#1017, #1019): for an API task, today's spend under the
-    cap by at least one request at its worst (meter.request_floor, #1150). Short of that, the
-    task stops before ``what`` runs: phase `stuck`, status `guard` `spend`, a `stuck` notice
-    with cause `spend` (not the step's own: results.THE_STEP). A GPU task always goes on, for
-    nothing."""
-    if meter.for_task(task) is None or not (why := meter.stop_reason(task, ahead=True)):
+    cap by at least one request at its worst (meter.request_floor, #1150), its input the next
+    round's first request's (first_tokens, #1173). Short of that, the task stops before
+    ``what`` runs: phase `stuck`, status `guard` `spend`, a `stuck` notice with cause `spend`
+    (not the step's own: results.THE_STEP). A GPU task always goes on, for nothing."""
+    if meter.for_task(task) is None:
+        return True
+    tokens = first_tokens(task)
+    if not (why := meter.stop_reason(task, ahead=True, tokens=tokens)):
         return True
     if (kh := CURRENT.get("keyhole")) is not None:
         kh.close(why)
@@ -4212,7 +4248,7 @@ def _go_on(task: store.Task, n: int, what: str) -> bool:
     task.set_status(phase="stuck", last=why[:200], guard="spend", infra=SPEND)
     task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": f"{why}: {what} didn't run",
                 "by": SPEND})
-    text = f"{meter.stop_text(task)}\n{what} didn't run: {why}."
+    text = f"{meter.stop_text(task, tokens=tokens)}\n{what} didn't run: {why}."
     # auto-fix and self-review have moved status `round` on to n + 1, which never ran: round n's
     # report goes with the notice, and says where it is (wb report alone said "no report yet")
     if (summary := task.round_dir(n) / "summary.md").exists():

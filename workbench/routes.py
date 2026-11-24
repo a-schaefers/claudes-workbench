@@ -588,7 +588,7 @@ def model_line(model_id: str, routed: dict) -> str:
 
 
 def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None = None,
-            gate: Callable | None = None) -> tuple:
+            gate: Callable | None = None, tokens: int | None = None) -> tuple:
     """wb start's model: (model, state, why, routed), `routed` the task.json keys (`via`, `role`;
     for API `provider`, `provider_name`, `thinking`, `said`, `said_ts`). Refused, with the one
     line, for what can't run as asked. In order: routes.json must read (never as all GPU); a
@@ -598,9 +598,11 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
     the role's API model by its exact id. No fallback in either direction: a GPU role with no
     GPU model never tries its stored API model, and an API role that can't run never the GPU.
     Either API path meets meter.refusal (no price, or today at the cap, #1019, or within one
-    request at its worst of it, #1150) first: the `--model` one before the dialog, the role's
+    request at its worst of it, #1150, its input ``tokens``: round 1's, runner.first_tokens,
+    #1173; None, a fresh session's least) first: the `--model` one before the dialog, the role's
     (agreed to in `wb route`'s) before it starts."""
     from . import meter, models, router  # they import more than routes needs at its import
+    first = meter.FIRST_TOKENS if tokens is None else tokens
     try:
         doc = read()
     except RoutesError as e:
@@ -614,7 +616,7 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
             return m, models.status(m), "asked for", {"via": "gpu", "role": role}
         if gate is not None:  # API_RUNS: the dialog's yes is wb start's own, last (#1104)
             gate(m)
-        if why := meter.refusal(m):  # before the dialog: never ask for a start that is refused
+        if why := meter.refusal(m, tokens=first):  # before the dialog: never ask for a start that is refused
             raise Refused(why)
         approved = os.environ.get("CLAUDECODE") == "1"
         return m, models.status(m), "asked for", {
@@ -644,7 +646,7 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
         raise Refused(cant_run(role, mid, "not in OpenCode's catalog now" + (
             f" (its read failed: {failed})" if failed else ""), "", doc))
     # a role on an unpriced model ran with no cap at all once #1016's path skipped this (wave 2's review)
-    if why := meter.refusal(m, role):
+    if why := meter.refusal(m, role, tokens=first):
         raise Refused(why)
     routed = {"via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
               "thinking": row["thinking"], "said": row.get("said") or "", "said_ts": row.get("ts")}
