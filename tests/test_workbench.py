@@ -41021,6 +41021,10 @@ class FirstRunApi(Base):
             self.assertEqual(cli.NO_LOCAL_OPTIONAL, "--  no local model registered (optional: an API role can do "
                                                     "the coding; run /workbench)")
             self.assertNotIn("Claude picks one for this machine", "\n".join(lines))
+            # unset here: since #1189 a key the keyhole reads from this environment runs, so the
+            # $XAI_API_KEY of the shell running the tests read the GPU lines as optional
+            self.enterContext(mock.patch.dict(os.environ))
+            os.environ.pop("XAI_API_KEY", None)
             for rows in ((), (key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}),)):
                 self.keys(*rows)                                   # no key wb can hold: as before
                 with mock.patch.object(cli.models, "_fake", return_value=False):
@@ -41154,7 +41158,7 @@ class FirstRunApi(Base):
         # wave 2's --order names one role's backends: never on several (wave 2's merge)
         code, _, err = self.wb("route", "trivial", "gpu", "significant", "gpu", "--order", "baseten")
         self.assertEqual(code, 1)
-        self.assertIn("--order, all, cap and busy go in a wb route of their own", err)
+        self.assertIn("--order, all, cap, busy and fallback go in a wb route of their own", err)  # #1196
         # nor does a pair's `api` put a kept OpenRouter model on API without its backends
         routes.write({"day_usd": 5, "roles": {"significant": {"api": "openrouter/deepseek/deepseek-v4.1-flash"}}})
         code, _, err = self.wb("route", "significant", "api", "trivial", "gpu")
