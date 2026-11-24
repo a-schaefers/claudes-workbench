@@ -1930,8 +1930,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 task.set_status(last=f"OpenCode retries a request: {row['text']}"[:200])
             task.event(row)
             why = detector.feed({**row, "sig": sig}) if sig else None
-            if why and detector.since_edit >= detector.no_edit:
-                if (m := gitops.mark(task.worktree)) != edit_mark:  # it edited through the shell
+            if why:
+                m = gitops.mark(task.worktree)
+                if detector.guard == "no_edit" and m != edit_mark:  # a shell edit: an edit, not a repeat
                     edit_mark, detector.since_edit, why = m, 0, None
                 elif m == green_tree(task, began):
                     # A self-review round is reads and runs by design (break a check, see a test
@@ -1939,7 +1940,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                     # guard stopped it as stuck, so a green task woke Claude as stuck and its
                     # step was recorded stuck (#1168, 2026-11-24). On the tree those tests
                     # passed on, it ends as the agent's finish: the tests, then review. A tree
-                    # it changed is stopped as before.
+                    # it changed is stopped as before. Any of the detector's guards, not only
+                    # the explore guard: a 9B's self-review that ran the acceptance command
+                    # four times in a row on the green tree met the repeat guard, stuck again
+                    # (#1250, 2026-11-24); a string of failing calls there is no less its finish.
                     out["settled"], why = why, None
             if why:
                 out["stuck"], out["guard"] = why, detector.guard
