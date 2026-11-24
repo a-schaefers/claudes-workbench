@@ -31289,6 +31289,10 @@ class Privacy(_KeyholeTest):
         g("init", "-q", "-b", "main")
         (repo / ".gitignore").write_text(".env\nCLAUDE.local.md\n")
         (repo / "CLAUDE.md").write_text("# repo\n")
+        # and a tracked .gitconfig the repo's config includes: unread, every git call in an API
+        # lane died "bad config line" (#1091's review, 2026-11-23)
+        (repo / ".gitconfig").write_text("[alias]\n\tst = status\n")
+        g("config", "include.path", "../.gitconfig")
         g("add", ".")
         g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
         (repo / ".env").write_text("STRIPE_KEY=sk_live_FAKE\n")

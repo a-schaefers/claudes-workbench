@@ -1477,12 +1477,36 @@ def _repo_parts(task: store.Task) -> tuple[set[str], set[str]]:
 
 def read_repo_dirs(task: store.Task) -> set[str]:
     """What the lane reads of the task's repo (readable): the checkout and its git directory, or
-    for an API task the git directory alone, which the worktree's git needs. Every file an API
-    agent reads goes to the provider, and a gitignored .env in the checkout was one `cat` away,
-    though wb start refuses to copy it unless it is named (#1091, 2026-11-23); the instruction
-    files only the checkout holds go as copies (instruction_files)."""
+    for an API task the git directory and the files its config includes (_config_includes),
+    which the worktree's git needs. Every file an API agent reads goes to the provider, and a
+    gitignored .env in the checkout was one `cat` away, though wb start refuses to copy it unless
+    it is named (#1091, 2026-11-23); the instruction files only the checkout holds go as copies
+    (instruction_files)."""
     checkout, git = _repo_parts(task)
-    return git if task.spec.get("via") == "api" else checkout | git
+    return git | _config_includes(checkout, git) if task.spec.get("via") == "api" else checkout | git
+
+
+def _config_includes(checkout: set[str], git: set[str]) -> set[str]:
+    """The files the repo's own git config includes outside its git directory, real paths: with
+    `include.path = ../.gitconfig` (a tracked .gitconfig of aliases, filters or merge drivers)
+    every git call in an API lane, which reads no checkout, died "bad config line" (#1091's
+    review, 2026-11-23). git's own `--show-origin` names them, relative to the top."""
+    found: set[str] = set()
+    for top in sorted(checkout):
+        if not os.path.isdir(top):
+            continue
+        try:
+            out = os.fsdecode(gitops.git_bytes(Path(top), "config", "--local", "--includes",
+                                               "--list", "--show-origin", "-z"))
+        except (gitops.GitError, OSError):
+            continue
+        for origin in out.split("\0")[::2]:
+            if origin.startswith("file:"):
+                f = os.path.realpath(os.path.join(top, origin[len("file:"):]))
+                if not any(f == g or _under(f, g) for g in git):
+                    found.add(f)
+        break
+    return found
 
 
 # What a task's directory holds beside its worktree: a sibling's link (`../<name>` from the
@@ -2733,7 +2757,8 @@ def tool_roots(hidden: set[str]) -> set[str]:
 
 def readable(task: store.Task) -> list[str] | None:
     """What the agent's processes may read: the system, the home directory's dotfiles but
-    SECRETS, the task's repo (an API task's: its git directory alone, read_repo_dirs) and its git
+    SECRETS, the task's repo (an API task's: its git directory and config includes alone,
+    read_repo_dirs) and its git
     directory, its lane and the programs it runs. None with the lane off. Landlock
     only allows, so this lists the entries beside each excluded one; lane.py adds the lane
     (writable) itself."""
