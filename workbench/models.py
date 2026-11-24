@@ -1600,8 +1600,13 @@ def unspoken_why(who: str, package: str) -> str:
 
 def unspoken_providers(pids) -> dict[str, str]:
     """{provider: its package} of those of ``pids`` whose package the catalog says the keyhole
-    can't carry (wb setup's `--` line, #1066); a provider the catalog doesn't list isn't one."""
-    provs = _dict(hosted_doc().get("providers")) if pids else {}
+    can't carry (wb setup's `--` line, #1066); a provider the catalog doesn't list isn't one, nor
+    any when the catalog can't be built: a config that doesn't parse stopped wb setup's checklist
+    (#1067's guard, which this read came after, 2026-11-23), and wb doctor names the config."""
+    try:
+        provs = _dict(hosted_doc().get("providers")) if pids else {}
+    except (RuntimeError, OSError):
+        return {}
     return {p: str(provs[p].get("package") or "") for p in pids
             if isinstance(provs.get(p), dict) and unspoken(p, str(provs[p].get("package") or ""))}
 
