@@ -31691,6 +31691,31 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertTrue(went.wait(30))                                # at its ok
         self.assertIsNone(self.models.api_health("deepinfra"))
 
+    def test_wb_resume_after_a_quota_stop_asks_at_once_rather_than_wait_out_the_mark(self):
+        # the review of #1178 (2026-11-24): wb resume's _credit_turn had no test; without it a
+        # quota-stopped task resumed after a top-up met the no_credit mark its own 402 had
+        # written and waited out its 900 s, told to top up again
+        self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.start_api("t-paid-rs", "http", spawn=False)
+        self.drive_here("t-paid-rs")
+        task = store.Task("t-paid-rs")
+        self.assertEqual((task.status["phase"], task.status.get("infra")), ("stuck", "provider"), task.status)
+        self.assertEqual(self.models.api_health("deepinfra")["state"], "no_credit")
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        self.up.mode, self.up.status = "ok", 200                      # the user tops up
+        with mock.patch.object(cli, "spawn_runner", lambda t: 0):
+            out = run_wb("resume", "t-paid-rs")
+        self.assertIn("resumed t-paid-rs in a fresh session", out)
+        self.assertEqual(self.models.api_health("deepinfra")["asked_by"], "t-paid-rs")
+        driver = threading.Thread(target=self.drive_here, args=("t-paid-rs",), daemon=True)
+        driver.start()
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)              # never the mark's 900 s
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual(len(self.up.seen), 2)                        # the 402, then its round
+        self.assertIsNone(self.models.api_health("deepinfra"))
+
     def test_waiters_for_credit_holding_every_slot_let_go_of_them_so_the_users_resume_asks_at_once(self):
         # the review of #1178 (2026-11-24): NoLease.load waited for credit with its slot held, so
         # with API_PARALLEL tasks queued behind the 402 (the issue's backlog) the resumed task
