@@ -1253,7 +1253,8 @@ def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None,
     "unignored", "differs"}, the paths as `shown` writes them: "kept" the tree's ``keep`` the
     worktree has, "left" what ``now_keep`` kept from being written, "unignored" the files deleted
     after the second snapshot, "differs" what is still not as the tree has it (beside "kept"
-    and "left"): a file a link or a directory kept, or one too big for the second snapshot."""
+    and "left"): a file a link or a directory kept, or one too big for the second snapshot
+    that the tree lacks (one it has is as it has it: written, or alike in both snapshots)."""
     wt = Path(worktree)
     if now is None:
         now, _, now_keep = review_snapshot(wt)
@@ -1283,6 +1284,11 @@ def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None,
     if after != tree:
         seen, expected, new = {p for _, p in first}, set(kept) | set(left), []
         for status, path in _tree_diff(wt, tree, after):
+            if _kept(path, after_keep):
+                # too big for this snapshot, so missing from it: a.txt, as round 2 had it, was
+                # named as differing once a later round's logs/ unignored pushed the total past
+                # SNAPSHOT_MAX (#1198's review); `gained` below checks the tree has it
+                continue
             if path in seen:
                 if path not in expected:
                     differs.append(path)  # a link out, a directory: _unlink_in passed it by

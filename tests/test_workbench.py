@@ -37927,11 +37927,32 @@ class Rewind(Base):
         self.assertEqual((task.worktree / "notes.txt").read_text(), "two\n")
         self.assertEqual((task.worktree / "data.bin").read_bytes(), grown)   # never written over
         self.assertIn("left as they are, in no review snapshot: data.bin (2 MB)\n", out)
-        self.assertNotIn("data.bin |", out)                       # not in the stat as undone
+        # not in the stat as undone: --stat pads each name to the longest, so `data.bin |` never
+        # matched, and the test passed with the exclusion gone (#1198's review)
+        stat = out.split("undone:\n", 1)[1].split("round 2's tests", 1)[0]
+        self.assertIn("notes.txt", stat)
+        self.assertNotIn("data.bin", stat)
         self.assertIn(f"round 4's files (not reviewed) are kept: wb rewind {name} 4", out)
         run_wb("rewind", name, "4")
         self.assertEqual((task.worktree / "notes.txt").read_text(), "three\n")
         self.assertEqual((task.worktree / "data.bin").read_bytes(), grown)
+
+    def test_a_file_too_big_for_the_second_snapshot_is_not_named_as_differing_when_the_tree_has_it(self):
+        # #1198's review: round 3's .gitignore, undone, unignored logs/ and pushed the second
+        # snapshot past SNAPSHOT_MAX, which left a.txt out: named as not round 2's, though it was
+        name = "t-rwb"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        with mock.patch.object(gitops, "SNAPSHOT_MAX", 30000):
+            self.reviewed(task, 2, {"a.txt": "a" * 20000})
+            self.reviewed(task, 3, {".gitignore": "logs/\n", "logs/big.log": "b" * 15000})
+            out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "a.txt").read_text(), "a" * 20000)
+        self.assertFalse((task.worktree / ".gitignore").exists())
+        self.assertFalse((task.worktree / "logs/big.log").exists())   # unignored: deleted
+        self.assertIn("deleted, not in round 2's files (a later .gitignore hid them): logs/big.log", out)
+        self.assertNotIn("not as round 2's files", out)
 
     def test_a_rewind_deletes_a_file_a_later_rounds_gitignore_hid_so_accept_cant_commit_it(self):
         # #1198's review: round 2's .gitignore back, round 3's ignored secret.env was a new file

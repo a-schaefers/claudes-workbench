@@ -966,7 +966,7 @@ but the tree's `.gitignore`, written back, can stop ignoring a file a later roun
 (a `secret.env` accept's `add -A` would have committed), so the worktree is snapshotted again
 and a file new in it that neither tree has is deleted (`deleted, not in round N's files (a
 later .gitignore hid them)`), and anything still unlike the tree, one too big for that snapshot
-among them, is named (`not as round N's files, left as they are`).
+that the tree lacks among them (one the tree has is as it has it), is named (`not as round N's files, left as they are`).
 Nothing is committed and the worktree's index is left alone (the issue's `read-tree HEAD` there
 would drop a sparse checkout's skip-worktree bits). The worktree's files before it, when no
 review tree holds them (a stuck or failed round's), are kept as that round's
