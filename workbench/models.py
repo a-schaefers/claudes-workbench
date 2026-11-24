@@ -2426,6 +2426,7 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
                            + (f": {fix}" if (fix := remedy(m, st)) else ""))
     lms = _lmstudio_of(m, _lmstudio_rows(m.root, m.api_key)) if m.engine == "server" else None
     short = _lmstudio_short(m, lms[1]) if lms else []
+    away = m.remote and not same_gpu(m)  # Ollama for Windows from WSL is on this GPU (#750)
     if lms and lms[0] and (not lms[1] or short):
         # LM Studio's just-in-time loading lists every downloaded model as served, so nothing
         # was loaded, and OpenCode's first request loaded it with LM Studio's default window
@@ -2433,7 +2434,9 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         # the audit of 1.4). Load it here with the window OpenCode is told. One loaded with a
         # smaller window (the UI's 4K) is loaded again: short_window failed the task (#645).
         t0 = time.time()
-        if not m.remote and not _room_beside(m):
+        # LM Studio for Windows from WSL is on this GPU too: freed only when local, every switch
+        # stacked one more model in VRAM until a load was refused (#1248, 2026-11-24)
+        if not away and not _room_beside(m):
             free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
         for instance in short:
             say(f"unloading {instance} from LM Studio: loaded with a smaller window than OpenCode is told")
@@ -2441,7 +2444,6 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         _lmstudio_load(m, lms[0], say)
         return time.time() - t0
     respread = st["resident"] and _respread(m, keep)
-    away = m.remote and not same_gpu(m)  # Ollama for Windows from WSL is on this GPU (#750)
     if st["resident"] and not respread and (away or not _others_resident(m, keep) or _room_beside(m)):
         return 0.0
     t0 = time.time()
@@ -2685,11 +2687,13 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
     seen: dict = {}
     stopped: list[Model] = []
     held = keep_loaded()
-    local = on_this_gpu(discover())  # another host's GPU isn't ours to free (unless it's this one: #750)
-    kept = [o for o in local if o.id in keep or o.id in held]
+    found = discover()
+    local = on_this_gpu(found)  # another host's GPU isn't ours to free (unless it's this one: #750)
+    lms_scope = local + _shared_servers(found)
+    kept = [o for o in lms_scope if o.id in keep or o.id in held]
     # LM Studio loads and unloads one model at a time: every instance not kept is unloaded and
     # the server left running (#645); its server is then done
-    extra, lmstudio = _lmstudio_extra(local, kept, held)
+    extra, lmstudio = _lmstudio_extra(lms_scope, kept, held)
     for server, instance in extra:
         deadline = time.monotonic() + INFLIGHT_WAIT
         while not _server_idle(server) and time.monotonic() < deadline:  # never cut off a reply
@@ -3049,10 +3053,11 @@ def unheld_loaded(skip=()) -> list[str]:
 def _others_resident(m: Model, keep=()) -> bool:
     """Whether anything free_gpu would let go of holds the GPU beside ``m``: an Ollama on other
     cards (apart) isn't asked, as free_gpu leaves it be."""
-    held, seen = keep_loaded(), {}
-    local = on_this_gpu(discover())
-    ours = [m, *(o for o in local if o.id in keep or o.id in held)]
-    if _lmstudio_extra(local, ours, held)[0]:  # another of LM Studio's models, loaded (#645)
+    held, seen, found = keep_loaded(), {}, discover()
+    local = on_this_gpu(found)
+    lms_scope = local + _shared_servers(found)  # LM Studio for Windows too (#1248)
+    ours = [m, *(o for o in lms_scope if o.id in keep or o.id in held)]
+    if _lmstudio_extra(lms_scope, ours, held)[0]:  # another of LM Studio's models, loaded (#645)
         return True
     if any(o.engine == "server" and o.stop and o.server not in {x.server for x in ours}
            and status(o)["resident"] for o in local):
@@ -4032,6 +4037,14 @@ def on_this_gpu(found: dict) -> list[Model]:
     """The discovered models whose memory is this GPU's: the local ones, and the Ollama ones
     on a server same_gpu says shares it (its API unloads them as a local one's does: #750)."""
     return [o for o in found.values() if not o.remote or (o.engine == "ollama" and same_gpu(o))]
+
+
+def _shared_servers(found: dict) -> list[Model]:
+    """The discovered server models (not Ollama) on a server same_gpu says shares this GPU: LM
+    Studio for Windows from WSL2, which free_gpu unloads through its REST API as a local one's,
+    yet never stops (no 'can't stop it' warning for a Windows server). Left out of on_this_gpu,
+    its instances were never unloaded: each switch stacked one more in VRAM (#1248)."""
+    return [o for o in found.values() if o.remote and o.engine == "server" and same_gpu(o)]
 
 
 def _started(pid: int) -> str | None:

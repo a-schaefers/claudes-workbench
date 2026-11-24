@@ -3158,7 +3158,9 @@ run, scout) probes the usual ports at `models.windows_host` (the default gateway
 `/proc/net/route`, else `/etc/resolv.conf`'s nameserver), calls a hit "on Windows", and with
 nothing prints `models.WSL_NAT` (#663: Claude proposed a second server inside WSL). A provider
 there is `remote` but on the same GPU (`models.same_gpu`): this machine's pool, and `free_gpu`
-unloads it (#750: as its own pool it ran beside WSL's tasks on the one card). NAT gives Windows a
+unloads it (#750: as its own pool it ran beside WSL's tasks on the one card); LM Studio for
+Windows's instances too, through its REST API (`models._shared_servers`, never stopped: #1248,
+each switch stacked one more model in VRAM). NAT gives Windows a
 new address when the WSL VM restarts, so `wb remote <Windows' address>` writes provider
 `models.WSL_PID` (`ollama-windows`, models.json `wsl_host: true`), and `discover()` follows it
 (`follow_windows_host`): a provider wb remote made there, still at its `remote` mark, whose host
@@ -3608,7 +3610,8 @@ immediate load split the model). Every Ollama model loaded is unloaded (`keep_al
 kept and `keep_loaded` ones (a server holding one is never stopped; `_others_resident` skips them).
 A server listing several models is one, kept when a kept model is on it, unless contended and
 serving another. LM Studio never evicts what `/api/v1/models/load` loaded, so its unkept instances
-are unloaded once idle (`_lmstudio_extra`, #645), and it is never stopped. `releasable(m)`: what
+are unloaded once idle (`_lmstudio_extra`, #645), and it is never stopped; one at a same-GPU remote
+(`_shared_servers`: WSL2's Windows host) the same, and `make_resident` frees for its models (#1248). `releasable(m)`: what
 `free_gpu` can free; `freed(m, keep)`: what it would.
 
 Before unloading, `_wait_unused` watches `/api/ps` `INFLIGHT_WATCH` 10 s (`_in_use`): a moving
@@ -3696,7 +3699,7 @@ the GPU alone, `wb start` refuses meanwhile (exit 4, *Two projects, one GPU*) un
 (`models.same_gpu`); None for an API model, which takes no GPU lease (#1015); else `gpu-<host>-<port>.{lock,json,admit,load}`, one task at a time, never
 waiting on this GPU (#116); exit 4, `--queue` and the bench's preemption apply per pool. `free_gpu`
 never touches another machine's models. A same-GPU remote model never shares, but `free_gpu`
-(`models.on_this_gpu`) unloads it, `make_resident` frees for it, `releasable` and `media.settle`
+(`models.on_this_gpu`; LM Studio's, `_shared_servers`, #1248) unloads it, `make_resident` frees for it, `releasable` and `media.settle`
 count it, its unloaded tests (`step_aside`, `verify`) hold this GPU, `wb optimize` probes it under
 one lease. A media engine joins `gpu` when on this GPU (`media.on_gpu`, `media.shares_gpu`), a box's
 pool otherwise (`media.boxes`), or none (`"gpu": false`).
@@ -7159,7 +7162,7 @@ doc needs its own `!/` line).
   `serving`, `free`, `publish`) → both `wb image` and `wb audio` (`tests.Images`, `tests.Audio`). A new media kind → its
   path in `store.PATH_VARS` and `context.private_paths`, its output dir in `cli.EVENT_SKIP` (and the mod's ears), its
   engines in `wb scout`.
-- **`models.same_gpu`** (a remote server on this GPU, #750) → `pool`, `on_this_gpu` (`free_gpu`, `_others_resident`), `releasable`,
+- **`models.same_gpu`** (a remote server on this GPU, #750) → `pool`, `on_this_gpu` and `_shared_servers` (`free_gpu`, `_others_resident`), `releasable`,
   `make_resident`, `GpuLease.step_aside`/`_unload_unshared`, `optimize.busy` and its lease, `runner._tests_gpu`,
   `media.boxes`, `media.shares_gpu`: one left out takes a second lease in one process (waits on itself) or leaves a
   model loaded.
