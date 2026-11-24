@@ -280,10 +280,13 @@ A **message** (`messages`, `replies`, `message`):
 - `from`: `"user"`, `"claude"`, `"notice"` (a dialog waits in the terminal), or an agent's name
   with `role: "agent"`.
 - On a message to Claude: `cid?`, `files?: [{id, name, size, type, path}]`, `about?`, and in the
-  state `received: {id, ts, by, how: "now"|"queued"} | null`, `expired?`.
+  state `received: {id, ts, by, how: "now"|"into"|"queued"} | null`, `expired?` (`into`: an
+  agent's message read into a turn it didn't open; `queued`: held for the running turn, `now` once
+  it ends).
 - On Claude's reply: `re?: [message ids]` (what it answers: `wb chat reply --to`, else the
-  messages Claude was given in that turn, the user's alone when the user's are among them; from
-  another Claude Code session than the listening one, none: it is the user's),
+  messages that opened that turn or the user's delivered into it, the user's alone when the
+  user's are among them; from another Claude Code session than the listening one, none: it is
+  the user's),
   `to?: ["user" | agent names]` (whose those messages are, or `"user"` for a question to the
   user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`, `claude_pid?`
   (the Claude Code process that wrote it, on every Claude row: a reply, a screenshot, a listen),

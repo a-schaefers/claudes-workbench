@@ -2668,6 +2668,33 @@ test('running wb counts as workbench mode, and a web message reaches a running t
   expect(runs.some(a => a.join(' ') === 'wb chat ack m1 --by ' + a[5] + ' --how now')).toBe(true)
 })
 
+test('#1175: an agent\'s message delivered into a running turn is acked into, so the turn\'s plain reply stays the user\'s', async ($, on) => {
+  // acked `now`, a wake turn's report to the away user went to the agent alone, pushed to no phone
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const sent: any[] = []
+  on('session.send', (_: any, e: any) => { sent.push(e); return { isDelivered: true } })
+  const runs: string[] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv.join(' ')); return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } } })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'a wake: task fix-login is in review', turnId: 't1' })
+  await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })  // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: 1_800_000_000, from: 'hermes', role: 'agent', text: 'please refactor foo' }) + '\n' +
+    JSON.stringify({ id: 'u1', ts: 1_800_000_001, from: 'user', text: 'status?' }) + '\n'
+  await clock.advance(3000)
+  expect(sent.length).toBe(2)                                    // both into the running turn
+  expect(sent[0].text).toContain('wb chat reply --to <id>')
+  expect(runs.filter(r => r.includes('chat ack a1'))).toEqual([expect.stringMatching(/ --how into$/)])
+  expect(runs.filter(r => r.includes('chat ack u1'))).toEqual([expect.stringMatching(/ --how now$/)])  // the user's: now
+})
+
 test('a web message queued behind a running turn reads as read once that turn ends', async ($, on) => {
   // 2026-11-21: three messages Claude had read and acted on said "Queued for Claude" on the phone for good
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

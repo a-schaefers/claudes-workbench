@@ -24439,6 +24439,25 @@ class WebChat(Base):
             run_wb("chat", "reply", "--text", "Still on it.")
         self.assertEqual(self.chat.thread()[-1]["re"], [mid])
 
+    def test_an_agents_message_delivered_into_a_wake_turn_leaves_its_plain_report_to_the_user(self):
+        # #1175: acked `now`, an agent's message the mod delivered into a running wake turn took
+        # that turn's plain `wb chat reply`: the report to the away user went to the agent alone,
+        # pushed to no phone, and the agent read it as its answer. The mod acks it `into`
+        tok = self._agent("hermes")
+        self._listening()
+        mid = self.call("/api/send", {"text": "please refactor foo"}, token=tok)[1]["message"]["id"]
+        run_wb("chat", "ack", mid, "--by", "s1", "--how", "into")         # into the running turn
+        run_wb("chat", "reply", "--text", "Task fix-login is accepted and merged: needs nothing from you")
+        r = self.chat.thread()[-1]
+        self.assertEqual((r.get("re"), r.get("to")), (None, None))            # no `to`: the user's
+        self.assertTrue(self.chat._for_user(r))
+        self.assertIn(r["id"], self.chat.news(store.now() + 20))              # pushed to the phone
+        _, w = self.call(f"/api/wait?after={mid}&timeout=0", token=tok)
+        self.assertEqual(w["replies"], [])                                    # never the agent's answer
+        run_wb("chat", "reply", "--to", mid, "--text", "Refactoring foo now.")  # its own, by --to
+        self.assertEqual([x["text"] for x in self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["replies"]],
+                         ["Refactoring foo now."])
+
     def test_an_agents_stream_never_pushes_the_users_page_out(self):
         tok, user = self._agent(), self.chat.token()
         self.srv.RequestHandlerClass.streams = threading.BoundedSemaphore(1)
