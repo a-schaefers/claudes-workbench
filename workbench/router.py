@@ -419,7 +419,7 @@ def api_choice(role: str) -> str:
     if not any(k["key"] == "stored" for k in keys.values()):
         return ""
     return (f"; or put {role} on an API model you connected (the user's yes): wb route {role} <id>, "
-            "wb models lists them")
+            "wb models --api <text> lists them")
 
 
 def choose(size: str, stack=(), task_name: str | None = None, down: set | None = None,

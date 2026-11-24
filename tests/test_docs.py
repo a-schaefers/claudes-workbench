@@ -135,6 +135,39 @@ class DocsMatchTheCode(unittest.TestCase):
         choosing = section(skill, "## 1. Pick the role; the user's roles pick the model")
         self.assertIn("never pass `--model <api id>`", " ".join(choosing.split()))
 
+    def test_the_skill_lets_a_user_named_api_model_through_wb_starts_dialog(self):
+        # #1132 (2026-11-23): "never pass `--model <api id>`" read as a ban even on the user's own
+        # `/workbench … --model <id>` (the skill's argument-hint), the start cli.start_gate and the
+        # mod's dialog were built for
+        skill = (ROOT / "skill/workbench/SKILL.md").read_text()
+        self.assertIn("[--model <id>]", skill[:skill.index("\n---", 4)])
+        choosing = " ".join(section(skill, "## 1. Pick the role; the user's roles pick the model").split())
+        self.assertIn("never pass `--model <api id>` unless the user named that id for this task (the mod's "
+                      'dialog then asks them, and a "not changed" means no)', choosing)
+        self.assertTrue(callable(cli.start_gate))
+        self.assertIn("calls.push(['--start'", (ROOT / "mod/hooks/register.tsx").read_text())
+
+    def test_the_skills_question_bullet_sends_a_files_text_never_a_path_outside_the_lane(self):
+        # #1133 (2026-11-23): an answer naming ~/.claude/plans/x.md (hidden from the lane whole)
+        # or another repo got the agent a denied read and another question, another wake
+        skill = (ROOT / "skill/workbench/SKILL.md").read_text()
+        bullet = skill[skill.index("- **question** —"):skill.index("- **stuck / failed** —")]
+        bullet = " ".join(bullet.split())
+        self.assertIn("never a path you name elsewhere (a plan under ~/.claude, another repo)", bullet)
+        self.assertIn("`wb answer <name> --file <path>`, which sends the file's contents", bullet)
+        self.assertIn("Path(a.file).read_text(", (ROOT / "workbench/cli.py").read_text())   # cmd_answer's
+
+    def test_the_backlog_promises_start_order_for_the_gpu_only_not_for_api_slots(self):
+        # #1130 (2026-11-23): driving.md promised start order and sent-back-first, which only
+        # GpuLease's `since` keeps; NoLease's waiters take a free slot in no set order
+        from workbench import models
+        driving = " ".join((ROOT / "skill/workbench/reference/driving.md").read_text().split())
+        self.assertIn(f"an API provider's slot ({models.API_PARALLEL} tasks at once) goes to whichever "
+                      "waiting task looks first, in no set order", driving)
+        self.assertNotIn("since", models.NoLease.__init__.__code__.co_names)   # still no queue order
+        self.assertIn("since", models.GpuLease.__init__.__code__.co_names)
+        self.assertIn("Waiters take a slot in no set order", " ".join(ARCH.split()))
+
     def test_every_web_chat_api_path_is_in_the_api_reference(self):
         # #1042: docs/chat-api.md is the page another agent is handed; a path the server answers
         # that it doesn't name is one nobody can find
