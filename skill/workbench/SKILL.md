@@ -537,6 +537,8 @@ When the fix is for something your spec missed, add `--spec-gap "…"` (checklis
 When a later round made things worse, `wb rewind <name> <round>` puts the files back to the best
 reviewed round of this step (the round its review notice named), then accept or send feedback
 from there; it prints that round's test verdict, and the next feedback starts a fresh session.
+Files it names as `left as they are` or `not as round N's files` are not that round's: check them
+before you accept.
 **Max 3 review rounds.** Still wrong after that: make the small remaining fix yourself in the task's worktree
 (`wb status <name>` prints its path) and accept, or `wb discard <name> --reason …`.
 If a "trivial" task fails twice, it wasn't trivial: discard and restart it with `--role significant`.

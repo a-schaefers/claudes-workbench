@@ -1192,39 +1192,28 @@ def drop_reviews(repo: Path, task: str) -> int:
     return len(refs)
 
 
-def _kept(path: bytes, keep) -> bool:
+def _kept(path, keep) -> bool:
     s = shown(path)
     return any(s == k or (k.endswith("/") and s.startswith(k)) for k in keep)
 
 
-def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None) -> dict:
-    """Put the worktree's files back to ``tree``, a review snapshot (wb rewind, #1198). Only what
-    differs from the worktree now (its own snapshot) is touched: a file the tree has and the
-    worktree lacks or holds otherwise is written from a scratch index (`read-tree` and
-    `checkout-index -f`, as fill_submodules does), and one the worktree has and the tree lacks is
-    deleted, unless ``keep`` (review_snapshot's paths left out of the tree) names it, since the
-    tree holds no copy of it. Ignored files, nested repositories and submodules are in neither
-    tree, and stay. Nothing is committed and the worktree's own index is left alone: a
-    `read-tree HEAD` there would drop a sparse checkout's skip-worktree bits, and every file
-    outside the cone would read as deleted. ``now``: the worktree's snapshot, when the caller
-    has just taken it. {"written", "deleted", "kept"}: the paths, as `shown` writes them."""
-    wt = Path(worktree)
-    now = now or snapshot(wt)
-    out = {"written": [], "deleted": [], "kept": []}
-    if now == tree:
-        return out
-    raw = git_bytes(wt, "diff-tree", "-r", "-z", "--raw", "--no-renames", tree, now).split(b"\0")
-    write, gone = [], []
+def _tree_diff(wt: Path, a: str, b: str) -> list[tuple[bytes, bytes]]:
+    """(status, path) for each file that differs from tree ``a`` to ``b``, submodules left out."""
+    raw = git_bytes(wt, "diff-tree", "-r", "-z", "--raw", "--no-renames", a, b).split(b"\0")
+    out = []
     for meta, path in zip(raw[0::2], raw[1::2]):
         fields = meta.split()
         if len(fields) < 5 or b"160000" in (fields[0].lstrip(b":"), fields[1]):
             continue  # a submodule's commit: its files are in neither tree
-        if fields[4] == b"A":
-            (out["kept"] if _kept(path, keep) else gone).append(path)
-        else:
-            write.append(path)
-    top, done = os.fsencode(os.path.realpath(wt)), []
-    for path in gone:
+        out.append((fields[4], path))
+    return out
+
+
+def _unlink_in(top: bytes, paths: list[bytes]) -> list[bytes]:
+    """Delete each of ``paths`` under the worktree ``top``, and the directories it empties; the
+    ones deleted."""
+    done = []
+    for path in paths:
         f = os.path.join(top, path)
         parent = os.path.realpath(os.path.dirname(f))
         # never through a link out of the worktree: a parent swapped for one since the snapshot
@@ -1240,6 +1229,48 @@ def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None) -> 
             except OSError:
                 break
             d = os.path.dirname(d)
+    return done
+
+
+def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None,
+                 now_keep=()) -> dict:
+    """Put the worktree's files back to ``tree``, a review snapshot (wb rewind, #1198). Only what
+    differs from the worktree now (its own snapshot) is touched: a file the tree has and the
+    worktree lacks or holds otherwise is written from a scratch index (`read-tree` and
+    `checkout-index -f`, as fill_submodules does), and one the worktree has and the tree lacks is
+    deleted, unless ``keep`` (review_snapshot's paths left out of the tree) names it, since the
+    tree holds no copy of it. A file the worktree's own snapshot left out (``now_keep``, its
+    review_snapshot's third value) is never written over either: no tree holds that copy, and a
+    2 MB file the agent grew from round 2's 10 KB got round 2's copy, gone for good, while the
+    rewind said it was left as it was (#1198's review). Ignored files, nested repositories and
+    submodules are in neither tree, and stay; but the tree's .gitignore, written back, can stop
+    ignoring a file a later round made and ignored (a secret.env wb accept would then have
+    committed, in no round's review): the worktree is snapshotted again, and a file new in it
+    that neither tree has is deleted. Nothing is committed and the worktree's own index is left
+    alone: a `read-tree HEAD` there would drop a sparse checkout's skip-worktree bits, and every
+    file outside the cone would read as deleted. ``now``: the worktree's snapshot, when the
+    caller has just taken it (``now_keep`` then too). {"written", "deleted", "kept", "left",
+    "unignored", "differs"}, the paths as `shown` writes them: "kept" the tree's ``keep`` the
+    worktree has, "left" what ``now_keep`` kept from being written, "unignored" the files deleted
+    after the second snapshot, "differs" what is still not as the tree has it (beside "kept"
+    and "left"): a file a link or a directory kept, or one too big for the second snapshot."""
+    wt = Path(worktree)
+    if now is None:
+        now, _, now_keep = review_snapshot(wt)
+    out = {k: [] for k in ("written", "deleted", "kept", "left", "unignored", "differs")}
+    if now == tree:
+        return out
+    top = os.fsencode(os.path.realpath(wt))
+    write, gone, kept, left = [], [], [], []
+    first = _tree_diff(wt, tree, now)
+    for status, path in first:
+        if status == b"A":
+            (kept if _kept(path, keep) else gone).append(path)
+        elif status == b"D" and _kept(path, now_keep) and os.path.lexists(os.path.join(top, path)):
+            left.append(path)  # the worktree's copy, which its snapshot left out: in no tree
+        else:
+            write.append(path)
+    done = _unlink_in(top, gone)
     if write:
         store.home().mkdir(parents=True, exist_ok=True)  # the scratch index: never in the lane
         with tempfile.TemporaryDirectory(prefix=store.scratch("wb-index-"), dir=store.home()) as scratch:
@@ -1247,8 +1278,32 @@ def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None) -> 
             _run(wt, ("read-tree", tree), env=env)
             _run(wt, ("checkout-index", "-f", "-z", "--stdin"), env=env,
                  input=b"".join(p + b"\0" for p in write))
+    after, _, after_keep = review_snapshot(wt)
+    unignored, differs = [], []
+    if after != tree:
+        seen, expected, new = {p for _, p in first}, set(kept) | set(left), []
+        for status, path in _tree_diff(wt, tree, after):
+            if path in seen:
+                if path not in expected:
+                    differs.append(path)  # a link out, a directory: _unlink_in passed it by
+            elif _kept(path, keep) or _kept(path, now_keep):
+                continue  # left out of a snapshot, not ignored: named as left as it is
+            elif status == b"A":
+                new.append(path)  # in neither tree: ignored until the tree's .gitignore
+            else:
+                differs.append(path)
+        unignored = _unlink_in(top, new)
+        differs += [p for p in new if p not in unignored]
+    # too big for the second snapshot, and left out of neither the tree nor the first snapshot
+    gained = [k for k in after_keep if not _kept(k, keep) and not _kept(k, now_keep)]
+    if gained:  # a file the tree holds, which this snapshot left out of a bigger total, is fine
+        held = set(git_bytes(wt, "ls-tree", "-r", "-z", "--name-only", tree, "--",
+                             *gained).split(b"\0"))
+        differs += [os.fsencode(k) for k in gained if os.fsencode(k) not in held]
     out.update(written=[shown(p) for p in write], deleted=[shown(p) for p in done],
-               kept=[shown(p) for p in out["kept"]])
+               kept=[shown(p) for p in kept], left=[shown(p) for p in left],
+               unignored=[shown(p) for p in unignored],
+               differs=list(dict.fromkeys(shown(p) for p in differs)))
     return out
 
 

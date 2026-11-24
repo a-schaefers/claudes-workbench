@@ -1858,12 +1858,15 @@ def cmd_rewind(a):
     if now == want["tree"]:
         print(f"{a.name}'s files are round {a.round}'s already")
         return
-    undone = gitops.git(wt, "diff", "--no-ext-diff", "--no-color", "--stat",
-                        f"--stat-count={gitops.CHANGED_SHOWN}", want["tree"], now, check=False).rstrip()
     try:
-        done = gitops.restore_tree(wt, want["tree"], want.get("keep") or [], now=now)
+        done = gitops.restore_tree(wt, want["tree"], want.get("keep") or [], now=now,
+                                   now_keep=now_keep)
     except (gitops.GitError, OSError) as e:
         die(f"the rewind stopped partway ({e}): wb rewind {a.name} {a.round} again")
+    # the stat names no file left as it is: a grown file the tree has read as deleted (#1198)
+    undone = gitops.git(wt, "diff", "--no-ext-diff", "--no-color", "--stat",
+                        f"--stat-count={gitops.CHANGED_SHOWN}", want["tree"], now, "--", ".",
+                        *(f":(exclude,literal){p}" for p in done["left"]), check=False).rstrip()
     # the next review's diff counts from here; the next round starts a fresh session (feedback)
     task.set_status(reviewed={"step": steps, "tree": want["tree"]}, rewound_to=a.round,
                     context="fresh")
@@ -1878,6 +1881,12 @@ def cmd_rewind(a):
     left += gitops.brief([k for k in done["kept"] if not any(x.startswith(k) for x in left)])
     if left:
         print(f"left as they are, in no review snapshot: {', '.join(left)}")
+    if done["unignored"]:  # a later round's .gitignore hid them; round N's doesn't (#1198)
+        print(f"deleted, not in round {a.round}'s files (a later .gitignore hid them): "
+              f"{', '.join(gitops.brief(done['unignored']))}")
+    if done["differs"]:  # never said to match round N's: wb accept would take them as they are
+        print(f"not as round {a.round}'s files, left as they are: "
+              f"{', '.join(gitops.brief(done['differs']))}")
     if saved:
         print(saved.lstrip("\n"))
     force = "" if st.get("phase") == "review" else " --force"
