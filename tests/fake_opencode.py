@@ -35,6 +35,8 @@
          FAKE_COMPACT_KEPT: its step after is at 34%, over half the one before: the tail OpenCode
          2.4.1 keeps verbatim beside the summary (#1185)
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
+  think  a step at 40% of a 32K window whose 8192 output is a think OpenCode never sends back,
+         then writes "41", a step whose prompt grew (5.2K), and writes "42" like ok (#1219)
   refill every session changes a file, then fills 76% and works on for an hour
   explore  FAKE_READS (41) reads of different files, each a small step, then FAKE_EXPLORE_PAUSE
          seconds (2: the runner sees the last read before the edit; a runner slower than that
@@ -934,6 +936,22 @@ elif scenario == "compact":  # #774: a tool result past the margin compacted it 
         finish()
     else:
         time.sleep(3600)
+elif scenario == "think":  # #1219: a thinking GPU model's long think, counted in `output`
+    emit("step_finish", reason="tool-calls", tokens={"input": 4914, "output": 78})
+    emit("step_finish", reason="tool-calls", tokens={"input": 291, "output": 8192,
+                                                      "cache": {"read": 4910}})  # 13393: 40%
+    time.sleep(1)  # the runner sees that step before the change
+    with open("answer.txt", "w") as fh:
+        fh.write("41\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    # the think is not sent back: the prompt grew, 5201 to 5237, its history in the cache
+    emit("step_finish", reason="tool-calls", tokens={"input": 40, "output": 177,
+                                                      "cache": {"read": 5197}})
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    emit("text", text="Wrote answer.txt = 42.")
+    finish()
 elif scenario == "compactfail":  # #969: as OpenCode 2.3 prints it, then the run ends
     if os.environ.get("FAKE_COMPACT_EDIT"):
         with open("answer.txt", "w") as fh:
