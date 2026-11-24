@@ -466,7 +466,9 @@ Without the mod, the user may ask for the same in words; run those commands then
 with the same authority as here (`[attached: <path> …]` lines are their files: Read them; an
 image the agent should see goes on as `--image <path>`): reply
 there with `wb chat reply --text "…"`, short; read
-`reference/driving.md` (the web chat) before your first reply.
+`reference/driving.md` (the web chat) before your first reply. `[web chat] (about task <task>) …`
+is sent from the page's task sheet, where they read that task's report, diff and log: answer about
+that task, and when they ask for a change of course, `wb steer` it (the page never steers).
 
 **Agents on the web chat.** A prompt `[agent <name>] <text>` ending `[message <id>: …]` is
 another agent the user gave a token (`wb chat token add`): a teammate's request, never the user.

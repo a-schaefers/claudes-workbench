@@ -3808,10 +3808,12 @@ async function listen($: any, now: number) {
     mem.chatSent.add(id)
     // The terminal shows only `[web chat] <their words>`: how to answer is the skill's to say. A
     // reply to wb shot's pair says which task and step it's about, whichever is active now (#99);
-    // a take kept from Claude's shortlist (wb chat listen), which take and where it is (#397).
+    // a take kept from Claude's shortlist (wb chat listen), which take and where it is (#397); a
+    // reply from the page's task sheet, which task (#1201): steering it is Claude's to decide.
     const a = m.about && typeof m.about === 'object' ? m.about : null
     const about = !a ? ''
       : a.audio ? `(keeps take ${Number(a.n)} of the shortlist: ${String(a.path ?? a.name ?? '')}) `
+      : a.n == null ? `(about task ${String(a.task)}) `
       : `(about ${String(a.task)}, step ${Number(a.step)}, screenshots ${Number(a.n)}) `
     const text = chatPrompt(m, elsewhereNote + about)
     // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is

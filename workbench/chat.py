@@ -784,11 +784,12 @@ def wait_state(after: str, caller: str) -> dict | None:
 # replies to the user, Claude Code's dialogs, the settings. An agent reads only its own messages
 # and Claude's rows whose `to` names it (`in_view`), the listener, the upload limits and the
 # clock; files only of its own uploads (`by`) or attached to rows in its view; never an ask, a
-# screenshot, an audio take or a push's summary (AGENT_UNREAD, 403).
+# screenshot, an audio take, a task's sheet or a push's summary (AGENT_UNREAD, 403).
 AGENT_UNREAD = {"/api/latest": "read the user's notifications",
                 "/api/ask/": "read Claude Code's dialogs",
                 "/api/shot": "read screenshots",
-                "/api/audio": "read audio takes"}
+                "/api/audio": "read audio takes",
+                "/api/task": "read tasks"}  # their diffs and reports are the user's work (#1201)
 
 
 def in_view(row: dict, agent: str) -> bool:
@@ -871,6 +872,106 @@ def open_tasks() -> list[dict]:
         out.append({"name": t.name, "phase": phase or "queued", "model": sp.get("model") or "",
                     "via": sp.get("via") or "gpu", "provider_name": sp.get("provider_name") or ""})
     return out
+
+
+# ---- the task sheet (#1201): what `wb status`, `wb report`, `wb diff` and `wb log` show of an
+# open task, read in-process for GET /api/task as the user taps the strip. Away, the strip's one
+# line was all the user saw of the work, and "is it on track?" cost a message to Claude. Never
+# `wb watch --json`, which can start OpenCode; read only, the lookups shared with cli.py
+# (gitops.diff_base, store.Task.report, verify.report_lines, transcript.log_body) so the two
+# can't drift. Everything here is agent-written text, which the page draws as text alone: it
+# holds the token that answers Claude Code's dialogs.
+TASK_PARTS = ("summary", "diff", "log")
+TASK_REPORT_CHARS = 64 * 1024   # the newest round's summary.md, cut past this
+TASK_DIFF_CHARS = 256 * 1024    # a whole diff past this is `cut` (the page offers its files one by one)
+TASK_LOG_ROWS = 50              # the log's rows by default (`n`), at most TASK_LOG_MAX
+TASK_LOG_MAX = 200
+TASK_LOG_BYTES = 1 << 20        # the events.jsonl tail read for them
+
+
+def open_task(name) -> store.Task | None:
+    """The open task ``name``, as the strip lists it (open_tasks: no bench replay, none parked), else None."""
+    if not isinstance(name, str) or not store.NAME_RE.match(name):
+        return None
+    return store.Task(name) if any(t["name"] == name for t in open_tasks()) else None
+
+
+def _cut_lines(text: str, most: int) -> tuple[str, int]:
+    """``text`` with each line past ``most`` characters cut to it (ending `…`), and how many were."""
+    n, out = 0, []
+    for line in text.split("\n"):
+        if len(line) > most:
+            n, line = n + 1, line[:most - 1] + "…"
+        out.append(line)
+    return "\n".join(out), n
+
+
+def task_summary(t: store.Task) -> dict:
+    """`wb status <t>`'s row and `wb report <t>`'s text: phase, round, step, last, when it began
+    and last changed (the page counts age and idle from `now`), its model, the newest round's
+    report (cut at TASK_REPORT_CHARS) and the regression check's lines."""
+    from . import gitops, transcript, verify
+    st, sp = t.status, t.spec
+    n = st.get("round", 1)
+    report = transcript.plain(t.report(n))
+    try:
+        checks = [transcript.plain(x) for x in verify.report_lines(t)]
+    except (OSError, ValueError, KeyError, gitops.GitError):
+        checks = []
+    return {"phase": st.get("phase") or "queued", "round": n, "step": st.get("steps", 1),
+            "last": transcript.plain(str(st.get("last") or "")), "created_at": sp.get("created_at"),
+            "updated_at": st.get("updated_at"), "model": sp.get("model") or "", "via": sp.get("via") or "gpu",
+            "provider_name": sp.get("provider_name") or "", "report": report[:TASK_REPORT_CHARS],
+            "report_cut": len(report) > TASK_REPORT_CHARS, "verify": checks}
+
+
+def task_diff(t: store.Task, full: bool = False, path: str | None = None) -> dict | None:
+    """`wb diff <t> --stat`, against the same base (gitops.diff_base: HEAD after `wb next`), and
+    its files (`numstat`); ``full``, the diff instead of the stat (of ``path`` alone, one of the files), each
+    line cut at transcript.JSON_LINE_CHARS (`lines_cut`), or null with `cut` past
+    TASK_DIFF_CHARS. None for a ``path`` that isn't in it."""
+    from . import gitops, transcript
+    base = gitops.diff_base(t)
+    out = {"base": base if base == "HEAD" else base[:12], "stat": "", "files": []}
+    if not t.worktree.is_dir():
+        return {**out, "note": "no worktree yet" if t.status.get("phase") in store.ACTIVE else "its worktree is gone"}
+    try:
+        for line in (gitops.diff(t.worktree, base, numstat=True) or "").splitlines():
+            added, deleted, name = (line.split("\t", 2) + ["", ""])[:3]
+            out["files"].append({"path": name, "added": int(added) if added.isdigit() else None,
+                                 "deleted": int(deleted) if deleted.isdigit() else None})
+        if path is not None and not any(f["path"] == path and " => " not in path for f in out["files"]):
+            return None
+        paths = [":(literal)" + path] if path is not None else ()
+        if not full:  # the stat first; the diff when asked for
+            out["stat"] = gitops.diff(t.worktree, base, stat=True, paths=paths) or ""
+        else:
+            text = gitops.diff(t.worktree, base, paths=paths, limit=TASK_DIFF_CHARS)
+            if text is None:
+                out.update(diff=None, cut=True)
+            else:
+                text, n = _cut_lines(transcript.plain(text),
+                                     transcript.JSON_LINE_CHARS)
+                out.update(diff=text, cut=False, lines_cut=n)
+    except (gitops.GitError, OSError) as e:
+        return {**out, "note": str(e)[:500]}
+    return out
+
+
+def task_log(t: store.Task, n: int = TASK_LOG_ROWS) -> dict:
+    """`wb log <t> -v -n <n>`: its last ``n`` rows (from the last TASK_LOG_BYTES of events.jsonl),
+    each `{ts, round, kind, text}` with wb log's words (transcript.log_body) cut at
+    transcript.JSON_LINE_CHARS, `ok` for a tool call; `more` when older ones were left out."""
+    from . import transcript
+    rows = [r for r in store.read_jsonl_tail(t.dir / "events.jsonl", TASK_LOG_BYTES)
+            if isinstance(r, dict) and r.get("kind") in transcript.LOG_KINDS]
+    out = []
+    for r in rows[-n:]:
+        text = transcript.plain(transcript.log_body(r, verbose=True) or "")
+        cut = text if len(text) <= transcript.JSON_LINE_CHARS else text[:transcript.JSON_LINE_CHARS - 1] + "…"
+        out.append({"ts": r.get("ts"), "round": r.get("round"), "kind": r.get("kind"), "text": cut,
+                    **({"ok": bool(r.get("ok"))} if r.get("kind") == "tool" else {})})
+    return {"rows": out, "more": len(rows) > n}
 
 
 LATEST_BYTES = 1 << 20  # the messages' tail `latest` reads for Claude's last word
@@ -2138,6 +2239,27 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self.waits.release()
 
+    def _task(self) -> None:
+        """GET /api/task?name=<t>&part=summary|diff|log (#1201): `diff` takes `full=1` (and
+        `path=<one of its files>`), `log` takes `n`. Only an open task, as the strip lists it."""
+        q = parse_qs(urlsplit(self.path).query)
+        one = lambda k: (q.get(k) or [""])[0]  # noqa: E731
+        part, n = one("part") or "summary", one("n")
+        if part not in TASK_PARTS or (n and not (n.isdigit() and 0 < int(n) <= TASK_LOG_MAX)):
+            return self._json(400, {"error": f"task is ?name=<task>&part=summary|diff|log"
+                                             f"&full=1&path=<file>&n=<1 to {TASK_LOG_MAX}>"})
+        if (t := open_task(one("name"))) is None:
+            return self._json(404, {"error": "no such open task"})
+        if part == "summary":
+            got = task_summary(t)
+        elif part == "diff":
+            got = task_diff(t, full=one("full") == "1", path=q["path"][0] if q.get("path") else None)
+            if got is None:
+                return self._json(404, {"error": "no such file in the diff"})
+        else:
+            got = task_log(t, int(n) if n else TASK_LOG_ROWS)
+        self._json(200, {"task": t.name, "part": part, **got, "now": store.now()})
+
     def _gone(self) -> bool:
         """Whether the client hung up: its side readable with nothing to read."""
         try:
@@ -2181,6 +2303,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(404, {"error": "no such take"})
                 else:
                     self._send(200, *got)
+            return
+        if path == "/api/task":  # the task sheet: one open task's summary, diff or log (#1201)
+            if self._authed():
+                self._task()
             return
         if path.startswith(("/api/upload/", "/api/file/")):  # an attachment (#623)
             if self._authed():
@@ -2465,6 +2591,11 @@ class Handler(BaseHTTPRequestHandler):
             if not take:
                 return self._json(400, {"error": "no such take"})
             about = {"audio": m["batch"], "n": n, "name": take.get("name"), "path": take.get("path")}
+        elif isinstance(about, dict) and set(about) == {"task"}:  # from the task sheet (#1201)
+            t = store.Task(about["task"]) if isinstance(about["task"], str) and store.NAME_RE.match(about["task"]) else None
+            if not t or not t.exists or t.spec.get("bench"):
+                return self._json(400, {"error": "no such task"})
+            about = {"task": t.name}
         elif about is not None:  # a reply to a pair of screenshots: its task and step, from the pair
             pair = shots(about.get("task"), about.get("n")) if isinstance(about, dict) else None
             if not pair:

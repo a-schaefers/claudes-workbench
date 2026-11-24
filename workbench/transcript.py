@@ -362,6 +362,26 @@ EVENT_KINDS = frozenset({
     "stopped", "error", "retry", "gpu", "served", "rate_limited", "backend", "rewound"})
 
 
+# What `wb log` prints, and the web chat's task sheet (#1201): the agent's text, its tool calls,
+# and every kind wb watch shows (a fixed nine once left out the runner's own rows, #861).
+LOG_KINDS = frozenset({"text", "tool"}) | EVENT_KINDS
+
+
+def log_body(r: dict, verbose: bool = False) -> str | None:
+    """A `wb log` line after its time and round, None for a row it doesn't show. Not ``verbose``,
+    the agent's text is its first line, cut to 110 characters."""
+    k = r.get("kind")
+    if k == "tool":
+        mark = "" if r.get("ok") else "  ✗ " + str(r.get("error") or "")[:100]
+        return f"{r.get('tool', ''):8} {r.get('brief', '')}{mark}"
+    if k not in LOG_KINDS:
+        return None
+    body = str(r.get("text") or "")
+    if k == "text" and not verbose:
+        body = body.strip().splitlines()[0][:110] if body.strip() else ""
+    return f"{k:8} {body}"
+
+
 def task_entries(task: store.Task) -> list[Entry]:
     out = []
     rows, _ = store.read_jsonl(task.dir / "events.jsonl")

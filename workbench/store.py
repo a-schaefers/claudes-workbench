@@ -950,6 +950,15 @@ class Task:
     def round_dir(self, n: int) -> Path:
         return self.dir / "rounds" / str(n)
 
+    def report(self, n: int) -> str:
+        """Round ``n``'s report (summary.md), else what stands instead, as `wb report` and the
+        web chat's task sheet (#1201) both say it."""
+        p = self.round_dir(n) / "summary.md"
+        try:
+            return p.read_text(errors="replace")
+        except FileNotFoundError:
+            return f"round {n} has no report yet ({self.status.get('phase')}: {self.status.get('last')})"
+
 
     def set_status(self, **fields) -> dict:
         # The runner and wb both write status; the lock keeps their edits whole.

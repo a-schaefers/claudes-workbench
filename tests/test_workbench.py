@@ -19862,6 +19862,11 @@ class Verify(Base):
         self.assertIn("proven: it fails on the base and passes on the candidate", rep)
         self.assertIn("base: exit 1: AssertionError: 250000 != 250", rep)
         self.assertIn("/verify/1/{base,candidate}.txt", rep)               # each run's output
+        from workbench import chat                    # the web chat's task sheet says the same (#1201)
+        checks = chat.task_summary(store.Task("t"))["verify"]
+        self.assertTrue(checks)                       # an empty list joins to "", in any string
+        self.assertIn("proven: it fails on the base", "\n".join(checks))
+        self.assertIn("\n".join(checks), rep)
         (self.wt / "calc.py").write_text("def kw(watts):\n    return watts / 1000.0\n")
         self.assertIn("stale: the worktree has changed since", run_wb("report", "t"))
         out = run_wb("accept", "t", "-m", "kW from W")
@@ -26932,6 +26937,125 @@ class WebChat(Base):
         task("t-done", "accepted")
         self.assertEqual(sorted(t["name"] for t in self.chat.open_tasks()), ["t-queued", "t-review"])
         self.assertEqual(sorted(t["name"] for t in self.chat.snapshot()["tasks"]), ["t-queued", "t-review"])
+
+    # ---- the task sheet (#1201) ----
+
+    def _sheet_task(self, name="fix-auth", phase="review", **status):
+        """An open task with a real worktree off self.repo: one file changed, one new."""
+        t = store.Task(name)
+        t.dir.mkdir(parents=True)
+        base = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", f"wb/{name}",
+                        str(t.dir / "worktree"), base], check=True, capture_output=True)
+        store.write_json(t.dir / "task.json", {"name": name, "model": "deepinfra/vendor/flash", "via": "api",
+                                               "provider_name": "DeepInfra", "repo": str(self.repo), "base": base,
+                                               "branch": f"wb/{name}", "created_at": store.now() - 90})
+        t.set_status(phase=phase, round=2, last="tests pass", **status)
+        (t.worktree / "README.md").write_text("hello\nworld\n")
+        (t.worktree / "new.py").write_text("x = 1\n")
+        return t
+
+    def test_the_task_sheet_shows_an_open_task_as_wb_status_report_diff_and_log_do(self):
+        t = self._sheet_task()
+        t.round_dir(2).mkdir(parents=True)
+        (t.round_dir(2) / "summary.md").write_text("## Done\nAdded new.py.\n")
+        for row in ({"kind": "round", "round": 2, "text": "round 2", "ts": store.now()},
+                    {"kind": "text", "round": 2, "text": "I'll add it.\nThen test.", "ts": store.now()},
+                    {"kind": "step", "round": 2, "ts": store.now()},         # held: wb log never shows one
+                    {"kind": "tool", "round": 2, "tool": "bash", "brief": "pytest", "ok": False,
+                     "error": "1 failed", "ts": store.now()}):
+            t.event(row)
+        tok, q = self.chat.token(), "/api/task?name=fix-auth&part="
+        code, s = self.call(q + "summary", token=tok)
+        self.assertEqual(code, 200, s)
+        self.assertEqual({k: s[k] for k in ("task", "part", "phase", "round", "step", "last", "model", "via",
+                                            "provider_name", "verify", "report_cut")},
+                         {"task": "fix-auth", "part": "summary", "phase": "review", "round": 2, "step": 1,
+                          "last": "tests pass", "model": "deepinfra/vendor/flash", "via": "api",
+                          "provider_name": "DeepInfra", "verify": [], "report_cut": False})
+        self.assertEqual(s["report"] + "\n", run_wb("report", "fix-auth"))  # print adds a newline
+        self.assertLess(s["created_at"], s["updated_at"])
+        self.assertLessEqual(s["updated_at"], s["now"])
+        # the diff: the stat first, then the whole, then one file, each as `wb diff` has it
+        code, d = self.call(q + "diff", token=tok)
+        self.assertEqual(code, 200, d)
+        self.assertEqual(d["stat"], run_wb("diff", "fix-auth", "--stat").rstrip("\n"))
+        self.assertEqual(d["files"], [{"path": "README.md", "added": 1, "deleted": 0},
+                                      {"path": "new.py", "added": 1, "deleted": 0}])
+        self.assertNotIn("diff", d)
+        code, d = self.call(q + "diff&full=1", token=tok)
+        self.assertEqual((d["diff"], d["cut"], d["lines_cut"], d["stat"]),
+                         (run_wb("diff", "fix-auth").rstrip("\n"), False, 0, ""))
+        code, d = self.call(q + "diff&full=1&path=new.py", token=tok)
+        self.assertEqual(d["diff"], run_wb("diff", "fix-auth", "--", "new.py").rstrip("\n"))
+        self.assertEqual(self.call(q + "diff&full=1&path=CLAUDE.md", token=tok),
+                         (404, {"error": "no such file in the diff"}))
+        # the log: wb log -v's lines after their time
+        code, lg = self.call(q + "log", token=tok)
+        self.assertEqual(code, 200, lg)
+        self.assertEqual([(r["kind"], r["round"], r["text"], r.get("ok")) for r in lg["rows"]],
+                         [("round", 2, "round    round 2", None), ("text", 2, "text     I'll add it.\nThen test.", None),
+                          ("tool", 2, "bash     pytest  ✗ 1 failed", False)])
+        self.assertEqual(run_wb("log", "fix-auth", "-v"),
+                         "".join(f"{time.strftime('%H:%M:%S', time.localtime(r['ts']))} r2 {r['text']}\n"
+                                 for r in lg["rows"]))
+        self.assertFalse(lg["more"])
+        code, lg = self.call(q + "log&n=1", token=tok)
+        self.assertEqual(([r["kind"] for r in lg["rows"]], lg["more"]), (["tool"], True))
+
+    def test_the_task_sheet_is_the_users_and_only_for_an_open_task(self):
+        # the diff and report are the user's work: an agent's token reads none of it (AGENT_UNREAD)
+        self._sheet_task()
+        tok = self.chat.token()
+        self.assertEqual(self.call("/api/task?name=fix-auth")[0], 401)
+        code, r = self.call("/api/task?name=fix-auth", token=self._agent())
+        self.assertEqual((code, r), (403, {"error": "agent tokens can't read tasks"}))
+        self.assertEqual(self.call("/api/task?name=fix-auth", token=tok)[1]["part"], "summary")  # the default
+        for bad in ("part=watch", "part=log&n=0", "part=log&n=abc", f"part=log&n={self.chat.TASK_LOG_MAX + 1}"):
+            self.assertEqual(self.call(f"/api/task?name=fix-auth&{bad}", token=tok)[0], 400, bad)
+        # none the strip leaves out: parked, a bench replay, closed, unknown, or no task name at all
+        self._sheet_task("t-parked", parked=store.now())
+        self._sheet_task("t-done", phase="accepted")
+        b = self._sheet_task("t-bench")
+        store.write_json(b.dir / "task.json", {**b.spec, "bench": True})
+        for name in ("t-parked", "t-done", "t-bench", "nope", "../fix-auth", ""):
+            self.assertEqual(self.call(f"/api/task?name={name}&part=diff", token=tok),
+                             (404, {"error": "no such open task"}), name)
+
+    def test_the_task_sheet_cuts_a_long_report_diff_and_line_and_follows_wb_next(self):
+        t = self._sheet_task(steps=2)
+        t.round_dir(2).mkdir(parents=True)
+        (t.round_dir(2) / "summary.md").write_text("r" * 100)
+        subprocess.run(["git", "-C", str(t.worktree), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(t.worktree), "commit", "-qm", "step 1"], check=True, capture_output=True)
+        (t.worktree / "new.py").write_text("x = 2\n" + "y" * 50 + "\n")
+        tok, q = self.chat.token(), "/api/task?name=fix-auth&part="
+        with mock.patch.object(self.chat, "TASK_REPORT_CHARS", 40), \
+                mock.patch("workbench.transcript.JSON_LINE_CHARS", 40):
+            s = self.call(q + "summary", token=tok)[1]
+            self.assertEqual((s["report"], s["report_cut"], s["step"]), ("r" * 40, True, 2))
+            # after `wb next`, the current step alone, as `wb diff` (gitops.diff_base: HEAD)
+            d = self.call(q + "diff&full=1", token=tok)[1]
+            self.assertEqual((d["base"], d["lines_cut"]), ("HEAD", 1))
+            self.assertIn("+" + "y" * 38 + "…", d["diff"].splitlines())
+            self.assertEqual([f["path"] for f in d["files"]], ["new.py"])
+            with mock.patch.object(self.chat, "TASK_DIFF_CHARS", 30):
+                d = self.call(q + "diff&full=1", token=tok)[1]
+                self.assertEqual((d["diff"], d["cut"]), (None, True))
+                self.assertEqual(d["files"], [{"path": "new.py", "added": 2, "deleted": 1}])
+
+    def test_a_reply_from_the_task_sheet_names_its_task_and_only_a_real_one(self):
+        # "Reply about this task": the message reaches Claude tagged with the task; acting on it
+        # (wb steer) stays Claude's, so the page never steers
+        self._sheet_task()
+        tok = self.chat.token()
+        code, r = self.call("/api/send", {"text": "is it on track?", "about": {"task": "fix-auth"}}, tok)
+        self.assertEqual((code, r["message"]["about"]), (200, {"task": "fix-auth"}))
+        for bad in ({"task": "nope"}, {"task": "../fix-auth"}, {"task": 7}):
+            self.assertEqual(self.call("/api/send", {"text": "x", "about": bad}, tok), (400, {"error": "no such task"}), bad)
+        code, r = self.call("/api/send", {"text": "x", "about": {"task": "fix-auth"}}, token=self._agent())
+        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about"}))
 
     # ---- the #1042 review ----
 

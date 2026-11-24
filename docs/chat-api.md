@@ -41,7 +41,8 @@ does the whole flow below with the standard library alone.
     - It can't answer Claude Code's dialogs (`/api/answer`), change the user's settings
       (`/api/prefs`), change notifications (`/api/push`), or mark the user away or what they have
       seen (`/api/active`, `/api/seen`); nor read a dialog (`/api/ask/<id>`), a push's summary
-      (`/api/latest`), a screenshot (`/api/shot`) or an audio take (`/api/audio`). Each is `403
+      (`/api/latest`), a screenshot (`/api/shot`), an audio take (`/api/audio`) or a task's
+      summary, diff or log (`/api/task`). Each is `403
       {"error": "agent tokens can't …"}`.
     - It works only from this machine: a request with an agent token from any other address
       (a tailnet or LAN peer, when the chat is bound there for the user's phone) is `403
@@ -126,7 +127,7 @@ An agent's token reads only its own conversation:
   attached to a row in its view; any other id is 404, as if there were none. A `PUT` under an id
   someone else stored is `409 {"error": "that upload id is another sender's"}`, and a send can
   attach only its own uploads.
-- **403:** `/api/latest`, `/api/ask/<id>`, `/api/shot`, `/api/audio`, and the user's `POST`s.
+- **403:** `/api/latest`, `/api/ask/<id>`, `/api/shot`, `/api/audio`, `/api/task`, and the user's `POST`s.
 - **`/api/health`** and the `listener` are as for the user.
 
 The user's own token reads everything, as below.
@@ -200,11 +201,13 @@ long`):
   {"error": "that cid is another sender's"}`.
 - `files`: optional, up to 10 upload ids (uploaded first; the same content twice is kept once).
 - `about`: optional, the user's only, what it answers: `{task, n}` (a pair of `wb shot`
-  screenshots) or `{audio: <batch>, n}` (a take of a `wb chat listen` shortlist). An agent's send
-  with `about` is `400 {"error": "agent messages can't carry about"}`.
+  screenshots), `{audio: <batch>, n}` (a take of a `wb chat listen` shortlist) or `{task}` alone
+  (a task, from the page's task sheet: any task wb has, but a bench replay; Claude gets `(about
+  task <task>)` and decides whether to steer it). An agent's send with `about` is `400 {"error":
+  "agent messages can't carry about"}`.
 
 Response: `{"message": {...}, "listener": {...}|null, "state": {...}}`. Errors: 400 `a message is
-1 to 8000 characters`, `bad cid`, `bad json`, `no such screenshots`, `no such take`, `no upload
+1 to 8000 characters`, `bad cid`, `bad json`, `no such screenshots`, `no such take`, `no such task`, `no upload
 <id>: it must be uploaded before the message` (for an agent, also another's upload), `files is a
 list of up to 10 upload ids`, `agent messages can't carry about`; 409 for another sender's `cid`;
 413 `too much for one message: …`; 429 for an agent over its limit.
@@ -243,6 +246,27 @@ else 404 `no such screenshot`.
 
 ### `GET /api/audio?batch=<batch>&n=<n>` (user only)
 One take of a `wb chat listen` shortlist, as its audio type (at most 64 MiB). 404 `no such take`.
+
+### `GET /api/task?name=<task>&part=summary|diff|log` (user only)
+One open task, as `wb status`, `wb report`, `wb diff` and `wb log` show it: the page's task sheet.
+Read only, from the task's files and its worktree; it never starts OpenCode. Only a task the
+`tasks` strip lists (open, not parked, not a bench replay); any other is `404 {"error": "no such
+open task"}`. Every answer is `{task, part, …, now}`:
+- `summary` (the default): `phase`, `round`, `step` (above 1 after `wb next`), `last`,
+  `created_at` and `updated_at` (seconds; age and idle are `now` minus them), `model`, `via`,
+  `provider_name`, `report` (the round's summary.md, or what stands instead, cut at 64 KB with
+  `report_cut: true`) and `verify` (the regression check's lines, `[]` for none).
+- `diff`: against `base` (the task's base commit, or `HEAD` after `wb next`: the current step,
+  as `wb diff`): `stat` (`wb diff --stat`) and `files` (`[{path, added, deleted}]`, null counts
+  for a binary file). With `full=1`, `diff` instead of the stat: the whole diff, or with
+  `path=<one of files>` that file's (else 404 `no such file in the diff`), each line cut at
+  2,000 characters (`lines_cut`: how many), or `diff: null` with `cut: true` past 256 KB. A task
+  with no worktree yet, or a git failure, answers `note` and no files.
+- `log`: `rows`, the last `n` (1 to 200, default 50) of `wb log -v`'s rows, each `{ts, round,
+  kind, text}` (`wb log`'s words after the time, cut at 2,000 characters; `ok` for a tool call),
+  and `more: true` when older ones were left out.
+
+400 for another `part` or a bad `n`. All of it is text the agent wrote: show it as text.
 
 ### `POST /api/answer` (user only)
 Answer a dialog: `{id, answer: "allow"|"deny", note?: ≤ 2000 characters, answers?: {question:
