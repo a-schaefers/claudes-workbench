@@ -5194,7 +5194,10 @@ atom.
 commands, read as above (`runsIn`: `simpleCommands`, `bash -c` and `eval` inside; `wbArgs`), each `wb route …` and each
 `wb start … --m…` (any abbreviation of `--model`) is a call (`routeCalls`); a show (`wb route`, `--json`) and a dry run
 change nothing. For the one call, the mod runs `wb route --dry-run --json <its args>` (a start's as `--start <wb start's
-args>`, parsed there by wb start's own parser: the task's name and an abbreviated `--model` as wb takes them), 60 s.
+args>`, parsed there by wb start's own parser: the task's name and an abbreviated `--model` as wb takes them), 60 s,
+in the directory the call runs in (`routeCalls`' `at`: `cd` and `pushd` followed from the session's, as `upstreamAim`
+does; wb start's `--repo` is `.` unless given, and a start after `cd other &&` was judged local-only, or not, by the
+session's repo, #1125).
 A dry run that exits non-zero (wb refuses the change itself), prints nothing gated (a GPU model pin, a GPU `--model`, the Agents switch to GPU)
 or can't run lets the call through: wb refuses a gated change under Claude Code without the approval anyway. Else, away
 on the web chat it denies at once (`NOT_CHANGED_AWAY`: `workbench: not changed: the user is away: say in the web chat

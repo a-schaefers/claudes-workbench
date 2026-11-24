@@ -1677,19 +1677,33 @@ function runsIn(src: string): string[][] {
 // Each wb route and each wb start with a --model (any abbreviation: --m…) in a command line, as
 // the arguments `wb route --dry-run --json` takes for it: a route's own, or `--start` and the
 // start's (parsed there by wb start's own parser). `hidden`: a route or such a start inside text
-// another program runs, which can't be shown
-export function routeCalls(command: string): { calls: string[][]; hidden: boolean } {
+// another program runs, which can't be shown. `at`: the directory each call runs in, `cd` and
+// pushd followed from ``cwd`` as upstreamAim follows them: the dry run ran in the session's
+// directory, so `cd other && wb start … --model <API id>` (--repo defaults to `.`) was judged
+// local-only, or not, by the wrong repo (#1125, 2026-11-23). '' without a ``cwd``.
+export function routeCalls(command: string, cwd = '', home = ''): { calls: string[][]; hidden: boolean; at: string[] } {
   const calls: string[][] = []
+  const at: string[] = []
+  let here = cwd
   let runner = false
   for (const words of runsIn(command)) {
     const i = commandAt(words)
     const cmd = wordOf(words[i])
+    if ((cmd === 'cd' || cmd === 'pushd') && here) {
+      const rest = words.slice(i + 1)
+      const k = rest.indexOf('--')
+      const to = k >= 0 ? rest[k + 1] : rest.find(w => !/^-[LPe@]+$/.test(w))
+      if (to !== '-') here = absolutePath(to ?? (home || '/'), home, here)
+      continue
+    }
     if (RUNS_CODE.test(cmd)) runner = true
     const wb = wbArgs(cmd, words.slice(i + 1))
     if (wb?.[0] === 'route') calls.push(wb.slice(1))
     else if (wb?.[0] === 'start' && wb.some(w => /^--m/.test(w))) calls.push(['--start', ...wb.slice(1)])
+    else continue
+    at.push(here)
   }
-  return { calls, hidden: !calls.length && runner && ROUTE_TEXT.test(command) }
+  return { calls, hidden: !calls.length && runner && ROUTE_TEXT.test(command), at }
 }
 
 const routesHome = async ($: any) => (await $.env.get('HOME').catch(() => '')) || mem.home
@@ -1788,15 +1802,18 @@ async function routeRefusal($: any, e: Row): Promise<string> {
   if (!/\b(?:route|start)\b|route-ok\.json/i.test(command)) return '' // most calls: no parse
   if (command.includes(ROUTE_OK) && (mentions(command, mem.root, await routesHome($)) ||
     /\$\{?WB_HOME\b/.test(command))) return ROUTE_OK_OWN
-  const { calls, hidden } = routeCalls(command)
+  const { calls, hidden, at } = routeCalls(command, (await $.session.cwd().catch(() => '')) || mem.cwd, await routesHome($))
   if (hidden) return ROUTE_OWN
   // a show (`wb route`, `--json`) and a dry run change nothing
-  const live = calls.filter(c => !c.includes('--dry-run') && (c[0] === '--start' || c.some(a => a !== '--json')))
+  const live = calls.flatMap((c, i) => !c.includes('--dry-run') && (c[0] === '--start' || c.some(a => a !== '--json'))
+    ? [{ args: c, cwd: at[i] }] : [])
   if (!live.length) return ''
   if (live.length > 1) return ROUTE_OWN
   let q: Row
   try {
-    const r = await $.process.run([mem.wb, 'route', '--dry-run', '--json', ...live[0]!], { timeoutMs: 60_000 })
+    // in the directory the call runs in: wb start's --repo is `.` unless given (#1125)
+    const r = await $.process.run([mem.wb, 'route', '--dry-run', '--json', ...live[0]!.args],
+      { timeoutMs: 60_000, ...(live[0]!.cwd ? { cwd: live[0]!.cwd } : {}) })
     if (r.exitCode !== 0) return '' // wb refuses it itself, saying why
     q = JSON.parse(String(r.stdout ?? ''))
   } catch {

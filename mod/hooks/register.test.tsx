@@ -5243,7 +5243,7 @@ const ROUTE_LINE = 'trivial: GPU → API deepseek/deepseek-flash · your code go
 const ROUTE_ARGV = ['route', 'trivial', 'deepseek/deepseek-flash', '--day-usd', '5']
 function routeWorld(on: any, files: Record<string, string>) {
   const w = {
-    asked: [] as string[], options: [] as string[][], answer: "Don't" as string | null, dry: [] as string[][], code: 0,
+    asked: [] as string[], options: [] as string[][], answer: "Don't" as string | null, dry: [] as string[][], dryAt: [] as string[], code: 0,
     reply: { change: ROUTE_LINE, gate: true, approval: { argv: ROUTE_ARGV, change: ROUTE_LINE } } as Record<string, unknown>,
   }
   on('session.cwd', () => ({ value: '/home/u/project' }))
@@ -5253,6 +5253,7 @@ function routeWorld(on: any, files: Record<string, string>) {
   on('process.run', (_: any, e: any) => {
     if (e.argv[1] === 'route' && e.argv[2] === '--dry-run') {
       w.dry.push(e.argv.slice(1))
+      w.dryAt.push(e.init?.cwd || '/home/u/project') // absent: the session's
       return { value: { exitCode: w.code, stdout: w.code ? '' : JSON.stringify(w.reply), stderr: w.code ? 'wb: no day cap yet' : '' } }
     }
     return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
@@ -5308,6 +5309,26 @@ test('#1014: a role change asks the user with wb\'s own change line; Allow write
     await $.tool.call(input as any)
     return { asked: w.asked.length - n }
   }
+  await clock.advance(1000)
+})
+
+test('#1125: an API --model start\'s dry run runs where the start runs, cd and pushd followed from the session\'s directory', async ($, on) => {
+  // the audit of 2.0 (2026-11-23): it ran in the session's directory, so `cd other && wb start …
+  // --model <API id>` (--repo defaults to `.`) was judged local-only, or not, by the wrong repo
+  const { clock, bash, w } = await routeProbe($, on)
+  const start = 'wb start t --spec s.md --model deepseek/deepseek-flash'
+  for (const [line, where] of [
+    [start, '/home/u/project'],
+    [`cd /b && ${start}`, '/b'],
+    [`cd ../other && ${start}`, '/home/u/other'],
+    [`cd /b && pushd sub && ${start}`, '/b/sub'],
+    [`cd ~/c && ${start}`, '/home/u/c'],
+  ] as const) {
+    const n = w.dryAt.length
+    await bash(line)
+    expect([line, w.dryAt.slice(n)]).toEqual([line, [where]])
+  }
+  expect(routeCalls('cd /b && wb route trivial api', '/a', '/home/u')).toEqual({ calls: [['trivial', 'api']], hidden: false, at: ['/b'] })
   await clock.advance(1000)
 })
 
