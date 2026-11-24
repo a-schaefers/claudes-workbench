@@ -2091,6 +2091,7 @@ def lane_refused(task: store.Task, output: str) -> list[str]:
     # From ABI 9 a socket made outside the lane is refused even inside a writable place: the
     # user's Postgres or MySQL socket in /tmp read as a broken database, no grant named (#826)
     sockets = context.unix_paths(task) if lane.abi() >= 9 else None
+    hidden = context.api_hidden(task)  # once: each path's check reads every token file
     found = []
     for line in output[-200_000:].splitlines():
         if PTY_REFUSED.search(line) and "/dev/pts" not in found and "/dev/pts" not in places:
@@ -2098,10 +2099,12 @@ def lane_refused(task: store.Task, output: str) -> list[str]:
         if not REFUSAL.search(line):
             continue
         for path in refused_paths(line):
-            if path not in found and context.api_hidden_refusal(task, path) and runner_may(path):
-                found.append(path)  # named as hidden, with no grant (#1093)
+            real = os.path.realpath(path)
+            if any(real == h or context._under(real, h) for h in hidden):
+                if path not in found and runner_may(path):
+                    found.append(path)  # named as hidden, with no grant (#1093)
                 continue
-            grant = lane_grant(path, task)
+            grant = lane_grant(path, hidden=hidden)
             if path not in found and grant and (not any(
                     path == w or path.startswith(str(w).rstrip("/") + "/") for w in places)
                     or sockets is not None and is_socket(path) and not any(
@@ -2133,7 +2136,7 @@ def is_socket(path: str) -> bool:
         return False
 
 
-def lane_grant(path: str, task: store.Task | None = None) -> str | None:
+def lane_grant(path: str, task: store.Task | None = None, hidden: set[str] | None = None) -> str | None:
     """The `wb allow --path` that reaches a refused path: /dev/pts for a pty, itself when it
     exists (a directory, a device node, a socket) or is a device node, else the nearest directory that does; the
     toolchain home it falls in when that isn't made yet, or the one below it (`~/go`: `go/pkg`,
@@ -2141,9 +2144,10 @@ def lane_grant(path: str, task: store.Task | None = None) -> str | None:
     home it is in (context.gem_home_of, #832); then, while that place holds what the lane is split around
     (context.split_points: a grant of it would be split again), the next directory down
     towards the path. None when no grant can (`/`, the home directory, a secret:
-    context.lane_refusal; for ``task``, a file its API lane hides: context.api_hidden, #1093)."""
+    context.lane_refusal; for ``task``, a file its API lane hides: context.api_hidden, #1093, or
+    ``hidden``, those files already read)."""
     target = real = os.path.realpath(path)
-    hidden = context.api_hidden(task) if task else set()
+    hidden = hidden if hidden is not None else context.api_hidden(task) if task else set()
     if any(target == h or context._under(target, h) for h in hidden):
         return None  # hidden over any grant (#1093)
     if real == "/dev/pts" or real.startswith("/dev/pts/"):
