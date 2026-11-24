@@ -1296,7 +1296,8 @@ def _count(v) -> int | None:
 def api_limits(cfg: dict) -> dict:
     """An API model's entry with its window and output capped (#1017): `limit.context` at most
     API_WINDOW, `limit.input` at most that, and `limit.output` and `options.max_tokens` both the
-    smallest of the entry's own two and API_OUTPUT (API_OUTPUT when it gives neither). Written
+    smallest of the entry's own two and API_OUTPUT (API_OUTPUT when it gives neither), and at
+    most _api_output_fit of the window (#1073). Written
     once here, so the layer's pins (runner.model_pins), OpenCode's compaction
     (runner.compaction_buffer), the slice, status `window`, the steps and the tuning keys all read
     one window. A catalog's 1M window let a session that only reads carry up to 1M tokens a
@@ -1310,10 +1311,24 @@ def api_limits(cfg: dict) -> dict:
     opts = cfg.get("options") if isinstance(cfg.get("options"), dict) else {}
     context = min(context, API_WINDOW)
     cap = min(v for v in (_count(lim.get("output")), _count(opts.get("max_tokens")), API_OUTPUT) if v)
+    # and at most what keeps the latest handover at or past the earliest fresh_at: a 32K window
+    # with a 32K output put OpenCode's compaction below zero, and the note told the user to
+    # lower a catalog's limits, which they can't (#1073, 2026-11-23)
+    cap = max(min(cap, _api_output_fit(context)), 1)
     out = {**lim, "context": context, "output": cap}
     if inp := _count(lim.get("input")):
         out["input"] = min(inp, context)
     return {**cfg, "limit": out, "options": {**opts, "max_tokens": cap}}
+
+
+def _api_output_fit(context: int) -> int:
+    """The largest output cap whose compaction buffer (runner.compaction_buffer: the reply plus
+    STEP_GROWTH) leaves runner.fresh_ceiling at or above the lowest fresh_at for this window:
+    1 - lo - max(STEP_GROWTH / window, CEILING_MARGIN) of the window, less STEP_GROWTH."""
+    from . import runner, tuning  # both import this module
+    lo = min(tuning.KNOBS["fresh_at"].values)
+    margin = max(runner.STEP_GROWTH / context, tuning.CEILING_MARGIN)
+    return int(context * (1 - lo - margin)) - runner.STEP_GROWTH
 
 
 def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:

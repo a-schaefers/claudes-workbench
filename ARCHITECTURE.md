@@ -2714,7 +2714,11 @@ read as a wrong id, Claude hunted for the "right" one).
   `BASE_WINDOW`: past it the slice grows only from steps that fit, and every request of a fuller
   window is paid for, up to 1M tokens a request in a session that only reads); `input` at most that
   when the catalog has one (`usable_input` reads the smaller); `output` `min(catalog, API_OUTPUT)`
-  (32768; `API_OUTPUT` when none), and `options.max_tokens` that output (DeepSeek honours only
+  (32768; `API_OUTPUT` when none), and at most `_api_output_fit(window)`, the largest that keeps
+  `runner.fresh_ceiling` at or above the lowest `fresh_at` (`window × (1 − lo − max(STEP_GROWTH /
+  window, CEILING_MARGIN)) − STEP_GROWTH`: 1638 at 16K, 11468 at 32K, 31129 at 64K, past
+  `API_OUTPUT` from about 70K; a 32K/32K catalog entry put the compaction point below zero and the
+  note told the user to lower a catalog's limits, #1073), and `options.max_tokens` that output (DeepSeek honours only
   `max_tokens`, and 384K out put the compaction point below zero; one reply alone can cost dollars).
   An entry's own `options.max_tokens` under those is kept, for both: the user's entries (a provider
   off this machine, an Ollama cloud model) come through here too, and raising theirs to 32768 spent
@@ -6207,7 +6211,7 @@ doc needs its own `!/` line).
   `RealOpenCodeAPI.test_the_tasks_own_catalog_*` on each OpenCode bump, and the fake's `OPENCODE_MODELS_PATH` listing.
 - **`models.API_PARALLEL`** → `cli._slots_full` and `_slot_note`'s text, `NoLease`'s queued `last`, SKILL.md's
   dispatch line.
-- **An API model's window and output** (`models.api_limits`, `API_WINDOW`, `API_OUTPUT`) are the one source for `runner.model_pins`/`api_pins` (the layer), `compaction_buffer`, `router.slice`, status `window` (the steps, `tuning._key`): read them from `m.config` (each round of an API task: status `api_entry`, `runner.pin_api`), never the catalog's `extra["catalog_limit"]` (#1017), which only `wb models --api` shows.
+- **An API model's window and output** (`models.api_limits`, `API_WINDOW`, `API_OUTPUT`, `_api_output_fit`) are the one source for `runner.model_pins`/`api_pins` (the layer), `compaction_buffer`, `router.slice`, status `window` (the steps, `tuning._key`): read them from `m.config` (each round of an API task: status `api_entry`, `runner.pin_api`), never the catalog's `extra["catalog_limit"]` (#1017), which only `wb models --api` shows.
 - **What a handoff costs Claude, measured** → the README's sentence.
 - **Anything a reader looks up** → this file, CLAUDE.md if it names it, the skill if Claude uses it; README only for the
   quickstart (CLAUDE.md's *Keeping the docs true*).
