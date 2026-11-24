@@ -656,7 +656,8 @@ work so far is in the worktree. Ask the user: a higher cap (wb route cap <usd>) 
 resume <task>; or the role on the GPU (wb route <role> gpu) for the next tasks, with wb takeover <task>
 or wb discard <task> for this one (resume keeps its API model).` (with no cap: `meter.no_cap()`, then
 `wb resume`; never tomorrow). Each remedy has its own next step: resume never re-routes, so "the role on
-the GPU … then wb resume" resumed into the same stop (#1095). The mod's `GUARD_WORDS.spend` names it,
+the GPU … then wb resume" resumed into the same stop (#1095); `wb resume` at the cap is now refused
+before any round (`cli._model_still_listed`, #1118). The mod's `GUARD_WORDS.spend` names it,
 and its wake for a `cause` `spend` notice ends with `SPEND_NEXT` (the same choices, asked of the user;
 `Ask the user for a day cap` when routes.json has none, `readRoutes`), not the stuck wake's
 feedback line: feedback would run a round the cap stops again at once. A `cause` `provider` notice (a quota, key, rate-limit

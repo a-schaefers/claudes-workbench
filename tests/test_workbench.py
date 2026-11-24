@@ -31631,7 +31631,7 @@ class ApiSpend(Base):
             "t-guard; or the role on the GPU (wb route significant gpu) for the next tasks, with wb takeover "
             "t-guard or wb discard t-guard for this one (resume keeps its API model)."))
 
-    def test_a_spend_stop_resumed_once_its_role_is_on_the_gpu_stops_again_on_its_api_model(self):
+    def test_a_spend_stop_resumed_once_its_role_is_on_the_gpu_is_refused_at_the_cap_on_its_api_model(self):
         # #1095 (2026-11-23): the notice and the mod's wake said "the role on the GPU … then wb
         # resume", but resume keeps the task's model (fixed per task, #1018), so the round stopped
         # at the cap again at once. This pins what the advice must match: the GPU is for the next
@@ -31647,15 +31647,18 @@ class ApiSpend(Base):
         self.assertNotIn("GPU, or tomorrow; then wb resume", first["text"])
         store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {
             r: {"via": "gpu"} for r in ("significant", "trivial", "writing")}})  # the user chose the GPU
-        with mock.patch.object(cli, "spawn_runner"):
+        # resume keeps the task's API model, so at the cap it is refused before any round is
+        # written (#1118, merged with this one): the GPU never helps this task, only the next
+        err = io.StringIO()
+        with (mock.patch.object(cli, "spawn_runner") as spawned, redirect_stderr(err),
+              self.assertRaises(SystemExit) as e):
             run_wb("resume", "t-f33")
+        self.assertEqual(e.exception.code, 3)
+        self.assertIn("day cap", err.getvalue())
+        spawned.assert_not_called()
         task = store.Task("t-f33")
         self.assertEqual((task.spec["via"], task.spec["model"]), ("api", SPEND_M))  # resume never re-routes
-        self.meter._METERS.clear()                                                # a new runner process
-        runner.drive(task)
         self.assertEqual(task.status["phase"], "stuck")
-        self.assertIn("spend cap is reached", task.status["last"])
-        self.assertEqual([r["cause"] for r in self.notices("t-f33", "stuck")], ["spend", "spend"])  # again at once
 
     def test_the_cap_is_checked_before_every_round_drive_goes_on_to(self):
         # #1017's _go_on: the in-round guard off, the cap reached in round 1 stops the auto-fix round
