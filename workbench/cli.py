@@ -1600,7 +1600,11 @@ def cmd_start(a):
     if mcp:  # each server's tools go into every request: prefill on the GPU (#1202)
         print(f"MCP: {', '.join(mcp)} (commands.json \"mcp\"): each server's tools go into every "
               "request")
-        for note in context.mcp_checkout_notes(mcp, [repo]) if api else ():  # #1202's review
+        # only where a lane hides the checkout: with no Landlock (every Mac) or the lane off the
+        # server reads it, and the note had Claude tell the user to change a config that works
+        # (#1202's review, 2026-11-24; api_hidden_note's gate, #1156)
+        hides = api and lane.abi() and context.writable(task) is not None
+        for note in context.mcp_checkout_notes(mcp, [repo]) if hides else ():
             print(note)
     if a.test and not a.no_base_check:
         print("base check: the runner runs the acceptance command once on the base first; what "
@@ -7344,8 +7348,9 @@ def cmd_doctor(a):
     for name, where in _mcp_named().items():  # the user's MCP servers for agents (#1202)
         why = context.mcp_servers([name])[1]
         line(not why, why[0] if why else f"MCP server {name} (commands.json): the agents of {where}")
-        # one named in a repo its tasks run in, which an API task's lane hides (#1202's review)
-        repos = context.commands_conf().get("repos") or {}
+        # one named in a repo its tasks run in, which an API task's lane hides (#1202's review);
+        # none with no lane to hide it (no Landlock, or "paths": ["*"]), as wb start
+        repos = (context.commands_conf().get("repos") or {}) if lane.abi() and context.lane_on() else {}
         for note in context.mcp_checkout_notes([name], list(repos) if where == "every task" else
                                                [r for r in repos if name in (repos[r].get("mcp") or ())]):
             print(f"--  {note.removeprefix('note: ')}")

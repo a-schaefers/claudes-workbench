@@ -3108,7 +3108,8 @@ def mcp_checkout_notes(names, repos) -> list[str]:
     leaves it out and the server dies at its start there. OpenCode 2.3.2 starts a local server
     in the project's directory (its `resolveCwd`: the config's `cwd` from there, else the
     directory itself), the task's worktree, so a path relative to the repo names the
-    worktree's copy (#1202's review, 2026-11-24)."""
+    worktree's copy (#1202's review, 2026-11-24). Its callers ask it only where a lane hides the
+    checkout (Landlock, the lane on): with none the server reads it."""
     home = os.path.realpath(Path.home())
     tops = {os.path.realpath(os.path.expanduser(str(r))) for r in repos}
     tops |= {os.path.abspath(os.path.expanduser(str(r))) for r in repos}

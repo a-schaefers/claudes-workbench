@@ -8192,33 +8192,61 @@ class UsersMcpServers(Base):
         self.assertIn("name it relative to the repo: `.`", notes[1])
         self.assertIn("which holds the repo", notes[2])
 
-    def test_wb_start_and_doctor_say_a_server_named_in_the_repo_goes_by_a_path_relative_to_it(self):
-        # #1202's review (2026-11-24): an API task's lane hides the checkout, so the server died
-        # at its start; OpenCode starts a local server in the task's worktree, where a path
-        # relative to the repo finds the worktree's copy
+    def servers_in_the_repo(self, **conf) -> None:
+        """Two servers whose commands name the repo: 'schema' for every task, 'fs' for the repo's;
+        an API model with a key, for wb start."""
         srv = self.repo / "tools" / "mcp" / "server.js"
         srv.parent.mkdir(parents=True)
         srv.write_text("")
         self.servers({"schema": {"type": "local", "command": ["node", str(srv)]},
                       "fs": {"type": "local", "command": ["mcp-fs", str(self.repo)]}})
-        self.commands({"mcp": ["schema"], "repos": {str(self.repo): {"mcp": ["fs"]}}})
+        self.commands({"mcp": ["schema"], "repos": {str(self.repo): {"mcp": ["fs"]}}, **conf})
         ApiHarness.catalog(self, API_CATALOG)
         store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
         os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
             {"id": "cred_deepinfra", "integrationID": "deepinfra", "label": "main", "active": True,
              "value": {"type": "key", "key": _ApiTask.CANARY}}])
-        out = _ApiTask.start_api(self, "t-mcp-api", "ok", spawn=False)
-        self.assertIn("note: MCP server 'schema' names", out)
-        self.assertIn("relative to the repo: `tools/mcp/server.js`", out)
-        self.assertIn("note: MCP server 'fs' names", out)
-        with mock.patch.object(cli, "spawn_runner"):   # a GPU task's lane reads the repo
-            self.assertNotIn("MCP server 'schema' names", self.start("t-mcp-gpu", "ok"))
+
+    def doctor(self) -> str:
         buf = io.StringIO()
         with redirect_stdout(buf), contextlib.suppress(SystemExit):
             cli.main(["doctor"])
-        out = buf.getvalue()
+        return buf.getvalue()
+
+    def test_wb_start_and_doctor_say_a_server_named_in_the_repo_goes_by_a_path_relative_to_it(self):
+        # #1202's review (2026-11-24): an API task's lane hides the checkout, so the server died
+        # at its start; OpenCode starts a local server in the task's worktree, where a path
+        # relative to the repo finds the worktree's copy. Landlock on, so it holds on a Mac too
+        self.servers_in_the_repo()
+        with mock.patch.object(lane, "abi", return_value=4):
+            out = _ApiTask.start_api(self, "t-mcp-api", "ok", spawn=False)
+            self.assertIn("note: MCP server 'schema' names", out)
+            self.assertIn("relative to the repo: `tools/mcp/server.js`", out)
+            self.assertIn("note: MCP server 'fs' names", out)
+            with mock.patch.object(cli, "spawn_runner"):   # a GPU task's lane reads the repo
+                self.assertNotIn("MCP server 'schema' names", self.start("t-mcp-gpu", "ok"))
+            out = self.doctor()
         self.assertIn("--  MCP server 'schema' names", out)
         self.assertIn("--  MCP server 'fs' names", out)
+
+    def test_with_no_lane_to_hide_the_checkout_neither_says_a_server_in_it_wont_be_reached(self):
+        # #1202's review (2026-11-24): with no Landlock (every Mac) or the lane off the server
+        # reads the checkout, yet both said it wouldn't, and Claude, as the skill says, told the
+        # user to change a config that works (api_hidden_note's gate, #1156)
+        self.servers_in_the_repo()
+        with mock.patch.object(lane, "abi", return_value=0):
+            out = _ApiTask.start_api(self, "t-no-landlock", "ok", spawn=False)
+            self.assertIn("MCP: ", out)
+            self.assertNotIn("note: MCP server", out)
+            self.assertNotIn("MCP server 'schema' names", self.doctor())
+        self.commands({"mcp": ["schema"], "repos": {str(self.repo): {"mcp": ["fs"]}}, "paths": ["*"]})
+        with mock.patch.object(lane, "abi", return_value=4):
+            out = _ApiTask.start_api(self, "t-lane-off", "ok", spawn=False)
+            self.assertIn("MCP: ", out)
+            self.assertNotIn("note: MCP server", out)
+            out = self.doctor()
+        self.assertNotIn("MCP server 'schema' names", out)
+        self.assertNotIn("MCP server 'fs' names", out)
 
     def test_a_server_in_opencodes_1x_shape_is_stubbed_and_can_be_named_too(self):
         from workbench import runner
