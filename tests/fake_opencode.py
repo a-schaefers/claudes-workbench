@@ -40,7 +40,9 @@
          as it began (#1168). FAKE_SELF_KEEP: it leaves "43" instead. FAKE_SELF_FILL: the
          self-review's first session breaks it, then fills 76% of a 32K window and works on for
          an hour; the fresh session carrying on plays the rest (#1188), or with FAKE_SELF_KEEP only
-         reads, the check left broken
+         reads, the check left broken. FAKE_SELF_STALL: the self-review's first run breaks it,
+         says a few words and is silent for an hour; the run after a nudge or a note (its prompt
+         the NUDGE or a steer's, "Claude, your reviewer") plays the rest (#1207)
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
@@ -593,8 +595,10 @@ if scenario == "http" and args and args[0] == "run":  # a model request through 
     scenario = "ok"
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
-if scenario == "selfreads" and "Before Claude reviews this" not in (args[-1] if args else ""):  # #1168: round 1 is ok's
-    scenario = "ok"
+if scenario == "selfreads" and "Before Claude reviews this" not in (args[-1] if args else "") \
+        and not (os.environ.get("FAKE_SELF_STALL")  # #1207: the nudge's or the note's round
+                 and re.search(r"Claude, your reviewer|Stop planning", args[-1] if args else "")):
+    scenario = "ok"  # #1168: round 1 is ok's
 if (scenario in ("fill", "compact", "donefull") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
         and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
@@ -796,6 +800,13 @@ elif scenario == "selfreads" and os.environ.get("FAKE_SELF_FILL") \
                                                       "cache": {"read": 900}})
     emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900, "reasoning": 6000,
                                                       "cache": {"read": 16100}})  # 76%, as fill's
+    time.sleep(3600)
+elif scenario == "selfreads" and os.environ.get("FAKE_SELF_STALL") \
+        and "Before Claude reviews this" in args[-1]:  # #1207: it thinks mid-check
+    with open("answer.txt", "w") as fh:
+        fh.write("41\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    emit("text", text="Now the test should fail; let me think about why.")
     time.sleep(3600)
 elif scenario == "selfreads":  # #1168: a self-review that breaks a check, copies it back, reads
     keep = os.environ.get("FAKE_SELF_KEEP")
