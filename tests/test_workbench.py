@@ -32211,8 +32211,9 @@ class ApiSpend(Base):
         self.assertIsNone(task.status.get("api_stop"))
         self.assertLess(mt.room(body, 4000), 0)                 # 1000 tokens at $5000/M: $5
         self.assertEqual(task.status["api_stop"]["guard"], "spend")
-        self.assertTrue(self.meter.stop_reason(task).startswith(
-            "the day's API spend cap is reached: ≈$4 of $5 today, and its next request could cost up to $5"))
+        self.assertTrue(self.meter.stop_reason(task).startswith(  # under the cap: not "reached" (#1150)
+            "too near the day's API spend cap for its next request: ≈$4 of $5 today, and its next request "
+            "could cost up to $5"))
         out = {"stuck": None, "guard": None}
         runner._spend_guard(task, out)
         self.assertEqual(out["guard"], "spend")
@@ -32235,6 +32236,75 @@ class ApiSpend(Base):
         self.assertAlmostEqual(self.meter.metered(prices, tok), (60000 * 2 + 50000 * 0.2) / 1e6, places=12)
         tok = {"in": 1000, "cache_read": 0, "cache_write": 0, "out": 10, "reasoning": 0}   # under it
         self.assertAlmostEqual(self.meter.metered(prices, tok), (1000 * 1 + 10 * 5) / 1e6, places=12)
+
+    def test_start_feedback_next_and_resume_refuse_within_one_worst_request_of_the_cap(self):
+        # #1150 (2026-11-24): today under the cap by less than one request at its worst passed wb
+        # start, feedback, next and resume (refusal blocked only at the cap); the checkout, setup
+        # and base check ran, then the room refused the first request: a spend wake for nothing
+        task = self.api_task("t-near", SPEND_TIER, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        self.cap(5)
+        self.spent(4.8)
+        m = runner.models.lookup(SPEND_TIER)
+        worst = m.config["options"]["max_tokens"] * 10 / 1e6        # the pinned output, the dearest tier
+        self.assertAlmostEqual(self.meter.request_floor(m), worst, places=9)
+        need = -(-(self.meter.today()["usd"] + worst) * 100 // 1) / 100  # up to the cent
+        line = ("trivial role: API spend today is ≈$4.80 of the $5 day cap, and one request on it can cost "
+                f"up to $0.33 (it resets at local midnight). Ask the user: a cap of at least ${need:.2f} "
+                "(wb route cap <usd>), the role on the GPU (wb route trivial gpu), or tomorrow")
+        self.assertEqual(self.meter.refusal(m, "trivial"), line)
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True):
+            run_wb("start", "t-near2", "--spec", str(self.spec), "--repo", str(self.repo), "--model", SPEND_TIER)
+        self.assertEqual(e.exception.code, 3)
+        self.assertIn("and one request on it can cost up to $0.33", err.getvalue())
+        self.assertFalse(store.Task("t-near2").dir.exists())
+        rnd = task.status["round"]
+        nxt = Path(self.tmp.name) / "next.md"
+        nxt.write_text("step two\n")
+        for args in (("feedback", "t-near", "--text", "1. make it 43"),
+                     ("next", "t-near", "--spec", str(nxt), "-m", "step one"), ("resume", "t-near")):
+            if args[0] == "resume":
+                task.set_status(phase="stuck")
+            err = io.StringIO()
+            with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+                  mock.patch.object(cli, "spawn_runner") as spawned):
+                run_wb(*args)
+            self.assertEqual(e.exception.code, 3, args)
+            self.assertIn("a cap of at least", err.getvalue())
+            spawned.assert_not_called()
+            self.assertFalse(task.round_dir(rnd + 1).exists(), args)
+        self.cap(need)                                           # the cap it named lets one through
+        self.assertIsNone(self.meter.refusal(m, "trivial"))
+
+    def test_a_stop_short_of_the_cap_says_too_near_and_names_a_cap_that_would_do(self):
+        # #1150 (2026-11-24): the room's stop under the cap said "the day's API spend cap is
+        # reached", so Claude resumed into the same stop; and drive went on to a round whose first
+        # request the room would refuse
+        self.cap(5)
+        self.spent(4.8)
+        task = self.api_task("t-near-room", SPEND_TIER)
+        mt = self.meter.for_task(task, runner.models.lookup(SPEND_TIER))
+        self.assertLess(mt.room({"model": "tiered-1", "max_tokens": 32768}, 400), 0)
+        self.assertTrue(self.meter.stop_reason(task).startswith(
+            "too near the day's API spend cap for its next request: ≈$4.80 of $5 today"))
+        text = self.meter.stop_text(task)
+        self.assertTrue(text.startswith(
+            "t-near-room stopped: too near the day's API spend cap for its next request (up to $0.33; ≈$4.80 "
+            "of $5 today; catalog prices). Its work so far is in the worktree. Ask the user: a cap of at "
+            "least $5.13 (wb route cap <usd>) or tomorrow, then wb resume t-near-room;"), text)
+        self.assertNotIn("cap is reached", text)
+        mt.begin(2)                                              # a new round clears the room's stop
+        self.assertIsNone(self.meter.stop_reason(task))          # in a round: a request let out is never cut
+        self.assertTrue(self.meter.stop_reason(task, ahead=True).startswith("too near the day's API spend cap"))
+        self.assertFalse(runner._go_on(task, 2, "auto-fix"))     # before a round: it would stop at once
+        (notice,) = self.notices("t-near-room", "stuck")
+        self.assertEqual(notice["cause"], "spend")
+        self.assertIn("auto-fix didn't run: too near the day's API spend cap", notice["text"])
+        self.assertIn("a cap of at least $5.13", notice["text"])
+        self.cap(5.13)
+        self.assertTrue(runner._go_on(task, 2, "auto-fix"))
 
     def test_the_room_prices_a_request_at_the_dearest_tier(self):
         self.cap(5)

@@ -193,9 +193,10 @@ def _coding_used(task: store.Task) -> None:
 def _model_still_listed(task: store.Task) -> None:
     """An API task's model must still be in OpenCode's catalog before feedback, next or resume
     writes a round: exit 3 with runner.left_catalog's line, never another model (#1016). And
-    wb start's spend refusal (meter.refusal: no price, no day cap (#1089), today at the cap), the same exit: the
-    round written past it stopped at once as a spend `stuck`, a Claude wake for nothing, with a
-    review counted or a step committed for a round that never ran (#1118, 2026-11-23)."""
+    wb start's spend refusal (meter.refusal: no price, no day cap (#1089), today at the cap or
+    within one request at its worst of it, #1150), the same exit: the round written past it
+    stopped at once as a spend `stuck`, a Claude wake for nothing, with a review counted or a
+    step committed for a round that never ran (#1118, 2026-11-23)."""
     if task.spec.get("via") != "api":
         return
     if (m := models.lookup(task.spec.get("model") or "")) is None:

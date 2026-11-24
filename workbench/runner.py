@@ -4068,10 +4068,11 @@ def _spend_lead(task: store.Task, rnd: dict) -> str:
 
 def _go_on(task: store.Task, n: int, what: str) -> bool:
     """Before each `continue` in drive (#1017, #1019): for an API task, today's spend under the
-    cap. At it, the task stops before ``what`` runs: phase `stuck`, status `guard` `spend`, a
-    `stuck` notice with cause `spend` (not the step's own: results.THE_STEP). A GPU task always
-    goes on, for nothing."""
-    if meter.for_task(task) is None or not (why := meter.stop_reason(task)):
+    cap by at least one request at its worst (meter.request_floor, #1150). Short of that, the
+    task stops before ``what`` runs: phase `stuck`, status `guard` `spend`, a `stuck` notice
+    with cause `spend` (not the step's own: results.THE_STEP). A GPU task always goes on, for
+    nothing."""
+    if meter.for_task(task) is None or not (why := meter.stop_reason(task, ahead=True)):
         return True
     if (kh := CURRENT.get("keyhole")) is not None:
         kh.close(why)

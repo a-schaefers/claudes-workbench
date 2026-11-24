@@ -513,8 +513,9 @@ coding choice is the user's (`wb coding`), never changed by a check.
   Tell the user what the STOPPED line names (on macOS Python's Install Certificates command, else
   the system's CA certificates, `SSL_CERT_FILE` or the proxy), then `wb feedback <name> --text
   "carry on"` once it's mended; never change the route for it.
-  A `spend` stop (cause `spend`: the day's API spend cap is reached) is the user's call, never a
-  retry: ask them, as the notice says. A higher cap or tomorrow: `wb resume <name>` once it allows.
+  A `spend` stop (cause `spend`: the day's API spend cap is reached, or too near it for the next
+  request) is the user's call, never a retry: ask them, as the notice says (it names a cap that
+  would do). A higher cap or tomorrow: `wb resume <name>` once it allows.
   The role on the GPU is for the next tasks; this one keeps its API model (resume never
   re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
 
