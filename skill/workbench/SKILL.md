@@ -556,6 +556,9 @@ generated files. When the bulk additions or large binaries belong in the commit,
 `--include` to `wb next` or `wb accept` after reviewing them. `NOTE: git ignores files the agent
 wrote` names files no diff shows and no commit takes: read them, then `--include` lands them. A
 file you write under an ignored path (a takeover, a fix) is refused the same way: `--include`.
+`note: git ignores N more files … leaves out as build or test output` names the rest you changed
+there: `wb next`'s stay in the worktree (`git -C <worktree> add -f <file>` keeps one), `wb
+accept`'s are copied to the task's `left-out/` before the worktree goes.
 When a command says the repo `moved or was deleted`, ask the user where it is now, then
 `wb relocate <name> --repo <dir>`; a removed linked worktree needs nothing (its main one is used).
 

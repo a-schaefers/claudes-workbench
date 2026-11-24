@@ -2438,6 +2438,76 @@ class Lifecycle(Base):
                       err.getvalue())
         self.assertTrue((t.worktree / "app" / "lib" / "helper.py").is_file())
 
+    def test_a_data_file_beside_claudes_module_under_an_ignored_path_is_named_and_kept_at_accept(self):
+        # #1179's review (2026-11-24): hand_written's kind filter took lib/answers.csv, which
+        # Claude's lib/helper.py reads, for a test run's (the repo tracks no .csv): accept --merge
+        # --include landed the module without it, main failed with FileNotFoundError, and the
+        # worktree went with the file, no word said
+        self.ignore_lib()
+        self.start("t-csv", "ok", "--test", TEST_CMD)
+        wait_phase("t-csv", {"review"})
+        t = store.Task("t-csv")
+        run_wb("takeover", "t-csv")
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "helper.py").write_text(
+            "from pathlib import Path\ndef answer():\n    return (Path(__file__).parent / 'answers.csv').read_text()\n")
+        (t.worktree / "lib" / "answers.csv").write_text("42\n")
+        (t.worktree / "main.py").write_text("from lib.helper import answer\nprint(answer())\n")
+        self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
+        self.assertEqual(runner.hand_left(t), ["lib/answers.csv"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-csv", "-m", "feat: one", "--merge")
+        self.assertIn("not committed: git ignores files written in the worktree (lib/helper.py)", err.getvalue())
+        self.assertIn("note: git ignores 1 more file changed since the agent stopped, which the commit "
+                      "leaves out as build or test output (lib/answers.csv): git -C ", err.getvalue())
+        out = run_wb("accept", "t-csv", "-m", "feat: one", "--merge", "--include")
+        self.assertIn("accepted t-csv", out)
+        self.assertIn(f"(lib/answers.csv): a copy is in {t.dir / 'left-out'}", out)
+        self.assertFalse(t.worktree.exists())
+        self.assertEqual((t.dir / "left-out" / "lib" / "answers.csv").read_text(), "42\n")
+
+    def test_wb_next_names_an_ignored_file_its_step_commit_leaves_out(self):
+        # #1179's review (2026-11-24): wb next's commit dropped what hand_written's filters took
+        # for a test run's without a word; it stays in the worktree, and the note says so
+        self.ignore_lib()
+        self.start("t-nx-csv", "ok", "--test", TEST_CMD)
+        wait_phase("t-nx-csv", {"review"})
+        t = store.Task("t-nx-csv")
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "answers.csv").write_text("42\n")
+        nxt = Path(self.tmp.name) / "step2.md"
+        nxt.write_text("Step two: read the answers.\n")
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            out = run_wb("next", "t-nx-csv", "--spec", str(nxt), "-m", "step1")
+        spawned.assert_called_once()
+        self.assertIn(f"(lib/answers.csv): git -C {t.worktree} add -f <file> has the next commit keep one", out)
+        self.assertTrue((t.worktree / "lib" / "answers.csv").is_file())
+
+    def test_an_in_tree_build_of_a_big_package_does_not_hide_a_module_under_another_ignored_path(self):
+        # #1179's review (2026-11-24): BUILD_FILES counted by top-level directory, so setuptools'
+        # services/api/build/lib copies of 60 tracked modules (pip install ./services/api) cut
+        # services/api/lib/helper.py, and hand_written said nothing of it
+        repo = Path(self.tmp.name) / "svc"
+        (repo / "services" / "api" / "api").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / ".gitignore").write_text("lib/\nbuild/\n__pycache__/\n")
+        for i in range(60):
+            (repo / "services" / "api" / "api" / f"m{i}.py").write_text(f"N = {i}\n")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit",
+                        "-qm", "api"], check=True)
+        t0 = time.time()
+        (repo / "services" / "api" / "lib").mkdir()
+        (repo / "services" / "api" / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
+        (repo / "services" / "api" / "build" / "lib" / "api").mkdir(parents=True)
+        for i in range(60):
+            (repo / "services" / "api" / "build" / "lib" / "api" / f"m{i}.py").write_text(f"N = {i}\n")
+        left: list[str] = []
+        self.assertEqual(gitops.hand_written(repo, t0, left), ["services/api/lib/helper.py"])
+        self.assertEqual(len(left), 60)                              # the build's: named, never committed
+        self.assertTrue(all(p.startswith("services/api/build/lib/api/") for p in left), left)
+
     def test_a_file_claude_writes_under_an_ignored_path_in_a_review_fix_is_still_named_after_the_next_round(self):
         # #1179: the agent's next round writes there too, which isn't Claude's, so what Claude
         # wrote at review is kept when a runner starts, and named at accept once it is back

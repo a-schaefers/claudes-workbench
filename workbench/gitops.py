@@ -1535,15 +1535,17 @@ def _text(full: str) -> bool:
         return False
 
 
-def hand_written(worktree: Path, since: float) -> list[str]:
+def hand_written(worktree: Path, since: float, left: list[str] | None = None) -> list[str]:
     """The files git ignores and doesn't track that changed in the worktree since ``since`` (a
     time.time()) and look written by hand, not by a build or a test run: text, named like a file
     the commit would hold (its suffix, or its whole name when it has none), under no directory
     that marks itself a cache (_marks_cache), and fewer than BUILD_FILES such files in their
-    top-level directory (an install). A module Claude wrote under Python.gitignore's lib/ after a
-    takeover was left out of wb accept's commit and deleted with the worktree, with no warning:
-    only the agent's edit tools were read (#1179, 2026-11-24). A test run's .pyc, .pytest_cache/
-    and logs, or an npm install, must not refuse the commit (Claude runs the tests there)."""
+    ignored directory (an install), else, ignored one by one, their top-level one. A module Claude
+    wrote under Python.gitignore's lib/ after a takeover was left out of wb accept's commit and
+    deleted with the worktree, with no warning: only the agent's edit tools were read (#1179,
+    2026-11-24). A test run's .pyc, .pytest_cache/ and logs, or an npm install, must not refuse
+    the commit (Claude runs the tests there). ``left`` gets the rest outside a cache, which the
+    commit leaves out: said, never silently dropped (left_out_line, #1179's review)."""
     top = os.path.abspath(worktree)
     changed = []
     for raw in git_bytes(worktree, "ls-files", "--others", "--ignored", "--exclude-standard",
@@ -1576,10 +1578,39 @@ def hand_written(worktree: Path, since: float) -> list[str]:
     # Only the files the other filters keep count toward BUILD_FILES: counted before them, the
     # .pyc of Claude's first test run (agents run without bytecode) in a 60-module app/ cut
     # app/lib/helper.py, and accept --merge dropped it without a word (#1179, 2026-11-24).
-    kept = [p for p in changed
-            if _kind(p) in kinds and not in_cache(p) and _text(os.path.join(top, p))]
-    tops = Counter(_top(p) for p in kept if "/" in p)
-    return sorted(p for p in kept if "/" not in p or tops[_top(p)] < BUILD_FILES)
+    # Counted by ignored directory: by top-level one, setuptools' in-tree services/api/build/lib
+    # copies of 60 modules cut services/api/lib/helper.py the same way (#1179's review)
+    outside = [p for p in changed if not in_cache(p)]
+    kept = [p for p in outside if _kind(p) in kinds and _text(os.path.join(top, p))]
+    dirs = {os.fsdecode(d).rstrip("/") for d in git_bytes(
+        worktree, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory",
+        "-z").split(b"\0") if d.endswith(b"/")}
+
+    def group(p: str) -> str:
+        parts = p.split("/")[:-1]
+        return next((d for i in range(1, len(parts) + 1) if (d := "/".join(parts[:i])) in dirs),
+                    _top(p))
+    groups = Counter(group(p) for p in kept if "/" in p)
+    out = sorted(p for p in kept if "/" not in p or groups[group(p)] < BUILD_FILES)
+    if left is not None:
+        left.extend(sorted(set(outside) - set(out)))
+    return out
+
+
+def left_out_line(paths: list[str], worktree: Path, kept: Path | None = None, gone: bool = False) -> str:
+    """The note for the ignored files changed since the agent stopped that the commit leaves out,
+    as hand_written took them for a build's or a test run's: a .csv beside Claude's module under
+    lib/ was dropped without a word, --include or not (#1179's review, 2026-11-24). ``kept``: the
+    copy wb accept keeps of them before the worktree goes; ``gone``: too many to copy; else where
+    `git add -f` stages one."""
+    head = (f"note: git ignores {len(paths)} more file{'s' if len(paths) != 1 else ''} changed "
+            f"since the agent stopped, which the commit leaves out as build or test output "
+            f"({', '.join(brief(paths))})")
+    if kept is not None:
+        return f"{head}: a copy is in {kept}"
+    if gone:
+        return f"{head}: too many to keep a copy, they go with the worktree"
+    return f"{head}: git -C {shlex.quote(str(worktree))} add -f <file> has the next commit keep one"
 
 
 def ignored_line(paths: list[str], who: str = "the agent wrote") -> str:
@@ -1591,7 +1622,7 @@ def ignored_line(paths: list[str], who: str = "the agent wrote") -> str:
 
 
 def commit_all(worktree: Path, message: str, include: bool = False, sign: bool = True,
-               written=()) -> str:
+               written=(), left=()) -> str:
     """Commit everything in the worktree, without git hooks (NO_HOOKS; also for a task started
     before its git dir was recorded) but signed if the user signs. Refuses a nested repository: committed, it was a gitlink to
     a commit that exists nowhere else. Refuses, unless ``include``, more than NEW_FILES_MAX new
@@ -1599,10 +1630,12 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
     Refuses, unless ``include``, which adds them, any of ``written`` (the files the agent wrote,
     and Claude's, #1179) that git ignores: `add -A` left a module under Python.gitignore's lib/
     out of the commit, and it was deleted with the worktree while main imported it (audit round 2
-    of 1.91)."""
+    of 1.91). A refusal names ``left`` too (left_out_line: what the commit leaves out, #1179's review)."""
     ignored = ignored_files(worktree, written)
     if ignored and not include:
-        raise GitError("not committed: " + ignored_line(ignored, "written in the worktree"))
+        rest = sorted(set(left) - set(ignored))
+        raise GitError("not committed: " + ignored_line(ignored, "written in the worktree")
+                       + (f"\n{left_out_line(rest, worktree)}" if rest else ""))
     if nested := nested_repos(worktree):
         raise GitError(f"{', '.join(nested)}: a git repository of its own, so not committed: "
                        "remove its .git or gitignore it, then try again")

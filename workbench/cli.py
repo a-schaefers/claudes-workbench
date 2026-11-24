@@ -4,6 +4,7 @@ Every command prints a short, plain report: it is read by Claude, whose tokens a
 resource, and by a person at a terminal.
 """
 import argparse
+import contextlib
 import fnmatch
 import functools
 import io
@@ -15,6 +16,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -1876,10 +1878,14 @@ def cmd_next(a):
                 # a step that changed nothing advances with no commit: it died on "nothing to
                 # commit" and the task stayed on the step (#507, Claude's audit of 1.90)
                 wrote = runner.agent_wrote(task) + runner.hand_wrote(task)  # Claude's too (#1179)
+                left = _left_out(task, wrote, a.include)
                 if gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote):
                     commit = gitops.commit_all(
                         task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} (step {step})"
-                        f"\nOpenCode-Session: {st.get('session')}", a.include, _signed(spec, a), wrote)
+                        f"\nOpenCode-Session: {st.get('session')}", a.include, _signed(spec, a), wrote,
+                        left)
+                if left:  # still in the worktree, for a later commit (#1179's review)
+                    print(gitops.left_out_line(left, task.worktree))
         except gitops.GitError as e:
             die(str(e))
     _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
@@ -2689,6 +2695,42 @@ def _resume(task: store.Task) -> None:
     print(f"resumed {name} in a fresh session (round {n + 1})")
     _say(gpu)
     _say(lessons.nudge(task))
+
+
+def _left_out(task: store.Task, wrote: list[str], include: bool) -> list[str]:
+    """The ignored files changed since the agent stopped that a commit of the worktree leaves out
+    (runner.hand_left; with ``include``, less the ignored ones of ``wrote`` it adds); [] when git
+    can't say. A .csv Claude wrote beside its module under lib/ was dropped without a word, and
+    deleted with the worktree (#1179's review, 2026-11-24)."""
+    try:
+        left = gitops.ignored_files(task.worktree, runner.hand_left(task))
+        return sorted(set(left) - set(gitops.ignored_files(task.worktree, wrote) if include else ()))
+    except (gitops.GitError, OSError):
+        return []
+
+
+LEFT_KEPT_MAX = 64 << 20  # bytes of left-out files wb accept copies before the worktree goes
+
+
+def _keep_left(task: store.Task, left: list[str]) -> str:
+    """wb accept's note for the files the commit leaves out (_left_out), a copy of them kept in
+    the task's `left-out/` first, as the worktree goes next; an install's worth (past
+    NEW_FILES_MAX files or LEFT_KEPT_MAX bytes) isn't copied, and the note says so."""
+    root, dest = Path(task.worktree), task.dir / "left-out"
+    sizes = {}
+    for p in left:
+        with contextlib.suppress(OSError):
+            if stat.S_ISREG((st := os.lstat(root / p)).st_mode):
+                sizes[p] = st.st_size
+    if not sizes:
+        return gitops.left_out_line(left, task.worktree)
+    if len(sizes) > gitops.NEW_FILES_MAX or sum(sizes.values()) > LEFT_KEPT_MAX:
+        return gitops.left_out_line(left, task.worktree, gone=True)
+    for p in sizes:
+        with contextlib.suppress(OSError):
+            (dest / p).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(root / p, dest / p, follow_symlinks=False)
+    return gitops.left_out_line(left, task.worktree, kept=dest)
 
 
 def _resume_prompt(asks: list[str], notes: str) -> str:
@@ -3738,12 +3780,16 @@ def cmd_accept(a):
                 with _settle_proposals(task, a.take_claude_md):  # kept if the commit fails (#507)
                     # Claude's ignored files too: a takeover's lib/ module was lost (#1179)
                     wrote = runner.agent_wrote(task) + runner.hand_wrote(task)
+                    left = _left_out(task, wrote, a.include)
                     if (gitops.changed(task.worktree) or head == spec["base"]
                             or gitops.ignored_files(task.worktree, wrote)):
-                        commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a), wrote)
+                        commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a),
+                                                   wrote, left)
                     else:  # nothing new: the branch's commits past the base are the work (the
                         # steps wb next committed, or Claude's own after a takeover: the audit)
                         commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
+                    if left:  # kept before the worktree goes (#1179's review)
+                        print(_keep_left(task, left))
             # the branch must hold it before the worktree goes: on a detached HEAD the commit was
             # left in no branch at all (#417, the audit of 1.8)
             gitops.put_on_branch(repo, spec["branch"], commit, task.worktree)

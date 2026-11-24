@@ -2689,10 +2689,23 @@ def hand_wrote(task: store.Task) -> list[str]:
     Claude's after a takeover or in a review fix, which the agent's events never show (#1179,
     2026-11-24). Kept in status `hand_wrote` by each runner that starts, and since the agent last
     stopped (`hands_off_at`)."""
-    out = set(task.status.get("hand_wrote") or [])
+    return _by_hand(task)[0]
+
+
+def hand_left(task: store.Task) -> list[str]:
+    """The rest of the ignored files changed while no runner ran, outside a cache, that
+    hand_written took for a build's or a test run's: the commit leaves them out, said (#1179's
+    review, 2026-11-24). Kept in status `hand_left` as `hand_wrote` is; only those still there."""
+    return [p for p in _by_hand(task)[1] if os.path.isfile(os.path.join(task.worktree, p))]
+
+
+def _by_hand(task: store.Task) -> tuple[list[str], list[str]]:
+    wrote, left = set(task.status.get("hand_wrote") or []), set(task.status.get("hand_left") or [])
     if since := task.status.get("hands_off_at"):
-        out |= set(gitops.hand_written(task.worktree, since))
-    return sorted(out)
+        rest: list[str] = []
+        wrote |= set(gitops.hand_written(task.worktree, since, rest))
+        left |= set(rest)
+    return sorted(wrote), sorted(left - wrote)
 
 
 def hands_off(task: store.Task) -> None:
@@ -2707,10 +2720,10 @@ def _hands_on(task: store.Task) -> None:
     if not task.status.get("hands_off_at"):
         return
     try:
-        wrote = hand_wrote(task)
+        wrote, left = _by_hand(task)
     except (gitops.GitError, OSError):
-        wrote = task.status.get("hand_wrote") or []
-    task.set_status(hand_wrote=wrote, hands_off_at=None)
+        wrote, left = task.status.get("hand_wrote") or [], task.status.get("hand_left") or []
+    task.set_status(hand_wrote=wrote, hand_left=left, hands_off_at=None)
 
 
 def ignored_writes(task: store.Task) -> list[str]:
