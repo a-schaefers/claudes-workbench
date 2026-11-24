@@ -2938,20 +2938,33 @@ def hang(task: store.Task, limit: int) -> dict | None:
 # dash's and ksh's `: not found` (exit 127). Not `No such file or directory`, which a script the
 # step creates (`./check.sh`) says on the base too.
 NOT_FOUND = re.compile(r"command not found|: not found$")
+# Python's own line for `python -m <module>` it can't import (exit 1): a test runner missing from
+# the agent's Python (`python3 -m pytest` on a system Python without it, or with the user's venv
+# that python_env leaves out) ran round 1 and both auto-fix rounds on correct code, each told the
+# bug was the change's, where `pytest` alone (exit 127) checked in (#1181, 2026-11-24). A dotted
+# module's parent missing says it the second way.
+NO_MODULE = re.compile(r"\S*python[\w.]*: (No module named [\w.]+|Error while finding module "
+                       r"specification for '[\w.]+' \(ModuleNotFoundError: No module named '[\w.]+'\))")
 # What gives the agent's environment that command, for the check-in and the skipped auto-fix
 GIVE_TOOL = ("no round can fix that: put the tool in the worktree (a .venv there comes first on "
-             "the agent's PATH), then wb feedback; or wb discard and start again with a --setup "
-             "that installs it, or a --test that names it by its path")
+             "the agent's PATH; a Python module: python3 -m venv .venv && .venv/bin/pip install "
+             "<module>), then wb feedback; or wb discard and start again with a --setup that "
+             "installs it (a module: that .venv), or a --test that names it by its path")
 
 
 def missing_command(r: dict | None) -> str | None:
-    """The shell's not-found line, when run ``r`` (the base check's, or a round's tests) exited
-    127 with it last: a tool the agent's environment lacks (one outside the agent's PATH, which
-    python_env and agent_path trim), which no edit in a round can give it (#1152); else None."""
-    if not r or r.get("exit") != 127:
+    """The line saying the command's tool isn't there, when run ``r`` (the base check's, or a
+    round's tests) ended with it: the shell's not-found line at exit 127 (#1152), or Python's
+    no-module line for `-m` at exit 1 (#1181). A tool the agent's environment lacks (one outside
+    the agent's PATH, which python_env and agent_path trim), which no edit in a round can give
+    it; else None."""
+    if not r or r.get("exit") not in (1, 127):
         return None
     last = (r.get("tail") or "").strip().splitlines()[-1:]
-    return last[0].strip() if last and NOT_FOUND.search(last[0].strip()) else None
+    line = last[0].strip() if last else ""
+    if r["exit"] == 127 and NOT_FOUND.search(line) or r["exit"] == 1 and NO_MODULE.fullmatch(line):
+        return line
+    return None
 
 
 def base_check_line(r: dict, task: store.Task) -> str:
@@ -2974,7 +2987,7 @@ def base_check_line(r: dict, task: store.Task) -> str:
                    "raise it for a slow suite" if full > limit else ""))
     if line := missing_command(r):  # every round's tests will fail so too (#1152, 2026-11-24)
         return (f"warning: the acceptance command can't run in the agent's environment: {line} "
-                f"(exit 127 on the base), so every round's tests will fail the same way; {GIVE_TOOL}")
+                f"(exit {r['exit']} on the base), so every round's tests will fail the same way; {GIVE_TOOL}")
     if r["ok"]:
         # the usual case when the agent writes the step's tests: a warning that said to discard
         # and start again cost a whole restart in one task of two (the 2026-11-17 measurement)
@@ -3638,7 +3651,7 @@ def not_the_code(task: store.Task, tests) -> str:
     (#496, the audit of 1.90): a run past --test-timeout went back as "the bug is in this change"
     and the agent edited code that may well have been right, nothing naming the limit; a device
     the lane refused (lane_refused, #331) was named only after both auto-fix rounds, and so was a
-    command the agent's environment lacks (missing_command, #1152). The part
+    command the agent's environment lacks (missing_command, #1152; a Python module, #1181). The part
     before the first colon is the cause, for status.last. "" when the failure may be the code's
     (a dropped proxy may be either: its auto-fix prompt says so, auto_fix_prompt)."""
     if not tests or tests["ok"]:
@@ -3651,11 +3664,11 @@ def not_the_code(task: store.Task, tests) -> str:
     base = task.status.get("base_check") or {}
     if (line := missing_command(tests)) and line == missing_command(base) \
             and base.get("cmd") == task.spec.get("test_cmd"):
-        # the same command not found as on the base: auto-fix rounds told "the system works; the
-        # bug is in this change" each failed the same way, before Claude heard (#1152, 2026-11-24).
-        # A command the step makes says something else once made.
-        return (f"the acceptance command can't run in the agent's environment: {line} (exit 127, "
-                f"as on the base); {GIVE_TOOL}")
+        # the same command (or Python module, #1181) not found as on the base: auto-fix rounds
+        # told "the system works; the bug is in this change" each failed the same way, before
+        # Claude heard (#1152, 2026-11-24). A command the step makes says something else once made.
+        return (f"the acceptance command can't run in the agent's environment: {line} (exit "
+                f"{tests['exit']}, as on the base); {GIVE_TOOL}")
     if nodes := tests.get("lane"):
         # the grant that reaches each, as the report names it: the path itself, when it was a
         # file not made yet, sent Claude's `wb allow --path` to make a directory of that name (#670)

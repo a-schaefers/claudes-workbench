@@ -503,6 +503,30 @@ class Lifecycle(Base):
         self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 2))
         self.assertFalse([r for r in store.notices() if r["task"] == "t-nf2" and r["kind"] == "checkin"])
 
+    def test_a_python_module_not_found_on_the_base_checks_in_at_once_and_skips_auto_fix(self):
+        # #1181 (bar round 2 of 2.0): `python3 -m pytest` without pytest printed `No module named
+        # pytest` (exit 1, not #1152's 127), and round 1 and both auto-fix rounds ran on correct code
+        self.start("t-nm", "ok", "--test", "python3 -m nosuch_module_1181 -q", "--auto-fix", "2",
+                   "--no-self-review")
+        st = wait_phase("t-nm", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 1))
+        task = store.Task("t-nm")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-nm" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertRegex(checkins[0], r"can't run in the agent's environment: \S*python3: No module "
+                                      r"named nosuch_module_1181 \(exit 1 on the base\)")
+        self.assertIn("a Python module: python3 -m venv .venv && .venv/bin/pip install <module>",
+                      checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: "), summary)
+        self.assertIn("No module named nosuch_module_1181 (exit 1, as on the base)", summary)
+        # an import error inside the tests (a module the step's code lacks) still goes back
+        self.assertIsNone(runner.missing_command(
+            {"exit": 1, "tail": "E   ModuleNotFoundError: No module named 'slug'"}))
+        self.assertIsNone(runner.missing_command({"exit": 2, "tail": "python3: No module named x"}))
+
     def test_what_the_base_check_writes_never_reaches_the_agents_worktree(self):
         # #192 (the 2026-11-19 audit): the base check ran in the task's worktree, and a stamp it
         # wrote made the same failing command pass after the agent's unrelated edit
