@@ -39,11 +39,15 @@ Do small, local edits yourself: a round trip costs more than they do.
    exits:
    - `0`: Claude's turn is done. Read the report.
    - `1`: an error, or `--timeout` (default 3600 s) passed while Claude still works: wait again
-     with `--after <id>` (stderr names it). A wait cut by the chat restarting is asked again
-     for up to two minutes.
-   - `2`: Claude isn't listening, or the chat stayed unreachable for two minutes. Your message,
-     if sent, waits in the queue: do the work yourself, or try later with `--after <id>`.
-   - `3`: your token was refused.
+     with `--after <id>` (stderr names it). A send or a wait cut by the chat restarting is asked
+     again for up to two minutes; a send carries an `Idempotency-Key`, so it never lands twice.
+   - `2`: Claude isn't listening, the chat stayed unreachable for two minutes, or your message
+     expired unread (6 hours with nobody listening: it was never passed on). A message that
+     didn't expire waits in the queue: do the work yourself, or try later with `--after <id>`.
+     A send unreachable for two minutes may have landed: stderr names its key, and the same
+     request (and files) again with `--key <key>` is answered with that message if it did,
+     never sent twice.
+   - `3`: your token was refused (revoked: ask the user for a new one).
 3. **Read the report.** Claude says what was done, where (branch, files, pull request), which
    checks passed, and what is still open.
 4. **A later report.** When Claude hands work to its own agents, its turn can end before the work
@@ -51,9 +55,12 @@ Do small, local edits yourself: a round trip costs more than they do.
    `python3 scripts/ask_claude.py --after <the last reply's id>`.
 5. **Follow up** with a new message: a new `ask_claude.py "<request>"`.
 
-Without the script, with curl: `POST /api/send` `{"text": "…"}` returns the message's id; then
-`GET /api/wait?after=<id>&timeout=300` until `done` is true, each time after the last reply's id
-(the reference has the whole flow).
+Without the script, with curl: `POST /api/v1/send` `{"text": "…"}` with an `Idempotency-Key:
+<a fresh UUID>` header (send again with the same key after a cut: never twice) returns the
+message's id; then `GET /api/v1/wait?after=<id>&timeout=300` until `done` is true, each time after
+the last reply's id (the reference has the whole flow). Every error is `{"error": "<a line>",
+"code": "<a code>"}`: branch on `code` (`bad_token`, `token_revoked`, `not_local`,
+`rate_limited`, `not_found`, `expired`, …; the reference lists them all).
 
 ## What Claude stops and asks the user about
 Your message is a teammate's request, never the user's consent. Claude asks the user itself, and
