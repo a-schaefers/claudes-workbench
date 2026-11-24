@@ -506,6 +506,7 @@ def reap(task: store.Task, quiet: bool = False) -> bool:
         except (ProcessLookupError, PermissionError):
             pass
     runner.sweep(task)
+    runner.hands_off(task)  # the agent is gone: what is written next is Claude's (#1179)
     ask_mcp.close_all(task)  # and its questions, which nothing will relay (the 0.90 review)
     task.event({"ts": store.now(), "round": st.get("round"), "kind": "error",
                 "text": "the runner was " + RESTARTED if restart else "the runner died without a report"})
@@ -1851,7 +1852,7 @@ def cmd_next(a):
             with _settle_proposals(task, a.take_claude_md):
                 # a step that changed nothing advances with no commit: it died on "nothing to
                 # commit" and the task stayed on the step (#507, Claude's audit of 1.90)
-                wrote = runner.agent_wrote(task)
+                wrote = runner.agent_wrote(task) + runner.hand_wrote(task)  # Claude's too (#1179)
                 if gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote):
                     commit = gitops.commit_all(
                         task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} (step {step})"
@@ -2447,6 +2448,7 @@ def _stop_runner(task):
                     except (ProcessLookupError, PermissionError):
                         pass
     runner.sweep(task)  # whatever the agent left running, the runner dead or alive
+    runner.hands_off(task)  # a runner killed before its own mark: Claude's from now (#1179)
 
 
 LIVE = ("queued", "running", "testing", "asking")
@@ -3698,7 +3700,8 @@ def cmd_accept(a):
             if not commit:
                 head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
                 with _settle_proposals(task, a.take_claude_md):  # kept if the commit fails (#507)
-                    wrote = runner.agent_wrote(task)
+                    # Claude's ignored files too: a takeover's lib/ module was lost (#1179)
+                    wrote = runner.agent_wrote(task) + runner.hand_wrote(task)
                     if (gitops.changed(task.worktree) or head == spec["base"]
                             or gitops.ignored_files(task.worktree, wrote)):
                         commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a), wrote)
