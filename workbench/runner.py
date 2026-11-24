@@ -3386,6 +3386,8 @@ NO_MODULE = re.compile(r"(?P<py>\S*python[\w.]*): (No module named (?P<m>[\w.]+)
 TOOL_DIRS = (".venv/bin", "venv/bin", "node_modules/.bin", "vendor/bin")
 # bash's and zsh's line for a path that isn't there (dash's and ksh's is NOT_FOUND's)
 NO_SUCH = re.compile(r"no such file or directory: (?P<z>.+)$|(?P<n>[^:]+): No such file or directory$")
+# dash's line for a file `.` can't read (it exits 2; bash says NO_SUCH's, exit 1, zsh NO_SUCH's z)
+NO_SOURCE = re.compile(r"\.: cannot open (?P<p>[^:]+)(?::.*)?$")
 # A task runner's own lines after its recipe's output, each runner's in one entry, its group (if
 # any) the recipe's exit: GNU make's `make: *** [Makefile:2: test] Error 127` (it exits 2), a
 # sub-make's `Leaving directory`, -k's `Target … not remade`; just's `error: Recipe `test` failed
@@ -3410,14 +3412,23 @@ RUNNER_LINES = (
 )
 RUNNER_TAIL = re.compile("|".join(RUNNER_LINES))
 # make's own line for a recipe it runs without a shell (no shell syntax in it) that execvp can't
-# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229)
-MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
+# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229). GNU
+# Make 3.81 (macOS's /usr/bin/make, Xcode's) says `Command not found`, which none of the
+# patterns read: a Mac's plain `make test` recipe ran round 1 and both auto-fix rounds on correct
+# code, each told the bug was the change's (#1262, bar round 6, 2026-11-24).
+MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): (?:No such file or directory|Command not found)")
 # wb's words for a tool not checked out (missing_command), the same in every shell, and its path
 NOT_CHECKED_OUT = re.compile(r"(?P<p>[^:]+): not in the worktree \(")
+# The words of a skipped auto-fix whose remedy is a wb feedback once Claude gives the agent's
+# environment what it lacked (GIVE_TOOL's tool, the lane's `wb allow`): that round fixes the
+# environment, not the code, and counted as a review the agent caused, it plus one real review
+# made the step go badly and shrank the model's slice (#1257, bar round 6, 2026-11-24). So the
+# review stop says so in status `env_skip`, its cause, which drive clears as the next run starts.
+THEN_FEEDBACK = ", then wb feedback"
 # What gives the agent's environment that command, for the check-in and the skipped auto-fix
 GIVE_TOOL = ("no round can fix that: put the tool in the worktree (a .venv there comes first on "
              "the agent's PATH; a Python module: python3 -m venv .venv && .venv/bin/pip install "
-             "<module>), then wb feedback; or wb discard and start again with a --setup that "
+             f"<module>){THEN_FEEDBACK}; or wb discard and start again with a --setup that "
              "installs it (a module: that .venv), or a --test that names it by its path")
 
 
@@ -3427,7 +3438,8 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     `<name>: command not found`, so the check-in and the base's line compared with a round's
     read the same under bash, zsh, dash or ksh (#1152; nightly run 45362198509, 2026-11-24), a
     name with a `/` never, but for one in TOOL_DIRS, which says `<path>: not in the worktree (…)`
-    (#1206); or Python's no-module line for `-m` at exit 1 (#1181). A tool the
+    (#1206), as does a file sourced from one at exit 1 or 2 (`source .venv/bin/activate`, #1258);
+    or Python's no-module line for `-m` at exit 1 (#1181). A tool the
     agent's environment lacks (one outside the agent's PATH, which python_env and agent_path
     trim), which no edit in a round can give it; else None. A module of ``task``'s own code
     (own_module) is none: the step may make it; nor is a console script of its own
@@ -3445,27 +3457,32 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     code = int(inner) if inner else code
     if wrapped and not inner and lines and NOT_FOUND.search(lines[-1]):
         code = 127  # pnpm exits 1 and names no code: the shell's not-found line is its 127 (#1243)
-    if code not in (1, 127):
+    if code not in (1, 2, 127):
         return None
     line = lines[-1].strip() if lines else ""
+    name = None
     if code == 127:
         name = missing_name(line) or ((m := MAKE_EXEC.fullmatch(line)) and m["n"].strip())
         if name and "/" not in name:
             # one the step's reinstall puts in the worktree's venv, first on the agent's PATH (#1244)
             return None if task and context.own_venv(task) and own_command(task, name) \
                 else f"{name}: command not found"
-        # a path: a script the step may make, but not a tool an install puts there (#1206)
-        path = name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip())
-        if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
-            s = f"/{path}"
-            where, tool = s[1:s.find(f"/{top}/") + 1 + len(top)], path.rsplit("/", 1)[-1]
-            # an install dir the setup made in the worktree: never "never checked out", and a
-            # console script the step adds to it is the step's own (#1244, bar round 5, 2026-11-24)
-            if task and not os.path.isabs(path) and (task.workdir / where).is_dir():
-                return None if own_command(task, tool) else \
-                    f"{path}: not in the worktree ({where}/ is there, without {tool})"
-            return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
-        return None
+    # a path: a script the step may make, but not a tool an install puts there (#1206); nor, at
+    # exit 1 or 2, a file the shell sourced from one: `source .venv/bin/activate && pytest` with
+    # no .venv in the worktree exits 1 under bash (dash's `.: cannot open`, 2), and round 1 and
+    # both auto-fix rounds ran on correct code, each told the bug was the change's (#1258, bar
+    # round 6, 2026-11-24)
+    path = name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip()) \
+        or ((m := NO_SOURCE.search(line)) and m["p"].strip())
+    if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
+        s = f"/{path}"
+        where, tool = s[1:s.find(f"/{top}/") + 1 + len(top)], path.rsplit("/", 1)[-1]
+        # an install dir the setup made in the worktree: never "never checked out", and a
+        # console script the step adds to it is the step's own (#1244, bar round 5, 2026-11-24)
+        if task and not os.path.isabs(path) and (task.workdir / where).is_dir():
+            return None if own_command(task, tool) else \
+                f"{path}: not in the worktree ({where}/ is there, without {tool})"
+        return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
     if code == 1 and (m := NO_MODULE.fullmatch(line)):
         return None if task and own_module(task, m["m"] or m["d"], m["py"]) else line
     return None
@@ -4434,7 +4451,7 @@ def not_the_code(task: store.Task, tests) -> str:
         grants = list(dict.fromkeys(lane_grant(n, task) or n for n in nodes))
         said = [f"the lane refused {', '.join(map(shlex.quote, nodes))}: "
                 + "; ".join(f"wb allow {task.name} --path {shlex.quote(g)}" for g in grants)
-                + ", then wb feedback, if the tests need it"] if nodes else []
+                + f"{THEN_FEEDBACK}, if the tests need it"] if nodes else []
         return "; ".join(said + [f"the lane refused {', '.join(map(shlex.quote, hidden))}: "
                                  f"{context.API_HIDDEN_WHY}"] if hidden else said)
     return ""
@@ -5138,7 +5155,7 @@ def drive(task: store.Task) -> None:
     # `last` at once, from the config alone (gpu_side): left to after resolve, which may read the
     # catalog, a GPU task showed the last run's line ("Claude reviews next") as queued (the
     # review of #1015, 2026-11-23)
-    task.set_status(phase="queued", pid=os.getpid(), infra=None,
+    task.set_status(phase="queued", pid=os.getpid(), infra=None, env_skip=None,
                     last="waiting for the GPU" if _gpu_side(task) else "starting",
                     boot=store.boot_id(),  # a later boot reaps it as a restart's (cli.reap)
                     machine=store.machine(), host=store.host(),  # whose pid it is (#849)
@@ -5423,6 +5440,9 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 continue
             task.set_status(phase="review", tests=tests,
                             hands_off_at=store.now(),  # Claude's to edit from now (#1179)
+                            # a tool or path the agent's environment lacks, whose fix is Claude's
+                            # wb feedback once it is given: no review round (cli.cmd_feedback)
+                            env_skip=skip.split(":")[0] if THEN_FEEDBACK in skip else None,
                             last="tests passed: Claude reviews next" if tests and tests["ok"]
                             else f"{skip.split(':')[0]}: Claude reviews next" if skip
                             else "Claude reviews next")

@@ -962,6 +962,78 @@ class Lifecycle(Base):
         self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 2))
         self.assertFalse([r for r in store.notices() if r["task"] == "t-nf2" and r["kind"] == "checkin"])
 
+    def test_the_feedback_a_skipped_auto_fix_advises_once_the_tool_is_given_is_no_review_round(self):
+        # #1257 (bar round 6 of 2.0): the `then wb feedback` GIVE_TOOL advises, sent once the tool
+        # was in the worktree, counted as a review the agent caused: with one real review the step
+        # read as two, went badly and shrank the model's slice from 3 files to 1
+        from workbench import router, results, tuning
+        self.start("t-env", "ok", "--test", "answercheck-1257", "--auto-fix", "2", "--no-self-review")
+        st = wait_phase("t-env", {"review"})
+        self.assertEqual(st["env_skip"], "the acceptance command can't run in the agent's environment")
+        task = store.Task("t-env")
+        venv = task.worktree / ".venv"   # GIVE_TOOL's own fix: the worktree's .venv, first on PATH
+        (venv / "bin").mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text(f"home = {Path(sys.executable).parent}\n")
+        tool = venv / "bin" / "answercheck-1257"
+        tool.write_text(f"#!/bin/sh\nexec {TEST_CMD}\n")
+        tool.chmod(0o755)
+        with mock.patch.object(cli, "spawn_runner"):
+            out = run_wb("feedback", "t-env", "--text", "The tool is in the worktree now: run the "
+                                                         "acceptance command again.")
+        self.assertIn("it follows a skipped auto-fix that wasn't the code's (the acceptance command "
+                      "can't run in the agent's environment), so no review round is counted", out)
+        self.assertEqual((task.status["reviews"], task.status["round_for"]), (0, "resume"))
+        self.assertTrue((task.round_dir(2) / runner.RESUMED).exists())  # round_asks walks past it
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status["tests"]["ok"]), ("review", True))
+        self.assertIsNone(task.status.get("env_skip"))  # cleared as the run started
+        # one real review after it is one, and the step still went well
+        with mock.patch.object(cli, "spawn_runner"):
+            self.assertIn("feedback round 1 sent", run_wb("feedback", "t-env", "--text", "1. Add a line."))
+        runner.drive(task)
+        step = results.step(task, True)
+        self.assertEqual((tuning.agent_reviews(step), router._went(step)), (1, "well"))
+
+    def test_a_stuck_or_failed_round_after_the_env_skip_feedback_is_the_models_own_stop(self):
+        # #1257's review: only drive's clear at the runner's start drops env_skip from a stop the
+        # next round makes stuck or failed (a guard, an opencode exit); kept, the feedback after a
+        # real stuck stop counted no review, and the discard read as the environment's, so tuning
+        # left out a step the model really failed
+        from workbench import tuning
+        for name, scenario, phase in (("t-envs", "loop", "stuck"), ("t-envf", "crash", "failed")):
+            with self.subTest(phase=phase):
+                os.environ["FAKE_SCENARIO"] = "ok"
+                self.start(name, "ok", "--test", "answercheck-1257", "--no-self-review")
+                self.assertTrue(wait_phase(name, {"review"})["env_skip"])
+                task = store.Task(name)
+                os.environ["FAKE_SCENARIO"] = scenario
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb("feedback", name, "--text", "The tool is in the worktree now.")
+                runner.drive(task)
+                st = task.status
+                self.assertEqual((st["phase"], st["reviews"]), (phase, 0))
+                self.assertIsNone(st.get("env_skip"))
+                self.assertIsNone(st.get("infra"))  # the model's stop, not the machine's
+                with mock.patch.object(cli, "spawn_runner"):
+                    out = run_wb("feedback", name, "--text", "1. Run the command once.")
+                self.assertNotIn("no review round is counted", out)
+                self.assertEqual(task.status["reviews"], 1)
+                run_wb("discard", name)
+                row = store.results()[-1]
+                self.assertEqual((row["task"], row["outcome"], row.get("infra")), (name, "discarded", None))
+                self.assertFalse(tuning.stopped_outside(row))
+
+    def test_the_discard_a_skipped_auto_fix_offers_is_not_the_models_rejected_work(self):
+        # #1257: GIVE_TOOL's other way out, wb discard and start again with a --setup, is a
+        # stop from outside the step as an infra stop's discard is (#1245)
+        from workbench import tuning
+        self.start("t-envd", "ok", "--test", "answercheck-1257", "--no-self-review")
+        wait_phase("t-envd", {"review"})
+        run_wb("discard", "t-envd")
+        row = store.results()[-1]
+        self.assertEqual((row["outcome"], row["infra"]), ("discarded", "environment"))
+        self.assertTrue(tuning.stopped_outside(row))
+
     @unittest.skipUnless(shutil.which("make"), "no make")
     def test_a_command_not_found_behind_make_test_checks_in_at_once_and_skips_auto_fix(self):
         # #1229 (bar round 4 of 2.0): make ends with its own `make: *** [Makefile:2: test] Error
@@ -1012,6 +1084,21 @@ class Lifecycle(Base):
                      "python3: No module named x"):
             self.assertIsNone(said(tail), tail)
         self.assertIsNone(said(f"/bin/sh: 1: x: not found\n{err.format(127)}", code=0))  # a passing run
+
+    def test_macos_make_381s_own_command_not_found_line_is_read_as_a_missing_tool(self):
+        # #1262 (bar round 6 of 2.0): GNU Make 3.81, macOS's /usr/bin/make, says `Command not
+        # found` for a recipe it execs itself, and its Error line has no `Makefile:N:`: nothing
+        # read it, so round 1 and both auto-fix rounds ran on correct code (the tails a real 3.81 printed)
+        said = lambda tail, code=2: runner.missing_command({"exit": code, "tail": tail})  # noqa: E731
+        self.assertEqual(said("pytest -q\nmake: pytest: Command not found\nmake: *** [test] Error 127"),
+                         "pytest: command not found")
+        self.assertEqual(said("make: .venv/bin/pytest: Command not found\nmake: *** [test] Error 127"),
+                         ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+        self.assertEqual(said("make[1]: pytest: Command not found\nmake[1]: *** [test] Error 127\n"
+                              "make[1]: Leaving directory '/r/sub'\nmake: *** [all] Error 2"),
+                         "pytest: command not found")
+        # a recipe's own failure, not make's exec, still goes back
+        self.assertIsNone(said("make: pytest: Command not found\nmake: *** [test] Error 1"))
 
     def test_a_package_managers_run_wrapper_lines_are_read_past_to_the_scripts(self):
         # #1243 (bar round 5 of 2.0): `pnpm test` and `yarn test` with jest not installed ended on
@@ -1081,6 +1168,47 @@ class Lifecycle(Base):
         line = said("bash: line 1: venv/bin/pytest: No such file or directory")
         self.assertEqual(runner.missing_name(line), "venv/bin/pytest")
         self.assertIn(runner.missing_name(line), runner.command_words("cd api && venv/bin/pytest -q"))
+
+    @unittest.skipUnless(shutil.which("bash"), "no bash")
+    def test_sourcing_the_checkouts_ignored_venv_checks_in_at_once_and_skips_auto_fix(self):
+        # #1258 (bar round 6 of 2.0): `source .venv/bin/activate && …` with no .venv in the
+        # worktree exits 1, not 127, so #1206's check never read it: no check-in, and round 1 and
+        # both auto-fix rounds ran on correct code, each told the bug was in the change
+        os.environ["SHELL"] = shutil.which("bash")  # the tests' shell (test_shell): dash has no `source`
+        (self.repo / ".gitignore").write_text(".venv/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        self.start("t-src", "ok", "--test", f"source .venv/bin/activate && {TEST_CMD}",
+                   "--auto-fix", "2", "--no-self-review")
+        st = wait_phase("t-src", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 1))
+        task = store.Task("t-src")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-src" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertIn("can't run in the agent's environment: .venv/bin/activate: not in the worktree "
+                      "(.venv/ is an install's, never checked out) (exit 1 on the base)", checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: .venv/bin/activate: "), summary)
+
+    def test_a_file_sourced_from_an_install_dir_is_a_missing_tool_in_every_shell(self):
+        # #1258: bash's and zsh's line at exit 1, dash's `.: cannot open` at exit 2, and under a
+        # make recipe; a file the step makes, or one outside an install dir, still goes back
+        said = lambda tail, code=1: runner.missing_command({"exit": code, "tail": tail})  # noqa: E731
+        gone = ".venv/bin/activate: not in the worktree (.venv/ is an install's, never checked out)"
+        self.assertEqual(said("/usr/bin/bash: line 1: .venv/bin/activate: No such file or directory"), gone)
+        self.assertEqual(said("zsh:source:1: no such file or directory: .venv/bin/activate"), gone)
+        self.assertEqual(said("/bin/sh: 1: .: cannot open .venv/bin/activate: No such file", 2), gone)
+        self.assertEqual(said("/bin/sh: 1: .: cannot open .venv/bin/activate: No such file\n"
+                              "make: *** [Makefile:2: test] Error 2", 2), gone)
+        self.assertEqual(said("venv/bin/activate: No such file or directory\nmake: *** [test] Error 1", 2),
+                         "venv/bin/activate: not in the worktree (venv/ is an install's, never checked out)")
+        for tail, code in (("bash: line 1: env.sh: No such file or directory", 1),
+                           ("/bin/sh: 1: .: cannot open ./setup-env.sh: No such file", 2),
+                           ("cat: answer.txt: No such file or directory", 1),
+                           ("bash: line 1: .venv/bin/activate: No such file or directory", 3)):
+            self.assertIsNone(said(tail, code), tail)
 
     def test_a_console_script_the_step_adds_to_the_setups_venv_goes_back_to_the_agent(self):
         # #1244 (bar round 5 of 2.0): a console script the step adds, which the agent's reinstall

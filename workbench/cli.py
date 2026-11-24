@@ -1762,8 +1762,12 @@ def cmd_feedback(a):
     # runner's, a restart's, a model server's): the round it resumes is no review. Counted, the
     # "carry on" the provider's stop notice advises plus one real review read as two, and the
     # step went badly, shrinking the model's slice (#1153, 2026-11-24). drive clears `infra` at
-    # each round's start, so a task in review never has it.
+    # each round's start, so a task in review never has it. Nor is the round after a skipped
+    # auto-fix whose remedy it is (status `env_skip`: a tool the agent's environment lacked, a
+    # path the lane refused): it gives the environment what it lacked, not the code a review, and
+    # counted, it plus one real review made the step go badly too (#1257, 2026-11-24).
     resumed = bool(st.get("infra"))
+    env = st.get("env_skip")  # set only in review, so never with an unsent round
     # ... and no review for round_asks either: it stopped at this round, so a later handover or
     # wb resume carried only "carry on" and dropped the review feedback the stop interrupted
     # (#1169, 2026-11-24). Unlinked otherwise: a feedback that died before its round was counted
@@ -1772,11 +1776,11 @@ def cmd_feedback(a):
     mark = task.round_dir(n) / runner.RESUMED
     if unsent:
         pass
-    elif resumed:
+    elif resumed or env:
         mark.touch()
     else:
         mark.unlink(missing_ok=True)
-    reviews = st.get("reviews", 0) + (0 if resumed or unsent else 1)
+    reviews = st.get("reviews", 0) + (0 if resumed or unsent or env else 1)
     handled = store.now()  # everything before the new round; what its runner raises stays news
     # An unsent round keeps its own `context` unless a flag says otherwise: the runner clears it
     # only once the round starts, so wb resume's or wb next --fresh's "fresh" (or a handover's
@@ -1789,7 +1793,8 @@ def cmd_feedback(a):
     task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
                     # an unsent round keeps its own (`next`: the pane's `step 2`)
                     # an infra stop's resume carries a self-review on as wb resume's does (#1228)
-                    **({} if unsent else {"round_for": "feedback"} if not resumed else
+                    # and after an env skip: no review counted, the pane's "resumed" (#1257)
+                    **({} if unsent else {"round_for": "feedback"} if not (resumed or env) else
                        {"round_for": "resume", "self_review_tree": runner.carried_tree(task)}),
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
@@ -1803,6 +1808,9 @@ def cmd_feedback(a):
     elif resumed:
         print(f"feedback sent to {a.name} (round {n}): it resumes after a stop that wasn't the "
               f"agent's ({st['infra']}), so no review round is counted")
+    elif env:
+        print(f"feedback sent to {a.name} (round {n}): it follows a skipped auto-fix that wasn't "
+              f"the code's ({env}), so no review round is counted")
     else:
         print(f"feedback round {reviews} sent to {a.name} (round {n})"
               + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
@@ -4470,9 +4478,11 @@ def cmd_discard(a):
     # the last stop wasn't the step's (status `infra`, which drive clears as a round starts; a
     # shutdown's signal sets none): in the row, so the discard the stop notice offers isn't
     # scored as the model's rejected work (#1245, 2026-11-24). Read before this discard's own stop.
+    # A skipped auto-fix's tool or path the agent's environment lacked (status `env_skip`) too:
+    # GIVE_TOOL offers this discard to start again with a --setup (#1257).
     st = task.status
-    outside = st.get("infra") or ("signal" if st.get("phase") == "stuck"
-                                  and st.get("last") == runner.SIGNAL_STOP else None)
+    outside = st.get("infra") or ("environment" if st.get("env_skip") else None) \
+        or ("signal" if st.get("phase") == "stuck" and st.get("last") == runner.SIGNAL_STOP else None)
     _stop_runner(task)
     _spec_gaps(task, a.spec_gap)
     repo = gitops.repo_of(spec)  # a removed linked worktree: the repository's main one (#498)
