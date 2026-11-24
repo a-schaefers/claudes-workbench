@@ -14,7 +14,11 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const pw = createRequire(import.meta.url)(process.env.PLAYWRIGHT || 'playwright')
 const home = mkdtempSync(join(tmpdir(), 'wbchat-'))
 const env = { ...process.env, WB_HOME: join(home, 'state'), WB_CHAT_TOKEN: join(home, 'token'),
-  WB_CHAT_CONFIG: join(home, 'chat.json'), WB_SAVINGS: join(home, 'savings.json'), WB_AUDIO: join(home, 'audio.json') }  // not the user's
+  WB_CHAT_CONFIG: join(home, 'chat.json'), WB_SAVINGS: join(home, 'savings.json'), WB_AUDIO: join(home, 'audio.json'),
+  // a GPU listener's turn (#1203): the lease here, never a shared GPU's, and no model of the
+  // user's unloaded for it (WB_FAKE_MODELS: free_gpu does nothing; no config of theirs read)
+  WB_GPU_DIR: join(home, 'state'), WB_FAKE_MODELS: '1', WB_OPENCODE_CONFIG: join(home, 'opencode.json'),
+  WB_MODELS: join(home, 'wb-models.json') }  // not the user's
 // a system Chromium when there is one (CHROMIUM names another), else Playwright's own
 const CHROMIUM = process.env.CHROMIUM || (existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : '')
 const PORT = Number(process.env.WB_E2E_PORT || 13371)
@@ -1117,7 +1121,7 @@ async function run(engine, device) {
     await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('settled in the terminal'))
     if (await page.locator('.row.ask').last().locator('.choices').count()) throw new Error('the buttons are still there')
   })
-  await check("the mic shows only with a listener; a clip recorded, or a voice memo picked over plain http, comes back as words in the box and nothing is sent (#1203)", async () => {
+  await check("the mic shows only with a listener; a clip recorded, or a voice memo picked over plain http, comes back as words in the box and nothing is sent; one that meets a busy GPU or a proxy's 502 waits (#1203)", async () => {
     if (await page.locator('#mic').isVisible()) throw new Error('a mic with no listener')
     writeFileSync(env.WB_AUDIO, JSON.stringify({ ear: { kind: 'listen', gpu: false, command: 'sh -c "echo Run the tests again." sh {in}' } }))
     const sent = messages().length
@@ -1125,7 +1129,7 @@ async function run(engine, device) {
     const before = new Set(uploads())
     const p = await ctx.newPage(), q = await ctx.newPage()
     // a stand-in microphone and recorder: Playwright's browsers have no microphone to grant
-    await p.addInitScript(() => {
+    const recorder = () => {
       Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) } })
       window.MediaRecorder = class {
         static isTypeSupported(t) { return t === 'audio/webm' }
@@ -1133,7 +1137,14 @@ async function run(engine, device) {
         start() {}
         stop() { this.ondataavailable({ data: new Blob(['\x1aE\xdf\xa3 a recorded clip'], { type: this.mimeType }) }); this.onstop() }
       }
-    })
+    }
+    const say = async pg => {  // a tap to record, a tap to stop
+      await pg.click('#mic')
+      await until(async () => await pg.getAttribute('#mic', 'aria-label') === 'Stop recording')
+      await pg.click('#mic')
+    }
+    const waiting = pg => pg.evaluate(() => JSON.parse(localStorage.getItem('wb-chat-dictate') || '[]').length)
+    await p.addInitScript(recorder)
     await q.addInitScript(() => Object.defineProperty(window, 'isSecureContext', { get: () => false, configurable: true }))
     try {
       await p.goto(base)
@@ -1149,6 +1160,43 @@ async function run(engine, device) {
       if (!readdirSync(join(home, 'state/chat/uploads', fresh[0])).some(n => n.endsWith('.webm'))) throw new Error('not saved as webm')
       if (await p.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('the page scrolls sideways')
       await p.fill('#input', '')
+      // a GPU listener while a task holds the GPU: the server says 409 at once, and the clip is
+      // kept until the GPU is free. A 409 dropped it, for the user to say again (#1203)
+      writeFileSync(env.WB_AUDIO, JSON.stringify({ ear: { kind: 'listen', command: 'sh -c "echo Run the tests again." sh {in}' } }))
+      const task = spawn('python3', ['-c', 'import sys\nsys.path.insert(0, sys.argv[1])\nfrom workbench import models\n'
+        + "with models.GpuLease(None, 't-busy', lambda *_: None):\n    print('held', flush=True)\n    sys.stdin.read()\n", ROOT],
+        { env, stdio: ['pipe', 'pipe', 'inherit'] })
+      try {
+        await new Promise((ok, no) => { task.stdout.once('data', ok); task.once('exit', no) })
+        await say(p)
+        await until(async () => await p.getAttribute('#mic', 'aria-label') === 'Waiting for the GPU…')
+        await until(async () => ((await p.textContent('#net')) || '').includes('A task has the GPU: the clip waits'))
+        if (await waiting(p) !== 1) throw new Error('the clip was not kept')
+        await sleep(1500)  // asked again meanwhile, and still kept
+        if (await waiting(p) !== 1 || await p.inputValue('#input')) throw new Error('heard while the GPU was a task\'s')
+      } finally { task.stdin.end() }
+      await new Promise(r => task.exitCode !== null ? r() : task.once('exit', r))
+      await until(async () => (await p.inputValue('#input')) === 'Run the tests again.', 40000)  // BACKOFF's steps
+      await until(async () => await p.getAttribute('#mic', 'aria-label') === 'Dictate')
+      if (await waiting(p)) throw new Error('the clip is still waiting')
+      await p.fill('#input', '')
+      writeFileSync(env.WB_AUDIO, JSON.stringify({ ear: { kind: 'listen', gpu: false, command: 'sh -c "echo Run the tests again." sh {in}' } }))
+      // a proxy's 5xx (tailscale serve while the chat restarts) is in the way, not the listener's
+      // verdict: kept and asked again. A page route sees no request a service worker makes
+      const vc = await browser.newContext({ ...(device ? pw.devices[device] : {}), serviceWorkers: 'block' })
+      try {
+        const v = await vc.newPage()
+        v.on('pageerror', e => errors.push(String(e)))
+        await v.addInitScript(recorder)
+        let asked = 0
+        await v.route('**/api/transcribe/**', route => ++asked === 1
+          ? route.fulfill({ status: 502, contentType: 'text/html', body: '<html>Bad Gateway</html>' }) : route.continue())
+        await v.goto(base + '#token=' + token)
+        await until(async () => await v.locator('#mic').isVisible())
+        await say(v)
+        await until(async () => (await v.inputValue('#input')) === 'Run the tests again.')
+        if (asked !== 2) throw new Error('asked ' + asked + ' times')
+      } finally { await vc.close() }
       // over plain http there is no microphone: the mic opens the phone's recorder or a voice memo
       await q.goto(base)
       await until(async () => await q.locator('#mic').isVisible())

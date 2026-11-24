@@ -1142,20 +1142,26 @@
   // POST /api/transcribe/<id> answers its words, added to the box for the user to edit and send:
   // Claude only ever gets the text. Clips waiting for their words (wb-chat-dictate, the bytes in
   // IndexedDB beside the draft's) outlive a reload; the computer keeps each one's words, so a
-  // retry never transcribes twice. A GPU listener gives way to a running task (409): the
-  // keyboard's own dictation is the way then.
+  // retry never transcribes twice. A GPU listener gives way to a running task at once (409), a url
+  // listener's server can be down a moment (503 `retry`), and a proxy in front of the chat answers
+  // 5xx while it restarts: the clip is kept and asked for again with backoff, the mic saying what
+  // it waits for. A 409 dropped the clip, so once the task let the GPU go the user had to say it
+  // all again (#1203); only the listener's own 502 (it ran and failed) and a 4xx drop it.
   const DICTATE = 'wb-chat-dictate'
   const RECORD_MS = 5 * 60 * 1000  // a clip stops by itself at five minutes
   const mic = $('mic')
   let clips = (load(DICTATE, []) || []).filter(d => d && d.id), rec = null, recTimer = 0
-  let hearing = false, hearTimer = 0, hearTries = 0
+  let hearing = false, hearTimer = 0, hearTries = 0, hearAt = 0
+  let waiting = ''  // what the clips wait for: 'gpu' (a task's), 'listener' (not answering), or ''
   const canRecord = () => window.isSecureContext && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && typeof MediaRecorder !== 'undefined'
   function drawMic() {
     const busy = clips.length > 0
     mic.hidden = !token || !(state.dictate || rec || busy)
     mic.classList.toggle('rec', !!rec)
     mic.classList.toggle('busy', !rec && busy)
-    mic.setAttribute('aria-label', rec ? 'Stop recording' : busy ? 'Transcribing…' : 'Dictate')
+    const label = rec ? 'Stop recording' : !busy ? 'Dictate'
+      : waiting === 'gpu' ? 'Waiting for the GPU…' : waiting ? 'Waiting for the listener…' : 'Transcribing…'
+    mic.setAttribute('aria-label', label); mic.title = label
   }
   function note(text) {  // a passing word on the banner, cleared unless something else took it
     banner(text, true)
@@ -1167,7 +1173,7 @@
     if (blob.size > lim.file) return note(`That clip is too big: ${fmtSize(blob.size)}, the limit is ${fmtSize(lim.file)}.`)
     const d = { id: newId(), name, type: (blob.type || '').split(';')[0] || 'application/octet-stream', size: blob.size }
     bytes.set(d.id, blob); db.put(d.id, blob)
-    clips.push(d); save(DICTATE, clips); drawMic(); hearAll()
+    clips.push(d); save(DICTATE, clips); drawMic(); hearAll(true)
   }
   function heard(d, text) {
     clips = clips.filter(x => x.id !== d.id); save(DICTATE, clips)
@@ -1178,20 +1184,38 @@
     input.value = box.trim() ? box.replace(/\s*$/, ' ') + text.trim() : text.trim()
     save(K.draft, input.value); grow(); armSend()
   }
-  async function hearAll() {
-    if (hearing || !token || !clips.length) return
+  // the listener's own verdict on a clip, or something in the way that will pass: a task on the
+  // GPU (409), a listener not answering (503 `retry`), a proxy's 5xx (no JSON error from the chat
+  // server), a 408/425/429, or a 200 that isn't the chat server's (#934)
+  const passing = (r, j) => r.status === 409 || transient(r.status) || r.ok
+    || (r.status >= 500 && !(r.status === 502 && typeof j.error === 'string'))
+  function waitFor(why) {
+    if (why === waiting) return
+    waiting = why
+    if (why === 'gpu') note('A task has the GPU: the clip waits, and its words come once it is free.')
+    else if (why) note("The listener isn't answering: the clip waits, and is tried again.")
+  }
+  async function hearAll(now) {
+    // a state's flush comes every few seconds: it asks again only once the backoff is up
+    if (hearing || !token || !clips.length || (!now && Date.now() < hearAt)) return
     hearing = true; clearTimeout(hearTimer)
-    let again = false
+    let again = false, after = 0
+    const tried = new Set()
     try {
       for (const d of [...clips]) {
+        tried.add(d.id)
         try {
           await upload(d)
           const r = await fetch('/api/transcribe/' + encodeURIComponent(d.id), { method: 'POST', cache: 'no-store',
             headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: '{}' })
           const j = await r.json().catch(() => ({}))
-          if (r.ok && typeof j.text === 'string') heard(d, j.text)
+          if (r.ok && typeof j.text === 'string') { waitFor(''); heard(d, j.text) }
           else if (r.status === 401) { keyless('That key was not accepted.'); break }
-          else if (transient(r.status) || (r.ok && typeof j.text !== 'string')) again = true  // not the chat server's 200 (#934)
+          else if (passing(r, j)) {
+            again = true; after = Math.max(after, retryAfter(r))
+            if (r.status === 409) { waitFor('gpu'); break }  // the next clip needs the same GPU
+            if (j.retry) waitFor('listener')
+          }
           else { heard(d); note('Not transcribed: ' + (j.error || 'HTTP ' + r.status) + '.') }
         } catch (e) {
           if (e instanceof Refused) { heard(d); note('Not transcribed: ' + e.message + '.') }
@@ -1200,9 +1224,16 @@
         }
       }
     } finally {
-      hearing = false; drawMic()
-      if (again) hearTimer = setTimeout(hearAll, BACKOFF[Math.min(hearTries++, BACKOFF.length - 1)])
-      else hearTries = 0
+      hearing = false
+      if (!clips.length) waiting = ''
+      drawMic()
+      if (again) {
+        const ms = Math.max(after, BACKOFF[Math.min(hearTries++, BACKOFF.length - 1)])
+        hearAt = Date.now() + ms; hearTimer = setTimeout(() => hearAll(true), ms)
+      } else {
+        hearTries = 0; hearAt = 0
+        if (clips.some(d => !tried.has(d.id))) setTimeout(() => hearAll(true))  // recorded meanwhile
+      }
     }
   }
   async function record() {
@@ -1239,7 +1270,7 @@
   async function flush(now) {
     if (now) { clearTimeout(flushTimer); flushTries = 0 }
     pump()  // the draft's uploads, on the same occasions
-    hearAll()  // and the clips waiting for their words (#1203)
+    hearAll(now)  // and the clips waiting for their words (#1203)
     outbox = outItems()  // another tab's too: whichever tab is online sends them all
     if (flushing || !token || !(outbox.length || held)) return
     flushing = true

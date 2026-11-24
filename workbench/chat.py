@@ -1951,7 +1951,8 @@ def upload_file(uid: str):
 # POST /api/transcribe/<id> for its words, which land in the box for the user to edit and send:
 # Claude only ever gets text. A voice memo attached as a file reached Claude as audio it can't
 # hear. The words are kept beside the clip (TRANSCRIPT), so a retry or a reload never runs the
-# listener twice; a GPU listener gives way to a task at once (409), never waits behind it.
+# listener twice; a GPU listener gives way to a task at once (409), never waits behind it: the
+# page keeps the clip and asks again.
 TRANSCRIPT = ".transcript.txt"  # a leading dot: no saved upload's name has one (upload_name)
 TRANSCRIPT_MAX = 64 * 1024      # read back at most this; a listener's words are far fewer
 DICTATE_TYPES = ("audio/", "video/")  # a phone's voice memo may be video/mp4 or video/webm
@@ -2002,7 +2003,8 @@ def _say(text: str) -> None:
 def transcribe_upload(uid: str) -> str:
     """POST /api/transcribe/<id>: the words the listener hears in upload ``uid`` (audio.hear),
     kept beside it. UploadError 404 (no such upload), 415 (not audio); audio.Busy (the GPU is a
-    task's), LookupError (no listener), RuntimeError and the like (the listener failed) as raised."""
+    task's), audio.Down (a url listener nothing answers at), LookupError (no listener),
+    RuntimeError and the like (the listener failed) as raised."""
     from . import audio
     m = upload_meta(uid)
     if not m:
@@ -2435,16 +2437,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _transcribe(self, uid: str) -> None:
         """POST /api/transcribe/<id>: 200 {text}; 404 no such upload or no listener, 415 not
-        audio, 409 the GPU is a task's (`busy: true`: the keyboard's dictation is the way then),
-        502 the listener failed. No GPU listener ever waits for the GPU here."""
+        audio, 409 the GPU is a task's (`busy: true`), 503 a url listener nothing answers at
+        (`retry: true`), 502 the listener failed. The page keeps a clip through a 409 or a 503
+        and asks again (#1203); no GPU listener ever waits for the GPU here."""
         from . import audio
         try:
             return self._json(200, {"text": transcribe_upload(uid)})
         except UploadError as e:
             return self._json(e.code, {"error": e.why})
         except audio.Busy as e:
-            return self._json(409, {"error": "the GPU is busy with a task: use the keyboard's dictation",
-                                    "busy": True, "why": str(e)})
+            return self._json(409, {"error": "the GPU is busy with a task", "busy": True, "why": str(e)})
+        except audio.Down as e:
+            _say(f"the listener is down: {e}")
+            return self._json(503, {"error": f"the listener isn't answering: {e}", "retry": True})
         except LookupError as e:
             return self._json(404, {"error": f"dictation is off: {e}"})
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as e:

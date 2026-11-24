@@ -253,8 +253,10 @@ One take of a `wb chat listen` shortlist, as its audio type (at most 64 MiB). 40
 edit and send as a message (the clip itself is never sent to Claude). The words are kept with the
 upload, so asking again never transcribes twice. Errors: 404 `no such upload`, `dictation is off:
 …` (no listener); 415 `not a voice clip (<type>)`; 409 `{error, busy: true, why}` while a task
-holds the GPU a GPU listener needs (it never waits: the keyboard's own dictation is the way then);
-502 `the listener failed: …`. It answers once the listener is done: give it minutes, not seconds.
+holds the GPU a GPU listener needs (it never waits for it: ask again later, as the page does);
+503 `{error, retry: true}` while a url listener's server doesn't answer (ask again too); 502 `the
+listener failed: …` (it ran and failed). It answers once the listener is done: give it minutes,
+not seconds.
 
 ### `POST /api/answer` (user only)
 Answer a dialog: `{id, answer: "allow"|"deny", note?: ≤ 2000 characters, answers?: {question:

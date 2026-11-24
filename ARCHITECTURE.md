@@ -4630,7 +4630,9 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   clip as it is, sent to a url listener as its own type (`_multipart`'s `ctype`: every clip went
   as `audio/wav`, so a phone's webm or m4a reached a server mislabelled), under
   `media.turns("wb chat dictation", …, wait=False)`: a GPU listener is `Busy` at once while a task
-  holds the GPU, its `unload` URL POSTed before the turn ends.
+  holds the GPU, its `unload` URL POSTed before the turn ends. A url listener nothing answers at
+  (`ready`'s probe, or a `URLError` on the clip's POST) is `Down`, for now; any other failure is
+  the listener's (`RuntimeError`).
 - The line: `3.4 s (asked 3) · peak -1.2 dBFS · -16 LUFS · lead 0.1 s, tail 0.3 s · gaps … · heard
   "…" WER 30% (twenty twenty six → 2026)` and the spectrogram's path; under 80% of the asked length,
   "cut short". `lines()` (`wb audio --list`, `wb scout`) shows kind, readiness, voices and `notes`
@@ -5074,10 +5076,16 @@ else `chat/serve.pid`, else 1337; `--port`, #349; the fragment never leaves the 
   reload never runs the listener twice; one clip at a time (`_dictate_lock`). The page puts them
   in the box for the user to edit and send: Claude only ever gets text, so the agents, OpenCode and
   the mod don't change. 409 `{error, busy: true, why}` when the GPU is a task's: a GPU listener
-  takes its turn with `wait` False and gives way, never queues behind a round (the keyboard's own
-  dictation is the way then); a `gpu: false` one runs beside tasks. 404 `dictation is off: …`
-  without a listener; 502 `the listener failed: …` (also in serve.log), nothing kept, so the next
-  try runs it again. An agent's token is 403 (`AGENT_DENIED`, a prefix entry). The clip's upload
+  takes its turn with `wait` False and gives way, never queues behind a round; a `gpu: false` one
+  runs beside tasks. 503 `{error: "the listener isn't answering: …", retry: true}` for
+  `audio.Down` (a url listener's server restarting). 404 `dictation is off: …` without a listener;
+  502 `the listener failed: …` (also in serve.log), nothing kept, so the next try runs it again.
+  The page keeps a clip (wb-chat-dictate, its bytes in IndexedDB) through a 409, a 503, a 5xx
+  that isn't the chat server's (a proxy's, no JSON `error`: `tailscale serve` while the server
+  restarts), a 408/425/429 or a 200 without `text`, and asks again on `BACKOFF` (a state's flush
+  only once the step is up, `hearAt`), its mic saying `Waiting for the GPU…` or `Waiting for the
+  listener…`; only a 4xx or the listener's own 502 drops it, its reason on the banner. A 409 had
+  dropped the clip, so the user said it all again once the task let the GPU go. An agent's token is 403 (`AGENT_DENIED`, a prefix entry). The clip's upload
   is a draft no message names, so `wb gc` drops it in time. Realtime voice isn't built: Claude
   Code's turns aren't a realtime loop, and its own voice covers the terminal.
 - **The switch.** `chat/switch.json` `{on}` (absent: off), written by `wb chat on|off`. `on` sets it
@@ -5354,7 +5362,8 @@ address (#534).
   `application/octet-stream` as an attachment, so no upload renders as a page; cached for a year
   (`FILE_CACHE`, `Vary: Authorization`: an upload never changes under its id, #754).
 - `POST /api/transcribe/<id>` `{}` (the user's token only, #1203): a voice clip's words → `{text}`; 404 (no
-  upload, no listener), 415 (not audio), 409 `busy: true` (a task's GPU), 502 (the listener failed); *Dictation*.
+  upload, no listener), 415 (not audio), 409 `busy: true` (a task's GPU), 503 `retry: true` (a url
+  listener nothing answers at), 502 (the listener failed); the page keeps the clip through a 409 or 503; *Dictation*.
 - `POST /api/answer` (the user's token only, as the four below): `{id, answer: "allow"|"deny", note?, answers?: ≤ 4}` (`expired` is the mod's
   alone; `answers` only and always for an allowed question) → `{ask, state}`, the answer that stands.
 - `POST /api/prefs` `{away}`; `POST /api/active` `{}` (`chat.active`: `page.json`, and `away.json`
@@ -6746,7 +6755,10 @@ never counted unread (#1128), its state without the user's, a dialog for it sayi
 card and in the push (#1042), a 25-task backlog's strip at most three lines on a phone, the queued counted apart
 (#1097), the mic with a listener only, a clip recorded (a stand-in `MediaRecorder`: the browsers have no
 microphone) and a voice memo picked over plain http each landing as words in the box, a failing listener said on the
-banner (#1203, `WB_AUDIO` the test's); and `sw.js` in a node `vm` (`swSays`) for a push's text.
+banner, a clip that meets a GPU lease held by another process (a real 409) kept until it is let go, and one past a
+proxy's HTML 502 (a routed context, its service worker blocked) asked again (#1203, `WB_AUDIO` the test's; the
+env's `WB_GPU_DIR`, `WB_FAKE_MODELS`, `WB_OPENCODE_CONFIG` and `WB_MODELS` too, so a GPU listener's turn never
+unloads the user's models); and `sw.js` in a node `vm` (`swSays`) for a push's text.
 `WebChat` runs the agents' client, `skill/agents/claude-workbench/scripts/ask_claude.py`, against its server with a
 listener played in the test (#1042).
 

@@ -25738,7 +25738,7 @@ class ChatUploads(Base):
         code, got = self.transcribe("gggggggg-1203")
         self.assertLess(time.monotonic() - began, 10)
         self.assertEqual((code, got["error"], got["busy"]),
-                         (409, "the GPU is busy with a task: use the keyboard's dictation", True))
+                         (409, "the GPU is busy with a task", True))
         self.assertIn("t-busy", got["why"])
         self.assertEqual(self.calls(), [])
         held.stdin.close()
@@ -25746,6 +25746,25 @@ class ChatUploads(Base):
         self.assertEqual(self.transcribe("gggggggg-1203"), (200, {"text": "hello"}))
         from workbench import models
         self.assertEqual(models.holders(), {})                              # the turn was let go
+
+    def test_a_url_listener_nothing_answers_at_is_a_503_to_try_again_not_the_listeners_502(self):
+        # #1203: the page dropped a clip on any answer but a 408/425/429, so a url listener's server
+        # restarting lost what the user had just said: down for now is 503 `retry`, kept and asked again
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]                                     # nothing listens there now
+        self.listener({"gpu": False, "url": f"http://127.0.0.1:{port}/v1/audio/transcriptions"})
+        self.put("kkkkkkkk-1203", b"\x1aE\xdf\xa3 webm", name="voice.webm", ctype="audio/webm")
+        with redirect_stderr(io.StringIO()) as log:
+            code, got = self.transcribe("kkkkkkkk-1203")
+        self.assertEqual((code, got.get("retry")), (503, True))
+        self.assertIn("the listener isn't answering: listener ear: nothing answers at", got["error"])
+        self.assertIn("wb chat: dictation: the listener is down", log.getvalue())
+        # it answered the probe, then dropped the connection before the clip's reply: down too
+        with mock.patch.object(audio, "ready", return_value=""), \
+                mock.patch.object(audio, "_ffmpeg", return_value=None), redirect_stderr(io.StringIO()):
+            code, got = self.transcribe("kkkkkkkk-1203")
+        self.assertEqual((code, got.get("retry")), (503, True))
 
     def test_a_server_listener_gets_the_clips_own_type_when_there_is_no_ffmpeg_to_convert_it(self):
         # #1203: _multipart labelled every file audio/wav, so a phone's webm reached a

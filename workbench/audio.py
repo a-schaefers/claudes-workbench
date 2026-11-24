@@ -34,6 +34,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+import urllib.error
 import uuid
 import wave
 from pathlib import Path
@@ -587,6 +588,11 @@ class Busy(RuntimeError):
     """The GPU (or a box's) is another's: dictation gives way to a task, never queues behind it."""
 
 
+class Down(RuntimeError):
+    """A url listener that nothing answers at, for now (a server restarting, a tunnel's blip):
+    the page keeps the clip and asks again, where a listener that failed is final (#1203)."""
+
+
 def dictation() -> tuple[str, dict] | None:
     """The listener the web chat's mic sends a clip to: the first, when its entry can run, else
     None (no mic on the page). Cheap, as it is on every state the chat sends: a url isn't probed
@@ -607,14 +613,15 @@ def hear(clip: Path, ctype: str = "", say=print) -> str:
     """What the listener hears in ``clip``, a voice clip of type ``ctype`` (a phone's webm or m4a):
     a 16 kHz mono WAV of it when ffmpeg makes one, as `inspect` gives a listener, else the clip as
     it is. The listener takes its turn on the GPU as `wb audio` does (`media.turns`), but never
-    waits: a task holding the GPU is Busy at once. LookupError: no listener; RuntimeError (or
-    OSError, TimeoutExpired): the listener failed."""
+    waits: a task holding the GPU is Busy at once. Down: a url listener nothing answers at, for
+    now. LookupError: no listener; RuntimeError (or OSError, TimeoutExpired): the listener failed."""
     ear = listener()  # not dictation(): a listener whose program went missing says so (502), not "off"
     if not ear:
         raise LookupError(f"no listener: describe one in {config_path()}")
     name, e = ear
     if why := ready(e):
-        raise RuntimeError(f"listener {name}: {why}")
+        raise (Down if e.get("url") and why.startswith("nothing answers") else RuntimeError)(
+            f"listener {name}: {why}")
     with tempfile.TemporaryDirectory(prefix=".wb-dictate-") as tmp:
         plain = Path(tmp) / "plain.wav"
         r = _ffmpeg("-v", "error", "-i", str(clip), "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
@@ -627,7 +634,12 @@ def hear(clip: Path, ctype: str = "", say=print) -> str:
         except RuntimeError as err:
             raise Busy(str(err)) from None
         with hold, media.unloading([e], say, "audio", config_path().parent):  # unloaded inside the turn
-            return transcribe(ear, use, Path(tmp) / "listen.log", kind)
+            try:
+                return transcribe(ear, use, Path(tmp) / "listen.log", kind)
+            except urllib.error.URLError as err:  # not an HTTPError: media.post made those its words
+                if e.get("command"):
+                    raise
+                raise Down(f"listener {name}: nothing answers at {e['url']} ({err.reason})") from None
 
 
 def inspect(path: Path, kind: str, script: str = "", seconds: float | None = None,
