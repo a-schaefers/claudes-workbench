@@ -29786,6 +29786,49 @@ class RealOpenCodeAPI(_KeyholeTest):
         self.assertEqual(got, [{"prompt_tokens": 7, "completion_tokens": 3}])    # once
         self.assertEqual(len(self.up.seen), 1)
 
+    def test_a_usage_cost_comes_back_as_the_step_cost_and_the_meter_books_it_once(self):
+        # #1234 (2026-11-24): OpenCode 2.3.2 takes a usage's own `cost` as its step figure (its
+        # chat, Responses and Messages usage all read it), the catalog's estimate only without
+        # one, and never DeepInfra's estimated_cost; the meter compared a usage.cost row at the
+        # catalog's, so a response billed past its listed price booked its excess twice
+        from workbench import meter
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        tmp = Path(self.tmp.name)
+        usage = {"prompt_tokens": 1000, "completion_tokens": 100}
+        for field in ("cost", "estimated_cost"):
+            m = self.model()
+            m.kind = "api"
+            m.config = {"cost": [{"input": 1, "output": 2}]}               # 0.0012 for usage
+            mt = meter.Meter(self.task, m)
+            mt.begin(1)
+            kh = self.keyhole(m, on_usage=mt.on_usage)
+            self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+            self.up.pieces = [f"data: {json.dumps(ev)}\n\n".encode() for ev in (
+                {"model": m.name, "choices": [{"index": 0, "delta": {"content": "ok"}}]},
+                {"model": m.name, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                 "usage": {**usage, field: 0.5}})] + [b"data: [DONE]\n\n"]
+            layer = tmp / f"layer-{field}.json"
+            layer.write_text(json.dumps({"provider": {"deepinfra": {"options": self.kh_mod.layer_options(kh)}}}))
+            r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", m.id,
+                                "--format", "json", "say ok"], cwd=self.repo,
+                               env=self.scratch_env(layer, field), capture_output=True, text=True,
+                               timeout=180)
+            self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
+            [part] = [e["part"] for e in map(json.loads, (x for x in r.stdout.splitlines()
+                                                          if x.startswith("{")))
+                      if e.get("type") == "step_finish"]
+            kh.close()
+            if field == "cost":
+                self.assertEqual(part["cost"], 0.5)                         # the provider's own
+                mt.step(part)
+                rows = [x for x in store.read_jsonl(meter.ledger_path())[0] if x["task"] == self.task.name]
+                self.assertEqual([(x["kind"], x["usd"], x.get("own")) for x in rows],
+                                 [("step", 0.5, "cost")])                    # no reconcile row
+                meter.ledger_path().unlink()
+            else:
+                self.assertGreater(part["cost"], 0)                         # the catalog's estimate
+                self.assertLess(part["cost"], 0.01)
+
     def scratch_env(self, layer, name, models_path=None):
         """Real OpenCode's environment with nothing of the user's: scratch homes, no catalog
         fetch, the layer, and the task's catalog file when given."""
@@ -35728,7 +35771,8 @@ class ApiSpendKeyhole(_KeyholeTest):
             self.assertEqual({k: results.api_usage(self.task)[k] for k in ("cost", "source", "prices")},
                              {"cost": 0.392, "source": "metered", "prices": "provider"})
         mt.on_usage({**tok, "cost": 0.5})          # OpenRouter's usage.cost, under its catalog figure
-        mt.step({"cost": 0.8, "tokens": {"input": 1_000_000, "output": 1_000_000}})
+        # OpenCode's step figure is that usage.cost too, not the catalog's 0.8 (#1234)
+        mt.step({"cost": 0.5, "tokens": {"input": 1_000_000, "output": 1_000_000}})
         self.assertEqual([r["kind"] for r in store.read_jsonl(meter.ledger_path())[0]], ["step"] * 2)
         mt.step({"cost": 0.3, "tokens": {"input": 1}})   # a response the keyhole never saw: booked
         self.assertEqual([round(r["usd"], 9) for r in store.read_jsonl(meter.ledger_path())[0]
@@ -35776,6 +35820,43 @@ class ApiSpendKeyhole(_KeyholeTest):
         with mock.patch.object(results, "_session_cost", side_effect=[2.4, None]):
             got = results.api_usage(self.task)
         self.assertEqual((got["cost"], got["source"]), (1.976, "mixed"))
+
+    def test_a_usage_cost_above_the_catalogs_is_booked_once_and_the_task_closes_at_the_bill(self):
+        # #1234 (2026-11-24): OpenCode 2.3.2 reports a usage's own `cost` as its step and export
+        # figure (it never reads DeepInfra's estimated_cost), but the meter compared OpenRouter's
+        # usage.cost at its catalog figure: a response billed past its listed price (a price
+        # fallback, a pinned backend) booked the excess again as a reconcile row, $0.15 in the
+        # ledger for a $0.1125 bill at 1.5x, `(catalog prices)`, the day cap at 75% of real spend
+        from workbench import meter, results
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        m = self.model("openrouter", "vendor/m1", "/api/v1", "@openrouter/ai-sdk-provider")
+        m.kind = "api"
+        m.config = {"cost": [{"input": 0.2, "output": 0.6}]}                 # 0.8 for MTOK
+        store.write_json(self.task.dir / "task.json", {**self.task.spec, "via": "api", "model": m.id})
+        mt = meter.Meter(self.task, m)
+        mt.begin(1)
+        for _ in range(2):
+            mt.on_usage({**self.MTOK, "cost": 1.2})                         # billed at 1.5x
+            mt.step({**self.STEP, "cost": 1.2})                             # OpenCode says the same
+        mt.end_round({"s1": {"info": {"cost": 2.4}}})
+        rows = store.read_jsonl(meter.ledger_path())[0]
+        self.assertEqual([(r["kind"], r["source"], r.get("own")) for r in rows],
+                         [("step", "provider", "cost")] * 2)
+        self.assertEqual({k: self.task.status["api"][k] for k in ("usd", "at_catalog", "prices")},
+                         {"usd": 2.4, "at_catalog": 2.4, "prices": "provider"})
+        self.assertEqual(meter.tail(m), " · today $2.40 of $100")
+        self.task.set_status(session="ses_1")
+        with mock.patch.object(results, "_session_cost", return_value=2.4):     # the export's
+            got = results.api_usage(self.task)
+        self.assertEqual({k: got[k] for k in ("cost", "prices")}, {"cost": 2.4, "prices": "provider"})
+        again = meter.Meter(self.task, m)                                   # round 2's runner
+        again.begin(2)
+        self.assertEqual((again.total, again.at_catalog), (2.4, 2.4))
+        again.end_round({"s1": {"info": {"cost": 2.4}}})
+        self.assertEqual(len(store.read_jsonl(meter.ledger_path())[0]), 2)
+        mt.step({"cost": 0.3, "tokens": {"input": 1}})       # a response the keyhole never saw
+        self.assertEqual([(r["kind"], round(r["usd"], 9)) for r in store.read_jsonl(meter.ledger_path())[0]
+                          if r["kind"] == "reconcile"], [("reconcile", 0.3)])
 
     def test_an_export_a_rounding_past_the_status_at_catalog_leaves_paid_at_the_providers_own_figure(self):
         # #1220 (2026-11-24): status api.at_catalog is written to 6 places and the export isn't, so

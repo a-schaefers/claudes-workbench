@@ -5,9 +5,10 @@ Prices are the catalog's (`Model.config["cost"]`, per million tokens), priced th
 prices itself (the spike for #1009): `input` leaves out cache reads, cache reads and writes at
 their own rates, reasoning at the output rate (the reasoning rate when one is listed), and a
 `tier: {type: "context", size}` price past its size. OpenCode's own figure is that same
-estimate, so wb meters the same way rather than at the cache-miss rate, which over-counted a
-cached context about 50 times. Where the split isn't known it never prices under: a usage
-that doesn't say its cache reads prices them as input, a missing cache price is the input's.
+estimate (unless the response's usage says its `cost`: then that, #1234), so wb meters the same
+way rather than at the cache-miss rate, which over-counted a cached context about 50 times.
+Where the split isn't known it never prices under: a usage that doesn't say its cache reads
+prices them as input, a missing cache price is the input's.
 
 Two views of the same requests, each kept as high as the other says (never under):
 - the keyhole's (`Meter.on_usage`, its thread): each upstream response's `usage`, every request
@@ -17,7 +18,8 @@ Two views of the same requests, each kept as high as the other says (never under
 - OpenCode's: live, each `step_finish.part.cost` (`Meter.step`); at each round's end the
   sessions' exported `info.cost` (`Meter.end_round`). With the keyhole metering, these only add
   a `reconcile` row when OpenCode says more than the keyhole saw, each at the same prices (a
-  provider's own figure compared at the catalog's, `at_catalog`: never topped up to it); without
+  provider's `estimated_cost` compared at the catalog's, `at_catalog`: never topped up to it; a
+  `usage.cost` as booked, which OpenCode reports as its own figure too, #1234); without
   it (no usage in the answers, the suite's fake), each step books its own row, OpenCode's cost or
   the metered one.
 An OpenCode cost of 0 for a model whose price isn't 0 is never trusted (never a false 0).
@@ -326,11 +328,15 @@ def _task_rows(name: str) -> list[dict]:
             and r.get("kind") in ("step", "reconcile") and _num(r.get("usd"))]
 
 
-def _at_catalog(usd_: float, source, mtr) -> float:
-    """A booked figure as OpenCode's own estimate prices it, to compare the two: a provider's own
+def _at_catalog(usd_: float, source, mtr, own=None) -> float:
+    """A booked figure as OpenCode's own figure prices it, to compare the two: a provider's own
     (`source: provider`) at its metered one, the catalog's (or the user's, which the task's
-    catalog.json gives OpenCode too); any other as booked (#1165, 2026-11-24)."""
-    return float(mtr) if source == PROVIDER and _num(mtr) else usd_
+    catalog.json gives OpenCode too); any other as booked (#1165, 2026-11-24). A provider's
+    `usage.cost` (``own`` "cost") as booked too: OpenCode 2.3.2 reports a usage's `cost` as its
+    own step and export figure; `estimated_cost` (DeepInfra's) it never reads. At the
+    catalog's, every OpenRouter response billed past its listed price booked the excess a second
+    time as a `reconcile` row (#1234, 2026-11-24). A row from before `own` is read as before."""
+    return float(mtr) if source == PROVIDER and own != "cost" and _num(mtr) else usd_
 
 
 def task_total(name: str) -> float:
@@ -562,9 +568,9 @@ class Meter:
         rows = _task_rows(task.name)  # booked for the task, any day, this runner's too
         self.total = round(sum(r["usd"] for r in rows), 10)
         # the ledger as OpenCode's figure prices it: a provider's own row at its catalog figure
-        # (`metered`), which is what OpenCode's estimate is compared with (#1165, 2026-11-24)
-        self.at_catalog = round(sum(_at_catalog(r["usd"], r.get("source"), r.get("metered"))
-                                    for r in rows), 10)
+        # (`metered`), unless it was usage.cost, which OpenCode reports too (#1165, #1234)
+        self.at_catalog = round(sum(_at_catalog(r["usd"], r.get("source"), r.get("metered"),
+                                                r.get("own")) for r in rows), 10)
         self.bases = {row_basis(r) for r in rows}
         self.metered_total = 0.0
         self.tok = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}
@@ -588,7 +594,7 @@ class Meter:
         return _num(oc) and oc >= 0 and not (oc == 0 and (metered(self.prices, tok) or 0) > 0)
 
     def _book(self, kind: str, usd_: float | None, source: str, tok: dict | None = None,
-              mtr: float | None = None) -> None:
+              mtr: float | None = None, own: str | None = None) -> None:
         ts = time.time()
         row = {"ts": round(ts, 3), "day": day(ts), "kind": kind, "task": self.task.name,
                "round": self.n or self.task.status.get("round"), "provider": self.m.provider,
@@ -598,6 +604,8 @@ class Meter:
         if self.plan:
             row["plan"] = self.m.provider
         row["source"] = source
+        if own:
+            row["own"] = own   # the provider's field: `cost` OpenCode reports too (#1234)
         if self.yours and not self.plan:
             row["prices"] = YOURS
         if tok is not None:
@@ -606,7 +614,7 @@ class Meter:
         with self.lock:
             if _num(row["usd"]):
                 self.total += row["usd"]
-                self.at_catalog += _at_catalog(row["usd"], source, mtr)
+                self.at_catalog += _at_catalog(row["usd"], source, mtr, own)
                 self.bases.add(row_basis(row))
             if _num(mtr):
                 self.metered_total += mtr
@@ -654,24 +662,24 @@ class Meter:
         # the provider's own figure: OpenRouter's usage.cost, DeepInfra's usage.estimated_cost (in
         # its last, `choices: []` chunk, at its own rate: dropped, every DeepInfra figure and the
         # day cap ran at the catalog's, about 2x the bill, #1165, 2026-11-24)
-        own = usage.get("cost")
-        if not _num(own):
-            own = usage.get("estimated_cost")
+        field = "cost" if _num(usage.get("cost")) else "estimated_cost"
+        own = usage.get(field)
         if _num(own) and own >= 0 and not (own == 0 and (mtr or 0) > 0):
             value, source = float(own), PROVIDER
         else:
-            value, source = mtr, "keyhole"
+            value, source, field = mtr, "keyhole", None
         with self.lock:
             self.keyhole = True
             # what the keyhole saw at the prices OpenCode's step figure uses (_at_catalog)
-            self.round_kh += _at_catalog(value or 0, source, mtr)
-        self._book("step", value, source, tok, mtr)
+            self.round_kh += _at_catalog(value or 0, source, mtr, field)
+        self._book("step", value, source, tok, mtr, field)
 
     def step(self, part: dict) -> None:
         """A `step_finish` (the runner's thread): its own row, or OpenCode's figure reconciling
         what the keyhole saw. Compared at the same prices (round_kh: a provider's own figure at
-        its catalog one): against what was booked, OpenCode's catalog estimate topped every
-        DeepInfra and OpenRouter row back up to the catalog's (#1165, 2026-11-24)."""
+        its catalog one, but a usage.cost as booked, which OpenCode's figure is too, #1234):
+        against what was booked, OpenCode's catalog estimate topped every DeepInfra row back up
+        to the catalog's (#1165, 2026-11-24)."""
         if not isinstance(part, dict):
             return
         tok = step_tokens(part)
@@ -697,9 +705,9 @@ class Meter:
         """At a round's end: OpenCode's figure for the whole task, the `info.cost` of each of its
         sessions (``sessions``: id -> export), which counts the title requests no step carries.
         More than the ledger has, a provider's own rows at their catalog figure (at_catalog, as in
-        step: #1165): one `reconcile` row with the difference. Never less (the keyhole's view is
-        what went out), never from a 0 for a priced model, never from a session that didn't
-        export."""
+        step: #1165; a usage.cost row as booked, #1234): one `reconcile` row with the difference.
+        Never less (the keyhole's view is what went out), never from a 0 for a priced model, never
+        from a session that didn't export."""
         if self.plan or not sessions:
             return
         costs = [(e.get("info") or {}).get("cost") if isinstance(e, dict) else None
