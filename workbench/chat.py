@@ -32,6 +32,7 @@ import socketserver
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zlib
@@ -143,7 +144,8 @@ AGENT_DENIED = {"/api/answer": "answer Claude Code's dialogs",
                 "/api/prefs": "change the user's settings",
                 "/api/push": "change notifications",
                 "/api/active": "mark the user away",
-                "/api/seen": "mark what the user has seen"}
+                "/api/seen": "mark what the user has seen",
+                "/api/transcribe/": "transcribe the user's voice clips"}  # a prefix: ends in /
 
 
 def agents_path() -> Path:
@@ -852,7 +854,7 @@ def snapshot() -> dict:
             "push": {"key": _push_key_or_none(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
             "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
-            "tasks": open_tasks(), "now": store.now()}
+            "tasks": open_tasks(), "dictate": dictate_ready(), "now": store.now()}
 
 
 def open_tasks() -> list[dict]:
@@ -1942,6 +1944,90 @@ def upload_file(uid: str):
     return os.fdopen(fd, "rb"), m
 
 
+
+# ---- dictation (#1203): a voice clip in, its words in the box ----
+# The page's mic (shown only while `dictate` is true: audio.json names a listener that can run)
+# records a clip, uploads it as any attachment (PUT /api/upload/<id>, once), and asks
+# POST /api/transcribe/<id> for its words, which land in the box for the user to edit and send:
+# Claude only ever gets text. A voice memo attached as a file reached Claude as audio it can't
+# hear. The words are kept beside the clip (TRANSCRIPT), so a retry or a reload never runs the
+# listener twice; a GPU listener gives way to a task at once (409), never waits behind it.
+TRANSCRIPT = ".transcript.txt"  # a leading dot: no saved upload's name has one (upload_name)
+TRANSCRIPT_MAX = 64 * 1024      # read back at most this; a listener's words are far fewer
+DICTATE_TYPES = ("audio/", "video/")  # a phone's voice memo may be video/mp4 or video/webm
+_dictate_lock = threading.Lock()  # one clip at a time: a retry of the same id then finds its words
+
+
+def dictate_ready() -> bool:
+    """The state's `dictate`: whether the page shows its mic (audio.dictation)."""
+    from . import audio  # only here: the server needs none of it otherwise
+    try:
+        return audio.dictation() is not None
+    except Exception:  # noqa: BLE001 - a snapshot never fails for it
+        return False
+
+
+def _transcript(uid: str) -> str | None:
+    """The words kept for upload ``uid``, or None when it has none yet."""
+    try:
+        d = _upload_dir(uid)
+    except (OSError, UploadError):
+        return None
+    try:
+        fd = os.open(TRANSCRIPT, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=d)
+    except OSError:
+        return None
+    finally:
+        os.close(d)
+    with os.fdopen(fd, "rb") as f:
+        return f.read(TRANSCRIPT_MAX).decode("utf-8", "replace")
+
+
+def _keep_transcript(uid: str, text: str) -> None:
+    d = _upload_dir(uid)
+    try:
+        tmp = f".transcript-{secrets.token_hex(6)}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=d)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.rename(tmp, TRANSCRIPT, src_dir_fd=d, dst_dir_fd=d)
+    finally:
+        os.close(d)
+
+
+def _say(text: str) -> None:
+    print(f"wb chat: dictation: {text}", file=sys.stderr, flush=True)  # serve.log
+
+
+def transcribe_upload(uid: str) -> str:
+    """POST /api/transcribe/<id>: the words the listener hears in upload ``uid`` (audio.hear),
+    kept beside it. UploadError 404 (no such upload), 415 (not audio); audio.Busy (the GPU is a
+    task's), LookupError (no listener), RuntimeError and the like (the listener failed) as raised."""
+    from . import audio
+    m = upload_meta(uid)
+    if not m:
+        raise UploadError(404, "no such upload")
+    ctype = m.get("type") or ""
+    if not (ctype.startswith(DICTATE_TYPES) or ctype == "application/octet-stream"):
+        raise UploadError(415, f"not a voice clip ({ctype})")
+    with _dictate_lock:
+        if (said := _transcript(uid)) is not None:
+            return said
+        got = upload_file(uid)
+        if got is None:
+            raise UploadError(404, "no such upload")
+        f, m = got
+        ext = os.path.splitext(m["name"])[1].lower()
+        # a copy under a plain name: the user's file name (quotes, a leading dash) never reaches
+        # the listener's command line or the form's filename
+        with f, tempfile.TemporaryDirectory(prefix=".wb-clip-") as tmp:
+            clip = Path(tmp) / ("clip" + (ext if re.fullmatch(r"\.[a-z0-9]{1,8}", ext) else ""))
+            with open(clip, "wb") as out:
+                shutil.copyfileobj(f, out, 1 << 16)
+            text = audio.hear(clip, ctype, say=_say)
+        _keep_transcript(uid, text)
+        return text
+
 def drop_old_uploads(days: float) -> int:
     """`wb gc`: remove the uploads older than ``days`` whose message has its receipt (an expired
     one's too: open_work retires it, #741), or that no message waiting for one names (a draft
@@ -2347,6 +2433,24 @@ class Handler(BaseHTTPRequestHandler):
                                 f"not saved: {e.strerror or e}", final=e.errno in FINAL_ERRNOS)
         self._json(200, {"upload": {k: meta.get(k) for k in ATTACHED}, "new": new})
 
+    def _transcribe(self, uid: str) -> None:
+        """POST /api/transcribe/<id>: 200 {text}; 404 no such upload or no listener, 415 not
+        audio, 409 the GPU is a task's (`busy: true`: the keyboard's dictation is the way then),
+        502 the listener failed. No GPU listener ever waits for the GPU here."""
+        from . import audio
+        try:
+            return self._json(200, {"text": transcribe_upload(uid)})
+        except UploadError as e:
+            return self._json(e.code, {"error": e.why})
+        except audio.Busy as e:
+            return self._json(409, {"error": "the GPU is busy with a task: use the keyboard's dictation",
+                                    "busy": True, "why": str(e)})
+        except LookupError as e:
+            return self._json(404, {"error": f"dictation is off: {e}"})
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as e:
+            _say(f"the listener failed: {e}")
+            return self._json(502, {"error": f"the listener failed: {e}"})
+
     def _refuse(self, code: int, why: str, final: bool = False) -> None:
         try:
             self._json(code, {"error": why, **({"final": True} if final else {})})
@@ -2372,12 +2476,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._allowed():
             return
-        if self.path not in ("/api/send", "/api/answer", "/api/prefs", "/api/seen", "/api/push", "/api/active"):
+        if self.path not in ("/api/send", "/api/answer", "/api/prefs", "/api/seen", "/api/push", "/api/active") \
+                and not self.path.startswith("/api/transcribe/"):
             return self._json(404, {"error": "not found"})
         if not self._authed():
             return
-        if self.agent and self.path in AGENT_DENIED:  # the user's alone (#1042)
-            return self._json(403, {"error": f"agent tokens can't {AGENT_DENIED[self.path]}"})
+        denied = next((k for k in AGENT_DENIED if self.path == k or k.endswith("/") and self.path.startswith(k)), None)
+        if self.agent and denied:  # the user's alone (#1042)
+            return self._json(403, {"error": f"agent tokens can't {AGENT_DENIED[denied]}"})
         if self.agent and self.path == "/api/send" and (wait := self.sends.hit(self.agent)):
             return self._json(429, {"error": f"over {AGENT_SENDS_PER_MIN} sends a minute", "retry_after": wait})
         if (self.headers.get("Content-Type") or "").split(";")[0] != "application/json":
@@ -2395,6 +2501,8 @@ class Handler(BaseHTTPRequestHandler):
             text, cid = str(body.get("text", "")).strip(), body.get("cid")
         except (ValueError, AttributeError):
             return self._json(400, {"error": "bad json"})
+        if self.path.startswith("/api/transcribe/"):  # a voice clip's words, for the box (#1203)
+            return self._transcribe(self.path[len("/api/transcribe/"):])
         if self.path == "/api/answer":  # an ask: allow or deny, a note, a question's answers
             ask_id, verdict = body.get("id"), body.get("answer")
             note, answers = body.get("note"), body.get("answers")

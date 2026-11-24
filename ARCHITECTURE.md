@@ -4624,6 +4624,13 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   Hangul) into characters; mostly such a script scores CER (`cer: true`, #598). The line shows what
   was heard too, since a WER alone misled (#396: "2026" for "Twenty twenty-six" read 30%). A failing
   listener is reported on the line, not raised.
+- **Dictation** (#1203, the web chat's mic, *The web chat*): `dictation()` is the first listener when
+  its entry can run (a command's program found; a url only well-formed, never probed, as it is on
+  every chat state); `hear(clip, ctype)` gives it a 16 kHz mono WAV when ffmpeg makes one, else the
+  clip as it is, sent to a url listener as its own type (`_multipart`'s `ctype`: every clip went
+  as `audio/wav`, so a phone's webm or m4a reached a server mislabelled), under
+  `media.turns("wb chat dictation", …, wait=False)`: a GPU listener is `Busy` at once while a task
+  holds the GPU, its `unload` URL POSTed before the turn ends.
 - The line: `3.4 s (asked 3) · peak -1.2 dBFS · -16 LUFS · lead 0.1 s, tail 0.3 s · gaps … · heard
   "…" WER 30% (twenty twenty six → 2026)` and the spectrogram's path; under 80% of the asked length,
   "cut short". `lines()` (`wb audio --list`, `wb scout`) shows kind, readiness, voices and `notes`
@@ -5055,6 +5062,24 @@ else `chat/serve.pid`, else 1337; `--port`, #349; the fragment never leaves the 
   `final: true` for `FINAL_ERRNOS`; the page stops on `final` or the `SERVER_TRIES`-th (3) 5xx,
   else backs off (it re-sent forever, #742). `wb gc` drops uploads past `--days` whose message has
   a receipt (expired too, #741) or that no deliverable message names (`chat.drop_old_uploads`).
+- **Dictation** (#1203). A voice memo attached reached Claude as audio it can't hear. The state's
+  `dictate` (`chat.dictate_ready`: `audio.dictation`, the first listener in audio.json when its
+  entry can run, a url not probed; read for every state, so a page shows a new listener's mic at
+  its next state) shows a mic beside the attach button; none without a listener, so nothing is
+  added by default. The clip is uploaded as an attachment (by its id, once), then
+  `POST /api/transcribe/<id>` (`chat.transcribe_upload`): an upload of type `audio/*`, `video/*` or
+  `application/octet-stream` (else 415; none, 404), copied to a temp `clip.<ext>` (the user's file
+  name never reaches the listener's argv or the form), then `audio.hear`. The words, `{text}`, are
+  kept in `uploads/<id>/.transcript.txt` (a leading dot: no upload is named so), so a retry or a
+  reload never runs the listener twice; one clip at a time (`_dictate_lock`). The page puts them
+  in the box for the user to edit and send: Claude only ever gets text, so the agents, OpenCode and
+  the mod don't change. 409 `{error, busy: true, why}` when the GPU is a task's: a GPU listener
+  takes its turn with `wait` False and gives way, never queues behind a round (the keyboard's own
+  dictation is the way then); a `gpu: false` one runs beside tasks. 404 `dictation is off: …`
+  without a listener; 502 `the listener failed: …` (also in serve.log), nothing kept, so the next
+  try runs it again. An agent's token is 403 (`AGENT_DENIED`, a prefix entry). The clip's upload
+  is a draft no message names, so `wb gc` drops it in time. Realtime voice isn't built: Claude
+  Code's turns aren't a realtime loop, and its own voice covers the terminal.
 - **The switch.** `chat/switch.json` `{on}` (absent: off), written by `wb chat on|off`. `on` sets it
   only once a server of this account's answers (else `web chat left off: …`, #690), starting
   `bin/wb chat serve --port <port>` detached (`chat.start`: `chat/serve.log`, `chat/serve.pid`
@@ -5109,7 +5134,7 @@ client; the server needs no browser.
   (`chat.agent_for`, constant time, the file read per request so a revoke is at once) and sets
   `Handler.agent`; an agent token from a peer that isn't loopback (`Handler._from_loopback`: `127.*`, `::1`) is 403 `agent tokens work only from this machine (localhost)` whatever the bind, as agents are this machine's own (owner, 2026-11-23), while the user's token still works from the tailnet or LAN; a held wait or open stream checks again at every wake (`Handler._revoked`:
   both went on reading its replies after a revoke, the #1042 review). An agent gets 403 `agent tokens can't …` on `AGENT_DENIED` (`/api/answer`,
-  `/api/prefs`, `/api/push`, `/api/active`, `/api/seen`), and 429 `{error, retry_after}` past
+  `/api/prefs`, `/api/push`, `/api/active`, `/api/seen`, `/api/transcribe/<id>`), and 429 `{error, retry_after}` past
   `AGENT_SENDS_PER_MIN` 30 sends in any 60 s (`chat.RateLimit`, per agent, in the server's memory).
   No switch of its own: answered while the server runs and a token exists. With the chat off no
   session listens, so `/api/health` says `listening: false` and a message waits, unread, until one
@@ -5238,7 +5263,7 @@ client; the server needs no browser.
   receipt that claim then reads, `_expired_receipt`, #536, #741).
 - `uploads/<id>/`: `<name>` and `.meta.json` `{id, name, size, type, sha256, ts, path, by?}`, written
   last (it marks the upload whole; `by`: the agent that uploaded it, #1042); `uploads.lock`: one
-  finishing at a time.
+  finishing at a time. A voice clip's `.transcript.txt` (#1203): the listener's words, plain UTF-8.
 - `prefs.json`: `{away: "ask"|"allow"}` (else `ask`), read by `chat.ask`.
 - `turns.jsonl`: `{ids, ended, by}`: a main turn of the listening session ended, having taken the
   messages `ids` (none: it only wrote to the thread), from `wb chat ended` (the mod's
@@ -5328,6 +5353,8 @@ address (#534).
   /api/upload/<id>`: `{upload}` or 404. `GET /api/file/<id>`: `SHOWN` images as themselves, else
   `application/octet-stream` as an attachment, so no upload renders as a page; cached for a year
   (`FILE_CACHE`, `Vary: Authorization`: an upload never changes under its id, #754).
+- `POST /api/transcribe/<id>` `{}` (the user's token only, #1203): a voice clip's words → `{text}`; 404 (no
+  upload, no listener), 415 (not audio), 409 `busy: true` (a task's GPU), 502 (the listener failed); *Dictation*.
 - `POST /api/answer` (the user's token only, as the four below): `{id, answer: "allow"|"deny", note?, answers?: ≤ 4}` (`expired` is the mod's
   alone; `answers` only and always for an allowed question) → `{ask, state}`, the answer that stands.
 - `POST /api/prefs` `{away}`; `POST /api/active` `{}` (`chat.active`: `page.json`, and `away.json`
@@ -5337,7 +5364,7 @@ address (#534).
 
 **The page** (`chat_static/`; no inline script, for the CSP). The token comes from the fragment (or
 `?token=`) into `localStorage` `wb-chat-token` and leaves the address bar (other keys: `wb-chat-thread`, the
-  last 50 for a reload; `wb-chat-seen`, 500 ids not replayed; `wb-chat-draft`, `wb-chat-about`); over https the manifest
+  last 50 for a reload; `wb-chat-seen`, 500 ids not replayed; `wb-chat-draft`, `wb-chat-about`, `wb-chat-dictate`); over https the manifest
 link carries `?k=<token>`, since an iPhone app has its own storage. The stream is a `fetch` with the
 bearer header (EventSource can't send one): each connection starts with a whole state, patches
 merge by id (`merge`), and a POST reply or `/api/state` older than the newest state's `now`
@@ -5359,7 +5386,11 @@ reloads (`reloadOnce`, once a minute). Use counts (`reportActive`, #959): on scr
 at a time (XHR; `STALL_MS` 30 s without progress retries the same id); edit restores the files, the
 `about` (`setAbout`, #843) and the words before the box's (#958); thumbnails load near view
 (`whenNear`, #754), and before the server's thread is in only from this browser's bytes: the rest wait
-in `nearLater`, judged again by `nearAgain` where that thread put them (a photo the saved thread showed was fetched, 2026-11-24); `sweepSoon` revokes unused object URLs (#746). The receipt texts, dialog cards
+in `nearLater`, judged again by `nearAgain` where that thread put them (a photo the saved thread showed was fetched, 2026-11-24); `sweepSoon` revokes unused object URLs (#746). The mic (`drawMic`, #1203):
+in a secure context `MediaRecorder` (a tap starts, a tap stops, `RECORD_MS` 5 min at most; webm, else mp4 or ogg, as the
+browser has), over plain http `#pick-voice` (`accept="audio/*" capture`: the phone's recorder or a voice memo); clips
+waiting for their words in `wb-chat-dictate`, bytes in IndexedDB beside the draft's, sent by `hearAll` (from `flush`,
+so after a reload or an outage too); the words join the box's end; a refusal shows on the banner (`note`) and drops the clip. The receipt texts, dialog cards
 (`makeAsk`), notices (`makeNotice`) and the gear's sections (`#away-when` states the away rule
 above; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
 models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43; catalog prices).`, or that alone, #1022, #1135) are in `app.js`. Over plain HTTP
@@ -6056,7 +6087,7 @@ $WB_HOME (~/.local/state/workbench)
   chat/                          messages.jsonl receipts.jsonl asks.jsonl prefs.json listener.json claims.json switch.json ({on})
                                  serve.pid ({pid, port, start}: wb chat url revives from it) serve.log port.json ({port, pid, start})
                                  away.json ({at, by}; 0 once the user types in the terminal) page.json ({at})
-                                 audio/<batch>/ (wb chat listen: <n>.<ext>, audio.json; newest 20) uploads/<id>/ (<name> 0600, .meta.json) uploads.lock
+                                 audio/<batch>/ (wb chat listen: <n>.<ext>, audio.json; newest 20) uploads/<id>/ (<name> 0600, .meta.json, .transcript.txt) uploads.lock
                                  turns.jsonl ({ids, ended, by}: the mod's turn ends, wb chat ended; #1042)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md, AGENTS.md (the user's ~/.config/workbench/AGENTS.md, copied: #1061),
                                  project-rules/<path> (a rule a link takes outside the repo: context.project_rules),
@@ -6713,7 +6744,9 @@ outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, i
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
 never counted unread (#1128), its state without the user's, a dialog for it saying so on the
 card and in the push (#1042), a 25-task backlog's strip at most three lines on a phone, the queued counted apart
-(#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text.
+(#1097), the mic with a listener only, a clip recorded (a stand-in `MediaRecorder`: the browsers have no
+microphone) and a voice memo picked over plain http each landing as words in the box, a failing listener said on the
+banner (#1203, `WB_AUDIO` the test's); and `sw.js` in a node `vm` (`swSays`) for a push's text.
 `WebChat` runs the agents' client, `skill/agents/claude-workbench/scripts/ask_claude.py`, against its server with a
 listener played in the test (#1042).
 

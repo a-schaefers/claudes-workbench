@@ -14,7 +14,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const pw = createRequire(import.meta.url)(process.env.PLAYWRIGHT || 'playwright')
 const home = mkdtempSync(join(tmpdir(), 'wbchat-'))
 const env = { ...process.env, WB_HOME: join(home, 'state'), WB_CHAT_TOKEN: join(home, 'token'),
-  WB_CHAT_CONFIG: join(home, 'chat.json'), WB_SAVINGS: join(home, 'savings.json') }  // not the user's
+  WB_CHAT_CONFIG: join(home, 'chat.json'), WB_SAVINGS: join(home, 'savings.json'), WB_AUDIO: join(home, 'audio.json') }  // not the user's
 // a system Chromium when there is one (CHROMIUM names another), else Playwright's own
 const CHROMIUM = process.env.CHROMIUM || (existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : '')
 const PORT = Number(process.env.WB_E2E_PORT || 13371)
@@ -1116,6 +1116,59 @@ async function run(engine, device) {
     wb('chat', 'answer', id, 'expired', '--by', 'interrupted')        // answered in the terminal first
     await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('settled in the terminal'))
     if (await page.locator('.row.ask').last().locator('.choices').count()) throw new Error('the buttons are still there')
+  })
+  await check("the mic shows only with a listener; a clip recorded, or a voice memo picked over plain http, comes back as words in the box and nothing is sent (#1203)", async () => {
+    if (await page.locator('#mic').isVisible()) throw new Error('a mic with no listener')
+    writeFileSync(env.WB_AUDIO, JSON.stringify({ ear: { kind: 'listen', gpu: false, command: 'sh -c "echo Run the tests again." sh {in}' } }))
+    const sent = messages().length
+    const uploads = () => existsSync(join(home, 'state/chat/uploads')) ? readdirSync(join(home, 'state/chat/uploads')) : []
+    const before = new Set(uploads())
+    const p = await ctx.newPage(), q = await ctx.newPage()
+    // a stand-in microphone and recorder: Playwright's browsers have no microphone to grant
+    await p.addInitScript(() => {
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) } })
+      window.MediaRecorder = class {
+        static isTypeSupported(t) { return t === 'audio/webm' }
+        constructor(stream, o) { this.mimeType = (o && o.mimeType) || '' }
+        start() {}
+        stop() { this.ondataavailable({ data: new Blob(['\x1aE\xdf\xa3 a recorded clip'], { type: this.mimeType }) }); this.onstop() }
+      }
+    })
+    await q.addInitScript(() => Object.defineProperty(window, 'isSecureContext', { get: () => false, configurable: true }))
+    try {
+      await p.goto(base)
+      await until(async () => await p.locator('#mic').isVisible())
+      await p.fill('#input', 'Then')
+      await p.click('#mic')
+      if (!(await p.getAttribute('#mic', 'class')).includes('rec') || await p.getAttribute('#mic', 'aria-label') !== 'Stop recording') throw new Error('not recording')
+      await p.click('#mic')
+      await until(async () => (await p.inputValue('#input')) === 'Then Run the tests again.')
+      await until(async () => !(await p.getAttribute('#mic', 'class')).includes('busy'))
+      const fresh = uploads().filter(u => !before.has(u))
+      if (fresh.length !== 1 || !existsSync(join(home, 'state/chat/uploads', fresh[0], '.transcript.txt'))) throw new Error('stored: ' + fresh)
+      if (!readdirSync(join(home, 'state/chat/uploads', fresh[0])).some(n => n.endsWith('.webm'))) throw new Error('not saved as webm')
+      if (await p.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('the page scrolls sideways')
+      await p.fill('#input', '')
+      // over plain http there is no microphone: the mic opens the phone's recorder or a voice memo
+      await q.goto(base)
+      await until(async () => await q.locator('#mic').isVisible())
+      const [chooser] = await Promise.all([q.waitForEvent('filechooser'), q.click('#mic')])
+      if (await chooser.element().getAttribute('accept') !== 'audio/*') throw new Error('the chooser takes ' + await chooser.element().getAttribute('accept'))
+      await chooser.setFiles({ name: 'memo.m4a', mimeType: 'audio/mp4', buffer: Buffer.from('\0\0\0\x18ftypM4A a voice memo') })
+      await until(async () => (await q.inputValue('#input')) === 'Run the tests again.')
+      await q.fill('#input', '')
+      // a listener that fails says so, and the clip isn't tried for good
+      writeFileSync(env.WB_AUDIO, JSON.stringify({ ear: { kind: 'listen', gpu: false, command: 'sh -c "echo no model >&2; exit 3" sh {in}' } }))
+      const [again] = await Promise.all([q.waitForEvent('filechooser'), q.click('#mic')])
+      await again.setFiles({ name: 'memo2.m4a', mimeType: 'audio/mp4', buffer: Buffer.from('\0\0\0\x18ftypM4A another memo') })
+      await until(async () => ((await q.textContent('#net')) || '').includes('Not transcribed: the listener failed: listener ear exited 3: no model'))
+      await until(async () => !(await q.getAttribute('#mic', 'class')).includes('busy'))
+      if (await q.inputValue('#input')) throw new Error('words in the box from a failed clip')
+      if (messages().length !== sent) throw new Error('a message was sent')
+    } finally {
+      writeFileSync(env.WB_AUDIO, '{}')
+      await p.close(); await q.close()
+    }
   })
   await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
   await browser.close()

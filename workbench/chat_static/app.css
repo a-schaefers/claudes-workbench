@@ -266,6 +266,11 @@ body.kb-open .composer { padding-bottom: 10px; }
 /* attachments (#623): the attach button beside the box, the tray of picked files above it, and
    a message's files in the thread */
 .composer .attach { background: var(--panel); color: var(--dim); border: 1px solid var(--line); padding: 11px; }
+/* dictation (#1203): the mic, red while it records, faded while the computer transcribes */
+.composer .mic[hidden] { display: none; }
+.composer .mic.rec { background: var(--bad); color: var(--on-bad); border-color: transparent; animation: rec 1.2s ease-in-out infinite; }
+.composer .mic.busy { opacity: .55; animation: rec 1.2s ease-in-out infinite; }
+@keyframes rec { 50% { box-shadow: 0 0 0 6px var(--accent-soft); } }
 body.dropping .composer textarea { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 /* wrapped, not scrolled sideways: a refused chip off screen would never say why */
 .tray { display: flex; flex-wrap: wrap; gap: 8px; max-width: 760px; width: 100%; margin: 0 auto; max-height: 34vh; overflow-y: auto;

@@ -66,4 +66,6 @@ message:
 
 Wait for a yes. Then install, write `~/.config/workbench/audio.json` (the licence goes in
 `notes`, `"gpu": false` for CPU engines, the listener as `"kind": "listen"`), make one test
-clip, and check its line (a speech test with WER 0%) before saying it works.
+clip, and check its line (a speech test with WER 0%) before saying it works. A listener also
+turns on the web chat's mic: the user dictates from the phone, and you get only the words they
+send (a `"gpu": false` listener works while a task holds the GPU; a GPU one gives way then).

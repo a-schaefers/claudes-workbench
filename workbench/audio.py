@@ -22,6 +22,7 @@ model is named here: the user installs one and describes it.
 from __future__ import annotations
 
 import array
+import contextlib
 import json
 import math
 import operator
@@ -534,19 +535,22 @@ def differences(script: str, heard: str, most: int = 4) -> list[str]:
     return score(script, heard, most)[1]
 
 
-def _multipart(fields: dict, file: Path) -> tuple[bytes, str]:
+def _multipart(fields: dict, file: Path, ctype: str = "audio/wav") -> tuple[bytes, str]:
+    """The form a /v1/audio/transcriptions server takes. ``ctype``: the clip's own type. Every
+    file went as audio/wav, so a phone's webm or m4a reached a server with no ffmpeg here mislabelled
+    (#1203)."""
     b = uuid.uuid4().hex
     parts = [f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
              for k, v in fields.items() if v]
     parts.append(f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="{file.name}"\r\n'
-                 "Content-Type: audio/wav\r\n\r\n".encode() + file.read_bytes() + b"\r\n")
+                 f"Content-Type: {ctype}\r\n\r\n".encode() + file.read_bytes() + b"\r\n")
     return b"".join(parts) + f"--{b}--\r\n".encode(), f"multipart/form-data; boundary={b}"
 
 
-def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
+def transcribe(ear: tuple[str, dict], clip: Path, log: Path, ctype: str = "audio/wav") -> str:
     """The listener's transcript: a command's stdout ({in} the clip; JSON with "text", or
     audio.cpp's `text_output=` line, is read too), or an OpenAI /v1/audio/transcriptions
-    server's "text"."""
+    server's "text" (the clip sent as ``ctype``)."""
     name, e = ear
     if e.get("command"):
         argv = media.fill(e["command"], {"in": clip})
@@ -562,8 +566,8 @@ def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
                                + " ".join(r.stderr.strip().splitlines()[-2:]))
         out = r.stdout.strip()
     else:
-        body, ctype = _multipart({"model": e.get("model")}, clip)
-        raw, _ = media.post(e, e["url"], body, ctype, float(e.get("timeout", 600)), config_path().parent)
+        body, form = _multipart({"model": e.get("model")}, clip, ctype)
+        raw, _ = media.post(e, e["url"], body, form, float(e.get("timeout", 600)), config_path().parent)
         out = raw.decode(errors="replace").strip()
     try:
         data = json.loads(out)
@@ -575,6 +579,55 @@ def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
     # whole, a perfect take read as a WER of several hundred percent (the first real run, #396)
     said = [line.split("=", 1)[1] for line in out.splitlines() if line.startswith("text_output=")]
     return " ".join(said).strip() if said else out
+
+
+# --- dictation: the web chat's mic (#1203) --------------------------------------------------------
+
+class Busy(RuntimeError):
+    """The GPU (or a box's) is another's: dictation gives way to a task, never queues behind it."""
+
+
+def dictation() -> tuple[str, dict] | None:
+    """The listener the web chat's mic sends a clip to: the first, when its entry can run, else
+    None (no mic on the page). Cheap, as it is on every state the chat sends: a url isn't probed
+    (`ready` waits up to 2 s for one that is down); a server that is down says so when a clip comes."""
+    try:
+        ear = listener()
+    except RuntimeError:  # audio.json doesn't parse: `wb audio` says so
+        return None
+    if not ear:
+        return None
+    e = ear[1]
+    if e.get("url") and not e.get("command"):
+        return None if media.problem(e, (*KINDS, "listen")) else ear
+    return None if ready(e) else ear
+
+
+def hear(clip: Path, ctype: str = "", say=print) -> str:
+    """What the listener hears in ``clip``, a voice clip of type ``ctype`` (a phone's webm or m4a):
+    a 16 kHz mono WAV of it when ffmpeg makes one, as `inspect` gives a listener, else the clip as
+    it is. The listener takes its turn on the GPU as `wb audio` does (`media.turns`), but never
+    waits: a task holding the GPU is Busy at once. LookupError: no listener; RuntimeError (or
+    OSError, TimeoutExpired): the listener failed."""
+    ear = listener()  # not dictation(): a listener whose program went missing says so (502), not "off"
+    if not ear:
+        raise LookupError(f"no listener: describe one in {config_path()}")
+    name, e = ear
+    if why := ready(e):
+        raise RuntimeError(f"listener {name}: {why}")
+    with tempfile.TemporaryDirectory(prefix=".wb-dictate-") as tmp:
+        plain = Path(tmp) / "plain.wav"
+        r = _ffmpeg("-v", "error", "-i", str(clip), "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                    "-y", str(plain))
+        use, kind = ((plain, "audio/wav") if r and r.returncode == 0 and plain.is_file()
+                     else (clip, ctype or "application/octet-stream"))
+        hold = contextlib.ExitStack()
+        try:
+            hold.enter_context(media.turns("wb chat dictation", say, False, e))
+        except RuntimeError as err:
+            raise Busy(str(err)) from None
+        with hold, media.unloading([e], say, "audio", config_path().parent):  # unloaded inside the turn
+            return transcribe(ear, use, Path(tmp) / "listen.log", kind)
 
 
 def inspect(path: Path, kind: str, script: str = "", seconds: float | None = None,

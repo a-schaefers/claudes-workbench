@@ -640,8 +640,8 @@
     if (s.build) build = s.build
     live = true
     if (!quiet) save(K.thread, (s.messages || []).slice(-50))  // a patch without messages: no rewrite (#755)
-    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [] }
-    drawTasks()
+    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [], dictate: !!s.dictate }
+    drawTasks(); drawMic()
     if (!sheet.hidden) drawSettings()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()
@@ -1134,11 +1134,112 @@
   })
   addEventListener('storage', e => { if (e.key === FILES) { draft = (load(FILES, []) || []).filter(d => d && d.id); drawTray(); armSend() } })
 
+  // ---- dictation (#1203): a voice clip in, its words in the box ----
+  // The mic shows only while the computer has a listener (the state's `dictate`). In a secure
+  // context (https, or localhost) it records with MediaRecorder: a tap starts, a tap stops; over
+  // plain http there is no microphone API, so it opens the phone's recorder or a voice memo
+  // (accept="audio/*" capture). The clip is uploaded as an attachment is (by its id, once), and
+  // POST /api/transcribe/<id> answers its words, added to the box for the user to edit and send:
+  // Claude only ever gets the text. Clips waiting for their words (wb-chat-dictate, the bytes in
+  // IndexedDB beside the draft's) outlive a reload; the computer keeps each one's words, so a
+  // retry never transcribes twice. A GPU listener gives way to a running task (409): the
+  // keyboard's own dictation is the way then.
+  const DICTATE = 'wb-chat-dictate'
+  const RECORD_MS = 5 * 60 * 1000  // a clip stops by itself at five minutes
+  const mic = $('mic')
+  let clips = (load(DICTATE, []) || []).filter(d => d && d.id), rec = null, recTimer = 0
+  let hearing = false, hearTimer = 0, hearTries = 0
+  const canRecord = () => window.isSecureContext && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && typeof MediaRecorder !== 'undefined'
+  function drawMic() {
+    const busy = clips.length > 0
+    mic.hidden = !token || !(state.dictate || rec || busy)
+    mic.classList.toggle('rec', !!rec)
+    mic.classList.toggle('busy', !rec && busy)
+    mic.setAttribute('aria-label', rec ? 'Stop recording' : busy ? 'Transcribing…' : 'Dictate')
+  }
+  function note(text) {  // a passing word on the banner, cleared unless something else took it
+    banner(text, true)
+    setTimeout(() => { if (net.textContent === text) banner('') }, 6000)
+  }
+  function hearClip(blob, name) {
+    const lim = limits()
+    if (!blob.size) return note('That clip was empty.')
+    if (blob.size > lim.file) return note(`That clip is too big: ${fmtSize(blob.size)}, the limit is ${fmtSize(lim.file)}.`)
+    const d = { id: newId(), name, type: (blob.type || '').split(';')[0] || 'application/octet-stream', size: blob.size }
+    bytes.set(d.id, blob); db.put(d.id, blob)
+    clips.push(d); save(DICTATE, clips); drawMic(); hearAll()
+  }
+  function heard(d, text) {
+    clips = clips.filter(x => x.id !== d.id); save(DICTATE, clips)
+    db.del(d.id); bytes.delete(d.id); drawMic()
+    if (text === undefined) return
+    if (!text.trim()) return note('Nothing was heard in that clip.')
+    const box = input.value
+    input.value = box.trim() ? box.replace(/\s*$/, ' ') + text.trim() : text.trim()
+    save(K.draft, input.value); grow(); armSend()
+  }
+  async function hearAll() {
+    if (hearing || !token || !clips.length) return
+    hearing = true; clearTimeout(hearTimer)
+    let again = false
+    try {
+      for (const d of [...clips]) {
+        try {
+          await upload(d)
+          const r = await fetch('/api/transcribe/' + encodeURIComponent(d.id), { method: 'POST', cache: 'no-store',
+            headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: '{}' })
+          const j = await r.json().catch(() => ({}))
+          if (r.ok && typeof j.text === 'string') heard(d, j.text)
+          else if (r.status === 401) { keyless('That key was not accepted.'); break }
+          else if (transient(r.status) || (r.ok && typeof j.text !== 'string')) again = true  // not the chat server's 200 (#934)
+          else { heard(d); note('Not transcribed: ' + (j.error || 'HTTP ' + r.status) + '.') }
+        } catch (e) {
+          if (e instanceof Refused) { heard(d); note('Not transcribed: ' + e.message + '.') }
+          else if (e.message === 'key') break
+          else again = true
+        }
+      }
+    } finally {
+      hearing = false; drawMic()
+      if (again) hearTimer = setTimeout(hearAll, BACKOFF[Math.min(hearTries++, BACKOFF.length - 1)])
+      else hearTries = 0
+    }
+  }
+  async function record() {
+    let stream
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }) }
+    catch (e) { return note("The microphone isn't allowed here (" + (e.name || e) + "): the keyboard's dictation works too.") }
+    const kind = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/webm']
+      .find(t => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t))
+    let r
+    try { r = new MediaRecorder(stream, kind ? { mimeType: kind } : undefined) }
+    catch (e) { stream.getTracks().forEach(t => t.stop()); return note("This browser can't record (" + (e.name || e) + ').') }
+    const chunks = []
+    r.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data) }
+    r.onstop = () => {
+      clearTimeout(recTimer); stream.getTracks().forEach(t => t.stop())
+      rec = null; drawMic()
+      const type = r.mimeType || kind || 'audio/webm'
+      const ext = /mp4/.test(type) ? 'm4a' : /ogg/.test(type) ? 'ogg' : 'webm'
+      hearClip(new Blob(chunks, { type }), `voice-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`)
+    }
+    rec = r; r.start(1000); drawMic()
+    recTimer = setTimeout(() => { if (rec === r) r.stop() }, RECORD_MS)
+  }
+  mic.onclick = () => {
+    if (rec) return rec.stop()
+    if (canRecord()) record()
+    else $('pick-voice').click()
+  }
+  $('pick-voice').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) hearClip(f, f.name || 'voice') }
+  addEventListener('storage', e => { if (e.key === DICTATE) { clips = (load(DICTATE, []) || []).filter(d => d && d.id); drawMic() } })
+
   // ---- sending: the outbox ----
   let flushing = false, flushTimer = 0, flushTries = 0
   async function flush(now) {
     if (now) { clearTimeout(flushTimer); flushTries = 0 }
     pump()  // the draft's uploads, on the same occasions
+    hearAll()  // and the clips waiting for their words (#1203)
     outbox = outItems()  // another tab's too: whichever tab is online sends them all
     if (flushing || !token || !(outbox.length || held)) return
     flushing = true
@@ -1246,7 +1347,7 @@
   input.addEventListener('input', () => { grow(); armSend(); save(K.draft, input.value) })
   input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !touch && !e.isComposing) { e.preventDefault(); send() } })
   $('composer').addEventListener('submit', e => { e.preventDefault(); send() })
-  armSend(); grow(); drawTray()
+  armSend(); grow(); drawTray(); drawMic()
 
   // ---- no key: say how to get one, or take it pasted ----
   function keyless(why, forget) {
