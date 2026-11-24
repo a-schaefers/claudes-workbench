@@ -656,8 +656,9 @@ exception: traceback to `runner.log`, `failed` with its tail. On exit `_end_agen
 
 **An update under a running task** (#603). The runner loads once, but each round's children (lane,
 git shim, ask server) load from the clone afresh, so a mid-task pull paired old and new. `main`
-records `code_print()` (sha256 of `runner.CHILD_CODE`) in `CURRENT["code"]` and imports `router`,
-`transcript`, `verify` up front; before each round `_updated` compares and on a change sets `stuck`
+records `code_print()` (sha256 of `runner.CHILD_CODE`) in `CURRENT["code"]` and imports every
+module the runner imports late up front (`load_up_front`: `cli`, `results`, `router`, `transcript`,
+`verify`; #1115: an API round's report loaded `results` mid-task, a test walks the late imports); before each round `_updated` compares and on a change sets `stuck`
 ("workbench was updated under this task: wb resume <task> continues it on the new code", `cause`
 `updated`, not held against the step's size, #660); `wb update` refuses while a runner is live
 (unless `--stop`), so a manual pull is what this catches. `opencode_moved` (before the lease and

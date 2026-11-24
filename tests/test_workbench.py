@@ -17973,6 +17973,25 @@ class UpdatedUnderATask(Base):
     """A clone pulled (or a plugin updated) while a task runs: its runner, on the old code, ends
     the task cleanly before the next round instead of feeding the round new children (#603)."""
 
+    def test_every_module_the_runner_imports_late_is_loaded_before_the_task_starts(self):
+        # #1115: main loaded router, transcript and verify up front but not results (every API
+        # round's report) nor cli (add_outline's PROTOCOL), so a pull mid-round made the old
+        # runner import the new results.py. A fresh interpreter: this one has loaded everything
+        import ast
+        tree = ast.parse((runner.PKG_ROOT / "workbench/runner.py").read_text())
+        late = set()
+        for fn in ast.walk(tree):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name != "load_up_front":
+                for node in ast.walk(fn):
+                    if isinstance(node, ast.ImportFrom) and node.level == 1:
+                        late |= ({node.module} if node.module else {a.name for a in node.names})
+        self.assertIn("results", late)                                      # the walk sees them
+        code = ("import sys, workbench.runner as r; r.load_up_front(); "
+                "print(' '.join(m[10:] for m in sys.modules if m.startswith('workbench.')))")
+        out = subprocess.run([sys.executable, "-c", code], cwd=runner.PKG_ROOT, text=True,
+                             capture_output=True, check=True).stdout.split()
+        self.assertEqual(sorted(late - set(out)), [])
+
     def test_a_runner_whose_lane_shim_or_ask_code_changed_stops_before_the_next_round(self):
         pkg = Path(self.tmp.name) / "pkg"   # a copy to update: the runner runs from it
         ignore = shutil.ignore_patterns("__pycache__")

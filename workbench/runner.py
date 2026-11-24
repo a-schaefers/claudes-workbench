@@ -4480,6 +4480,14 @@ def _beat(path: Path) -> None:
     threading.Thread(target=touch, daemon=True, name="beat").start()
 
 
+def load_up_front() -> None:
+    """Import now every module the runner imports late, so a mid-task pull can't pair this old
+    process with a new file's code (#603): results (each API round's report, _load_failed) and
+    cli (add_outline's PROTOCOL) were missed and loaded mid-task (#1115, 2026-11-23); a test
+    walks this file's late imports. Cheap: cli and results import this module already."""
+    from . import cli, results, router, transcript, verify  # noqa: F401
+
+
 def main():
     store.absolute_env()
     gitops.drop_repo_env()  # the caller's repository variables, for the agent too (#798)
@@ -4491,7 +4499,7 @@ def main():
     _beat(lock_file(task.name, "runner"))
     signal.signal(signal.SIGTERM, _on_term)
     CURRENT["code"] = code_print()  # what the children load; compared before each round (#603)
-    from . import router, transcript, verify  # noqa: F401 (now, not mid-task from an updated clone)
+    load_up_front()
     try:
         drive(task)
     except Stopped:
