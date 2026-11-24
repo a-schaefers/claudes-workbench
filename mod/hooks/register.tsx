@@ -684,8 +684,9 @@ function probeSaid(out: string): ProbeState {
 async function probeStatus($: any): Promise<ProbeState> {
   const now = await $.clock.now()
   if (mem.probe && now - mem.probe.at < PROBE_RECHECK_MS) return mem.probe.said
-  const { ok, out } = await runWb($, ['experiment', 'probe'], 15_000)
+  const { ok, out, aborted } = await runWb($, ['experiment', 'probe'], 15_000)
   const said = ok ? probeSaid(out) : { state: 'unknown' as const, version: '', recommended: false }
+  if (aborted) return mem.probe?.said ?? said // not kept: the next draw asks again (#1142)
   mem.probe = { at: now, said }
   return said
 }
@@ -918,7 +919,7 @@ async function refreshStats($: any, force = false) {
     await update($, statsFeed, () => ({ key, feed }))
     mem.statsLoaded = true
   } catch (err) {
-    failed(brief(String(err)))
+    if (!isAbort(err)) failed(brief(String(err))) // an abort isn't wb's failure: no line, no wait (#1142)
   } finally {
     mem.statsReading = false
   }
@@ -2636,15 +2637,33 @@ async function compactAtBoundary($: any): Promise<void> {
 
 // `wb <args>`: ok when it exited 0, and what it said. A failing wb's traceback is not output to
 // pass on as if it were the answer (the 2026-11-16 audit: it reached Claude as "open tasks").
-// `wb update` takes the longest the engine allows: its steps may take 300 s each.
-async function runWb($: any, args: string[], timeoutMs = 120_000): Promise<{ ok: boolean; out: string }> {
+// `wb update` takes the longest the engine allows: its steps may take 300 s each. `aborted`: the
+// engine cancelled the call (a plugin reload, a redraw superseding the one in flight; never a
+// timeout, which is wb hung and said as a failure), which is not wb failing, so it says nothing: "could not run wb route --json: ... aborted" showed on the
+// Settings tab after /reload-plugins and stayed ROLES_CACHE_MS, for a command that takes 0.12 s
+// (#1142, 2026-11-23). A caller that keeps what it read keeps its last good value instead.
+export type WbRun = { ok: boolean; out: string; aborted?: boolean }
+async function runWb($: any, args: string[], timeoutMs = 120_000): Promise<WbRun> {
   try {
     const r = await $.process.run([mem.wb, ...args], { timeoutMs })
     return { ok: r.exitCode === 0, out: `${r.stdout}${r.stderr}`.trim() || '(no output)' }
   } catch (err) {
-    return { ok: false, out: `could not run wb ${args.join(' ')}: ${err}` }
+    return wbThrew(args, err)
   }
 }
+
+// What runWb says when `$.process.run` threw: an abort says nothing (#1142), anything else is that
+// wb could not run
+export const wbThrew = (args: string[], err: unknown): WbRun =>
+  isAbort(err) ? { ok: false, out: '', aborted: true } : { ok: false, out: `could not run wb ${args.join(' ')}: ${err}` }
+
+// A `$` call the engine cancelled (its hook's call was): `HooksError: workbench: $.process.run(wb)
+// aborted` (#1142), or a DOM-style AbortError. Only a bare "aborted" at the end: the engine words a
+// timeout `... aborted: still running after 15000ms` (Claude Code 2.1.325), and that is wb hung,
+// which must still say so and back off (#553); /\baborted\b/ took it for an abort (#1142's review,
+// 2026-11-23)
+export const isAbort = (err: unknown): boolean =>
+  (err as any)?.name === 'AbortError' || /\baborted$/.test(String((err as any)?.message ?? err).trim())
 
 // `--session <id>` for each id this process has had, and `--repo <the session's directory>` for
 // tasks without one: a quit or the status block takes this session's tasks only, as `mine` does.
@@ -3001,22 +3020,39 @@ export function apiStops(label: string, m: WbModels | null, current: string, oth
 }
 
 // `wb route --json` and `wb models --json`, kept ROLES_CACHE_MS. `why`: wb's line when the roles can't
-// be read (routes.json broken), or OLDER_WB for a wb without them
-type PaneRoles = { at: number; routes: WbRoutes | null; models: WbModels | null; why: string }
+// be read (routes.json broken), or OLDER_WB for a wb without them; '' with no routes: nothing drawn.
+// Only wb's answer is kept (#1142, 2026-11-23): an aborted read draws the last good roles (else
+// nothing) and a failed one wb's line, and either reads again on the next draw. A cached failure,
+// or an abort cached as one, stayed on the tab ROLES_CACHE_MS (rolesRead).
+export type PaneRoles = { at: number; routes: WbRoutes | null; models: WbModels | null; why: string }
 async function rolesNow($: any): Promise<PaneRoles> {
   const now = await $.clock.now()
   if (mem.roles && now - mem.roles.at < ROLES_CACHE_MS) return mem.roles
-  const json = async (args: string[]): Promise<[any, string]> => {
-    const { ok, out } = await runWb($, args, 15_000)
+  const routes = await runWb($, ['route', '--json'], 15_000)
+  const models = routes.aborted ? null : await runWb($, ['models', '--json'], 15_000)
+  const { shown, keep } = rolesRead(mem.roles, now, routes, models)
+  if (keep) mem.roles = shown
+  return shown
+}
+
+// One read of the roles (#1142): what the tab draws, and whether it is kept ROLES_CACHE_MS. Kept when
+// wb answered: the roles, or OLDER_WB (a wb without them stays so until it is updated); `last`, the
+// last good read, is drawn for an aborted one, with none nothing (why ''); a failure (routes.json
+// broken) shows wb's line and is never kept. `modelsRun` is null when the roles' read aborted: it
+// isn't run then.
+export function rolesRead(last: PaneRoles | null, now: number, routesRun: WbRun, modelsRun: WbRun | null): { shown: PaneRoles; keep: boolean } {
+  if (routesRun.aborted || !modelsRun || modelsRun.aborted)
+    return { shown: last ?? { at: now, routes: null, models: null, why: '' }, keep: false }
+  const json = (r: WbRun): [any, string] => {
     try {
-      if (ok) return [JSON.parse(out), '']
+      if (r.ok) return [JSON.parse(r.out), '']
     } catch { /* an older wb: no --json */ }
-    return [null, !ok && !/invalid choice|unrecognized arguments/.test(out) && out !== '(no output)' ? brief(out) : OLDER_WB]
+    return [null, !r.ok && !/invalid choice|unrecognized arguments/.test(r.out) && r.out !== '(no output)' ? brief(r.out) : OLDER_WB]
   }
-  const [routes, why] = await json(['route', '--json'])
-  const [models] = await json(['models', '--json'])
-  mem.roles = { at: now, routes: routes?.roles ? routes : null, models: Array.isArray(models?.gpu) ? models : null, why: routes?.roles ? '' : why || OLDER_WB }
-  return mem.roles
+  const [routes, why] = json(routesRun)
+  const [models] = json(modelsRun)
+  const shown: PaneRoles = { at: now, routes: routes?.roles ? routes : null, models: Array.isArray(models?.gpu) ? models : null, why: routes?.roles ? '' : why || OLDER_WB }
+  return { shown, keep: !!shown.routes || shown.why === OLDER_WB }
 }
 
 // A pane press on the roles: the change as wb computes it, approved for exactly that when it needs the
@@ -3073,6 +3109,7 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
   const { Box, Text, Button } = kit
   const r = role.routes, m = role.models
   const dim = (key: string, text: string) => infoLine(kit, key, text)
+  if (!r && !role.why) return { top: [], cap: [], gpu: [], api: [] } // an aborted first read (#1142)
   if (!r) {
     const line = dim('roles-why', role.why)
     return { top: [line], cap: [], gpu: [line, ...mediaRows(kit, $, view, m)], api: [] }
@@ -3227,10 +3264,11 @@ async function poll($: any) {
     await chatLink($)
     if (now - mem.savingsAt > 10 * 60_000) {
       mem.savingsAt = now
-      const { ok, out } = await runWb($, ['savings', '--json'])
+      const { ok, out, aborted } = await runWb($, ['savings', '--json'])
       const said = ok ? savedLine(out) : ''
       mem.price = ok ? priceOf(out) : mem.price
-      if (said !== (await read($, savings))) await update($, savings, () => said)
+      if (aborted) mem.savingsAt = 0 // the line stays and the next poll reads (#1142)
+      else if (said !== (await read($, savings))) await update($, savings, () => said)
     }
   } finally {
     mem.polling = false
@@ -3556,7 +3594,8 @@ async function chatLink($: any) {
   const now = await $.clock.now()
   if (!(await read($, chat)).web || now - mem.chatUrlAt <= 10 * 60_000) return
   mem.chatUrlAt = now
-  const { ok, out } = await runWb($, ['chat', 'url'])
+  const { ok, out, aborted } = await runWb($, ['chat', 'url'])
+  if (aborted) { mem.chatUrlAt = 0; return } // the pinned link stays and the next poll reads (#1142)
   const link = ok && /^https?:\/\/\S+#token=\S+$/.test(out) ? out : ''
   if (link !== (await read($, chat)).url) await update($, chat, c => ({ ...c, url: link }))
 }
@@ -4535,8 +4574,8 @@ export const register: Register = (on, options) => {
       const routes = await readRoutes($) // once any role has an API model (#1014)
       if (routes.api) blocks.push({ name: 'workbench-routes', text: ROUTES_NOTE(routes) })
     }
-    const { ok, out: status } = await runWb($, ['status', ...(await scope($))])
-    if (!ok) warnOnce($, 'status', `wb status failed: ${brief(status)}; wb doctor`)
+    const { ok, out: status, aborted } = await runWb($, ['status', ...(await scope($))])
+    if (!ok && !aborted) warnOnce($, 'status', `wb status failed: ${brief(status)}; wb doctor`)
     if (!ok || status.startsWith('no open tasks')) return { blocks }
     return {
       blocks: [...blocks, {
