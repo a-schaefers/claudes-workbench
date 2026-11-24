@@ -45,7 +45,9 @@
   selfreads  behaves like ok; a run whose prompt is the self-review's (runner.SELF_REVIEW, in
          a continued session, a fresh one's handoff or a carry-on) breaks answer.txt ("41") and
          writes it back, then FAKE_READS (45) reads and goes on exploring for an hour: the tree
-         as it began (#1168). FAKE_SELF_KEEP: it leaves "43" instead. FAKE_SELF_FILL: the
+         as it began (#1168). FAKE_SELF_RERUN: those calls rerun the acceptance command
+         (`shell grep -qx 42 answer.txt`); FAKE_SELF_MISS: the reads fail (#1250).
+         FAKE_SELF_KEEP: it leaves "43" instead. FAKE_SELF_FILL: the
          self-review's first session breaks it, then fills 76% of a 32K window and works on for
          an hour; the fresh session carrying on plays the rest (#1188), or with FAKE_SELF_KEEP only
          reads, the check left broken. FAKE_SELF_STALL: the self-review's first run breaks it,
@@ -861,8 +863,13 @@ elif scenario == "selfreads":  # #1168: a self-review that breaks a check, copie
         with open("answer.txt", "w") as fh:
             fh.write(text + "\n")
         tool("write", {"filePath": os.path.abspath("answer.txt"), "content": text})
+    miss = os.environ.get("FAKE_SELF_MISS")  # #1250: reads that fail, the error-streak guard's
     for i in range(int(os.environ.get("FAKE_READS", 45))):
-        tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")})
+        if os.environ.get("FAKE_SELF_RERUN"):  # #1250: the acceptance command, again and again
+            tool("shell", {"command": "grep -qx 42 answer.txt"})
+        else:
+            tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")},
+                 **({"status": "error", "error": "File not found"} if miss else {}))
         emit("step_finish", reason="tool-calls", tokens={"input": 1000 + 100 * i, "output": 50})
     time.sleep(3600)
 elif scenario == "probing":  # #857: probe in a compound line, a long file read whole and in part

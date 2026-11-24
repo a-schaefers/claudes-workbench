@@ -503,6 +503,7 @@ coding choice is the user's (`wb coding`), never changed by a check.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
   the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`; one later ("round N never reached the agent"): fix it, then `wb feedback <name> --text "carry on"`, which sends round N's prompt first.
+  A wake saying `(not its agent's doing)` (a model gone from OpenCode's catalog, a moved repo, a full disk…): do what the notice names; `wb feedback` only when it names it.
   A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
   agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
   up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted);
@@ -519,7 +520,8 @@ coding choice is the user's (`wb coding`), never changed by a check.
   A `spend` stop (cause `spend`: the day's API spend cap is reached, or too near it for the next
   request) is the user's call, never a retry: ask them, as the notice says (it names a cap that
   would do). A higher cap or tomorrow: `wb resume <name>` once it allows. `wb feedback`, `next`
-  or `resume` refused at the cap (exit 3) is the same call.
+  or `resume` refused at the cap (exit 3) is the same call. API tasks queued behind it send no
+  stop of their own: they wait as queued and go on once the cap is raised or at midnight.
   The notice's route change is for the next tasks; this one keeps its API model (resume never
   re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
   With Agents on GPU the same stop says `Agents is GPU, so nothing spends`: API tasks already

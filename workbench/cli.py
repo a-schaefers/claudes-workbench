@@ -3881,8 +3881,11 @@ def cmd_accept(a):
         if into and into != "HEAD" and close.get("merge_from"):
             # an earlier try got into its merge, and a SIGKILL there left it half made: the retry
             # blamed it as uncommitted changes, or said merged with MERGE_HEAD still there
-            # (#1231). No merge lock: while it's there, every other wb merge refuses the checkout
-            gitops.clear_killed_merge(repo, close["merge_from"], tip, close.get("merge_as", "merge"))
+            # (#1231). No merge lock: while it's there, every other wb merge refuses the checkout.
+            # Its signing git first, if it still waits: it landed the merge after this backed
+            # it out, over the unmerged files (#1246)
+            gitops.clear_killed_merge(repo, close["merge_from"], tip, close.get("merge_as", "merge"),
+                                      close.get("merge_git"))
         if into and into != "HEAD" and gitops.contains(repo, f"refs/heads/{into}", tip):
             merged = gitops.git(repo, "rev-parse", "--short", f"refs/heads/{into}").strip()  # made already
         elif into and into != "HEAD" and (merged := gitops.squashed(
@@ -3906,9 +3909,12 @@ def cmd_accept(a):
                     # since the start, the merge brought back what was withdrawn from it (#418)
                     # signed as the task's commit was, and a kill backs the checkout out: SIGTERM
                     # left MERGE_HEAD and the staged merge in the user's checkout (#420)
+                    # its signing git, which outlives a SIGKILL of wb, for a retry to end (#1246)
                     merged = gitops.merge(repo, a.name, into, spec["base"], tip=tip,
                                           how=close.get("merge_as", "merge"),
-                                          sign=close.get("sign", True) and _signed(spec, a))
+                                          sign=close.get("sign", True) and _signed(spec, a),
+                                          started=lambda pid: task.set_status(closing={
+                                              **close, "merge_git": [pid, models._started(pid)]}))
             except gitops.GitError as e:
                 refused = str(e)
                 print(f"wb: not merged: {e}", file=sys.stderr)
@@ -4461,6 +4467,12 @@ def cmd_discard(a):
         die(f"{a.name} is already {task.status.get('phase')}")
     if why := _accepting(task):  # its commit exists, perhaps merged: not a discard (#878)
         die(why)
+    # the last stop wasn't the step's (status `infra`, which drive clears as a round starts; a
+    # shutdown's signal sets none): in the row, so the discard the stop notice offers isn't
+    # scored as the model's rejected work (#1245, 2026-11-24). Read before this discard's own stop.
+    st = task.status
+    outside = st.get("infra") or ("signal" if st.get("phase") == "stuck"
+                                  and st.get("last") == runner.SIGNAL_STOP else None)
     _stop_runner(task)
     _spec_gaps(task, a.spec_gap)
     repo = gitops.repo_of(spec)  # a removed linked worktree: the repository's main one (#498)
@@ -4506,11 +4518,12 @@ def cmd_discard(a):
         else:
             said = _held(repo, branch)
     # --drop-steps deleted the approved steps with the branch: no longer kept work (#722)
-    dropped = {"steps_dropped": True} if getattr(a, "drop_steps", False) else {}  # bench's own call lacks it
+    extra = {"steps_dropped": True} if getattr(a, "drop_steps", False) else {}  # bench's own call lacks it
+    extra |= {"infra": outside} if outside else {}
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None,
                     unrecorded={"outcome": "discarded", "step": measured,
-                                "extra": {"reason": a.reason, **dropped}})
-    row = results.record(task, "discarded", measured, reason=a.reason, **dropped)
+                                "extra": {"reason": a.reason, **extra}})
+    row = results.record(task, "discarded", measured, reason=a.reason, **extra)
     task.set_status(unrecorded=None)
     _ack_all(task)
     _closed(task)
@@ -6517,14 +6530,28 @@ def _held_elsewhere(pid: str, key: str) -> str:
             "config": f"{pid}'s key is written in {models._key_file(pid)}"}.get(key, f"{pid}'s key is {key}")
 
 
+def _holds_key(mid: str) -> bool:
+    """Whether a role's API model runs on a key wb holds (runner.needs_keyhole): not an Ollama
+    cloud model, whose login this machine's Ollama holds, nor a keyless free one. connected()
+    leaves the GPU side's `ollama` out, so wb setup told a user with every role on an Ollama
+    cloud model that those tasks "can't start" until /connect added a key, which changes nothing
+    for Ollama (#1242, 2026-11-24). A model the catalog can't find, or a read that fails, counts
+    as needing one: its line stays as it was."""
+    try:
+        m = models.lookup(mid)
+    except (RuntimeError, OSError):
+        return True
+    return m is None or runner.needs_keyhole(m)
+
+
 def api_key_lines(keys: dict | None) -> list[str]:
     """wb setup's API keys (#1024), from models.connected(): one `ok` line for the providers with
     a stored key and which roles use them, one `--` line for those whose key wb can't hold
     outside the lane (an environment variable, OAuth, a cloud login) with the fix, one for each
     key written in a config file (remove it there, #1075), one for a stored key on a package the
     keyhole can't carry (models.unspoken_providers, #1066), and one for each provider a role on API
-    uses with no key at all, required (#1067); else NO_KEY for none; nothing when `auth list`
-    can't be read."""
+    uses with no key at all, required (#1067), never for a model that needs none held (_holds_key,
+    #1242); else NO_KEY for none; nothing when `auth list` can't be read."""
     if keys is None:
         return []
     try:
@@ -6532,7 +6559,8 @@ def api_key_lines(keys: dict | None) -> list[str]:
     except routes.RoutesError:
         doc = None
     uses = {} if doc is None else {r: doc["roles"][r]["api"].split("/", 1)[0] for r in routes.ROLES
-                                   if routes.effective_via(doc, r) == "api" and doc["roles"][r].get("api")}
+                                   if routes.effective_via(doc, r) == "api" and doc["roles"][r].get("api")
+                                   and _holds_key(doc["roles"][r]["api"])}
     # a provider a role on API uses with no key at all: required, not NO_KEY's "optional" (#1067)
     unkeyed = {}
     for r, p in uses.items():
@@ -6689,7 +6717,10 @@ def cmd_try(a):
     # unlocking failed wb try at once, or with a terminal (WSL2) hung it on a prompt (#1226)
     argv = ["start", name, "--spec", str(TRY / "spec.md"), "--repo", str(d), "--size", "trivial",
             "--trial", "--no-sign", "--test", f"{py} -m unittest",
-            *(["--model", a.model] if a.model else [])]
+            *(["--model", a.model] if a.model else []),
+            # wb start's busy-GPU refusal names --queue, which wb try once refused as an unknown
+            # argument: the setup check couldn't wait behind a task or a bench (#1251, 2026-11-24)
+            *(["--queue"] if a.queue else [])]
     try:
         # the copy and its init inside: wb init refusing (no git identity, a home that is a
         # git repo) left try/<n> behind, one more at each retry (#530)
@@ -8017,6 +8048,8 @@ def parser() -> argparse.ArgumentParser:
                        "started as a trivial trial, and the hidden check to run at review")
     s.add_argument("--model", help="a model id (a GPU model's fragment will do; an API model "
                    "never matches one); default: the router's pick for a trivial task")
+    s.add_argument("--queue", action="store_true", help="start even when the GPU's holders leave "
+                   "no room for its model: it waits behind them (else exit 4)")
     s.set_defaults(f=cmd_try)
     s = sub.add_parser("remote", help="use the Ollama on another machine (LAN, tailnet): its "
                        "provider, marked local, and its tool-capable models registered")

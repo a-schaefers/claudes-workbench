@@ -572,6 +572,23 @@ const LOCAL_ONLY_HEADLINE = 'was stopped: its repo became local-only'
 const LOCAL_ONLY_NEXT = (n: string) => 'Tell the user its repo is local-only now, so its API model can\'t ' +
   `go on (only they lift that, never you); then \`wb takeover ${n}\` to finish it yourself or \`wb discard ${n}\`, ` +
   'as they choose. `wb feedback` and `wb resume` are refused while the repo stays local-only.'
+// Every other stop outside the step (a `cause` not in results.THE_STEP, the allowlist of the
+// agent's own: a model that left OpenCode's catalog, a repo that moved, a setup, checkout, load,
+// full disk, model server or reaped runner) has its remedy in the notice itself, from wb, which
+// knows it: the wake ended with the failed or stuck one's "wb feedback …", which wb refused
+// (exit 3) for a model gone from the catalog, and for a moved repo ran a runner that failed at
+// once, next to the notice's own takeover or relocate (the bar loop, #1247, 2026-11-24; #1232's
+// shape). One rule for them all, so a new such stop needs only its cause.
+const THE_STEP = new Set(['guard', 'agent'])
+const outsideTheStep = (row: Row) => typeof row.cause === 'string' && !THE_STEP.has(row.cause)
+const OUTSIDE_HEADLINE: Record<string, string> = {
+  stuck: 'was stopped (not its agent\'s doing)',
+  failed: 'failed (not its agent\'s doing)',
+}
+const OUTSIDE_NEXT = (n: string) => 'It stopped on something outside its agent\'s work, so its ' +
+  'remedy is the notice\'s own, above: do what it names (telling the user when it needs them). ' +
+  `Not \`wb feedback ${n}\` unless the notice names it: wb refuses it or runs into the same stop. ` +
+  `A notice that names no step: \`wb feedback ${n} --text "carry on"\` once that cause is gone.`
 
 // A question delivered into a running turn (#542): the engine frames it as another session's
 // message, so one line says whose it is and that it can't wait for the turn to end.
@@ -4034,7 +4051,8 @@ async function deliver($: any, now: number) {
       const batch = batchOf(row)
       const headline = batch ? (batch.length > 1 ? `and ${batch.length - 1} more were interrupted`
         : 'was interrupted') : row.cause === 'provider' ? PROVIDER_HEADLINE
-        : row.cause === 'local_only' ? LOCAL_ONLY_HEADLINE : HEADLINE[row.kind] ?? row.kind
+        : row.cause === 'local_only' ? LOCAL_ONLY_HEADLINE
+        : (outsideTheStep(row) ? OUTSIDE_HEADLINE[row.kind] : undefined) ?? HEADLINE[row.kind] ?? row.kind
       const key = `${name}:${row.ts}`
       if (current && !mem.toasted.has(key)) {
         mem.toasted.add(key)
@@ -4045,6 +4063,7 @@ async function deliver($: any, now: number) {
       const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? (row.guard === 'agents' ? AGENTS_NEXT(name) : SPEND_NEXT(name, (await readRoutes($)).cap !== null))
         : row.cause === 'provider' ? PROVIDER_NEXT(name)
         : row.cause === 'local_only' ? LOCAL_ONLY_NEXT(name)
+        : outsideTheStep(row) && OUTSIDE_HEADLINE[row.kind] ? OUTSIDE_NEXT(name)
         : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`
