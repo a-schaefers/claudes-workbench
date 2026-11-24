@@ -1088,7 +1088,9 @@ def local_only_refusal(repo: Path, sub: str | None, role: str, model: str | None
 def _local_only_now(task: store.Task) -> str:
     """For an API task whose repo became local-only after it started, the line wb next, feedback
     and resume refuse it with (takeover or discard: its model is fixed per task), else ''."""
-    if privacy.is_api_task(task) and privacy.local_only(task.spec["repo"], task.spec.get("subdir")):
+    # runner.api_task: a task from before #1016 on an API model has no `via` until its runner
+    # writes one (runner.settle_via), and its first round after the upgrade went too (#1111)
+    if runner.api_task(task) and privacy.local_only(task.spec["repo"], task.spec.get("subdir")):
         return privacy.since_start_line(task)
     return ""
 
@@ -2656,9 +2658,10 @@ def _when_delivered(task: store.Task, phase: str, running: str) -> str:
     if phase == "testing":
         return (f"its tests are running (up to {int(task.spec.get('test_timeout') or 900)}s); "
                 "the agent gets it when they end")
-    if phase == "queued":
-        return ("it is waiting for the GPU or its model, before a round or a round's tests; the "
-                "agent gets it when the round starts, or once the tests end")
+    if phase == "queued":  # an API task waits for a provider slot, never the GPU (#1112, 2026-11-23)
+        return (("it is waiting for a provider slot or its setup" if runner.api_task(task) else
+                 "it is waiting for the GPU or its model") + ", before a round or a round's tests; "
+                "the agent gets it when the round starts, or once the tests end")
     return running
 
 

@@ -492,10 +492,13 @@ coding choice is the user's (`wb coding`), never changed by a check.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
   the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`.
-  A `rate_limited`, `outage`, `quota` or `auth` stop is the API provider's, not the agent's
-  (the report says "the provider's stop"): tell the user so, and its remedy (wait, top up, or
-  /connect the key again), then `wb feedback <name> --text "carry on"` once it allows. Never
-  switch the task's model or role yourself: a route change takes the user's yes.
+  A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
+  agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
+  up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows. A
+  `refused` one (the provider turned the request down: a moderation flag, a schema, a model gone)
+  quotes what it said: fix that, then `wb feedback`; on an HTTP 404 the model is gone, so `wb
+  takeover` or `wb discard`. Never switch the task's model or role yourself: a route change
+  takes the user's yes.
   A `setup` stop ("this machine's stop") is neither the agent's nor the provider's: this machine
   can't reach the provider (a certificate that doesn't verify, or a proxy refusing the tunnel).
   Tell the user what the STOPPED line names (on macOS Python's Install Certificates command, else

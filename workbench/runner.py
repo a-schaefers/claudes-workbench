@@ -1173,8 +1173,10 @@ def checkin_text(task: store.Task, n: int, out: dict, since: float, active: floa
     from . import router  # router -> models; imported late to keep the runner's startup lean
     spec, st, now = task.spec, task.status, time.time()
     took = now - spec["created_at"]
+    # the role's record only for writing (router.record_role), as the pane and progress checks
+    # read it: the raw role timed `--role trivial --size significant` on trivial rows (#1113, 2026-11-23)
     typical = router.expected_minutes(spec["model"], spec.get("size", "significant"),
-                                      spec.get("weights_id"), spec.get("role"))
+                                      spec.get("weights_id"), router.record_role(spec.get("role")))
     eta = ""
     if typical:  # active work against active work: the wall clock held queues and reviews (#543)
         left = typical * 60 - (active_so_far(task, now) if active is None else active)
@@ -1263,8 +1265,29 @@ RATE_WAIT_S = 600
 RETRY_PAUSE_S = 60   # an API `retry` line pauses the clocks this long: OpenCode's own backoff
 HELD = ("rate_limited", "outage")
 # stops that are the provider's (cause "provider"); `setup` is this machine's way to it (a
-# certificate, a proxy: the keyhole's api_stop, #1080), never the agent's either, and not revived
-PROVIDER_GUARDS = frozenset({*HELD, "quota", "auth", "setup"})
+# certificate, a proxy: the keyhole's api_stop, #1080), never the agent's either, and not revived.
+# `refused`: a request the provider turned down for a reason no retry or key fixes (a 404 for a
+# model gone, a 400/422 schema, a 403 moderation or permission): the agent's, with no remedy, or
+# under 403 "refused the API key" with /connect (#1082, #1084, 2026-11-23)
+PROVIDER_GUARDS = frozenset({*HELD, "quota", "auth", "setup", "refused"})
+# no 413: OpenCode 2.3.2 calls it payload-too-large, beside context-overflow, a step that read too
+# much and so the step's (the review of #1082, 2026-11-23)
+REFUSED_CODES = frozenset({400, 403, 404, 405, 409, 410, 415, 422})
+REFUSED_KINDS = frozenset({"provider.content-filter", "provider.invalid-request", "provider.no-route",
+                           "provider.unsupported-operation"})
+# a 403 is the key's only when it says so: moderation, a model or region the key may not use and
+# the keyhole's own "this task may use only <model>" are 403s too (#1084). OpenCode's
+# provider.auth with another status is the key's when it says so too: 2.3.2 types a 400
+# "Incorrect API key provided", api_key_invalid and authentication_error that way (the review of
+# #1084, 2026-11-23)
+KEY_WORDS = re.compile(r"(?i)api.?key|token|credential|unauthori[sz]ed|authenticat")
+# a request over the model's window is the step's (too big a read), whoever answered it (#1082)
+CONTEXT_WORDS = re.compile(r"(?i)context.{0,20}(length|window|limit)|too many tokens|too long|"
+                           r"maximum.{0,30}tokens")
+# a provider queue (the keyhole's `queued`: SSE keep-alives only) pauses the clocks, and OpenCode's
+# ten retries of the requests it closed unanswered held a round ~110 minutes on paused clocks, then
+# failed it as the agent's (#1083, 2026-11-23): a queued run this long stops as an `outage`
+QUEUE_WAIT_S = 2 * RATE_WAIT_S
 # #1019's day spend cap: status `api_stop {guard: "spend"}` or its own stop between rounds. A cause
 # of its own, `spend`, outside results.THE_STEP like `provider`: the user's budget, never held
 # against the model or its slice (the engineer's call, 2026-11-23)
@@ -1287,6 +1310,28 @@ def api_task(task: store.Task) -> bool:
         return models.is_api(task.spec.get("model") or "")
     except Exception:  # a config that can't be read: a GPU task, as before
         return False
+
+
+def settle_via(task: store.Task, api: bool) -> None:
+    """task.json `via` (and an API model's `provider`) written once, from the model drive resolved,
+    for a task from before #1016 that has none. A 1.91 task on an opted-in Ollama `:cloud` model ran
+    as an API task (lease, meter, keyhole) while results, privacy's local_only and the lane's
+    token hiding read it as GPU by `via` alone (#1111, 2026-11-23): now every reader agrees."""
+    if task.spec.get("via") in ("gpu", "api"):
+        return
+    spec = {**task.spec, "via": "api" if api else "gpu"}
+    if api:
+        spec.setdefault("provider", provider_of(task))
+    store.write_json(task.dir / "task.json", spec)
+
+
+def self_review_aside(task: store.Task) -> Path:
+    """Where SELF_REVIEW has the agent copy a file aside: `aside/` in its runtime directory
+    (context.runtime_dir: the task's own, 0700, writable in its lane, removed at accept and
+    discard), never a name in /tmp another task shares (#1085)."""
+    d = context.runtime_dir(task) / "aside"
+    d.mkdir(exist_ok=True)
+    return d
 
 
 def provider_of(task: store.Task) -> str:
@@ -1319,6 +1364,8 @@ class _ProviderWait:
         self.was = False                # waiting at the last tick: the gap since counts as the wait
         self.fatal = None               # (guard, text): a 402 or 401 OpenCode gave up on at once
         self.held = False               # any wait this round (measure_speed skips the round)
+        self.queued_since = None        # a queue no answer has ended yet (#1083)
+        self.cut = ""                   # OpenCode's provider.invalid-output: answers that never ended
         st = task.status
         if self.api and (st.get("ratelimit_until") or st.get("ratelimit")):
             # a runner killed mid-hold left them: the new round starts with none (edge cases)
@@ -1341,6 +1388,8 @@ class _ProviderWait:
                 self._ended(now)
             was, self.was = self.was, False
             return was
+        if now_wait["kind"] == "queued" and self.queued_since is None:
+            self.queued_since = now_wait["since"]
         if self.run is None:
             self.run = {**now_wait, "held_since": None}
         else:
@@ -1371,23 +1420,38 @@ class _ProviderWait:
 
     def on_error(self, raw: dict) -> None:
         """An OpenCode `error` line: a 402 (provider.quota), a 400 whose text is a spent balance
-        (keyhole.CREDIT) or a 401/403 (provider.auth) ends the round at once, the provider's; a
-        rate limit or outage it gave up on, `end` stops."""
+        (keyhole.CREDIT), a 401 or a 403 that names the key (provider.auth), or a request the
+        provider refused (REFUSED_CODES, REFUSED_KINDS; not one over the window) ends the round at
+        once, the provider's; a rate limit, an outage or answers cut short
+        (provider.invalid-output) it gave up on, `end` stops."""
         if not self.api:
             return
         err = raw.get("error") if isinstance(raw.get("error"), dict) else {}
         kind, code = str(err.get("type") or ""), err.get("status")
-        # Anthropic's spent balance is a 400 invalid_request_error (#1079): its wording, keyhole.CREDIT
+        said = (str(err.get("message") or "").strip().splitlines() or [""])[0][:160]
+        # Anthropic's spent balance is a 400 invalid_request_error (#1079): its wording,
+        # keyhole.CREDIT, checked before REFUSED_CODES' 400 makes it a `refused`
         if kind == "provider.quota" or code == 402 or (
                 code == 400 and keyhole.CREDIT.search(str(err.get("message") or ""))):
             self.fatal = ("quota", f"{self.provider} says the account is out of credit "
                                    f"(HTTP {code or 402})")
-        elif kind == "provider.auth" or code in (401, 403):
+        elif code == 401 or ((kind == "provider.auth" or code == 403) and
+                             (code is None or KEY_WORDS.search(said))):
             self.fatal = ("auth", f"{self.provider} refused the API key (HTTP {code or 401})")
+        elif (code in REFUSED_CODES or kind in REFUSED_KINDS or kind == "provider.auth") \
+                and not CONTEXT_WORDS.search(said):
+            self.fatal = ("refused", f"{self.provider} refused the request"
+                                     + (f" (HTTP {code})" if code else "") + (f": {said}" if said else ""))
+        elif kind == "provider.invalid-output" and (code == 200 or self.queued_since is not None):
+            # only an HTTP answer the provider cut short, or one out of its queue: 2.3.2 types the
+            # model's own overrun ("exceeded its output limit") and bad structured output this way
+            # too, and those are the step's (the review of #1083, 2026-11-23)
+            self.cut = said or "its answer ended early"
 
     def answered(self) -> None:
-        """The model's own output: whatever OpenCode retried got through."""
+        """The model's own output: whatever OpenCode retried got through, out of any queue."""
         self.retry, self.retry_until = None, 0.0
+        self.queued_since, self.cut = None, ""
 
     def stop(self, now: float, gave_up: bool = False) -> tuple[str, str] | None:
         """(guard, text) when the provider ends the round: a quota or key error, the keyhole's (or
@@ -1395,14 +1459,21 @@ class _ProviderWait:
         run, OpenCode having exited on it)."""
         if not self.api:
             return None
-        if self.fatal:
-            return self.fatal
         stop = self.st.get("api_stop")
         if isinstance(stop, dict) and stop.get("guard"):
             # consumed: the next round starts clean. #1019's `spend` comes through here too:
-            # cause `spend`, not `provider` (stopped_by)
+            # cause `spend`, not `provider` (stopped_by). Before `fatal`: the keyhole answers its
+            # own quota and spend stops with a 400, which on_error would call `refused` (#1082)
             self.task.set_status(api_stop=None)
             return str(stop["guard"]), str(stop.get("text") or f"{self.provider} stopped the round")
+        if self.fatal:
+            return self.fatal
+        if self.queued_since is not None and (gave_up or (self.run and self.run["kind"] == "queued" and
+                                                           now - self.queued_since >= QUEUE_WAIT_S)):
+            return "outage", (f"{self.provider} held the agent's requests in its queue for "
+                              f"{_span(now - self.queued_since)} without answering")
+        if gave_up and self.cut:  # OpenCode's ten resends, every answer cut short
+            return "outage", f"{self.provider} cut its answers short ({self.cut})"
         run = self.run or ({**self.retry, "held_since": self.retry["since"]} if gave_up and self.retry else None)
         if not run or run["kind"] not in HELD or run["held_since"] is None:
             return None
@@ -1484,6 +1555,23 @@ def opencode_env(task: store.Task, run: str = "") -> dict:
             "SHELL": str(write_shell_shim(task))}
 
 
+# The explore guard's calls without an edit, per 32K of an API model's window: 40 was set where 40
+# reads fill a 32K window, and stopped API one-shots (131K) still exploring at 16% of theirs
+# (#1087, 2026-11-23). A loop that never fills the window still stops, at NO_EDIT_MAX. A GPU
+# task's stays 40 whatever its window, as in 1.91.x: the 40 was tuned on local models, the ones
+# that loop on reads (the review of #1087, 2026-11-23)
+NO_EDIT_PER_32K = 40
+NO_EDIT_MAX = 160
+
+
+def no_edit_limit(window, *, api: bool) -> int:
+    """events.StuckDetector's `no_edit` for a model of this window (status `window`): on an API
+    model 40 for 32K or less (or unknown), 40 more for each 32K over it, at most NO_EDIT_MAX; on
+    the GPU (``api`` false) always NO_EDIT_PER_32K."""
+    w = window if api and isinstance(window, int) and window > 0 else 0
+    return min(NO_EDIT_MAX, NO_EDIT_PER_32K * max(1, w // 32768))
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -1534,7 +1622,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         power = _Power()
         power.start()
 
-    detector = StuckDetector(**spec.get("stuck", {}), worktree=task.worktree)
+    detector = StuckDetector(**{"no_edit": no_edit_limit(st.get("window"), api=api_task(task)),
+                                **spec.get("stuck", {})},
+                             worktree=task.worktree)
     wall, silence, think = limit(task, "round"), limit(task, "silence"), limit(task, "think")
     # A shell command OpenCode moved to the background (past 2 minutes it does, and the turn
     # ends waiting on it) prints nothing until it is done: a long test suite counted as thinking,
@@ -1571,6 +1661,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # One tool result bigger than the margin before it (a long file, a test log) compacted the
     # session between two steps, and the agent worked on from its summary (#774).
     last_step: tuple = (None, 0)
+    # The tool output since that step, in tokens (bytes / CHARS_PER_TOKEN, OpenCode's own
+    # estimate): OpenCode counts it in before the next request, and six parallel 50 KB results
+    # from a step at 40K compacted the session with no step near the point (#1086, 2026-11-23)
+    pending = 0
     opened: dict = {}  # the questions open this round (ask_mcp.relay)
     spend = _spend_round(task, n)  # an API task's meter (#1019), else None
     warmed = time.monotonic()  # the model's keep-alive, renewed while the round waits (#864)
@@ -1625,6 +1719,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 waiting_bg = False  # the session moved on
             sig = row.pop("sig", None)
             if row["kind"] == "tool":
+                state = (raw.get("part") or {}).get("state") if isinstance(raw.get("part"), dict) else None
+                if isinstance(state, dict) and isinstance(state.get("output"), str):
+                    pending += len(state["output"]) // context.CHARS_PER_TOKEN
                 out["tools"][row["tool"]] = out["tools"].get(row["tool"], 0) + 1
                 if not row["ok"]:
                     out["errors"].append(f"{row['tool']}: {row.get('error', '')}")
@@ -1661,21 +1758,22 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 # four minutes, each fresh session getting 3K of work. It carries on instead.
                 changed = None
                 sid = raw.get("sessionID") or task.status.get("session")
-                if window and compacted_between(last_step, sid, used, fresh_at * window, window):
+                before = last_step[1] + pending  # what OpenCode had when it compacted
+                if window and compacted_between(last_step, sid, used, fresh_at * window, window, pending):
                     changed = marks != {gitops.mark(task.worktree)}
                     if changed and floor is None:  # it changed nothing by the step before
                         floor = last_step[1]
                         task.set_status(session_floor=floor)
                     if changed and not keep and not out["full"] \
                             and fresh_at * window - floor >= HANDOVER_ROOM * window:
-                        out["full"], out["compacted"] = last_step[1], True
+                        out["full"], out["compacted"] = min(before, window), True
                     else:
                         task.event({"ts": store.now(), "round": n, "kind": "compacted",
                                     "text": f"OpenCode compacted the agent's session mid-round at "
-                                            f"{100 * last_step[1] // window}% of its window: it "
+                                            f"{min(100, 100 * before // window)}% of its window: it "
                                             f"works on from its own summary"})
                 if used:
-                    last_step = (sid, used)
+                    last_step, pending = (sid, used), 0
                 if floor is None and window:
                     changed = marks != {gitops.mark(task.worktree)}
                     if changed:
@@ -2963,7 +3061,8 @@ def _base_check(task: store.Task) -> None:
     report, and a check-in at once when it says the command can't do its job."""
     task.set_status(last="checking the acceptance command on the base")
     r = base_check(task)
-    task.set_status(base_check=r, last="waiting for the GPU")
+    # an API task waits on no GPU: drive's "starting" stood until here (#1112, 2026-11-23)
+    task.set_status(base_check=r, last="waiting for the GPU" if _gpu_side(task) else "starting")
     if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS:  # every round's tests will too
         task.notify("checkin", f"task {task.name}: {base_check_line(r, task)}",
                     round=task.status.get("round", 1))
@@ -3021,7 +3120,7 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
         if rnd.get("guard") in PROVIDER_GUARDS:
-            lines.append(provider_remedy(task, rnd["guard"]))
+            lines.append(provider_remedy(task, rnd["guard"], str(rnd.get("stuck") or "")))
     elif rnd.get("left_bg"):  # #658: what the agent left running, stopped with it
         lines.append("the agent left " + ", ".join(f"`{j}`" for j in rnd["left_bg"])
                      + " running in the background when its turn ended; stopped")
@@ -3387,12 +3486,16 @@ def _fresh_said(task: store.Task, n: int) -> str | None:
 # next task's agent "restored" a check by retyping it and rebuilt the loop wrong, then spent
 # its round debugging its own restore (2026-11-18): it copies the file back instead. One
 # automatic round, before Claude is woken, costs local time only.
+# {aside}: self_review_aside, the task's own: `cp f.c /tmp/f.c` sent every task's backup to one
+# shared name, and two tasks self-reviewing a cli.py at once could copy back each other's (#1085,
+# 2026-11-23); /tmp held 27 such backups, never removed
 SELF_REVIEW = (
     "Before Claude reviews this, review your own change as a strict senior reviewer would: `git "
     "diff`, and `git status` for new files. Check each point, and fix what fails:\n"
     "1. Every rule in the task (each must, only, at most, rejects, limit and error message) has a "
     "test that fails if that rule alone breaks. A rule without one: write the test. Check each "
-    "rejection and limit by doing it, one at a time: copy the file aside (`cp f.c /tmp/f.c`), "
+    "rejection and limit by doing it, one at a time: copy the file aside (`cp f.c {aside}/f.c`, "
+    "this task's own directory: never a bare /tmp name, which another task may use too), "
     "comment out its check, run the acceptance command, see a test fail, then copy the file back "
     "(never retype it), and run the command again to see it pass. No test failed: the "
     "test's input breaks another rule too; make it valid in every other way. Each test the task "
@@ -3810,11 +3913,19 @@ def _tests_gpu(task: store.Task, lease):
         yield
 
 
-def provider_remedy(task: store.Task, guard: str) -> str:
+def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
     """What to do about a stop that is the provider's (#1020): never a model or route switched
-    by wb or Claude (the 2.0 rules); `wb route` only with a role, and only with the user's yes."""
+    by wb or Claude (the 2.0 rules); `wb route` only with a role, and only with the user's yes.
+    ``said``: the stop's line, whose HTTP 404 may mean the model is gone (#1082)."""
     p, name = provider_of(task), task.name
     resume = f'wb feedback {name} --text "carry on"'
+    role = task.spec.get("role")
+    if guard == "refused":  # the provider's reason is in the STOPPED line: no wait or key fixes it
+        gone = (f"; if {p} no longer serves {task.spec.get('model')}, workbench never switches a "
+                f"task's model: wb takeover {name} or wb discard {name}") if "HTTP 404" in said else ""
+        return (f"the provider's stop, not the agent's: once what {p} said is fixed, {resume} "
+                f"resumes it" + gone
+                + (f"; or wb route {role} gpu (the user's yes) for the next tasks" if role else ""))
     if guard == "quota":
         return (f"the provider's stop, not the agent's: top up your {p} account, or wait for the "
                 f"plan's reset; then {resume} resumes it")
@@ -3824,7 +3935,6 @@ def provider_remedy(task: store.Task, guard: str) -> str:
     if guard == "setup":  # #1080: no route change or wait mends this machine's own setup
         return (f"this machine's stop, not the agent's or {p}'s: mend what the line above says; "
                 f"then {resume} resumes it")
-    role = task.spec.get("role")
     return (f"the provider's stop, not the agent's: {resume} resumes it once {p} allows"
             + (f"; or wb route {role} gpu (the user's yes) for the next tasks" if role else ""))
 
@@ -3959,6 +4069,7 @@ def drive(task: store.Task) -> None:
             return _left_catalog(task)
         return _load_failed(task, e)
     api = m.kind == "api"
+    settle_via(task, api)
     # an API task waits for no GPU (#1015): its first line says so
     task.set_status(last="starting" if api else "waiting for the GPU")
     CURRENT["api"] = api  # no GPU power to sample, no keep-alive to renew (run_round)
@@ -4187,7 +4298,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     and task.status.get("self_reviewed") != mark:
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
-                    SELF_REVIEW.format(cmd=task.spec["test_cmd"]))
+                    SELF_REVIEW.format(cmd=task.spec["test_cmd"], aside=self_review_aside(task)))
                 task.set_status(round=n + 1, self_reviewed=mark, tests=tests, round_for="self_review")
                 task.event({"ts": store.now(), "round": n, "kind": "self_review",
                             "text": "tests pass; the agent reviews its own change first"})
@@ -4263,13 +4374,14 @@ def round_asks(task: store.Task, n: int) -> list[str]:
 HANDOVER_ROOM = 0.25
 
 
-def compacted_between(last: tuple, sid, used: int, point: float, window: int) -> bool:
+def compacted_between(last: tuple, sid, used: int, point: float, window: int, pending: int = 0) -> bool:
     """Whether OpenCode compacted the session between the last step (`last`: its session and
     context) and this one: in the same session, this step carries under half of what the last
-    did, and the last was within one step's growth (fresh_ceiling's margin) of the handover
+    did, and the last, with the tool output since (``pending``, tokens: OpenCode compacts with
+    it counted in, #1086), was within one step's growth (fresh_ceiling's margin) of the handover
     point, where only OpenCode's compaction shrinks a context (#774)."""
     margin = max(STEP_GROWTH, tuning.CEILING_MARGIN * window)
-    return bool(sid) and last[0] == sid and 0 < used < last[1] / 2 and last[1] >= point - margin
+    return bool(sid) and last[0] == sid and 0 < used < last[1] / 2 and last[1] + pending >= point - margin
 
 
 def _reading_full(task: store.Task, n: int, used: int, window: int,
@@ -4493,6 +4605,14 @@ def _beat(path: Path) -> None:
     threading.Thread(target=touch, daemon=True, name="beat").start()
 
 
+def load_up_front() -> None:
+    """Import now every module the runner imports late, so a mid-task pull can't pair this old
+    process with a new file's code (#603): results (each API round's report, _load_failed) and
+    cli (add_outline's PROTOCOL) were missed and loaded mid-task (#1115, 2026-11-23); a test
+    walks this file's late imports. Cheap: cli and results import this module already."""
+    from . import cli, results, router, transcript, verify  # noqa: F401
+
+
 def main():
     store.absolute_env()
     gitops.drop_repo_env()  # the caller's repository variables, for the agent too (#798)
@@ -4504,7 +4624,7 @@ def main():
     _beat(lock_file(task.name, "runner"))
     signal.signal(signal.SIGTERM, _on_term)
     CURRENT["code"] = code_print()  # what the children load; compared before each round (#603)
-    from . import router, transcript, verify  # noqa: F401 (now, not mid-task from an updated clone)
+    load_up_front()
     try:
         drive(task)
     except Stopped:

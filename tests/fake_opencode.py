@@ -17,9 +17,12 @@
   compact  writes "41", a step at 52% of a 32K window, then one at 15%: OpenCode compacted it
          between them, which `run --format json` doesn't print (#774); then works on for an
          hour; a fresh session handed the task behaves like ok. FAKE_COMPACT_READ: it reads
-         before writing, its first step at 50%
+         before writing, its first step at 50%. FAKE_COMPACT_BURST: its step before is at 30%,
+         then three reads whose 16 KB outputs (`state.output`) take it past the point (#1086)
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
   refill every session changes a file, then fills 76% and works on for an hour
+  explore  FAKE_READS (41) reads of different files, each a small step, then 2 s (the runner
+         sees the last read before the edit) and writes "42" like ok: a one-shot still exploring
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
@@ -71,7 +74,10 @@ API models (#1011), as the spike for #1009 saw OpenCode 2.3.2 print them:
   FAKE_RETRY_OK: ratelimit's and down's retries end in an answer instead (the run goes on as ok)
   api    one model request to a keyhole, FAKE_API ("<base> <token> <model>"), silent while it waits;
          a 429 or 5xx back is a `retry` line and the request again (10 at most), another error
-         ends the run (402 provider.quota, 401/403 provider.auth); then as ok (#1020)
+         ends the run (402 provider.quota, 401/403 provider.auth); then as ok (#1020). A 200
+         event stream with no `finish_reason` (a provider queue closed unanswered) is 2.3.2's
+         `provider.invalid-output` "OpenAI Chat stream ended without finish_reason", status 200:
+         a `retry` line and the request again, FAKE_CUT_RETRIES times (10), then that error (#1083)
 The upstream error's message (FAKE_ERROR_BODY, else a stock one) comes through verbatim, in
 `message` and `response.body`, as in OpenCode (a key-like string in a 401's body reached
 stdout). WB_FAKE_CATALOG names a JSON file: a list of `api model.list` entries (`providerID`, `id`, `variants`, `cost`, `limit`…), or
@@ -106,12 +112,14 @@ rows record it as `models_path`, and OPENCODE_CONFIG_CONTENT as `content`.
          provider: <baseURL>/messages?beta=true with `x-api-key`), through urllib, so the
          environment's http_proxy and no_proxy apply as they do to OpenCode's fetch. A 2xx is
          `ok` (it writes 42); another status is OpenCode's error for it, the upstream's message
-         verbatim (`provider.auth` for 401/403, `provider.quota` 402, `provider.rate-limit` 429,
-         else `provider.http`), exit 1; no connection is `provider.transport`, exit 1. FAKE_HTTP_LOG,
-         a file: each request's URL and status (or error) appended.
+         verbatim (`provider.auth` for 401/403 or, as 2.3.2, "Incorrect API key provided",
+         `provider.quota` 402, `provider.rate-limit` 429, else `provider.http`), exit 1; no
+         connection is `provider.transport`, exit 1. FAKE_HTTP_LOG, a file: each request's URL
+         and status (or error) appended.
 """
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -345,13 +353,23 @@ def api_request() -> None:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     body = json.dumps({"model": model, "stream": True,
                        "messages": [{"role": "user", "content": "hi"}]}).encode()
+    cut = 0
     for attempt in range(1, 12):
         req = urllib.request.Request(base + "/chat/completions", data=body, headers={
             "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
         try:
             with opener.open(req, timeout=900) as r:
-                r.read()
-            return
+                got, sse = r.read(), "event-stream" in (r.headers.get("Content-Type") or "")
+            if not sse or b"finish_reason" in got:
+                return
+            cut += 1  # real OpenCode retries a stream that ended unfinished, then gives up (#1083)
+            err = {"type": "provider.invalid-output", "status": 200,
+                   "message": "OpenAI Chat stream ended without finish_reason"}
+            if cut > int(os.environ.get("FAKE_CUT_RETRIES", 10)):
+                fail(err["type"], err["message"], 200)
+            print(json.dumps({"type": "retry", "timestamp": t(), "sessionID": session,
+                              "messageID": "msg_fake", "attempt": cut + 1, "error": err}), flush=True)
+            continue
         except urllib.error.HTTPError as e:
             status, raw = e.code, e.read().decode(errors="replace")
         except OSError as e:
@@ -375,10 +393,12 @@ def api_request() -> None:
     fail("provider.rate-limit", "too many retries", 429)
 
 
-def tool(name, inp, status="completed", error=None):
+def tool(name, inp, status="completed", error=None, output=None):
     state = {"status": status, "input": inp}
     if error:
         state["error"] = error
+    if output is not None:  # `part.state.output`, the result as the model gets it (2.3.2)
+        state["output"] = output
     emit("tool_use", tool=name, state=state)
 
 
@@ -488,7 +508,9 @@ if scenario == "http" and args and args[0] == "run":  # a model request through 
             message = json.loads(text)["error"]["message"]
         except (ValueError, KeyError, TypeError):
             message = text
-        fail({401: "provider.auth", 403: "provider.auth", 402: "provider.quota",
+        # 2.3.2 types a 400 "Incorrect API key provided" provider.auth too (#1084)
+        fail("provider.auth" if re.search(r"(?i)incorrect api key provided", message) else
+             {401: "provider.auth", 403: "provider.auth", 402: "provider.quota",
               429: "provider.rate-limit"}.get(e.code, "provider.http"), message, e.code)
     except (urllib.error.URLError, OSError) as e:
         logged(f"error: {e}")
@@ -648,6 +670,16 @@ elif scenario == "read":
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "explore":  # #1087: many small reads before the first edit
+    for i in range(int(os.environ.get("FAKE_READS", 41))):
+        tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")})
+        emit("step_finish", reason="tool-calls", tokens={"input": 1000 + 100 * i, "output": 50})
+    time.sleep(2)
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    emit("text", text="Wrote answer.txt = 42.")
+    finish()
 elif scenario == "probing":  # #857: probe in a compound line, a long file read whole and in part
     with open("long.py", "w") as fh:
         fh.write("x = 1\n" * 400)
@@ -692,8 +724,14 @@ elif scenario == "compact":  # #774: a tool result past the margin compacted it 
                                                       "cache": {"read": 900 if not os.environ.get(
                                                           "FAKE_COMPACT_READ") else 14400}})
     emit("text", text="Wrote 41 so far; reading the test log next.")
-    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
-                                                      "cache": {"read": 14900}})  # 17000: 52%
+    if os.environ.get("FAKE_COMPACT_BURST"):  # parallel reads from a step under the margin
+        emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                          "cache": {"read": 7800}})  # 9900: 30%
+        for i in range(3):
+            tool("read", {"filePath": os.path.abspath(f"log{i}.txt")}, output="x" * 16000)
+    else:
+        emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                          "cache": {"read": 14900}})  # 17000: 52%
     tool("read", {"filePath": os.path.abspath("answer.txt")})
     emit("step_finish", reason="tool-calls", tokens={"input": 4000, "output": 900,
                                                       "cache": {"read": 0}})  # 4900: 15%
