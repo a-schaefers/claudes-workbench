@@ -3416,7 +3416,8 @@ RUNNER_TAIL = re.compile("|".join(RUNNER_LINES))
 MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
 # A wrapper's own words for a program it couldn't start, at its own exit, not the shell's 127
 # (missing_tool): Poetry's `Command not found: <name>` (exit 1, #1256), uv's `Failed to spawn:
-# `<name>``, bundler's `command not found: <name>` above its hint; and for a path, a file the
+# <name>` (exit 2; only with its sync off, uv_synced_programs), bundler's `command not found:
+# <name>` above its hint; and for a path, a file the
 # shell couldn't open, `source .venv/bin/activate` at exit 1 in bash (dash's `.: cannot open
 # <path>`, exit 2, #1258). Each wrapper's wording was a pattern of its own, and each bar round
 # found one more missed (#1206, #1229, #1243, #1256, #1258, #1262): what decides is whether the
@@ -3514,13 +3515,16 @@ def missing_tool(lines: list[str], cmd: str | None, task: store.Task | None = No
     argument such as a subcommand the step adds) not on the agent's PATH (on_agent_path), where
     every wrapper looks too (Poetry, uv and pipenv put their venv's `bin` ahead of it), and not a
     console script of the step's own (own_command; after a wrapper's run verb with no venv
-    yet, as the wrapper looks the project's own scripts up itself); never one a runner's recipe names, which the command
+    yet, as the wrapper looks the project's own scripts up itself), nor any program after a `uv
+    run` that syncs (uv_synced_programs: a dependency the step declares is installed before it
+    spawns); never one a runner's recipe names, which the command
     doesn't (a code the runner names stays its own). A path: one in TOOL_DIRS the worktree hasn't, named by the
     command or under a runner (`make test` sourcing `.venv/bin/activate`). wb's own wording, as
     missing_command's. Poetry's `Command not found: pytest` at exit 1 (#1256), `source
     .venv/bin/activate && pytest` at bash's 1 or dash's 2 (#1258) each ran round 1 and every
     auto-fix round on correct code, told the bug was the change's (bar round 6, 2026-11-24)."""
     words, programs, run = command_words(cmd), command_programs(cmd), command_programs(cmd, True)
+    synced = uv_synced_programs(cmd)
     for line in reversed([ln for ln in map(str.strip, lines) if ln][-GONE_LINES:]):
         tool, opened = TOOL_GONE.search(line), PATH_GONE.search(line)
         if not (tool or opened):
@@ -3540,6 +3544,14 @@ def missing_tool(lines: list[str], cmd: str | None, task: store.Task | None = No
                 # false "no round can fix that", and skipped the auto-fix round when round 1 left
                 # it out (#1256's review, 2026-11-24)
                 if w in run and task and own_command(task, w):
+                    continue
+                # nor is any program `uv run` gives, unless the command turns its sync off: uv
+                # syncs the project, dev group included, before it spawns, so a step adding ruff
+                # to [dependency-groups] dev said uv 0.13.10's `Failed to spawn: ruff` on the base
+                # (exit 2), checked in before round 1 with a false "no round can fix that", and
+                # skipped the auto-fix round when round 1 left the dependency out (#1256's second
+                # review, 2026-11-24): a round can declare it, so the failure is the agent's
+                if w in synced:
                     continue
                 if said := _missing_bare(w, task):
                     return said
@@ -3781,20 +3793,8 @@ def command_programs(cmd: str | None, run_only: bool = False) -> set[str]:
     Every word missing_tool counted, `python3 cli.py frobnicate` for a step adding Click's
     `frobnicate` checked in as a missing tool and skipped auto-fix (#1262's review, 2026-11-24).
     ``run_only``: only the words after a run verb, which the wrapper looks up in the project."""
-    lex = shlex.shlex(cmd or "", posix=True, punctuation_chars=True)
-    lex.whitespace_split = True
-    try:
-        tokens = list(lex)
-    except ValueError:
-        return set()
     out: set[str] = set()
-    simple: list[list[str]] = [[]]
-    for t in tokens:
-        if t in SHELL_OPS or set(t) <= set("&|;()"):
-            simple.append([])
-        else:
-            simple[-1].append(t)
-    for words in simple:
+    for words in _simple_commands(cmd):
         for i, w in enumerate(words):
             # an assignment, a prefix's option or its number (`env -i`, `nice -n 10`, `timeout 60`)
             if re.match(r"[A-Za-z_][A-Za-z0-9_]*=|-|\d+(?:\.\d+)?[smhd]?$", w):
@@ -3806,6 +3806,60 @@ def command_programs(cmd: str | None, run_only: bool = False) -> set[str]:
                 continue
             if name in RUN_VERBS:
                 out |= _wrapped_program(words[i + 1:], RUN_VERBS[name])
+            break
+    return out
+
+
+def _simple_commands(cmd: str | None) -> list[list[str]]:
+    """Shell command ``cmd``'s simple commands, each its words; none for an unbalanced quote."""
+    lex = shlex.shlex(cmd or "", posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        tokens = list(lex)
+    except ValueError:
+        return []
+    simple: list[list[str]] = [[]]
+    for t in tokens:
+        if t in SHELL_OPS or set(t) <= set("&|;()"):
+            simple.append([])
+        else:
+            simple[-1].append(t)
+    return simple
+
+
+# What turns `uv run`'s sync off (uv 0.13's `uv run --help`): its flags, and their variables,
+# set in the command (`UV_NO_SYNC=1 uv run …`) or in the environment the tests run with
+UV_NO_SYNC_FLAGS = ("--no-sync", "--no-project")
+UV_NO_SYNC_VARS = ("UV_NO_SYNC", "UV_NO_PROJECT")
+UV_TRUE = {"1", "true", "yes", "on", "y", "t"}
+
+
+def uv_synced_programs(cmd: str | None) -> set[str]:
+    """The programs (command_programs' words after the run verb) of each `uv run` in ``cmd``
+    that syncs the project first, which installs every dependency the project declares, the
+    dev group's included, before it spawns one: a program a step's dependency brings is there
+    once the step declares it. None where a flag or variable (UV_NO_SYNC_FLAGS, UV_NO_SYNC_VARS)
+    turns the sync off (#1256's second review, 2026-11-24)."""
+    simple = _simple_commands(cmd)
+    words_all = [w for words in simple for w in words]
+    if any(os.environ.get(v, "").strip().lower() in UV_TRUE for v in UV_NO_SYNC_VARS) or any(
+            w.split("=", 1)[0] in UV_NO_SYNC_VARS and w.split("=", 1)[1].strip().lower() in UV_TRUE
+            for w in words_all if "=" in w):
+        return set()
+    out: set[str] = set()
+    for words in simple:
+        for i, w in enumerate(words):
+            if re.match(r"[A-Za-z_][A-Za-z0-9_]*=|-|\d+(?:\.\d+)?[smhd]?$", w):
+                continue
+            name = w.rsplit("/", 1)[-1]
+            if name in PREFIXES:
+                continue
+            if name == "uv" and "run" in words[i + 1:]:
+                programs = _wrapped_program(words[i + 1:], "run")
+                # uv's own options: those before its program (a program's own come after it)
+                upto = next((j for j, x in enumerate(words) if j > i and x in programs), len(words))
+                if not any(x.split("=", 1)[0] in UV_NO_SYNC_FLAGS for x in words[i + 1:upto]):
+                    out |= programs
             break
     return out
 

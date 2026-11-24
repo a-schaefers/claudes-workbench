@@ -1103,7 +1103,7 @@ class Lifecycle(Base):
                 ("Creating virtualenv p in /r/.venv\nCommand not found: nosuch-tool-1256", 1,
                  "poetry run nosuch-tool-1256 -q"),
                 ("error: Failed to spawn: `nosuch-tool-1256`\n  Caused by: No such file or directory "
-                 "(os error 2)", 2, "uv run nosuch-tool-1256"),
+                 "(os error 2)", 2, "uv run --no-sync nosuch-tool-1256"),
                 ("bundler: command not found: nosuch-tool-1256\nInstall missing gem executables with "
                  "`bundle install`", 127, "bundle exec nosuch-tool-1256")):
             self.assertEqual(said(tail, code, cmd), nf, tail)
@@ -1197,12 +1197,13 @@ class Lifecycle(Base):
     def test_a_console_script_the_step_adds_under_uv_run_goes_back_to_the_agent(self):
         # #1256's review (2026-11-24): `uv run` syncs the project, installing the
         # [project.scripts] entry the step adds, so uv's `Failed to spawn` for it on the base (no
-        # venv yet) is no missing tool, nor when the round left the script out
+        # venv yet) is no missing tool, nor when the round left the script out; with the sync
+        # off (`--no-sync`) only a script of the step's own still goes back
         self.spec.write_text("Fix the answer.\n")
         self.start("t-uvs", "ok", "--no-base-check", "--no-self-review")
         wait_phase("t-uvs", {"review"})
         task = store.Task("t-uvs")
-        said = lambda: runner.missing_command({"exit": 2, "cmd": "uv run --frozen mycli1256 check", "tail": (  # noqa: E731
+        said = lambda: runner.missing_command({"exit": 2, "cmd": "uv run --no-sync mycli1256 check", "tail": (  # noqa: E731
             "error: Failed to spawn: `mycli1256`\n  Caused by: No such file or directory (os error 2)")}, task)
         self.assertFalse(context.own_venv(task))
         self.assertEqual(said(), "mycli1256: command not found")
@@ -1219,6 +1220,35 @@ class Lifecycle(Base):
         self.assertEqual(runner.missing_command({"exit": 1, "cmd": "mycli1256 check",
                                                  "tail": "Command not found: mycli1256"}, task),
                          "mycli1256: command not found")
+
+    def test_a_tool_a_dependency_brings_under_uv_run_goes_back_to_the_agent_unless_the_sync_is_off(self):
+        # #1256's second review (2026-11-24): `uv run` syncs the project, dev group included,
+        # before it spawns, so a step adding ruff to [dependency-groups] dev runs it once it
+        # declares it; uv 0.13.10's base lines (with `dependencies = []` and no ruff on PATH;
+        # verbatim but the name, one on no PATH) at its exit 2 checked in before round 1 with a
+        # false "no round can fix that ... or wb discard", and skipped the auto-fix round when
+        # round 1 left the dependency out
+        self.spec.write_text("Add ruff as a dev dependency ([dependency-groups] dev) and fix "
+                             "every lint error it reports.\n")
+        self.start("t-uvd", "ok", "--no-base-check", "--no-self-review")
+        wait_phase("t-uvd", {"review"})
+        task = store.Task("t-uvd")
+        tail = ("Using CPython 3.11.18 interpreter at: /usr/bin/python3.11\n"
+                "Creating virtual environment at: .venv\nerror: Failed to spawn: nosuch-ruff-1256\n"
+                "  cause: No such file or directory (os error 2)")
+        said = lambda cmd: runner.missing_command({"exit": 2, "cmd": cmd, "tail": tail}, task)  # noqa: E731
+        for cmd in ("uv run nosuch-ruff-1256 check .", "uv run --frozen nosuch-ruff-1256 check .",
+                    "uv run --with x nosuch-ruff-1256 check .", "timeout 60 uv run nosuch-ruff-1256",
+                    "uv run nosuch-ruff-1256 --no-sync"):
+            self.assertIsNone(said(cmd), cmd)
+        # with the sync off uv installs nothing first, so the tool is the environment's to give
+        for cmd in ("uv run --no-sync nosuch-ruff-1256 check .", "uv --no-project run nosuch-ruff-1256",
+                    "UV_NO_SYNC=1 uv run nosuch-ruff-1256", "env UV_NO_PROJECT=true uv run nosuch-ruff-1256"):
+            self.assertEqual(said(cmd), "nosuch-ruff-1256: command not found", cmd)
+        with mock.patch.dict(os.environ, {"UV_NO_SYNC": "1"}):
+            self.assertEqual(said("uv run nosuch-ruff-1256"), "nosuch-ruff-1256: command not found")
+        self.assertEqual(runner.uv_synced_programs("uv sync && uv run --with x pytest -q && poetry run y"),
+                         {"x", "pytest"})
 
     def test_a_tool_in_the_checkouts_ignored_venv_checks_in_at_once_and_skips_auto_fix(self):
         # #1206 (bar round 3 of 2.0): `--test .venv/bin/python …`, as Claude runs it in the user's
