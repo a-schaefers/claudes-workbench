@@ -26,7 +26,7 @@ from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import ask_mcp, context, gitops, media, models, results, router, runner, spend, store, verify
+from . import ask_mcp, context, gitops, media, meter, models, results, router, runner, spend, store, verify
 from .runner import PKG_ROOT
 from .watch import Watcher
 
@@ -863,15 +863,18 @@ def paid(task: store.Task) -> dict:
     (results.api_usage; a replay writes no results row, so its money is said here, #1022)."""
     if (u := results.api_usage(task)) is None:
         return {}
-    return {"kind": "api", "paid": {"cost": u["cost"], "source": u["source"]}}
+    return {"kind": "api", "paid": {"cost": u["cost"], "source": u["source"],
+                                    **({"prices": u["prices"]} if u.get("prices") else {})}}
 
 
 def paid_since(since: float = 0) -> dict:
-    """The API replays' money since ``since``, for `wb savings --api`: {tasks, cost, unknown}."""
+    """The API replays' money since ``since``, for `wb savings --api`: {tasks, cost, unknown,
+    prices (meter.basis, #1135)}."""
     rs = [r for r in store.read_jsonl(runs_file())[0] if isinstance(r, dict) and results.api_row(r)
           and (r.get("ts") or 0) >= since]
-    known = [c for r in rs if (c := results.row_cost(r)) is not None]
-    return {"tasks": len(rs), "cost": round(sum(known), 6), "unknown": len(rs) - len(known)}
+    known = [(c, r) for r in rs if (c := results.row_cost(r)) is not None]
+    return {"tasks": len(rs), "cost": round(sum(c for c, _ in known), 6), "unknown": len(rs) - len(known),
+            "prices": meter.basis(results.row_basis(r) for c, r in known if c)}
 
 
 def _wait(task: store.Task) -> tuple[dict, int]:

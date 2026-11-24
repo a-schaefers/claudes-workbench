@@ -1304,10 +1304,14 @@
       const r = Number(x.toPrecision(2))
       return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
     }
+    // ≈: at the catalog's prices, an estimate, unless the user set the model's (wb model price, #1135)
+    const est = v => ((v.prices || 'catalog') === 'catalog' && v.cost ? '≈' : '') + usd(v.cost)
+    const note = a.cost ? ({ catalog: 'catalog prices', yours: 'your prices' })[a.prices || 'catalog'] : ''
     const provs = Object.entries(a.by_provider || {}).filter(([, v]) => v.tasks > v.unknown + (v.plan || 0))
-      .sort((x, y) => y[1].cost - x[1].cost).map(([p, v]) => `${(a.names || {})[p] || p} ${usd(v.cost)}`)
+      .sort((x, y) => y[1].cost - x[1].cost).map(([p, v]) => `${(a.names || {})[p] || p} ${est(v)}`)
     const known = a.tasks - a.unknown - (a.plan || 0)
-    const parts = [known ? `${usd(a.cost)}${provs.length ? ` (${provs.join(', ')})` : ''}` : '',
+    const inside = [provs.join(', '), note].filter(Boolean).join('; ')
+    const parts = [known ? `${est(a)}${inside ? ` (${inside})` : ''}` : '',
       a.unknown ? `${a.unknown} with no price` : '', a.plan ? `${a.plan} on plan usage` : ''].filter(Boolean)
     return `API models: ${a.tasks} task${a.tasks === 1 ? '' : 's'}, ${parts.join(', ')}.`
   }

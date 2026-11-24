@@ -1354,6 +1354,13 @@ def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
     config = {k: v for k, v in entry.items() if k not in ("free", "cloud")}
     if isinstance(config.get("limit"), dict):  # the catalog's own: wb models --api shows its window (#1026)
         over = {**over, "catalog_limit": dict(config["limit"])}
+    over.pop("cost", None)  # a provider's entry has none: only the model's own (below)
+    # the user's own prices (wb model price, models.json `cost`): the catalog's ran about 2x
+    # DeepInfra's bill, and every figure with it (#1135, 2026-11-23). Kept in config, so the meter
+    # and the task's catalog.json (catalog_doc) price alike; the catalog's in `catalog_cost`
+    if (mine := own_cost((extra.get(mid) or {}).get("cost"))) is not None:
+        over = {**over, "catalog_cost": config.get("cost"), "cost": mine}
+        config = {**config, "cost": mine}
     config = api_limits(config)
     return Model(id=mid, provider=pid, name=str(entry.get("name") or mid.split("/", 1)[1]),
                  base_url=str(prov.get("api") or ""), engine="api",
@@ -1362,6 +1369,29 @@ def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
                  key=str(prov.get("key") or ("none" if entry.get("free") else "")),
                  free=bool(entry.get("free")),
                  package=str(prov.get("package") or ""))
+
+
+PRICE_KEYS = ("input", "output")  # per million tokens; cache read and write go in `cache`
+
+
+def own_cost(v) -> list | None:
+    """models.json's `cost` for a model (wb model price, #1135) as the catalog's rows, or None
+    when it isn't one: [{input, output, cache?: {read?, write?}}], every price a number >= 0."""
+    if not (isinstance(v, list) and len(v) == 1 and isinstance(v[0], dict)):
+        return None
+    r, ok = v[0], lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0  # noqa: E731
+    cache = r.get("cache", {})
+    if not all(ok(r.get(k)) for k in PRICE_KEYS) or not isinstance(cache, dict) \
+            or set(cache) - {"read", "write"} or not all(map(ok, cache.values())) \
+            or set(r) - {*PRICE_KEYS, "cache"}:
+        return None
+    return [{**{k: float(r[k]) for k in PRICE_KEYS},
+             **({"cache": {k: float(x) for k, x in cache.items()}} if cache else {})}]
+
+
+def own_price(m: Model) -> bool:
+    """Whether ``m`` is priced at the user's own prices (wb model price), not the catalog's."""
+    return getattr(m, "kind", "gpu") == "api" and "cost" in (getattr(m, "extra", None) or {})
 
 
 def hosted(fresh: bool = False) -> dict[str, Model]:

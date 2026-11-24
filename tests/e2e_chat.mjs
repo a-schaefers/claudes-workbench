@@ -363,11 +363,14 @@ async function run(engine, device) {
     // energy's cost still has none (#845)
     appendFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted', kind: 'api', provider: 'deepseek',
         model: 'deepseek/deepseek-flash', api: { cost: 0.42, source: 'opencode' } }) + '\n')
+    // #1135: at the catalog's prices a figure is an estimate (≈); at the user's own (wb model price) it isn't
+    appendFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted', kind: 'api', provider: 'deepinfra',
+        model: 'deepinfra/acme-flash', api: { cost: 0.1, source: 'metered', prices: 'yours' } }) + '\n')
     await page.click('#gear')
     await until(async () => await page.locator('#settings').isHidden())
     await page.reload()
     await page.click('#gear')
-    await until(async () => (await page.textContent('#saved')).includes('API models: 1 task, $0.42 (deepseek $0.42).'))
+    await until(async () => (await page.textContent('#saved')).includes('API models: 2 tasks, ≈$0.52 (deepseek ≈$0.42, deepinfra $0.10; catalog prices).'))
     if (!(await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18. API')) throw new Error(await page.textContent('#saved'))
     writeFileSync(env.WB_SAVINGS, '{}')  // no price again, for the next engine
     // #101: the badge, its number and its words, legible at phone width

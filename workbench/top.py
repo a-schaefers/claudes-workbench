@@ -22,9 +22,9 @@ import threading
 import time
 from pathlib import Path
 
-from . import hardware, models, router, stats, store
+from . import hardware, meter, models, router, stats, store
 from .transcript import plain
-from .savings import usd
+from .savings import money
 
 EVERY = 2          # seconds between ticks without stats.json `every`
 PROBE_EVERY = 5    # seconds between asks of the model servers (/api/ps, /api/tags, /v1/models, /metrics)
@@ -434,6 +434,7 @@ class Top:
         spend = results.live_spend(mid, st, self.files.step_cost(d / "events.jsonl"))
         if spend is not None:
             out["spend"] = spend
+            out["prices"] = results.live_basis(st)  # its `≈` unless at the user's prices (#1135)
         if st.get("phase") == "queued":
             out["waits"] = f"a {pid} slot"
         return out
@@ -725,7 +726,8 @@ def _lines(snap: dict, fold: int = 0) -> list[list[tuple[str, str]]]:
             row.append(("", ctx))
         if r.get("via") == "api":  # its provider and its spend (#1022): no GPU of ours
             row.append(("", f"  API {p(r.get('provider') or '?')}"
-                        + (f" · {usd(r['spend'])}" if isinstance(r.get("spend"), (int, float)) else "")
+                        + (f" · {money(r['spend'], r.get('prices', meter.CATALOG))}"
+                           if isinstance(r.get("spend"), (int, float)) else "")
                         + (f" · waits for {p(r['waits'])}" if r.get("waits") else "")))
         out.append(row)
         if r.get("last"):

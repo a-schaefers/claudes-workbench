@@ -75,7 +75,8 @@ the change to look for, and the test it must pass. A model you add: offer an ove
 `wb bench run --model <id>` before its first real task.
 
 **API roles in the check.** For each role on API, `wb scout`'s API section gives its model's
-record (tasks, accepted, paid a task, rate-limited rounds) and the week's spend beside the day cap,
+record (tasks, accepted, paid a task, rate-limited rounds) and the week's spend beside the day cap
+(`≈`: at the catalog's prices, an estimate; `wb model price` only if the user finds it off their bill),
 and a count of each connected provider's models. Look up the same providers' newer or cheaper
 models and any price change on the providers' own pages, and whether thinking would pay for
 `significant` from its record. Recommend in chat only: changing a role is the user's, in the

@@ -18031,7 +18031,7 @@ class DynamicWorkflows(Base):
         self.assertTrue(out.startswith("started fan-docs on deepseek/deepseek-flash (API) · branch "), out)
         # "you": the dialog's yes was the user's (routes.said: only the user sets a role)
         self.assertIn(f"\nmodel: deepseek/deepseek-flash · API (DeepSeek) · writing role, set by you {day} · "
-                      "thinking off · today $0.00 of $5\n", out)  # meter.tail (#1019)
+                      "thinking off · today $0.00 of $5 (catalog prices)\n", out)  # meter.tail (#1019, #1135)
         self.assertIn("note: 3 tasks run on deepseek's API; this task waits as queued for a slot", out)
         self.assertNotIn("GPU", out)                          # never the GPU's wait, nor its notes
         got = threading.Event()
@@ -31678,6 +31678,7 @@ class RateLimits(Base):
 SPEND_M, SPEND_FREE, SPEND_NONE, SPEND_GO = ("meterco/priced-1", "meterco/free-1", "meterco/noprice-1",
                                              "opencode-go/plan-1")
 SPEND_TIER = "meterco/tiered-1"  # dearer past 100K of context, as Anthropic's long-context price
+SPEND_FLASH = "meterco/flash-1"  # #1135: the catalog's 0.2/0.6, where the provider billed 0.098/0.294
 SPEND_CATALOG = [
     {"id": i.split("/", 1)[1], "providerID": i.split("/", 1)[0], "package": "@opencode/ai/providers/openai-compatible",
      "settings": {"baseURL": "https://api.meterco.example/v1"}, "capabilities": {"tools": True},
@@ -31688,7 +31689,8 @@ SPEND_CATALOG = [
                      (SPEND_GO, {"cost": [{"input": 1, "output": 2, "cache": {"read": 0, "write": 0}}]}),
                      (SPEND_TIER, {"cost": [{"input": 1, "output": 5, "cache": {"read": 0.1, "write": 1.25}},
                                             {"input": 2, "output": 10, "cache": {"read": 0.2, "write": 2.5},
-                                             "tier": {"type": "context", "size": 100000}}]}))]
+                                             "tier": {"type": "context", "size": 100000}}]}),
+                     (SPEND_FLASH, {"cost": [{"input": 0.2, "output": 0.6, "cache": {"read": 0.006, "write": 0}}]}))]
 
 
 class ApiSpend(Base):
@@ -31802,7 +31804,7 @@ class ApiSpend(Base):
         self.spent(3.0)
         self.spent(2.03)
         self.spent(9.0, day="2000-01-01")                        # another day's: not today's
-        for model, said in ((SPEND_M, f"{SPEND_M}: API spend today is $5.03 of the $5 day cap (it "
+        for model, said in ((SPEND_M, f"{SPEND_M}: API spend today is ≈$5.03 of the $5 day cap (it "
                                       "resets at local midnight). Ask the user: a higher cap (wb route cap "
                                       "<usd>), the role on the GPU (wb route <role> gpu), or tomorrow"),
                             (SPEND_NONE, f"{SPEND_NONE}: OpenCode's catalog gives no price for it, so the "
@@ -31816,7 +31818,7 @@ class ApiSpend(Base):
             self.assertFalse(store.Task("t-cap").dir.exists())
         m = runner.models.lookup(SPEND_M)
         self.assertTrue(self.meter.refusal(m, "trivial").startswith(
-            "trivial role: API spend today is $5.03 of the $5 day cap"))
+            "trivial role: API spend today is ≈$5.03 of the $5 day cap"))
         with mock.patch.object(cli, "spawn_runner"):          # a GPU model starts as ever
             self.assertIn("started t-gpu", self.start("t-gpu", "ok"))
         self.assertFalse(task_rows := self.rows("t-gpu"), task_rows)
@@ -31862,7 +31864,7 @@ class ApiSpend(Base):
         self.spent(0.12)
         self.spent(4.0, day="2000-01-01")
         m = runner.models.lookup(SPEND_M)
-        self.assertEqual(self.meter.tail(m), " · today $0.42 of $5")
+        self.assertEqual(self.meter.tail(m), " · today ≈$0.42 of $5 (catalog prices)")  # #1135
         self.assertEqual(self.meter.tail(runner.models.lookup("ollama/mimo-v2.6:9b-q8_0")), "")
 
     def test_the_spend_guard_stops_the_round_within_a_tick_of_the_crossing_step(self):
@@ -31879,7 +31881,7 @@ class ApiSpend(Base):
         st = task.status
         self.assertEqual(st["phase"], "stuck")
         self.assertEqual(len(self.rows("t-guard", "step")), 3)  # stopped at the crossing step
-        why = "the day's API spend cap is reached: $5.30 of $5 today"
+        why = "the day's API spend cap is reached: ≈$5.30 of $5 today"
         self.assertEqual(st["last"], why)
         self.assertEqual(calls[:2], [("close", why), ("stop", None)])  # the keyhole refuses first
         (notice,) = self.notices("t-guard", "stuck")
@@ -31887,7 +31889,7 @@ class ApiSpend(Base):
         from workbench import results
         self.assertNotIn(notice["cause"], results.THE_STEP)       # the slice isn't shrunk for it
         self.assertTrue(notice["text"].startswith(
-            "t-guard stopped: the day's API spend cap is reached ($5.30 of $5 today). Its work so far is "
+            "t-guard stopped: the day's API spend cap is reached (≈$5.30 of $5 today; catalog prices). Its work so far is "
             "in the worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb resume "
             "t-guard; or the role on the GPU (wb route significant gpu) for the next tasks, with wb takeover "
             "t-guard or wb discard t-guard for this one (resume keeps its API model)."))
@@ -31949,8 +31951,8 @@ class ApiSpend(Base):
         self.assertEqual(len(self.rows(kind="checkin")), 1)
         said = [n for t in ("t-half1", "t-half2", "t-half3") for n in self.notices(t, "checkin")]
         self.assertEqual([n["task"] for n in said], ["t-half2"])
-        self.assertEqual(said[0]["text"], "API spend today has passed half the day cap: $1.20 of $2 "
-                                          "(t-half2 $0.60 so far). Nothing to do unless the user wants to change it.")
+        self.assertEqual(said[0]["text"], "API spend today has passed half the day cap: ≈$1.20 of $2 "
+                                          "(t-half2 ≈$0.60 so far; catalog prices). Nothing to do unless the user wants to change it.")
         self.assertEqual(self.rows(kind="checkin")[0]["usd_today"], 1.2)
 
     def test_a_plans_tokens_are_its_usage_never_dollars_nor_a_spend_stop(self):
@@ -31996,6 +31998,53 @@ class ApiSpend(Base):
                                                   "output_tokens_details": {"reasoning_tokens": 5}}),
                          {"in": 20, "cache_read": 30, "cache_write": 0, "out": 15, "reasoning": 5})
 
+    def test_costs_are_catalog_estimates_until_the_user_sets_the_models_prices_and_clear_brings_the_estimate_back(self):
+        # #1135 (2026-11-23): the catalog priced DeepInfra's flash model at 0.2/0.6 where DeepInfra
+        # billed 0.098/0.294, so every figure ran 2x high and said nothing of being an estimate
+        from workbench import models, results, savings
+        a_million = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
+
+        def task_at(name, info_cost):
+            """A task's response metered by the keyhole, then its round's export at OpenCode's
+            figure (``info_cost``): its ledger row, its results row's line and its round report's."""
+            task = self.api_task(name, SPEND_FLASH)
+            m = models.lookup(SPEND_FLASH)
+            mt = self.meter.for_task(task, m)
+            mt.begin(1)
+            mt.on_usage(a_million)
+            mt.end_round({"s1": {"info": {"cost": info_cost}}})
+            (row,) = self.rows(name)                      # OpenCode agrees: no reconcile row
+            line = savings.api_line({"kind": "api", "provider": "meterco", "model": SPEND_FLASH,
+                                     "api": results.api_usage(task)})
+            return m, row, line, runner._spend_part(task)
+
+        out = run_wb("model", "price", SPEND_FLASH, "--input", "0.098", "--output", "0.294", "--cache-read", "0.00294")
+        self.assertIn("your prices, $0.098 in / $0.294 out / $0.00294 cache read per 1M tokens", out)
+        m, row, line, report = task_at("t-mine", 0.392)
+        self.assertEqual((round(row["usd"], 9), row.get("prices")), (0.392, "yours"))
+        self.assertEqual(line, "paid meterco $0.39 (meterco/flash-1, your prices)")
+        self.assertEqual(report, " · $0.39 so far (your prices)")
+        self.assertEqual(self.meter.tail(m), " · today $0.39 of $100 (your prices)")
+        self.assertIn("$0.098/$0.294 per 1M in/out, your prices", run_wb("models", "--api", "flash"))
+        runner.CURRENT["keyhole"] = types.SimpleNamespace(task=store.Task("t-mine"), model=m)
+        catalog = json.loads(runner.write_catalog(store.Task("t-mine")).read_text())  # OPENCODE_MODELS_PATH's
+        self.assertEqual(catalog["meterco"]["models"]["flash-1"]["cost"]["text"],
+                         {"input": {"price": 0.098, "cache": {"read": 0.00294}}, "output": {"price": 0.294}})
+
+        self.assertIn("back to the catalog's prices", run_wb("model", "price", SPEND_FLASH, "--clear"))
+        m, row, line, report = task_at("t-est", 0.8)
+        self.assertEqual((round(row["usd"], 9), row.get("prices")), (0.8, None))
+        self.assertEqual(line, "paid meterco ≈$0.80 (meterco/flash-1, catalog prices)")
+        self.assertEqual(report, " · ≈$0.80 so far (catalog prices)")
+        self.assertEqual(self.meter.tail(m), " · today ≈$1.19 of $100 (catalog prices)")  # one estimate in it
+        self.assertIn("$0.2/$0.6 per 1M in/out, catalog prices", run_wb("models", "--api", "flash"))
+        week = savings.api_totals([{"kind": "api", "provider": "meterco", "ts": time.time(),
+                                    "api": results.api_usage(store.Task(n))} for n in ("t-mine", "t-est")])
+        self.assertEqual(savings.api_summary(week), "api: 2 task(s) · ≈$1.19 (meterco ≈$1.19; catalog prices)")
+        self.assertIn("by day: ", savings.api_report(week, "week", None, savings.spent()))
+        self.assertIn("≈$1.19 today (the day ledger: open tasks and bench replays in, catalog prices)",
+                      savings.api_report(week, "week", None, savings.spent()))
+
     def test_the_keyholes_room_refuses_a_request_that_could_pass_the_cap(self):
         self.cap(5)
         self.spent(4.0)
@@ -32007,7 +32056,7 @@ class ApiSpend(Base):
         self.assertLess(mt.room(body, 4000), 0)                 # 1000 tokens at $5000/M: $5
         self.assertEqual(task.status["api_stop"]["guard"], "spend")
         self.assertTrue(self.meter.stop_reason(task).startswith(
-            "the day's API spend cap is reached: $4 of $5 today, and its next request could cost up to $5"))
+            "the day's API spend cap is reached: ≈$4 of $5 today, and its next request could cost up to $5"))
         out = {"stuck": None, "guard": None}
         runner._spend_guard(task, out)
         self.assertEqual(out["guard"], "spend")
@@ -32143,7 +32192,7 @@ class ApiSpend(Base):
                   mock.patch.object(cli, "spawn_runner") as spawned):
                 run_wb(*args)
             self.assertEqual(e.exception.code, 3, args)
-            self.assertIn("API spend today is $6.", err.getvalue())
+            self.assertIn("API spend today is ≈$6.", err.getvalue())
             self.assertIn("day cap", err.getvalue())
             spawned.assert_not_called()
             got = store.Task("t-cap").status
@@ -32161,7 +32210,7 @@ class ApiSpend(Base):
         task = self.api_task("t-goon-sr", SPEND_M, "ok", "--test", TEST_CMD, "--self-review", FAKE_STEP_IN="100")
         with mock.patch.object(runner, "_spend_guard"):
             runner.drive(task)
-        why = "the day's API spend cap is reached: $1.10 of $1 today"
+        why = "the day's API spend cap is reached: ≈$1.10 of $1 today"
         self.assertEqual((task.status["phase"], task.status["guard"]), ("stuck", "spend"))
         self.assertEqual(calls, [("close", why)])
         (notice,) = self.notices("t-goon-sr", "stuck")
@@ -32180,7 +32229,7 @@ class ApiSpend(Base):
         task = self.api_task("t-goon-full", SPEND_M, "ok", FAKE_STEP_IN="100")
         with mock.patch.object(runner, "_spend_guard"), mock.patch.object(runner, "run_round", full):
             runner.drive(task)
-        why = "the day's API spend cap is reached: $1.60 of $1 today"
+        why = "the day's API spend cap is reached: ≈$1.60 of $1 today"
         self.assertEqual((task.status["phase"], task.status["guard"], task.status["handovers"]),
                          ("stuck", "spend", 1))
         self.assertEqual(calls, [("close", why)])
@@ -32218,7 +32267,7 @@ class ApiSpend(Base):
                  "outcome": "accepted", "task": f"p{i}", "api": {"cost": 0.5, "source": "meter"}}
                 for i in range(3)]
         rows = paid + [{**r, "model": SPEND_M, "ts": store.now()} for r in nothing]
-        self.assertEqual(results.paid_cell(rows), "$0.50")                   # not ~$0.30
+        self.assertEqual(results.paid_cell(rows), "≈$0.50")                  # not ~$0.30
         self.assertEqual(results.paid_cell(nothing), "?")
         self.assertEqual(stats._kind_stats(rows)["paid"], 0.5)
         self.assertNotIn("paid", stats._kind_stats(nothing))
@@ -32265,7 +32314,7 @@ class ApiSpend(Base):
         self.assertEqual((u["source"], u["plan"], u["cost"]), ("plan", "ollama-cloud", None))
         plan = {"kind": "api", "api": {"cost": None, "source": "plan", "plan": "ollama-cloud"}}
         self.assertEqual(results.paid_cell([plan, plan]), "plan")             # not `?`
-        self.assertEqual(results.paid_cell([plan, {"kind": "api", "api": {"cost": 0.2}}]), "$0.20")
+        self.assertEqual(results.paid_cell([plan, {"kind": "api", "api": {"cost": 0.2}}]), "≈$0.20")
 
 
 class ApiSpendKeyhole(_KeyholeTest):
@@ -33347,10 +33396,11 @@ class ApiStats(Base):
         self.booked(2.0, now, task="open-one", provider="deepinfra")
         self.rows(self.api_row(cost=3.0, ts=now, task="night", provider="deepinfra"))
         out = run_wb("savings", "--api").splitlines()
-        self.assertEqual(out[0], "api, the last 7 days: 1 task(s) closed, $3.00")
-        self.assertEqual(out[2], "  spent: $5.00, $2.00 today (the day ledger: open tasks and bench replays in)")
+        self.assertEqual(out[0], "api, the last 7 days: 1 task(s) closed, ≈$3.00 at catalog prices")  # #1135
+        self.assertEqual(out[2], "  spent: ≈$5.00, ≈$2.00 today (the day ledger: open tasks and bench replays in, "
+                                 "catalog prices)")
         yesterday, today = meter.day(now - 86400)[5:], meter.day(now)[5:]
-        self.assertEqual(out[3], f"  by day: {yesterday} $3.00 · {today} $2.00")
+        self.assertEqual(out[3], f"  by day: {yesterday} ≈$3.00 · {today} ≈$2.00")
         j = json.loads(run_wb("savings", "--api", "--json"))["spent"]
         self.assertEqual((j["usd"], j["today"], j["by_provider"]), (5.0, 2.0, {"deepinfra": 5.0}))
         self.assertEqual(j["today"], cli._spend_today()["usd"])            # the pane's figure
@@ -33366,7 +33416,7 @@ class ApiStats(Base):
         self.assertEqual(savings.score(both), savings.score(alone))
         out = run_wb("savings").splitlines()
         self.assertEqual(out[0], gpu_line)               # the GPU line's saved unchanged
-        self.assertEqual(out[1], "api: 1 task(s) · $0.42 (deepseek $0.42) · claude 56K · "
+        self.assertEqual(out[1], "api: 1 task(s) · ≈$0.42 (deepseek ≈$0.42; catalog prices) · claude 56K · "
                                  "writing it yourself ~59K (estimate)")
         self.assertIsNone(savings.of_row(self.api_row()))
 
@@ -33383,7 +33433,7 @@ class ApiStats(Base):
         self.assertEqual(savings.line(self.api_row(cost=None, source="unknown")),
                          "claude: 56K · writing it yourself: ~59K (estimate) · paid: unknown (no price for this model)")
         self.assertEqual(savings.line(self.api_row()), "claude: 56K · writing it yourself: ~59K (estimate) · "
-                                                      "paid deepseek $0.42 (deepseek/flash)")
+                                                      "paid deepseek ≈$0.42 (deepseek/flash, catalog prices)")
 
     def test_wb_savings_api_says_the_week_by_provider_and_day_with_trials_and_bench_replays_in(self):
         from workbench import bench
@@ -33398,15 +33448,15 @@ class ApiStats(Base):
             self.booked(usd_, now - ago * 86400)
         out = run_wb("savings", "--api", "--week").splitlines()
         # the providers once, on their own line (#1022's review: the header said them too)
-        self.assertEqual(out[0], "api, the last 7 days: 3 task(s) closed, $1.27 (incl. 1 trial)")
-        self.assertEqual(out[1], "  by provider: deepseek $0.84 (2) · anthropic $0.43 (1)")
-        self.assertEqual(out[2], "  spent: $1.57, $0.73 today (the day ledger: open tasks and bench "
-                                 "replays in)")
+        self.assertEqual(out[0], "api, the last 7 days: 3 task(s) closed, ≈$1.27 at catalog prices (incl. 1 trial)")
+        self.assertEqual(out[1], "  by provider: deepseek ≈$0.84 (2) · anthropic ≈$0.43 (1)")
+        self.assertEqual(out[2], "  spent: ≈$1.57, ≈$0.73 today (the day ledger: open tasks and bench "
+                                 "replays in, catalog prices)")
         self.assertTrue(out[3].startswith("  by day: "), out)
         self.assertEqual(out[3].count("$"), 3)
-        self.assertEqual(out[4], "  bench replays: $0.30 (1)")
+        self.assertEqual(out[4], "  bench replays: ≈$0.30 (1)")
         j = json.loads(run_wb("savings", "--api", "--week", "--json"))
-        self.assertEqual(j["by_provider"]["deepseek"], {"tasks": 2, "cost": 0.84, "unknown": 0})
+        self.assertEqual(j["by_provider"]["deepseek"], {"tasks": 2, "cost": 0.84, "unknown": 0, "prices": "catalog"})
         self.assertEqual(round(sum(j["spent"]["by_day"].values()), 2), 1.57)
         self.assertEqual((j["trials"], j["bench"]["cost"]), (1, 0.3))
         self.assertEqual(json.loads(run_wb("savings", "--json"))["api"]["tasks"], 3)
@@ -33423,11 +33473,11 @@ class ApiStats(Base):
         self.assertNotIn("local tok", out)
         lines = {x.split()[0]: x.split() for x in out.splitlines() if x.split() and "/" in x.split()[0]}
         self.assertEqual((lines[mimo][1], lines[mimo][-2]), ("gpu", "-"))
-        self.assertEqual((lines["deepseek/flash"][1], lines["deepseek/flash"][-2]), ("api", "$0.12"))
+        self.assertEqual((lines["deepseek/flash"][1], lines["deepseek/flash"][-2]), ("api", "≈$0.12"))  # #1135: an estimate
         self.assertEqual(lines["zai/flash"][-2], "?")
         self.assertEqual(lines["zen/flash"][-2], "~$0.20")
         self.assertTrue(all(len(x) <= 120 for x in out.splitlines() if x.startswith(("model ", "ollama/"))))
-        self.assertIn("api this week: 5 task(s), $0.44 (deepseek $0.24, zen $0.20), 2 with no price", out)
+        self.assertIn("api this week: 5 task(s), ≈$0.44 (deepseek ≈$0.24, zen ≈$0.20; catalog prices), 2 with no price", out)
 
     def test_a_served_model_other_than_the_one_asked_reaches_the_results_row(self):
         # #1122 (2026-11-23): only `served.by` reached the row, so a provider's swap was lost at close
@@ -33452,7 +33502,7 @@ class ApiStats(Base):
         out = run_wb("backlog", "night").splitlines()
         self.assertEqual(out[-2], "the batch: no GPU task to compare (API tasks are below, apart from "
                                   "the score)")
-        self.assertTrue(out[-1].startswith("api: 2 task(s) · $1.23 (deepinfra $1.23)"), out)
+        self.assertTrue(out[-1].startswith("api: 2 task(s) · ≈$1.23 (deepinfra ≈$1.23; catalog prices)"), out)
         j = json.loads(run_wb("backlog", "night", "--json"))
         self.assertEqual((j["totals"]["tasks"], j["totals"]["api"]["tasks"], j["totals"]["api"]["cost"]),
                          (0, 2, 1.23))
@@ -33569,7 +33619,7 @@ class ApiStats(Base):
         self.assertFalse({r["model"] for r in snap["rack"]} & {"deepseek/deepseek-flash"})
         self.assertFalse(any(str(t).startswith("api-") for r in snap["rack"] for t in r.get("tasks") or []))
         self.assertEqual([q["task"] for q in snap["queue"]], ["later"])
-        self.assertIn("API deepseek · $0.12", top.render(snap, 200, color=False))
+        self.assertIn("API deepseek · ≈$0.12", top.render(snap, 200, color=False))  # #1135: an estimate
 
     def test_a_gpu_only_stats_and_bench_table_read_as_before_and_never_cut_a_model_id(self):
         # wave 2's review: a GPU-only user's table gained `kind` and `paid`, renamed `size` and
@@ -33596,7 +33646,7 @@ class ApiStats(Base):
         from workbench import bench
         os.environ["FAKE_COST"] = "0.3"
         t = self.api_task("bench-x", {"session": "ses_b"}, bench={"case": "c"})
-        self.assertEqual(bench.paid(t), {"kind": "api", "paid": {"cost": 0.3, "source": "opencode"}})
+        self.assertEqual(bench.paid(t), {"kind": "api", "paid": {"cost": 0.3, "source": "opencode", "prices": "catalog"}})
         self.assertEqual(bench.paid(self.api_task("bench-g", via=None)), {})
         base = {"ts": store.now(), "run": "r1", "case": "c", "outcome": "passed", "rounds": 1, "minutes": 2,
                 "tok_in": 10, "tok_out": 5}
@@ -33619,11 +33669,11 @@ class ApiStats(Base):
             runner.drive(store.Task(task.name))
         first = lambda task: (task.dir / "rounds" / "1" / "summary.md").read_text().splitlines()[0]  # noqa: E731
         self.assertRegex(first(t), r" · local tokens \d+ in / \d+ out$")    # a GPU task: as before, no money
-        self.assertRegex(first(a), r" · agent tokens \d+ in / \d+ out · \$0\.\d\d so far$")
+        self.assertRegex(first(a), r" · agent tokens \d+ in / \d+ out · ≈\$0\.\d\d so far \(catalog prices\)$")
         (a.dir / "events.jsonl").write_text("")                     # no cost known, no price
         self.assertEqual(runner._spend_part(store.Task(a.name)), " · cost unknown")
         a.set_status(api={"usd": 0.2})                              # the meter's key (#1019)
-        self.assertEqual(runner._spend_part(store.Task(a.name)), " · $0.20 so far")
+        self.assertEqual(runner._spend_part(store.Task(a.name)), " · ≈$0.20 so far (catalog prices)")
 
     def test_a_step_event_keeps_opencodes_cost_and_the_cache_read_and_write_apart(self):
         from workbench import events
@@ -33849,7 +33899,7 @@ class ApiStats(Base):
             store.write_json(t.dir / "task.json", {**t.spec, "via": "api", "provider": "deepseek"})
         with mock.patch.object(bench, "_start_task", start):
             row = bench.replay(bench.cases()["t-src"], "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
-        self.assertEqual((row["kind"], row["paid"]), ("api", {"cost": 0.3, "source": "opencode"}))
+        self.assertEqual((row["kind"], row["paid"]), ("api", {"cost": 0.3, "source": "opencode", "prices": "catalog"}))
         gpu = bench.replay(bench.cases()["t-src"], "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
         self.assertNotIn("paid", gpu)
 
@@ -33920,7 +33970,7 @@ class RoleResolution(Base):
                           "said": said["said"], "said_ts": said["ts"]})
         day = time.strftime("%m-%d", time.localtime(said["ts"]))
         self.assertIn(f"\nmodel: deepseek/deepseek-flash · API (DeepSeek) · trivial role, set by you {day} · "
-                      "thinking off · today $0.00 of $5\n", out)  # with today's spend (meter.tail, #1019)
+                      "thinking off · today $0.00 of $5 (catalog prices)\n", out)  # with today's spend (meter.tail, #1019)
         self.assertTrue(out.startswith("started t-api on deepseek/deepseek-flash (API) · branch "), out)
         # the first API task in the repo for this provider: whose choice and where it goes (#1021's words)
         self.assertIn("\nnote: this task sends the repo, its spec, CLAUDE.md files", out)
@@ -34204,7 +34254,7 @@ class RoleResolution(Base):
         sp = store.Task("t-asked").spec
         self.assertEqual((sp["via"], sp["said"], sp["role"]), ("api", "asked for", "significant"))
         self.assertIn("\nmodel: deepseek/deepseek-v4-pro · API (DeepSeek) · asked for · thinking off · today $0.00 "
-                      "of $5\n", out)
+                      "of $5 (catalog prices)\n", out)
         self.assertIn(" to DeepSeek (asked for; data policy: ", out)  # the first-API note
 
     def test_a_model_that_left_the_catalog_mid_task_is_never_replaced(self):
@@ -34634,7 +34684,7 @@ class FirstRunApi(Base):
                                       "  deepseek/deepseek-flash  3 task(s) · 66% accepted"
                                       + " · ~$0.10/task · 1 rate-limited round(s)"])
         # the money over 7 days, beside the cap (the day ledger's, savings.spent, #1094)
-        self.assertIn("api spend, the last 7 days: $0.30 of $5/day at most (deepseek $0.30)", lines)
+        self.assertIn("api spend, the last 7 days: ≈$0.30 of $5/day at most (deepseek $0.30; catalog prices)", lines)
         at = lines.index("connected providers (models with tool calls)")
         self.assertEqual(lines[at + 1:], ["  anthropic: 1 (can't run: anthropic is signed in with OAuth)",
                                           "  bigrouter: 300", "  cloud: 0, 1 the catalog doesn't say (can't run: no key)",
@@ -34657,7 +34707,7 @@ class FirstRunApi(Base):
         _ledger_step(0.004, store.now() - 3600, "t-0")
         lines = cli.scout_api_lines()
         self.assertIn("  deepseek/deepseek-flash  1 task(s) · 100% accepted · ~$0.004/task", lines)
-        self.assertIn("api spend, the last 7 days: $0.004 of $5/day at most (deepseek $0.004)", lines)
+        self.assertIn("api spend, the last 7 days: ≈$0.004 of $5/day at most (deepseek $0.004; catalog prices)", lines)
         self.assertIn("$0.004", run_wb("savings", "--api"))
 
     def test_scouts_api_spend_is_the_day_ledgers_as_wb_savings_api_says_it(self):
@@ -34672,9 +34722,9 @@ class FirstRunApi(Base):
             "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 3.0, "source": "opencode"}})
         _ledger_step(3.0, now - 7200, "closed")
         _ledger_step(2.0, now - 60, "open-one")
-        self.assertIn("api spend, the last 7 days: $5.00 of $5/day at most (deepseek $5.00)",
+        self.assertIn("api spend, the last 7 days: ≈$5.00 of $5/day at most (deepseek $5.00; catalog prices)",
                       cli.scout_api_lines())
-        self.assertIn("  spent: $5.00,", run_wb("savings", "--api"))
+        self.assertIn("  spent: ≈$5.00,", run_wb("savings", "--api"))
 
     def test_scout_has_no_api_section_with_no_provider_and_no_api_role(self):
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
@@ -34722,7 +34772,8 @@ class SettingsRoles(Base):
             shown = json.loads(self.wb("route", "--json")[1])
         self.assertEqual((shown["busy"], shown["day_usd"]), ("wait", 5))
         self.assertEqual(shown["roles"]["trivial"]["api_status"]["why"], "API (DeepSeek)")
-        self.assertEqual(shown["spend_today"], {"usd": 0.47, "by_provider": {"deepseek": 0.42, "anthropic": 0.05}})
+        self.assertEqual(shown["spend_today"], {"usd": 0.47, "prices": "catalog",
+                                                "by_provider": {"deepseek": 0.42, "anthropic": 0.05}})
         p = shown["providers"]
         self.assertEqual(p["deepseek"], {"name": "DeepSeek", "key": "stored"})
         self.assertEqual((p["xenv"]["key"], p["xenv"]["why"]),
@@ -34730,7 +34781,8 @@ class SettingsRoles(Base):
         self.assertEqual(p["oauthco"]["key"], "oauth")
         self.assertIn("needs a key wb can hold outside the lane (an OAuth login)", p["oauthco"]["why"])
         ledger.unlink()
-        self.assertEqual(json.loads(self.wb("route", "--json")[1])["spend_today"], {"usd": 0, "by_provider": {}})
+        self.assertEqual(json.loads(self.wb("route", "--json")[1])["spend_today"],
+                         {"usd": 0, "prices": "catalog", "by_provider": {}})
 
     def test_with_keys_stored_and_no_catalog_read_yet_the_panes_settings_still_list_the_providers(self):
         # #1069 (audit 1 of 2.0): the pane reads only hosted.json, which only other commands
@@ -34967,7 +35019,7 @@ class BusyGpu(Base):
         self.assertNotIn("waits as queued", out)
         # wave 2's merge: the start line's spend part and the thinking read the busy path's model
         self.assertIn("model: deepseek/deepseek-flash · API (DeepSeek) · ", out)
-        self.assertIn(" · thinking off · today $0.00 of $5\n", out)
+        self.assertIn(" · thinking off · today $0.00 of $5 (catalog prices)\n", out)
         self.assertEqual((sp["thinking"], sp["opencode_model"].split("#")[0], sp["auto_fix"]),
                          ("off", "deepseek/deepseek-flash", cli.AUTO_FIX["api"]))
         self.assertIn("thinking_shown", sp)
@@ -35053,7 +35105,7 @@ class BusyGpu(Base):
         code, out, err = self.begin("t-capped", "--role", "trivial")
         self.assertEqual(code, 4, err)
         self.assertIn("note: the GPU is busy, and the trivial role's API model deepseek/deepseek-flash can't "
-                      "take it: trivial role: API spend today is $5 of the $5 day cap (it resets at local "
+                      "take it: trivial role: API spend today is ≈$5 of the $5 day cap (it resets at local "
                       "midnight)\n", out)
         self.assertNotIn("Ask the user", out)
         self.assertIn("Ask the user: a higher cap", cli.meter.refusal(runner.models.lookup("deepseek/deepseek-flash"),
@@ -35463,7 +35515,7 @@ class ApiCompat(Base):
         self.assertEqual(len(out), cli.API_LIST_MAX + 1)
         self.assertEqual(out[-1], "and 16 more: a longer text narrows it")
         self.assertEqual(out[0], f"opencode/deep-free  200K · free: {cli.FREE_NOTE}")
-        self.assertEqual(out[1], "openrouter/deepseek/deep-000  200K · $0.2/$0.6 per 1M in/out")
+        self.assertEqual(out[1], "openrouter/deepseek/deep-000  200K · $0.2/$0.6 per 1M in/out, catalog prices")
         self.assertEqual(out[1:-1], sorted(out[1:-1]))
         self.assertNotIn("acme/other", "\n".join(out))
         self.assertIn("no API model in OpenCode's catalog contains 'zzz'", run_wb("models", "--api", "zzz"))
