@@ -639,11 +639,16 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
     row = doc["roles"][role]
     if effective_via(doc, role) == "gpu":
         if row["gpu"] != AUTO:  # the user's pin: that model, never the router's other pick
-            try:
-                m = models.resolve(row["gpu"])
-            except KeyError as e:
-                raise Refused(f"{role} role: its GPU model {row['gpu']} isn't found ({str(e).strip(chr(34))}). "
-                              f"Ask the user: fix that, or let the router pick (wb route {role} --gpu auto)") from None
+            # by its exact id, as wb route stored it and its listing finds it: models.resolve's
+            # fragment match ran a retired qwen3:8b pin's role on qwen3:8b-q8_0, said as the pin,
+            # while wb route said not found (#1214, 2026-11-24)
+            found = models.discover()
+            m = found.get(row["gpu"])
+            if m is None:
+                known = ", ".join(found) or f"none ({models.why_none()})"
+                raise Refused(f"{role} role: its GPU model {row['gpu']} isn't found (not in OpenCode's config "
+                              f"now; known: {known}). Ask the user: fix that, or let the router pick "
+                              f"(wb route {role} --gpu auto)")
             return m, models.status(m), f"the {role} role's GPU model (wb route)", {"via": "gpu", "role": role}
         # the writing role ranks on its own record (#1025), a coding role on its size's: choose
         # reads that from the role, which also names it in the refusal's API choice (#1024)

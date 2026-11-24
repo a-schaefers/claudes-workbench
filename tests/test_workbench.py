@@ -36398,6 +36398,25 @@ class RoleResolution(Base):
                          ("ollama/qwen3.8-27b", "gpu", "the significant role's GPU model (wb route)"))
         self.assertIn("\nmodel: the significant role's GPU model (wb route)\n", out)
 
+    def test_a_pin_gone_from_the_config_exits_3_never_running_a_model_its_id_is_a_fragment_of(self):
+        # #1214 (2026-11-24): a pin retired for a longer tag (qwen3:8b for qwen3:8b-q8_0) ran its
+        # role on the longer one, said as the pin, while wb route said the pin wasn't found
+        self.set_role("significant", "--gpu", "qwen")
+        doc = json.loads(self.routes.read_text())
+        doc["roles"]["significant"]["gpu"] = "ollama/qwen3.8"   # only a fragment of ollama/qwen3.8-27b
+        self.routes.write_text(json.dumps(doc))
+        code, out, err = self.begin("t-gone")
+        self.assertEqual((code, out), (3, ""))
+        self.assertTrue(err.startswith("wb: significant role: its GPU model ollama/qwen3.8 isn't found (not in "
+                                       "OpenCode's config now; known: "), err)
+        self.assertIn("ollama/qwen3.8-27b", err)
+        self.assertTrue(err.endswith("Ask the user: fix that, or let the router pick (wb route significant "
+                                     "--gpu auto)\n"), err)
+        self.assertFalse(store.Task("t-gone").dir.exists())
+        code, out, err = self.wb("route", "--json")
+        self.assertEqual(code, 0, err)
+        self.assertIs(json.loads(out)["roles"]["significant"]["gpu_found"], False)   # the listing agrees
+
     def test_a_model_asked_for_keeps_its_gpu_way_and_an_api_one_says_it_was_asked_for(self):
         self.set_role("cap", "5")                              # an API start needs one (#1089)
         self.assertEqual(self.begin("t-mimo", "--model", "mimo")[0], 0)
