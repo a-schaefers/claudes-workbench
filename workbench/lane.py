@@ -8,10 +8,15 @@ and reading files when `--read` names what may be read (context.py: everything b
 credentials live; running a program reads it, so it must be readable too). Where the kernel can
 (ABI 9, ABI 6), it also refuses connecting to a UNIX socket made outside the lane (the session
 bus, the SSH and GPG agents: `--unix` names the places that may), an abstract socket, or a signal
-to a process outside it (the runner, other tasks, Claude Code). Listing directories and the network
-stay as they were. Landlock doesn't cover metadata: chmod, chown, utimes and xattrs on a file
-outside the lane still succeed. A write elsewhere fails with "Permission denied", and the agent
-asks Claude for the directory (`wb allow --path`). context.py decides the lane; OpenCode's own
+to a process outside it (the runner, other tasks, Claude Code). From ABI 4 it refuses a TCP connect
+to each `--deny-port` (context.deny_ports: local daemons that take commands, a debugger's port),
+on any address: Landlock only allows ports, so every other port gets a rule; its rule sees TCP
+sockets only, so a seccomp filter refuses making an MPTCP or SMC one then, and io_uring (which
+makes sockets past the filter), as a kernel without them does. Listing directories,
+binding and the rest of the network stay as they were. Landlock doesn't cover metadata: chmod,
+chown, utimes and xattrs on a file outside the lane still succeed. A write or a denied connect
+fails with "Permission denied", and the agent asks Claude for the directory (`wb allow --path`)
+or the port (`wb allow --port`). context.py decides the lane; OpenCode's own
 `external_directory` rule keeps its file tools to it as well.
 
 On macOS (#1194) the same entry point execs `/usr/bin/sandbox-exec` with a profile drawn fresh
@@ -31,6 +36,7 @@ round.
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import platform
 import shutil
@@ -44,7 +50,7 @@ import sys
 CREATE_RULESET, ADD_RULE, RESTRICT_SELF = 444, 445, 446
 UNIFIED = ("x86_64", "amd64", "i386", "i686", "aarch64", "arm64", "armv7l", "armv6l", "riscv64",
            "ppc64le", "ppc64", "s390x", "loongarch64")
-RULE_PATH_BENEATH = 1
+RULE_PATH_BENEATH, RULE_NET_PORT = 1, 2
 PR_SET_NO_NEW_PRIVS = 38
 PR_SET_PDEATHSIG = 1
 WRITE_FILE, READ_FILE, REMOVE_DIR, REMOVE_FILE = 1 << 1, 1 << 2, 1 << 4, 1 << 5
@@ -67,6 +73,24 @@ SEATBELT_SOCKETS = ("/private/var/run/mDNSResponder", "/private/var/run/syslog")
 SEATBELT_REFUSED = ("/usr/bin/sudo", "/usr/bin/su", "/usr/bin/login",
                     "/usr/libexec/security_authtrampoline", "/usr/bin/open", "/bin/launchctl",
                     "/usr/bin/osascript")
+CONNECT_TCP = 1 << 1                             # ABI 4: ruleset_attr.handled_access_net
+
+# seccomp, for the stream sockets Landlock's TCP rule doesn't see (#1197's review, 2026-11-24):
+# an MPTCP socket (protocol 262) connected to a denied port on Linux 7.2, ABI 10, and SMC's
+# hands its connect to a kernel TCP socket; io_uring makes sockets with no socket(2) to filter
+PR_SET_SECCOMP, SECCOMP_MODE_FILTER = 22, 2
+RET_ALLOW, RET_ERRNO = 0x7FFF0000, 0x00050000
+LD_ABS, JEQ, RET = 0x20, 0x15, 0x06              # BPF_LD|W|ABS, BPF_JMP|JEQ|K, BPF_RET|K
+AF_INET, AF_INET6, AF_SMC = 2, 10, 43
+IPPROTO_SMC, IPPROTO_MPTCP = 256, 262
+X86_64, X32 = 0xC000003E, 0x40000000           # x32's bit on x86_64's syscall numbers
+IO_URING_SETUP = 425                              # the same on every arch the unified table has
+# AUDIT_ARCH_* and socket(2)'s number on it, the compat ones too (a 32-bit program on a 64-bit
+# kernel). socketcall(2) (i386, ppc, s390) passes its arguments in memory, which seccomp can't
+# read: a 32-bit x86 program calling it still makes an MPTCP socket
+SOCKET_NR = {X86_64: (41, X32 | 41), 0x40000003: (359,), 0xC00000B7: (198,),
+             0x40000028: (281,), 0xC00000F3: (198,), 0xC0000102: (198,), 0xC0000015: (326,),
+             0x80000015: (326,), 0x00000014: (326,), 0x80000016: (359,), 0x00000016: (359,)}
 
 
 def _libc():
@@ -101,11 +125,12 @@ def held() -> bool:
 
 
 def restrict(writable: list[str], readable: list[str] | None = None,
-             unix: list[str] | None = None) -> int:
+             unix: list[str] | None = None, deny_ports: list[int] | None = None) -> int:
     """Forbid this process and its children every write outside `writable` (directories, and
     files such as /dev/null) and, given `readable`, reading a file outside it and `writable`;
-    connecting to a UNIX socket made outside the lane except beneath `unix`, and signalling a
-    process outside it. Returns the ABI used, 0 when Landlock isn't there."""
+    connecting to a UNIX socket made outside the lane except beneath `unix`, signalling a
+    process outside it, and connecting over TCP to a port of `deny_ports`. Returns the ABI
+    used, 0 when Landlock isn't there."""
     version = abi()
     libc = _libc()
     # Before Landlock: no-new-privileges holds on any Linux, so sudo is refused even where the
@@ -132,10 +157,18 @@ def restrict(writable: list[str], readable: list[str] | None = None,
     # 2026-11-16 audit). Sockets the lane's own processes make are theirs whatever the rules.
     if version >= 9:
         handled |= RESOLVE_UNIX
-    if version >= 6:  # handled_access_net stays 0: the network (the model servers) stays free
+    # TCP connect handled only with ports to refuse, each other port allowed by a rule of its
+    # own: Landlock lists the ports allowed, never those refused, so the agent's tests still
+    # reach the servers they start on any port (#1197, 2026-11-24: 65,530 rules and
+    # restrict_self took 0.05 s on ABI 10). Binding stays unhandled.
+    deny = {p for p in deny_ports or () if 0 <= p <= 65535} if version >= 4 else set()
+    net = CONNECT_TCP if deny else 0
+    if version >= 6:
         attr = ctypes.create_string_buffer(
-            struct.pack("=QQQ", handled, 0, SCOPE_ABSTRACT_UNIX | SCOPE_SIGNAL), 24)
+            struct.pack("=QQQ", handled, net, SCOPE_ABSTRACT_UNIX | SCOPE_SIGNAL), 24)
         size = 24
+    elif version >= 4:  # handled_access_net, and no `scoped` before ABI 6
+        attr, size = ctypes.create_string_buffer(struct.pack("=QQ", handled, net), 16), 16
     else:
         attr, size = ctypes.c_uint64(handled), 8
     fd = libc.syscall(CREATE_RULESET, ctypes.byref(attr), ctypes.c_size_t(size), ctypes.c_uint32(0))
@@ -164,11 +197,86 @@ def restrict(writable: list[str], readable: list[str] | None = None,
                     raise OSError(ctypes.get_errno(), f"landlock_add_rule {path}")
             finally:
                 os.close(pfd)
+        if net:
+            _allow_ports(libc, fd, deny)
         if libc.syscall(RESTRICT_SELF, fd, ctypes.c_uint32(0)) < 0:
             raise OSError(ctypes.get_errno(), "landlock_restrict_self")
     finally:
         os.close(fd)
+    if net:  # else a denied port is a socket(…, 262) away
+        refuse_unseen_streams(libc)
     return version
+
+
+def stream_filter() -> bytes:
+    """The seccomp program refusing what Landlock's TCP rule doesn't see: an MPTCP or SMC socket
+    on IPv4 or IPv6 gets EPROTONOSUPPORT (as on a kernel without them: curl --mptcp and the
+    rest fall back to TCP, which the rule covers), an AF_SMC one EAFNOSUPPORT, io_uring_setup
+    ENOSYS (as where it's off). Everything else is allowed."""
+    big = sys.byteorder == "big"
+    arg = lambda i: 16 + 8 * i + (4 if big else 0)  # noqa: E731 an int argument's low word
+    prog: list[tuple] = [("ld", 4)]                 # seccomp_data.arch
+    arches = sorted(SOCKET_NR)
+    prog += [("jeq", a, f"arch{a}") for a in arches] + [("ret", RET_ALLOW)]
+    for a in arches:
+        prog += [("label", f"arch{a}"), ("ld", 0)]   # seccomp_data.nr
+        prog += [("jeq", nr, "socket") for nr in SOCKET_NR[a]]
+        prog += [("jeq", nr, "nosys") for nr in (IO_URING_SETUP, X32 | IO_URING_SETUP)[
+            :2 if a == X86_64 else 1]]
+        prog.append(("ret", RET_ALLOW))
+    prog += [("label", "socket"), ("ld", arg(0)), ("jeq", AF_SMC, "noaf"),
+             ("jeq", AF_INET, "proto"), ("jeq", AF_INET6, "proto"), ("ret", RET_ALLOW),
+             ("label", "proto"), ("ld", arg(2)), ("jeq", IPPROTO_MPTCP, "noproto"),
+             ("jeq", IPPROTO_SMC, "noproto"), ("ret", RET_ALLOW),
+             ("label", "noproto"), ("ret", RET_ERRNO | errno.EPROTONOSUPPORT),
+             ("label", "noaf"), ("ret", RET_ERRNO | errno.EAFNOSUPPORT),
+             ("label", "nosys"), ("ret", RET_ERRNO | errno.ENOSYS)]
+    at, n = {}, 0
+    for op in prog:
+        if op[0] == "label":
+            at[op[1]] = n
+        else:
+            n += 1
+    out, n = [], 0
+    for op in prog:
+        if op[0] == "label":
+            continue
+        n += 1
+        if op[0] == "ld":
+            out.append(struct.pack("=HBBI", LD_ABS, 0, 0, op[1]))
+        elif op[0] == "ret":
+            out.append(struct.pack("=HBBI", RET, 0, 0, op[1]))
+        else:  # true: the label, relative to the next instruction; false: the next
+            jt = at[op[2]] - n
+            if not 0 <= jt < 256:
+                raise ValueError(f"seccomp jump {jt}")
+            out.append(struct.pack("=HBBI", JEQ, jt, 0, op[1]))
+    return b"".join(out)
+
+
+def refuse_unseen_streams(libc) -> None:
+    """Install stream_filter on this process and what it execs (no-new-privileges is set)."""
+    code = stream_filter()
+    buf = ctypes.create_string_buffer(code, len(code))
+
+    class Prog(ctypes.Structure):  # struct sock_fprog
+        _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
+    prog = Prog(len(code) // 8, ctypes.addressof(buf))
+    mode = ctypes.c_ulong(SECCOMP_MODE_FILTER)
+    if libc.prctl(PR_SET_SECCOMP, mode, ctypes.byref(prog), 0, 0) < 0:
+        raise OSError(ctypes.get_errno(), "seccomp")
+
+
+def _allow_ports(libc, fd: int, deny: set[int]) -> None:
+    """A connect rule for every TCP port but those of `deny`, one buffer reused (speed)."""
+    rule = ctypes.create_string_buffer(16)  # landlock_net_port_attr: allowed_access, port
+    add, flags = libc.syscall, ctypes.c_uint32(0)
+    for port in range(65536):
+        if port in deny:
+            continue
+        struct.pack_into("=QQ", rule, 0, CONNECT_TCP, port)
+        if add(ADD_RULE, fd, RULE_NET_PORT, rule, flags) < 0 and port:  # 0: no connect's
+            raise OSError(ctypes.get_errno(), f"landlock_add_rule port {port}")
 
 
 def gaps(version: int | str) -> list[str]:
@@ -184,6 +292,9 @@ def gaps(version: int | str) -> list[str]:
         out.append("moving or hard-linking a file between directories fails even inside the "
                    "lane (\"Invalid cross-device link\"; most tools fall back to a copy) before "
                    "ABI 2 (Linux 5.19)")
+    if 0 < version < 4:
+        out.append("the agent can connect to local daemons' TCP ports (a Docker API, adb, a "
+                   "debugger's port) before ABI 4 (Linux 6.7)")
     if 0 < version < 6:
         out.append("the agent can signal the user's other processes before ABI 6 (Linux 6.12)")
     if 0 < version < 9:
@@ -203,16 +314,18 @@ SEATBELT_GAPS = (
     "the directory",
     "macOS's own services stay reachable over Mach (a program can still ask LaunchServices to "
     "start an app outside the lane; open, launchctl and osascript are refused by name)",
-    "TCP isn't refused, as on Linux")
+    "a TCP connect to a local daemon's port isn't refused, as Linux refuses it from Landlock ABI 4 "
+    "(#1197)")
 
 
 def wrap(writable: list[str] | None, cmd: list[str],
          readable: list[str] | None = None, unix: list[str] | None = None,
          reads: list[tuple[str, str]] | None = None,
-         deny_write: list[str] | None = None) -> list[str]:
+         deny_write: list[str] | None = None, deny_ports: list[int] | None = None) -> list[str]:
     """The command that runs `cmd` inside the lane; `cmd` itself when there is no lane.
     `readable` is Landlock's read lane, `reads` Seatbelt's: ("deny" | "allow", path) in order;
-    `deny_write` Seatbelt's places refused inside `writable` (Landlock's lane is split instead)."""
+    `deny_write` Seatbelt's places refused inside `writable` (Landlock's lane is split instead);
+    `deny_ports` the TCP ports Landlock refuses connecting to from ABI 4 (#1197)."""
     if writable is None:
         return cmd
     return [sys.executable, "-I", os.path.abspath(__file__),
@@ -221,7 +334,8 @@ def wrap(writable: list[str] | None, cmd: list[str],
             *(["--reads"] if readable is not None else []),
             *(a for p in readable or [] for a in ("--read", p)),
             *(a for e, p in reads or [] for a in ("--hide" if e == "deny" else "--show", p)),
-            *(a for p in unix or [] for a in ("--unix", p)), "--", *cmd]
+            *(a for p in unix or [] for a in ("--unix", p)),
+            *(a for p in sorted(deny_ports or ()) for a in ("--deny-port", str(p))), "--", *cmd]
 
 
 def profile(writable: list[str], reads: list[tuple[str, str]] | None = None,
@@ -348,8 +462,9 @@ def main(argv: list[str]) -> None:
             print(f"workbench lane: can't run {argv[sep + 1]} ({e.strerror})", file=sys.stderr)
             sys.exit(126)
         return  # never Landlock's below: execv doesn't return, but a test's stand-in does
+    deny = [int(p) for p in pick("--deny-port")]  # wrap's own numbers: a bad one is a traceback
     try:
-        restrict(pick("--write"), readable, pick("--unix"))
+        restrict(pick("--write"), readable, pick("--unix"), deny)
     except OSError as e:  # Landlock is there but refused the lane: don't run outside it
         print(f"workbench lane: the kernel refused the lane ({e}); not running "
               f"{argv[sep + 1]}", file=sys.stderr)

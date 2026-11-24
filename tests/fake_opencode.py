@@ -79,7 +79,9 @@ unpaired surrogate escaped, which is valid JSON).
 FAKE_LATIN1: a run first prints a line that isn't UTF-8 (`caf\xe9`, Latin-1).
 FAKE_RUNS rows also say what OpenCode's environment had (`opencode_db`, `xdg_data`, `xdg_state`,
 `shell`, and `env_names`: every variable's name, never a value) and what a command the agent runs through `$SHELL -c` sees (`shell_sees`: its
-XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset).
+XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset); with FAKE_CONNECT (a
+port) the run connects to it on 127.0.0.1 first, its row's `connect` "ok" or the errno (13: the
+lane refused it, #1197).
 A run with OPENCODE_DB set records its new session in that home (`<db>.sessions`), as OpenCode
 keeps it in its database (#1010). `session export` prints one finished step, its `info.home` the
 database it read: FAKE_FILL sets the context it read, FAKE_COMPACTED adds a completed compaction;
@@ -530,8 +532,16 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                               capture_output=True, text=True, timeout=30).stdout
     except (OSError, subprocess.TimeoutExpired):
         sees = None
+    connect = None
+    if os.environ.get("FAKE_CONNECT"):  # a TCP connect the agent makes in its round (#1197)
+        import socket
+        try:
+            socket.create_connection(("127.0.0.1", int(os.environ["FAKE_CONNECT"])), 5).close()
+            connect = "ok"
+        except OSError as e:
+            connect = e.errno
     with open(os.environ["FAKE_RUNS"], "a") as fh:
-        fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1],
+        fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1], "connect": connect,
                              "cwd": os.getcwd(), "pwd": os.environ.get("PWD"),
                              "opencode_db": os.environ.get("OPENCODE_DB"),
                              "xdg_data": os.environ.get("XDG_DATA_HOME"),

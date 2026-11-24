@@ -293,7 +293,7 @@ Then:
 - It writes `task.json`, round 1's prompt (the spec plus `cli.PROTOCOL`: git read-only,
   `cli.test_line` (never weaken a test, not the whole suite unless asked: #127), the
   `ask_reviewer` budget, scope, the writable places, a closing summary and `Lesson:` lines), the
-  status, `rules/<task>/grants.json` (`--allow`, `--allow-path`), spawns the runner, and prints
+  status, `rules/<task>/grants.json` (`--allow`, `--allow-path`, `--allow-port`), spawns the runner, and prints
   the model and why, the slice, the spec record, skills and `next: wb wait <task>`.
 
 **Waiting for a server that is down** (`models.may_come_up`): `runner._wait_up` waits before
@@ -1974,7 +1974,7 @@ deliberately hostile process.
   home is granted whole, as on the GPU. The agent's environment
   already drops the matching variables (`SECRET_ENV`).
 - *The kernel's side* (`lane.py`, Landlock, no root): the runner starts OpenCode as `python -I
-  lane.py --write P… [--reads --read P…] [--unix P…] -- opencode …`; it restricts itself and execs,
+  lane.py --write P… [--reads --read P…] [--unix P…] [--deny-port N…] -- opencode …`; it restricts itself and execs,
   so everything below inherits. Handled: writes, removes, every make, refer (ABI 2), truncate
   (ABI 3), reads with `--reads`, and from ABI 9 connecting to a UNIX socket made outside the lane,
   allowed only beneath `--unix` (`context.unix_paths`): the `SYSTEM_SOCKETS` that exist, which
@@ -1986,26 +1986,27 @@ deliberately hostile process.
   socket in `/tmp` the user's server made is refused and named (`is_socket`, #826). So the session
   bus, `systemd-run`, the keyring and the SSH and GPG agents are out of reach; sockets the lane's
   own processes make stay theirs. From ABI 6 signals and abstract sockets are scoped: the agent
-  signals only what it started, while the runner can still stop it. Directories get every
+  signals only what it started, while the runner can still stop it. From ABI 4 a TCP connect to
+  a `--deny-port` is refused, and making an MPTCP socket, by seccomp (*What TCP reaches*). Directories get every
   right; files write, read, truncate and the socket right. No-new-privileges (no setuid: sudo, su,
   snap-confine, so no snap runs; `wb start` refuses a snap `--test`, `wb doctor` names those on
-  PATH) is set on every Linux, Landlock or not. Free: listing directories, the network (*What TCP
-  reaches*), and metadata (chmod, chown, utimes, xattrs on outside files: only the patterns).
+  PATH) is set on every Linux, Landlock or not. Free: listing directories, binding, the network but
+  the denied ports (*What TCP reaches*), and metadata (chmod, chown, utimes, xattrs on outside files: only the patterns).
   Fails closed: Landlock present but refusing prints `workbench lane: the kernel refused the lane
   (<error>); not running <cmd>` and exits 126; an exec failure is `workbench lane: can't run <cmd>
   (<reason>)`, 127 not found, else 126. Without Landlock (an old kernel, an architecture off
   `lane.UNIFIED`, whose syscall numbers it knows) it execs unrestricted but for no-new-privileges;
   macOS has its own (next).
   Older ABIs hold less (`lane.gaps`): before ABI 3 truncation outside isn't refused; ABI 1 fails
-  cross-directory moves and links even inside (EXDEV); before 6 signals, before 9 sockets aren't
-  scoped. `wb doctor` draws a real lane and tries a write outside it (`ok agents write only in their
+  cross-directory moves and links even inside (EXDEV); before 4 no TCP port is refused; before 6
+  signals, before 9 sockets aren't scoped. `wb doctor` draws a real lane and tries a write outside it (`ok agents write only in their
   lane (Landlock ABI N)` or `BAD the lane didn't hold a write outside it: …`), with a line per gap
   and one for WSL interop.
 - *macOS's side* (`lane.py`, Seatbelt, #1194). `lane.kind()` is `landlock` (`abi()` > 0),
   `seatbelt` (darwin with `/usr/bin/sandbox-exec` executable) or None; `lane.held()` is whether
   either holds, the question doctor, setup, `lane_refused`, `python_installs` and the API note ask.
-  The runner and the test runner reach it through `context.lane_wrap(task)`, which hands lane.py
-  Landlock's lists or Seatbelt's: `--write P…`, `--deny-write P…` (`context.write_denied`: the
+  The runner and the test runner reach it through `context.lane_wrap(task, ports)`, which hands lane.py
+  Landlock's lists (with the refused TCP ports, `--deny-port`: `ports`, else `context.deny_ports`, #1197) or Seatbelt's: `--write P…`, `--deny-write P…` (`context.write_denied`: the
   `NOT_WRITABLE` places inside the lane, made or not, each by its real path and its own name,
   a link unresolved; Landlock's lane is split around them instead), `--hide P`/`--show P` in order (`context.read_rules`) and `--unix P…`
   (`context.socket_places`). lane.py's `main` then builds `lane.profile(writable, reads, unix,
@@ -2049,17 +2050,49 @@ deliberately hostile process.
   names what it can't hold: sandbox-exec is deprecated; a sandbox can't be made inside it (SwiftPM
   needs `--disable-sandbox`, Chromium and Playwright `--no-sandbox`); reads are refused by a list;
   a socket in a temp directory is refused even if the agent's own; Mach services stay reachable
-  (`open`, `launchctl`, `osascript` refused by name only); TCP is free, as on Linux. Opting out is
+  (`open`, `launchctl`, `osascript` refused by name only); TCP is free, local daemons' ports too (Linux refuses those from Landlock ABI 4, #1197). Opting out is
   the same: `"paths": ["*"]` or `--allow-path '*'`.
-- *What TCP reaches* (#993, 2026-11-22). Landlock's TCP rule (ABI 4) allows ports, never an
-  address, so it can't keep the agent from instance metadata (`169.254.169.254`, the machine's role
-  credentials over plain HTTP) or a local daemon. The environment turns the SDKs' metadata lookups
-  off (`runner.METADATA_OFF`); a program asking the address itself still gets an answer, as do
-  Azure's SDKs and Google's Go client (no switch). `wb doctor` warns `--  port N listens here
-  (<what>): the lane doesn't stop TCP, so an agent can reach it` for each `context.DAEMON_PORTS`
-  port listening (`listening_daemons`, `/proc/net/tcp{,6}` state `0A`, Landlock only): Docker or
-  Podman's API (2375, 2376), adb (5037), OpenOCD (3333), J-Link (2331). Bound to a UNIX socket, such
-  a daemon is behind the socket rule.
+- *What TCP reaches* (#993, 2026-11-22; #1197, 2026-11-24). Landlock's TCP rule (ABI 4, Linux
+  6.7) names ports, never an address, and lists the ports allowed, never those refused. So the lane
+  refuses by enumeration: with ports to refuse it handles `CONNECT_TCP` and adds a
+  `LANDLOCK_RULE_NET_PORT` rule for every port 0-65535 but those (65,530 rules and
+  `restrict_self` in 0.05 s on ABI 10), so a test suite's own servers on any other port still
+  connect; binding and UDP stay unhandled, and the ruleset attr is 16 bytes for ABI 4-5, 24 from 6.
+  The rule sees TCP sockets only: an MPTCP one (`socket(AF_INET, SOCK_STREAM, 262)`, curl
+  `--mptcp`) connected to a denied port and carried a request and its reply (Linux 7.2, ABI 10,
+  #1197's review). So with ports to refuse the lane also installs a seccomp filter
+  (`lane.refuse_unseen_streams`, `lane.stream_filter`, classic BPF through `prctl`, under the
+  no-new-privileges already set): an MPTCP or SMC (256) socket on IPv4 or IPv6 gets
+  `EPROTONOSUPPORT`, an `AF_SMC` one `EAFNOSUPPORT`, as on a kernel without them, so MPTCP-aware
+  tools fall back to TCP, which the rule covers; `io_uring_setup` gets `ENOSYS`, as where it's
+  off (io_uring makes sockets with no `socket(2)` to filter). It knows `socket(2)`'s number on
+  each `lane.UNIFIED` architecture and their 32-bit compat ones (`lane.SOCKET_NR`, x32 too);
+  `socketcall(2)` (i386, ppc, s390) passes its arguments in memory, which seccomp can't read, so
+  a 32-bit x86 program calling it still makes an MPTCP socket: the one way past it known.
+  The ports, `context.deny_ports(task, keep)`: `context.DAEMON_PORTS`, Docker or Podman's API (2375,
+  2376), adb (5037), OpenOCD (3333), J-Link (2331), Chrome's DevTools (9222, a browser, maybe the
+  user's signed-in one) and Node's inspector (9229, code run outside the lane), whether or not they
+  listen (a daemon started later is refused too), less `context.granted_ports` (commands.json
+  `ports`, grants `ports`) and `keep`: `runner.lane_ports` keeps the task's model server's port
+  (`context.url_port` of its base URL, `CURRENT["model"]`) and its keyhole's, so no setup is ever
+  needed. Every lane gets them: the agent's round, `--test`, `--setup`, the base check, `wb verify`
+  and the bench (`runner.run_in_lane`; a replay is granted its case's `ports`), and
+  `transcript.stores`' reads of the task's home (the round's and the reads' refusal are tested
+  with the fake's `FAKE_CONNECT`). A connect
+  there fails with `EACCES` ("Permission denied"); the agent asks with `port` (*Asking for more*).
+  `wb doctor` draws a lane denying a port it listens on itself and connects, over TCP and then
+  MPTCP (`_tcp_refused`): `ok local daemons' TCP ports are out of the lane (N ports)`, or `BAD
+  the lane didn't refuse a TCP connect to a denied port: …` (`the connect went through`, `an
+  MPTCP socket connected`), plus a line naming the ports commands.json grants every agent.
+  Before ABI 4 it keeps #993's warning, `--  port N listens here (<what>): the lane doesn't stop
+  TCP, so an agent can reach it` for each `DAEMON_PORTS` port listening (`listening_daemons`,
+  `/proc/net/tcp{,6}` state `0A`), and `lane.gaps` says so. Instance metadata (`169.254.169.254`,
+  the machine's role credentials over plain HTTP) is on port 80, which can't be refused by port: the
+  environment turns the SDKs' metadata lookups off (`runner.METADATA_OFF`); a program asking the
+  address itself still gets an answer, as do Azure's SDKs and Google's Go client (no switch). Not
+  built (#1197): domain lists, an egress proxy, network namespaces (Ubuntu's AppArmor often blocks
+  unprivileged user namespaces), filtering 80 and 443. Bound to a UNIX socket, a daemon is behind
+  the socket rule.
 - *OpenCode's side* (`external_rules`): `external_directory` (file tools' paths, the shell's workdir
   and `cd` targets only) is deny `*`, then allow `<dir>/*` for the lane, `READABLE` (`/usr`, `/etc`,
   `/opt`, `/lib*`, `/bin`, `/sbin`, `/proc`, `/sys`, `/nix`, `/run/current-system`, macOS's
@@ -2079,7 +2112,10 @@ deliberately hostile process.
   made a directory broke keytool, #670), and a `kept_out` place (#912: the PERMISSION notice then
   says no grant reaches it). Then it creates the directory. `lane_paths` drops a `commands.json`
   or grant path the same check refuses. `*` turns the lane off for the task; `"paths": ["*"]` in
-  `commands.json` for every task.
+  `commands.json` for every task. A refused TCP connect: `ask_reviewer` with `port`, a PERMISSION
+  question naming `wb allow <task> --port N` (`--always`: commands.json `ports`) when N is a
+  `DAEMON_PORTS` port, else saying no grant lifts it; `wb allow --port` refuses a port the lane
+  doesn't refuse.
 
 **Its environment** (`runner.agent_env`) is that of the `wb` command that last started the runner
 (`start`, `feedback`, `next`, `resume`), less `CLAUDE_CODE_OFF` (*Skills*), the runner's own
@@ -2632,8 +2668,11 @@ listed as `workbench_ask_reviewer`.
 **Browsers and the web.** Workbench brings no browser; Claude's are its session's, the user's
 stated preference first (the skill's). Research is Claude's: the agent's web tools
 are denied and `curl`/`wget` aren't listed; what it needs comes in the spec or an answer. Those are
-rules on its tools, not the network: the lane leaves it open, so what keeps that cheap is that
-credentials stay out (`SECRET_ENV`, `SECRETS`). A browser as a test tool runs in the lane
+rules on its tools, not the network: the lane leaves it open but for local daemons' ports (*What
+TCP reaches*), so what keeps that cheap is that credentials stay out (`SECRET_ENV`, `SECRETS`).
+Chrome's DevTools port (9222) is one of those: a test that starts Chrome with
+`--remote-debugging-port=9222` and connects needs `wb allow --port 9222`; Playwright's own pipe and
+a port the kernel picks need nothing. A browser as a test tool runs in the lane
 (`playwright` listed, browsers in `~/.cache`, `/dev/shm` in `DEV_NODES`; Chrome's own sandbox works
 inside it, checked 2026-11-17 on ABI 10); headless Chromium needs `--user-data-dir=$(mktemp -d)`
 (the handbook). A bare browser isn't listed (it fetches any URL, like `curl`): `wb allow <task>
@@ -2682,15 +2721,15 @@ Claude is the driver, not a spectator, and the agent is a teammate it can reach 
 OpenCode starts with each `opencode run`, as `mcp.servers.workbench` (`type: local`, `codemode:
 false`, `timeout.startup` 15 s, `timeout.execution` the ask timeout plus a minute, `environment`
 `WB_TASK`, `WB_HOME`). It answers `initialize` (the client's protocol version, else `2025-06-18`),
-`ping`, `tools/list`, `tools/call`; one tool, `ask_reviewer {question, context?, command?, path?}`. `tools/list`
+`ping`, `tools/list`, `tools/call`; one tool, `ask_reviewer {question, context?, command?, path?, port?}`. `tools/list`
 touches `ask/.listed` (`LISTED`; removed by `run_round` before each OpenCode starts): a clean round
 without it reports `NOTE: the agent's OpenCode never listed workbench_ask_reviewer, so it can't ask
 you anything` with the `opencode mcp list` command (2026-11-19 audit, #481).
-The server runs in the lane and writes only `ask/`. It rejects a bad `command`/`path`
-(`bad_request`: one line, at most `LINE_MAX` 4096; a path absolute) or an empty `question`
+The server runs in the lane and writes only `ask/`. It rejects a bad `command`/`path`/`port`
+(`bad_request`: one line, at most `LINE_MAX` 4096; a path absolute; a port 1-65535 in digits) or an empty `question`
 (`NO_QUESTION`, the runner's `_judge` text), and past a budget refuses (a courtesy, counted as the
 runner counts: status `asks` plus unjudged ask files, #831). Else it writes `ask/<id>.json` (`{id,
-ts, round, question, context, command?, path?}`) and blocks (a `Watcher`) until `ask/<id>.answer`
+ts, round, question, context, command?, path?, port?}`) and blocks (a `Watcher`) until `ask/<id>.answer`
 or `--ask-timeout` (20 min), then returns the answer or `NO_ANSWER`. Both sides' waits use
 `ask_mcp.Waited` (monotonic, less steps over `FROZEN_SECS` 60 s; the server looks every `STEP_SECS`
 30 s), so a suspend doesn't expire a question (#453). A failing call returns `isError: true`,
@@ -2702,10 +2741,12 @@ on its own thread, so `ping` is answered while a question waits; the silence gua
 The runner relays (`ask_mcp.relay`, each tick, woken by the steer bell). Outside the lane it reads
 new ask files (no links, at most `FILE_MAX` 256 KiB, `NEW_MAX` a tick, `ASKS_MAX` in all) and
 counts each in status `asks` (`{id: "q" | "p" | "x"}`, out of the agent's reach, so deleting files
-returns no budget): questions up to `--ask-budget` (2) across all steps, command/path requests up to
+returns no budget): questions up to `--ask-budget` (2) across all steps, command/path/port requests up to
 `PERMISSION_BUDGET` (8) apart. A refused one (`x`) is answered with why, without waking Claude.
 Otherwise an `ask` event and a `question` notice: `Q: …`, or `PERMISSION to run: `cmd`` /
-`PERMISSION to use the directory D (outside its lane)` with the `wb allow` that grants it. The
+`PERMISSION to use the directory D (outside its lane)` / `PERMISSION to connect to TCP port N
+(outside its lane)` (a `port` of digits, 1-65535, else refused: `bad_request`) with the `wb allow`
+that grants it. The
 question is clipped at `QUESTION_CHARS` (2,000), context at `CONTEXT_CHARS` (4,000); continuation
 lines are marked `> ` so none passes for workbench's own; `command` and `path` are never clipped.
 The phase is `asking` while any question of the round is open (`status.asking` the oldest), set
@@ -2724,7 +2765,7 @@ through `ask_mcp.answer_once`: the open check and `write_answer` in one step und
 "<id> was already answered (or closed with NO_ANSWER)", exit 1, status `answered` untouched (#938:
 apart, a late answer overwrote `NO_ANSWER` and counted as answered).
 
-**Granting.** `wb allow <task> "<pattern>"… [--path DIR…] [--always]` adds to
+**Granting.** `wb allow <task> "<pattern>"… [--path DIR…] [--port N…] [--always]` adds to
 `rules/<task>/grants.json` (`context.grant`), and with `--always` to `commands.json`
 (`context.allow_always` via `store.edit_config`: locked, through a symlink, mode kept, #495;
 refuses a malformed file). It answers a pending question "Claude allowed … Run it again now and
@@ -4581,7 +4622,9 @@ graded by the tests it was accepted with (a synthetic suite every model passed w
 2026-11-16). Shown only (`wb models`, `wb scout`, `wb bench report`); the router doesn't read it.
 
 **A case** (`wb bench add <task> [--step N]`, default the last step) comes from a closed, accepted,
-non-trial task. It keeps the task's setup and `--setup-timeout`, copies, siblings, grants (status
+non-trial task. It keeps the task's setup and `--setup-timeout`, copies, siblings, grants (`allow`,
+`paths`, `ports`: each replay's `wb start --allow`, `--allow-path`, `--allow-port`; without its
+ports a replay's tests were refused the port the original's passed with, #1197's review; status
 `grants_kept`, `cli._keep_grants`, since the rules go at the close, #250), package (`subdir`) and
 `unload_for_tests`, and passes them to its base check, reference check, each replay and
 `wb bench self` (`bench._inputs`; without the limit a long build stopped at 1800 s and was an `error` every
@@ -6376,11 +6419,11 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--role significant\|trivial\|writing` (from `--size`: trivial, else significant), `--size trivial\|significant` (from `--role`: trivial for the trivial role, else significant; both given, the role picks the model and the size the slice and the GPU router's size), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2 on the GPU, 1 on API: `cli.AUTO_FIX`, `cli.auto_fix`; a given value is kept and the start line prints the one used, #1017), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders, or for an API provider's slot), `--trial`, `--local-only` (task.json `local_only`: an API model is refused for this task, as for a repo commands.json marks local-only, *Privacy for API roles*), `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--group NAME` (task.json `group`: one request's fan-out, *Dynamic workflows*; `cli.GROUP_RE`, a task name's characters up to 32, else refused before anything is made, `cli._check_group`, #1048), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), an API model (a `--model`, or the role's side as it runs, `routes.effective_via`) in a local-only spot, before any model is picked (exit 3, `cli._local_only_check`, #1021), an unreadable routes.json (exit 3, *Roles*), a role that can't run (exit 3, one line, never the other side: an API role's model without a key, gone from the catalog or out of credit, `routes.cant_run`, never rate-limited or unreachable, a note, #1088; a provider marked out of credit, rate-limited or unreachable starts the role's fallback instead when the user set one, `cli._fallback_start`, #1196; Agents on API with a role that has no API model; a GPU role with no GPU model, the router's line; a pinned GPU model not found; *A task, start to finish*, #1016), an API model with no price or today's spend at the cap, or within one request at its worst of it (`meter.request_floor`, #1150; its input round 1's, `runner.first_tokens`, #1173) (exit 3, `meter.refusal` in `routes.resolve`, both API paths: a `--model`'s before the dialog, *Spend*, #1019; an API `--model` while Agents is GPU (exit 3, `routes.AGENTS_GPU`, before the dialog, *Roles*, #1213); no cap at all too, `meter.no_cap`, #1089), a `--model` naming an API model under Claude Code without the dialog's yes (exit 3, `cli.start_gate`, #1014; checked last, after every other refusal, so a refused start never uses the yes up, #1104), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4; with routes.json `busy` api a role with an API model starts on it instead, `cli._busy_api`, #1023), an API model's provider already running `API_PARALLEL` (3) tasks, those on their way to a slot counted (exit 4, `cli._slots_full`, `cli._api_pending`, #1116; `--queue` waits for a slot, #1015). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL, a writing task's `WRITING_PROTOCOL`) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why (an API task's `model: <id> · API (<provider>) · <role> role, set by you MM-DD · thinking off`, `routes.model_line`; its `started … on <id> (API)`; then `cli._api_notes`: the first API task in a repo for a provider adds the where-note, `note: this task sends the repo, its spec, CLAUDE.md files … to <provider> (the <role> role's model, or `fallback` on the role's fallback, #1196; data policy: <url>)`, its OpenRouter backends task.json's `order`, and `context.api_hidden_note`, *Privacy for API roles*), `next: wb wait <task>`. A writing task (task.json `role: writing`, *The writing role*) gets self-review off unless `--self-review` (`cli.self_review`), probe off (`experiments_off` `a writing task`), the writing handbook, and `--test` stays optional (no note asks for one). |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--role significant\|trivial\|writing` (from `--size`: trivial, else significant), `--size trivial\|significant` (from `--role`: trivial for the trivial role, else significant; both given, the role picks the model and the size the slice and the GPU router's size), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2 on the GPU, 1 on API: `cli.AUTO_FIX`, `cli.auto_fix`; a given value is kept and the start line prints the one used, #1017), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--allow-port N…` (grants `ports`: a port the lane refuses, *What TCP reaches*; the bench's replays, a case's `ports`), `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders, or for an API provider's slot), `--trial`, `--local-only` (task.json `local_only`: an API model is refused for this task, as for a repo commands.json marks local-only, *Privacy for API roles*), `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--group NAME` (task.json `group`: one request's fan-out, *Dynamic workflows*; `cli.GROUP_RE`, a task name's characters up to 32, else refused before anything is made, `cli._check_group`, #1048), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), an API model (a `--model`, or the role's side as it runs, `routes.effective_via`) in a local-only spot, before any model is picked (exit 3, `cli._local_only_check`, #1021), an unreadable routes.json (exit 3, *Roles*), a role that can't run (exit 3, one line, never the other side: an API role's model without a key, gone from the catalog or out of credit, `routes.cant_run`, never rate-limited or unreachable, a note, #1088; a provider marked out of credit, rate-limited or unreachable starts the role's fallback instead when the user set one, `cli._fallback_start`, #1196; Agents on API with a role that has no API model; a GPU role with no GPU model, the router's line; a pinned GPU model not found; *A task, start to finish*, #1016), an API model with no price or today's spend at the cap, or within one request at its worst of it (`meter.request_floor`, #1150; its input round 1's, `runner.first_tokens`, #1173) (exit 3, `meter.refusal` in `routes.resolve`, both API paths: a `--model`'s before the dialog, *Spend*, #1019; an API `--model` while Agents is GPU (exit 3, `routes.AGENTS_GPU`, before the dialog, *Roles*, #1213); no cap at all too, `meter.no_cap`, #1089), a `--model` naming an API model under Claude Code without the dialog's yes (exit 3, `cli.start_gate`, #1014; checked last, after every other refusal, so a refused start never uses the yes up, #1104), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4; with routes.json `busy` api a role with an API model starts on it instead, `cli._busy_api`, #1023), an API model's provider already running `API_PARALLEL` (3) tasks, those on their way to a slot counted (exit 4, `cli._slots_full`, `cli._api_pending`, #1116; `--queue` waits for a slot, #1015). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL, a writing task's `WRITING_PROTOCOL`) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why (an API task's `model: <id> · API (<provider>) · <role> role, set by you MM-DD · thinking off`, `routes.model_line`; its `started … on <id> (API)`; then `cli._api_notes`: the first API task in a repo for a provider adds the where-note, `note: this task sends the repo, its spec, CLAUDE.md files … to <provider> (the <role> role's model, or `fallback` on the role's fallback, #1196; data policy: <url>)`, its OpenRouter backends task.json's `order`, and `context.api_hidden_note`, *Privacy for API roles*), `next: wb wait <task>`. A writing task (task.json `role: writing`, *The writing role*) gets self-review off unless `--self-review` (`cli.self_review`), probe off (`experiments_off` `a writing task`), the writing handbook, and `--test` stays optional (no note asks for one). |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps first. Review/stuck/failed with no live runner; refuses a moved repo (`wb relocate`), OpenCode 1.x (exit 3, `_opencode_again`, #866), an API task whose model left OpenCode's catalog, has no price, no day cap (routes.json `day_usd`, #1089) or meets today's, or comes within one request at its worst of it (#1150; its input the round's first request's, the session's context and the text, #1173, after round N's own prompt when an unsent round runs again, #1180) (exit 3, `_model_still_listed`, #1016, #1118; next and resume too), an API task whose repo became local-only (exit 3, `_local_only_since`, #1021), an API task while Agents is GPU (exit 3, `_agents_gpu_now`, #1213; next and resume too), empty text. Prompt: `FEEDBACK_HEAD` + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (re-run only with a test) + text; reviews+1, none when status `infra` is set (a stop not the step's: the provider's "carry on" counted, one real review made the step go badly, #1153), which prints `feedback sent to <task> (round N): it resumes after a stop that wasn't the agent's (<infra>), so no review round is counted`, `round_for` `resume`, and marks the round `rounds/<n>/resumed` (`runner.RESUMED`), so `round_asks` walks on to the feedback the stop interrupted (#1169); after a provider's stop (`infra: provider`) its provider's `no_credit` mark becomes its turn to ask (`cli._credit_turn`, wb resume too, #1178). Stuck/failed with round n never sent (`runner.reached` false: the model's load, the server's wait, the keyhole stopped it first; wb next's step or the last feedback lost, the agent told only "carry on", #1180): round n again, the prompt after its own (`runner.add_to_round`), no review counted, `round_for` and its `resumed` mark kept, printing `feedback sent to <task> (round N): after round N's own prompt, which never reached the agent (<infra>), so no review round is counted`. Warns past three reviews. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--include` (bulk additions, large binaries, ignored files the agent or Claude wrote), `--no-sign`, `--test` (replaces it, granted to the shell too), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Review only; an API task whose repo became local-only exits 3 (`_local_only_since`, #1021). Commits the step (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`; an empty step advances uncommitted, #507); prompt "Step N of this task is done and committed (<sha>). The next step:" + spec + the task's protocol (`cli.protocol_for`: a writing task keeps `WRITING_PROTOCOL`); advances round, steps, step_round, `reviews` reset, `step_base` the worktree's HEAD (#652), phase queued in one status write right before the spawn (#191: written earlier, an interrupt left the step under review with no runner). A retry after its commit landed (`cli._step_landed`) measures from `HEAD~1` (#85). Says `runner.fresh_reason`'s verdict. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` | `ask/<id>.answer` via `ask_mcp.write_answer`; the id into status `answered`. Refuses empty, over `ask_mcp.FILE_MAX` 256 KiB (`too_long`: never read, the agent waited out its timeout, #605), or closed, racing too (`answer_once`, #938). |
-| `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` (the whole answer checked against `FILE_MAX` before any grant, #605) | Into `rules/<task>/grants.json` (`--always`: commands.json, once `context.commands_conf` passes); answers the oldest permission request (else the question) "Claude allowed … for this task. Run it again now and carry on." (`from now on` with `--always`), sent to a live agent as a `--now` steer. `--path` through `_lane_dir` (no link; not what `lane_refusal` or `kept_out` refuses, #912, nor a file the task's API lane hides, `api_hidden_refusal`, #1093; not in the task's repo or its git dir, where a planted hook runs outside the lane; a missing path named like a file refused, #670; made if missing); `*` turns the lane off. |
+| `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--port N…` (a TCP port the lane refuses, `context.DAEMON_PORTS`; another is refused, as nothing would change, #1197), `--always`, `--text "…"` (the whole answer checked against `FILE_MAX` before any grant, #605) | Into `rules/<task>/grants.json` (`--always`: commands.json, once `context.commands_conf` passes); answers the oldest permission request (else the question) "Claude allowed … for this task. Run it again now and carry on." (`from now on` with `--always`), sent to a live agent as a `--now` steer. `--path` through `_lane_dir` (no link; not what `lane_refusal` or `kept_out` refuses, #912, nor a file the task's API lane hides, `api_hidden_refusal`, #1093; not in the task's repo or its git dir, where a planted hook runs outside the lane; a missing path named like a file refused, #670; made if missing); `*` turns the lane off. |
 | `wb progress [on\|off]` | `--after MIN` (default the task's typical length on its model; refused with `off` or while off, #602; `0` clears) | The opt-in to *Progress checks*. |
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (opens with `STEP_NOTE`: a `smaller` intervention after a progress check, else a `hint`) | Queued/running/testing/asking with a live runner only. steer.jsonl, delivered when the run ends, before the tests; `--now` at once. |
 | `wb note <task> --text "…"` | | A `captain` event. |
@@ -6458,7 +6501,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb patch upstream <commit> --name <slug>` | | A clone; the slug `[a-z0-9][a-z0-9-]*` (`patches.SLUG`); an existing `pr/<slug>` or worktree refused. Fetches the upstream's remote, `worktree add -b pr/<slug> $WB_HOME/upstream/<slug> <local@{u}>`, cherry-picks the commit (a conflict stays there for `git cherry-pick --continue`); a commit with no test file says `it has no test: add one before sending (upstream asks for one, and wb patch check needs it)` (`NO_TEST_SEND`); a `Scope: me` commit is flagged. Writes `patches.json`, its `prepared` row the picked commit's ident. Prints, under `next (none of this has run):`, the tests (and the plugin's two when `mod/` changed), the body file to fill (`upstream/<slug>.md`, a copy of `.github/pull_request_template.md` when it exists), the one `wb patch send <slug> --title "<the commit's subject>" --body-file <it>`, `patches.gh_line`, and that send needs the user's yes; off GitHub, that send works only there. |
 | `wb patch send <slug> --title T --body-file F` | `--draft`, `--anyway` (sends a `Scope: me` commit) | *Sending a patch upstream*. Refuses before any network (`patches._refuse_send`): no `pr/<slug>` in its worktree, a cherry-pick under way, uncommitted changes there, no commits over the target, an empty body or the template unchanged, a `Scope: me` commit without `--anyway`; then a remote off GitHub, gh not `ready` (`gh_line`), a `.github/workflows/` change over https without the token's `workflow` scope. Under Claude Code (`CLAUDECODE=1`) it then refuses unless the mod's dialog approved exactly this send (`patches._approved`, `send-ok.json`), saying the user may run it in a terminal of their own. Then `gh repo fork` (not when the login owns upstream) and which repository the fork is (`_fork_of`), the push to it in gh's protocol, `gh pr create`; prints `pushed …` and `opened <url>` (`opened <url> (already open)` when a pull request for the branch is open already); on both, `patches.json`'s `sent` row records it (`note_sent`), which `wb update` asks gh about. A failed step says what is done already (a rerun goes on from there). No abbreviated flags (`allow_abbrev=False`: the dialog reads `--title` and `--body-file` as written). The mod asks the user first (*The consent gate*). |
 | `wb patch check <commit>` | | *Local patches*. A clone; the commit one of `local@{u}..local` (else `isn't one of local's patches`, exit 1; `no such commit`, exit 1). Its test files (`is_test`) alone, as a diff, `git apply --3way` onto the upstream `wb update` last fetched, in a scratch worktree under `patches/` (removed afterwards, a failure too); then only what the patch added: each `def test_…` its diff adds, as `python -m unittest <module>.<Class>.<method>` (the class read from the file there with `ast`), run by `patches.RUN_TESTS` (a `-c` script, `python -m unittest`'s loader and cwd, telling apart exit 1 a failure or an error, 3 a skip, an expected failure, an unexpected success or no test run, 0 a pass), and `claude plugin test mod` when a `*.test.ts(x)` changed (its exit 0 a pass), with `WB_HOME` inside the scratch directory and `CHECK_SECS` 900 each (the process group killed past it, a failure). One verdict, exit 0, the first that holds: `upstream fails this patch's tests (<subject>): keep it` (any failure); `<subject>'s tests didn't all run here (<why>), so wb patch check can't tell: run them where they can (a skip is not a pass)` (`a test was skipped`, `no test class holds <names>`: an added `def test_…` `_test_ids` placed in no class, `claude isn't on PATH for the mod's tests`; joined by `; `), never a pass: a test skipped without Landlock or claude was called `already passes`, inviting a drop (#1005, 2026-11-22); `<subject> has no test of its own, so wb patch check can't tell: write one (upstream asks for one in a pull request too)` (no test file, or nothing it found to run); `upstream already passes this patch's tests (<subject>): it likely fixed the same thing. Drop it with the user's yes: wb patch drop <sha>`. Before any, `<subject>'s tests don't apply to upstream any more: compare by hand`. It drops nothing. No abbreviated flags. |
-| `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models (an Ollama cloud one: `--  <id> is an Ollama cloud model, an API model now: set a role to use it`, #1013), `limit.context`, the roles (`BAD <path> can't be read (…)`, else `--  roles: <summary> (wb route)` once any is set, #1014; then each role on API, `ok  <role> role: <id> ready` or `BAD` with wb start's own refusal, `routes.resolve` and `routes.cant_run`: no key, a key wb can't hold, gone from the catalog, out of credit, no price, the day cap, `cli._api_role_lines`, #1067; with a role on API, the keys, `cli.api_key_lines`); with every role on API, no local model and no OpenCode config read `--` (`--  0 local model(s): every role runs on API`), not `BAD`, `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`lane.gaps`, `context.interop_gap`, `context.home_gap`, `context.listening_daemons`), commands.json, `context.TOOLCHAINS`, `wb` on PATH (the plugin's launcher, `cli.plugin_launcher`, said as such and never as another copy; not on PATH with the mod installed, a `--` line for the user's own terminal, not BAD, #1190), `cli.logout_stops`, `cli.awake_line`, `webpush.has_cas` (with push subscriptions or any API role: the keyhole's context is `webpush.tls()`, #1080), the mod (`cli._mod_behind`), then `cli.agents_md_note`: `note: agents no longer get your ~/.claude/CLAUDE.md or ~/.claude/rules/: what they should follow in every project goes in ~/.config/workbench/AGENTS.md`, while either of Claude's exists and that file doesn't (#1061; `wb setup` prints it too); then `patches.doctor_lines`: `ok  install: marketplace at P`, `your own clone at P, branch B (wb patch init)` (on `local`, or patches.json's `source`) or `developer clone at P, branch B`; `--  local patches: N (scopes)` (a clone on `local`; a marketplace clone: its local changes and `wb patch init`); `gh: ready as L over P` (`ok`) or `--  gh: <state>: <hint>`, asked only with patches or a `wb patch upstream` branch that hasn't landed upstream (`held`, `_landed_pr`, by the local refs alone); none sets the exit code. Then each experiment. |
+| `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models (an Ollama cloud one: `--  <id> is an Ollama cloud model, an API model now: set a role to use it`, #1013), `limit.context`, the roles (`BAD <path> can't be read (…)`, else `--  roles: <summary> (wb route)` once any is set, #1014; then each role on API, `ok  <role> role: <id> ready` or `BAD` with wb start's own refusal, `routes.resolve` and `routes.cant_run`: no key, a key wb can't hold, gone from the catalog, out of credit, no price, the day cap, `cli._api_role_lines`, #1067; with a role on API, the keys, `cli.api_key_lines`); with every role on API, no local model and no OpenCode config read `--` (`--  0 local model(s): every role runs on API`), not `BAD`, `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`lane.gaps`, `context.interop_gap`, `context.home_gap`; from ABI 4 `_tcp_refused`'s `local daemons' TCP ports are out of the lane (N ports)`, before it `context.listening_daemons`, *What TCP reaches*), commands.json, `context.TOOLCHAINS`, `wb` on PATH (the plugin's launcher, `cli.plugin_launcher`, said as such and never as another copy; not on PATH with the mod installed, a `--` line for the user's own terminal, not BAD, #1190), `cli.logout_stops`, `cli.awake_line`, `webpush.has_cas` (with push subscriptions or any API role: the keyhole's context is `webpush.tls()`, #1080), the mod (`cli._mod_behind`), then `cli.agents_md_note`: `note: agents no longer get your ~/.claude/CLAUDE.md or ~/.claude/rules/: what they should follow in every project goes in ~/.config/workbench/AGENTS.md`, while either of Claude's exists and that file doesn't (#1061; `wb setup` prints it too); then `patches.doctor_lines`: `ok  install: marketplace at P`, `your own clone at P, branch B (wb patch init)` (on `local`, or patches.json's `source`) or `developer clone at P, branch B`; `--  local patches: N (scopes)` (a clone on `local`; a marketplace clone: its local changes and `wb patch init`); `gh: ready as L over P` (`ok`) or `--  gh: <state>: <hint>`, asked only with patches or a `wb patch upstream` branch that hasn't landed upstream (`held`, `_landed_pr`, by the local refs alone); none sets the exit code. Then each experiment. |
 
 ## Files and formats
 
@@ -6541,7 +6584,7 @@ $WB_HOME (~/.local/state/workbench)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md, AGENTS.md (the user's ~/.config/workbench/AGENTS.md, copied: #1061),
                                  project-rules/<path> (a rule a link takes outside the repo: context.project_rules),
                                  imports/<n>/<name> (an import from outside the repo: context.import_files),
-                                 checkout/<path> (an API task's instruction file only the checkout holds: context._checkout_copies, #1091), bin/git (the shim), grants.json (what Claude allowed: {"allow", "paths", "test_tools"}),
+                                 checkout/<path> (an API task's instruction file only the checkout holds: context._checkout_copies, #1091), bin/git (the shim), grants.json (what Claude allowed: {"allow", "paths", "ports", "test_tools"}),
                                  shell/<name> (OpenCode's $SHELL, named as the shell it runs: the user's XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL back, then that shell: runner.write_shell_shim, #1010),
                                  gitdir.json (the real git dir, the .git's text: {"gitdir", "dotgit"}), submodules.json ([{"path", "src" (the user's checkout), "sha", "index"}]), submodule-<n>.index,
                                  catalog.json (an API task's own models.dev v2 catalog: runner.write_catalog, models.catalog_doc; OPENCODE_MODELS_PATH, #1015);
@@ -6589,6 +6632,7 @@ $WB_HOME (~/.local/state/workbench)
   images.json ($WB_IMAGES)  audio.json ($WB_AUDIO)   image engines; audio engines (speech, sfx, music, a listener);
                                  top-level strings "default" (images), "default_speech|sfx|music" (audio): the default engines (#1047)
   commands.json ($WB_COMMANDS)   {"allow": [patterns], "paths": [dirs], "env": [names]} (lists of strings, or refused: context.commands_conf),
+                                 "ports": [N] (TCP ports every lane lets connect, wb allow --port --always; port numbers or refused, #1197),
                                  "repos": {"<repo path>": {"setup", "setup_timeout", "copy", "siblings", "merge": "merge|ff|squash",
                                  "local_only": true|false (API models never get it; a bool or refused, #1021)}}
   chat.json ($WB_CHAT_CONFIG)    {"bind": [...], "hosts": [...], "upload_mb": 25, "upload_message_mb": 50}
@@ -6793,7 +6837,7 @@ the step included, #904), `stuck`, `took_over`, `claude` (its share, `spend.usag
 
 **bench/cases/<case>/case.json** (`bench.add`): `name`, `task`, `step`, `repo`, `checkout` (task.json `repo`, which
 `siblings` resolve from lexically, #909), `git_common` (`bench._repo`), `base`, `reference`, `size`, `stack`,
-`test_cmd`, `test_timeout`, `check_cmd`, `hidden` (paths; their files in `hidden/`), `allow`, `paths` (the grants, `grants_kept` once rules are gone), `setup`, `copy`, `siblings`, `setup_timeout`,
+`test_cmd`, `test_timeout`, `check_cmd`, `hidden` (paths; their files in `hidden/`), `allow`, `paths`, `ports` (the grants, `grants_kept` once rules are gone; a case made before `ports` was kept replays without them), `setup`, `copy`, `siblings`, `setup_timeout`,
 `unload_for_tests`, `subdir` ('' for the top), `skills`, `original` (`model`, `rounds`, `reviews`, `minutes`, `steps`),
 `base_check` (`fails` or `not checked (timed out)`), `created_at`. **bench/runs.jsonl** (`bench.replay`): `ts`, `run`,
 `label`, `rep`, `case`, `model`, `task`, `wb_commit`, `skills`, `outcome` (`passed`, `failed`, `preempted`, `error`:
@@ -6806,7 +6850,7 @@ on an API model `kind: "api"` and `paid {cost, source}` (`bench.paid`, from `res
 **Other formats.**
 - `steer.jsonl`: `{ts, text, now}`. `acked`: a float timestamp, replaced whole (`store.write_ack`): polled readers saw 0
   between a truncate and a write.
-- `ask/<id>.json`: `{id, ts, round, question, context, command?, path?}` (the agent's: checked); `<id>.answer`: the text
+- `ask/<id>.json`: `{id, ts, round, question, context, command?, path?, port? (an int)}` (the agent's: checked); `<id>.answer`: the text
   (`ask_mcp.write_answer`), `NO_ANSWER` for one the runner dropped (timed out, round ended, stopped,
   runner died).
 - `lessons.jsonl`: `{ts, task, repo, skills, id, kind, round, text}`; a close `{close: id, ts, how: "skill:<name>"|"dropped", why}`.
@@ -7096,7 +7140,7 @@ and `auth` commands fail without `--standalone` (#1070); `auth export <provider>
 else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `text`, `step_finish` with tokens). Live tool names are 1.x-style (`bash`, `filePath`; 2.x `shell`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
-`pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), `env_names` (every variable's name, never a value: #1189), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
+`pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), `env_names` (every variable's name, never a value: #1189), `shell_sees`: what a `$SHELL -c` command gets, and `connect`: with `FAKE_CONNECT` a TCP connect to that port from inside the round, `ok` or its errno, #1197); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_PAD` (that many characters before the Lesson line, #1186), `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > util.py <<X` with `workdir` lib/, main.py and answer.txt with `write`: #1210, its third review), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
 `read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188; `FAKE_SELF_STALL`: it breaks it and goes silent, the run after a nudge or a note restores it: #1207), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
@@ -7549,7 +7593,11 @@ doc needs its own `!/` line).
   protocol's lane line, the handbook. What it leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`), what WSL's interop
   runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes* and *Reads*, `wb doctor`. A `NOT_WRITABLE` place → Landlock's split
   (`MADE_FIRST` where the tool makes it later) and Seatbelt's `write_denied` (its roots' own paths `lane.profile`'s literal denies), read by `read_only` too. A secret in a `TOOL_HOMES` entry → `SPLIT_MADE`; one a
-  tool opens at every start (helm, k6) → its path in `agent_env`.
+  tool opens at every start (helm, k6) → its path in `agent_env`. The ports it refuses (`context.DAEMON_PORTS`,
+  `deny_ports`) → `wb allow --port`'s refusal, the `port` PERMISSION notice, driving.md's *Ports it asks for*,
+  *What TCP reaches*; a new lane caller goes through `context.lane_wrap` (`runner.lane_ports` as its `ports` in a
+  runner); Seatbelt refuses no port (`lane.SEATBELT_GAPS`). A new
+  `lane.UNIFIED` architecture → its `AUDIT_ARCH` and `socket(2)` number in `lane.SOCKET_NR` (else its sockets pass the filter).
 - **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → register.tsx's `checkUpdate`
   (toasts only `update available` and `LOCAL_CHANGES`, the opening of `patches.CHECK_LINE`) and `UPDATE` (reloads only
   after `updated`).

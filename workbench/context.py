@@ -660,7 +660,7 @@ def commands_path() -> Path:
 
 
 def allow_always(key: str, items: list[str]) -> None:
-    """Add ``items`` to commands.json's ``key`` ("allow" or "paths"), for every task (`wb allow
+    """Add ``items`` to commands.json's ``key`` ("allow", "paths" or "ports"), for every task (`wb allow
     --always`): under its lock and through a link, the file checked first (commands_conf), since
     rewriting one that doesn't parse would lose it. Unlocked, two sessions' grants close together
     lost one; written with write_json, a dotfiles link became a plain 0644 file (#495)."""
@@ -687,6 +687,10 @@ def commands_conf() -> dict:
         v = conf.get(key)
         if v is not None and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
             raise RuntimeError(f'{path}: "{key}" must be a list of strings, e.g. ["make *"]')
+    v = conf.get("ports")  # wb allow --port --always (#1197)
+    if v is not None and not (isinstance(v, list) and all(
+            isinstance(x, int) and not isinstance(x, bool) and 0 < x < 65536 for x in v)):
+        raise RuntimeError(f'{path}: "ports" must be a list of TCP port numbers, e.g. [9229]')
     repos = conf.get("repos")
     if repos is not None and not isinstance(repos, dict):
         raise RuntimeError(f'{path}: "repos" must map a repo\'s path to its settings, e.g. '
@@ -2618,13 +2622,42 @@ def interop_gap() -> str | None:
             "gpu_gb then")  # a GPU only Windows sees had no budget at all after it (#702)
 
 
-# Local daemons that take commands over TCP, which the lane doesn't restrict (its socket rule is
-# for UNIX sockets; Landlock's TCP rule only allows ports, so it would have to list every other
-# one): a Docker or Podman API runs containers as the user, adb drives their devices, a GDB
-# server their boards. `wb doctor` names each one listening here (#993, 2026-11-22).
+# Local daemons that take commands over TCP, each a way out of the lane: a Docker or Podman API
+# runs containers as the user (root on the host), adb drives their devices, a GDB server their
+# boards, Chrome's DevTools port is a browser (maybe the user's, signed in), Node's inspector runs
+# code outside the lane. #993 (2026-11-22) only warned in `wb doctor`, believing Landlock's TCP
+# rule could only allow ports; it can refuse these by allowing every other one (#1197,
+# 2026-11-24), so the lane refuses connecting to them from ABI 4 (deny_ports), listening or not:
+# a daemon started after the lane is drawn is refused too.
 DAEMON_PORTS = {2375: "a Docker or Podman API", 2376: "a Docker or Podman API (TLS)",
-                5037: "adb's server", 3333: "OpenOCD's GDB server", 2331: "J-Link's GDB server"}
+                5037: "adb's server", 3333: "OpenOCD's GDB server", 2331: "J-Link's GDB server",
+                9222: "Chrome's DevTools", 9229: "Node's inspector"}
 PROC_TCP = ("/proc/net/tcp", "/proc/net/tcp6")
+NET_ABI = 4  # Landlock's TCP rule (Linux 6.7)
+
+
+def granted_ports(task: store.Task | None = None) -> set[int]:
+    """The TCP ports the user (commands.json `ports`) or Claude for this task (grants `ports`,
+    `wb allow --port`) let the agent connect to."""
+    ports = [*commands_conf().get("ports", []),
+             *((grants(task).get("ports") or []) if task else [])]
+    return {p for p in ports if isinstance(p, int) and not isinstance(p, bool)}
+
+
+def url_port(url: str) -> int | None:
+    """The TCP port a URL's requests go to (its scheme's when unsaid), or None."""
+    try:
+        u = urllib.parse.urlsplit(url or "")
+        return u.port or {"http": 80, "https": 443}.get(u.scheme.lower())
+    except ValueError:
+        return None
+
+
+def deny_ports(task: store.Task | None = None, keep=()) -> list[int]:
+    """The TCP ports the task's lane refuses connecting to (lane.wrap's `deny_ports`):
+    DAEMON_PORTS but the granted ones and ``keep``, the ports the round itself needs (its model
+    server's, its keyhole's: runner.lane_ports), so no setup is ever asked for."""
+    return sorted(set(DAEMON_PORTS) - granted_ports(task) - {p for p in keep if p})
 
 
 def listening_daemons(sources=PROC_TCP, ports=None) -> list[int]:
@@ -3009,10 +3042,11 @@ def socket_places(task: store.Task) -> list[str]:
     return places
 
 
-def lane_wrap(task: store.Task):
+def lane_wrap(task: store.Task, ports: list[int] | None = None):
     """What runs a command in ``task``'s lane (lane.wrap with its lists, drawn once): Landlock's
-    read lane (readable) or Seatbelt's (read_rules, #1194), whichever this machine has; the
-    command as it is with the lane off."""
+    read lane (readable) and its refused TCP ports (``ports``, else deny_ports: #1197), or
+    Seatbelt's read rules (read_rules, #1194), whichever this machine has; the command as it is
+    with the lane off."""
     places = writable(task)
     if places is None:
         return lambda cmd: lane.wrap(None, cmd)
@@ -3020,7 +3054,8 @@ def lane_wrap(task: store.Task):
         reads, sockets, denied = read_rules(task), socket_places(task), write_denied(places)
         return lambda cmd: lane.wrap(places, cmd, unix=sockets, reads=reads, deny_write=denied)
     readable_, sockets = readable(task), unix_paths(task)
-    return lambda cmd: lane.wrap(places, cmd, readable_, sockets)
+    denied_ports = deny_ports(task) if ports is None else ports
+    return lambda cmd: lane.wrap(places, cmd, readable_, sockets, deny_ports=denied_ports)
 
 
 def read_only(task: store.Task, lane: list[str]) -> list[str]:
@@ -3102,8 +3137,9 @@ def rules_dir(task: store.Task) -> Path:
 
 def grants(task: store.Task) -> dict:
     """What Claude allowed this task beyond the everyday rules: {"allow": [patterns], "paths":
-    [dirs], "test_tools": [patterns, ASK_FIRST still asked]}. Kept with the rules, out of the agent's reach: an agent that edited its own grants
-    would widen its next round."""
+    [dirs], "ports": [TCP ports], "test_tools": [patterns, ASK_FIRST still asked]}. Kept with
+    the rules, out of the agent's reach: an agent that edited its own grants would widen its
+    next round."""
     # read without making the directory: a closed task's rules are gone (cli.gc), its grants
     # kept in its status (cli._keep_grants: wb bench add replays a case with them, #250)
     return store.read_json(store.home() / "rules" / task.name / "grants.json", {}) or \
