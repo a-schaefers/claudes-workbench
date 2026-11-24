@@ -2052,6 +2052,25 @@ test('a reply to a pair of screenshots reaches Claude with its task and step (#9
   expect(asked).toEqual(['[web chat] (about fix-nav, step 1, screenshots 2) the button moved'])
 })
 
+test('a reply from the task sheet reaches Claude with its task alone (#1201)', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'is it on track?',
+    about: { task: 'fix-auth' } }) + '\n'
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(asked).toEqual(['[web chat] (about task fix-auth) is it on track?'])
+})
+
 test('a take the user keeps from the shortlist reaches Claude with its number and path (#397)', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}

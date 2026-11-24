@@ -5038,7 +5038,7 @@ else `chat/serve.pid`, else 1337; `--port`, #349; the fragment never leaves the 
 
 - **The path of a message.** The page posts it to `chat/messages.jsonl`; the listening session's
   mod submits `[web chat] <the user's words>` and nothing more (plus `(about <task>, step <s>,
-  screenshots <n>)`, `(keeps take <n> of the shortlist: <path>)`, and per file `[attached: <path>
+  screenshots <n>)`, `(about task <task>)` from the task sheet, `(keeps take <n> of the shortlist: <path>)`, and per file `[attached: <path>
   (<size>, <type>)]`, `attachedLines`): into the running turn (`session.send`) or as the next
   prompt; a receipt (`wb chat ack`) shows at once. Claude answers with `wb chat reply` (the skill).
 - **Attachments, each uploaded once** (#623). Each file gets its id on the page when picked and is
@@ -5162,7 +5162,7 @@ client; the server needs no browser.
   `chat.in_view` passes: its own, and Claude's whose `to` names it; `chat.thread(keep=…)`) for
   `/api/state`, `/api/stream` and `/api/send`'s `state`; no asks, prefs, push, savings, build or tasks.
   `/api/wait` on a row not in its view is 404 (`chat.wait_state`). `AGENT_UNREAD` (`/api/latest`,
-  `/api/ask/`, `/api/shot`, `/api/audio`) is 403 `agent tokens can't …` (`Handler._agent_unread`,
+  `/api/ask/`, `/api/shot`, `/api/audio`, `/api/task`) is 403 `agent tokens can't …` (`Handler._agent_unread`,
   before the path's own handler). Its upload keeps `by: <name>` in `.meta.json` (`save_upload(by=)`);
   a PUT on an id stored by anyone else is 409 `that upload id is another sender's`
   (`chat._not_theirs`: answered with the first upload, it read the user's file's name and path); a
@@ -5302,7 +5302,7 @@ address (#534).
   the queued, three at most, then `+N more`, and `.tasks` is clamped to three lines: a
   25-task backlog took the screen from the thread on a phone, the queued read as running (#1097); the
   stream sends it when the chat directory wakes it, or at the hub's idle bump (`IDLE_BUMP_S`, 60 s), not on a
-  task's own status write), now}`. `build`
+  task's own status write; a tap on the strip opens the task sheet, `GET /api/task` below), now}`. `build`
   (`chat.build`, a crc32 of the page files' names, mtimes, sizes) makes a stale page reload.
 - `GET /api/ask/<id>` (`chat.find_ask`): the whole ask, else 404 "no such prompt".
 - `GET /api/shot?task=&n=&side=base|candidate`: a PNG, only for a task passing `store.NAME_RE`, an
@@ -5310,6 +5310,19 @@ address (#534).
   (`store.SLIM_DAYS`, #821) 410 "expired"; else 404 "no such screenshot". `GET /api/audio?batch=&n=`: a take, the batch matching
   `BATCH_RE`, a real directory with audio.json, a regular file `O_NOFOLLOW`, at most `AUDIO_MAX` 64
   MiB; else 404 "no such take". The page shows both as blob URLs fetched with the token.
+- `GET /api/task?name=&part=summary|diff|log` (`Handler._task`, #1201): one open task for the page's
+  task sheet, only a name `chat.open_task` finds among `open_tasks` (none parked, no bench replay;
+  else 404 "no such open task"), read in-process from the task's files, never through `wb watch
+  --json`, which can start OpenCode. `summary` (`chat.task_summary`): phase, round, step, last,
+  `created_at`/`updated_at`, model, via, provider_name, the round's report (`store.Task.report`, as
+  `wb report`; cut at `TASK_REPORT_CHARS` 64 KB, `report_cut`) and `verify` (`verify.report_lines`).
+  `diff` (`chat.task_diff`): against `gitops.diff_base` (HEAD after `wb next`, as `wb diff`), `stat`
+  and `files` (numstat); `full=1` the diff instead (`path=` one of `files`, `:(literal)`, else 404 "no
+  such file in the diff"), each line cut at `transcript.JSON_LINE_CHARS` (`lines_cut`), `diff: null`
+  and `cut` past `TASK_DIFF_CHARS` 256 KB (`gitops.diff`'s `limit`: never held whole); no worktree or
+  a git failure, a `note`. `log` (`chat.task_log`): the last `n` (`TASK_LOG_ROWS` 50, at most
+  `TASK_LOG_MAX` 200) of the `transcript.LOG_KINDS` rows in events.jsonl's last `TASK_LOG_BYTES` 1 MiB,
+  `{ts, round, kind, text: transcript.log_body(…, verbose)}`, `more`. 400 for another part or `n`.
 - `GET /api/stream`: SSE: `event: state` at once, then `event: patch` (`chat.patch` against what
   this stream sent: `messages`/`asks` as `{put, drop}`, every other field whole so a stale busy flag
   can't stick; #755), `: ping` after 15 s idle. `MAX_STREAMS` 16: the oldest gives way (`evicted`),
@@ -5319,7 +5332,8 @@ address (#534).
   `IDLE_BUMP_S` 60 s (#841). A `_watch` failure restarts a second later. It keeps its `chat/`
   (`Hub.dir`) and stops at `close()` (#134).
 - `POST /api/send`: JSON (415), ≤ 32 KB (413), `{text: ≤ 8000 (empty with files), cid?: ≤ 64,
-  about?: {task, n} | {audio, n}, files?: ≤ 10 ids}` (400 "no such screenshots", "no such take",
+  about?: {task, n} | {audio, n} | {task}, files?: ≤ 10 ids}` (400 "no such screenshots", "no such take",
+  "no such task" (`{task}`: a task wb has, no bench replay, #1201),
   "no upload <id>: …"; over `upload_message_mb` 413; an agent past its rate 429) → `{message, listener, state}`
   (an agent's: `from: <name>, role: "agent"`).
 - `PUT /api/upload/<id>` (8–64 of `[A-Za-z0-9-]`): a raw body (no multipart: `cgi` is gone in 3.13),
@@ -5364,6 +5378,19 @@ in `nearLater`, judged again by `nearAgain` where that thread put them (a photo 
 above; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
 models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43; catalog prices).`, or that alone, #1022, #1135) are in `app.js`. Over plain HTTP
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
+
+**The task sheet** (#1201, `app.js`'s `showTaskSheet`): away, the strip's one line was all the
+user saw of the work, and "is it on track?" cost a message to Claude. A tap (or Enter) on `#tasks`
+opens `#task-sheet` under it (closing the gear's, and closed by Esc, a tap outside or a strip gone
+empty): the open tasks, ranked as the strip ranks them, each a row; a row opens its Summary, and the
+Diff and Log tabs fetch `GET /api/task` when opened (the diff's stat first, "Show the whole diff",
+one file at a time when it is `cut`). Nothing polls: a change in the stream's `tasks` (`sheetNews`)
+re-fetches only the open view, quietly, and Refresh asks again; a task gone says it is no longer
+open. Its report, diff and log are agent-written, drawn with `textContent` and `<pre>` alone, never
+markup: the page holds the token that answers Claude Code's dialogs, so markup an agent wrote would
+be a way past them. "Reply about this task" sets `about: {task}` (`setAbout`), so the next message
+reaches Claude as `[web chat] (about task <task>) …`; steering stays Claude's (`wb steer`), and the
+page never steers, edits or accepts.
 
 **The app and notifications.** The manifest ("Claude's Workbench", `short_name` "Workbench") is offered over https only (`app.js` removes its link
 over http: localhost counts as secure and one computer got two apps). The `badge` is
@@ -5923,9 +5950,9 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb wait [<task>]` | `--timeout S` (0 none); unnamed: `--repo DIR`, `--session ID…`, `--all-sessions` | Reaps, blocks (inotify), prints `[<kind>] <task>\n<text>`, claiming it (`cli.claim_ack`: one waiter or the mod wins, #696); skips notices no longer true. Named: closed exits 2; taken elsewhere "(already delivered once)"; no notice `[<phase>] <task> (no notice: <last>)`. Bare, no open task: exit 2. |
 | `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID`, `--all-sessions` | Reaps. A line per open task; `?` when its runner died within `REAP_GRACE`; a `via` column (`gpu`, `api`) before the model, 24 wide (`cli.status_model`: an API task's `provider/model`, the provider never cut, a vendor segment between cut to `…/` and the model's own name, the id's last segment, kept, its end when it alone overflows, `deepinfra/deepseek-ai/DeepSeek-V4.1-Flash` as `deepinfra/…ek-V4.1-Flash`: two models of one vendor read apart, #1117; a GPU task's last segment, #1016). Named: `worktree:`, `cli.use_line`, `experiments_off`. Parked tasks fold into one `parked by wb stop --all …` line without `--all` (#541); scoped, `open elsewhere (other sessions'): …`. |
 | `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden, the pane's), `--last N` (hidden) | `transcript.follow`; default the latest open task, never a bench replay (#555). The header's `routed:` line, and with `--json` a `routed` row after `meta` (`transcript.routed_text`, #1016). |
-| `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The events, one line per `transcript.EVENT_KINDS` kind (#861); `-n` counts printed lines, `step` rows dropped first (#861); `-f` follows until it needs Claude, reaping, flushing (#90, #545). |
-| `wb report <task>` | `--round N` | summary.md. |
-| `wb diff <task> [paths…]` | `--stat`, `--all` | Against the base or the last step (`--all`: the branch); worktree gone: the git command up to `tip` (#477). |
+| `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The events, one line per `transcript.LOG_KINDS` kind (`EVENT_KINDS`, `text`, `tool`; `transcript.log_body`, which the web chat's task sheet shows too, #1201) (#861); `-n` counts printed lines, `step` rows dropped first (#861); `-f` follows until it needs Claude, reaping, flushing (#90, #545). |
+| `wb report <task>` | `--round N` | summary.md (`store.Task.report`), then the newest regression check (`verify.report_lines`) without `--round`; the web chat's task sheet shows both (#1201). |
+| `wb diff <task> [paths…]` | `--stat`, `--all` | Against the base or the last step (`--all`: the branch; `gitops.diff_base`, which the web chat's task sheet uses too, #1201); worktree gone: the git command up to `tip` (`gitops.diff_tip`, #477). |
 | `wb top` | `--json`, `--every S` (0.2 to 3600; stats.json `every`, else 2) | GPUs, tasks, models, the lease queue. Never a model call, load or export. |
 | `wb adopt <task>` | `--session ID…` (required), `--pid PID` (`CLAUDE_PID`, else wb's parent) | The mod's (#687): a task whose Claude Code process is gone becomes the claimer's (`session`, `claude_pid`, `claude_start`, `claude_machine`); exit 1 while it lives or ran elsewhere (#922). |
 | `wb ack <task> <ts>` | `--if TS` (roll back an undelivered wake: `cli.release_ack`) | The mod's, before a wake (`cli.claim_ack`); exit 3 when taken first (#786). |
@@ -6713,8 +6740,10 @@ outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, i
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
 never counted unread (#1128), its state without the user's, a dialog for it saying so on the
 card and in the push (#1042), a 25-task backlog's strip at most three lines on a phone, the queued counted apart
-(#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text.
-`WebChat` runs the agents' client, `skill/agents/claude-workbench/scripts/ask_claude.py`, against its server with a
+(#1097), the task sheet's summary, diff and log of a real worktree drawn as text (a report's and a diff's markup never
+markup) and its "Reply about this task" sending `about: {task}` (#1201); and `sw.js` in a node `vm` (`swSays`) for a push's text.
+`WebChat` checks `/api/task` against `wb report`, `wb diff` and `wb log -v` on one task, its cuts, the agents' 403
+and `about: {task}` (#1201). `WebChat` runs the agents' client, `skill/agents/claude-workbench/scripts/ask_claude.py`, against its server with a
 listener played in the test (#1042).
 
 **Rate limits** (`RateLimits`, #1020): the runner in-process (`runner.drive`) on a task written as `wb start --role`
@@ -6995,7 +7024,10 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **`wb watch --json`** → the mod's `LINE_STYLE`, its pose regex, `live-1`; `--last`, `JSON_LINE_CHARS` with
   `KEEP_LINES`, `LINE_CHARS`.
 - **task.json's routing keys** (`via`, `role`, `provider`, `provider_name`, #1016) → the mod's row builder (`scan`,
-  tasks.ts's `placeOf`) and `chat.open_tasks` with `chat_static/app.js`'s strip; **the `routed` watch kind** → the mod's
+  tasks.ts's `placeOf`) and `chat.open_tasks` with `chat_static/app.js`'s strip; **`wb status`, `report`, `diff` and
+  `log`'s words** → the web chat's task sheet (`chat.task_summary`, `task_diff`, `task_log`; app.js's `drawSummary`,
+  `drawDiff`, `drawLog`), through the helpers both read: `store.Task.report`, `verify.report_lines`,
+  `gitops.diff_base`/`diff_tip`, `transcript.log_body`/`LOG_KINDS` (#1201); **the `routed` watch kind** → the mod's
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
   and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`; a role's **`order`**
   (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126).
@@ -7028,7 +7060,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   old rows.
 - **The GPU admission rule** (`models.admits`, `can_share`) → the lease, `wb start`'s refusal, `cli._gpu_holders`,
   `_gpu_note`, the Sharing tests.
-- **A new event kind** → `transcript.task_entries`, `transcript.EVENT_KINDS` (which `wb log` uses; unknown kinds are
+- **A new event kind** → `transcript.task_entries`, `transcript.EVENT_KINDS` (which `wb log` and the task sheet use, through `LOG_KINDS`; unknown kinds are
   never shown, #846, #861), *Files and formats*; `Watch` checks every `.event({… "kind": …})` literal (#865).
 - **A new tuned knob** → `tuning.KNOBS`, `tuning.value(task, name)`, a ceiling in `drive`; an evidence flag (`fills`,
   `passed`) → `tuning.acted` and its row field (`peak_share`, `self_review_due`).

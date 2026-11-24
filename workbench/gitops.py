@@ -1159,6 +1159,19 @@ def left_line(left: list[str]) -> str:
             "; the next review's diff shows them again" if left else "")
 
 
+def diff_base(task: store.Task, all_steps: bool = False) -> str:
+    """What `wb diff` compares the worktree with: the task's base, or after `wb next` HEAD (the
+    current step's work alone; ``all_steps``: the whole task). The web chat's task sheet reads
+    it too, so the phone and `wb diff` show the same diff (#1201)."""
+    return "HEAD" if task.status.get("steps", 1) > 1 and not all_steps else task.spec["base"]
+
+
+def diff_tip(task: store.Task) -> str:
+    """The task's work for a diff without its worktree: the accepted commit, else the branch
+    (`--merge` deletes the branch: #477, the audit of 1.8)."""
+    return (task.status.get("tip") or "")[:12] or task.spec["branch"]
+
+
 def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False, stat_count=None,
          limit: int | None = None) -> str | None:
     """The diff since ``base``, new files included. ``limit``: None when it is longer than that

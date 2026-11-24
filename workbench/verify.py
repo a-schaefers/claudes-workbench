@@ -620,6 +620,14 @@ def note(task: store.Task) -> str:
     return ""
 
 
+def report_lines(task: store.Task) -> list[str]:
+    """The newest regression check as `wb report` shows it at review (#97), [] for none: the web
+    chat's task sheet shows the same lines (#1201)."""
+    if not (r := last(task)):
+        return []
+    return lines(r) + (["  (stale: the worktree has changed since; run wb verify again)"] if r["stale"] else [])
+
+
 def last(task: store.Task) -> dict | None:
     """The task's newest regression check, with ``stale`` when the worktree has changed since."""
     runs = sorted((p for p in (task.dir / "verify").glob("*") if p.name.isdigit()),

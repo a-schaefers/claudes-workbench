@@ -2387,26 +2387,17 @@ def cmd_log(a):
     # the agent's words and output, on a terminal: no raw escape sequences (transcript.plain)
     shown = transcript.plain if sys.stdout.isatty() else str
 
-    # the agent's text, its tool calls, and every kind wb watch shows (transcript.EVENT_KINDS):
-    # a fixed nine once left out the runner's own rows, a gpu or handover among them (#861)
-    kinds = {"text", "tool"} | transcript.EVENT_KINDS
-
+    # the agent's text, its tool calls, and every kind wb watch shows (transcript.LOG_KINDS,
+    # transcript.log_body: the web chat's task sheet shows the same lines, #1201)
     def show(r):
-        t = time.strftime("%H:%M:%S", time.localtime(r.get("ts") or 0))
-        k = r.get("kind")
-        if k == "tool":
-            mark = "" if r.get("ok") else "  ✗ " + r.get("error", "")[:100]
+        if (body := transcript.log_body(r, a.verbose)) is not None:
+            t = time.strftime("%H:%M:%S", time.localtime(r.get("ts") or 0))
             # flushed: piped or redirected, a follow printed nothing for minutes (#545)
-            print(shown(f"{t} r{r.get('round')} {r.get('tool', ''):8} {r.get('brief', '')}{mark}"), flush=True)
-        elif k in kinds:
-            body = str(r.get("text") or "")
-            if k == "text" and not a.verbose:
-                body = body.strip().splitlines()[0][:110] if body.strip() else ""
-            print(shown(f"{t} r{r.get('round')} {k:8} {body}"), flush=True)
+            print(shown(f"{t} r{r.get('round')} {body}"), flush=True)
 
     # -n counts the lines printed: the last N rows, cut before the filter, held step rows (one
     # per model request) that never print, and `-n 30` showed a dozen lines (#861)
-    rows = [r for r in rows if r.get("kind") in kinds]
+    rows = [r for r in rows if r.get("kind") in transcript.LOG_KINDS]
     for r in rows[-a.n:] if a.n else rows:
         show(r)
     watcher = Watcher(task.dir) if a.follow else None
@@ -2429,26 +2420,21 @@ def cmd_log(a):
 
 def cmd_report(a):
     task = need(a.name)
-    n = a.round or task.status.get("round", 1)
-    p = task.round_dir(n) / "summary.md"
-    text = p.read_text() if p.exists() else (f"round {n} has no report yet "
-                                             f"({task.status.get('phase')}: {task.status.get('last')})")
+    text = task.report(a.round or task.status.get("round", 1))
     print(transcript.plain(text) if sys.stdout.isatty() else text)  # it quotes the agent's words
-    if (r := verify.last(task)) and not a.round:  # the live comparison, at review (#97)
-        print("\n" + "\n".join(verify.lines(r)) + (
-            "\n  (stale: the worktree has changed since; run wb verify again)" if r["stale"] else ""))
+    if not a.round and (checks := verify.report_lines(task)):  # the live comparison, at review (#97)
+        print("\n" + "\n".join(checks))
 
 
 def cmd_diff(a):
     """The work under review: the whole task, or after `wb next` the current step (--all: all)."""
     task = need(a.name)
-    # the accepted commit, not the branch: --merge deletes the branch (#477, the audit of 1.8)
-    tip = (task.status.get("tip") or "")[:12] or task.spec["branch"]
+    tip = gitops.diff_tip(task)  # the accepted commit, not the branch (#477)
     repo = shlex.quote(str(gitops.repo_of(task.spec)))
     if not task.worktree.is_dir():
         die(f"{a.name} is {task.status.get('phase')} and its worktree is gone: "
             f"git -C {repo} diff {task.spec['base'][:12]} {tip}")
-    base = "HEAD" if task.status.get("steps", 1) > 1 and not a.all else task.spec["base"]
+    base = gitops.diff_base(task, a.all)  # the web chat's task sheet's too (#1201)
     try:
         print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths) or "(no changes)")
     except gitops.GitError as e:

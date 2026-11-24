@@ -68,7 +68,24 @@
   </div>
 </section>
 <div class="net" id="net" hidden></div>
-<div class="tasks" id="tasks" hidden></div>
+<div class="tasks" id="tasks" role="button" tabindex="0" aria-expanded="false" aria-controls="task-sheet" hidden></div>
+<section class="tasksheet" id="task-sheet" hidden aria-label="Tasks">
+  <div class="ts-list" id="ts-list"></div>
+  <div class="ts-one" id="ts-one" hidden>
+    <div class="ts-head">
+      <button type="button" id="ts-back">‹ All tasks</button>
+      <b id="ts-name"></b>
+      <button type="button" id="ts-refresh">Refresh</button>
+    </div>
+    <div class="seg ts-tabs" id="ts-tabs" role="tablist" aria-label="What to show">
+      <button type="button" role="tab" data-part="summary">Summary</button>
+      <button type="button" role="tab" data-part="diff">Diff</button>
+      <button type="button" role="tab" data-part="log">Log</button>
+    </div>
+    <div class="ts-body" id="ts-body" role="tabpanel"></div>
+    <button type="button" class="ts-reply" id="ts-reply">Reply about this task</button>
+  </div>
+</section>
 <main id="scroll" aria-live="polite" aria-relevant="additions">
   <div class="thread" id="thread">
     <div class="intro" id="intro">
@@ -84,7 +101,7 @@
 </button>
 <div class="about" id="about" hidden>
   <span id="about-text"></span>
-  <button id="about-x" type="button" aria-label="Not about these screenshots">✕</button>
+  <button id="about-x" type="button" aria-label="Not about this">✕</button>
 </div>
 <div class="tray" id="tray" hidden aria-label="Attached"></div>
 <form class="composer" id="composer" autocomplete="off">
