@@ -2913,8 +2913,11 @@ def _route_api(mid: str, role: str) -> models.Model:
     st = models.status(m)
     # a server of the user's on another host of the LAN, not opted in, reads as an API provider
     # with no key: its own fix, never /connect, which a LAN server has no use for (#1109,
-    # 2026-11-23); a public host keeps /connect, a hosted provider's fix (#1109's review)
-    if not st["available"] and st["why"].startswith("no key for ") and \
+    # 2026-11-23); a public host keeps /connect, a hosted provider's fix (#1109's review). Nor
+    # the keyhole's refusal of its package (#1066: a config provider's `npm` is
+    # @ai-sdk/openai-compatible), which `local: true` makes moot: it runs as a GPU model then
+    if not st["available"] and (st["why"].startswith("no key for ") or
+                                st["why"] == models.keyhole_refusal(m)) and \
             (off := _off_lan().get(m.provider)):
         die(f"{mid} can't be a role's model: provider {m.provider}: {off}", 3)
     if not _runs_held(m) or (not st["available"] and not st["why"].startswith(HEALTH)):

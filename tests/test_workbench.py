@@ -28808,7 +28808,9 @@ class ApiDiscovery(Base):
         # so a cloud provider configured by hand (api.together.xyz) lost the key it needed, and
         # following the hint would make a cloud host count as a local model
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
-        cfg["provider"] = {"together": {"npm": "@ai-sdk/openai-compatible",
+        # a package the keyhole speaks: on @ai-sdk/openai-compatible no key would run it, and the
+        # keyhole's refusal (#1066) comes before any key line
+        cfg["provider"] = {"together": {"npm": "@opencode/ai/providers/togetherai",
                                         "options": {"baseURL": "https://api.together.xyz/v1"},
                                         "models": {"qwen-coder": {"limit": {"context": 65536}}}},
                            "tail": {"npm": "@ai-sdk/openai-compatible",

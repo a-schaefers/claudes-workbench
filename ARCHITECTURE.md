@@ -3566,7 +3566,7 @@ The changes (each one exit 3 with one line when refused, writing nothing):
   OpenCode's catalog: wb models lists the API models`, a GPU id (`… is a GPU model: wb route <role>
   --gpu <id> pins it`), no key (`… can't be a role's model: no key for <p>: run /connect in OpenCode
   and add it`, said once; a configured provider on another host of the LAN, not opted in, gets its
-  `local: true` hint instead, `provider <p>: <host> isn't this machine; …`, #1109: `cli._off_lan`,
+  `local: true` hint instead, of that or of the keyhole's refusal of its `npm` package (#1066), `provider <p>: <host> isn't this machine; …`, #1109: `cli._off_lan`,
   a private, link-local or tailnet address or a bare, `.local`, `.lan`, `.home.arpa`, `.internal`
   or `.ts.net` name, `cli._on_lan`; a public host, a hosted provider added by hand, keeps the
   /connect line), an OAuth, environment, config or signing key, or a keyless free model
