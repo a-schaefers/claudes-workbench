@@ -152,7 +152,8 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
 - `push`: `{key: the VAPID public key or null, test: the last test push's time or null}`.
 - `savings`: the week's `wb savings` totals and `score`, and `api`: the week's API tasks apart
   (`tasks`, `cost` in dollars, `unknown`, `plan`, `trials`, `claude`, `self_est`, `by_provider`,
-  `by_day`, and `names`: each provider's name), never part of the score.
+  `by_day`, `prices`: `catalog` (an estimate, shown `≈`), `yours` or `provider`, the total's and each
+  provider's, and `names`: each provider's name), never part of the score.
 - `uploads`: `{file, message, files}`: bytes per file, bytes per message, files per message.
 - `build`: the page files' stamp (a page whose stamp differs reloads).
 - `tasks`: the open tasks, for the strip over the thread: `[{name, phase, model, via: "gpu"|"api",

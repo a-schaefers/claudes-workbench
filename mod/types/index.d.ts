@@ -97,7 +97,8 @@ export type WbRoutes = {
   day_usd: number | null
   roles: Record<'significant' | 'trivial' | 'writing', { via: 'gpu' | 'api'; gpu: string; api?: string;
     thinking: 'off' | 'on'; label: string }>
-  spend_today: { usd: number; by_provider: Record<string, number> }
+  /** `prices`: the dollars' basis (meter.basis, #1135): catalog (an estimate, ≈), yours (wb model price), provider */
+  spend_today: { usd: number; prices?: 'catalog' | 'yours' | 'provider'; by_provider: Record<string, number> }
   providers: Record<string, { name: string; key: 'stored' | 'ollama' | 'env' | 'oauth' | 'none'; why?: string }>
 }
 

@@ -14,7 +14,7 @@ import json
 import os
 from pathlib import Path
 
-from . import spend, store
+from . import meter, spend, store
 
 # The eight-paired-run fit (2026-11-17), see the module docstring.
 SELF_CALLS = 4.9
@@ -336,6 +336,11 @@ def usd(x: float) -> str:
     return f"${r:.2f}" if abs(r) >= 0.01 else "$" + format(Decimal(repr(r)), "f")
 
 
+def money(x: float, b: str = "catalog") -> str:
+    """usd(), with `≈` in front of a catalog estimate (meter.basis, #1135); $0 is none."""
+    return ("≈" if b == meter.CATALOG and x else "") + usd(x)
+
+
 def provider_labels(pids) -> dict[str, str]:
     """Providers as OpenCode names them (hosted.json, as it is, read once: no catalog read), else
     their ids."""
@@ -364,10 +369,9 @@ def spent(since: float = 0) -> dict:
     """The day ledger's dollars since ``since`` (meter.py's spend-api.jsonl, `step` and
     `reconcile` rows, as the day cap and the pane read it): open tasks and bench replays in, each
     on the day it was spent. {usd, today (meter.today's, the pane's), by_day: {YYYY-MM-DD: $},
-    by_provider: {p: $}}. The results rows are written at a close and dated by it, so `wb savings
+    by_provider: {p: $}, prices (meter.basis of its rows, #1135)}. The results rows are written at a close and dated by it, so `wb savings
     --api` said $3 today and $3 for the week where the ledger said $2 and $5 (#1094, 2026-11-23)."""
-    from . import meter
-    out = {"usd": 0.0, "by_day": {}, "by_provider": {}}
+    out, bases = {"usd": 0.0, "by_day": {}, "by_provider": {}}, set()
     for r in store.read_jsonl(meter.ledger_path())[0]:
         if not (isinstance(r, dict) and r.get("kind") in ("step", "reconcile") and meter._num(r.get("usd"))
                 and meter._num(r.get("ts")) and r["ts"] >= since):
@@ -376,7 +380,9 @@ def spent(since: float = 0) -> dict:
         out["usd"] += r["usd"]
         out["by_day"][d] = out["by_day"].get(d, 0.0) + r["usd"]
         out["by_provider"][p] = out["by_provider"].get(p, 0.0) + r["usd"]
-    return {"usd": round(out["usd"], 6), "today": meter.today()["usd"],
+        if r["usd"]:
+            bases.add(meter.row_basis(r))
+    return {"usd": round(out["usd"], 6), "today": meter.today()["usd"], "prices": meter.basis(bases),
             "by_day": {d: round(v, 6) for d, v in sorted(out["by_day"].items())},
             "by_provider": {p: round(v, 6) for p, v in out["by_provider"].items()}}
 
@@ -387,8 +393,9 @@ def api_totals(rows: list[dict], since: float = 0) -> dict:
     `unrecorded`, a priced model whose figure never came back, #1106) or count against a plan
     (`plan`), the trials among them, Claude's side (`claude`, `self_est`: weighted tokens,
     side by side, never subtracted from the dollars), and the dollars by provider. Closed tasks
-    only, by their close: the money by day is the ledger's (`spent`, #1094)."""
-    from .results import row_cost
+    only, by their close: the money by day is the ledger's (`spent`, #1094). `prices`, the total's
+    and each provider's: meter.basis of the dollars (#1135)."""
+    from .results import row_basis, row_cost
     out = {"tasks": 0, "cost": 0.0, "unknown": 0, "unrecorded": 0, "plan": 0, "trials": 0,
            "claude": 0, "self_est": 0, "by_provider": {}}
     for r in rows:
@@ -413,12 +420,18 @@ def api_totals(rows: list[dict], since: float = 0) -> dict:
         else:
             out["cost"] += cost
             p["cost"] += cost
+            if cost:
+                p.setdefault("bases", set()).add(row_basis(r))
         if (c := _compare(r)) is not None:
             out["claude"] += c["claude"]
             out["self_est"] += c["self_est"]
     out["cost"] = round(out["cost"], 6)
+    every = set()
     for p in out["by_provider"].values():
         p["cost"] = round(p["cost"], 6)
+        every |= (bases := p.pop("bases", set()))
+        p["prices"] = meter.basis(bases)
+    out["prices"] = meter.basis(every)
     return out
 
 
@@ -432,13 +445,18 @@ def _paid(row: dict) -> str:
     if cost is None:  # by its cause: a priced model whose figure never came back has a price (#1106)
         return ("paid: unknown (no figure recorded)" if api.get("source") == "unrecorded"
                 else "paid: unknown (no price for this model)")
-    return f"paid {provider_label(pid)} {usd(cost)} ({row.get('model')})"
+    from .results import row_basis
+    b = row_basis(row)  # ≈ and "catalog prices" unless the user set the model's (#1135)
+    return f"paid {provider_label(pid)} {money(cost, b)} ({row.get('model')}{NOTE_IN[b] if cost else ''})"
+
+
+NOTE_IN = {meter.CATALOG: ", catalog prices", meter.YOURS: ", your prices", meter.PROVIDER: ""}
 
 
 def api_line(row: dict) -> str:
     """An API task's line at its close (line() gives it for one): Claude's side as line() says it,
     then what the provider was paid, apart: claude: 56K · writing it yourself: ~59K (estimate) ·
-    paid DeepSeek $0.12 (deepseek/deepseek-flash)."""
+    paid DeepSeek ≈$0.12 (deepseek/deepseek-flash, catalog prices)."""
     est = _compare(row)
     k = lambda n: f"{n / 1000:.0f}K"  # noqa: E731
     if est is None:
@@ -472,8 +490,24 @@ def unpriced(v: dict) -> str:
     return "no figure" if late and late == v["unknown"] else "unknown" if late else "no price"
 
 
+def money_of(v: dict) -> str:
+    """A total's dollars with its `≈` (money, #1135): a row from before it is the catalog's."""
+    return money(v["cost"], v.get("prices", meter.CATALOG))
+
+
+def note(a: dict) -> str:
+    """The basis said once with a line's dollars: `catalog prices`, `your prices`, or "" with no
+    dollars or the provider's own (#1135)."""
+    return meter.NOTE[a.get("prices", meter.CATALOG)].strip(" ()") if a.get("cost") else ""
+
+
+def inside(*parts: str) -> str:
+    """` (deepseek ≈$0.84, anthropic ≈$0.43; catalog prices)`: the parts given, "" with none."""
+    return f" ({'; '.join(p for p in parts if p)})" if any(parts) else ""
+
+
 def _by_provider(a: dict) -> str:
-    return ", ".join(f"{p} {usd(v['cost'])}" for p, v in
+    return ", ".join(f"{p} {money_of(v)}" for p, v in
                      sorted(a["by_provider"].items(), key=lambda kv: -kv[1]["cost"]) if _priced(v))
 
 
@@ -481,7 +515,7 @@ def _money(a: dict) -> str:
     """The period's dollars, the tasks with no price, no figure and on a plan said apart: never
     `$0.00` for a task whose price is unknown."""
     known = a["tasks"] - a["unknown"] - a["plan"]
-    parts = [f"{usd(a['cost'])}" + (f" ({by})" if (by := _by_provider(a)) else "")] if known else []
+    parts = [money_of(a) + inside(_by_provider(a), note(a))] if known else []
     parts += unknown_parts(a)
     if a["plan"]:
         parts.append(f"{a['plan']} on plan usage")
@@ -492,7 +526,7 @@ def _counts(a: dict) -> str:
     """`--api`'s first line: the dollars and the tasks with no price or on a plan, without the
     providers (its `by provider:` line says them, #1022's review)."""
     known = a["tasks"] - a["unknown"] - a["plan"]
-    return ", ".join(([usd(a["cost"])] if known else [])
+    return ", ".join(([money_of(a) + (f" at {n}" if (n := note(a)) else "")] if known else [])
                      + unknown_parts(a)
                      + ([f"{a['plan']} on plan usage"] if a["plan"] else []))
 
@@ -520,14 +554,16 @@ def api_report(a: dict, period: str, bench: dict | None = None, paid: dict | Non
     provs = sorted(a["by_provider"].items(), key=lambda kv: (-kv[1]["cost"], kv[0]))
     if provs:
         out.append("  by provider: " + " · ".join(
-            f"{p} " + (usd(v["cost"]) if _priced(v) else unpriced(v))
+            f"{p} " + (money_of(v) if _priced(v) else unpriced(v))
             + f" ({v['tasks']})"
             for p, v in provs))
     if paid["by_day"]:  # the ledger's: what the day cap and the pane count (#1094)
-        out.append(f"  spent: {usd(paid['usd'])}, {usd(paid['today'])} today (the day ledger: open "
-                   "tasks and bench replays in)")
-        out.append("  by day: " + " · ".join(f"{d[5:]} {usd(v)}" for d, v in paid["by_day"].items()))
+        b = paid.get("prices", meter.CATALOG)
+        out.append(f"  spent: {money(paid['usd'], b)}, {money(paid['today'], b)} today (the "
+                   f"day ledger: open tasks and bench replays in{NOTE_IN[b]})")
+        out.append("  by day: " + " · ".join(f"{d[5:]} {money(v, b)}" for d, v in paid["by_day"].items()))
     if bench and bench.get("tasks"):
-        out.append(f"  bench replays: {usd(bench['cost'])} ({bench['tasks']})"
+        out.append(f"  bench replays: {money(bench['cost'], bench.get('prices', meter.CATALOG))} "
+                   f"({bench['tasks']})"
                    + (f" + {bench['unknown']} with no price" if bench.get("unknown") else ""))
     return "\n".join(out)

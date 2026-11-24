@@ -3101,14 +3101,15 @@ def steps_line(task: store.Task) -> str | None:
 
 
 def _spend_part(task: store.Task) -> str:
-    """The round report's money for an API task (#1022): ` · $0.12 so far`, ` · cost unknown`
-    (no price: never a false $0); nothing for a GPU task."""
+    """The round report's money for an API task (#1022): ` · ≈$0.12 so far (catalog prices)`
+    (`$0.12 so far (your prices)` at the user's own, #1135), ` · cost unknown` (no price: never a
+    false $0); nothing for a GPU task."""
     if task.spec.get("via") != "api":
         return ""
-    from .results import spend_so_far
-    from .savings import usd
-    v = spend_so_far(task)
-    return f" · {usd(v)} so far" if v is not None else " · cost unknown"
+    from .results import live_basis, spend_so_far
+    from .savings import money
+    v, b = spend_so_far(task), live_basis(task.status)
+    return f" · {money(v, b)} so far{meter.NOTE[b] if v else ''}" if v is not None else " · cost unknown"
 
 
 # The round report's line for a task whose agent had a copy of Claude's global files until this

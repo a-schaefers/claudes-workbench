@@ -295,7 +295,8 @@ def _api_period(a: dict) -> dict | None:
     """A period's `api` part of the feed, from savings.api_totals; None with no API task."""
     if not a["tasks"]:
         return None
-    return {k: a[k] for k in ("tasks", "cost", "unknown", "plan", "by_provider")}  # plan: no false $0
+    # plan: no false $0; prices: the dollars' basis, the pane's ≈ (#1135)
+    return {k: a[k] for k in ("tasks", "cost", "unknown", "plan", "by_provider", "prices") if k in a}
 
 
 def _by(rows: list[dict], key) -> dict:
@@ -485,17 +486,16 @@ def summary(f: dict) -> list[str]:
 
 
 def api_week_line(api: dict) -> str:
-    """`wb stats`' API line: api this week: 6 task(s), $1.27 (deepseek $0.84, anthropic $0.43),
-    then the tasks with no price, no figure recorded and on plan usage, each said apart (never a
-    false $0, #1106)."""
+    """`wb stats`' API line: api this week: 6 task(s), ≈$1.27 (deepseek ≈$0.84, anthropic ≈$0.43;
+    catalog prices), then the tasks with no price, no figure recorded and on plan usage, each
+    said apart (never a false $0, #1106); `≈` and the basis by meter.basis (#1135)."""
     from . import savings
-    from .savings import usd
     plan = api.get("plan") or 0
     priced = {p: v for p, v in api["by_provider"].items() if v["tasks"] > v["unknown"] + v.get("plan", 0)}
     known = api["tasks"] - api["unknown"] - plan
     return (f"api this week: {api['tasks']} task(s)"
-            + (f", {usd(api['cost'])} (" + ", ".join(f"{p} {usd(v['cost'])}" for p, v in
-                                                      sorted(priced.items(), key=lambda kv: -kv[1]["cost"]))
-               + ")" if known else "")
+            + (f", {savings.money_of(api)}" + savings.inside(", ".join(
+                f"{p} {savings.money_of(v)}" for p, v in sorted(priced.items(), key=lambda kv: -kv[1]["cost"])),
+                savings.note(api)) if known else "")
             + "".join(f", {u}" for u in savings.unknown_parts(api))
             + (f", {plan} on plan usage" if plan else ""))

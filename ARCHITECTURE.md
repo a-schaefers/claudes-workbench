@@ -478,25 +478,27 @@ with no price`, one of a priced model with no figure as `N with no figure record
 a provider's `no price`, `no figure` or `unknown` when both, `unpriced`: it said `no price` for a
 model the catalog prices, #1106), never `$0.00`; a plan model's (`opencode-go`, an Ollama cloud model) as `on plan
 usage`. `line(row)` gives an API row `api_line`: `claude: 56K · writing it yourself: ~59K
-(estimate) · paid DeepSeek $0.12 (deepseek/deepseek-flash)` (the name from hosted.json,
-`provider_labels`), `· paid: unknown (no price for this model)` (`unrecorded`: `· paid: unknown
+(estimate) · paid DeepSeek ≈$0.12 (deepseek/deepseek-flash, catalog prices)` (the name from hosted.json,
+`provider_labels`; `$0.12 (…, your prices)` at the user's own, *Estimates or your prices*;
+`· paid: unknown (no price for this model)` (`unrecorded`: `· paid: unknown
 (no figure recorded)`, #1106) or `· plan usage (opencode-go)`;
 so `wb accept`, `wb discard` and `wb backlog` print it. With API rows and no GPU one to compare,
 `summary` says `no GPU task to compare (API tasks are below, apart from the score)`, not that a
 task lacks its Claude usage and diff (#1121). `wb savings` adds, when the period has API
-rows, `api: 6 task(s) · $1.27 (deepseek $0.84, anthropic $0.43) + 1 with no price · claude 210K ·
+rows, `api: 6 task(s) · ≈$1.27 (deepseek ≈$0.84, anthropic ≈$0.43; catalog prices) + 1 with no price · claude 210K ·
 writing it yourself ~520K (estimate)` (`api_summary`); `--json` gains `api` (api_totals), which the
 pane's footer and the chat read. **`wb savings --api`** (`api_report`, with `--week`/`--month`/`--all`):
-`api, the last 7 days: 6 task(s) closed, $1.27, 1 with no price (incl. 1 trial)`, then `by provider:`
+`api, the last 7 days: 6 task(s) closed, ≈$1.27 at catalog prices, 1 with no price (incl. 1 trial)`, then `by provider:`
 (the closed tasks'), then the day ledger's (`savings.spent(since)`: spend-api.jsonl's `step` and
 `reconcile` rows since then, open tasks and bench replays in, each on its own `day`; `today` is
-`meter.today()`, the pane's): `spent: $1.57, $0.73 today (the day ledger: open tasks and bench
-replays in)` and `by day:`. The money by day once came from the results rows, dated by their close:
+`meter.today()`, the pane's): `spent: ≈$1.57, ≈$0.73 today (the day ledger: open tasks and bench
+replays in, catalog prices)` and `by day:`. The money by day once came from the results rows, dated by their close:
 a task spent overnight and accepted in the morning, and every open one, read wrong against the
 ledger the cap and the pane count (#1094). Then `bench replays: $0.30 (2)` (`bench.paid_since`,
 only when there are any: a replay writes no results row; its money is in `spent` already);
-`--api --json` is api_totals plus `bench` and `spent` (`{usd, today, by_day: {YYYY-MM-DD: $},
-by_provider: {p: $}}`). The first line names no provider (`_counts`): the `by provider:` line does.
+`--api --json` is api_totals plus `bench` and `spent` (`{usd, today, prices, by_day: {YYYY-MM-DD: $},
+by_provider: {p: $}}`); api_totals, each of its providers, `bench` and `spent` carry `prices`
+(`meter.basis`, *Estimates or your prices*). The first line names no provider (`_counts`): the `by provider:` line does.
 
 **What an API task cost** (#1022, `results.api_usage`, at its close; `bench.paid` for a replay).
 `kind` is task.json `via` (`results.task_kind`: anything but `"api"` is GPU), `provider` task.json's
@@ -533,7 +535,10 @@ when `_plan` finds none (a cloud model hosted.json no longer lists at close, #11
 (OpenRouter's served provider, the keyhole's), the last seen, and `served_model` status
 `served.model` when it isn't the id asked for (#1122). Live, `results.live_spend` is the
 meter, else the steps' summed `cost`, else 0 for a free model, else unknown (`spend_so_far` for the
-round report, every step of events.jsonl; `wb top` keeps a running sum, below).
+round report, every step of events.jsonl; `wb top` keeps a running sum, below). A known cost carries
+`prices` (status `api.prices`, `results.live_basis`; OpenCode's export, `opencode` or `mixed`, is
+never the provider's own figure, so `provider` reads `catalog` there; a row from before #1135 reads
+`catalog`, `results.row_basis`).
 
 **Sharing it** (`wb savings --share`, `savings.share`, #119): a summary to paste, nothing sent (the user posts it, if they choose; Claude never posts it, a bench report or a badge anywhere without the user's yes):
 the machine (`hardware.system()`, `hardware.gpus(windows=False)`), the models' count and weights
@@ -598,12 +603,40 @@ Without the keyhole's view (a model `runner.needs_keyhole` starts none for: an O
 model, a keyless free one), OpenCode's compaction requests count only as far as its `info.cost` does. A catalog price below a backend's
 (an OpenRouter endpoint priced over its listing, without `usage.cost`) meters under.
 
+**Estimates or your prices** (#1135, 2026-11-23). The catalog's price can be far off a provider's
+bill: DeepInfra's flash model at $0.20/$0.60 per M where DeepInfra billed $0.098/$0.294, so every
+figure read 2x high (Anthropic's matched). DeepInfra puts no cost in `usage`. So by default nothing
+changes but the labels: every API money figure says it is an estimate, `≈$0.42` and `catalog
+prices`; nothing to set, nothing asked, and wb never fetches or guesses a price. Opt in: **`wb model
+price <exact id> --input X --output Y [--cache-read Z] [--cache-write W]`** (dollars per M, as the
+provider bills) writes models.json `cost` (`[{input, output, cache?: {read?, write?}}]`,
+`models.own_cost`) on that model; `models._api_model` puts it in `config["cost"]` (the catalog's
+kept in `extra.catalog_cost`; `models.own_price(m)` says whether), so the meter and the task's
+catalog.json (`models.catalog_doc`, OPENCODE_MODELS_PATH) price alike: OpenCode's own estimate then
+agrees and `reconcile` books no difference back. `--clear` goes back to the catalog's. Refused for an
+id not in the catalog, a plan, a free model, one `catalog_doc` can't carry (its OpenCode would
+price from elsewhere), or prices all 0 (that is `meter.is_free`: the day cap would stop counting it,
+the review's catch). The basis (`meter.basis`): `catalog` (shown `≈`), `yours` (`your prices`, no
+`≈`) or `provider` (OpenRouter's `usage.cost`, plain); a ledger row at the user's prices says
+`prices: "yours"` (`meter.row_basis`: `source: provider` first; none, `catalog`), any catalog one
+makes a sum an estimate, `$0` gets no `≈` (`meter.money`, `savings.money`). Status `api.prices`,
+`meter.today()`'s `basis`, results `api.prices`, `bench.paid`'s, api_totals', `spent`'s and the
+roles' JSON `spend_today.prices` carry it to the start line (` · today ≈$0.42 of $5 (catalog
+prices)`: today's rows and the starting model), `wb accept`'s `paid`, the round report, `wb savings`,
+`wb stats` (and `paid` `≈$0.12`, with `paid: ≈ is at catalog prices, an estimate` under the table),
+`wb top`, scout, the stop and check-in texts, the pane (`isEst`, `estUsd`, `pricesNote`; a narrow
+Tasks row drops the `≈` before its place) and the chat (`apiSaved`). The roles' listing ends an API
+role's row with `catalog prices` or `your prices` (`cli._prices_of`), `wb models --api` each price,
+`wb models --json` gives `prices`. The day cap counts the figure shown: a catalog that runs high
+stops tasks early (the safe side); one that runs low lets real spend pass the cap, which the opt-in
+tightens.
+
 **The ledger**, `$WB_HOME/spend-api.jsonl` (`store.append_jsonl`, locked; *Files and formats*):
 `step`, `reconcile` and `checkin` rows, each with its local `day` (`meter.day`: a round past
 midnight books its later steps on the new day). `meter.today()` gives `{usd, unpriced_tok,
-plan_tok: {provider: n}, checkin}` from today's rows, read on from the last offset (the file's
+plan_tok: {provider: n}, checkin, basis, bases}` from today's rows, read on from the last offset (the file's
 inode and size tell a new or rewritten one), so the 5 s tick never re-reads it whole. Status `api`
-(`{usd, metered, source, tok}`, per row through `Task.set_status`, under the meter's lock: the
+(`{usd, metered, source, tok, prices}`, per row through `Task.set_status`, under the meter's lock: the
 keyhole's thread and the runner's book at once, and a total written after a newer one would leave
 it under the ledger) is the task's own; its results row's `api` reads it at the close
 (`results.metered`, *What an API task cost*). `wb savings --api`'s spend and by day read the
@@ -619,20 +652,20 @@ its checkout, setup and base check), and at the cap (a task that meets no cap an
 edited mid-task, is stopped by the guard at once, `meter.NO_CAP`, and its keyhole's room is
 negative, so it spends nothing rather than without a limit; one that can't be read the same way,
 saying so, never NO_CAP's advice; an unpriced model that started anyway is stopped as well, its
-room negative and `stop_reason` the NO_PRICE line): `trivial role: API spend today is $5.03 of the $5 day cap (it resets at local midnight).
+room negative and `stop_reason` the NO_PRICE line): `trivial role: API spend today is ≈$5.03 of the $5 day cap (it resets at local midnight).
 Ask the user: a higher cap (wb route cap <usd>), the role on the GPU (wb route trivial gpu), or
 tomorrow` (the busy opt-in's note, `advice=False`, ends at `midnight)`: its role is on the GPU, the start only
 waits). `wb feedback`, `next` and `resume` on an API task refuse the same way, exit 3 with the
 task's role in the line, before any round is written, a review counted or a step committed
 (`cli._model_still_listed`, #1118: the round they wrote stopped at once as a spend `stuck`, a wake
-for nothing); with no cap set too (#1089's refusal). `meter.tail(m)` is the start line's part, ` · today $0.42 of $5`, or a plan's ` · plan
+for nothing); with no cap set too (#1089's refusal). `meter.tail(m)` is the start line's part, ` · today ≈$0.42 of $5 (catalog prices)`, or a plan's ` · plan
 usage (OpenCode Go): 1.2M tokens today`, which wb start's model line ends with (`cli.cmd_start`).
 
 **The guard `spend`, inside a round** (`runner._spend_guard`, each tick after the stuck checks, an
 API task only): status `api_stop` (`{guard, text}`, written by the keyhole's side: the room's
 `spend`, or its `quota` stop, #1020's, the guard taken as written; `_ProviderWait.stop`, earlier in
 the tick, consumes it first; cleared at each round's start, below) or `meter.stop_reason(task)`, today's spend at the cap (`the day's API spend
-cap is reached: $5.02 of $5 today`, or no cap at all, `meter.no_cap()`: `NO_CAP`, or `UNREADABLE`
+cap is reached: ≈$5.02 of $5 today`, or no cap at all, `meter.no_cap()`: `NO_CAP`, or `UNREADABLE`
 for a routes.json that can't be read; or no price, `<id>: NO_PRICE`). It calls `CURRENT["keyhole"].close(why)` first, so every
 request from then on gets a 400 with `{"error": {"message": "workbench: <why>"}}`, nothing sent
 upstream (`keyhole.Keyhole.close(reason)`; with no reason it shuts the server down as before),
@@ -653,7 +686,7 @@ handover, Claude's notes, the revive, auto-fix, self-review): at the cap, phase 
 report when it has one (`Round <n>'s report (wb report <task> --round <n>):`: auto-fix and
 self-review have already moved status `round` on to n + 1, which never ran). Both notices
 have `cause` `spend`, not the step's own (`results.THE_STEP`), so the slice isn't shrunk, and lead
-with `meter.stop_text`: `<task> stopped: the day's API spend cap is reached ($5.02 of $5 today). Its
+with `meter.stop_text`: `<task> stopped: the day's API spend cap is reached (≈$5.02 of $5 today; catalog prices). Its
 work so far is in the worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb
 resume <task>; or the role on the GPU (wb route <role> gpu) for the next tasks, with wb takeover <task>
 or wb discard <task> for this one (resume keeps its API model).` (with no cap: `meter.no_cap()`, then
@@ -669,8 +702,8 @@ never discard it; it once ended with the stuck wake's "Steer it … or wb discar
 
 **The check-in at half** (`CHECKIN_SHARE` 0.5): a priced row that leaves today at or past half the
 cap, with no `checkin` row today, appends one (under `spend-api.jsonl.checkin.lock`, so tasks in
-parallel add one) and raises `checkin`: `API spend today has passed half the day cap: $2.51 of $5
-(<task> $0.88 so far). Nothing to do unless the user wants to change it.` Once a day across every
+parallel add one) and raises `checkin`: `API spend today has passed half the day cap: ≈$2.51 of $5
+(<task> ≈$0.88 so far; catalog prices). Nothing to do unless the user wants to change it.` Once a day across every
 task.
 
 **Plans** (`meter.is_plan`: `opencode-go/*`, an Ollama cloud model): a quota, not dollars. Their
@@ -1122,7 +1155,8 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
 1. `task X · label · round n · M.m min · local tokens IN in / OUT out` (input excludes cache
    reads; an API task's says `agent tokens`: an API model's tokens are neither local nor free,
    #1022), for an API task then
-   `· $0.12 so far` (`results.spend_so_far`: the runner's meter, else the step events' `cost`) or
+   `· ≈$0.12 so far (catalog prices)` (`results.spend_so_far`: the runner's meter, else the step
+   events' `cost`; `$0.12 so far (your prices)` at the user's own, #1135) or
    `· cost unknown` (`runner._spend_part`); ahead of it in the review notice and `summary.md`,
    `auto-fix skipped: <cause>`.
 2. `agent context: U.UK of WK (P%)[, compacted Nx][; the next round starts a fresh session | ;
@@ -1801,7 +1835,15 @@ all, the 2026-11-23 review). The protocol comes from the catalog's provider pack
 Anthropic's and `anthropic-compatible` take `x-api-key` (and keep `anthropic-version`); alibaba,
 cerebras, cloudflare-workers-ai, deepinfra, deepseek, digitalocean, fireworks, groq, meta, minimax,
 mistral, moonshot, openai, openai-compatible(-responses), openrouter, togetherai, venice, xai, zai
-and zai-coding-plan take `Authorization: Bearer`. Any other package (Google's `x-goog-api-key` and
+and zai-coding-plan take `Authorization: Bearer`. A config provider's V1 npm `@ai-sdk/<name>` (the
+form OpenCode's docs give a custom provider: `@ai-sdk/openai-compatible`, `@ai-sdk/anthropic`) reads
+as `<name>` (`AI_SDK_PREFIX`, as `PACKAGE_PREFIX`): OpenCode 2.3.2 runs it as its own
+`@opencode/ai/providers/<name>` where it has one (openai-compatible, anthropic, openai, deepinfra,
+…), and read as its scope, `@ai-sdk`, every such provider was refused (#1137); an unknown
+`@ai-sdk/foo` (OpenCode's `aisdk:@ai-sdk/foo`, an npm package it loads) still reads as none. A raw
+`@ai-sdk/deepseek` reads as bearer although OpenCode loads that one from npm too (its
+`aisdk:@ai-sdk/deepseek`); it posts Bearer to the base plus `/chat/completions` as well, not
+checked on real OpenCode. Any other package (Google's `x-goog-api-key` and
 `/models/<id>:streamGenerateContent`, Azure's `api-key`, Cohere's native `/chat`, gateways with
 their own paths or headers, none at all) can't run: `start` raises "needs a key wb can hold
 outside the lane: <provider> takes its key in a way the keyhole doesn't speak" rather than a 401
@@ -1817,8 +1859,8 @@ runner). The base mirrors the upstream's path on 127.0.0.1, because a package bu
 the base alone (`new URL(trim(baseURL) + path)`, DeepInfra first appending `/openai` unless the base
 ends in it), so OpenCode posts to the path it would have posted upstream and the keyhole sends that
 path and its query to the upstream's host: DeepInfra `…/v1/openai/chat/completions`, Anthropic
-`…/v1/messages?beta=true` (*API models through OpenCode*; checked on real OpenCode in
-`RealOpenCodeAPI`). A package that rewrites its base by the host (Azure) would not map.
+`…/v1/messages?beta=true`, a custom provider on `@ai-sdk/anthropic` `…/v1/messages` (*API models
+through OpenCode*; checked on real OpenCode in `RealOpenCodeAPI`). A package that rewrites its base by the host (Azure) would not map.
 A request passes, in order, each refusal a JSON error body: the path (a POST to exactly the base
 plus one of `MODEL_PATHS`, `chat/completions`, `responses`, `messages`, `messages/count_tokens`,
 no segment between, since OpenCode never posts one and `…/threads/<id>/messages` carried the key
@@ -2275,13 +2317,13 @@ plan-only week never reads `API $0`. `model_lines` and `models` take an API mode
 then as an API one (an Ollama `:cloud` id, #1013) gives two lines; each has `kind`, an API one
 `paid`, its mean dollars a task over the known costs (none known: no `paid`; a task that sent
 nothing is none, `results.task_cost`, #1106). The trial-free rows
-(`tuning.judged`) give those lines. Plain `wb stats`' headline adds `api this week: 6 task(s), $1.27
-(deepseek $0.84, anthropic $0.43)`, then `N with no price` and `N on plan usage`
-(`stats.api_week_line`; `N with no figure recorded` apart, `unknown_parts`). The Stats tab: each period adds `API $1.27 (DeepSeek $0.84 · Anthropic
-$0.43)` (`apiPeriod`, each provider by its name, `providerWord`; `API plan usage` or `API no price`
+(`tuning.judged`) give those lines. Plain `wb stats`' headline adds `api this week: 6 task(s), ≈$1.27
+(deepseek ≈$0.84, anthropic ≈$0.43; catalog prices)`, then `N with no price` and `N on plan usage`
+(`stats.api_week_line`; `N with no figure recorded` apart, `unknown_parts`). The Stats tab: each period adds `API ≈$1.27 (DeepSeek ≈$0.84 · Anthropic
+≈$0.43; catalog prices)` (`apiPeriod`, each provider by its name, `providerWord`; `API plan usage` or `API no price`
 with no known dollars, `apiMoney`), and an API model's line (`API DeepSeek deepseek-flash: …`) says
 `paid ~$0.12/task` in place of its write speed. The footer's API-only
-week reads `this week: API $1.27 on 6 tasks (no GPU task to compare)`, or `this week: 1 API task,
+week reads `this week: API ≈$1.27 on 6 tasks (no GPU task to compare)`, or `this week: 1 API task,
 no price (…)` / `2 API tasks, plan usage (…)` (`apiAlone`).
 
 **Taking over.** `wb takeover <task>` stops the agent and sets `review` ("Claude took over"):
@@ -2496,8 +2538,8 @@ user sees.
   shows the phase and says what it does and the time left, or who acts next ("Claude reviews
   next.", #103), as do the transcript's last line and status `last`. Then the week's saving
   (`savedLine` of `wb savings --json`, read every 10 minutes and when a task closes; no currency
-  sign, #609), then ` · API $1.27` when its `api` has tasks (`apiMoney`; an API-only week: `this
-  week: API $1.27 on 6 tasks (no GPU task to compare)`, #1022). The web chat's link is on Settings
+  sign, #609), then ` · API ≈$1.27` when its `api` has tasks (`apiMoney`; an API-only week: `this
+  week: API ≈$1.27 on 6 tasks (no GPU task to compare)`, #1022; no `≈` at the user's prices, #1135). The web chat's link is on Settings
   only.
   The Settings tab (`settingRow`; Buttons, since a Select opened on a click and could pick nothing,
   2026-11-19): a Button per setting naming its value, capitalized, the default option saying `(default)` (`▸
@@ -2568,8 +2610,8 @@ key `ollama`, #1077) and no role holding an API model, the
   · <provider> (<window>) · $in/$out per M` with a free model's data-use mark; then `Other model…`,
   which opens the Input `api-<role>-other`, an exact id wb checks; `wb route <role> --api <id>`),
   `<label> thinking` (`THINK_STOPS`, `think-<role>`: `wb route <role> --thinking on|off`, for tasks
-  started after it), and `Spend today: $0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14)`, without a
-  cap `Spend today: $0.42 (DeepSeek $0.42) · no day cap` (`spendLine`, its dollars by the Stats
+  started after it), and `Spend today: ≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14; catalog prices)`, without a
+  cap `Spend today: ≈$0.42 (DeepSeek $0.42; catalog prices) · no day cap` (`spendLine`, `your prices` and no `≈` at the user's, #1135, its dollars by the Stats
   tab's `usd`, each provider by its name from `providers`, the Stats tab's ` · `). A press goes
   through `paneRoute`: `wb route --dry-run --json <args>`, and when it is gated the mod writes its
   `approval` to route-ok.json with `by: pane` (the press is the user's yes; no dialog, no flag
@@ -2707,11 +2749,11 @@ floor); `read_from: "median"`. No first-token time: OpenCode's events carry none
 else the steps' `cost` over all of events.jsonl, which `_Files.step_cost` sums on from the offset
 the last tick reached, again from the start when the file is replaced or cut; the 64 KB
 `EVENTS_TAIL` held a fraction of a long task's; absent when unknown, never 0 for a missing
-price) and, queued for one of its provider's slots, `waits: "a <provider> slot"`. No live server
+price; `prices`, `results.live_basis`, #1135) and, queued for one of its provider's slots, `waits: "a <provider> slot"`. No live server
 rate (no server of ours: the last call's rate still works). It is never in the rack, which stays
 `discover()`'s GPU models, nor the queue, the lease's waiters: an API task takes no lease. The text
-row ends `  API deepseek · $0.12`; the pane's **Now** row reads `▶ <task> API DeepSeek deepseek-flash ·
-running · round 2 · 3m10s · $0.12`: its place and model first, as the Tasks row (`modelWord`), then
+row ends `  API deepseek · ≈$0.12`; the pane's **Now** row reads `▶ <task> API DeepSeek deepseek-flash ·
+running · round 2 · 3m10s · ≈$0.12`: its place and model first, as the Tasks row (`modelWord`), then
 `apiParts`' spend and wait.
 
 On a terminal: the alternate screen, redrawn each tick, bars in eighths, the card's short name
@@ -3093,6 +3135,8 @@ provider:
   untagged as `:latest` (`models._kept_name`, #461);
 - `variant_of`/`replaces`: a `wb optimize apply` variant's source and parent; one record
   (`router.lineage`), the variant first (#584, #723); `wb model retire` keeps both;
+- `cost`: `wb model price` (#1135): an API model's own prices, `[{input, output, cache?: {read?,
+  write?}}]` per M, over the catalog's (*Estimates or your prices*); a malformed one is ignored;
 - `renamed_from`: `wb model rename OLD NEW`, followed back (`router.earlier`): score, slice, knobs
   (`tuning._rows`), speed and Stats line carry over (#818). Without it, a vanished id whose newest
   row ran on the digest the model has now (`weights_id` vs `models.identity`) links the same way;
@@ -3299,7 +3343,7 @@ the section is two lines: `none set up, every role on the GPU` and the catalog's
 model, the GPU part is `no local models: <why_none()>` and the section still prints, exit 0, when a
 role is on API or a key is stored; otherwise it dies as before. `--api TEXT` (`_api_list`) lists the
 catalog ids containing TEXT (any case), sorted, at most `API_LIST_MAX` 30, each with the catalog's own window (`catalog_limit`),
-`$in/$out per 1M in/out` from its first untiered price and the free note, then `and N more: a longer
+`$in/$out per 1M in/out, catalog prices` (`your prices` once `wb model price` set them, #1135; no basis for a plan or a 0 entry) from its first untiered price and the free note, then `and N more: a longer
 text narrows it`; nothing matching reads the catalog again once when `models.miss_rereads()` (as
 `_hosted_exact`: a just-connected provider, #1076); it lists only, never sets a role. `--set-default` stays GPU (`router.choose` over
 `discover()`): never an API model as OpenCode's default.
@@ -3632,12 +3676,13 @@ a pin no longer found exits 3, never the router's other pick).
 `API <id> (<provider>) · thinking off`, `API kept: <id>`, `set by you|Claude MM-DD`: on API from
 `by`/`ts`, who sent its code there, which a GPU pin since never replaces; on the GPU the newer of
 `by`/`ts` and `gpu_by`/`gpu_ts`,
-`(not in OpenCode's catalog now)` for an API model the catalog no longer lists) and the cap,
+`(not in OpenCode's catalog now)` for an API model the catalog no longer lists; an API row ends `catalog
+prices` or `your prices`, whose prices its dollars are at, `cli._prices_of`, #1135) and the cap,
 under a first line while Agents isn't Both (`cli._agents_line`: `Agents: GPU (every role runs on the
 GPU; wb route all both goes back to each role's own below)`); `--json` the normalized document (its
 `use` and `busy` too) plus `summary`, per role
 `label`, `api_status` (`models.status` of its API model from the cached catalog, or not in it) and
-`gpu_found`, and for the pane (#1023, `cli._route_pane`) `spend_today` (`{usd, by_provider}`, today's
+`gpu_found`, and for the pane (#1023, `cli._route_pane`) `spend_today` (`{usd, prices, by_provider}`, today's
 `step` and `reconcile` rows of the day ledger, spend-api.jsonl; `usd` is `meter.today()`'s, the sum the
 cap is checked against) and `providers` (`{<id>: {name, key,
 why?}}` from the cached catalog: `key` `stored`, `ollama`, `env`, `oauth` or `none`, with the why for any but
@@ -5040,7 +5085,7 @@ at a time (XHR; `STALL_MS` 30 s without progress retries the same id); edit rest
 (`whenNear`, #754); `sweepSoon` revokes unused object URLs (#746). The receipt texts, dialog cards
 (`makeAsk`), notices (`makeNotice`) and the gear's sections (`#away-when` states the away rule
 above; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
-models: 6 tasks, $1.27 (DeepSeek $0.84, Anthropic $0.43).`, or that alone, #1022) are in `app.js`. Over plain HTTP
+models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43; catalog prices).`, or that alone, #1022, #1135) are in `app.js`. Over plain HTTP
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
 
 **The app and notifications.** The manifest ("Claude's Workbench", `short_name` "Workbench") is offered over https only (`app.js` removes its link
@@ -5109,11 +5154,11 @@ imports from the module's own files pass too). The helpers type `$` as `any`, so
 literals: `HOME`, `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_SAVINGS`, `WB_COMPACT_AT`.
 
 **State.** Ten `$.state` atoms survive a module reload; one read under an old shape tag is absent,
-so change the tag when its type changes: `tasks` (`tasks-10`, WbTask[]: name, phase, round, model,
+so change the tag when its type changes: `tasks` (`tasks-11`, WbTask[]: name, phase, round, model,
 label, via, role, provider, routed (#1016), tests, last, createdAt, updatedAt, tokens, recent, repo, cwd, subdir, session, claude_pid,
 claude_start, backlog, parked, allowed, and the Tasks view's (#1048, `viewFacts`): group, cards, tools, tokOut, ctxUsed,
 window, freshAt, autoFixes, autoFixMax, roundFor, reviews, steps, activeS, roundStartedAt, typicalMin, typicalN, lateMin,
-spend), `live` (`live-1`, {task, lines: {s, t}[]}), `chat`
+spend, est: the spend at catalog prices, #1135), `live` (`live-1`, {task, lines: {s, t}[]}), `chat`
 (`chat-4`, {key, delegating, url, web}: workbench mode, also kept by session id in `$.store`
 `modes`, #689), `pane` (`pane-1`, {tab, open, focus, minimized}), `sessions` (`sessions-1`,
 string[]: the process's session ids), `savings` (`savings-1`, string: the pane's saving line), `stats` (`stats-1`, {key,
@@ -5284,7 +5329,7 @@ rows (the 14-row box below a ~100-column terminal) or when two would leave the t
 apprentice, the tabs and the modeline under 12 rows. A press on a task's first row (a `plain` Button
 keyed `task-<name>`) follows it (`followTask`, `mem.picked`, which `focusOf` keeps while the task is
 listed). While an API task works (running, testing or asking: not one queued for its slot, the
-owner's "only while an API task runs"), `API today $0.42 of the $5 day cap  ▉░░░░░░░░░` sits above the
+owner's "only while an API task runs"), `API today ≈$0.42 of the $5 day cap  ▉░░░░░░░░░` (no `≈` at the user's prices, #1135) sits above the
 saving (`capRow`: warning from `meter.CHECKIN_SHARE`, error at the cap), from `wb route --json` as
 `rolesNow` caches it, read again past `ROLES_CACHE_MS` off the render's path (`capNow`).
 
@@ -5605,12 +5650,13 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
 |---|---|---|
-| `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, free}] (stored keys on a package the keyhole speaks, #1066, and Ollama cloud only, `cli._runs_held`), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
+| `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, prices (catalog\|yours, #1135), free}] (stored keys on a package the keyhole speaks, #1066, and Ollama cloud only, `cli._runs_held`), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider never touched, one for another baseURL refuses; off this machine needs `local: true`); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | *Optimize*; `start` detached, refused while a task holds the GPU, stopped by a task that wants it; `--bench` then runs `wb bench run`; `apply` adds the measured window as its own entry (`optimize.entry_name`; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>`, `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
 | `wb model retire <id>` | `--delete` | Not OpenCode's `model` or `small_model` (#708); keeps `variant_of`, `replaces` (#723); `--delete` drops Ollama's weights; an API id refused (`cli.API_SIZES`, #1013). |
 | `wb model rename <old id> <new id>` | | models.json `renamed_from` (#818); refused while the old id is configured, or for an API id. |
+| `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures say `your prices`, no `≈`; `--clear` the catalog's again. Needs `--input` and `--output`; refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry, prices all 0 (free, outside the cap); another action's flag refused. |
 | `wb model sizes <id> [trivial] [significant]` | | The sizes it's routed; another action's flag refused (#602); an API id refused: `sizes are for GPU models; API models run by role`. |
 | `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`; an OpenRouter model set or switched to without them exits 3, `privacy.order_refusal`, #1021), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`; with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin needs no dialog. |
 | `wb scout` | `--done [--notes "…"]` (`--notes` alone refused, #602), `--due` (7 days), `--watch "…"`, `--unwatch N` (1-based) | The weekly facts: `cli.gpu_line`, `cli.ollama_line`, `cli.server_lines` (`models.SERVER_COMMANDS`, `models.SERVER_PORTS`, `NEEDS_KEY`, `models.WSL_NAT`, `models.server_key`), `audio.coverage`, `cli.image_server_lines`; the API section (`cli.scout_api_lines`: roles, API records, spend, a count per provider, #1024). |
@@ -5692,9 +5738,10 @@ $WB_HOME (~/.local/state/workbench)
                                  runner holding it, its task's name inside (models.api_holders); never in gpu.json
   spend-api.jsonl  .lock .checkin.lock  the API ledger (meter.py, #1019; *Spend*), one row each, every row {ts, day (local
                                  %Y-%m-%d)}: step {task, round, provider, model, usd (null: a plan or unpriced), metered,
-                                 source (keyhole|provider|opencode|metered|metered (opencode said 0)), plan?, tok {in, out,
+                                 source (keyhole|provider|opencode|metered|metered (opencode said 0)), plan?, prices? ("yours":
+                                 at wb model price's, #1135), tok {in, out,
                                  cache_read, cache_write, reasoning}}; reconcile {task, round, provider, model, usd (OpenCode
-                                 said more), source opencode}; checkin {task, usd_today, cap}: today's one check-in at half
+                                 said more), source opencode, prices?}; checkin {task, usd_today, cap}: today's one check-in at half
   update.json                    wb update's last check
   patches.json                   {source (the clone install), upstream (owner/repo on GitHub, else null)}: patches.note_install, by wb patch init, upstream, send and wb update (not --check) on `local`; the mod's consent gate reads it.
                                  prepared {<slug>: {author, email, date (unix), subject}}: the local commit wb patch upstream picked;
@@ -6371,12 +6418,13 @@ request's path, headers and body and answers OpenAI or Anthropic SSE, an error s
 echoing the key, chunks spaced in time, a served model and an OpenRouter provider. `fake_auth`
 stands in for `opencode auth export|list` (`FAKE_AUTH`). `RealOpenCodeAPI` runs real OpenCode
 (scratch homes, `OPENCODE_DISABLE_MODELS_FETCH=1`, an environment without the user's keys) on the
-built-in `deepinfra` and `anthropic` providers through the keyhole: one request upstream with the
+built-in `deepinfra` and `anthropic` providers, and custom ones on V1 npm `@ai-sdk/openai-compatible`
+and `@ai-sdk/anthropic` (#1137), through the keyhole: one request upstream with the
 canary, OpenCode's own with only the token, at the path OpenCode would have used upstream. The
 2026-11-23 reviews' findings each have a `Keyhole` test: bodies other JSON parsers route elsewhere,
 a key with a newline, bad queries and chunk sizes (`raw_request`, for what http.client won't send),
 an error body cut across the key, errors inside a 200 stream (`_Upstream`'s "raw" mode), packages
-the keyhole can't speak, DeepInfra's appended `/openai`, a key written as a header, a key in a
+the keyhole can't speak, `@ai-sdk/<name>` npm names (#1137), DeepInfra's appended `/openai`, a key written as a header, a key in a
 model's own entry or the V2 form (#1015's review). Its
 `test_the_tasks_own_catalog_*` (#1015) takes real `api model.list` entries through `hosted()`,
 `catalog_doc` and the runner's overlay: real OpenCode reads them back field for field (the `limit` capped), and a model
@@ -6484,7 +6532,7 @@ doc needs its own `!/` line).
   route dialog's text is `routes.change`'s line, which the mod reads from `wb route … --dry-run --json` (#1014's), never words of its own. **The local_only edit guard**
   (`localOnlyRefusal` in register.tsx) and commands.json's `repos` shape change together.
 - **The keyhole's paths** (`keyhole.MODEL_PATHS`, the base mirroring the upstream's path in `layer_options`,
-  `mirror_path`) and **its packages** (`keyhole.PACKAGES`) → what OpenCode posts for each package and how it sends the
+  `mirror_path`) and **its packages** (`keyhole.PACKAGES`, `AI_SDK_PREFIX`'s npm names) → what OpenCode posts for each package and how it sends the
   key (*API models through OpenCode*; packages/ai/src/providers): re-check with `RealOpenCodeAPI` and the source on
   each OpenCode bump. `keyhole.redact` → any new place an upstream error is shown.
 - **The keyhole overlay** (`runner.keyhole_overlay`) → `write_config_layer`'s provider merge and `rules_env`'s
@@ -6632,7 +6680,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
   and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`; a role's **`order`**
   (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126).
-- **A `$.state` atom's type** → its tag (`tasks-10`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`,
+- **A `$.state` atom's type** → its tag (`tasks-11`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`,
   `stats-1`, `top-1`, `said-3`, `splash-1`).
 - **The Tasks page's layout** → `pageParts`, `pageShape` (#963);
 - **The Tasks view** (#1048): the status keys `round_for`, `typical`, `late_min`, `cards`, `api` and task.json `group` →
@@ -6649,7 +6697,9 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   tab, `savedLine`, `drawSaved`.
 - **API money** (#1022): `savings.of_row`'s `kind` check is what keeps the score, card, share, milestones and badge
   GPU-only; `savings.api_totals`' keys → `stats._api_period`, `savings.api_summary`/`api_report`, `stats.api_week_line`, the mod's `apiMoney`,
-  `apiPeriod`, the chat's `apiSaved`; `savings.usd` → the mod's `usd`, `apiSaved`'s; the `kind` default (`gpu`) →
+  `apiPeriod`, the chat's `apiSaved`; `savings.usd` → the mod's `usd`, `apiSaved`'s; `meter.basis`' values
+  (`catalog`, `yours`, `provider`) and `meter.NOTE`'s words → the mod's `isEst`/`pricesNote`, tasks.ts' `est`, `apiSaved`'s `est`/`note`
+  (#1135); the `kind` default (`gpu`) →
   `results.api_row` (a row; `models.is_api` takes an id), `router.same_kind` (score, expected, slice, `tuning._rows`), `stats._energy`. `local tok` → `agent tok` (with an API row shown) in `results.table`, the bench
   table and the round report's `agent tokens` (an API task's) together. `WbTop`'s type is unchanged (the API fields are optional keys of `running` rows): `top-1` stays.
 - **Which session a task is** → the mod's `mine` and `cli._scope`: the same rule, the home-or-`/` exception included;

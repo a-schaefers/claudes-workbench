@@ -20,7 +20,13 @@ Two views of the same requests, each kept as high as the other says (never under
 An OpenCode cost of 0 for a model whose price isn't 0 is never trusted (never a false 0).
 
 The ledger is `$WB_HOME/spend-api.jsonl` (store.append_jsonl, locked): `step`, `reconcile` and
-`checkin` rows, each with its local `day`. A plan (OpenCode Go, an Ollama cloud model) is a
+`checkin` rows, each with its local `day`; a row at the user's own prices (wb model price,
+models.json `cost`) says `prices: "yours"`.
+
+Every figure is an estimate unless the user set the model's prices: the catalog's can be about
+twice a provider's bill (DeepInfra's, #1135, 2026-11-23). `basis` says which a figure is:
+"catalog" (shown `≈$0.42 … (catalog prices)`), "yours" (`$0.42 … (your prices)`) or "provider"
+(the provider's own `usage.cost`: plain). A plan (OpenCode Go, an Ollama cloud model) is a
 quota, not dollars: its rows have `usd: null` and `plan`, and never count against the cap."""
 
 from __future__ import annotations
@@ -44,6 +50,33 @@ NO_CAP = "there is no API day cap (routes.json day_usd): ask the user for one (w
 # so the task stops as for NO_CAP, but saying so: NO_CAP's advice there brought up the dialog
 # "every role starts over on the GPU" for a cap that was set (wave 2's review)
 UNREADABLE = "routes.json can't be read ({why}), so the day cap can't be kept: wb route shows it"
+
+
+CATALOG, YOURS, PROVIDER = "catalog", "yours", "provider"  # a figure's basis (#1135)
+NOTE = {CATALOG: " (catalog prices)", YOURS: " (your prices)", PROVIDER: ""}
+
+
+def row_basis(r: dict) -> str:
+    """A ledger row's basis: the provider's own figure, the user's prices, else the catalog's
+    (every row from before #1135)."""
+    return PROVIDER if r.get("source") == "provider" else YOURS if r.get("prices") == YOURS else CATALOG
+
+
+def basis(bases) -> str:
+    """Several figures' basis summed: any catalog one makes the sum an estimate; none at all is
+    the catalog's (a $0 so far reads as the default)."""
+    got = set(bases)
+    return CATALOG if CATALOG in got or not got else YOURS if YOURS in got else PROVIDER
+
+
+def model_basis(m) -> str:
+    """What a model's next figures will be: the user's prices (wb model price), else the catalog's."""
+    return YOURS if models.own_price(m) else CATALOG
+
+
+def money(x: float | None, b: str = CATALOG) -> str:
+    """usd(), with `≈` in front of a catalog estimate (#1135); $0 is none."""
+    return ("≈" if b == CATALOG and x else "") + usd(x)
 
 
 def ledger_path() -> Path:
@@ -212,19 +245,21 @@ _TODAY_LOCK = threading.Lock()
 
 def today() -> dict:
     """Today's spend over every task: {"usd": float, "unpriced_tok": int, "plan_tok":
-    {provider: int}, "checkin": bool}, from today's `step` and `reconcile` rows."""
+    {provider: int}, "checkin": bool, "basis": its rows' (basis)}, from today's `step` and
+    `reconcile` rows."""
     path, d = ledger_path(), day()
     with _TODAY_LOCK:
         try:
             st = os.stat(path)
         except OSError:
-            return {"usd": 0.0, "unpriced_tok": 0, "plan_tok": {}, "checkin": False}
+            return {"usd": 0.0, "unpriced_tok": 0, "plan_tok": {}, "checkin": False, "basis": CATALOG,
+                    "bases": []}
         c = _TODAY
         if (c.get("path"), c.get("ino"), c.get("day")) != (str(path), st.st_ino, d) \
                 or st.st_size < c.get("offset", 0):
             c.clear()
             c.update(path=str(path), ino=st.st_ino, day=d, offset=0, usd=0.0, unpriced=0, plan={},
-                     checkin=False)
+                     checkin=False, bases=set())
         if st.st_size > c["offset"]:
             rows, c["offset"] = store.read_jsonl(path, c["offset"])
             for r in rows:
@@ -236,19 +271,24 @@ def today() -> dict:
                     tok = _total(r["tok"]) if isinstance(r.get("tok"), dict) else 0
                     if _num(r.get("usd")):
                         c["usd"] += r["usd"]
+                        c["bases"].add(row_basis(r))
                     elif r.get("plan"):
                         c["plan"][r["plan"]] = c["plan"].get(r["plan"], 0) + tok
                     else:
                         c["unpriced"] += tok
         return {"usd": round(c["usd"], 6), "unpriced_tok": c["unpriced"], "plan_tok": dict(c["plan"]),
-                "checkin": c["checkin"]}
+                "checkin": c["checkin"], "basis": basis(c["bases"]), "bases": sorted(c["bases"])}
+
+
+def _task_rows(name: str) -> list[dict]:
+    rows, _ = store.read_jsonl(ledger_path())
+    return [r for r in rows if isinstance(r, dict) and r.get("task") == name
+            and r.get("kind") in ("step", "reconcile") and _num(r.get("usd"))]
 
 
 def task_total(name: str) -> float:
     """Everything the ledger books for one task, any day."""
-    rows, _ = store.read_jsonl(ledger_path())
-    return round(sum(r["usd"] for r in rows if isinstance(r, dict) and r.get("task") == name
-                     and r.get("kind") in ("step", "reconcile") and _num(r.get("usd"))), 10)
+    return round(sum(r["usd"] for r in _task_rows(name)), 10)
 
 
 def usd(x: float | None) -> str:
@@ -291,22 +331,24 @@ def refusal(m, role: str | None = None, advice: bool = True) -> str | None:
     if cap() is None:
         return f"{who}: {no_cap()}"
     if (c := cap()) is not None and (t := today()["usd"]) >= c:
-        return (f"{who}: API spend today is {usd(t)} of the {usd(c)} day cap (it resets at local "
+        return (f"{who}: API spend today is {money(t, today()['basis'])} of the {usd(c)} day cap (it resets at local "
                 f"midnight)" + (f". Ask the user: a higher cap (wb route cap <usd>), the role on the GPU "
                                 f"(wb route {role or '<role>'} gpu), or tomorrow" if advice else ""))
     return None
 
 
 def tail(m) -> str:
-    """The start line's spend part: ` · today $0.42 of $5`, or a plan's ` · plan usage (OpenCode
-    Go): 1.2M tokens today`; "" for a GPU model."""
+    """The start line's spend part: ` · today ≈$0.42 of $5 (catalog prices)` (`$0.42 … (your
+    prices)` when today's rows and this model are all at the user's prices, #1135), or a plan's
+    ` · plan usage (OpenCode Go): 1.2M tokens today`; "" for a GPU model."""
     if getattr(m, "kind", "gpu") != "api":
         return ""
     t = today()
     if is_plan(m):
         return f" · plan usage ({_plan_name(m)}): {_tokens(t['plan_tok'].get(m.provider, 0))} tokens today"
-    c = cap()
-    return f" · today {usd(t['usd'])}" + (f" of {usd(c)}" if c is not None else ", no day cap")
+    c, b = cap(), basis([*t["bases"], model_basis(m)])
+    return (f" · today {money(t['usd'], b)}" + (f" of {usd(c)}" if c is not None else ", no day cap")
+            + NOTE[b])
 
 
 # The runner's meter, one per task in this process
@@ -345,13 +387,13 @@ def stop_reason(task) -> str | None:
     if (c := cap()) is None:
         return no_cap()
     if (t := today()["usd"]) >= c:
-        return f"{STOP}: {usd(t)} of {usd(c)} today"
+        return f"{STOP}: {money(t, today()['basis'])} of {usd(c)} today"
     return None
 
 
 def stop_text(task) -> str:
     """The `stuck` notice's lead for a spend stop."""
-    c, t = cap(), today()["usd"]
+    c, t, b = cap(), today()["usd"], today()["basis"]
     if c is None:
         return (f"{task.name} stopped: {no_cap()}. Its work so far is in the worktree; then wb resume "
                 f"{task.name}.")
@@ -359,7 +401,8 @@ def stop_text(task) -> str:
     # (fixed per task): the resumed round stopped at the cap again at once (#1095, 2026-11-23).
     # A route change is for the next tasks; this one is taken over or discarded.
     n, role = task.name, task.spec.get("role") or "<role>"
-    return (f"{n} stopped: {STOP} ({usd(t)} of {usd(c)} today). Its work so far is in the "
+    note = f"; {NOTE[b].strip(' ()')}" if t and NOTE[b] else ""
+    return (f"{n} stopped: {STOP} ({money(t, b)} of {usd(c)} today{note}). Its work so far is in the "
             f"worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb resume "
             f"{n}; or the role on the GPU (wb route {role} gpu) for the next tasks, with wb takeover "
             f"{n} or wb discard {n} for this one (resume keeps its API model).")
@@ -374,8 +417,11 @@ class Meter:
         self.plan = is_plan(m)
         self.prices = price(m)
         self.free = not self.plan and is_free(m)  # booked, never capped
+        self.yours = models.own_price(m)  # wb model price's: its rows say so (#1135)
         self.lock = threading.Lock()
-        self.total = task_total(task.name)  # booked for the task, any day, this runner's too
+        rows = _task_rows(task.name)  # booked for the task, any day, this runner's too
+        self.total = round(sum(r["usd"] for r in rows), 10)
+        self.bases = {row_basis(r) for r in rows}
         self.metered_total = 0.0
         self.tok = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}
         self.keyhole = False   # the keyhole metered a response: steps then only reconcile
@@ -408,18 +454,22 @@ class Meter:
         if self.plan:
             row["plan"] = self.m.provider
         row["source"] = source
+        if self.yours and not self.plan:
+            row["prices"] = YOURS
         if tok is not None:
             row["tok"] = tok
         store.append_jsonl(ledger_path(), row)
         with self.lock:
             if _num(row["usd"]):
                 self.total += row["usd"]
+                self.bases.add(row_basis(row))
             if _num(mtr):
                 self.metered_total += mtr
             for k, v in (tok or {}).items():
                 self.tok[k] = self.tok.get(k, 0) + v
             api = {"usd": None if self.plan else round(self.total, 6),
                    "metered": round(self.metered_total, 6), "source": source, "tok": dict(self.tok),
+                   "prices": basis(self.bases or {model_basis(self.m)}),
                    **({"plan": self.m.provider} if self.plan else {})}
             # written under the lock: the keyhole's thread and the runner's book at once, and a
             # total written after a newer one left status `api` under the ledger (the review)
@@ -440,8 +490,10 @@ class Meter:
             ts = time.time()
             store.append_jsonl(path, {"ts": round(ts, 3), "day": day(ts), "kind": "checkin",
                                       "task": self.task.name, "usd_today": round(t["usd"], 6), "cap": c})
-        self.task.notify("checkin", f"API spend today has passed half the day cap: {usd(t['usd'])} of "
-                                    f"{usd(c)} ({self.task.name} {usd(self.total)} so far). Nothing to do "
+        b, note = t["basis"], NOTE[t["basis"]].strip(" ()")
+        self.task.notify("checkin", f"API spend today has passed half the day cap: {money(t['usd'], b)} of "
+                                    f"{usd(c)} ({self.task.name} {money(self.total, b)} so far"
+                                    f"{'; ' + note if note else ''}). Nothing to do "
                                     "unless the user wants to change it.", round=self.n or None)
 
     def on_usage(self, usage: dict) -> None:
@@ -529,6 +581,6 @@ class Meter:
         left = c - t - worst
         if left < 0 and not self.task.status.get("api_stop"):
             self.task.set_status(api_stop={"guard": "spend", "text": (
-                f"{STOP}: {usd(t)} of {usd(c)} today, and its next request could cost up to "
+                f"{STOP}: {money(t, today()['basis'])} of {usd(c)} today, and its next request could cost up to "
                 f"{usd(worst)}")})
         return left

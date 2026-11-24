@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, agentOf, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, splashTarget, statsLines, usd, wrapParts, wrapWords } from './register.js'
+import { absolutePath, agentOf, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, spendLine, apiParts, splashTarget, statsLines, usd, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
@@ -5794,11 +5794,25 @@ test('#1126: an OpenRouter role\'s backends are in the roles\' summary, so a cha
   expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')  // as wb refuses it
 })
 
+test('API dollars at the catalog\'s prices read as estimates and at the user\'s own say so (#1135)', () => {
+  // the catalog ran about 2x DeepInfra's bill (2026-11-23): a figure says which prices it is at
+  const mine = { tasks: 2, cost: 0.2, unknown: 0, plan: 0, prices: 'yours', by_provider: { deepinfra: { tasks: 2, cost: 0.2, unknown: 0, prices: 'yours' } } }
+  const t = (o: object) => JSON.stringify({ tasks: 0, claude: 0, self_est: 0, saved: 0, wh: 0, ...o })
+  expect(savedLine(t({ api: mine }))).toBe('this week: API $0.20 on 2 tasks (no GPU task to compare)')
+  expect(statsLines({ tasks: 2, periods: { week: { tasks: 2, landed: 2, api: mine } } })[0].text)
+    .toContain('API $0.20 (deepinfra $0.20; your prices)')
+  const routes = (prices?: string) => ({ v: 1, day_usd: 5, roles: {}, providers: {}, spend_today: { usd: 0.42, by_provider: { deepinfra: 0.42 }, ...(prices ? { prices } : {}) } }) as any
+  expect(spendLine(routes('yours'))).toBe('Spend today: $0.42 of $5 (deepinfra $0.42; your prices)')
+  expect(spendLine(routes())).toBe('Spend today: ≈$0.42 of $5 (deepinfra $0.42; catalog prices)')
+  expect(apiParts({ via: 'api', spend: 0.12 })).toEqual(['≈$0.12', ''])
+  expect(apiParts({ via: 'api', spend: 0.12, prices: 'yours' })).toEqual(['$0.12', ''])
+})
+
 test('an API task\'s dollars sit beside the saving, never in it, and an API-only week says there was no GPU task (#1022)', () => {
   const api = { tasks: 6, cost: 1.27, unknown: 0, plan: 0, by_provider: { deepseek: { tasks: 4, cost: 0.84, unknown: 0 }, anthropic: { tasks: 2, cost: 0.43, unknown: 0 } } }
   const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })
-  expect(savedLine(t({ api }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · API $1.27')
-  expect(savedLine(t({ tasks: 0, saved: 0, api }))).toBe('this week: API $1.27 on 6 tasks (no GPU task to compare)')
+  expect(savedLine(t({ api }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · API ≈$1.27')
+  expect(savedLine(t({ tasks: 0, saved: 0, api }))).toBe('this week: API ≈$1.27 on 6 tasks (no GPU task to compare)')
   expect(savedLine(t({ tasks: 0, saved: 0, api: { tasks: 1, cost: 0, unknown: 1, plan: 0 } })))
     .toBe('this week: 1 API task, no price (no GPU task to compare)')                    // never $0 for no price
   expect(savedLine(t({ tasks: 0, saved: 0, api: { tasks: 2, cost: 0, unknown: 0, plan: 2 } })))
@@ -5810,7 +5824,7 @@ test('an API task\'s dollars sit beside the saving, never in it, and an API-only
   expect([usd(4e-5), usd(4.1e-5), usd(0.0041), usd(0.009999), usd(0.42), usd(0)]).toEqual(['$0.00004', '$0.000041', '$0.0041', '$0.01', '$0.42', '$0'])
   expect(savedLine(t({ api: { tasks: 0, cost: 0, unknown: 0, plan: 0 } }))).toBe('this week: saved ~30K Claude tokens (38%, estimate)')
   const week = statsLines({ tasks: 6, periods: { week: { tasks: 6, landed: 6, api } } })[0].text
-  expect(week).toContain('API $1.27 (deepseek $0.84 · anthropic $0.43)')
+  expect(week).toContain('API ≈$1.27 (deepseek ≈$0.84 · anthropic ≈$0.43; catalog prices)')
   const model = statsLines({ tasks: 2, model_lines: { lines: [{ model: 'deepseek/deepseek-flash', tasks: 2, accepted_pct: 100,
     kind: 'api', paid: 0.12, speed: { write: 80 } }] } }).find(l => l.label === 'API deepseek deepseek-flash')!
   expect(model.text).toContain('paid ~$0.12/task')
@@ -5818,7 +5832,7 @@ test('an API task\'s dollars sit beside the saving, never in it, and an API-only
   const row = liveLines({ snap: { ts: 0, every: 2, gpus: [], rack: [], queue: [], running: [{ task: 'fix-auth',
     model: 'deepseek/deepseek-flash', label: 'deepseek-flash', phase: 'running', round: 2, round_s: 190,
     via: 'api', provider: 'deepseek', spend: 0.12 }] }, busy: {} } as any)[0].map(p => p.text).join('')
-  expect(row).toBe('▶ fix-auth API deepseek deepseek-flash · running · round 2 · 3m10s · $0.12')
+  expect(row).toBe('▶ fix-auth API deepseek deepseek-flash · running · round 2 · 3m10s · ≈$0.12')  // #1135
 })
 
 test('#1016: the Agents switch: its change line is the dialog\'s text, and the roles\' summary says it', async ($, on) => {
@@ -5867,7 +5881,7 @@ test('#1016: Agents set in routes.json reaches the conversation, and a value wb 
   expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')
 })
 
-test('#1016: an API task\'s row names API and its provider before the model, the live view its routed line, and tasks is tasks-10', async ($, on) => {
+test('#1016: an API task\'s row names API and its provider before the model, the live view its routed line, and tasks is tasks-11', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   task(files, 'fix-api', 'running', { model: 'deepseek/deepseek-flash', model_label: 'DeepSeek (API)', via: 'api',
@@ -5899,7 +5913,7 @@ test('#1016: an API task\'s row names API and its provider before the model, the
   await ui.unmount()
   expect(sets.length).toBeGreaterThan(0)
   const last = sets.at(-1)
-  expect(last.shape).toBe('tasks-10')
+  expect(last.shape).toBe('tasks-11')  // #1135 added est
   const api = last.value.find((t: WbTask) => t.name === 'fix-api')
   expect([api.via, api.role, api.provider, api.routed]).toEqual(['api', 'trivial', 'DeepSeek',
     'API deepseek/deepseek-flash (DeepSeek) · trivial role, set by you 11-20 · thinking off'])
@@ -6100,7 +6114,7 @@ test('#1023: a role\'s API model is a dropdown of the models wb can run, with Ot
 
 test('#1023: thinking runs wb route <role> --thinking, the day cap takes $5, 5,00 and 5 USD as 5 and empty as off, and spend today reads from wb route --json', { timeoutMs: 20_000 }, async ($, on) => {
   const { ui, w, texts, ran } = await settingsTab($, on)
-  expect(await texts()).toContain('Spend today: $0.42 of $5 (DeepSeek $0.42)')
+  expect(await texts()).toContain('Spend today: ≈$0.42 of $5 (DeepSeek $0.42; catalog prices)')  // #1135
   await ui.press({ key: 'think-writing' })
   expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('for tasks started after this')
   await ui.press({ key: 'think-writing:on' })
@@ -6117,7 +6131,7 @@ test('#1023: thinking runs wb route <role> --thinking, the day cap takes $5, 5,0
   await ui.input({ key: 'cap', text: '' })
   expect(ran('wb route cap off')).toBe(true)
   expect((await ui.find({ key: 'cap' }))?.props.value).toBe('')
-  expect(await texts()).toContain('Spend today: $0.42 (DeepSeek $0.42) · no day cap')
+  expect(await texts()).toContain('Spend today: ≈$0.42 (DeepSeek $0.42; catalog prices) · no day cap')
   await ui.unmount()
 })
 
@@ -6290,12 +6304,12 @@ test('#1048: three tasks running at once draw under one group header with their 
   await clock.advance(1600)
   const rows = await listRows(ui)
   expect(rows.slice(0, 7).map(r => r.replace(/[✻✳✶✢·] hiscore-s/, '✻ hiscore-s').replace(/\d+m$/, 'Nm'))).toEqual([
-    '▾ hiscore · 3 tasks · 2 running · 1 testing    $0.04  ░░░░░░░░ 0/3 done',
-    '├ ✻ hiscore-store  round 2 · fix 1/2           GPU 0                Nm',
+    '▾ hiscore · 3 tasks · 2 running · 1 testing   ≈$0.04  ░░░░░░░░ 0/3 done',  // #1135: an estimate
+    '├ ✻ hiscore-store  round 2 · fix 1/2          GPU 0                 Nm',
     '│   ⎿ edit src/score_store.py    ctx ████▌┊░░ 56% · ~6m left · 17 tools',
-    '├ ✻ hiscore-screen round 1                     GPU 1                 Nm',
+    '├ ✻ hiscore-screen round 1                    GPU 1                  Nm',
     '│   ⎿ write src/ui/hiscore.py    ctx █████▋░░ 71% · ~11m left · 9 tools',
-    '└ ◐ hiscore-docs   testing                     API DeepSeek  $0.04   Nm',
+    '└ ◐ hiscore-docs   testing                    API DeepSeek  ≈$0.04   Nm',
     '    ⎿ tests: python3 -m unitte…              ctx █▊░░░┊░░ 22% · 6 tools',
   ])
   // the running cards' last events are gone from the list: the followed task's transcript has them
@@ -6384,8 +6398,8 @@ test('#1048: the API day cap shows on the Tasks tab only while an API task runs'
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 71, scroll: { offset: 0, bodyRows: 40 } } })
   await clock.advance(1600)
   await ui.redraw()
-  expect(await ui.find({ type: 'Text', text: /^API today \$0\.42 of the \$5 day cap  ▉░░░░░░░░░$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /^[✻✳✶✢·] port-parser round 1 +API DeepSeek +deepseek-v4\.1-flash +\$0\.31 +\d+m$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^API today ≈\$0\.42 of the \$5 day cap  ▉░░░░░░░░░$/ })).toBeTruthy()  // #1135
+  expect(await ui.find({ type: 'Text', text: /^[✻✳✶✢·] port-parser round 1 +API DeepSeek +deepseek-v4\.1-flash +≈\$0\.31 +\d+m$/ })).toBeTruthy()
   const reads = runs.filter(r => r[1] === 'route').length
   await clock.advance(5000)
   expect(runs.filter(r => r[1] === 'route').length).toBe(reads)   // read again only past ROLES_CACHE_MS
@@ -6421,7 +6435,7 @@ test('#1048: the Stats tab names models and providers as the Tasks view does, a 
     optimized: { 'ollama/qwen3-coder:30b': { window: 65536, spill: 0 } },
   }
   const said = statsLines(f, '', names).map(l => `${l.label}: ${l.text}`)
-  expect(said[0]).toContain('API $1.27 (DeepSeek $0.84 · Anthropic $0.43)')        // names, not ids
+  expect(said[0]).toContain('API ≈$1.27 (DeepSeek ≈$0.84 · Anthropic ≈$0.43; catalog prices)')  // names, not ids
   expect(said).toContain(`qwen3-coder 30B: 24 tasks · 83% landed · writes ~61${NB}tok/s`)  // Now's label, not ollama/…
   expect(said).toContain('API DeepSeek deepseek-v4.1-flash: 4 tasks · 100% landed · paid ~$0.21/task')  // the Tasks view's place and model
   expect(said).toContain('By size: trivial 17 (94%) · complex 24 (71%)')             // "Complex coding", not significant
@@ -6439,7 +6453,7 @@ test('#1048: the Stats tab names models and providers as the Tasks view does, a 
     label: 'deepseek/deepseek-flash', phase: 'running', round: 2, round_s: 190, via: 'api', provider: 'deepseek', spend: 0.12 }],
     rack: [{ model: 'ollama/m', label: 'M', state: 'resident', gpu_bytes: 2 ** 33, write_tok_s: 61 }] } } as any
   const rows = liveLines(top, '', names).map(r => r.map(p => p.text).join(''))
-  expect(rows[0]).toBe('▶ fix-auth API DeepSeek deepseek-flash · running · round 2 · 3m10s · $0.12')
+  expect(rows[0]).toBe('▶ fix-auth API DeepSeek deepseek-flash · running · round 2 · 3m10s · ≈$0.12')
   expect(rows[1]).toBe(`● M resident 8.0 GiB on the GPU · writes ~61${NB}tok/s`)
 })
 

@@ -97,7 +97,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-10',
+  shape: 'tasks-11',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -332,9 +332,9 @@ const frameOf = (pose: Pose, tick: number): Pose => {
 // What the Tasks page is made of, apart from its drawing: the render draws it and pageShape
 // measures it, so the two can't disagree (#963).
 function pageParts(list: WbTask[], watched: WbLive, delegating: boolean, now: number, spin: string, cols: number,
-  pixels: boolean, bodyRows = 24, cap: { spent: number; cap: number | null } | null = null) {
+  pixels: boolean, bodyRows = 24, cap: { spent: number; cap: number | null; est?: boolean } | null = null) {
   const rows = listRows(list, watched.task, now, spin, cols, bodyRows)
-  const capLine = cap ? capRow(list, cap.spent, cap.cap, cols, usd) : null
+  const capLine = cap ? capRow(list, cap.spent, cap.cap, cols, usd, cap.est) : null
   // The history is drawn, newest within HISTORY_CHARS: the engine scrolls the pane (arrows,
   // while focused) and follows the end as lines arrive. What the agent is doing now is the
   // apprentice's to say.
@@ -2528,6 +2528,7 @@ export function viewFacts(sp: Row, st: Row) {
     activeS: Math.max(0, num(st.active_s) - num(st.step_active_s)), roundStartedAt: num(st.round_started_at) * 1000,
     typicalMin: num(typical.min), typicalN: num(typical.n), lateMin: num(st.late_min),
     spend: !api ? null : api.plan ? 'plan' as const : typeof api.usd === 'number' ? api.usd as number : 'none' as const,
+    est: !!api && isEst(api.prices),
   }
 }
 
@@ -2551,10 +2552,11 @@ function listRows(list: WbTask[], followed: string, now: number, spin: string, c
 // The day cap's line's numbers on the Tasks tab (#1048): `wb route --json` as rolesNow last read it,
 // only while an API task works (the owner, 2026-11-23: "only while an API task runs"); null
 // otherwise, or before the first read
-function capOf(list: WbTask[]): { spent: number; cap: number | null } | null {
+function capOf(list: WbTask[]): { spent: number; cap: number | null; est: boolean } | null {
   if (!apiWorking(list)) return null
   const r = mem.roles?.routes
-  return r ? { spent: Number(r.spend_today?.usd ?? 0), cap: typeof r.day_usd === 'number' ? r.day_usd : null } : null
+  return r ? { spent: Number(r.spend_today?.usd ?? 0), cap: typeof r.day_usd === 'number' ? r.day_usd : null,
+    est: isEst(r.spend_today?.prices) } : null
 }
 
 // Reads them again past ROLES_CACHE_MS while an API task works, off the render's path (a
@@ -2833,17 +2835,25 @@ function namesNow(list: WbTask[], top: WbTop | null): Names {
   return n
 }
 
+// API dollars are estimates at the catalog's prices unless the user set the model's (wb model price,
+// #1135, 2026-11-23: the catalog ran about 2x DeepInfra's bill): `prices` is meter.basis's, missing
+// on rows from before it (the catalog's)
+export const isEst = (prices: unknown) => prices !== 'yours' && prices !== 'provider'
+export const estUsd = (x: number, prices: unknown) => (x && isEst(prices) ? '≈' : '') + usd(x)
+const PRICES: Record<string, string> = { catalog: 'catalog prices', yours: 'your prices' }
+export const pricesNote = (prices: unknown) => PRICES[typeof prices === 'string' ? prices : 'catalog'] ?? ''
+
 // A period's API money as the footer says it: never $0 for tasks with no price; '' with none
 export function apiMoney(a: any): string {
   if (!a || !a.tasks) return ''
   const known = a.tasks - (a.unknown ?? 0) - (a.plan ?? 0)
-  return known > 0 ? usd(a.cost ?? 0) : a.plan ? 'plan usage' : 'no price'
+  return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no price'
 }
 
 // An API-only week: API $1.27 on 6 tasks, or 1 API task, no price (no dollars to put "on")
 export function apiAlone(a: any, money: string): string {
   const tasks = `task${a.tasks === 1 ? '' : 's'}`
-  return `this week: ${money.startsWith('$') ? `API ${money} on ${a.tasks} ${tasks}` : `${a.tasks} API ${tasks}, ${money}`} (no GPU task to compare)`
+  return `this week: ${/^≈?\$/.test(money) ? `API ${money} on ${a.tasks} ${tasks}` : `${a.tasks} API ${tasks}, ${money}`} (no GPU task to compare)`
 }
 
 // A Stats period's API part (the feed's periods[*].api): API $1.27 (DeepSeek $0.84 · Anthropic $0.43)
@@ -2851,15 +2861,16 @@ export function apiPeriod(a: any, names: Names = NO_NAMES): string {
   const money = apiMoney(a)
   if (!money) return ''
   const provs = Object.entries(a.by_provider ?? {}).filter(([, v]: any) => v.tasks > (v.unknown ?? 0) + (v.plan ?? 0))
-    .sort((x: any, y: any) => y[1].cost - x[1].cost).map(([p, v]: any) => `${providerWord(p, names)} ${usd(v.cost)}`)
-  return `API ${money}${provs.length ? ` (${provs.join(' · ')})` : ''}${a.unknown && money !== 'no price' ? ` + ${a.unknown} with no price` : ''}`
+    .sort((x: any, y: any) => y[1].cost - x[1].cost).map(([p, v]: any) => `${providerWord(p, names)} ${estUsd(v.cost, v.prices)}`)
+  const inside = [provs.join(' · '), a.cost ? pricesNote(a.prices) : ''].filter(Boolean).join('; ')
+  return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no price' ? ` + ${a.unknown} with no price` : ''}`
 }
 
 // An API task's RUNNING row's parts after its phase (wb top's `spend`, `waits`); its place and model
 // lead the row, as on the Tasks view (`API DeepSeek deepseek-flash`, modelWord)
 export function apiParts(r: Row): string[] {
   if (r.via !== 'api') return []
-  return [typeof r.spend === 'number' ? usd(r.spend) : '', r.waits ? `waits for ${r.waits}` : '']
+  return [typeof r.spend === 'number' ? estUsd(r.spend, r.prices) : '', r.waits ? `waits for ${r.waits}` : '']
 }
 
 // The electricity price `wb savings --json` says is set (per kWh), or null
@@ -3038,14 +3049,16 @@ async function setCap($: any, text: string) {
   $.ui.invalidate('ui.render')
 }
 
-// Spend today, from `wb route --json`: `$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14)`; the dollars by
+// Spend today, from `wb route --json`: `≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14; catalog prices)`; the dollars by
 // `usd`, the Stats tab's (#1022), so the two never say one sum two ways (wave 2's merge), and each
 // provider by its name and the Stats tab's ` · ` (#1048's review: `deepseek $0.28, anthropic`)
 export function spendLine(r: WbRoutes): string {
-  const s = r.spend_today ?? { usd: 0, by_provider: {} }
+  const s: WbRoutes['spend_today'] = r.spend_today ?? { usd: 0, by_provider: {} }
   const by = Object.entries(s.by_provider ?? {}).filter(([, v]) => v > 0).map(([p, v]) => `${r.providers?.[p]?.name || p} ${usd(v)}`)
-  const each = by.length ? ` (${by.join(' · ')})` : ''
-  return `Spend today: ${usd(s.usd ?? 0)}${r.day_usd != null ? ` of ${money(r.day_usd)}${each}` : `${each} · no day cap`}`
+  // ≈ and "catalog prices" unless at the user's own (#1135): once, the providers' share it
+  const inside = [by.join(' · '), s.usd ? pricesNote(s.prices) : ''].filter(Boolean).join('; ')
+  const each = inside ? ` (${inside})` : ''
+  return `Spend today: ${estUsd(s.usd ?? 0, s.prices)}${r.day_usd != null ? ` of ${money(r.day_usd)}${each}` : `${each} · no day cap`}`
 }
 
 // The Connected line: each provider, a stored key as working ("key stored": "stored" alone said

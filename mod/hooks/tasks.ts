@@ -32,6 +32,8 @@ export type TaskFacts = Pick<WbTask, 'name' | 'phase' | 'round' | 'model' | 'lab
    * length at least progress.FLOOR_MIN), 0 for none: a task is late only from there */
   lateMin: number
   spend: number | 'plan' | 'none' | null   // null: no api record (a GPU task, or an older wb)
+  /** the spend is at the catalog's prices, an estimate: drawn `≈` (status `api.prices`, #1135) */
+  est?: boolean
 }
 
 const WORKING = new Set(['running', 'testing', 'asking']) // where the context and the estimate mean something
@@ -204,7 +206,7 @@ type Meter = Part[]
 type Row = {
   t: TaskFacts; mark: Part; name: string; underline: boolean
   stage: string; stageS: string; stageColor: string; fixAt: boolean
-  where: string; whereS: string; placeStyle: Style; model: string; role: string; spend: string
+  where: string; whereS: string; placeStyle: Style; model: string; role: string; spend: string; spendS: string
   elapsed: string; elapsedStyle: Style
   eta: { text: string; color?: string } | null; doing: string | null; doingStyle: Style
   ctx: { frac: number; freshAt: number | null } | null; tools: number; tok: string
@@ -212,10 +214,11 @@ type Row = {
 
 // line 1's columns, left to right, and what goes first when there is no room: the role, the
 // model, the long stage (`round 2` becomes `r2`), the long place (`API DeepSeek` becomes `API`),
-// the place. The glyph, the name, the stage, the spend and the elapsed time always stay.
+// the estimate's `≈` (#1135: `≈$0.04` becomes `$0.04`), the place. The glyph, the name, the
+// stage, the spend and the elapsed time always stay.
 const COLS1 = ['where', 'model', 'role', 'spend', 'elapsed'] as const
 type Col = typeof COLS1[number]
-const DROP1 = ['role', 'model', 'long-stage', 'long-where', 'where']
+const DROP1 = ['role', 'model', 'long-stage', 'long-where', 'est', 'where']
 // line 2's meters: the tokens go first, then the bar narrows from 8 cells to 5, the tool count,
 // the bar (`ctx 56%` stays), the estimate. What it is doing keeps MIN_DOING columns.
 const DROP2 = ['tok', 'bar8', 'tools', 'bar5', 'eta']
@@ -268,7 +271,8 @@ function rowOf(t: TaskFacts, now: number, spin: string, followed: string, groupe
     // an API task's the id's last part (its place names the provider, #1016's badge), a GPU task's label
     model: (t.via === 'api' ? '' : t.label) || (t.model ?? '').split('/').pop() || '',
     role: ROLE_WORDS[t.role] ?? t.role ?? '',
-    spend: typeof t.spend === 'number' ? usd(t.spend) : t.spend === 'plan' ? 'plan' : t.spend === 'none' ? 'no price' : '',
+    spend: typeof t.spend === 'number' ? (t.est && t.spend ? '≈' : '') + usd(t.spend) : t.spend === 'plan' ? 'plan' : t.spend === 'none' ? 'no price' : '',
+    spendS: typeof t.spend === 'number' ? usd(t.spend) : '',
     elapsed, elapsedStyle: late ? { color: late } : { dim: true },
     eta: etaOf(t, now), doing: doingOf(t), doingStyle: DOING_STYLE[t.phase] ?? { dim: true },
     ctx: ctxOf(t), tools: t.tools || 0, tok: t.tokOut > 0 ? tokens(t.tokOut) : '',
@@ -298,7 +302,7 @@ const meters = (r: Row, drop: string[]): Meter[] => {
 }
 const meterText = (ms: Meter[]) => ms.map(textOf).join(' · ')
 
-type Layout = { w: Record<string, number>; keep: string[]; ls: boolean; lw: boolean; drop: string[]; mw: number }
+type Layout = { w: Record<string, number>; keep: string[]; ls: boolean; lw: boolean; le: boolean; drop: string[]; mw: number }
 
 function layout(rows: Row[], cols: number, grouped: boolean): Layout {
   const c1 = grouped ? 2 : 0
@@ -310,11 +314,12 @@ function layout(rows: Row[], cols: number, grouped: boolean): Layout {
     const ls = keep.includes('long-stage')
     const stage = Math.min(24, widest(rows.map(r => (ls ? r.stage : r.stageS || r.stage))))
     if (!keep.includes('long-where')) ww.where = widest(rows.map(r => r.whereS || r.where))
+    if (!keep.includes('est')) ww.spend = widest(rows.map(r => r.spendS || r.spend))
     const ks = keep.filter(k => (COLS1 as readonly string[]).includes(k))
     const right = ks.reduce((s, k) => s + ww[k]!, 0) + 2 * Math.max(0, ks.length - 1)
     return [c1 + 2 + w.name! + 1 + stage + 2 + right, ww]
   }
-  keep.push('long-stage', 'long-where')
+  keep.push('long-stage', 'long-where', 'est')
   for (const k of DROP1) {
     if (need(keep)[0] <= cols) break
     if (keep.includes(k)) keep.splice(keep.indexOf(k), 1)
@@ -337,7 +342,7 @@ function layout(rows: Row[], cols: number, grouped: boolean): Layout {
   const rlen = right.reduce((s, k) => s + w[k]!, 0) + 2 * Math.max(0, right.length - 1)
   const room = cols - (c1 + 3 + w.name!) - rlen - 2
   if (room < MIN_STAGE) w.name = Math.max(Math.min(MIN_NAME, w.name!), w.name! - (MIN_STAGE - room))
-  return { w, keep, ls: keep.includes('long-stage'), lw: keep.includes('long-where'), drop, mw }
+  return { w, keep, ls: keep.includes('long-stage'), lw: keep.includes('long-where'), le: keep.includes('est'), drop, mw }
 }
 
 // trailing blanks off, as Python's rstrip
@@ -379,6 +384,7 @@ function line1(r: Row, cols: number, conn: string, L: Layout): Part[] {
     if (!L.keep.includes(k) || !w[k]) continue
     let v = colOf(r, k)
     if (k === 'where' && !L.lw) v = r.whereS || v
+    if (k === 'spend' && !L.le) v = r.spendS || v
     const text = k === 'spend' || k === 'elapsed' ? v.padStart(w[k]!) : v.padEnd(w[k]!)
     const style: Style = k === 'where' ? r.placeStyle : k === 'elapsed' ? r.elapsedStyle : k === 'spend' ? {} : { dim: true }
     right.push([{ text, ...style }])
@@ -418,7 +424,8 @@ function header(group: string, tasks: TaskFacts[], cols: number, compact: boolea
     return k ? [{ text: `${k} ${p}`, ...(p === 'stuck' || p === 'failed' ? { color: 'error' } : { dim: true }) }] : []
   })
   const paid = tasks.filter(t => typeof t.spend === 'number')
-  const spend = paid.length ? usd(paid.reduce((s, t) => s + (t.spend as number), 0)) : ''
+  const sum = paid.reduce((s, t) => s + (t.spend as number), 0)
+  const spend = paid.length ? (sum && paid.some(t => t.est) ? '≈' : '') + usd(sum) : ''
   const left: Part[] = [{ text: '▾ ', dim: true }, { text: group, bold: true }]
   if (!compact) left.push({ text: ` · ${n} tasks`, dim: true })
   for (const c of counts) left.push({ text: ' · ', dim: true }, c)
@@ -488,14 +495,16 @@ export const apiWorking = (list: Pick<TaskFacts, 'via' | 'phase'>[]) => list.som
 
 /** The API day cap's line, only while an API task is working (the owner, 2026-11-23: on Tasks only
  * then; Settings has it always): `API today $0.42 of the $5 day cap  █▍░░░░░░░░`, warning from
- * CHECKIN_SHARE of the cap, error at it; without a cap, today's spend alone. */
+ * CHECKIN_SHARE of the cap, error at it; without a cap, today's spend alone. `est`: today's spend
+ * is at the catalog's prices, drawn `≈$0.42` (#1135). */
 export function capRow(list: TaskFacts[], spent: number, cap: number | null, cols: number,
-  usd: (x: number) => string = plainUsd): Part[] | null {
+  usd: (x: number) => string = plainUsd, est = false): Part[] | null {
   if (!apiWorking(list)) return null
-  if (!(cap && cap > 0)) return clipParts([{ text: `API today ${usd(spent)}`, dim: true }], cols)
+  const today = (est && spent ? '≈' : '') + usd(spent)
+  if (!(cap && cap > 0)) return clipParts([{ text: `API today ${today}`, dim: true }], cols)
   const share = spent / cap
   const color = share >= 1 ? 'error' : share >= CHECKIN_SHARE ? 'warning' : 'success'
   const capText = Number.isInteger(cap) ? `$${cap}` : usd(cap)
-  return clipParts([{ text: `API today ${usd(spent)} of the ${capText} day cap  `, dim: true },
+  return clipParts([{ text: `API today ${today} of the ${capText} day cap  `, dim: true },
     { text: bar(share, 10), color }], cols)
 }

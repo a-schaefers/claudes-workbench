@@ -251,6 +251,14 @@ def spend_so_far(task: store.Task) -> float | None:
     return live_spend(str(task.spec.get("model") or ""), task.status, step_cost(_step_rows(task)))
 
 
+def live_basis(st: dict) -> str:
+    """The basis of a task's dollars so far (meter.basis): the runner's meter's status `api.prices`,
+    else the catalog's (#1135)."""
+    v = st.get("api")
+    b = v.get("prices") if isinstance(v, dict) else None
+    return b if b in meter.NOTE else meter.CATALOG
+
+
 def live_spend(model_id: str, st: dict, total: float) -> float | None:
     """A live API task's dollars so far: the runner's meter, else ``total``, the step events'
     summed `cost` over the whole events.jsonl (a tail's sum was a fraction of a long task's,
@@ -302,7 +310,26 @@ def api_usage(task: store.Task) -> dict | None:
     None unless known, never 0 for a missing price: a 0 from OpenCode for a model the catalog
     prices isn't trusted. None for a GPU task. The order: every session's export, then some
     sessions' plus the meter's remainder, then the meter, then the step events' sum (both floors,
-    `metered`), then a free model's 0, then nothing sent's 0."""
+    `metered`), then a free model's 0, then nothing sent's 0. A known cost says its `prices`
+    (meter.basis: the meter's; OpenCode's export is never the provider's own figure, #1135)."""
+    out = _api_usage(task)
+    if out is not None and out.get("cost") is not None and out["source"] not in ("plan", "none"):
+        b = live_basis(task.status)
+        out["prices"] = meter.CATALOG if b == meter.PROVIDER and out["source"] in ("opencode", "mixed") else b
+    return out
+
+
+def row_basis(row: dict) -> str:
+    """A results or bench row's money basis (`api.prices`, `paid.prices`): a row from before
+    #1135 is the catalog's."""
+    for key in ("api", "paid"):
+        v = row.get(key)
+        if isinstance(v, dict) and v.get("prices") in meter.NOTE:
+            return v["prices"]
+    return meter.CATALOG
+
+
+def _api_usage(task: store.Task) -> dict | None:
     spec, st = task.spec, task.status
     if task_kind(spec) != "api":
         return None
@@ -408,11 +435,12 @@ def paid_cell(rows: list[dict]) -> str:
     if not priced:
         return "plan"
     priced = [r for r in priced if not _source(r, "none")]
-    known = [c for r in priced if (c := task_cost(r)) is not None]
+    known = [(c, r) for r in priced if (c := task_cost(r)) is not None]
     if not known:
         return "?"
     from .savings import usd
-    return ("~" if len(known) < len(priced) else "") + usd(sum(known) / len(known))
+    est = meter.basis(row_basis(r) for _, r in known) == meter.CATALOG  # #1135: ≈, an estimate
+    return ("~" if len(known) < len(priced) else "≈" if est else "") + usd(sum(c for c, _ in known) / len(known))
 
 
 def _apart(steps: list[dict], key: str, fields: tuple) -> dict:
@@ -511,6 +539,8 @@ def table(only: set | None = None) -> str:
                    f"{avg('auto_fixes'):>7.1f} {avg('reviews'):>7.1f} {avg('minutes'):>6.1f} "
                    + (f"{tok:>9} {paid_cell(rs):>7}" if api else f"{tok:>10}")
                    + (f" {_claude_avg(rs):>9}" if claude else ""))
+    if api and any(api_row(r) and row_cost(r) and row_basis(r) == meter.CATALOG for r in rows):
+        left_out = "\npaid: ≈ is at catalog prices, an estimate" + left_out  # #1135
     if claude:
         unknown = sum("claude" not in r for r in rows)
         left_out = ("\nclaude: what a task cost Claude, its calls in the session that ran it, in "

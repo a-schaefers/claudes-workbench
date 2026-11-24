@@ -2968,6 +2968,14 @@ def _route_gpu(wanted: str, role: str) -> str:
     return m.id
 
 
+def _prices_of(m) -> str:
+    """Whose prices an API model's dollars are at (#1135): "your prices" (wb model price), else
+    "catalog prices", an estimate; "" for a plan, a free model or none."""
+    if m is None or getattr(m, "kind", "gpu") != "api" or meter.is_plan(m) or meter.is_free(m):
+        return ""
+    return meter.NOTE[meter.model_basis(m)].strip(" ()")
+
+
 def _who(mid: str) -> str:
     m = models.lookup(mid)
     return models.provider_name(m) if m is not None and m.kind == "api" else mid.split("/", 1)[0]
@@ -3089,6 +3097,8 @@ def _route_show(as_json: bool) -> None:
         if made:
             ts, by = max(made, key=lambda x: x[0])
             bits.append(f"set by {'Claude' if by == 'claude' else 'you'} {time.strftime('%m-%d', time.localtime(ts))}")
+        if row["via"] == "api" and not gone and (p := _prices_of(models.lookup(row["api"]))):
+            bits.append(p)  # whose prices its dollars are at: the catalog's, an estimate, or yours (#1135)
         print(f"{r:<{width}}" + " · ".join(bits))
     if doc["day_usd"] is not None:
         print(f"day cap {routes.money(doc['day_usd'])}")
@@ -3135,7 +3145,7 @@ def _read_catalog_later() -> None:
 
 def _route_pane() -> dict:
     """`wb route --json`'s keys for the pane's Settings tab (#1023): `spend_today` (the day
-    ledger's, spend-api.jsonl: {usd, by_provider}) and `providers` ({id: {name, key, why}}, key
+    ledger's, spend-api.jsonl: {usd, prices, by_provider}) and `providers` ({id: {name, key, why}}, key
     stored, ollama (Ollama cloud's login), env, oauth or none, from the cached catalog: never a
     network probe or OpenCode run inline; with no cache, or one past PANE_REREAD_SECS that lists no
     stored key, one read in the background, _read_catalog_later)."""
@@ -3169,7 +3179,7 @@ def _spend_today() -> dict:
     `step` and `reconcile` rows, each with `day`, `provider` and `usd`); none yet is 0. `usd` is
     meter.today()'s, the sum the day cap is checked against, so the pane never shows another
     (wave 2's merge: this read the ledger a second way)."""
-    day = meter.day()
+    day, t = meter.day(), meter.today()
     rows, _ = store.read_jsonl(meter.ledger_path())
     by: dict = {}
     for r in rows:
@@ -3177,7 +3187,8 @@ def _spend_today() -> dict:
                 and meter._num(r.get("usd")):
             p = str(r.get("provider") or "?")
             by[p] = by.get(p, 0.0) + r["usd"]
-    return {"usd": meter.today()["usd"], "by_provider": {p: round(v, 6) for p, v in by.items()}}
+    # `prices`: the pane's ≈ and "(catalog prices)" unless every row is at the user's (#1135)
+    return {"usd": t["usd"], "prices": t["basis"], "by_provider": {p: round(v, 6) for p, v in by.items()}}
 
 
 def _agents_line(doc: dict) -> str:
@@ -4332,7 +4343,7 @@ def _models_json() -> dict:
     cards the numbers of the cards its Ollama sees (models.card_numbers; None when unknown);
     `api`: the models a task runs with (_runs_held: a key stored by /connect, on a package the
     keyhole speaks, #1066, or Ollama cloud), [{id, name, provider, provider_name, window, price
-    {input, output} per million, free}]; `used`: the API
+    {input, output} per million, prices (catalog or yours: wb model price, #1135), free}]; `used`: the API
     models tasks ran on, newest first; `optimize`: {done_at, models, running}; `media`: the image
     and audio engines and their defaults (_media_json, #1047)."""
     seen: dict = {}
@@ -4350,7 +4361,7 @@ def _models_json() -> dict:
                     "provider_name": models.provider_name(m),
                     "window": (m.config.get("limit") or {}).get("context"),
                     "price": {k: cost.get(k) for k in ("input", "output")} if isinstance(cost, dict) else None,
-                    "free": m.free})
+                    "prices": meter.model_basis(m), "free": m.free})
     used: list = []
     for t in sorted(store.all_tasks(archived=True), key=lambda t: -(t.spec.get("created_at") or 0)):
         if t.spec.get("via") == "api" and (mid := t.spec.get("model")) and mid not in used:
@@ -4473,8 +4484,11 @@ def _api_list(text: str) -> None:
         cost = m.config.get("cost")
         rate = next((c for c in cost if isinstance(c, dict) and not c.get("tier")), None) \
             if isinstance(cost, list) else None
+        # whose prices only when there is a basis to say: a plan or a 0 entry has none, and its
+        # line ended in a bare ", " (#1135's review, 2026-11-23)
+        basis = _prices_of(m)
         price = f" · ${rate.get('input') or 0:g}/${rate.get('output') or 0:g} per 1M in/out" \
-            if rate and not m.free else ""
+            + (f", {basis}" if basis else "") if rate and not m.free else ""
         # the catalog's own window, the model's fact (#1017 plans every API task to API_WINDOW)
         own = (m.extra.get("catalog_limit") or m.config.get("limit") or {}).get("context")
         print(f"{m.id}  {_window(own)}{price}"
@@ -4925,8 +4939,8 @@ def scout_api_lines() -> list[str]:
     # task paid a fraction of a cent (wave 2's merge)
     by = ", ".join(f"{p} {savings.usd(v)}" for p, v in sorted(paid["by_provider"].items(), key=lambda x: -x[1])
                    if v)
-    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {savings.usd(paid['usd'])} of {cap}"
-               + (f" ({by})" if by else "")
+    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {savings.money(paid['usd'], paid['prices'])} of {cap}"
+               + savings.inside(by, savings.note({"cost": paid["usd"], "prices": paid["prices"]}))  # #1135
                + (f"; task(s) {', '.join(u)}" if (u := savings.unknown_parts(t)) else ""))  # #1106
     by_prov: dict[str, list] = {}
     for m in hosted.values():
@@ -5364,6 +5378,53 @@ def _media_json() -> dict:
 API_SIZES = "sizes are for GPU models; API models run by role"
 
 
+def _per_m(v: float) -> str:
+    return f"${v:g}"
+
+
+def _model_price(mid: str, inp, out, read, write, clear: bool = False) -> None:
+    """wb model price: the user's own prices for an API model, per million tokens (models.json
+    `cost`), or --clear for the catalog's again. Opt-in only: wb never fetches or guesses one, and
+    never asks for one; the catalog's ran about 2x DeepInfra's bill (#1135, 2026-11-23)."""
+    if clear:
+        if any(v is not None for v in (inp, out, read, write)):
+            die("--clear takes no prices")
+        if (models._overrides().get(mid) or {}).get("cost") is None:
+            print(f"{mid}: no prices of yours set; its costs are the catalog's (≈, an estimate)")
+            return
+        models.set_override(mid, "cost", None)
+        print(f"{mid}: back to the catalog's prices; its costs are estimates again (≈)")
+        return
+    if inp is None or out is None:
+        die("wb model price <id> --input X --output Y [--cache-read Z] [--cache-write W]: dollars "
+            "per million tokens, as the provider bills them; or --clear")
+    if any(v < 0 or v != v for v in (inp, out, read, write) if v is not None):
+        die("prices are dollars per million tokens, 0 or more")
+    if not any(v for v in (inp, out, read, write) if v is not None):
+        # every price 0 is meter.is_free: the day cap would stop counting the model, unsaid
+        # (#1135's review, 2026-11-23); a free model is the catalog's to say, never a typo's
+        die(f"{mid}: prices all 0 would make it free, outside the day cap: there is no price to set at 0")
+    try:
+        m = models.lookup(mid)
+    except RuntimeError as e:
+        die(str(e))
+    if m is None or m.kind != "api":
+        die(f"{mid} is not an API model in OpenCode's catalog (wb models --api TEXT lists the exact ids)")
+    if meter.is_plan(m) or m.free:
+        die(f"{mid} is {'plan usage, not dollars' if meter.is_plan(m) else 'free'}: there is no price to set")
+    if models.catalog_doc(m) is None:
+        # its OpenCode reckons from another catalog (its config entry, the bundled one): its own
+        # estimate would stay there, and the meter's reconcile book the difference back in
+        die(f"{mid}: wb can't hand its OpenCode a price (not a plain catalog entry); a model in your "
+            "OpenCode config takes its cost there")
+    cache = {k: v for k, v in (("read", read), ("write", write)) if v is not None}
+    row = {"input": inp, "output": out, **({"cache": cache} if cache else {})}
+    models.set_override(mid, "cost", [row])
+    print(f"{mid}: your prices, {_per_m(inp)} in / {_per_m(out)} out"
+          + "".join(f" / {_per_m(v)} cache {k}" for k, v in cache.items())
+          + " per 1M tokens; its costs say \"your prices\" from its next task (--clear: the catalog's)")
+
+
 def _api_id(model_id: str) -> bool:
     """Whether the id names an API model (hosted(), #1013), asked only when discover() lacks it
     and it isn't the GPU side's (models.gpu_side: `wb model rename OLD`'s OLD is gone from the
@@ -5402,6 +5463,13 @@ def cmd_model(a):
         die("--url, --start, --stop, --label, --context and --pull go with wb model add")
     if a.action != "retire" and a.delete:
         die("--delete goes with wb model retire")
+    priced = [a.price_in, a.price_out, a.cache_read, a.cache_write]
+    if a.action != "price" and (a.clear or any(v is not None for v in priced)):
+        die("--input, --output, --cache-read, --cache-write and --clear go with wb model price")
+    if a.action == "price":
+        if a.sizes:
+            die("wb model price <id> takes no sizes")
+        return _model_price(a.id, *priced, clear=a.clear)
     if a.action == "rename":
         return _model_rename(a.id, a.sizes)
     if a.action != "sizes" and a.sizes:
@@ -6388,9 +6456,13 @@ def cmd_remote(a):
         out, err = io.StringIO(), io.StringIO()
         try:
             with redirect_stdout(out), redirect_stderr(err):
+                # every flag of wb model's parser: #1135's price flags, missing here, made
+                # every wb remote die on an AttributeError (caught integrating, 2026-11-23)
                 cmd_model(argparse.Namespace(action="add", id=f"{pid}/{name}", sizes=[], pull=False,
                                              url=None, start=None, stop=None, label=None,
-                                             context=a.context, delete=False))
+                                             context=a.context, delete=False, price_in=None,
+                                             price_out=None, cache_read=None, cache_write=None,
+                                             clear=False))
             print(out.getvalue().splitlines()[0])
         except SystemExit:  # die: why this one wasn't registered, and the rest go on
             print(f"--  {pid}/{name}: {err.getvalue().strip().removeprefix('wb: ')}")
@@ -7550,8 +7622,9 @@ def parser() -> argparse.ArgumentParser:
                    f"contain TEXT (at most {API_LIST_MAX}), with window and price; lists only")
     s.set_defaults(f=cmd_models)
     s = sub.add_parser("model", help="add a model to OpenCode (--pull downloads it), retire one, "
-                                     "limit the task sizes it is routed, or carry a renamed one's record")
-    s.add_argument("action", choices=["add", "retire", "sizes", "rename"])
+                                     "limit the task sizes it is routed, carry a renamed one's record, "
+                                     "or set an API model's prices to yours")
+    s.add_argument("action", choices=["add", "retire", "sizes", "rename", "price"])
     s.add_argument("id", help="provider/model (rename: the id it had before)")
     s.add_argument("sizes", nargs="*", help="sizes: the only task sizes it gets (none: all); "
                    "rename: the id it has now")
@@ -7565,6 +7638,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--context", type=int, help="add: context tokens (default: what Ollama serves "
                    "it, else what the provider's other models use; another server needs it)")
     s.add_argument("--delete", action="store_true", help="retire: also delete its weights")
+    s.add_argument("--input", dest="price_in", type=float, metavar="X", help="price: an API model's "
+                   "input price, dollars per 1M tokens, as your provider bills it (models.json cost)")
+    s.add_argument("--output", dest="price_out", type=float, metavar="Y", help="price: its output price")
+    s.add_argument("--cache-read", type=float, metavar="Z", help="price: its cache-read price")
+    s.add_argument("--cache-write", type=float, metavar="W", help="price: its cache-write price")
+    s.add_argument("--clear", action="store_true", help="price: back to the catalog's (estimates)")
     s.set_defaults(f=cmd_model)
     s = sub.add_parser("scout", help="the weekly model check: hardware, installed models, results")
     s.add_argument("--done", action="store_true", help="record that the check was done")

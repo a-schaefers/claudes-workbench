@@ -368,6 +368,9 @@ test('an API task shows its spend, and one with no price says no price, never $0
   // wave 2's usd(), once step E passes it
   expect(taskRows([fact({ name: 'p', ...DEEPSEEK, spend: 0.0041 })], { cols: 71, now: NOW, spin: '✻', followed: '',
     compact: false, usd: x => `$${x}` }).map(text)[0]).toContain('$0.0041')
+  // #1135: at the catalog's prices the spend is an estimate, drawn ≈
+  expect(taskRows([fact({ name: 'p', ...DEEPSEEK, spend: 0.31, est: true })], { cols: 71, now: NOW, spin: '✻', followed: '',
+    compact: false }).map(text)[0]).toContain('≈$0.31')
   // tokens: only those written (the owner, 2026-11-23: "3.9K out")
   expect(draw(G, 89)[2]).toMatch(/· 3\.9K out$/)
 })
@@ -425,6 +428,8 @@ test('the API day cap shows on Tasks only while an API task works, in its colour
   // one waiting for its provider's slot isn't running yet (the owner: "only while an API task runs")
   expect(capRow(QUEUED, 0.42, 5, 71)).toBe(null)
   expect(text(capRow(API, 0.42, null, 71)!)).toBe('API today $0.42')
+  // #1135: today's spend at the catalog's prices is an estimate
+  expect(text(capRow(API, 0.42, 5, 71, undefined, true)!)).toBe('API today ≈$0.42 of the $5 day cap  ▉░░░░░░░░░')
 })
 
 test('the small helpers the pane shares', () => {
