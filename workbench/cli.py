@@ -1364,6 +1364,96 @@ def _no_base(repo: Path, base: str) -> str:
     return f"no commit {base} in {repo}: a typo, or a ref not fetched yet (git fetch)"
 
 
+# --image (#1199): what OpenCode's `run -f` attaches as an image, OpenCode 2.3.2's limits. Its
+# read tool takes these four (MEDIA_MIMES, core/src/tool/read-filesystem.ts), by extension, so
+# the copy gets the type's own; over ATTACH_FILE_MAX_BYTES (cli/src/run/run.ts) `run` exits 1
+# before any request, and the round would fail mid-task. At most IMAGE_MAX a command.
+IMAGE_MAX = 4
+IMAGE_BYTES = 10 * 1024 * 1024
+IMAGE_KINDS = ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"GIF87a", ".gif"),
+               (b"GIF89a", ".gif"))
+
+
+def _image_kind(head: bytes) -> str | None:
+    """An image's extension from its first bytes (WebP: RIFF....WEBP), or None."""
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    return next((ext for magic, ext in IMAGE_KINDS if head.startswith(magic)), None)
+
+
+def _images_given(paths: list[str] | None) -> list[tuple[Path, str]]:
+    """--image's files, each (path, extension), checked before anything is written: there, a
+    file, PNG, JPEG, GIF or WebP by its bytes, 10 MiB at most, IMAGE_MAX of them."""
+    if not paths:
+        return []
+    if len(paths) > IMAGE_MAX:
+        die(f"--image: at most {IMAGE_MAX} images a command")
+    found = []
+    for p in paths:
+        path = Path(p).expanduser()
+        try:
+            st = path.stat()
+            if not stat.S_ISREG(st.st_mode):  # never opened: a FIFO would hang the command
+                die(f"--image {p}: not a file")
+            size = st.st_size
+            with path.open("rb") as fh:
+                head = fh.read(12)
+        except FileNotFoundError:
+            die(f"--image {p}: no such file")
+        except OSError as e:
+            die(f"--image {p}: {e.strerror or e}")
+        if not (ext := _image_kind(head)):
+            die(f"--image {p}: not a PNG, JPEG, GIF or WebP image, the kinds OpenCode attaches")
+        if size > IMAGE_BYTES:
+            die(f"--image {p}: {size / 2**20:.1f} MiB, over OpenCode's 10 MiB for an attachment")
+        found.append((path.resolve(), ext))
+    return found
+
+
+def _images_fit(m: models.Model | None, model_id: str) -> None:
+    """--image only for a model that takes images (models.takes_images): one line otherwise, so
+    Claude says it in words instead. Never another model, never dropped unsaid (#1199)."""
+    said = models.takes_images(m) if m else None
+    if said is False:
+        die(f"{model_id} takes no image input: describe the image in the spec")
+    if said is None:
+        die(f"{model_id} doesn't say it takes image input (OpenCode's config: modalities.input): "
+            "describe the image in the spec")
+
+
+def _task_images(task: store.Task, paths: list[str] | None) -> list[tuple[Path, str]]:
+    """wb feedback's and wb next's --image, checked against the task's own model."""
+    shown = _images_given(paths)
+    if shown:
+        mid = task.spec.get("model") or ""
+        _images_fit(models.lookup(mid), mid)
+    return shown
+
+
+def _keep_images(task: store.Task, found: list[tuple[Path, str]], rnd: int) -> dict:
+    """Copy --image's files into tasks/<task>/images/<k>-<name> (out of the worktree, so never
+    in the review diff; the lane reads the task's directory): the status fields that list them
+    for round ``rnd`` (`images`, {file, round} each), which runner.attachments sends with it.
+    Empty with none, so the caller's status write keeps the task's own."""
+    if not found:
+        return {}
+    rows = list(task.status.get("images") or [])
+    where = runner.images_dir(task)
+    where.mkdir(parents=True, exist_ok=True)
+    for path, ext in found:
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "-", path.stem).strip("-.")[:40] or "image"
+        name = f"{len(rows) + 1}-{stem}{ext}"
+        shutil.copyfile(path, where / name)
+        rows.append({"file": name, "round": rnd})
+    return {"images": rows}
+
+
+def _images_line(fields: dict, rnd: int) -> str:
+    """What wb start, feedback and next say of the images going with round ``rnd``."""
+    names = [r["file"] for r in fields.get("images") or () if r.get("round") == rnd]
+    return f"images: {', '.join(names)} go with the agent's message (OpenCode's run -f)" if names else ""
+
+
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
@@ -1394,6 +1484,7 @@ def cmd_start(a):
     spec_text = read_text(a.spec, "the spec")
     if not spec_text.strip():
         die("the spec is empty")
+    shown = _images_given(getattr(a, "image", None))  # #1199
     handed = _skill_names(a.skill)
     # the repo's own directories (context.repo_dirs reads only the spec's repo: task.json is to come)
     guard = context.repo_dirs(SimpleNamespace(spec={"repo": str(repo)}))
@@ -1467,6 +1558,8 @@ def cmd_start(a):
     if waits and not a.queue:
         die(models.busy(held, f"{m.id} can't run beside {'it' if len(held) == 1 else 'them'}. "
                         "--queue starts it anyway, to wait behind; or do this step yourself"), 4)
+    if shown:  # the model the task runs on, once nothing moves it (_busy_api above)
+        _images_fit(m, m.id)
 
     try:
         task.dir.mkdir(parents=True)
@@ -1523,6 +1616,7 @@ def cmd_start(a):
                                                       experiments=exps))
     task.round_dir(1).mkdir(parents=True)
     task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
+    pictures = _keep_images(task, shown, 1)  # before task.json too: a dead start's, for gc
     # from the model's measured speed on this machine, else defaults; its identity (cached:
     # weights_id below) finds the speed it had under an id it was renamed from (#905)
     limits = router.budgets(m, models.identity(m))
@@ -1582,7 +1676,7 @@ def cmd_start(a):
                     # each step's acceptance command, as data: bench add read it back from the
                     # prompt alone, whose one-line pattern missed a command of several lines
                     # (#941, the v1.90.24 review); task.json's test_cmd is only the latest
-                    step_tests={"1": a.test})
+                    step_tests={"1": a.test}, **pictures)
     exact, tools = context.test_allowances(a.test)
     context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
     context.grant(task, "test_tools", tools)
@@ -1642,6 +1736,7 @@ def cmd_start(a):
     print(f"slice: {router.slice(m).line()}")
     if gaps := results.spec_gap_line():
         print(gaps)
+    _say(_images_line(pictures, 1))
     if handed:
         print("skills handed: " + ", ".join(handed))
     elif fits := skills.suggest(spec_text):
@@ -1716,6 +1811,7 @@ def cmd_feedback(a):
         read_text(a.message, "the feedback")
     if not text.strip():  # before anything is written: an empty one cost a round (the audit)
         die("the feedback is empty")
+    shown = _task_images(task, getattr(a, "image", None))  # #1199
     rerun = " re-run the acceptance command and" if task.spec.get("test_cmd") else ""
     said = (f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
             "summary:\n\n" + text.strip())
@@ -1763,11 +1859,12 @@ def cmd_feedback(a):
     handled = store.now()  # everything before the new round; what its runner raises stays news
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
+    pictures = _keep_images(task, shown, n)
     task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
                     # an unsent round keeps its own (`next`: the pane's `step 2`)
                     **({} if unsent else {"round_for": "resume" if resumed else "feedback"}),
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
-                    auto_fixes=0)
+                    auto_fixes=0, **pictures)
     _credit_turn(task)
     spawn_runner(task)
     _ack_all(task, upto=handled)
@@ -1781,6 +1878,7 @@ def cmd_feedback(a):
     else:
         print(f"feedback round {reviews} sent to {a.name} (round {n})"
               + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
+    _say(_images_line(pictures, n))
     _say(gpu)
     _say_dropped(dropped)
     _say(lessons.nudge(task))
@@ -1867,6 +1965,7 @@ def cmd_next(a):
         die(f"can't read the next step's spec: {e}")
     if not nxt.strip():
         die("the next step's spec is empty")
+    shown = _task_images(task, getattr(a, "image", None))  # #1199: before the commit
     # after the spec, before the commit: the step's first request carries the session's context
     # and the spec with the protocol (#1173)
     _model_still_listed(task, nxt + protocol_for(spec), True if a.fresh else None)
@@ -1935,6 +2034,7 @@ def cmd_next(a):
     # 2026-11-19 audit). Interrupted before the write, a retry advances from the step's commit.
     why = runner.fresh_reason(task, {**task.status, **advance})
     gpu = _gpu_note(task)
+    advance.update(_keep_images(task, shown, n))
     task.set_status(**advance)
     task.event({"ts": store.now(), "round": n, "kind": "next_step",
                 "text": f"step {step} " + (f"committed as {commit}" if commit else
@@ -1944,6 +2044,7 @@ def cmd_next(a):
     print(f"step {step} of {a.name} " + (f"committed as {commit}" if commit else "had no changes")
           + f"; step {step + 1} sent "
           + (f"to a fresh session ({why})" if why else "to the same session"))
+    _say(_images_line(advance, n))
     _say(gpu)
     _say_dropped(dropped)
     _say(lessons.nudge(task))
@@ -5790,6 +5891,9 @@ def cmd_model(a):
             entry["limit"] = {"context": ctx, "input": ctx - out, "output": out}
         if prov["engine"] == "ollama":
             entry["options"] = {"max_tokens": models.ollama_cap(entry)}
+        if prov["engine"] == "ollama" and caps:  # what --image checks, and OpenCode sends (#1199)
+            entry["modalities"] = {"input": ["text", models.IMAGE_INPUT] if "vision" in caps
+                                   else ["text"], "output": ["text"]}
         try:
             models.write_entry(provider, name, entry)
         except RuntimeError as e:
@@ -5798,7 +5902,8 @@ def cmd_model(a):
         print(f"registered {a.id}: "
               f"{'tools' if entry['tool_call'] else 'NO tool calls, so wb will not route tasks to it'}, "
               f"{'reasoning' if entry['reasoning'] else 'no reasoning'}, "
-              f"{ctx // 1024}K context\nnext: wb model sizes {a.id} … if it should only "
+              + ("images, " if models.IMAGE_INPUT in (entry.get("modalities") or {}).get("input", ()) else "")
+              + f"{ctx // 1024}K context\nnext: wb model sizes {a.id} … if it should only "
               "take some task sizes; the router guesses from its size until real tasks show more")
         return
     # retire
@@ -7350,6 +7455,12 @@ def cmd_doctor(a):
     sys.exit(0 if ok else 1)
 
 
+def _image_flag(s) -> None:
+    s.add_argument("--image", action="append", metavar="PATH",
+                   help=f"an image for the agent to see (a mockup, a screenshot): PNG, JPEG, GIF or "
+                   f"WebP, 10 MiB at most, up to {IMAGE_MAX}; only for a model that takes images")
+
+
 def main(argv=None):
     store.absolute_env()  # before anything reads a path from the environment or a child inherits it
     gitops.drop_repo_env()  # a git hook's GIT_INDEX_FILE, a vcsh shell's GIT_DIR: never ours (#798)
@@ -7402,6 +7513,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("start", help="hand a task to an OpenCode agent (GPU or API)")
     s.add_argument("name")
     s.add_argument("--spec", required=True, help="spec file, or - for stdin")
+    _image_flag(s)
     s.add_argument("--repo", default=".")
     s.add_argument("--role", choices=routes.ROLES,
                    help="the kind of work, whose model the user set (wb route): GPU or API; default: "
@@ -7489,9 +7601,11 @@ def parser() -> argparse.ArgumentParser:
                    help="continue the session even if it is getting full")
     s.add_argument("--spec-gap", action="append", metavar="WHAT",
                    help="this round is the spec's fault: what it missed (repeatable)")
+    _image_flag(s)
     s.set_defaults(f=cmd_feedback)
     s = sub.add_parser("next", help="commit the approved step and send the same agent the next one")
     s.add_argument("name"); s.add_argument("--spec", required=True, help="the next step's spec file, or - for stdin")
+    _image_flag(s)
     s.add_argument("--message", "-m", required=True, help="commit subject for the approved step")
     s.add_argument("--test", help="the next step's acceptance command (default: unchanged)")
     s.add_argument("--include", action="store_true", help="commit it even with more than "

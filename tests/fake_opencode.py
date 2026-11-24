@@ -63,7 +63,9 @@ unpaired surrogate escaped, which is valid JSON).
 FAKE_LATIN1: a run first prints a line that isn't UTF-8 (`caf\xe9`, Latin-1).
 FAKE_RUNS rows also say what OpenCode's environment had (`opencode_db`, `xdg_data`, `xdg_state`,
 `shell`) and what a command the agent runs through `$SHELL -c` sees (`shell_sees`: its
-XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset).
+XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset), and `files`: each
+`run -f/--file` it attached, `{name, bytes}`, read as OpenCode's client reads it (one it can't
+open is "File not found", exit 1; a directory or one over 10 MiB "Cannot attach", #1199).
 A run with OPENCODE_DB set records its new session in that home (`<db>.sessions`), as OpenCode
 keeps it in its database (#1010). `session export` prints one finished step, its `info.home` the
 database it read: FAKE_FILL sets the context it read, FAKE_COMPACTED adds a completed compaction;
@@ -479,6 +481,25 @@ def finish(reason="stop"):  # FAKE_STEP_IN: the step's input tokens (what it cos
 if args and args[0] == "run" and args[-1].startswith("-") and args[-2:-1] != ["--"]:
     print("opencode run [flags] [<message...>]", file=sys.stderr)  # OpenCode 2.3 took it for a flag
     sys.exit(1)
+# `run -f/--file <path>` (repeatable, before `--`), as 2.3.2's run.ts prepareFile: a path not
+# there is "File not found: <path>", one not a regular file or over 10 MiB "Cannot attach …", exit
+# 1 before any event; each opened here, in the lane, as OpenCode's client opens it (#1199)
+attached = []
+if args and args[0] == "run":
+    flags = args[:args.index("--")] if "--" in args else args
+    for i, flag in enumerate(flags[:-1]):
+        if flag in ("-f", "--file"):
+            want = os.path.join(os.environ.get("PWD") or os.getcwd(), flags[i + 1])
+            try:
+                with open(want, "rb") as fh:
+                    if not os.path.isfile(want) or os.fstat(fh.fileno()).st_size > 10 * 1024 * 1024:
+                        print(f"Error: Cannot attach a directory, special file, or file larger than "
+                              f"10 MiB: {flags[i + 1]}", file=sys.stderr)
+                        sys.exit(1)
+                    attached.append({"name": os.path.basename(want), "bytes": len(fh.read())})
+            except OSError:
+                print(f"Error: File not found: {flags[i + 1]}", file=sys.stderr)
+                sys.exit(1)
 if os.environ.get("FAKE_PROMPTS") and args and args[0] == "run":
     with open(os.environ["FAKE_PROMPTS"], "a") as fh:
         fh.write(json.dumps(args[-1]) + "\n")
@@ -507,6 +528,7 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                              "fetch_off": os.environ.get("OPENCODE_DISABLE_MODELS_FETCH"),
                              "models_path": os.environ.get("OPENCODE_MODELS_PATH"),
                              "content": os.environ.get("OPENCODE_CONFIG_CONTENT"),
+                             "files": attached,
                              "shell_sees": sees}) + "\n")
 if args and args[0] == "run" and "-m" in args:  # the model: <provider>/<id>[#<variant>]
     ref = args[args.index("-m") + 1]

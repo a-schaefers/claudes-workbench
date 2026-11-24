@@ -4656,6 +4656,36 @@ def ollama_installed(root: str) -> list[dict]:
             for x in (_get(f"{root}/api/tags") or {}).get("models", [])]
 
 
+# What a model's OpenCode entry says it reads (#1199): V1 config's `modalities.input`, V2 config's
+# and the catalog's (hosted.json) `capabilities.input`. Ollama says `vision` (/api/show).
+IMAGE_INPUT = "image"
+
+
+def declared_input(m: Model) -> list[str] | None:
+    """The input kinds ``m``'s entry declares (["text", "image"]), or None when it says none."""
+    for key in ("modalities", "capabilities"):
+        got = (m.config or {}).get(key)
+        if isinstance(got, dict) and isinstance(got.get("input"), list):
+            return [str(x) for x in got["input"]]
+    return None
+
+
+def takes_images(m: Model) -> bool | None:
+    """Whether ``m`` takes image input: its entry's declaration (declared_input), else for a GPU
+    model on Ollama what /api/show says now (5 s at most). None when nothing says. An entry with
+    no declaration is not "no": OpenCode then reads it as text and image (Capabilities.default,
+    2.3.2) and sends the image, and a text-only server fails the request, every later one in
+    the session too, since the image stays in its history (#1199, read in 2.3.2's source 2026-11-24)."""
+    if (said := declared_input(m)) is not None:
+        return IMAGE_INPUT in said
+    if m.kind != "gpu" or m.engine != "ollama":
+        return None
+    try:
+        return "vision" in (ollama_show(m.root, m.name, timeout=5).get("capabilities") or [])
+    except Exception:  # not answering: unknown, as for any server that doesn't say
+        return None
+
+
 def ollama_show(root: str, name: str, timeout: float = 30) -> dict:
     """Ollama's own facts about a pulled model: its capabilities, trained context length, and
     the num_ctx its Modelfile sets, if any."""
@@ -4799,6 +4829,10 @@ def write_entry(provider: str, name: str, entry: dict | None) -> None:
             entries.pop(name, None)
         else:  # keys added by hand (variants, options) stay
             old = entries.get(name) or {}
+            if "modalities" in entry and mine is (own.get("providers") or {}).get(provider):
+                # V2 reads `capabilities.input`, and drops a V1 `modalities` unsaid (#1199)
+                caps = {**(old.get("capabilities") or {}), **entry["modalities"]}
+                entry = {**{k: v for k, v in entry.items() if k != "modalities"}, "capabilities": caps}
             entries[name] = {**old, **entry, "options": {**(old.get("options") or {}), **(entry.get("options") or {})}}
             if not entries[name]["options"]:
                 del entries[name]["options"]

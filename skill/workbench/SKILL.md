@@ -333,8 +333,10 @@ which already knows the code. (Measured: a step that never landed in an hour as 
 in ~30 minutes as three, every hidden check passing.)
 - Names, signatures and constants that other code relies on: write them in the spec and say
   "exactly"; agents otherwise rename them to fit their own taste.
-- The agent cannot see what it draws. For anything visual, look at the screenshot yourself;
-  after one miss on a visual detail, fix it yourself rather than describing it again.
+- The agent sees only the images you give it (`--image`, below): hand it the mockup or the
+  screenshot rather than describing it, when its model takes images. It cannot see what it
+  draws: look at the result yourself (`wb shot`); after one miss on a visual detail, fix it
+  yourself rather than describing it again.
 
 **Skills for the agents** are yours to write, hand out (`wb start … --skill <name>`, 0–2 that fit
 the task) and keep honest. `reference/skills.md` has how: read it before you write, patch, import
@@ -348,6 +350,10 @@ wb start <kebab-name> --spec <file|-> --repo <repo> --role significant|trivial|w
    --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix N]
 ```
 `--auto-fix` defaults to 2 on the GPU and 1 on API.
+**An image the agent should see** (a mockup, a screenshot, an error capture, the user's upload):
+`--image <path>` (repeatable, up to 4; PNG, JPEG, GIF or WebP, 10 MiB at most) on `wb start`,
+`wb feedback` or `wb next`. Only for a model that takes images: otherwise it is refused in one
+line, and you describe it in the spec instead; never change the role or pass `--model` for it.
 Put the project's compiler, typecheck or lint ahead of the tests in `--test` (`mypy && pytest`):
 its errors reach the agent as auto-fix rounds, not your review. Only one the project runs or
 configures, or a syntax-only check, and only when it passes on the base: `reference/checks.md`
@@ -430,7 +436,8 @@ Tasks listed as left alone belong to another live session: leave them unless ask
 Without the mod, the user may ask for the same in words; run those commands then.
 
 **The web chat.** A prompt that is just `[web chat] <their words>` is the user on their phone,
-with the same authority as here (`[attached: <path> …]` lines are their files: Read them): reply
+with the same authority as here (`[attached: <path> …]` lines are their files: Read them; an
+image the agent should see goes on as `--image <path>`): reply
 there with `wb chat reply --text "…"`, short; read
 `reference/driving.md` (the web chat) before your first reply.
 
