@@ -15452,6 +15452,38 @@ class ClaudeSpend(Base):
         ])
         self.assertEqual(spend.usage(t)["output"], 3 + 5 + 7 + 11 + 13 + 17 + 19)
 
+    def test_reading_other_files_with_bash_after_wb_start_ends_the_tasks_charge(self):
+        # #1123 (2026-11-23, the review of the first fix): only the Read, Grep and Glob tools ended
+        # the charge, so a turn that read with Bash (`sed -n`, `grep`, a probe), as bypass mode
+        # says to, still charged all 21 calls after `wb start` to the task
+        from workbench import spend
+        t = self.task("t-x")
+
+        def sh(mid, at, out, command, cwd="/r"):
+            return [{"type": "assistant", "timestamp": at, "cwd": cwd, "message": {
+                "id": mid, "role": "assistant", "usage": {"output_tokens": out},
+                "content": [{"type": "tool_use", "name": "Bash", "input": {"command": command}}]}}]
+        self.transcript([
+            _turn("start it, then look into the keyhole", "2026-11-17T10:00:00Z"),
+            *sh("r0", "2026-11-17T10:00:01Z", 3, "sed -n 1,40p /r/spec-notes.md"),   # for the spec
+            *_call("st", "2026-11-17T10:00:02Z", 5, "wb start t-x --trial --spec s.md"),
+            *_call("say", "2026-11-17T10:00:03Z", 7),                       # its reply: still t-x's
+            *(row for i in range(20)                                        # other code: nobody's
+              for row in sh(f"o{i}", f"2026-11-17T10:00:{10 + i}Z", 1000, f"sed -n 1,80p /r/src/m{i}.py")),
+            *sh("py", "2026-11-17T10:00:40Z", 1000, "python3 -c 'import json; print(1)'"),
+            _turn("[workbench] Task `t-x` is ready for review.", "2026-11-17T10:20:00Z"),
+            *_call("rp", "2026-11-17T10:20:01Z", 11, "wb report t-x"),
+            *sh("d", "2026-11-17T10:20:02Z", 13, f"git -C {t.worktree} diff HEAD"),   # its own
+            *sh("in", "2026-11-17T10:20:03Z", 17, "python3 -m unittest", cwd=str(t.worktree)),
+            *sh("rd", "2026-11-17T10:20:04Z", 1000, "cat /r/README.md"),     # then other work
+            _turn("accept it", "2026-11-17T10:30:00Z"),
+            *sh("ctx", "2026-11-17T10:30:01Z", 19, "grep -n caller /r/src/caller.py"),  # for the review
+            *_call("acc", "2026-11-17T10:30:02Z", 23, "wb accept t-x -m 'feat: x'"),
+        ])
+        self.assertEqual(spend.usage(t)["output"], 3 + 5 + 7 + 11 + 13 + 17 + 19 + 23)
+        self.assertTrue(spend._shell_theirs("cat ~/.local/state/workbench/tasks/t-x/report.md", "/r", {"t-x"}))
+        self.assertFalse(spend._shell_theirs("cat /s/tasks/t-x-2/report.md", "/r", {"t-x"}))
+
     def test_the_weights_count_writes_reads_and_output_against_input(self):
         from workbench import spend
         self.assertEqual(spend.weighted({"input": 100, "cache_write_5m": 100, "cache_write_1h": 100,
