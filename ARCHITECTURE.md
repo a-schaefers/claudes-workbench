@@ -4214,6 +4214,10 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   Workbench-Task: csv-export
   OpenCode-Session: ses_…
   ```
+  `<model>` is task.json's `model_label` (`models.task_label`): a GPU model's label (`MiMo-V2.6 9B
+  Q8 (Ollama)`), an API model's exact id and provider (`deepinfra/deepseek-ai/DeepSeek-V4.1-Flash-1017 (DeepInfra, API)`;
+  `<id> (Ollama cloud)`; a `label` the user set, as set), never the provider alone, which two roles
+  on one provider share (#1078); the round reports, wakes and `wb watch` lead with it too.
   Rounds count every runner round (auto-fixes, notes, handovers); review rounds the last step's. `wb next` commits with
   `Workbench-Task: <task> (step N)`. A clean worktree accepts the branch's commits past the base;
   none is refused. An accept that committed then died finishes on retry by its trailer
@@ -5566,7 +5570,7 @@ mod's `absolutePath` does the same for `WB_HOME`, `CLAUDE_CONFIG_DIR`, `WB_SAVIN
 the directory rule adopts the task), `claude_start` (`models._started`, against a recycled pid), `claude_machine` (a process on another
 machine is never gone here, `cli._gone`, nor checked by the mod's `noteClaude`: two machines adopted each other's tasks,
 #922), `base` (full sha), `base_ref`, `base_branch` (where `--merge` lands: `HEAD`'s branch, or `--base` naming a local one; null on a detached HEAD, tag or commit),
-`branch`, `model`, `model_label`, `opencode_model` (`<id>#<variant>` for an API task's thinking, `runner.with_thinking`), `weights_id` (`models.identity`), `route` (the router's why; an API task's routing line), `via` (`gpu`|`api`) and `role` (#1016, always; `writing`: *The writing role*; a task from before it has neither, and reads as GPU),
+`branch`, `model`, `model_label` (`models.task_label`: an API model's names its id, #1078), `opencode_model` (`<id>#<variant>` for an API task's thinking, `runner.with_thinking`), `weights_id` (`models.identity`), `route` (the router's why; an API task's routing line), `via` (`gpu`|`api`) and `role` (#1016, always; `writing`: *The writing role*; a task from before it has neither, and reads as GPU),
 `provider`, `provider_name` (the catalog's), `thinking` (`off`|`on`, the role's, default off), `said` (the role's `said`, or `asked for[, approved in the dialog]` for a `--model`), and `said_ts` (the role's `ts`) (API only, fixed at start as `model` is), `thinking_shown` (what it does: `thinking off`, `thinking at its lowest effort (it can't turn off)`, `thinking as the model's default (it lists no lower setting)`…), `thinking_off` (`wb-off`'s `{settings}` or `{body}`, #1018), `size`, `stack`, `trial`, `backlog`,
 `group` (`--group`: the tasks one request fanned out to, #1048; missing: no group),
 `bench` (`{case, run, label}`), `test_cmd`, `no_base_check`, `unload_for_tests`, `sign` (false: `--no-sign`), `subdir` (a monorepo package), `setup`,

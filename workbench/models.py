@@ -1417,6 +1417,16 @@ def catalog_variants(m: Model) -> dict:
             if isinstance(v, dict) and v.get("id")}
 
 
+def task_label(m: Model) -> str:
+    """task.json's `model_label`, the name the reports, wakes, wb watch and the commit trailer
+    give the task's model. An API model's own label names only its provider ("DeepSeek (API)"),
+    so two roles on one provider read alike and git history couldn't say which model wrote the
+    code (#1078, 2026-11-23): its exact id goes first. A label the user set stays theirs."""
+    if m.kind != "api" or m.extra.get("label"):
+        return m.label
+    return f"{m.id} ({provider_name(m)}" + (")" if m.cloud else ", API)")
+
+
 def provider_name(m: Model) -> str:
     """How a provider is named to the user: its name in OpenCode's auth list or config."""
     if m.cloud:

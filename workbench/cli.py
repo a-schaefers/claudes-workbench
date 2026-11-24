@@ -1421,7 +1421,7 @@ def cmd_start(a):
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         # the weights behind the id: a record on other weights under it isn't this model's (#726)
         **({"weights_id": w} if (w := models.identity(m)) else {}),
-        "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
+        "branch": gitops.branch_name(a.name), "model": m.id, "model_label": models.task_label(m),
         "opencode_model": m.id, "route": why, "size": size, "stack": stack,
         **_routed_keys(routed),  # via, role; an API model's provider, thinking, said (#1016)
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,

@@ -29509,7 +29509,7 @@ class ApiThinking(Base):
         self.assertEqual(json.loads(runner.write_config_layer(task).read_text())["small_model"],
                          "deepseek/deepseek-flash#none")
         out = transcript.model_line(store.Task("t-flash"), {})
-        self.assertEqual(out, "deepseek (API) · thinking off · 128K context")   # task.json's, no variant; #1017's window
+        self.assertEqual(out, "deepseek/deepseek-flash (deepseek, API) · thinking off · 128K context")   # task.json's (#1078), no variant; #1017's window
         from workbench import results
         row = results.record(task, "discarded")
         self.assertEqual(row["thinking"], "off")                  # the weekly check's evidence
@@ -32140,6 +32140,30 @@ class RoleResolution(Base):
         code, out, _ = self.begin("t-api2", "--role", "trivial")
         self.assertEqual(code, 0)
         self.assertNotIn("this task sends", out)
+
+    def test_an_api_tasks_report_watch_line_and_commit_name_its_model_not_only_the_provider(self):
+        # #1078 (audit 1 of 2.0): all read "DeepSeek (API)", so two roles on one provider looked
+        # alike, and git history couldn't say which model wrote the code
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.assertEqual(self.begin("t-named", "--role", "trivial")[0], 0)
+        task = store.Task("t-named")
+        label = "deepseek/deepseek-flash (DeepSeek, API)"
+        self.assertEqual(task.spec["model_label"], label)
+        self.assertTrue(transcript.model_line(task, {}).startswith(f"{label} · "))
+        runner.checkout(task)
+        (task.worktree / "a.txt").write_text("a\n")
+        rnd = {"secs": 60, "tok_in": 1, "tok_out": 1, "stuck": None, "tools": {}, "texts": [],
+               "exit": 0, "errors": [], "guard": None, "retries": 0, "left_bg": None}
+        first = runner.summary_text(task, 1, rnd, None).splitlines()[0]
+        self.assertTrue(first.startswith(f"task t-named · {label} · round 1 · "), first)
+        task.set_status(phase="review")
+        run_wb("accept", "t-named", "-m", "feat: a")
+        body = subprocess.run(["git", "-C", str(self.repo), "log", "-1", "--format=%B", "delegate/t-named"],
+                              capture_output=True, text=True, check=True).stdout
+        self.assertIn(f"Delegated to {label} via OpenCode: ", body)
+        from workbench import models
+        m = models.lookup("deepseek/deepseek-flash")
+        self.assertEqual(models.provider_name(m), "DeepSeek")     # still the provider's own
 
     def test_an_openrouter_roles_backends_reach_task_json_and_the_note_names_those_alone(self):
         # wave 2's review: routes.json's `order` never reached task.json, so the keyhole sent no
