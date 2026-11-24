@@ -1583,6 +1583,65 @@ async function gateConf($: any): Promise<Gate> {
   return { home, cwd, slug, dirs, plugins }
 }
 
+// The marketplace's full clone, which the mod runs wb from when no wb is on its PATH (#1190): a
+// fresh install has none until `wb setup` links one, and Claude Code puts the plugin's bin/
+// launcher on the Bash tool's PATH only, not the mod's. The same places in the same order as that
+// launcher (mod/bin/wb), the clones gateConf counts: known_marketplaces.json's installLocation
+// (a directory marketplace), then the clone under CLAUDE_CODE_PLUGIN_CACHE_DIR, then under
+// CLAUDE_CONFIG_DIR or ~/.claude. '' when none holds a bin/wb.
+async function marketplaceClone($: any, home: string, cwd: string): Promise<string> {
+  const config = absolutePath((await $.env.get('CLAUDE_CONFIG_DIR').catch(() => '')) || `${home}/.claude`, home, cwd)
+  const cacheDir = await $.env.get('CLAUDE_CODE_PLUGIN_CACHE_DIR').catch(() => '')
+  const cache = cacheDir ? absolutePath(cacheDir, home, cwd) : ''
+  const listed = (await readJson($, `${cache || `${config}/plugins`}/known_marketplaces.json`))?.workbench?.installLocation
+  for (const dir of [typeof listed === 'string' ? listed : '', cache && `${cache}/marketplaces/workbench`, `${config}/plugins/marketplaces/workbench`]) {
+    if (dir && await $.fs.stat(`${dir}/bin/wb`).catch(() => undefined)) return dir
+  }
+  return ''
+}
+
+// Whether a command of that name is in one of PATH's directories; null when PATH can't be read
+async function onPath($: any, name: string): Promise<boolean | null> {
+  const path: string = (await $.env.get('PATH').catch(() => '')) || ''
+  if (!path) return null
+  for (const dir of path.split(':')) {
+    if (dir.startsWith('/') && await $.fs.stat(`${dir}/${name}`).catch(() => undefined)) return true
+  }
+  return false
+}
+
+// A fresh install (#1190), read from the task files so the mod keeps no state: no task ever ran
+// (nothing under tasks/, no results.jsonl rows) and no role is on API. /workbench alone then starts
+// the skill's *First run* at once: told to wait for a first request, a new user saw nothing happen.
+async function freshInstall($: any): Promise<boolean> {
+  if ((await $.fs.list(`${mem.root}/tasks`).catch(() => []))?.length) return false
+  if ((await $.fs.stat(`${mem.root}/results.jsonl`).catch(() => undefined))?.size) return false
+  return !(await readRoutes($)).api
+}
+
+// What a fresh install's /workbench alone carries after the skill's text; SKILL.md's *First
+// task* reads it by this name
+const FIRSTRUN = 'workbench-firstrun'
+const FIRSTRUN_NOTE = `[${FIRSTRUN}] A fresh install: no task has run here yet and no role is on API. ` +
+  'Run the skill\'s *First run* now, from its step 1, each install or download on the user\'s yes; ' +
+  'don\'t wait for a first request.'
+
+// `wb setup` on a session's start when the /workbench skill isn't linked (#1190): a fresh install,
+// which `claude plugin install` alone leaves without it. It makes only links (and starts the
+// optimize when due), what the user installed the plugin for: no question asked. A skill linked
+// mid-session may not be listed until /reload-skills (Claude Code watches only the skill
+// directories there at its start), so the mod runs that too, and says so if it can't.
+async function setUp($: any, { ok, out, aborted }: WbRun) {
+  if (aborted) return // a reload under way: the next session start runs it again
+  if (!ok) {
+    const bad = out.split('\n').find(l => l.startsWith('BAD ')) ?? out
+    $.ui.toast(`workbench: wb setup failed: ${brief(bad)}`)
+    return
+  }
+  const reloaded = await $.command.run({ command: 'reload-skills', args: '' }).then(() => true, () => false)
+  $.ui.toast(`workbench: set up (wb and /workbench linked); ${reloaded ? '' : '/reload-skills, then '}type /workbench`)
+}
+
 // The dialog, or its refusal: '' lets the call through on exactly 'Send it'
 async function askToSend($: any, question: string): Promise<string> {
   // the dialog would wait at an empty terminal
@@ -4346,6 +4405,11 @@ export const register: Register = (on, options) => {
     // bare name still goes through PATH
     const bin = await $.env.get('WB_BIN')
     mem.wb = bin ? (bin.includes('/') || bin.startsWith('~') ? abs(bin) : bin) : 'wb'
+    // none on the mod's PATH (a fresh install, ~/.local/bin off it): the marketplace clone's (#1190)
+    if (!bin && await onPath($, 'wb') === false) {
+      const clone = await marketplaceClone($, home ?? '', mem.cwd)
+      if (clone) mem.wb = `${clone}/bin/wb`
+    }
     const config = await $.env.get('CLAUDE_CONFIG_DIR')
     mem.skill = `${config ? abs(config) : `${home}/.claude`}/skills/workbench/SKILL.md`
     const priced = await $.env.get('WB_SAVINGS')
@@ -4353,14 +4417,18 @@ export const register: Register = (on, options) => {
     const commands = await $.env.get('WB_COMMANDS')
     mem.commandsFile = commands ? abs(commands) : `${home}/.config/workbench/commands.json`
     mem.startedAt = await $.clock.now()
-    // 2026-11-17: /delegate became /workbench. A copy updated across it still has only the old
-    // skill link, which now leads nowhere: wb setup makes the new one and drops the old.
+    // No /workbench skill: a fresh install (#1190; `setUp`), or a copy updated across 2026-11-17,
+    // when /delegate became /workbench, with only the old skill link, which leads nowhere. wb
+    // setup makes the link (and drops the old one). A fresh install's only with a person there:
+    // a `claude -p` or SDK session runs no wb (below).
     const skills = mem.skill.slice(0, -'/workbench/SKILL.md'.length)
-    if (!(await $.fs.stat(mem.skill).catch(() => undefined))
-      && (await $.fs.stat(`${skills}/delegate`).catch(() => undefined))?.isLink) {
-      const { ok, out } = await runWb($, ['setup'])
-      $.ui.toast(ok ? 'workbench: /delegate is now /workbench (wb setup linked it)'
-        : `workbench: /delegate is now /workbench, but wb setup failed: ${brief(out)}`)
+    if (!(await $.fs.stat(mem.skill).catch(() => undefined))) {
+      const renamed = (await $.fs.stat(`${skills}/delegate`).catch(() => undefined))?.isLink
+      if (renamed) {
+        const { ok, out } = await runWb($, ['setup'])
+        $.ui.toast(ok ? 'workbench: /delegate is now /workbench (wb setup linked it)'
+          : `workbench: /delegate is now /workbench, but wb setup failed: ${brief(out)}`)
+      } else if (e.isInteractive || e.surface != null) void setUp($, await runWb($, ['setup'])).catch(() => {})
     }
     if (!(await read($, chat)).key) {
       const key = `${Math.floor(mem.startedAt)}-${Math.random().toString(36).slice(2, 8)}`
@@ -4498,7 +4566,8 @@ export const register: Register = (on, options) => {
   })
 
   // /workbench turns workbench mode on for the session, with or without a task, and shows the pane.
-  // Run again while it is on, it brings the pane back; alone, that is all it does.
+  // Run again while it is on, it brings the pane back; alone, that is all it does, except on a
+  // fresh install (FIRSTRUN_NOTE).
   on('skill.prompt', { skill: SKILL }, async ($, e, next) => {
     if (e.path) mem.skill = e.path
     const again = (await read($, chat)).delegating
@@ -4515,9 +4584,13 @@ export const register: Register = (on, options) => {
     }
     await workbenchMode($, true)
     await showPane($)
-    if (again && !firstTask(e.text)) return { text: add(AGAIN_NOTE(mem.skill)) }
+    // alone on a fresh install, the skill's whole text and the note to run its *First run* now
+    // (#1190), the mode on already or not: in this text, since prompt.context fires only at a
+    // conversation's first message, and /workbench may come later in it
+    const first = !firstTask(e.text) && await freshInstall($)
+    if (again && !firstTask(e.text) && !first) return { text: add(AGAIN_NOTE(mem.skill)) }
     const r = await next(e)
-    return { ...r, text: add(r.text) }
+    return { ...r, text: add(first ? `${r.text}\n\n${FIRSTRUN_NOTE}` : r.text) }
   })
 
   // Typed in the terminal: the user is back, so answers go here again

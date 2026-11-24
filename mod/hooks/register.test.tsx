@@ -53,6 +53,7 @@ test('/workbench run again brings the pane back; alone, it is all it does', asyn
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   on('fs.exists', () => ({ value: false }))                      // the mode's poll: no state yet
+  on('fs.list', () => ({ value: [{ name: 'fix-it', kind: 'dir' }] }))  // a task ran here once: no fresh install's first run (#1190)
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
   const skill = (task: string) => $.skill.prompt({ skill: 'workbench', frontmatter: {}, source: 'userSettings',
     text: `- **First task:** \`${task}\`. Empty? Reply in one line that workbench mode is on.` })
@@ -181,6 +182,168 @@ test('a copy updated from /delegate gets its /workbench link from wb setup', asy
   expect(toasts.join('\n')).toContain('/delegate is now /workbench')
 })
 
+// A machine just after `claude plugin install` (#1190): HOME /home/u, WB_HOME /wb, a PATH with no
+// wb on it unless `files` has one, the files `files` holds (any other path is missing), and the
+// environment `env` adds. What the mod ran, toasted and ran as a slash command is recorded; `fail`
+// makes `wb setup` exit 1 with that output, `refuse` makes a slash command throw.
+function freshMachine(on: any, files: Record<string, string>, env: Record<string, string> = {}) {
+  const seen = { ran: [] as string[][], toasts: [] as string[], commands: [] as string[], fail: '', refuse: false }
+  on('session.version', () => ({ value: TESTED }))
+  on('command.register', (_: any, e: any) => ({ value: { command: e.name } }))
+  on('env.get', (_: any, e: any) => ({ value: ({ HOME: '/home/u', WB_HOME: '/wb', PATH: '/usr/bin:/bin', ...env } as any)[e.name] }))
+  on('clock.now', () => ({ value: 1_800_000_000_000 }))
+  on('clock.every', () => ({ value: { cancel: () => {} } }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  const stat = (path: string) => {
+    if (!(path in files)) throw new Error(`ENOENT: ${path}`)
+    return { value: { kind: 'file', size: files[path].length, mtimeMs: 0, isLink: false } }
+  }
+  on('fs.stat', (_: any, e: any) => stat(e.path))
+  on('fs.read', (_: any, e: any) => ({ value: (stat(e.path), files[e.path]) }))
+  on('fs.exists', (_: any, e: any) => ({ value: Object.keys(files).some(p => p.startsWith(e.path)) }))
+  on('fs.write', (_: any, e: any) => { files[e.path] = e.text; return { value: undefined } })
+  on('fs.list', (_: any, e: any) => ({ value: [...new Set(Object.keys(files).filter(p => p.startsWith(`${e.path}/`))
+    .map(p => p.slice(e.path.length + 1).split('/')[0]))].map(name => ({ name, kind: 'dir' })) }))
+  on('process.run', (_: any, e: any) => {
+    seen.ran.push(e.argv)
+    const failed = e.argv[1] === 'setup' && seen.fail
+    return { value: { exitCode: failed ? 1 : 0, stdout: failed ? seen.fail : '', stderr: '' } }
+  })
+  on('process.spawn', async function* () {             // `wb events`, saying hello
+    yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  on('ui.toast', (_: any, e: any) => { seen.toasts.push(e.text); return { value: undefined } })
+  on('command.run', (_: any, e: any) => {
+    seen.commands.push(e.command)
+    if (seen.refuse) throw new Error(`no ${e.command} here`)
+    return { text: '' }
+  })
+  return seen
+}
+// what a hook left running after its return (setUp's reload and toast) has done by then
+const settle = async (done: () => boolean) => {
+  for (let i = 0; i < 100 && !done(); i++) await new Promise(r => setTimeout(r, 2))
+}
+const SKILL_AT = '/home/u/.claude/skills/workbench/SKILL.md'
+const CLONE = '/home/u/.claude/plugins/marketplaces/workbench'
+
+test('a fresh install runs wb setup from the marketplace clone, reloads the skills and says so once (#1190)', async ($, on) => {
+  // two plugin commands then /workbench: no PATH edit, no third command; the mod ran wb by name,
+  // which isn't on its PATH before wb setup has linked it
+  const files: Record<string, string> = { [`${CLONE}/bin/wb`]: '' }
+  const seen = freshMachine(on, files)
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await settle(() => seen.toasts.length > 0)
+  expect(seen.ran).toContainEqual([`${CLONE}/bin/wb`, 'setup'])
+  expect(seen.commands).toEqual(['reload-skills'])
+  expect(seen.toasts).toEqual(['workbench: set up (wb and /workbench linked); type /workbench'])
+  // the next session finds the skill linked: no setup again, nothing said
+  files[SKILL_AT] = '(the skill)'
+  seen.ran.length = 0
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await settle(() => false)
+  expect(seen.ran.filter(a => a[1] === 'setup')).toEqual([])
+  expect(seen.toasts).toHaveLength(1)
+})
+
+test('the mod looks for the clone where its bin/wb launcher does, and a wb on PATH or WB_BIN goes first (#1190)', async ($, on) => {
+  const files: Record<string, string> = {}
+  const env: Record<string, string> = {}
+  const seen = freshMachine(on, files, env)
+  const setupBy = async (have: Record<string, string>, vars: Record<string, string> = {}) => {
+    for (const k of Object.keys(files)) delete files[k]
+    for (const k of Object.keys(env)) delete env[k]
+    Object.assign(files, have)
+    Object.assign(env, vars)
+    seen.ran.length = 0
+    await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+    return seen.ran.find(a => a[1] === 'setup')?.[0]
+  }
+  const known = (at: string) => JSON.stringify({ workbench: { source: { source: 'directory', path: at }, installLocation: at } })
+  // known_marketplaces.json's installLocation first: a directory marketplace, a developer's clone
+  expect(await setupBy({ '/home/u/.claude/plugins/known_marketplaces.json': known('/home/u/src/wb'),
+    '/home/u/src/wb/bin/wb': '', [`${CLONE}/bin/wb`]: '' })).toBe('/home/u/src/wb/bin/wb')
+  // a listed one without a bin/wb is passed over
+  expect(await setupBy({ '/home/u/.claude/plugins/known_marketplaces.json': known('/home/u/gone'),
+    [`${CLONE}/bin/wb`]: '' })).toBe(`${CLONE}/bin/wb`)
+  // CLAUDE_CODE_PLUGIN_CACHE_DIR holds the clone, and its known_marketplaces.json, when set (a ~ as typed)
+  expect(await setupBy({ '/home/u/cache/marketplaces/workbench/bin/wb': '', [`${CLONE}/bin/wb`]: '' },
+    { CLAUDE_CODE_PLUGIN_CACHE_DIR: '~/cache' })).toBe('/home/u/cache/marketplaces/workbench/bin/wb')
+  expect(await setupBy({ '/home/u/cache/known_marketplaces.json': known('/home/u/src/wb'), '/home/u/src/wb/bin/wb': '' },
+    { CLAUDE_CODE_PLUGIN_CACHE_DIR: '/home/u/cache' })).toBe('/home/u/src/wb/bin/wb')
+  // CLAUDE_CONFIG_DIR's plugins, else ~/.claude's
+  expect(await setupBy({ '/home/u/cc/plugins/marketplaces/workbench/bin/wb': '', [`${CLONE}/bin/wb`]: '' },
+    { CLAUDE_CONFIG_DIR: '/home/u/cc' })).toBe('/home/u/cc/plugins/marketplaces/workbench/bin/wb')
+  // a wb on the mod's PATH (wb setup's link, a developer's), or WB_BIN, is what runs
+  expect(await setupBy({ '/home/u/bin/wb': '', [`${CLONE}/bin/wb`]: '' }, { PATH: '/usr/bin:/home/u/bin' })).toBe('wb')
+  expect(await setupBy({ [`${CLONE}/bin/wb`]: '' }, { WB_BIN: '/opt/wb' })).toBe('/opt/wb')
+  // no clone anywhere: by name, as before, and its failure is said
+  expect(await setupBy({})).toBe('wb')
+})
+
+test('a fresh install\'s failing wb setup toasts its BAD line, and a refused /reload-skills is left to the user (#1190)', async ($, on) => {
+  const files: Record<string, string> = { [`${CLONE}/bin/wb`]: '' }
+  const seen = freshMachine(on, files)
+  seen.fail = 'ok  /home/u/.claude/skills/workbench → x (made)\nBAD /home/u/.local/bin/wb is already there: left as it is\nfirst run:\n--  OpenCode isn\'t installed'
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await settle(() => seen.toasts.length > 0)
+  expect(seen.toasts).toEqual(['workbench: wb setup failed: BAD /home/u/.local/bin/wb is already there: left as it is'])
+  expect(seen.commands).toEqual([])
+  seen.fail = ''
+  seen.refuse = true
+  seen.toasts.length = 0
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await settle(() => seen.toasts.length > 0)
+  expect(seen.toasts).toEqual(['workbench: set up (wb and /workbench linked); /reload-skills, then type /workbench'])
+})
+
+test('a scripted session on a fresh install runs no wb setup: the next one with a person does (#1190)', async ($, on) => {
+  const seen = freshMachine(on, { [`${CLONE}/bin/wb`]: '' })
+  await $.session.start({ cwd: '/home/u/a', isInteractive: false } as any)
+  await settle(() => false)
+  expect(seen.ran).toEqual([])
+  expect(seen.toasts).toEqual([])
+})
+
+test('/workbench alone on a fresh install starts the first run at once; a task, one run before, or an API role waits as before (#1190)', async ($, on) => {
+  const files: Record<string, string> = { [SKILL_AT]: '(the skill)', '/usr/bin/wb': '' }
+  const seen = freshMachine(on, files)
+  let held: any[] = []
+  on('ui.panes', () => ({ value: held }))
+  on('ui.close', () => { held = []; return { value: undefined } })
+  on('ui.open', () => { held = [{ id: 'workbench', title: 'Workbench', isShown: true, isFocused: false, isPlaced: true }]; return { value: { isPlaced: true } } })
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  const skill = async (task: string) => (await $.skill.prompt({ skill: 'workbench', frontmatter: {}, source: 'userSettings',
+    text: `- **First task:** \`${task}\`. Empty? Reply in one line that workbench mode is on.` })).text
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  expect(seen.ran.filter(a => a[1] === 'setup')).toEqual([])           // linked already: no setup
+  const first = await skill('')
+  expect(first).toContain('First task')                                // the whole skill
+  expect(first).toContain('[workbench-firstrun] A fresh install')
+  expect(first).toContain('*First run* now')
+  // run again with the mode on and still nothing run: the skill again, not "reply in one line"
+  const again = await skill('')
+  expect(again).toContain('[workbench-firstrun]')
+  expect(again).not.toContain('The user ran /workbench again')
+  // with a task given, the task is the work: no first run note
+  expect(await skill('add a high-score screen')).not.toContain('workbench-firstrun')
+  // a task ran here (its files under tasks/): /workbench alone is the pane again
+  files['/wb/tasks/fix-it/task.json'] = '{}'
+  expect(await skill('')).toContain('The user ran /workbench again')
+  delete files['/wb/tasks/fix-it/task.json']
+  // one accepted and cleaned up since: results.jsonl has its row
+  files['/wb/results.jsonl'] = '{"task": "fix-it"}\n'
+  expect(await skill('')).not.toContain('workbench-firstrun')
+  delete files['/wb/results.jsonl']
+  // a role on API: the user set the roles up already
+  files['/home/u/.config/workbench/routes.json'] = JSON.stringify({ roles: { trivial: { via: 'api', api: 'prov/model' } } })
+  expect(await skill('')).not.toContain('workbench-firstrun')
+  delete files['/home/u/.config/workbench/routes.json']
+  expect(await skill('')).toContain('[workbench-firstrun]')
+})
+
 // A file system in memory: what `wb` and its runner would have written. `ui` records the pane
 // opening and closing and each status line.
 // The web chat as the user turned it on (`wb chat on`): off by default (the user, 2026-11-19)
@@ -210,6 +373,8 @@ function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], sc
   })
   // the weekly model check was done just now, unless the test is about it
   if (scouted) files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_000 })
+  // the /workbench skill linked, as wb setup leaves it: without it a session's start runs wb setup (#1190)
+  files['/home/u/.claude/skills/workbench/SKILL.md'] ??= '(the skill)'
   on('env.get', (_: any, e: any) => ({ value: ({ WB_HOME: '/wb', HOME: '/home/u', ...engine.env } as any)[e.name] }))
   const reads: string[] = []
   on('fs.read', (_: any, e: any) => {

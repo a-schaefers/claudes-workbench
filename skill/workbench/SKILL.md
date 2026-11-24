@@ -57,16 +57,18 @@ the user's sign that it is on. The user then works with you as usual, in plain w
 request is handled the way this skill says, until they run `/workbench-quit` or
 `/workbench-quit-and-hand-back-claude`. Running `/workbench` again while it is on only brings
 the pane back (the mod answers it; with a task, the task is yours to take as usual).
-- **First task:** `$ARGUMENTS`. Empty? Reply in one line that workbench mode is on and wait for
-  their first request. Don't scan the repo or check models until there is work.
+- **First task:** `$ARGUMENTS`. Empty? With a `workbench-firstrun` note after this skill (the
+  mod's, on a fresh install: no task ever ran, no role is on API), run *First run* below now.
+  Otherwise reply in one line that workbench mode is on and wait for their first request; don't
+  scan the repo or check models until there is work.
 - **What goes to the agents:** the coding: features, fixes, refactors, tests, boilerplate.
   Answer questions, read code, plan, and do what is yours (git, CLAUDE.md, `.claude/`, anything
   outward) yourself, as always. An edit that costs less to make than to spec (a typo, one line)
   you may just make.
-- **First run** (no role can run: `wb start` exits 3 with the router's `no GPU model…` line and
-  no role is on API, `wb setup` says what is missing; or the user wants to see it work), in this
-  order, each install or download on the user's yes. Once a role runs (on the GPU or on API),
-  `/workbench` goes straight to work: this never runs again on its own.
+- **First run** (a `workbench-firstrun` note; no role can run: `wb start` exits 3 with the
+  router's `no GPU model…` line and no role is on API, `wb setup` says what is missing; or the
+  user wants to see it work), in this order, each install or download on the user's yes. Once a
+  task has run or a role is on API, no note comes and `/workbench` goes straight to work.
   1. `wb setup`: its `first run:` lines say what is missing, and which API keys OpenCode holds.
   2. **No GPU model, a provider with a stored key** (`ok  API keys: …`): `wb models --api
      <provider>` lists that provider's ids, each with its window and price. Pick two as the weekly check would: reliable tool calls, a priced model
@@ -116,7 +118,7 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
 - **Plans are handoff plans**, in plan mode or not: see "Planning work you will hand off" below.
 
 `wb` is the workbench CLI (on PATH as `wb`; `wb --help`). Its code, ARCHITECTURE.md included, is
-two directories above `readlink -f "$(command -v wb)"`. Every command
+two directories above `readlink -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/workbench"`. Every command
 prints a short report written for you — don't go digging in raw logs unless a report says to.
 
 ## 0. The project: git and CLAUDE.md are yours

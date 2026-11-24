@@ -63,11 +63,7 @@ Tested in the Claude Code CLI only, not the Claude desktop app.
 ```sh
 claude plugin marketplace add a-schaefers/claudes-workbench
 claude plugin install workbench@workbench
-"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/marketplaces/workbench/bin/wb setup   # puts wb on your PATH and /workbench in your skills
 ```
-
-With `CLAUDE_CODE_PLUGIN_CACHE_DIR` set, Claude Code keeps the clone under it instead: run
-`bin/wb setup` in `"$CLAUDE_CODE_PLUGIN_CACHE_DIR"/marketplaces/workbench`.
 
 ### In Claude Code, inside your project
 
@@ -75,7 +71,8 @@ With `CLAUDE_CODE_PLUGIN_CACHE_DIR` set, Claude Code keeps the clone under it in
 /workbench
 ```
 
-The first time, Claude finishes the setup and proves it on a tiny sample task.
+The first time, Claude checks what's missing and offers to set it up, then proves it on a tiny
+sample task. (`/workbench` not listed? `/reload-skills`; still not, ask Claude to run `wb setup`.)
 
 Then work as you always do. On the left is Claude, as usual; on the right, the agents it's
 directing for you.

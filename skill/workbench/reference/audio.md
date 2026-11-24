@@ -54,7 +54,7 @@ holder, and `--wait` (Bash `run_in_background: true`) queues behind it. A url en
 
 **No ready engine? Offer to set one up; never set it up unasked.** This step is optional, as
 ARCHITECTURE.md's Audio section says (in the workbench code, two directories above
-`readlink -f "$(command -v wb)"`). Read `wb scout` for the OS, GPU and RAM, then propose in one
+`readlink -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/workbench"`). Read `wb scout` for the OS, GPU and RAM, then propose in one
 message:
 - the runtime that section recommends, on the right backend (Vulkan for AMD or Intel, CUDA for
   NVIDIA, Metal on macOS, the CPU without a GPU), built from its upstream source or its release

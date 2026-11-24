@@ -43,7 +43,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
   mode. The mod keeps it until a quit command, reminds Claude after a compaction or `/clear`,
   counts a delegating `wb` command as the mode, keeps it by session id in `$.store`, and turns it
   on when it adopts a task still delegated (#689; not one parked or taken over, #834).
-- **`wb`** (`bin/wb` → `cli.py`): one thing per command, a short plain report.
+- **`wb`** (`bin/wb` → `cli.py`): one thing per command, a short plain report. Claude Code's Bash
+  also finds it as the plugin's `mod/bin/wb`, which runs the marketplace clone's (*Installing*).
 - **The runner** (`runner.py`): detached, one per task, round after round until the task needs
   Claude, then exits.
 - **OpenCode**: the model headless in the worktree, inside the lane (`lane.py`), with a
@@ -55,7 +56,8 @@ The runner, the ask server and the chat server never call each other or the mod:
 files in `$WB_HOME` (`store.py`), and waiters sleep in the kernel (inotify, pidfd: `watch.py`).
 The mod's only calls are `wb` subcommands (`events`, `watch --json`, `status`, `chat
 ack|claim|url|log|ask|wait|answer|on|off`, `stop|takeover --all --repo … --session …`, `update`
-and its weekly `update --check --if-due`, `optimize start --if-due` once a session), plus `kill
+and its weekly `update --check --if-due`, `optimize start --if-due` once a session, `setup` when
+the skill isn't linked), plus `kill
 -0` where there is no `/proc` and `tail -c`. A crash loses nothing; everything reads with `cat`.
 
 `bin/wb` and `bin/wb-ask-mcp` check the interpreter first: below 3.11 they exec the newest
@@ -67,7 +69,7 @@ wb-python` against a second hand-over; with none, exit 78 and one line (the chat
 
 | Process | Started by | How it finds `workbench` |
 |---|---|---|
-| `wb` | the user, Claude, the mod | `bin/wb` puts its real path's repo root on `sys.path` (symlinks work) |
+| `wb` | the user, Claude, the mod | `bin/wb` puts its real path's repo root on `sys.path` (symlinks work); the plugin's `mod/bin/wb` (`sh`) execs a clone's `bin/wb` (#1190) |
 | the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` the repo root (the caller's in `WB_USER_PYTHONPATH`: `context.detached_env`), own session and, where logind kills at logout, own systemd scope (`cli.detach`, `cli.runner_scope`, #351), output to `runner.log` |
 | the ask server | OpenCode, the layer's `mcp.servers.workbench` | `[sys.executable, <root>/bin/wb-ask-mcp]` |
 | the git shim | the agent's shell (`<rules>/bin/git`) | a `/bin/sh` wrapper exec'ing `<python> -I -c` (quoted: a shebang splits at a space) with `sys.path.insert` |
@@ -5592,7 +5594,8 @@ setting `userConfig.wake` `on`|`off`, default `on`, changed with `claude plugin 
 workbench@workbench`, which reloads the module), `hooks/hooks.json` (`{"modules":
 ["./register.tsx"]}`), `hooks/register.tsx` (everything), `hooks/apprentice.ts`, `hooks/splash.ts`
 (#963), `hooks/modeline.ts` (#976), `hooks/tasks.ts` (#1048: the Tasks view's rows), `hooks/register.test.tsx` and `hooks/tasks.test.ts` (`claude plugin test mod`), `types/index.d.ts`
-(the atom types), `.claude-plugin/icon.png` (the `work` pose).
+(the atom types), `.claude-plugin/icon.png` (the `work` pose), `bin/wb` (#1190: the launcher
+Claude Code puts on its Bash tool's PATH, *Installing*).
 The root's `.claude-plugin/marketplace.json` (source `./mod`) makes the id `workbench@workbench`,
 read from the clone: `wb update` plus `/reload-plugins` upgrades it. `mod/tsconfig.json` extends
 the generated, gitignored `./.claude-plugin/types/tsconfig.json`.
@@ -5601,7 +5604,8 @@ the generated, gitignored `./.claude-plugin/types/tsconfig.json`.
 functions declared at the top level of `register.tsx` (a declaration or a const bound to one;
 imports from the module's own files pass too). The helpers type `$` as `any`, so validate's listing
 (hooks, calls, env reads, "gating hook without .catch") is the check. Env reads are string
-literals: `HOME`, `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_SAVINGS`, `WB_COMPACT_AT`.
+literals: `HOME`, `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_SAVINGS`, `WB_COMPACT_AT`, `PATH`,
+`CLAUDE_CODE_PLUGIN_CACHE_DIR`.
 
 **State.** Ten `$.state` atoms survive a module reload; one read under an old shape tag is absent,
 so change the tag when its type changes: `tasks` (`tasks-11`, WbTask[]: name, phase, round, model,
@@ -5622,14 +5626,22 @@ is `mem`, reset by a reload. Task facts are re-read from `$WB_HOME`; the mod wri
 **session.start.** `mem.root`, `mem.wb`, `mem.skill` (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then
 `skills/workbench/SKILL.md`); `WB_HOME`, `CLAUDE_CONFIG_DIR` and `WB_SAVINGS` resolved by
 `absolutePath` as `store.absolute_env` does (settings.json passes `~` literally, #454), `WB_BIN` too
-when it has a `/` or starts with `~` (#699); the chat key (`<start ms>-<6 base36>`, kept across
+when it has a `/` or starts with `~` (#699); with no `WB_BIN` and no `wb` in a `PATH` directory
+(`onPath`, by `$.fs.stat`: a fresh install, `~/.local/bin` off PATH), `mem.wb` is the marketplace
+clone's `bin/wb` (`marketplaceClone`, the launcher's lookup: Claude Code puts the plugin's `bin/`
+on the Bash tool's PATH only, #1190); the chat key (`<start ms>-<6 base36>`, kept across
 reloads); `mem.cwd`, `mem.home` (which
 session-less tasks are `mine`); `mem.ids`. Workbench mode comes back when `$.store` `modes` holds
 one of those ids (`modeKept`; `keepMode` writes every id when the mode turns on and a /clear's new
 id while on, #840, drops the process's ids when off, ages entries out at `MODES_KEEP_MS` 30 days;
 #689: `claude --continue` came back with the mode off), and on a successful `wb adopt` of a task
 still delegated (`delegatedWork`: running, or waiting on Claude, not parked or `taken_over`, #834).
-It registers the commands, runs `wb setup` once for a stale `skills/delegate` link, and starts the
+It registers the commands, runs `wb setup` when `skills/workbench/SKILL.md` isn't there: for a
+stale `skills/delegate` link (its own toast), else on a fresh install with a person there (#1190,
+`setUp`, not awaited past the setup itself: it runs `/reload-skills` through `$.command.run`, as
+Claude Code watches only the skill directories there at its start, and toasts `workbench: set up
+(wb and /workbench linked); type /workbench`, with `/reload-skills, then` before `type` when that
+call is refused, or `workbench: wb setup failed: <its BAD line>`). It starts the
 ears and timers only when a person can be there (`isInteractive`, or a surface): a `claude -p` or
 SDK session stays quiet until `session.attach` (it took the terminal's wakes, the 2026-11-16 audit).
 
@@ -5692,7 +5704,12 @@ task's sessions the first to deliver wins (the `acked` write is not locked).
 
 **Workbench mode** (`workbenchMode(on)`, `chat.delegating`). On: the `workbench` skill's prompt
 (`skill.prompt`, which opens the pane via `showPane`; again while on with no task, read by
-`firstTask` from the skill's "**First task:** \`…\`" line, it returns AGAIN_NOTE instead), or a
+`firstTask` from the skill's "**First task:** \`…\`" line, it returns AGAIN_NOTE instead; with no
+task on a fresh install, `freshInstall`: nothing under `tasks/`, `results.jsonl` empty or missing,
+no role on API, read from the files so the mod keeps no state, it returns the whole skill with
+`FIRSTRUN_NOTE` after it, `[workbench-firstrun] A fresh install: …`, which SKILL.md's *First task*
+reads as "run *First run* now", #1190: in the skill's text, since `prompt.context` fires only at a
+conversation's first message), or a
 Bash call running `wb start|next|feedback|steer|answer|resume` (`delegates`, `HANDS_OUT`; not
 `accept` or `takeover`, which a quit's notes ask for). Only a command counts, not text (#409), read
 as bash reads it (`simpleCommands`, #560): quotes undone within a word, comments and heredoc
@@ -6143,7 +6160,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|notice\|wait\|answer\|token\|ended]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo --pid --for <agent> --here` (last line `<id> open\|allow\|expired`, the mod parses it), `wait <id> --timeout` (30) `--json` (allow, deny, expired, or `open`), `answer <id> allow\|deny\|expired --by --note`, `notice --tool --kind --text` (its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end) | The web chat (*The web chat*); `on` refuses, switch off, when something else answers the port (#690); `off` stops only a server `on` started. |
 | `wb try` | `--model <id>` (a GPU model's fragment will do; an API id never matches one) | A sample trial (#112): `workbench/try/project/` copied to `~/.local/share/workbench/try/<n>` (not the state dir, hidden from the lane, #164), started as `try-<n>` on `workbench/try/spec.md`, `--size trivial --trial` (so the trivial role's model, an API one when the user put it there, #1016), its test `sys.executable` (#530); Claude's hidden check `workbench/try/check.py <worktree>`; a refusal removes the copy (#161). An API `--model`: exit 3, `<id> is an API model: wb try runs on GPU models only`, before the copy (#1014). A sample on the trivial role's API model (task.json `via`/`role`, #1016) adds `wb try: the trivial role is API (<id>, <Provider>): the sample's code goes there, and its cost counts toward today's $<cap> cap` (`_try_api_line`, #1026). |
 | `wb init <dir>` | | git, a first commit, AGENTS.md → CLAUDE.md (#931; nothing while `gitops.under_way`). Refuses home or above, inside another repo (but a home repo nests, #684), a repo git refuses (`gitops.NotARepo`), no git identity, likely secrets or uncovered installed directories. |
-| `wb setup` | `--force` (a link pointing elsewhere; never a file) | Links `~/.local/bin/wb` and `skills/workbench`, removes a dead `skills/delegate` link (the mod runs `wb setup` when it finds only that), exit 1 when something is in the way, PATH advice (`cli.path_advice`), the optimize when due, then `first run:` (`cli.first_run`, with the API keys line `cli.api_key_lines`), then `cli.agents_md_note` (below); names no model (*Installing*). |
+| `wb setup` | `--force` (a link pointing elsewhere; never a file) | Links `~/.local/bin/wb` and `skills/workbench`, removes a dead `skills/delegate` link (the mod runs `wb setup` when it finds no `skills/workbench`: only that link, or a fresh install, #1190), exit 1 when something is in the way, PATH advice (`cli.path_advice`; with the mod installed, `cli.mod_listed`, for the user's own terminal only, `path_advice(claude=False)`: Claude Code runs wb from the plugin's `bin/` and the marketplace clone, #1190), the optimize when due, then `first run:` (`cli.first_run`, with the API keys line `cli.api_key_lines`), then `cli.agents_md_note` (below); names no model (*Installing*). |
 | `wb update` | `--check` (`update available: …` or `up to date`; on a marketplace clone with local changes also `patches.CHECK_LINE`, `local changes in the marketplace clone: wb update would refuse (Claude Code re-clones it); wb patch init keeps them`, alone when nothing is new; the mod toasts both; also `cli._mod_behind`), `--if-due` (only with `--check`, #602: `UPDATE_EVERY`, `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`), `--stop` (`_stop_for_update`: `last` `UPDATE_STOP`, one `stuck` notice per `store.owner`, #694) | *Installing*, *Local patches*. A marketplace install first looks for local changes in its clone (`patches.marketplace_refusal`) and, with any, saves them under `rescued/` and refuses before anything else: Claude Code's update re-clones it and would wipe them (#1005). A clone: `git pull --ff-only` (uncommitted tracked changes refused); on branch `local`, after the fetch, each pull request `wb patch send` opened (`patches.json` `sent`) is asked of gh, `gh pr view <n> -R <owner/repo> --json state,mergeCommit`, at most `GH_SECS` each (`patches.settle_sent`; never with `--check`, which the mod runs on a timer): merged, its merge commit (when gh names one) in the fetched upstream (else nothing yet: `PENDING`), its local commit (matched by ident) is left out of the rebase and the row marked `merged`; closed, at the end once (`closed_lines`, `closed_said`, the patch's sha as it is after the rebase) `your pull request #<n> was closed without merging: kept the local patch <subject> (wb patch check <sha> tells whether upstream fixed it another way)`; open, nothing; not asked (gh missing, offline, a timeout, any other answer) `couldn't ask GitHub about pull request #<n> (<why, scrubbed>): kept the local patch`, never a failure. These lines, and `couldn't check the pull requests wb patch send opened: …`, come after the `updated …` or `already up to date` line, never ahead of it: the mod's `/workbench-update` reloads the plugin only on output that starts `updated` (#1005, 2026-11-22); a refusal after the fetch prints them first, and a plugin step that fails after the branch moved first prints the merged and landed lines too (said then or never, #1005). Then, diverged and behind or with a merged pull request's patch to leave out, its patches rebased in a scratch worktree (`patches.rebase_patches`, `check_move`) before any task is stopped and the branch moved after (`move_branch`), the report `updated clone a..b (N commit(s))` (N: upstream's news only), then `your pull request #<n> merged: dropped the local patch <subject>` per merged one, `landed upstream, dropped from local: <subject>` per patch upstream has, then `N local patch(es) on top of upstream (local)`; a conflict refuses naming the patch, ending `(wb patch check <sha> first: if upstream fixed it another way, drop it)`, its stdout first saying each pull request closed unmerged (`closed_lines`, HEAD's shas: nothing moved; `closed_said` set, so the next run doesn't repeat it); any other branch diverged is refused; on `local` (not `--check`) it writes `patches.json`. At the end, on any clone, each merged pull request whose local commit is gone from `local` is forgotten and its `pr/<slug>` retired (`retire_sent`: `pull request #<n> merged, removed pr/<slug>, its worktree and its body file`), then each `pr/<slug>` of `wb patch upstream`'s (`patches.held`: its worktree under `upstream/`, or its body file there) that landed upstream (`_landed_pr`) goes, worktree, branch and body: `landed upstream, removed pr/<slug>, its worktree and its body file` (`retire_landed`; a worktree with changes of its own is kept, and said). Then `claude plugin marketplace update workbench` and `claude plugin update workbench@workbench`, each step at most 300 s. Refuses while a runner lives (`cli._running`, `_whose`); every refusing check, a patch's conflict too, runs before `--stop` stops anything (#775). The fetch (`_fetch_origin`, the upstream's remote `branch.<name>.remote`, #875) never prompts: `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, `FETCH_SECS` 60, the user's `GIT_SSH_COMMAND`/`GIT_SSH`/`core.sshCommand` kept, else `BatchMode`. |
 | `wb patch init` | `--dir DIR` (else `WB_SOURCE`, else `~/.local/share/workbench/source`: `patches.source_dir`) | *Local patches*. On a clone install a note (`patches.clone_note`), exit 0. Refuses, changing nothing: `claude` not on PATH, a running task (`cli._running`), DIR inside Claude Code's marketplaces directory, a non-empty DIR that isn't a clone of the same origin (or, without `local`, has uncommitted changes), carried changes with no git identity. Saves the marketplace clone's changes (`rescued/`), clones (or fetches into the reused DIR), makes `local` at the marketplace clone's merge-base with its upstream (the code doesn't change; `origin/<branch>` when the clone lacks it), tracking `origin/<that clone's branch>`, then `git am --3way` the commits and `git apply --index` the uncommitted diff, committed as `CARRIED` (`Local changes carried over from the marketplace clone`). A failure removes a DIR it cloned, puts a reused one back on its branch without `local`, and leaves the install as it was. A DIR with `local` already is kept and nothing carried (a rerun goes on from there). Then, from DIR: `claude plugin marketplace add DIR`, `DIR/bin/wb setup --force`, `claude plugin update workbench@workbench`, each failure saying what is done and how to finish; writes `patches.json`; `workbench runs from DIR now, branch local tracking origin/<b>; N patch(es) carried over …`, stashes and other branches named as kept only in `rescued/`, and `/reload-plugins`. |
 | `wb patch list` | | A clone: `<root>: branch B, tracking U` (warned off `local`), one row per patch oldest first `<short>  <subject>  [<Scope> \| no Scope trailer]`, ending ` (no test)` for one that touches no test file (`patches.has_test`, `is_test`: under `tests/`, or a `test_*.py`, `*.test.ts`, `*.test.tsx` anywhere; `wb patch check` can't judge it), `uncommitted: …`, `upstream branch pr/<slug>  <worktree \| (no worktree)>`. A marketplace install: why it can't keep patches, its local changes, `wb patch init`. |
@@ -6151,7 +6168,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb patch upstream <commit> --name <slug>` | | A clone; the slug `[a-z0-9][a-z0-9-]*` (`patches.SLUG`); an existing `pr/<slug>` or worktree refused. Fetches the upstream's remote, `worktree add -b pr/<slug> $WB_HOME/upstream/<slug> <local@{u}>`, cherry-picks the commit (a conflict stays there for `git cherry-pick --continue`); a commit with no test file says `it has no test: add one before sending (upstream asks for one, and wb patch check needs it)` (`NO_TEST_SEND`); a `Scope: me` commit is flagged. Writes `patches.json`, its `prepared` row the picked commit's ident. Prints, under `next (none of this has run):`, the tests (and the plugin's two when `mod/` changed), the body file to fill (`upstream/<slug>.md`, a copy of `.github/pull_request_template.md` when it exists), the one `wb patch send <slug> --title "<the commit's subject>" --body-file <it>`, `patches.gh_line`, and that send needs the user's yes; off GitHub, that send works only there. |
 | `wb patch send <slug> --title T --body-file F` | `--draft`, `--anyway` (sends a `Scope: me` commit) | *Sending a patch upstream*. Refuses before any network (`patches._refuse_send`): no `pr/<slug>` in its worktree, a cherry-pick under way, uncommitted changes there, no commits over the target, an empty body or the template unchanged, a `Scope: me` commit without `--anyway`; then a remote off GitHub, gh not `ready` (`gh_line`), a `.github/workflows/` change over https without the token's `workflow` scope. Under Claude Code (`CLAUDECODE=1`) it then refuses unless the mod's dialog approved exactly this send (`patches._approved`, `send-ok.json`), saying the user may run it in a terminal of their own. Then `gh repo fork` (not when the login owns upstream) and which repository the fork is (`_fork_of`), the push to it in gh's protocol, `gh pr create`; prints `pushed …` and `opened <url>` (`opened <url> (already open)` when a pull request for the branch is open already); on both, `patches.json`'s `sent` row records it (`note_sent`), which `wb update` asks gh about. A failed step says what is done already (a rerun goes on from there). No abbreviated flags (`allow_abbrev=False`: the dialog reads `--title` and `--body-file` as written). The mod asks the user first (*The consent gate*). |
 | `wb patch check <commit>` | | *Local patches*. A clone; the commit one of `local@{u}..local` (else `isn't one of local's patches`, exit 1; `no such commit`, exit 1). Its test files (`is_test`) alone, as a diff, `git apply --3way` onto the upstream `wb update` last fetched, in a scratch worktree under `patches/` (removed afterwards, a failure too); then only what the patch added: each `def test_…` its diff adds, as `python -m unittest <module>.<Class>.<method>` (the class read from the file there with `ast`), run by `patches.RUN_TESTS` (a `-c` script, `python -m unittest`'s loader and cwd, telling apart exit 1 a failure or an error, 3 a skip, an expected failure, an unexpected success or no test run, 0 a pass), and `claude plugin test mod` when a `*.test.ts(x)` changed (its exit 0 a pass), with `WB_HOME` inside the scratch directory and `CHECK_SECS` 900 each (the process group killed past it, a failure). One verdict, exit 0, the first that holds: `upstream fails this patch's tests (<subject>): keep it` (any failure); `<subject>'s tests didn't all run here (<why>), so wb patch check can't tell: run them where they can (a skip is not a pass)` (`a test was skipped`, `no test class holds <names>`: an added `def test_…` `_test_ids` placed in no class, `claude isn't on PATH for the mod's tests`; joined by `; `), never a pass: a test skipped without Landlock or claude was called `already passes`, inviting a drop (#1005, 2026-11-22); `<subject> has no test of its own, so wb patch check can't tell: write one (upstream asks for one in a pull request too)` (no test file, or nothing it found to run); `upstream already passes this patch's tests (<subject>): it likely fixed the same thing. Drop it with the user's yes: wb patch drop <sha>`. Before any, `<subject>'s tests don't apply to upstream any more: compare by hand`. It drops nothing. No abbreviated flags. |
-| `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models (an Ollama cloud one: `--  <id> is an Ollama cloud model, an API model now: set a role to use it`, #1013), `limit.context`, the roles (`BAD <path> can't be read (…)`, else `--  roles: <summary> (wb route)` once any is set, #1014; then each role on API, `ok  <role> role: <id> ready` or `BAD` with wb start's own refusal, `routes.resolve` and `routes.cant_run`: no key, a key wb can't hold, gone from the catalog, out of credit, no price, the day cap, `cli._api_role_lines`, #1067; with a role on API, the keys, `cli.api_key_lines`); with every role on API, no local model and no OpenCode config read `--` (`--  0 local model(s): every role runs on API`), not `BAD`, `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`lane.gaps`, `context.interop_gap`, `context.home_gap`, `context.listening_daemons`), commands.json, `context.TOOLCHAINS`, `wb` on PATH, `cli.logout_stops`, `cli.awake_line`, `webpush.has_cas` (with push subscriptions or any API role: the keyhole's context is `webpush.tls()`, #1080), the mod (`cli._mod_behind`), then `cli.agents_md_note`: `note: agents no longer get your ~/.claude/CLAUDE.md or ~/.claude/rules/: what they should follow in every project goes in ~/.config/workbench/AGENTS.md`, while either of Claude's exists and that file doesn't (#1061; `wb setup` prints it too); then `patches.doctor_lines`: `ok  install: marketplace at P`, `your own clone at P, branch B (wb patch init)` (on `local`, or patches.json's `source`) or `developer clone at P, branch B`; `--  local patches: N (scopes)` (a clone on `local`; a marketplace clone: its local changes and `wb patch init`); `gh: ready as L over P` (`ok`) or `--  gh: <state>: <hint>`, asked only with patches or a `wb patch upstream` branch that hasn't landed upstream (`held`, `_landed_pr`, by the local refs alone); none sets the exit code. Then each experiment. |
+| `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models (an Ollama cloud one: `--  <id> is an Ollama cloud model, an API model now: set a role to use it`, #1013), `limit.context`, the roles (`BAD <path> can't be read (…)`, else `--  roles: <summary> (wb route)` once any is set, #1014; then each role on API, `ok  <role> role: <id> ready` or `BAD` with wb start's own refusal, `routes.resolve` and `routes.cant_run`: no key, a key wb can't hold, gone from the catalog, out of credit, no price, the day cap, `cli._api_role_lines`, #1067; with a role on API, the keys, `cli.api_key_lines`); with every role on API, no local model and no OpenCode config read `--` (`--  0 local model(s): every role runs on API`), not `BAD`, `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`lane.gaps`, `context.interop_gap`, `context.home_gap`, `context.listening_daemons`), commands.json, `context.TOOLCHAINS`, `wb` on PATH (the plugin's launcher, `cli.plugin_launcher`, said as such and never as another copy; not on PATH with the mod installed, a `--` line for the user's own terminal, not BAD, #1190), `cli.logout_stops`, `cli.awake_line`, `webpush.has_cas` (with push subscriptions or any API role: the keyhole's context is `webpush.tls()`, #1080), the mod (`cli._mod_behind`), then `cli.agents_md_note`: `note: agents no longer get your ~/.claude/CLAUDE.md or ~/.claude/rules/: what they should follow in every project goes in ~/.config/workbench/AGENTS.md`, while either of Claude's exists and that file doesn't (#1061; `wb setup` prints it too); then `patches.doctor_lines`: `ok  install: marketplace at P`, `your own clone at P, branch B (wb patch init)` (on `local`, or patches.json's `source`) or `developer clone at P, branch B`; `--  local patches: N (scopes)` (a clone on `local`; a marketplace clone: its local changes and `wb patch init`); `gh: ready as L over P` (`ok`) or `--  gh: <state>: <hint>`, asked only with patches or a `wb patch upstream` branch that hasn't landed upstream (`held`, `_landed_pr`, by the local refs alone); none sets the exit code. Then each experiment. |
 
 ## Files and formats
 
@@ -6521,9 +6538,23 @@ on an API model `kind: "api"` and `paid {cost, source}` (`bench.paid`, from `res
 ```sh
 claude plugin marketplace add a-schaefers/claudes-workbench
 claude plugin install workbench@workbench
-"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/marketplaces/workbench/bin/wb setup
 ```
-then `/workbench`; `wb setup` ends with the `first run:` checklist (`cli.first_run`: OpenCode, a
+then `/workbench`: no third command, no PATH edit, no restart (#1190; until then a third command
+ran `bin/wb setup` from the clone, a path that moved under `CLAUDE_CODE_PLUGIN_CACHE_DIR`, and
+`/workbench` alone waited for a first request). Three pieces, all on Claude Code's own plugin
+features: **the launcher** `mod/bin/wb` (POSIX `sh`, not a link: the install copies only `mod/`), on
+the Bash tool's PATH since Claude Code puts each enabled plugin's `bin/` there (2.1.311 on, after
+the user's own entries, so a `wb` already on PATH runs first). It execs the first clone with an
+executable `bin/wb`: `known_marketplaces.json`'s `workbench.installLocation` (read with `python3
+-I`; in `$CLAUDE_CODE_PLUGIN_CACHE_DIR` when set, else `<CLAUDE_CONFIG_DIR or ~/.claude>/plugins`;
+a directory marketplace: a developer's or `wb patch init`'s clone), then
+`$CLAUDE_CODE_PLUGIN_CACHE_DIR/marketplaces/workbench`, then `<CLAUDE_CONFIG_DIR or
+~/.claude>/plugins/marketplaces/workbench`, a `~` or relative value read as Claude Code reads it;
+with none, exit 127 and one line naming `claude plugin marketplace add`. **The mod** runs `wb
+setup` at a session's start when the skill isn't linked, from the same clone when no `wb` is on its
+own PATH (*The mod, inside*), then `/reload-skills`. **`/workbench` alone on a fresh install**
+carries `[workbench-firstrun]`, and the skill runs its *First run* at once, each install or download
+still on the user's yes. `wb setup` ends with the `first run:` checklist (`cli.first_run`: OpenCode, a
 model server, a registered model, the API keys, Landlock). Its API keys line (#1024,
 `cli.api_key_lines`, from `models.connected()`: `opencode auth list` in wb's environment, never a
 lane, never a secret): `ok  API keys: deepseek (stored via /connect); no role uses one yet` (or
@@ -6965,6 +6996,15 @@ not spawned and `drive_here` runs `runner.drive` in this process, for a test tha
 `models` (a counted `make_resident`, a `models.resolve` returning an API model on a local
 `_Upstream`, since `_build_hosted` leaves out loopback bases). The fake's `http` scenario then
 sends the agent's real request to that upstream through the keyhole.
+**Two commands, then `/workbench`** (#1190): `Setup`'s launcher test runs `mod/bin/wb` against each
+clone location (`known_marketplaces.json` first, one without a `bin/wb` passed over, unreadable
+JSON, `CLAUDE_CONFIG_DIR` as `~/…` and relative, `CLAUDE_CODE_PLUGIN_CACHE_DIR`), none (exit 127),
+the arguments as given, and this clone's real `bin/wb`; with the mod listed, `wb setup`'s PATH line
+and doctor's are for the user's terminal, and the launcher on PATH is no other copy.
+register.test.tsx: a fresh install runs `wb setup` from the clone's `bin/wb`, `/reload-skills`, one
+toast, and not again once linked; the clone found where the launcher looks, a `wb` on PATH or
+`WB_BIN` first; a failing setup's BAD line, a refused reload; a scripted session runs none; the
+firstrun note only on a fresh install with no task given, the mode on or not.
 **The first run for API roles** (`FirstRunApi`, #1024): `wb setup`'s API keys line for a stored key
 (and which roles use it, the Agents switch heeded), an environment key, an OAuth login, several
 providers and none; the GPU lines optional only with a stored key and no local model; several roles in
@@ -7281,6 +7321,10 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   command run at the tagged commit (#422), platforms by hand, each run recorded with SHA, OS, filesystem, versions,
   hardware, result, skip reason; a skip is not a gate), a `v<version>` tag (trailing `.0` dropped, `v0.90`), `gh release
   create v<version> --generate-notes` linking the checklist. **`wb setup`'s links** → README's quickstart, *Installing*.
+- **Where the marketplace clone is** (#1190): `mod/bin/wb`'s lookup ↔ the mod's `marketplaceClone` (the same order)
+  ↔ `gateConf`'s directories ↔ `cli.plugins_dir`, `cli._install_kind`; a `wb patch init` clone is found as
+  `known_marketplaces.json`'s `installLocation`. **`FIRSTRUN_NOTE`** (`[workbench-firstrun]`) ↔ SKILL.md's *First
+  task* and *First run*; `freshInstall`'s files ↔ `tasks/`, `results.jsonl`, routes.json.
 - **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.
 - **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → the mod's `GUARD_WORDS`, *Stats recording*'s list.
