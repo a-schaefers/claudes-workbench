@@ -535,7 +535,9 @@ chunk) and handed over before the response's last byte, so OpenCode prints that 
 (`prompt_tokens` with `prompt_tokens_details.cached_tokens` or DeepSeek's
 `prompt_cache_hit_tokens`, `completion_tokens_details.reasoning_tokens`), the Responses API
 (`input_tokens_details`, `output_tokens_details`) and Anthropic (`cache_read_input_tokens`,
-`cache_creation_input_tokens`). It sees every request the model gets, titles and compaction too
+`cache_creation_input_tokens`, `output_tokens_details.thinking_tokens` as reasoning), told by its
+cache fields first: its `message_delta` carries `output_tokens_details` too, read as the Responses
+API with every cache read and write 0 (#1081). It sees every request the model gets, titles and compaction too
 (which no `step_finish` carries), and a provider's own `usage.cost` (OpenRouter's) wins over the
 catalog (`source: provider`). OpenCode's (`Meter.step`, `step_finish.part.cost`, which
 `events.normalize` keeps as the step row's `cost`): with the keyhole metering, only a `reconcile`

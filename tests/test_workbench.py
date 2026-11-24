@@ -26237,6 +26237,32 @@ class Keyhole(_KeyholeTest):
         self.assertIn("the round stops", text)                           # a 400: OpenCode won't retry
         self.assertEqual(self.task.status["api_stop"]["guard"], "setup")
 
+    def test_anthropics_cache_writes_are_metered_when_its_message_delta_names_thinking_tokens(self):
+        # #1081 (2026-11-23): Anthropic's message_delta now carries output_tokens_details
+        # {thinking_tokens}, which usage_tokens read as the Responses API: a real Haiku step was
+        # booked {"in": 4, "cache_write": 0, "out": 200} against OpenCode's 7226 cache writes
+        from workbench import meter
+        got = []
+        m = self.model("anthropic", "claude-haiku-5-5", "/v1", "@opencode/ai/providers/anthropic")
+        kh = self.keyhole(m, on_usage=got.append)
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [f"event: {ev['type']}\ndata: {json.dumps(ev)}\n\n".encode() for ev in (
+            {"type": "message_start", "message": {"id": "msg_1", "type": "message", "model": m.name,
+                                                  "usage": {"input_tokens": 11, "output_tokens": 1,
+                                                            "cache_creation_input_tokens": 6303,
+                                                            "cache_read_input_tokens": 0}}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 40, "output_tokens_details": {"thinking_tokens": 25}}},
+            {"type": "message_stop"})]
+        code, _, _ = self.post(kh, "/messages", headers={"Authorization": None, "x-api-key": kh.token})
+        self.assertEqual(code, 200)
+        self.assertEqual([meter.usage_tokens(u) for u in got],
+                         [{"in": 11, "cache_read": 0, "cache_write": 6303, "out": 15, "reasoning": 25}])
+        self.assertEqual(meter.usage_tokens({                            # the issue's own figures
+            "input_tokens": 11, "cache_creation_input_tokens": 6303, "cache_read_input_tokens": 0,
+            "output_tokens": 4, "output_tokens_details": {"thinking_tokens": 0}}),
+            {"in": 11, "cache_read": 0, "cache_write": 6303, "out": 4, "reasoning": 0})
+
     def test_oauth_and_env_keys_cant_run(self):
         self.fake_auth({"oauthco": {"export": [self.key_row("oauthco", {
                             "type": "oauth", "methodID": "m", "refresh": self.CANARY,
