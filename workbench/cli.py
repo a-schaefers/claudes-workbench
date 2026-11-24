@@ -581,7 +581,9 @@ def _stop_for_update(tasks) -> str:
             _stop_runner(t)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": UPDATE_STOP})
-            t.set_status(phase="stuck", last=UPDATE_STOP, pid=None)
+            # `infra`: not the step's, so a discard (the wake offers one) isn't scored as the
+            # model's failed try, nor a wb feedback counted a review (#1260, 2026-11-24)
+            t.set_status(phase="stuck", last=UPDATE_STOP, pid=None, infra=UPDATE)
             stopped.append(t)
     groups: dict = {}
     for t in stopped:
@@ -1758,12 +1760,18 @@ def cmd_feedback(a):
     else:
         task.round_dir(n).mkdir(parents=True, exist_ok=True)
         task.round_dir(n).joinpath("prompt.md").write_text(said, encoding="utf-8")
-    # a stop that wasn't the step's (status `infra`: an API provider's, the spend cap's, a reaped
-    # runner's, a restart's, a model server's): the round it resumes is no review. Counted, the
-    # "carry on" the provider's stop notice advises plus one real review read as two, and the
-    # step went badly, shrinking the model's slice (#1153, 2026-11-24). drive clears `infra` at
-    # each round's start, so a task in review never has it.
-    resumed = bool(st.get("infra"))
+    # a stop that wasn't the step's (stopped_outside: an API provider's, the spend cap's, a reaped
+    # runner's, a restart's, a model server's, an update's, a signal's, wb stop --all's): the
+    # round it resumes is no review. Counted, the "carry on" the provider's stop notice advises
+    # plus one real review read as two, and the step went badly, shrinking the model's slice
+    # (#1153, #1260, 2026-11-24). drive clears `infra` at each round's start, so a task in review
+    # never has it. Nor is the round after a skipped auto-fix whose remedy it is (status
+    # `env_skip`: a tool the agent's environment lacked, a path the lane refused): it gives the
+    # environment what it lacked, not the code a review, and counted, it plus one real review
+    # made the step go badly too (#1257, 2026-11-24).
+    outside = stopped_outside(st)
+    resumed = bool(outside)
+    env = st.get("env_skip")  # set only in review, so never with an unsent round
     # ... and no review for round_asks either: it stopped at this round, so a later handover or
     # wb resume carried only "carry on" and dropped the review feedback the stop interrupted
     # (#1169, 2026-11-24). Unlinked otherwise: a feedback that died before its round was counted
@@ -1772,11 +1780,11 @@ def cmd_feedback(a):
     mark = task.round_dir(n) / runner.RESUMED
     if unsent:
         pass
-    elif resumed:
+    elif resumed or env:
         mark.touch()
     else:
         mark.unlink(missing_ok=True)
-    reviews = st.get("reviews", 0) + (0 if resumed or unsent else 1)
+    reviews = st.get("reviews", 0) + (0 if resumed or unsent or env else 1)
     handled = store.now()  # everything before the new round; what its runner raises stays news
     # An unsent round keeps its own `context` unless a flag says otherwise: the runner clears it
     # only once the round starts, so wb resume's or wb next --fresh's "fresh" (or a handover's
@@ -1789,7 +1797,8 @@ def cmd_feedback(a):
     task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
                     # an unsent round keeps its own (`next`: the pane's `step 2`)
                     # an infra stop's resume carries a self-review on as wb resume's does (#1228)
-                    **({} if unsent else {"round_for": "feedback"} if not resumed else
+                    # and after an env skip: no review counted, the pane's "resumed" (#1257)
+                    **({} if unsent else {"round_for": "feedback"} if not (resumed or env) else
                        {"round_for": "resume", "self_review_tree": runner.carried_tree(task)}),
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
@@ -1798,11 +1807,14 @@ def cmd_feedback(a):
     _ack_all(task, upto=handled)
     if unsent:
         print(f"feedback sent to {a.name} (round {n}): after round {n}'s own prompt, which never "
-              "reached the agent" + (f" ({st['infra']})" if st.get("infra") else "")
+              "reached the agent" + (f" ({outside})" if outside else "")
               + ", so no review round is counted")
     elif resumed:
         print(f"feedback sent to {a.name} (round {n}): it resumes after a stop that wasn't the "
-              f"agent's ({st['infra']}), so no review round is counted")
+              f"agent's ({outside}), so no review round is counted")
+    elif env:
+        print(f"feedback sent to {a.name} (round {n}): it follows a skipped auto-fix that wasn't "
+              f"the code's ({env}), so no review round is counted")
     else:
         print(f"feedback round {reviews} sent to {a.name} (round {n})"
               + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
@@ -1903,7 +1915,7 @@ def cmd_next(a):
                 # a step that changed nothing advances with no commit: it died on "nothing to
                 # commit" and the task stayed on the step (#507, Claude's audit of 1.90)
                 # Claude's too (#1179), and the agent's shell's (#1210)
-                wrote = runner.agent_wrote(task) + runner.hand_wrote(task) + runner.shell_wrote(task)
+                wrote = runner.accept_writes(task)
                 left = _left_out(task, wrote, a.include)
                 if gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote):
                     commit = gitops.commit_all(
@@ -2476,7 +2488,9 @@ def cmd_diff(a):
             f"git -C {repo} diff {task.spec['base'][:12]} {tip}")
     base = "HEAD" if task.status.get("steps", 1) > 1 and not a.all else task.spec["base"]
     try:
-        print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths) or "(no changes)")
+        # the ignored files --include commits too, as the review diff shows them (#1259)
+        print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths,
+                          force=runner.ignored_to_commit(task)) or "(no changes)")
     except gitops.GitError as e:
         die(f"{e}\nthe branch's commits: git -C {repo} diff {task.spec['base'][:12]} {tip}")
 
@@ -2531,7 +2545,8 @@ def stop_everything(tasks=None) -> list[str]:
             _stop_runner(t)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": "bail out: stopped by the user"})
-            t.set_status(phase="stuck", last="bail out: stopped", pid=None,
+            # `infra`: the user's quit (/workbench-quit), not the step's: as wb update --stop (#1260)
+            t.set_status(phase="stuck", last=BAIL_OUT, pid=None, infra=BAILED,
                          parked=store.now())  # out of the status line and new sessions (#541)
             _ack_all(t)
             stopped.append(f"{t.name} (worktree kept: {t.worktree})")
@@ -2595,6 +2610,10 @@ ALL_SESSIONS = ("every Claude Code session's tasks (from Claude Code's Bash, the
 
 # What `wb update --stop` leaves in status `last` (#694): resumed like a restart's
 UPDATE_STOP = "stopped for a workbench update (wb update --stop), not by Claude"
+# ... and `wb stop --all`'s (the mod's /workbench-quit), which wb resume --all leaves alone
+BAIL_OUT = "bail out: stopped"
+# Their status `infra` (stopped_outside)
+UPDATE, BAILED = "update", "stopped"
 # What `wb resume --all` continues: tasks interrupted from outside, not those stopped for a
 # reason of their own (a guard, a crash, a failed load), which want Claude's look first (#544)
 INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP, UPDATE_STOP)
@@ -2607,6 +2626,23 @@ def _interrupted(last) -> bool:
     And runner.opencode_moved's, OpenCode changed under it (#866)."""
     return last in INTERRUPTED or isinstance(last, str) and last.startswith(
         (runner.UPDATED + ":", runner.OPENCODE_MOVED + " ("))
+
+
+def stopped_outside(st: dict) -> str | None:
+    """Why a task's last stop wasn't its step's, or None: the one place wb discard (the row's
+    `infra`, tuning.stopped_outside) and wb feedback (no review counted) decide it. Status `infra`,
+    which every stop from outside the step sets (the provider, the cap, a restart, an update, a
+    shutdown's signal, `wb stop --all`, the repo gone) and drive clears as a round starts; else,
+    for a status written before its stop set one, read from `last`. Until #1260 (2026-11-24)
+    `wb update --stop`, `wb stop --all` and a signal set none, and each reader had its own test:
+    the discard their wake offers was scored as the model's failed try, and a wb feedback counted
+    a review. The update that installs this stops its tasks with the old code."""
+    if st.get("infra"):
+        return st["infra"]
+    if st.get("phase") != "stuck":
+        return None
+    return {runner.SIGNAL_STOP: runner.SIGNAL_INFRA, UPDATE_STOP: UPDATE,
+            BAIL_OUT: BAILED}.get(st.get("last"))
 
 
 @one_at_a_time
@@ -3267,6 +3303,9 @@ def _route_show(as_json: bool) -> None:
         doc = routes.read()
     except routes.RoutesError as e:
         die(routes.unreadable(e), 3)
+    # what each API model does with thinking, from the catalog now (#1263): the pane's rows the
+    # cached one's, as every lookup of theirs (#1023)
+    doc = routes.with_thinks(doc, cached=as_json)
     if as_json:
         out = {**doc, "summary": routes.summary(doc), "roles": {}, **_route_pane()}
         for r in routes.ROLES:
@@ -3290,7 +3329,7 @@ def _route_show(as_json: bool) -> None:
         gone = row.get("api") and models.lookup(row["api"]) is None
         if row["via"] == "api":
             bits = [f"API {row['api']} ({_who(row['api'])})" + (" (not in OpenCode's catalog now)" if gone else ""),
-                    f"thinking {row['thinking']}", *([f"backends {', '.join(row['order'])}"] if row.get("order") else [])]
+                    routes.thinking_said(row), *([f"backends {', '.join(row['order'])}"] if row.get("order") else [])]
         else:
             bits = ["GPU (the router picks)" if row["gpu"] == routes.AUTO else f"GPU {row['gpu']} (pinned)"]
             if row.get("api"):
@@ -3595,7 +3634,8 @@ def _route_apply(a, argv: list[str], changed) -> None:
                 if not ok:
                     die(gate_refusal("a role changes", "wb " + shlex.join(argv)), 3)
                 by = "pane" if ok.get("by") == "pane" else "dialog"
-            new = routes.stamp(ch, by)
+            # each role's `thinks` read again: what the mod says of its thinking (#1263)
+            new = routes.with_thinks(routes.stamp(ch, by))
             held[0].clear()
             held[0].update(new)
     except _Unchanged:
@@ -3833,7 +3873,7 @@ def cmd_accept(a):
                 with _settle_proposals(task, a.take_claude_md):  # kept if the commit fails (#507)
                     # Claude's ignored files too: a takeover's lib/ module was lost (#1179); and
                     # the agent's shell's: its `cat > lib/util.py` was (#1210)
-                    wrote = runner.agent_wrote(task) + runner.hand_wrote(task) + runner.shell_wrote(task)
+                    wrote = runner.accept_writes(task)
                     left = _left_out(task, wrote, a.include)
                     if (gitops.changed(task.worktree) or head == spec["base"]
                             or gitops.ignored_files(task.worktree, wrote)):
@@ -4467,12 +4507,13 @@ def cmd_discard(a):
         die(f"{a.name} is already {task.status.get('phase')}")
     if why := _accepting(task):  # its commit exists, perhaps merged: not a discard (#878)
         die(why)
-    # the last stop wasn't the step's (status `infra`, which drive clears as a round starts; a
-    # shutdown's signal sets none): in the row, so the discard the stop notice offers isn't
-    # scored as the model's rejected work (#1245, 2026-11-24). Read before this discard's own stop.
+    # the last stop wasn't the step's (stopped_outside): in the row, so the discard the stop
+    # notice offers isn't scored as the model's rejected work (#1245, #1260, 2026-11-24). Read
+    # before this discard's own stop. A skipped auto-fix's tool or path the agent's environment
+    # lacked (status `env_skip`) too: GIVE_TOOL offers this discard to start again with a --setup
+    # (#1257). Not in stopped_outside: wb feedback says that one apart.
     st = task.status
-    outside = st.get("infra") or ("signal" if st.get("phase") == "stuck"
-                                  and st.get("last") == runner.SIGNAL_STOP else None)
+    outside = stopped_outside(st) or ("environment" if st.get("env_skip") else None)
     _stop_runner(task)
     _spec_gaps(task, a.spec_gap)
     repo = gitops.repo_of(spec)  # a removed linked worktree: the repository's main one (#498)
@@ -5129,7 +5170,7 @@ SCOUT_SPEND_DAYS = 7   # and the API spend
 
 def _role_where(doc: dict, r: str) -> str:
     """A role as wb scout says it: `GPU (router)`, `GPU <id> (pinned)` or `API <id>, set by you
-    11-20, thinking off`."""
+    11-20, thinking off` (what the model does with it: routes.thinking_said, #1263)."""
     row = doc["roles"][r]
     if routes.effective_via(doc, r) != "api":
         return "GPU (router)" if row["gpu"] == routes.AUTO else f"GPU {row['gpu']} (pinned)"
@@ -5139,7 +5180,7 @@ def _role_where(doc: dict, r: str) -> str:
     if isinstance(row.get("ts"), (int, float)):
         out += (f", set by {'Claude' if row.get('by') == 'claude' else 'you'} "
                 f"{time.strftime('%m-%d', time.localtime(row['ts']))}")
-    return out + f", thinking {row['thinking']}"
+    return out + f", {routes.thinking_said(row)}"
 
 
 def _api_record(mid: str, since: float) -> str:
@@ -5175,6 +5216,7 @@ def scout_api_lines() -> list[str]:
     if not hosted and not mids:
         return []
     out = ["", "roles" + (f" ({line})" if (line := _agents_line(doc)) else "")]
+    doc = routes.with_thinks(doc)  # hosted.json's, as the rest (#1263)
     out += [f"  {r:<12} {_role_where(doc, r)}" for r in routes.ROLES]
     now = store.now()
     if mids:
@@ -6059,9 +6101,12 @@ def cmd_init(a):
     if not has_commits:
         gitops.git(d, "add", "-A")  # the agents work from commits: the project as it is now
         n = len(gitops.git(d, "diff", "--cached", "--name-only", "-z").split("\0")) - 1
-        try:  # signed as accept's are, or unsigned for wb try: a locked key hung it (#1226)
-            gitops.commit(d, "commit", "-q", "--allow-empty", "-m", "Initial commit",
-                          sign=not a.no_sign)
+        # signed as accept's are, or unsigned for wb try: a locked key hung it (#1226). No hooks,
+        # as no commit of wb's runs them: a global core.hooksPath's commit-msg policy failed wb
+        # try on every retry, and a hook reading /dev/tty could hang it (#1254, 2026-11-24)
+        try:
+            gitops.commit(d, *gitops.NO_HOOKS, "commit", "-q", "--allow-empty", "-m",
+                          "Initial commit", sign=not a.no_sign)
         except gitops.GitError as e:  # left staged: wb init again, once unlocked, commits it
             die(f"{d}: {e}")
         did.append(f"initial commit of the {n} file(s) here (git show --stat to check)" if n

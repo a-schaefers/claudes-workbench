@@ -125,6 +125,11 @@ def normalize(doc) -> dict:
         for key in STAMPS:
             if key in e:
                 row[key] = e[key]
+        # what its API model does with thinking (with_thinks, #1263): wb's own record, read
+        # again on every change, so a malformed one is left out rather than refused
+        t = e.get("thinks")
+        if isinstance(t, dict) and all(isinstance(t.get(k), str) for k in ("api", "off", "on")):
+            row["thinks"] = {k: t[k] for k in ("api", "off", "on")}
         out[r] = row
     use = doc.get("use", "both")
     if use not in USES:
@@ -193,6 +198,42 @@ def thinking_of(m, thinking: str) -> str:
     it (#1237, 2026-11-24)."""
     from . import runner  # it imports far more than routes needs at its import, as resolve's
     return runner.thinking_variant(m, thinking)[1]
+
+
+def model_thinks(m) -> dict:
+    """A role's `thinks` record for API model ``m``: what it does with each thinking setting
+    (thinking_of), and which model that was said of (`api`)."""
+    return {"api": m.id, "off": thinking_of(m, "off"), "on": thinking_of(m, "on")}
+
+
+def with_thinks(doc: dict, cached: bool = True) -> dict:
+    """``doc`` with each role's `thinks` read again from the catalog (model_thinks) for its API
+    model. wb writes it with every change (cli._route_apply) so a reader with no catalog, the
+    mod's routesSummary, says what the model does (#1263). A model the catalog doesn't list now
+    keeps a record said of it (`api` its id) and loses any other: hosted.json holds no models
+    for DOWN_SECS after a failed read, and dropping the record then said `thinking off` again,
+    and wrote that to routes.json with any change, one to another role too (#1263's review,
+    2026-11-24); thinking_said reads a record only while its `api` is the role's."""
+    from . import models
+    for row in doc["roles"].values():
+        m = models.lookup(row["api"], cached=cached) if row.get("api") else None
+        if m is not None and m.kind == "api":
+            row["thinks"] = model_thinks(m)
+        elif m is not None or not row.get("api") or (row.get("thinks") or {}).get("api") != row["api"]:
+            row.pop("thinks", None)
+    return doc
+
+
+def thinking_said(row: dict) -> str:
+    """What a role's thinking does on its API model: its `thinks` record (with_thinks') for the
+    setting, else the setting as it is. Every view of a role's thinking says this one line (the
+    mod's routesSummary the same: Couplings): the roles listing, its summary, the pane and wb scout
+    said `thinking off` for a model that can't turn it off after #1237 fixed the dialog and the
+    start line, so the user kept a model that thinks and paid for it (#1263, 2026-11-24)."""
+    t = row.get("thinks")
+    if isinstance(t, dict) and t.get("api") == row.get("api") and isinstance(t.get(row["thinking"]), str):
+        return t[row["thinking"]]
+    return plain_thinks(row.get("api") or "", row["thinking"])
 
 
 def _thinking_on(roles: list, doc: dict, thinks: Callable[[str, str], str] = plain_thinks) -> list:
@@ -584,7 +625,7 @@ def summary(doc: dict) -> str:
         # change of them alone reached the conversation as nothing (#1126, 2026-11-23)
         backends = f", backends {', '.join(row['order'])}" if row.get("api") and row.get("order") else ""
         if row["via"] == "api":
-            out.append(f"{r} API {row['api']}{backends}, thinking {row['thinking']}")
+            out.append(f"{r} API {row['api']}{backends}, {thinking_said(row)}")
             continue
         text = f"{r} GPU " + ("(the router picks)" if row["gpu"] == AUTO else row["gpu"])
         if row.get("api"):
