@@ -4366,9 +4366,17 @@ export const register: Register = (on, options) => {
       name: HAND_BACK,
       description: 'Stop this session\'s agents and hand their tasks back to Claude to finish',
     })
-    // the file system ignores case when the directory is there with every letter's case swapped
-    const swapped = [...mem.cwd].map(c => c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()).join('')
-    mem.fold = swapped !== mem.cwd && !!(await $.fs.stat(swapped).catch(() => undefined))
+    // the file system ignores case when some component of the directory is there in its own
+    // parent with its letters' case swapped, as store.folds_case: the whole path swapped read
+    // /MNT/C/uSERS/… on WSL2, missing on the ext4 root, so drvfs read case-sensitive (#1217,
+    // 2026-11-24); any component, as WSL makes its own directories there case-sensitive
+    const swap = (s: string) => [...s].map(c => c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()).join('')
+    const comps = mem.cwd.split('/')
+    mem.fold = false
+    for (let i = comps.length - 1; i > 0 && !mem.fold; i--) {
+      const twin = swap(comps[i])
+      if (twin !== comps[i]) mem.fold = !!(await $.fs.stat([...comps.slice(0, i), twin].join('/')).catch(() => undefined))
+    }
     mem.home = home ? await real(home) : ''
     mem.ids = new Set(await read($, sessions))
     mem.said = mem.said ?? await read($, saidState) // a reload: what this conversation was told stands (#697)

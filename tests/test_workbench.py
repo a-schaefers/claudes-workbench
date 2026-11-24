@@ -34624,6 +34624,34 @@ class Privacy(_KeyholeTest):
             with mock.patch.object(store, "folds_case", lambda p: True):
                 self.assertEqual(cli.privacy.local_only(wt), str(typed))
 
+    def test_a_local_only_key_in_another_letter_case_refuses_an_api_start_on_a_folding_mount_under_a_case_sensitive_root(self):
+        # #1217: WSL2's /mnt/c folds case below an ext4 root, but folds_case swapped the whole
+        # path (/MNT/C/uSERS/…, no /MNT on ext4) and read case-sensitive, so the key missed and
+        # the repo went to the API model. drvfs emulated: names below <tmp>/mnt/c fold case
+        mount = Path(self.tmp.name) / "mnt" / "c"
+        on_disk = mount / "Users" / "Me" / "Code" / "ClientX"
+        on_disk.parent.mkdir(parents=True)
+        shutil.move(self.repo, on_disk)
+        self.repo = on_disk
+        typed = mount / "users" / "me" / "code" / "clientx"
+        self.local_only(key=typed)
+        self.role(via="api", api=FLASH)
+        samefile = os.path.samefile
+
+        def as_on_drvfs(a, b):
+            below = [os.path.relpath(p, mount) for p in map(os.fspath, (a, b))
+                     if p.startswith(str(mount) + os.sep)]
+            if len(below) == 2 and below[0].lower() == below[1].lower() and os.path.exists(a):
+                return True
+            return samefile(a, b)
+        with mock.patch("os.path.samefile", as_on_drvfs):
+            self.assertTrue(store.folds_case(self.repo))
+            self.assertEqual(cli.privacy.local_only(self.repo), str(typed))
+            code, err = self.fails("start", "t-lo-drvfs", "--spec", str(self.spec), "--repo", str(self.repo))
+        self.assertEqual(code, 3)
+        self.assertIn("is local-only (commands.json \"repos\")", err)
+        self.assertFalse(store.Task("t-lo-drvfs").exists)
+
     def test_commands_json_refuses_a_local_only_that_isnt_true_or_false(self):
         self.conf.write_text(json.dumps({"repos": {str(self.repo): {"local_only": "yes"}}}))
         with self.assertRaises(RuntimeError) as cm:

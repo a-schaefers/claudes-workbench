@@ -900,8 +900,27 @@ test('on a file system that ignores case, a task under ~/Repos is a session in ~
   on('ui.toast', () => ({ value: undefined }))
   const woken: string[] = []
   on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
-  files['/uSERS/U/REPOS/A'] = ''  // the directory, every letter's case swapped: APFS finds it
+  files['/Users/u/repos/A'] = ''  // the directory, its name's case swapped in its parent: APFS finds it
   await $.session.start({ cwd: '/Users/u/repos/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-cased'))).toHaveLength(1)
+})
+
+test('on WSL2\'s /mnt/c, which ignores case under a root that keeps it, a task under C:\\Users is a session in /mnt/c/users\'s', async ($, on) => {
+  // #1217: the whole path swapped, /MNT/C/uSERS/…, isn't on the ext4 root, so drvfs read as
+  // case-sensitive. Its own components fold: a directory WSL made there (code) keeps case
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'cased', 'review', { repo: '/mnt/c/Users/Me/code/a', cwd: '/mnt/c/Users/Me/code/a' })
+  notice(files, { ts: ts0, task: 'cased', kind: 'review', text: 'REPORT-cased' })
+  fakeTasks(on, files, ['cased'])
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  files['/mnt/c/USERS'] = ''  // C:\Users, Windows' own, finds a name in any case
+  await $.session.start({ cwd: '/mnt/c/users/me/code/a', surface: 'terminal', isInteractive: true })
   await clock.advance(3000)
   expect(woken.filter(t => t.includes('REPORT-cased'))).toHaveLength(1)
 })
