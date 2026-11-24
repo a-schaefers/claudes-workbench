@@ -51,6 +51,27 @@ Do small, local edits yourself: a round trip costs more than they do.
    `python3 scripts/ask_claude.py --after <the last reply's id>`.
 5. **Follow up** with a new message: a new `ask_claude.py "<request>"`.
 
+**Over MCP instead.** If you take tools from an MCP client, the user can add
+`scripts/mcp_server.py` (stdio, the same two variables in its environment). It gives you three tools:
+- `ask_claude(text)`: sends one request and returns its id at once.
+- `get_reply(id)`: Claude's replies, and whether it is done, still working, waiting on the
+  user's yes, queued or expired. It holds up to `wait` seconds (20 by default).
+- `list_requests()`: your recent requests.
+
+Pass the same `key` again only to retry a send you aren't sure landed: it lands once. It works
+only with a chat on this machine (`localhost`, `127.*`, `::1`). The config, one line, for
+OpenCode's `opencode.json`:
+
+```json
+"mcp": {"servers": {"claude-workbench": {"type": "local", "command": ["python3", "/path/to/scripts/mcp_server.py"], "environment": {"CLAUDE_WB_URL": "http://localhost:1337", "CLAUDE_WB_TOKEN": "wba-…"}, "codemode": false}}}
+```
+
+For a client that reads an `mcpServers` map (Cursor, Gemini CLI):
+
+```json
+"mcpServers": {"claude-workbench": {"command": "python3", "args": ["/path/to/scripts/mcp_server.py"], "env": {"CLAUDE_WB_URL": "http://localhost:1337", "CLAUDE_WB_TOKEN": "wba-…"}}}
+```
+
 Without the script, with curl: `POST /api/send` `{"text": "…"}` returns the message's id; then
 `GET /api/wait?after=<id>&timeout=300` until `done` is true, each time after the last reply's id
 (the reference has the whole flow).

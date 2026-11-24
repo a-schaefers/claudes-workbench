@@ -37,8 +37,16 @@ WAIT_EACH = 300  # seconds one GET /api/wait may hold (the server's default)
 TRANSIENT = (502, 503, 504)
 RETRY_FIRST, RETRY_MOST = 1.0, 15.0
 OUTAGE_MOST = 120.0
+class _Stay(urllib.request.HTTPRedirectHandler):
+    """No redirect is followed: urllib sends the Authorization header on to wherever a 3xx points,
+    so a redirect could carry the token off this machine (the chat never sends one: a 3xx comes
+    back as its status; #1138, the MCP server's loopback-only check is moot otherwise)."""
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 # straight to the chat, never through an http_proxy from the environment: the token would pass it
-_open = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+_open = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Stay).open
 
 
 class Refused(Exception):

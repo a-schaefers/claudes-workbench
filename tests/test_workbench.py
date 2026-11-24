@@ -24312,6 +24312,281 @@ while True:
 """
 
 
+class AgentMcp(Base):
+    """The agents' MCP server (#1138): skill/agents/claude-workbench/scripts/mcp_server.py, run as
+    an MCP client runs it, on stdio, against this test's chat server; no network."""
+    SCRIPT = ROOT / "skill/agents/claude-workbench/scripts/mcp_server.py"
+
+    def setUp(self):
+        super().setUp()
+        os.environ["WB_CHAT_TOKEN"] = str(Path(self.tmp.name) / "chat-token")
+        os.environ["WB_CHAT_CONFIG"] = str(Path(self.tmp.name) / "chat.json")  # not the user's
+        from workbench import chat
+        self.chat = chat
+        fqdn = mock.patch("socket.getfqdn", lambda name="": name or socket.gethostname())  # WebChat's why
+        fqdn.start()
+        self.addCleanup(fqdn.stop)
+        servers, _ = chat.make_servers(0, ["127.0.0.1"])
+        self.srv = servers[0]
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.srv.RequestHandlerClass.hub.close()
+        super().tearDown()
+
+    def _agent(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            return run_wb("chat", "token", "add", "my-agent").strip()
+
+    def _listening(self):
+        from workbench import models
+        me = os.getpid()
+        store.write_json(self.chat.chat_dir() / "listener.json",
+                         {"session": "s1", "cwd": "/home/u/project", "pid": me, "start": models._started(me)})
+
+    def _server(self, url=None, token="wba-x"):
+        """The MCP server as a client starts it; rpc(method, params) -> the reply's message."""
+        env = {"PATH": os.environ.get("PATH", ""), "CLAUDE_WB_URL": url or f"http://localhost:{self.port}",
+               "CLAUDE_WB_TOKEN": token}
+        proc = subprocess.Popen([sys.executable, "-I", str(self.SCRIPT)], env=env, text=True,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(lambda: (proc.kill(), proc.wait(), proc.stdout.close(), proc.stderr.close()))
+        waiting, lines, ids, lock = {}, queue.Queue(), iter(range(1, 10 ** 6)), threading.Lock()
+
+        def read():  # each reply to the call that waits on its id (calls overlap: a held get_reply)
+            for line in proc.stdout:
+                got = json.loads(line)
+                with lock:
+                    to = waiting.pop(got.get("id"), lines)
+                to.put(got)
+        threading.Thread(target=read, daemon=True).start()
+
+        def rpc(method, params=None, notify=False):
+            msg = {"jsonrpc": "2.0", "method": method, **({"params": params} if params is not None else {})}
+            if not notify:
+                with lock:
+                    msg["id"] = mid = next(ids)
+                    waiting[mid] = mine = queue.Queue()
+            with lock:
+                proc.stdin.write(json.dumps(msg) + "\n")
+                proc.stdin.flush()
+            return None if notify else mine.get(timeout=30)
+
+        def tool(name, **args):
+            return rpc("tools/call", {"name": name, "arguments": args})["result"]
+        rpc.tool, rpc.lines = tool, lines
+        return rpc
+
+    def test_the_mcp_server_initializes_and_lists_ask_claude_get_reply_and_list_requests(self):
+        rpc = self._server()
+        init = rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                  "clientInfo": {"name": "test", "version": "0"}})["result"]
+        self.assertEqual((init["protocolVersion"], init["serverInfo"]["name"]), ("2025-06-18", "claude-workbench"))
+        self.assertIn("tools", init["capabilities"])
+        rpc("notifications/initialized", notify=True)                    # no reply to a notification
+        tools = {t["name"]: t for t in rpc("tools/list")["result"]["tools"]}
+        self.assertEqual(set(tools), {"ask_claude", "get_reply", "list_requests"})
+        self.assertEqual(tools["ask_claude"]["inputSchema"]["required"], ["text"])
+        self.assertEqual(tools["get_reply"]["inputSchema"]["required"], ["id"])
+        self.assertEqual(rpc("ping")["result"], {})
+        self.assertTrue(rpc.lines.empty())                               # the notification had none
+        self.assertEqual(rpc("tools/call", {"name": "nope"})["error"]["code"], -32602)
+        self.assertEqual(rpc("resources/list")["error"]["code"], -32601)
+
+    def test_the_mcp_server_asks_claude_and_gets_the_reply_end_to_end_once_per_key(self):
+        # #1138: ask_claude returns the request's id at once; get_reply says "still working", then
+        # "waiting on the user" while a dialog of Claude Code's is open, then the reply once done
+        tok = self._agent()
+        rpc = self._server(token=tok)
+        rpc("initialize", {"protocolVersion": "2025-06-18"})
+        r = rpc.tool("ask_claude", text="fix it")
+        self.assertTrue(r["isError"])                                    # nobody listening: nothing sent
+        self.assertIn("Claude isn't listening", r["content"][0]["text"])
+        self.assertEqual(self.chat.thread(), [])
+        self._listening()
+        keys, handler = [], self.srv.RequestHandlerClass
+        post = handler.do_POST
+
+        def seen(h):  # the header part A's server reads; the cid already lands it once
+            keys.append(h.headers.get("Idempotency-Key"))
+            return post(h)
+        mock.patch.object(handler, "do_POST", seen).start()
+        self.addCleanup(mock.patch.stopall)
+        began = time.monotonic()
+        r = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="retry-1")
+        self.assertLess(time.monotonic() - began, 10)
+        self.assertFalse(r["isError"], r)
+        rid = r["structuredContent"]["id"]
+        self.assertIn(f"request {rid}: sent", r["content"][0]["text"])
+        again = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="retry-1")
+        self.assertEqual(again["structuredContent"]["id"], rid)          # a retry under its key lands once
+        self.assertEqual([m["id"] for m in self.chat.thread()], [rid])
+        self.assertEqual(self.chat.thread()[0]["cid"], "retry-1")
+        self.assertEqual(keys, ["retry-1", "retry-1"])
+        self.assertIn("key is 1 to 64", rpc.tool("ask_claude", text="x", key="a b")["content"][0]["text"])
+        r = rpc.tool("get_reply", id=rid, wait=0)
+        self.assertEqual(r["structuredContent"]["status"], "still working")
+        self.chat.ack(rid, "s1")
+        self.chat.reply("On it: a branch json-flag.", [rid])
+        ask = self.chat.ask("AskUserQuestion", "Push the branch?", kind="question", for_=["my-agent"])
+        r = rpc.tool("get_reply", id=rid, wait=0)
+        self.assertEqual(r["structuredContent"]["status"], "waiting on the user", r)
+        self.assertIn("On it: a branch json-flag.", r["content"][0]["text"])
+        self.chat.answer(ask["id"], "deny", "user")
+        got = {}
+        t = threading.Thread(target=lambda: got.update(r=rpc.tool("get_reply", id=rid, wait=20)))
+        t.start()
+        time.sleep(0.5)
+        self.assertTrue(t.is_alive())                                    # held for the turn's end
+        self.assertEqual(rpc("ping")["result"], {})                      # pings answered meanwhile
+        self.chat.reply("Done: branch json-flag, tests pass.", [rid])
+        self.chat.turn_ended([rid], "s1")
+        t.join(15)
+        r = got["r"]
+        self.assertEqual(r["structuredContent"]["status"], "done", r)
+        self.assertEqual([x["text"] for x in r["structuredContent"]["replies"]],
+                         ["On it: a branch json-flag.", "Done: branch json-flag, tests pass."])
+        listed = rpc.tool("list_requests")["structuredContent"]
+        self.assertTrue(listed["listening"])
+        self.assertEqual([(q["id"], q["status"]) for q in listed["requests"]], [(rid, "2 replies")])
+        # a later request Claude answers on its own: the first is still done, the second has its reply
+        r2 = rpc.tool("ask_claude", text="and a changelog line")["structuredContent"]["id"]
+        self.chat.ack(r2, "s1")
+        self.chat.reply("Adding it.", [r2])
+        self.assertEqual(rpc.tool("get_reply", id=rid, wait=0)["structuredContent"]["status"], "done")
+        r = rpc.tool("get_reply", id=r2, wait=0)["structuredContent"]
+        self.assertEqual((r["status"], [x["text"] for x in r["replies"]]), ("still working", ["Adding it."]))
+        self.assertIn("no request nope", rpc.tool("get_reply", id="nope", wait=0)["content"][0]["text"])
+        # nobody listening: a request unread past 6 hours is expired, a newer one queued
+        (self.chat.chat_dir() / "listener.json").unlink()
+        old = {"id": f"{int(time.time() * 1000) - 1}-abcdef", "ts": store.now() - 7 * 3600,
+               "from": "my-agent", "role": "agent", "text": "an old one"}
+        store.append_jsonl(self.chat.chat_dir() / "messages.jsonl", old)
+        self.assertEqual(rpc.tool("get_reply", id=old["id"], wait=5)["structuredContent"]["status"], "expired")
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_calls_the_mcp_servers_tools_end_to_end(self):
+        # #1138's acceptance: a real MCP client's tool calls, from the config line the docs give
+        # (`codemode: false`: by default OpenCode 2.3 offers MCP tools only behind `execute`),
+        # against this test's chat and a Claude played here; the model is capture_llm.py, which
+        # makes the calls. No network: every server is on 127.0.0.1
+        tok = self._agent()
+        self._listening()
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        tmp = Path(self.tmp.name)
+        out = tmp / "requests-1138.jsonl"
+        calls = [{"name": "claude-workbench_ask_claude", "arguments": {"text": "CANARY-MCP: add a --json flag"}},
+                 {"name": "claude-workbench_list_requests", "arguments": {}}]
+        llm = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(port), str(out),
+                                json.dumps(calls)])
+        self.addCleanup(lambda: (llm.kill(), llm.wait()))
+        xdg = tmp / "xdg-1138"
+        (xdg / "opencode").mkdir(parents=True)
+        (xdg / "opencode" / "opencode.json").write_text(json.dumps({
+            "provider": {"cap": {"npm": "@ai-sdk/openai-compatible",
+                                 "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+                                 "models": {"cap": {"name": "capture", "tool_call": True,
+                                                    "limit": {"context": 32768, "output": 1024}}}}},
+            "mcp": {"servers": {"claude-workbench": {
+                "type": "local", "command": [sys.executable, str(self.SCRIPT)], "codemode": False,
+                "environment": {"CLAUDE_WB_URL": f"http://localhost:{self.port}", "CLAUDE_WB_TOKEN": tok}}}}}))
+        proj = tmp / "proj-1138"
+        proj.mkdir()
+        # OpenCode in homes of the test's own: never the user's config, database or CLAUDE.md
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp / "home-1138"), "PWD": str(proj),
+               "XDG_CONFIG_HOME": str(xdg), "XDG_DATA_HOME": str(tmp / "share-1138"),
+               "XDG_STATE_HOME": str(tmp / "state-1138"), "XDG_CACHE_HOME": str(tmp / "cache-1138"),
+               "TMPDIR": tempfile.gettempdir(), "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+               "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1",
+               "OPENCODE_DISABLE_AUTOUPDATE": "1"}
+        stop = threading.Event()
+
+        def claude():
+            while not stop.is_set():
+                for m in self.chat.pending():
+                    self.chat.ack(m["id"], "s1")
+                    self.chat.reply("On it.", [m["id"]])
+                time.sleep(0.1)
+        t = threading.Thread(target=claude)
+        t.start()
+        try:
+            r = subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format", "json",
+                                "go"], cwd=proj, env=env, capture_output=True, text=True, timeout=180)
+        finally:
+            stop.set()
+            t.join()
+        sent = [m for m in self.chat.thread() if m.get("role") == "agent"]
+        self.assertEqual([(m["from"], m["text"]) for m in sent], [("my-agent", "CANARY-MCP: add a --json flag")],
+                         r.stdout[-2000:] + r.stderr[-2000:])
+        seen = json.dumps([json.loads(line).get("messages") for line in out.read_text().splitlines()])
+        self.assertIn(f"request {sent[0]['id']}: sent (Claude is listening)", seen)   # ask_claude's result
+        self.assertIn(f"{sent[0]['id']}  ", seen)                                     # list_requests' row
+
+    def test_the_mcp_server_refuses_a_chat_url_that_isnt_this_machines_and_sends_nothing(self):
+        # #1138: local only by design; the token never goes to a tailnet, LAN or public address
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("wb_mcp_1138", self.SCRIPT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        for url in ("http://localhost:1337", "http://127.0.0.1:1337", "http://127.8.9.10", "http://[::1]:1337",
+                    "https://LOCALHOST.", "http://[::ffff:127.0.0.1]:1"):
+            self.assertTrue(m.loopback(url), url)
+        for url in ("http://192.0.2.1:1337", "http://localhost.example.com", "http://[::ffff:192.0.2.1]",
+                    "http://100.64.0.1:1337", "http://0.0.0.0:1337", "ftp://localhost", "localhost:1337",
+                    "http://localhost:99999", "http://my-host.tailnet.ts.net"):
+            self.assertFalse(m.loopback(url), url)
+        rpc = self._server(url="http://192.0.2.1:1337")                  # TEST-NET-1: never reached
+        for name, args in (("ask_claude", {"text": "x"}), ("get_reply", {"id": "m1"}), ("list_requests", {})):
+            r = rpc.tool(name, **args)
+            self.assertTrue(r["isError"])
+            self.assertIn("must be this machine's chat", r["content"][0]["text"])
+        r = self._server(token="wba-nope").tool("list_requests")         # a token the chat refuses
+        self.assertTrue(r["isError"])
+        self.assertIn("the token was refused", r["content"][0]["text"])
+
+    def test_the_agents_client_never_follows_a_redirect_with_the_token(self):
+        # #1138: urllib sends Authorization on to wherever a 3xx points, past the loopback check
+        hits = []
+
+        class Away(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                hits.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+
+        away = HTTPServer(("127.0.0.1", 0), Away)
+        threading.Thread(target=away.serve_forever, daemon=True).start()
+        self.addCleanup(away.server_close)
+        self.addCleanup(away.shutdown)
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{away.server_address[1]}/api/state")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        srv = HTTPServer(("127.0.0.1", 0), Redirect)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        r = self._server(url=f"http://127.0.0.1:{srv.server_address[1]}", token="wba-secret").tool("list_requests")
+        self.assertTrue(r["isError"])
+        self.assertIn("HTTP 302", r["content"][0]["text"])
+        self.assertEqual(hits, [])
+
+
 class ChatUploads(Base):
     """The web chat's attachments (#623): each file uploaded once, by the id the page gave it."""
     def setUp(self):

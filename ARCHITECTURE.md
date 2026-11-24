@@ -72,6 +72,7 @@ wb-python` against a second hand-over; with none, exit 78 and one line (the chat
 | the ask server | OpenCode, the layer's `mcp.servers.workbench` | `[sys.executable, <root>/bin/wb-ask-mcp]` |
 | the git shim | the agent's shell (`<rules>/bin/git`) | a `/bin/sh` wrapper exec'ing `<python> -I -c` (quoted: a shebang splits at a space) with `sys.path.insert` |
 | the lane | the runner | `python -I lane.py …`, standard library only |
+| the agents' MCP server | another agent's MCP client | `python3 skill/agents/claude-workbench/scripts/mcp_server.py`: no package, standard library only, `ask_claude.py` beside it loaded by path |
 
 ## Why it's built this way
 
@@ -4878,6 +4879,35 @@ client; the server needs no browser.
 - **Kept apart.** A `cid` another sender used is 409 (`chat.send`: an agent's send could get the
   user's message back); an agent's stream never makes the oldest give way (503 at once); the mod
   indents an agent's later lines, so none starts as `[web chat]` or `[message …]` (`chatPrompt`).
+- **The MCP server** (#1138, for 2.1): `skill/agents/claude-workbench/scripts/mcp_server.py`, a
+  stdio MCP server (newline-delimited JSON-RPC, as `ask_mcp.py`: `initialize` with the client's
+  protocol version, else `PROTOCOL` `2025-06-18`; `ping`; `tools/list`; `tools/call` on a thread
+  of its own, so pings go on while one holds) for an agent that speaks MCP rather than running
+  `ask_claude.py`. The same config (`CLAUDE_WB_URL`, `CLAUDE_WB_TOKEN` from its environment) and
+  `ask_claude.call`, loaded by path. Three tools, each answering text and `structuredContent`:
+  - `ask_claude {text, key?}`: `GET /api/health` first (not listening: refused, nothing sent, as
+    `ask_claude.py`), then `POST /api/send` with `cid` and an `Idempotency-Key` header both the
+    key (`key`, `KEY` 1 to 64 of `A-Za-z0-9._:-`, or a new uuid4), sent again under it up to
+    `SEND_TRIES` 3 on a reset or 502 to 504; a 429 is refused naming `retry_after` and the key.
+    Returns `{id, key, listening}` at once.
+  - `get_reply {id, wait?}`: `/api/wait?after=<id>&timeout=0`, then held (`wait`, `WAIT_DEFAULT`
+    20 s, at most `WAIT_MOST` 300: many clients cut a tool call at 60 s) from the last reply on
+    until the turn's end, not the first reply ("On it" came first). The wait answers for the
+    agent's whole conversation, so the replies kept are those whose `re` names the id, and when
+    the newest reply is a later request's alone this one is done (the turn that took it ended).
+    Status `done`, `waiting on the user` (`waiting_on_user`), `queued` (`listener: null`),
+    `expired` (its row in `/api/state` says so) or `still working`, each with what to do next
+    (`NEXT`); an id outside the agent's view is refused (404).
+  - `list_requests {}`: the newest `LISTED` 20 of its own messages from `/api/state`, each with
+    `N replies`, `received`, `queued` or `expired`, and whether Claude listens.
+
+  Local only, by design: `loopback` takes `localhost`, `127.0.0.0/8` and `::1` (IPv4-mapped too)
+  over http or https, and anything else (a tailnet or LAN address, any other name: its address
+  could be anywhere) makes every tool refuse, nothing sent, as the chat refuses an agent token
+  from another address anyway. `ask_claude.py`'s opener follows no redirect (`_Stay`): urllib
+  sends `Authorization` on to wherever a 3xx points. Its config line for OpenCode needs
+  `codemode: false`, or OpenCode 2.3 offers MCP tools only behind `execute` (docs/chat-api.md,
+  *An MCP server*).
   An agent's `about` is 400 `agent messages can't carry about` (what a message answers is the
   user's to say).
 - **An agent's view.** An agent reads only its own conversation: round one let its token read the
@@ -6397,7 +6427,9 @@ never counted unread (#1128), its state without the user's, a dialog for it sayi
 card and in the push (#1042), a 25-task backlog's strip at most three lines on a phone, the queued counted apart
 (#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text.
 `WebChat` runs the agents' client, `skill/agents/claude-workbench/scripts/ask_claude.py`, against its server with a
-listener played in the test (#1042).
+listener played in the test (#1042). `AgentMcp` runs the agents' MCP server as a subprocess on stdio against its own
+chat server (`initialize`, `tools/list`, each tool, the loopback refusal, a redirect never followed), and, with
+`opencode` on PATH, real OpenCode with the docs' config line, `capture_llm.py` making the tool calls (#1138).
 
 **Rate limits** (`RateLimits`, #1020): the runner in-process (`runner.drive`) on a task written as `wb start --role`
 writes it (`via: api`, `provider`, `role`), the keyhole started in the test as `drive` will start it (#1015,
@@ -6721,7 +6753,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `chat._inbound`, `chat.AGENT_RESERVED`, `sw.js`, `makeRow`, `metaFor`, `agentMeta`, `reportSeen`, `wb chat log`, the
   mod's `unread`/`agentOf`/`chatPrompt` and `owedAtTurnEnd` (`claude` only), docs/chat-api.md.
 - **The web chat's API** (a path, a field, an error, a limit) → docs/chat-api.md (`test_docs` checks the paths),
-  `skill/agents/claude-workbench/` (SKILL.md, `ask_claude.py`); a change that breaks a client → `chat.API_VERSION` and
+  `skill/agents/claude-workbench/` (SKILL.md, `ask_claude.py`, `mcp_server.py`); a change that breaks a client → `chat.API_VERSION` and
   the doc's *Versions*. **What an agent token may do** → `chat.AGENT_DENIED`, the doc, the agents' skill. **What an
   agent may read** → `chat.in_view`, `chat.agent_snapshot`, `chat.AGENT_UNREAD`, `chat.agent_may_read`, the doc's
   *An agent's view*.
