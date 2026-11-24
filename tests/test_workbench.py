@@ -23443,6 +23443,21 @@ class WebChat(Base):
         self.assertGreater(len(hits), 1)
         self.assertIn("ask_claude.py --after m1 waits on", err.getvalue())
 
+    def test_the_chats_task_strip_leaves_out_a_task_wb_stop_all_parked(self):
+        # #1097: open_tasks listed every task not accepted or discarded, so a review the quit
+        # parked (out of `wb status` and the status line, #541) stayed on the phone's strip for good
+        def task(name, phase, **status):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "model": "m", "created_at": store.now()})
+            t.set_status(phase=phase, round=1, **status)
+        task("t-parked", "review", parked=store.now())
+        task("t-review", "review")
+        task("t-queued", "queued")
+        task("t-done", "accepted")
+        self.assertEqual(sorted(t["name"] for t in self.chat.open_tasks()), ["t-queued", "t-review"])
+        self.assertEqual(sorted(t["name"] for t in self.chat.snapshot()["tasks"]), ["t-queued", "t-review"])
+
     # ---- the #1042 review ----
 
     def _held_wait(self, path, token):

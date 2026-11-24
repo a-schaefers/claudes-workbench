@@ -4730,9 +4730,14 @@ address (#534).
   savings (`chat.week_saved`: `wb savings --json` over 7 days, no `period`; its `api` adds each
   provider's name, `names`, #1022), uploads (`{file,
   message, files}`), build, expire (`MESSAGE_EXPIRE` in seconds), tasks (`chat.open_tasks`, #1016: `[{name,
-  phase, model, via, provider_name}]` for each open task, no bench replay; the page's strip over the
-  thread, `Running: fix-auth · API deepseek-flash (DeepSeek)`, hidden for none or an older server; the
-  stream sends it when the chat directory wakes it, not on a task's own status write), now}`. `build`
+  phase, model, via, provider_name}]` for each open task, no bench replay and none parked (`store.parked`,
+  as `wb status`, #1097); the page's strip over the thread, `Running: fix-auth · API deepseek-flash
+  (DeepSeek)`, hidden for none or an older server; more than one kind or `TASKS_SHOWN` 3 counts them
+  apart, `2 running, 1 waiting on Claude, 22 queued: …`, names the running first, then those waiting
+  on Claude, then the queued, three at most, then `+N more`, and `.tasks` is clamped to three lines: a
+  25-task backlog took the screen from the thread on a phone, the queued read as running (#1097); the
+  stream sends it when the chat directory wakes it, or at the hub's idle bump (`IDLE_BUMP_S`, 60 s), not on a
+  task's own status write), now}`. `build`
   (`chat.build`, a crc32 of the page files' names, mtimes, sizes) makes a stale page reload.
 - `GET /api/ask/<id>` (`chat.find_ask`): the whole ask, else 404 "no such prompt".
 - `GET /api/shot?task=&n=&side=base|candidate`: a PNG, only for a task passing `store.NAME_RE`, an
@@ -6053,7 +6058,8 @@ and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7:
 outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, install over https, `/api/seen` and
 `/api/active` only while in use, notices, shot pairs, listen's shortlist, the keyboard, uploads, an agent's message
 shown with its name and its reply through `/api/wait`, its state without the user's, a dialog for it saying so on the
-card and in the push (#1042); and `sw.js` in a node `vm` (`swSays`) for a push's text.
+card and in the push (#1042), a 25-task backlog's strip at most three lines on a phone, the queued counted apart
+(#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text.
 `WebChat` runs the agents' client, `skill/agents/claude-workbench/scripts/ask_claude.py`, against its server with a
 listener played in the test (#1042).
 

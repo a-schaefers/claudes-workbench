@@ -830,11 +830,13 @@ def snapshot() -> dict:
 def open_tasks() -> list[dict]:
     """The open tasks for the page's strip over the thread (#1016): while away, the chat is all
     the user sees, and it named no model (robustness minor 8). From task.json and status.json:
-    `{name, phase, model, via, provider_name}`; a bench replay is no one's task."""
+    `{name, phase, model, via, provider_name}`; a bench replay is no one's task, and a parked one
+    (`wb stop --all`) is left out as `wb status` leaves it: the quit's tasks filled the strip for
+    good (#1097, 2026-11-23)."""
     out = []
     for t in store.all_tasks():
         sp, phase = t.spec, t.status.get("phase")
-        if not sp.get("name") or sp.get("bench") or phase in store.CLOSED:
+        if not sp.get("name") or sp.get("bench") or phase in store.CLOSED or store.parked(t.status):
             continue
         out.append({"name": t.name, "phase": phase or "queued", "model": sp.get("model") or "",
                     "via": sp.get("via") or "gpu", "provider_name": sp.get("provider_name") or ""})

@@ -487,6 +487,34 @@ async function run(engine, device) {
     wb('chat', 'reply', '--text', 'Done with fix-auth.')
     await until(async () => await page.locator('#tasks').isHidden())
   })
+  await check('a backlog on the strip names three, counts the queued apart and leaves the thread the screen (#1097)', async () => {
+    // 25 open tasks were 22 lines of "Running: …" on an iPhone, the queued read as running, and
+    // the thread a 36 px sliver; a task wb stop --all parked stays off it (chat.open_tasks)
+    const made = []
+    const task = (name, phase, i, status = {}) => {
+      const t = join(home, 'state/tasks', name)
+      mkdirSync(t, { recursive: true }); made.push(t)
+      writeFileSync(join(t, 'task.json'), JSON.stringify({ name, created_at: Date.now() / 1000 + i,
+        ...(i % 2 ? { model: 'deepinfra/deepseek-ai/DeepSeek-V4.1-Flash', via: 'api', provider_name: 'DeepInfra' }
+          : { model: 'qwen3-coder-30b' }) }))
+      writeFileSync(join(t, 'status.json'), JSON.stringify({ phase, round: 1, updated_at: Date.now() / 1000, ...status }))
+    }
+    for (let i = 0; i < 25; i++) task(`backlog-step-${String(i).padStart(2, '0')}`, i < 3 ? 'queued' : i < 5 ? 'running' : 'queued', i)
+    task('old-parked', 'review', -1, { parked: Date.now() / 1000 })
+    try {
+      wb('chat', 'reply', '--text', 'Started the backlog.')
+      await until(async () => (await page.textContent('#tasks')).startsWith('2 running, 23 queued: backlog-step-03 · '))
+      const text = await page.textContent('#tasks')
+      if (!text.endsWith('; +22 more') || text.includes('old-parked') || !text.includes('backlog-step-00 (queued)'))
+        throw new Error('the strip says: ' + text)
+      const got = await page.evaluate(() => ({ strip: document.getElementById('tasks').getBoundingClientRect().height,
+        thread: document.getElementById('scroll').getBoundingClientRect().height, height: innerHeight, line: parseFloat(getComputedStyle(document.getElementById('tasks')).lineHeight) || 18 }))
+      if (got.strip > got.line * 3 + 16) throw new Error(`the strip is ${got.strip} px tall`)
+      if (got.thread < got.height * 0.4) throw new Error(`the thread has ${got.thread} of ${got.height} px`)
+    } finally { for (const t of made) rmSync(t, { recursive: true, force: true }) }
+    wb('chat', 'reply', '--text', 'Backlog done.')
+    await until(async () => await page.locator('#tasks').isHidden())
+  })
   await check("wb shot's pair: both images labelled, one above the other on a phone, a reply tied to their step", async () => {
     const d = join(home, 'state/tasks/fix-nav/shots/1')
     mkdirSync(d, { recursive: true })

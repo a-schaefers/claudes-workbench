@@ -289,15 +289,26 @@
   }
 
   // The open tasks in one line over the thread (chat.open_tasks, #1016): which model each runs on,
-  // GPU or API and whose, as the pane's row says it. A server without `tasks` (an older wb): none
-  const ACTIVE = ['queued', 'running', 'testing', 'asking']
+  // GPU or API and whose, as the pane's row says it. A server without `tasks` (an older wb): none.
+  // At most TASKS_SHOWN named, the running first, then those waiting on Claude, then the queued,
+  // with the counts said apart: a 25-task backlog was 22 lines of "Running: …", the queued read
+  // as running, and the thread a sliver on a phone (#1097, 2026-11-23)
+  const RUNNING = ['running', 'testing', 'asking'], TASKS_SHOWN = 3
   function tasksLine(tasks) {
     if (!Array.isArray(tasks) || !tasks.length) return ''
-    return 'Running: ' + tasks.map(t => {
+    const rank = t => RUNNING.includes(t.phase) ? 0 : t.phase === 'queued' ? 2 : 1
+    const all = [...tasks].sort((a, b) => rank(a) - rank(b))
+    const named = all.slice(0, TASKS_SHOWN).map(t => {
       const short = String(t.model || '').split('/').pop()
       const on = t.via === 'api' ? `API ${short}${t.provider_name ? ` (${t.provider_name})` : ''}` : `GPU ${short}`
-      return `${t.name}${ACTIVE.includes(t.phase) ? '' : ` (${t.phase})`} · ${on}`
-    }).join('; ')
+      return `${t.name}${RUNNING.includes(t.phase) && t.phase !== 'asking' ? '' : ` (${t.phase})`} · ${on}`
+    })
+    if (all.length > TASKS_SHOWN) named.push(`+${all.length - TASKS_SHOWN} more`)
+    const n = r => all.filter(t => rank(t) === r).length
+    const counts = [[n(0), 'running'], [n(1), 'waiting on Claude'], [n(2), 'queued']].filter(([c]) => c)
+    const head = counts.length === 1 && n(0) && all.length <= TASKS_SHOWN ? 'Running'
+      : counts.map(([c, what]) => `${c} ${what}`).join(', ')
+    return head + ': ' + named.join('; ')
   }
   function drawTasks() {
     const el = $('tasks'), text = tasksLine(state.tasks)

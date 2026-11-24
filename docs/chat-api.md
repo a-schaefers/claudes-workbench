@@ -152,7 +152,7 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
 - `uploads`: `{file, message, files}`: bytes per file, bytes per message, files per message.
 - `build`: the page files' stamp (a page whose stamp differs reloads).
 - `tasks`: the open tasks, for the strip over the thread: `[{name, phase, model, via: "gpu"|"api",
-  provider_name}]` (none accepted or discarded).
+  provider_name}]` (none accepted, discarded or parked by `wb stop --all`).
 - `expire`: seconds a message waits before it is never passed on (21600).
 - `now`: the server's time (seconds).
 
