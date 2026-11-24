@@ -4200,8 +4200,10 @@ def add_server_provider(pid: str, base: str) -> bool:
     """Give OpenCode a provider ``pid`` for the OpenAI-compatible server at ``base`` (its
     baseURL, usually ending in /v1), whatever runs it: llama.cpp, LM Studio, vLLM, Ollama. Only
     Ollama had a command for it, so every other server meant editing opencode.json by hand. False
-    when the config already has ``pid`` for that same endpoint (a provider the user wrote is never
-    touched); RuntimeError when it has ``pid`` for another one."""
+    when the config already has ``pid`` for that same endpoint, left as it is except that one at
+    WSL2's Windows host gets the `wsl_url` mark (#1167); False too when ``pid`` is marked
+    `wsl_url` at Windows' old address and ``base`` is the same server at its new one, which moves
+    the provider there; RuntimeError when it has ``pid`` for another endpoint."""
     u = urlparse(base)
     if u.scheme not in ("http", "https") or not u.hostname:
         raise RuntimeError(f"--url {base}: give the server's baseURL, e.g. http://127.0.0.1:8080/v1")

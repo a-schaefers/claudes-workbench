@@ -2651,6 +2651,31 @@ class Remote(unittest.TestCase):
             self.assertEqual(code, 0, out)                                # the same provider
             self.assertEqual(list(json.loads(cfg_path.read_text())["provider"]), ["lmstudio"])
 
+    def test_wb_model_add_at_windows_new_address_before_any_discovery_moves_the_provider_there(self):
+        # #1167 (2026-11-24): wb model add runs add_server_provider before discovery, so after a
+        # reboot `wb model add <p>/<m> --url <Windows' new address>` met the provider still at the
+        # old one and refused, "change lmstudio's baseURL ... by hand"; marked `wsl_url`, it moves
+        before = self.lmstudio_at("127.0.0.2")
+        port = before.server_address[1]
+        self.config({}, {"lmstudio": {"local": True}})
+        cfg_path, models_path = Path(os.environ["WB_OPENCODE_CONFIG"]), Path(os.environ["WB_MODELS"])
+        old, new = f"http://127.0.0.2:{port}/v1", f"http://127.0.0.3:{port}/v1"
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", old, "--context", "32768")
+        self.assertEqual(code, 0, out)
+        before.shutdown()
+        before.server_close()
+        self.servers.remove(before)
+        self.lmstudio_at("127.0.0.3", port)
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.3"), \
+                redirect_stderr(io.StringIO()):
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", new, "--context", "32768")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("by hand", out)
+        self.assertEqual(json.loads(cfg_path.read_text())["provider"]["lmstudio"]["options"]["baseURL"], new)
+        self.assertEqual(json.loads(models_path.read_text())["lmstudio"]["wsl_url"], new)
+        self.assertEqual(list(json.loads(cfg_path.read_text())["provider"]), ["lmstudio"])
+
     def test_a_runner_waiting_on_a_server_after_a_reboot_leases_and_loads_it_at_windows_new_address(self):
         # #1167 (2026-11-24): _drive dropped what _wait_up returned, so lease_for and _load kept
         # the old Model, the server read down at Windows' old address, and _load waited DOWN_WAIT:
