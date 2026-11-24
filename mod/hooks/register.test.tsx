@@ -5595,6 +5595,38 @@ test('#1014: the mod\'s summary of the roles reads as routes.summary does', () =
       'API kept: anthropic/claude-haiku-5-5, thinking on')
 })
 
+test('#1126: an OpenRouter role\'s backends are in the roles\' summary, so a change of them alone reaches the conversation', async ($, on) => {
+  // the audit of 2.0 (2026-11-23): `wb route significant --order …` from a terminal changed where
+  // the code goes with no row; tests.test_workbench.Routes checks routes.summary on the same fixture
+  const role = (order?: string[]) => ({ significant: { via: 'api', api: 'openrouter/x/y', thinking: 'off', ...(order ? { order } : {}) },
+    trivial: { via: 'gpu', api: 'openrouter/x/z', order: ['together'] } })
+  expect(routesSummary({ roles: role(['deepinfra', 'together']) })).toBe('significant API openrouter/x/y, backends deepinfra, together, ' +
+    'thinking off; trivial GPU (the router picks), API kept: openrouter/x/z, backends together; writing GPU (the router picks)')
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const at = '/home/u/.config/workbench/routes.json'
+  const files: Record<string, string> = { [at]: JSON.stringify({ v: 1, day_usd: 5, roles: role(['deepinfra']) }) }
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(31_000)
+  const before = rows.filter(r => r.includes('The roles changed')).length
+  files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: role(['together']) })          // the order alone
+  await clock.advance(31_000)
+  const changed = rows.filter(r => r.includes('The roles changed'))
+  expect(changed).toHaveLength(before + 1)
+  expect(changed.at(-1)).toContain('significant API openrouter/x/y, backends together, thinking off')
+  files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: { significant: { via: 'api', api: 'openrouter/x/y', order: 'together' } } })
+  await clock.advance(31_000)
+  expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')  // as wb refuses it
+})
+
 test('an API task\'s dollars sit beside the saving, never in it, and an API-only week says there was no GPU task (#1022)', () => {
   const api = { tasks: 6, cost: 1.27, unknown: 0, plan: 0, by_provider: { deepseek: { tasks: 4, cost: 0.84, unknown: 0 }, anthropic: { tasks: 2, cost: 0.43, unknown: 0 } } }
   const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })

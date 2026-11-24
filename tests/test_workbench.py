@@ -28638,6 +28638,18 @@ class Routes(Base):
                          "deepseek/deepseek-flash, thinking off; writing GPU (the router picks)")
         self.assertEqual(json.loads(self.route("--json")[1])["roles"]["trivial"]["api_status"]["why"], "API (DeepSeek)")
 
+    def test_an_openrouter_roles_backends_are_in_the_summary_so_a_change_of_them_alone_is_said(self):
+        # #1126 (2026-11-23): routes.summary left `order` out, so a terminal's `wb route <role>
+        # --order …` changed where the code goes and the mod's echo said nothing; the mod's
+        # routesSummary is checked on the same fixture (register.test.tsx, #1126)
+        doc = lambda order: routes.normalize({"v": 1, "day_usd": 5, "roles": {
+            "significant": {"via": "api", "api": "openrouter/x/y", "thinking": "off", "order": order},
+            "trivial": {"via": "gpu", "api": "openrouter/x/z", "order": ["together"]}}})
+        self.assertEqual(routes.summary(doc(["deepinfra", "together"])),
+                         "significant API openrouter/x/y, backends deepinfra, together, thinking off; trivial GPU "
+                         "(the router picks), API kept: openrouter/x/z, backends together; writing GPU (the router picks)")
+        self.assertNotEqual(routes.summary(doc(["deepinfra"])), routes.summary(doc(["together"])))
+
     def test_under_claude_code_a_role_changes_only_on_the_dialogs_approval_used_once(self):
         os.environ["CLAUDECODE"] = "1"
         asked = self.dry("trivial", "deepseek/deepseek-flash", "--day-usd=5")

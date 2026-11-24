@@ -480,12 +480,15 @@ def summary(doc: dict) -> str:
     out = []
     for r in ROLES:
         row = doc["roles"][r]
+        # an OpenRouter role's backends (`order`, #1021) are where its code goes: left out, a
+        # change of them alone reached the conversation as nothing (#1126, 2026-11-23)
+        backends = f", backends {', '.join(row['order'])}" if row.get("api") and row.get("order") else ""
         if row["via"] == "api":
-            out.append(f"{r} API {row['api']}, thinking {row['thinking']}")
+            out.append(f"{r} API {row['api']}{backends}, thinking {row['thinking']}")
             continue
         text = f"{r} GPU " + ("(the router picks)" if row["gpu"] == AUTO else row["gpu"])
         if row.get("api"):
-            text += f", API kept: {row['api']}"
+            text += f", API kept: {row['api']}{backends}"
         if row["thinking"] == "on":
             text += ", thinking on"
         out.append(text)

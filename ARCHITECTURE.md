@@ -5211,7 +5211,8 @@ the name in the code passes. A speed bump, not a wall: a command that builds the
 
 **The roles in the conversation.** `WbSaid.routes` (the `said-3` atom) is the roles' summary as the mod reads
 routes.json (`readRoutes`, `routesSummary`, which says what `routes.summary` says: Couplings) and the cap (`. Day cap
-$N`: in what is compared, so a cap changed alone is a row too; it once wasn't, 2026-11-23), '' while every role is
+$N`: in what is compared, so a cap changed alone is a row too; it once wasn't, 2026-11-23; an OpenRouter role's
+`order` as `, backends a, b` after its API model, for the same reason, #1126), '' while every role is
 the default and no cap is set (nothing to tell), `routes.json can't be read (wb route says why)` for a file wb wouldn't read
 (`routesValid`); read in `wanted` while delegating or with a task open. `unsaid` pushes `[workbench] The roles changed:
 <summary>. <ROUTES_RULE>` whenever it differs from what was said (the first time `ROUTES_NOTE`), so any change, the
@@ -6329,7 +6330,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **task.json's routing keys** (`via`, `role`, `provider`, `provider_name`, #1016) → the mod's row builder (`scan`,
   tasks.ts's `placeOf`) and `chat.open_tasks` with `chat_static/app.js`'s strip; **the `routed` watch kind** → the mod's
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
-  and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`.
+  and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`; a role's **`order`**
+  (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126).
 - **A `$.state` atom's type** → its tag (`tasks-10`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`,
   `stats-1`, `top-1`, `said-3`, `splash-1`).
 - **The Tasks page's layout** → `pageParts`, `pageShape` (#963);
