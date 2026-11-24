@@ -6469,7 +6469,10 @@ keyhole (the 400, not retried). The room's stop under the cap is driven whole to
 through the keyhole, refused for its input alone (a model with no output price, `request_floor(m, 0)` 0), and the notice's
 lead says too near with the room's `worst` (#1150's review). The cap a near-cap refusal names lets the round's first
 request through, the room's own check, for wb next on a session carrying 120K tokens, `_go_on` on one carrying
-80K, and wb start's round 1 (#1173).
+80K, wb start's round 1, and, past what `meter.FIRST_TOKENS` alone covers, `wb start` and its dialog's dry run
+(`_route_start`) with an 80 KB spec, `wb feedback` with 80 KB of text and `wb resume`'s handoff with 50 KB of
+uncommitted work: each exits 3, and at the cap its refusal names the room lets that request through (#1173
+and its review).
 
 **The Tasks view's data** (#1048): status `round_for` for each kind of round (`start` and `feedback` in
 `Lifecycle`, `fix` in `AutoFix`, `steer` in `Steering`, `fresh` in `Context`, `self_review`, `next` and `resume`, both its paths, in `Lifecycle`); `typical`

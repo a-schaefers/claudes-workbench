@@ -32700,6 +32700,94 @@ class ApiSpend(Base):
         self.assertGreaterEqual(self.meter.for_task(fresh, m).room({"max_tokens": 32768}, 65_000), 0)
         self.assertIsNone(fresh.status.get("api_stop"))
 
+    def test_a_large_spec_counts_in_wb_starts_look_ahead_so_the_cap_it_names_lets_round_1_through(self):
+        # #1173's review (2026-11-24): a fresh session's least (FIRST_TOKENS, 65,536 bytes) covers a
+        # small spec, so only a large one tells whether wb start, and the dialog's dry run before
+        # it, count round 1's prompt: left out, the cap they named was short of what the room asks
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        big = Path(self.tmp.name) / "big-spec.md"
+        big.write_text("Make the parser take every case below.\n" + "- a case of the parser's, one line\n" * 2300)
+        size = len(big.read_bytes())
+        self.assertGreater(size, 78_000)
+        m = runner.models.lookup(SPEND_TIER)
+        self.cap(5)
+        self.spent(4.8)
+        start = ("start", "t-big", "--spec", str(big), "--repo", str(self.repo), "--model", SPEND_TIER,
+                 "--no-base-check")
+        # the dialog's dry run (_route_start) first, then wb start itself
+        for args in (("route", "--dry-run", "--json", "--start", *start[1:]), start):
+            self.cap(5)
+            err = io.StringIO()
+            with (self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True),
+                  mock.patch.object(cli, "spawn_runner") as spawned):
+                run_wb(*args)
+            self.assertEqual(e.exception.code, 3, args[0])
+            self.assertIn("a cap of at least", err.getvalue())
+            spawned.assert_not_called()
+            self.assertFalse(store.Task("t-big").dir.exists())
+            self.cap(need(err.getvalue()))
+            room = self.meter.for_task(self.api_task(f"t-big-{args[0]}", SPEND_TIER), m)
+            self.assertGreaterEqual(room.room({"max_tokens": 32768}, 65_000 + size), 0, args[0])
+        with mock.patch.object(cli, "API_RUNS", True), mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb(*start)                                    # the cap it named: it starts
+        spawned.assert_called_once()
+
+    def test_feedbacks_text_and_a_resumes_handoff_count_in_the_look_ahead(self):
+        # #1173's review (2026-11-24): feedback's first request carries its text on the session's
+        # context, a resume's (a fresh session) the handoff with the work so far; either left out,
+        # the cap the refusal named was short of what the room asks of that request
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        m = runner.models.lookup(SPEND_TIER)
+        task = self.api_task("t-cap-fb", SPEND_TIER, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        task.set_status(live_used={"session": task.status["session"], "used": 20_000})
+        text = "1. take each of these cases too:\n" + "- a case of the parser's, one line\n" * 2300
+        self.cap(5)
+        self.spent(4.6)
+        rnd = task.status["round"]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("feedback", "t-cap-fb", "--text", text)
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("feedback", "t-cap-fb", "--text", text)
+        spawned.assert_called_once()
+        prompt = len(task.round_dir(rnd + 1).joinpath("prompt.md").read_bytes())
+        self.assertGreater(prompt, 78_000)
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 20_000 * 4 + prompt), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+        # wb resume: a fresh session's handoff, the uncommitted work so far in it
+        task = self.api_task("t-cap-resume", SPEND_TIER, "ok")
+        runner.drive(task)
+        task.set_status(phase="stuck", window=1_000_000)
+        (task.worktree / "cases.txt").write_text("a case of the parser's, one line\n" * 1600)
+        self.assertGreater(len(runner.handoff_prompt(task, "", runner.RESUME)), 50_000)  # the diff is in it
+        rnd = task.status["round"]
+        self.cap(5)
+        self.spent(0.2)                                          # today $4.80
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("resume", "t-cap-resume")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("resume", "t-cap-resume")
+        spawned.assert_called_once()
+        sent = runner.handoff_prompt(task, "resumed by the reviewer",
+                                     task.round_dir(rnd + 1).joinpath("prompt.md").read_text())
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 65_000 + len(sent.encode())), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+
     def test_a_round_the_room_stopped_under_the_cap_says_too_near_with_the_rooms_worst(self):
         # #1150's review (2026-11-24): the round's stop (_ProviderWait.stop) consumed `api_stop` at
         # its tick, before stop_text wrote the notice, so the room's `worst` was never read: with
