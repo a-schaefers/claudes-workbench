@@ -3288,8 +3288,10 @@ engine with no `notes` says "licence: not noted"; `audio.coverage`, #398), and i
 (`cli._role_where`: `GPU (router)`, `GPU <id> (pinned)`, `API <id>, set by you MM-DD, thinking off`),
 each role's API model's record over `SCOUT_API_DAYS` 30 (`cli._api_record`: tasks, accepted share,
 `~$/task` from `results.task_cost`, #1022's `row_cost` less the nothing-sent rows (#1106), rate-limited rounds from the tasks' `rate_limited` events),
-the spend over `SCOUT_SPEND_DAYS` 7 beside the day cap (#1022's `savings.api_totals`, trials
-included, per provider, then `; task(s) N with no price, M with no figure recorded`, `unknown_parts`, #1106; its dollars and `~$/task` by `savings.usd`, as `wb savings --api` and the pane say them), and one line per connected provider counting its models with tool calls
+the spend over `SCOUT_SPEND_DAYS` 7 beside the day cap (the day ledger's, `savings.spent`, as
+`wb savings --api`'s `spent:`, open tasks and bench replays in, per provider: the closed tasks'
+said $3.00 for a week the ledger said $5.00, #1094; then the closed rows' `; task(s) N with no
+price, M with no figure recorded`, `savings.api_totals`, trials included, `unknown_parts`, #1106; its dollars and `~$/task` by `savings.usd`, as `wb savings --api` and the pane say them), and one line per connected provider counting its models with tool calls
 (free ones, those the catalog doesn't say, a key wb can't hold): never each id, as a provider may list
 hundreds. Only hosted.json's catalog: no network beyond it. Claude researches primary
 sources, recommends keep / add / retire and changes nothing without the user's yes; `wb scout --done
@@ -6134,7 +6136,7 @@ providers and none; the GPU lines optional only with a stored key and no local m
 one `wb route` (one line, one approval, all or nothing, the refusal naming the pair, OpenRouter set
 alone, `--order` refused beside pairs, a kept OpenRouter model with no backends refused); the router's `no GPU …` refusal with the API choice only for a stored key (never while Agents is GPU), and `wb start`'s
 exit 3 with it; `wb scout`'s API section (one line per provider at 300 models, a task's mean cost by
-`results.task_cost`, the spend line by `savings.api_totals`) and none with no provider and no API role.
+`results.task_cost`, the spend line by `savings.spent`) and none with no provider and no API role.
 
 **The busy-GPU opt-in** (`BusyGpu`, #1023): with `busy` api a start the GPU would make wait runs on the
 role's API model (task.json `busy`, the start line with today's spend, the role's thinking, API's

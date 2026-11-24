@@ -4711,12 +4711,16 @@ def scout_api_lines() -> list[str]:
         out.append(f"api models in roles (the last {SCOUT_API_DAYS} days)")
         out += [f"  {mid}  {_api_record(mid, now - SCOUT_API_DAYS * 86400)}" for mid in mids]
     cap = f"{routes.money(doc['day_usd'])}/day at most" if doc["day_usd"] is not None else "no day cap"
-    t = savings.api_totals(store.results(trials=True), now - SCOUT_SPEND_DAYS * 86400)  # #1022
+    # the day ledger's dollars, as wb savings --api's `spent` and the cap beside them count them:
+    # the closed tasks' said $3.00 for a week the ledger said $5.00 (#1094, 2026-11-23); the
+    # tasks with no known cost are the closed rows' (#1022)
+    since = now - SCOUT_SPEND_DAYS * 86400
+    paid, t = savings.spent(since), savings.api_totals(store.results(trials=True), since)
     # savings.usd, as wb savings --api and the pane say the same dollars: :.2f said $0.00 for a
     # task paid a fraction of a cent (wave 2's merge)
-    by = ", ".join(f"{p} {savings.usd(v['cost'])}" for p, v in sorted(t["by_provider"].items(), key=lambda x: -x[1]["cost"])
-                   if v["cost"])
-    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {savings.usd(t['cost'])} of {cap}"
+    by = ", ".join(f"{p} {savings.usd(v)}" for p, v in sorted(paid["by_provider"].items(), key=lambda x: -x[1])
+                   if v)
+    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {savings.usd(paid['usd'])} of {cap}"
                + (f" ({by})" if by else "")
                + (f"; task(s) {', '.join(u)}" if (u := savings.unknown_parts(t)) else ""))  # #1106
     by_prov: dict[str, list] = {}

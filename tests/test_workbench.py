@@ -32461,6 +32461,14 @@ class RoleResolution(Base):
             self.assertFalse(task.round_dir(2).exists())
 
 
+def _ledger_step(usd_: float, ts: float, task: str, provider: str = "deepseek") -> None:
+    """A step row in the day ledger (meter.py's spend-api.jsonl), on ``ts``'s local day."""
+    from workbench import meter
+    store.append_jsonl(meter.ledger_path(), {
+        "ts": ts, "day": meter.day(ts), "kind": "step", "task": task, "round": 1, "provider": provider,
+        "model": f"{provider}/deepseek-flash", "usd": usd_, "source": "opencode"})
+
+
 class FirstRunApi(Base):
     """First run and the skill for API roles (#1024): wb setup sees the keys OpenCode holds, a
     stored key makes the GPU optional, one wb route sets several roles under one yes, the
@@ -32699,6 +32707,7 @@ class FirstRunApi(Base):
             store.append_jsonl(store.home() / "results.jsonl", {
                 "ts": now - 3600, "task": f"t-{i}", "outcome": outcome, "model": "deepseek/deepseek-flash",
                 "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 0.1, "source": "opencode"}})
+            _ledger_step(0.1, now - 3600, f"t-{i}")
         (store.home() / "tasks" / "t-0").mkdir(parents=True)
         store.append_jsonl(store.home() / "tasks" / "t-0" / "events.jsonl",
                            {"ts": now, "round": 1, "kind": "rate_limited", "text": "x"})
@@ -32710,7 +32719,7 @@ class FirstRunApi(Base):
         self.assertEqual(lines[5:7], ["api models in roles (the last 30 days)",
                                       "  deepseek/deepseek-flash  3 task(s) · 66% accepted"
                                       + " · ~$0.10/task · 1 rate-limited round(s)"])
-        # the money over 7 days, beside the cap (savings.api_totals, #1022)
+        # the money over 7 days, beside the cap (the day ledger's, savings.spent, #1094)
         self.assertIn("api spend, the last 7 days: $0.30 of $5/day at most (deepseek $0.30)", lines)
         at = lines.index("connected providers (models with tool calls)")
         self.assertEqual(lines[at + 1:], ["  anthropic: 1 (can't run: anthropic is signed in with OAuth)",
@@ -32731,10 +32740,27 @@ class FirstRunApi(Base):
         store.append_jsonl(store.home() / "results.jsonl", {
             "ts": store.now() - 3600, "task": "t-0", "outcome": "accepted", "model": "deepseek/deepseek-flash",
             "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 0.004, "source": "opencode"}})
+        _ledger_step(0.004, store.now() - 3600, "t-0")
         lines = cli.scout_api_lines()
         self.assertIn("  deepseek/deepseek-flash  1 task(s) · 100% accepted · ~$0.004/task", lines)
         self.assertIn("api spend, the last 7 days: $0.004 of $5/day at most (deepseek $0.004)", lines)
         self.assertIn("$0.004", run_wb("savings", "--api"))
+
+    def test_scouts_api_spend_is_the_day_ledgers_as_wb_savings_api_says_it(self):
+        # #1094, the review (2026-11-23): wb savings --api took the ledger's figure ($5.00: an open
+        # task's $2 in) while scout's line beside the day cap still summed the closed tasks' $3.00
+        self.catalog(ROUTES_CATALOG[-3:], [key_row("deepseek", "DeepSeek", STORED)])
+        runner.models.hosted(fresh=True)
+        self.assertEqual(self.wb("route", "trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        now = store.now()
+        store.append_jsonl(store.home() / "results.jsonl", {
+            "ts": now - 3600, "task": "closed", "outcome": "accepted", "model": "deepseek/deepseek-flash",
+            "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 3.0, "source": "opencode"}})
+        _ledger_step(3.0, now - 7200, "closed")
+        _ledger_step(2.0, now - 60, "open-one")
+        self.assertIn("api spend, the last 7 days: $5.00 of $5/day at most (deepseek $5.00)",
+                      cli.scout_api_lines())
+        self.assertIn("  spent: $5.00,", run_wb("savings", "--api"))
 
     def test_scout_has_no_api_section_with_no_provider_and_no_api_role(self):
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
