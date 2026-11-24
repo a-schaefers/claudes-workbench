@@ -419,6 +419,54 @@ class Lifecycle(Base):
                 self.assertEqual(task.status["round"], 2)
                 self.assertEqual([x["text"] for x in lessons.gather(task) if x["kind"] == "feedback"], want)
 
+    def test_feedback_on_a_feedback_round_never_sent_keeps_it_a_review_so_a_handover_carries_no_older_feedback(self):
+        # the merge of #1180 and #1169 (2026-11-24): a round run again keeps its own `resumed`
+        # mark; marked for the stop's `infra`, round_asks walked past its feedback, and a later
+        # handover carried the round before's, reviewed and done
+        name = "t-rmark"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", name, "--text", "1. Round two's change.")
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status["round"]), ("review", 2))
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", name, "--text", "1. Round three's change.")
+        with mock.patch.object(runner, "_down", return_value=True), \
+                mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+            runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status["infra"], task.status["round"]), ("failed", "model", 3))
+        self.assertFalse(runner.reached(task, 3))
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", name, "--text", "carry on")
+        self.assertEqual(task.status["round"], 3)
+        self.assertFalse((task.round_dir(3) / runner.RESUMED).exists())
+        asks = "\n".join(runner.round_asks(task, 3))
+        self.assertIn("Round three's change.", asks)
+        self.assertIn("carry on", asks)
+        self.assertNotIn("Round two's change.", asks)
+
+    def test_feedback_on_a_round_stopped_before_it_began_with_no_infra_counts_no_review(self):
+        # the merge of #1180 and #1153 (2026-11-24): a round can stop before it starts with
+        # `infra` unset (a signal while queued for the GPU, a failed checkout, the repo gone),
+        # and its "carry on" must count no review the agent never had
+        name = "t-rsig"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", name, "--text", "1. Rename x to answer.")
+        task.set_status(phase="stuck", last=runner.SIGNAL_STOP)  # stopped while queued
+        self.assertIsNone(task.status.get("infra"))
+        self.assertFalse(runner.reached(task, 2))
+        reviews = task.status["reviews"]
+        with mock.patch.object(cli, "spawn_runner"):
+            out = run_wb("feedback", name, "--text", "carry on")
+        self.assertIn("feedback sent to t-rsig (round 2): after round 2's own prompt, which never "
+                      "reached the agent, so no review round is counted", out)
+        self.assertEqual((task.status["round"], task.status["reviews"]), (2, reviews))
+
     def test_feedback_is_gathered_once_unchanged_after_a_handover_or_a_resume_that_carries_it(self):
         # #1180's review (2026-11-24): lessons.feedback read any FEEDBACK_HEAD paragraph, and a
         # handover's carry-on or a resume copies the earlier feedback whole into "What you were
