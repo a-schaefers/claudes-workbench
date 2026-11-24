@@ -771,6 +771,13 @@ def _cloud_name(name: str) -> bool:
     return name.endswith((":cloud", "-cloud"))
 
 
+def _ollama_ish(pid: str, url: str, engine: str) -> bool:
+    """A provider on this machine that is Ollama, or may be: probed as Ollama, on Ollama's port, or
+    named for it. A proxy that hides /api/version, or models.json `engine: server`, makes Ollama
+    probe as a server, and its cloud models then fell out of hosted() (#1074, 2026-11-23)."""
+    return engine == "ollama" or urlparse(url).port == OLLAMA_PORT or "ollama" in pid.lower()
+
+
 def _cloud_row(row: dict) -> bool:
     """An /api/tags row Ollama forwards to its cloud: a stub of a few hundred bytes."""
     return bool(row.get("remote_host") or row.get("remote_model")) or _cloud_name(row.get("name") or "")
@@ -787,8 +794,8 @@ def ollama_cloud_ids() -> list[str]:
     this machine: API models now, left out of discover() (#1013). From the config alone: no
     catalog read."""
     extra, dirs = _overrides(), _provider_dirs()
-    return [f"{pid}/{name}" for pid, prov, _, engine, _ in _local_providers(read_config(), extra, dirs)
-            if engine == "ollama" for name in prov.get("models") or {}
+    return [f"{pid}/{name}" for pid, prov, url, engine, _ in _local_providers(read_config(), extra, dirs)
+            if _ollama_ish(pid, url, engine) for name in prov.get("models") or {}
             if _cloud_name(name) and not (extra.get(f"{pid}/{name}") or {}).get("skip")]
 
 
@@ -899,8 +906,10 @@ def discover() -> dict[str, Model]:
             over = {**extra.get(pid, {}), **extra.get(mid, {})}
             # an Ollama cloud model was routed trivial work as "the smallest" (the 2026-11-16
             # audit); opted in with "local": true it was a remote GPU candidate the router could
-            # explore to, sending a task's code to ollama.com unchosen. An API model now (#1013)
-            if over.get("skip") or (engine == "ollama" and _cloud_name(name)):
+            # explore to, sending a task's code to ollama.com unchosen. An API model now (#1013).
+            # By name whatever the engine: an Ollama probed as a server (a proxy hiding /api, or
+            # `engine: server`) made one the largest GPU candidate, picked unchosen (#1074)
+            if over.get("skip") or _cloud_name(name):
                 continue
             found[mid] = Model(id=mid, provider=pid, name=str(spec.get("id") or name),
                                base_url=url, engine=engine,
@@ -1235,7 +1244,7 @@ def _build_hosted() -> dict:
                 continue
             found[mid] = {**spec, "name": str(spec.get("id") or name), "free": False}
     for pid, prov, url, engine, _ in _local_providers(cfg, extra, dirs):
-        if engine != "ollama":
+        if not _ollama_ish(pid, url, engine):  # #1074: not the probe alone
             continue
         for name, spec in (prov.get("models") or {}).items():
             mid = f"{pid}/{name}"

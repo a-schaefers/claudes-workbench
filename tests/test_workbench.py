@@ -28320,6 +28320,30 @@ class ApiDiscovery(Base):
         self.assertIn("--  ollama/gpt-oss:120b-cloud is an Ollama cloud model, an API model now: set a "
                       "role to use it", buf.getvalue())
 
+    def test_an_ollama_cloud_model_is_never_a_gpu_candidate_when_ollama_probes_as_a_server(self):
+        # #1074: every cloud exclusion was gated on the probed engine, so an Ollama behind a proxy
+        # hiding /api/version, or models.json `engine: server`, made gpt-oss:120b-cloud the
+        # largest GPU model, and significant work went to ollama.com unchosen
+        from workbench import router
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"] = {
+            "ollama": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
+                       "models": {"qwen3:8b": {"limit": {"context": 32768}},
+                                  "gpt-oss:120b-cloud": {"limit": {"context": 131072}}}},
+            "front": {"options": {"baseURL": "http://127.0.0.1:59999/v1"},  # no Ollama by port or name
+                      "models": {"big-cloud": {"limit": {"context": 131072}}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"ollama": {"engine": "server"},
+                                                             "front": {"engine": "server"}}))
+        self.assertEqual(sorted(self.models.discover()), ["ollama/qwen3:8b"])
+        self.assertEqual(self.models.ollama_cloud_ids(), ["ollama/gpt-oss:120b-cloud"])
+        found = self.models.hosted(fresh=True)
+        self.assertTrue(found["ollama/gpt-oss:120b-cloud"].cloud)  # an API model, on Ollama's port
+        self.assertNotIn("front/big-cloud", found)                  # neither side's: never run
+        for size in ("significant", "trivial"):
+            top, _ = router.choose(size)
+            self.assertEqual(top.model.id, "ollama/qwen3:8b")
+
     def test_with_api_runs_off_wb_start_refuses_an_api_model_by_model_flag(self):
         # cli.API_RUNS is on since #1016 (wb start --role): the off path, kept
         err = io.StringIO()

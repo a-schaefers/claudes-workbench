@@ -2687,7 +2687,9 @@ read as a wrong id, Claude hunted for the "right" one).
   whose baseURL is off this machine and not `local: true` (`_off_machine`: `_scan` still skips it
   with its `local: true` hint); the Ollama cloud models of an Ollama provider on this machine
   (`:cloud`/`-cloud` by name, whatever their `local: true`: key `ollama`, label `Ollama cloud
-  (ollama.com)`, `cloud`). `disabled_providers`/`enabled_providers` and models.json `skip` are
+  (ollama.com)`, `cloud`; Ollama by `_ollama_ish`: probed as Ollama, on its port or named for it,
+  never the probe alone, #1074: one behind a proxy hiding `/api/version`, or `engine: server`, fell
+  out of both lists and was the router's largest GPU model). `disabled_providers`/`enabled_providers` and models.json `skip` are
   followed. A catalog entry whose `settings.baseURL` is this machine (`_this_host` without its DNS
   lookup: a catalog names dozens of hosts) is left out: a server OpenCode found by itself (2.3.2
   lists a running Ollama at 127.0.0.1 with no config) is `wb model add`'s, not an API model told to
@@ -2891,7 +2893,9 @@ the model unavailable ("… add NAME to commands.json env").
 **Ollama cloud models** (`:cloud`, `-cloud`, a tags row with `remote_host`/`remote_model`) run on
 ollama.com, so they are API models (#1013), never GPU candidates, and `local: true` no longer makes
 one a candidate (it was a `remote` one the router could explore to, sending a task's code to
-ollama.com unchosen). By name, `discover()` leaves one out and `hosted()` lists it (`kind` api,
+ollama.com unchosen). By name, `discover()` leaves one out whatever the provider's engine (#1074),
+and `hosted()` lists it when the provider is `_ollama_ish` (a cloud name elsewhere is neither side's,
+as `gpu_side` says) (`kind` api,
 `key` `ollama`, which needs no keyhole); one Ollama forwards under another name is known only by its
 tags row, so `discover()` still lists it and `status` refuses it (`CLOUD_WHY`: never a GPU model, and
 not an API model either, as `hosted()` knows them by name: add it by its cloud name), `weights` 0.
