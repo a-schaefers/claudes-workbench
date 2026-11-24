@@ -3953,10 +3953,10 @@ def ollama_root_here() -> str:
     return f"{u.scheme}://{f'[{host}]' if ':' in host else host}:{u.port or OLLAMA_PORT}"
 
 
-def ollama_answers(root: str) -> bool:
+def ollama_answers(root: str, timeout: float = 1.5) -> bool:
     if _fake():
         return False
-    body = _get(f"{root}/api/version", timeout=1.5)
+    body = _get(f"{root}/api/version", timeout=timeout)
     return isinstance(body, dict) and "version" in body and not emulator(root)
 
 
@@ -4087,11 +4087,21 @@ def _repoint(pid: str, root: str) -> None:
     set_override(pid, "remote", root)
 
 
+def _moved_to(mark: str, root: str) -> bool:
+    """Whether Windows' Ollama left ``mark`` for ``root``: the old root silent, the new answering.
+    Both probed at once, briefly, so a dead provider costs discovery a second, not three."""
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(2) as pool:
+        old, new = pool.map(lambda r: ollama_answers(r, timeout=1), (mark, root))
+    return new and not old
+
+
 def follow_windows_host(extra: dict) -> list[str]:
     """Repoint each provider wb remote made for WSL2's Windows host (models.json `wsl_host`) whose
-    address is no longer windows_host()'s, keeping its port; a line each on stderr, once. Read in
-    discover(), so every command after the reboot finds it there (#1159). One wb can't rewrite
-    (comments, another layer) stays as it is, and remedy() names the new address."""
+    address is no longer windows_host()'s, keeping its port, when Ollama has stopped answering at
+    the old address and answers at the new one; a line each on stderr, once. Read in discover(),
+    so every command after the reboot finds it there (#1159). One wb can't rewrite (comments,
+    another layer) stays as it is, and remedy() names the new address."""
     marked = {pid: e["remote"] for pid, e in extra.items()
               if isinstance(e, dict) and e.get("wsl_host") and isinstance(e.get("remote"), str)}
     if not marked or not (win := windows_host()):
@@ -4103,6 +4113,12 @@ def follow_windows_host(extra: dict) -> list[str]:
             continue
         try:
             root = remote_root(win, was.port or OLLAMA_PORT)
+            # windows_host() is only the default gateway: under networkingMode=mirrored (which
+            # WSL_NAT and the remedy advise) it is the LAN router, and a VPN inside WSL moves it
+            # too. A working provider was rewritten to the router, a false "moved" line said, and
+            # every wb start sent the user to start Ollama there (#1159's review, 2026-11-24)
+            if not _moved_to(mark, root):
+                continue
             _repoint(pid, root)
         except (RuntimeError, OSError, ValueError):
             continue
@@ -4124,8 +4140,17 @@ def windows_moved(m: Model) -> str:
     mirrored = ("networkingMode=mirrored under [wsl2] in %UserProfile%\\.wslconfig keeps 127.0.0.1 "
                 "for good")
     if m.extra.get("wsl_host"):
-        return (f"WSL2's NAT gave Windows a new address, {win}: wb remote {win} points it at "
-                f"Windows' new address, and {mirrored}")
+        port = urlparse(m.root).port or OLLAMA_PORT
+        with contextlib.suppress(RuntimeError):
+            if ollama_answers(remote_root(win, port)):
+                return (f"WSL2's NAT gave Windows a new address, {win}: wb remote {win} points it at "
+                        f"Windows' new address, and {mirrored}")
+        # nothing answers at the default gateway: under mirrored networking (or a VPN) that is
+        # the router, not Windows, and "WSL2's NAT gave Windows a new address" sent the user
+        # there (#1159's review, 2026-11-24)
+        return (f"start Ollama on Windows: it answers neither at {m.root} nor at {win}, WSL2's "
+                f"default gateway; under networkingMode=mirrored Windows' Ollama is on 127.0.0.1 "
+                f"here instead, which wb remote 127.0.0.1 --port {port} adds (its models get new ids)")
     # wb remote <new> doesn't repoint this one: nothing says its address was Windows', so it makes
     # ollama-windows beside it, and saying "points it at" sent the user round again (#1159's
     # review, 2026-11-24)

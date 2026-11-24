@@ -2853,13 +2853,20 @@ unloads it (#750: as its own pool it ran beside WSL's tasks on the one card). NA
 new address when the WSL VM restarts, so `wb remote <Windows' address>` writes provider
 `models.WSL_PID` (`ollama-windows`, models.json `wsl_host: true`), and `discover()` follows it
 (`follow_windows_host`): a provider wb remote made there, still at its `remote` mark, whose host
-isn't `windows_host()` now has its baseURL (port kept) and mark rewritten through `own_config`,
-one `wb: Windows' address moved …` line on stderr; one the user repointed (baseURL off its mark)
-stays theirs (#242). At Windows' address `wb remote` and `--remove` take the provider marked
-`wsl_host` whatever its id (`models._remote_pid_for`), and `wb remote <new>` repoints it if
-discovery hasn't yet. One wb can't rewrite stays, and `remedy` (`windows_moved`) names the new
-address where it said to start Ollama: for a `wsl_host` one `wb remote <new>` (it repoints it), or
-`networkingMode=mirrored`; for any other wb remote provider, or remote Ollama, gone from an address
+isn't `windows_host()` now, once `models._moved_to` finds Ollama silent at the mark and answering
+at the new address (both probed at once, 1 s, only when the addresses differ), has its baseURL
+(port kept) and mark rewritten through `own_config`, one `wb: Windows' address moved …` line on
+stderr; one the user repointed (baseURL off its mark) stays theirs (#242). The probe because
+`windows_host()` is only the default gateway: under `networkingMode=mirrored` or a VPN in WSL it
+is the router, and a working provider was rewritten to it, every `wb start` then saying to start
+Ollama at the router (#1159's review). At Windows' address `wb remote` and `--remove` take the
+provider marked `wsl_host` whatever its id (`models._remote_pid_for`), and `wb remote <new>`
+repoints it if discovery hasn't yet (it probes the new address first, as every `wb remote` does).
+One wb can't rewrite stays, and `remedy` (`windows_moved`) names the new address where it said to
+start Ollama: for a `wsl_host` one, when Ollama answers at `windows_host()`, `wb remote <new>` (it
+repoints it), or `networkingMode=mirrored`; when nothing answers there, "start Ollama on Windows",
+never that NAT moved it, and under mirrored `wb remote 127.0.0.1 --port N` (Windows' Ollama is on
+127.0.0.1 there); for any other wb remote provider, or remote Ollama, gone from an address
 that isn't Windows' now ("if <host> was Windows' address"), `wb remote <new>` adds `ollama-windows`
 beside it (new ids) and `wb remote <old> --remove` drops it (#1159's review: it said `wb remote
 <new>` repointed it). A provider `ollama-<address>` from before stays its own (`wb remote` again at

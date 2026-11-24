@@ -2538,6 +2538,50 @@ class Remote(unittest.TestCase):
         self.assertEqual(json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
                          ["provider"][models.WSL_PID]["options"]["baseURL"], f"http://127.0.0.9:{dead}/v1")
 
+    def test_discovery_follows_windows_only_when_ollama_left_the_old_address_for_the_new_one(self):
+        # #1159's review (2026-11-24): under networkingMode=mirrored (or a VPN in WSL) the default
+        # gateway is the router, not Windows: discovery rewrote a working ollama-windows to it,
+        # said Windows' address had moved, and every wb start said to start Ollama at the router
+        tags = [{"name": "coder:7b"}]
+        shows = {"coder:7b": {"capabilities": ["tools"], "model_info": {}}}
+        try:
+            old, port = fake_remote_ollama(tags, shows, host="127.0.0.2")
+        except OSError:
+            self.skipTest("no 127.0.0.2 here")
+        self.servers.append(old)
+        self.config({models.WSL_PID: {"name": "Ollama on Windows", "models": {"coder:7b": {}},
+                                      "options": {"baseURL": f"http://127.0.0.2:{port}/v1"}}},
+                    {models.WSL_PID: {"local": True, "wsl_host": True, "remote": f"http://127.0.0.2:{port}"}})
+        files = (Path(os.environ["WB_OPENCODE_CONFIG"]), Path(os.environ["WB_MODELS"]))
+        before = [f.read_bytes() for f in files]
+        err = io.StringIO()
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.6"), redirect_stderr(err):
+            m = models.discover()[f"{models.WSL_PID}/coder:7b"]    # the gateway dead, Windows still up
+            self.assertEqual(m.root, f"http://127.0.0.2:{port}")
+            try:  # something at the gateway too: the old address still answering keeps it
+                gw = ThreadingHTTPServer(("127.0.0.6", port), old.RequestHandlerClass)
+            except OSError:
+                self.skipTest("no 127.0.0.6 here")
+            threading.Thread(target=gw.serve_forever, daemon=True).start()
+            self.servers.append(gw)
+            self.assertEqual(models.discover()[f"{models.WSL_PID}/coder:7b"].root, f"http://127.0.0.2:{port}")
+            gw.shutdown()
+            gw.server_close()
+            self.servers.remove(gw)
+            old.shutdown()
+            old.server_close()
+            self.servers.remove(old)
+            m = models.discover()[f"{models.WSL_PID}/coder:7b"]    # nothing answers anywhere
+            self.assertEqual(m.root, f"http://127.0.0.2:{port}")
+            st = models.status(m)
+            fix = models.remedy(m, st)
+        self.assertNotIn("moved", err.getvalue())
+        self.assertEqual([f.read_bytes() for f in files], before)   # both untouched
+        self.assertEqual(st["why"], "ollama is not answering")
+        self.assertNotIn("start Ollama at http://127.0.0.6", fix)
+        self.assertNotIn("gave Windows a new address", fix)
+        self.assertIn("127.0.0.1", fix)
+
 
 class Optimize(unittest.TestCase):
     """wb optimize against an Ollama whose placement depends on the window: 10 GB of weights and
