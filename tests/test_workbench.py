@@ -32818,7 +32818,8 @@ class Privacy(_KeyholeTest):
             self.assertEqual(out.stdout.split(), [want] * len(files) + ["read", "built"], (via, out.stderr))
         self.assertIn(str(home / ".gradle" / "caches"), context.writable(self.bare("t-dot-g", "api")))
         self.assertIn("an API task can't read ~/.config/pypoetry/auth.toml, ~/.gradle/gradle.properties, "
-                      "~/.hex/hex.config, ~/.m2/settings.xml and 2 more", context.api_hidden_note())
+                      "~/.hex/hex.config, ~/.m2/settings.xml and 2 more",
+                      context.api_hidden_note(self.bare("t-dot-note", "api")))
         for home_ in (home / ".hex", home / ".nuget"):              # the other split homes (#1021's review)
             self.assertIn(str(home_ / "packages"), context.writable(self.bare(f"t-dot-{home_.name[1:]}", "api")))
 
@@ -32862,7 +32863,8 @@ class Privacy(_KeyholeTest):
             hidden = context.api_hidden_paths()
             for rel in (".config/composer/auth.json", ".npmrc"):
                 self.assertIn(os.path.realpath(home / rel), hidden, rel)
-            note = context.api_hidden_note()
+            with mock.patch.object(lane, "abi", return_value=6):  # the note is a lane's (#1156)
+                note = context.api_hidden_note(self.bare("t-cred-note", "api"))
             self.assertIn("each holds a credential, which would reach the provider): in its lane", note)
             self.assertIn("Bundler", note.split("stop")[0])          # Bundler stops on every run
             self.assertIn("installs from a private registry fail", note)
@@ -32928,8 +32930,9 @@ class Privacy(_KeyholeTest):
             self.assertNotIn(str(gh), api)
             for made in (gh / "caches", gh / "wrapper", hh / "packages", home / ".nuget/packages"):
                 self.assertIn(str(made), api)
-            self.assertIn("in its lane Gradle and dotnet stop on every run, and Hex installs from a "
-                          "private registry fail", context.api_hidden_note())
+            with mock.patch.object(lane, "abi", return_value=6):  # the note is a lane's (#1156)
+                self.assertIn("in its lane Gradle and dotnet stop on every run, and Hex installs from a "
+                              "private registry fail", context.api_hidden_note(self.bare("t-mv-note", "api")))
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     @home_outside_the_lane
@@ -32962,7 +32965,8 @@ class Privacy(_KeyholeTest):
                                            context.readable(task)),
                                  capture_output=True, text=True, timeout=20)
             self.assertEqual(out.stdout.split(), want + ["wrote"] * len(dirs), (via, out.stderr))
-        self.assertIn("Hugging Face's gated and private models don't download", context.api_hidden_note())
+        self.assertIn("Hugging Face's gated and private models don't download",
+                      context.api_hidden_note(self.bare("t-hf-note", "api")))
         (hf / "token").write_text("")                               # logged out: nothing to hide
         (hf / "stored_tokens").unlink()
         self.assertEqual(context.api_hidden_paths(), set())
@@ -33081,7 +33085,9 @@ class Privacy(_KeyholeTest):
         home = Path(self.tmp.name) / "home"
         home.mkdir()
         (home / ".npmrc").write_text("//registry.example/:_authToken=t\n")
-        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+        # the note is a lane's (#1156): macOS CI has none, so the API start draws one
+        drawn = mock.patch.object(lane, "abi", return_value=6)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}), drawn:
             self.assertIn("note: an API task can't read ~/.npmrc (it holds a credential, which would "
                           "reach the provider): in its lane npm installs from a private registry fail",
                           self.start_api("t-dn1"))
@@ -33089,14 +33095,36 @@ class Privacy(_KeyholeTest):
             # review: the note said only private installs fail, and Maven never ran at all)
             (home / ".m2").mkdir()
             (home / ".m2/settings.xml").write_text("<settings/>")
-            self.assertNotIn("Maven", context.api_hidden_note())     # no credential: Maven runs
+            task = store.Task("t-dn1")
+            self.assertNotIn("Maven", context.api_hidden_note(task))  # no credential: Maven runs
             (home / ".m2/settings.xml").write_text("<settings><servers><server><id>r</id>"
                                                    "<password>p</password></server></servers></settings>")
             self.assertIn("(each holds a credential, which would reach the provider): in its lane Maven "
                           "stops on every run, and npm installs from a private registry fail",
-                          context.api_hidden_note())
+                          context.api_hidden_note(task))
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
             self.assertNotIn("can't read ~/.npmrc", self.start("t-dn2", "ok"))
             wait_phase("t-dn2", ("review",))
+
+    def test_an_api_start_with_no_lane_says_no_token_file_is_hidden(self):
+        # #1156 (2026-11-24): on macOS, with no Landlock, every API start said ~/.npmrc and
+        # ~/.m2/settings.xml were unreadable and Maven stopped on every run, while the agent read
+        # both and Maven ran; the skill had Claude tell the user the repo won't build on API
+        home = Path(self.tmp.name) / "home"
+        (home / ".m2").mkdir(parents=True)
+        (home / ".npmrc").write_text("//registry.example/:_authToken=t\n")
+        (home / ".m2/settings.xml").write_text("<settings><servers><server><id>r</id>"
+                                               "<password>p</password></server></servers></settings>")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            with mock.patch.object(lane, "abi", return_value=0):         # macOS, a kernel without it
+                out = self.start_api("t-nl1")
+                self.assertNotIn("can't read", out)
+                self.assertEqual(context.api_hidden_note(store.Task("t-nl1")), "")
+            with mock.patch.object(lane, "abi", return_value=6):
+                task = store.Task("t-nl1")
+                self.assertIn("Maven stops on every run", context.api_hidden_note(task))
+                Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))  # lane off
+                self.assertEqual(context.api_hidden_note(task), "")
 
     def test_an_api_start_names_a_remote_url_that_holds_a_token(self):
         # #1072 (2026-11-23): `git remote -v` in an API lane printed origin's token, or one from

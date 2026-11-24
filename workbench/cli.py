@@ -1145,9 +1145,10 @@ def _local_only_since(task: store.Task) -> None:
 def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> list[str]:
     """An API task's start notes: on the repo's first task to this provider, what goes, to whom
     and whose choice it was (privacy.where_note, #1016's first-task note with #1021's words), and
-    the token files its lane hides: those holding a credential (#1021). ``routed``: what task.json
-    holds (_routed_keys): the backends named are the ones the keyhole routes by, never routes.json's
-    (an `order` the note named once never reached the task: wave 2's review)."""
+    the token files its lane hides: those holding a credential (#1021), when it has a lane (#1156).
+    ``routed``: what task.json holds (_routed_keys): the backends named are the ones the keyhole
+    routes by, never routes.json's (an `order` the note named once never reached the task: wave
+    2's review)."""
     notes = []
     if privacy.first_for(repo, m.provider, task_name):
         info = privacy.where(m, routed.get("order"))
@@ -1156,7 +1157,7 @@ def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> 
         whose = ("asked for" if (routed.get("said") or "").startswith("asked for")
                  else f"the {routed.get('role') or _role(a)} role's model")
         notes.append(privacy.where_note(info, rules, named, whose))
-    if gap := context.api_hidden_note():
+    if gap := context.api_hidden_note(store.Task(task_name)):  # none with no lane (#1156)
         notes.append(gap)
     if gap := context.git_url_note(repo):  # a token in a remote URL (#1072)
         notes.append(gap)
