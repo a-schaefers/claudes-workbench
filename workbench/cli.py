@@ -2792,10 +2792,25 @@ def gate_refusal(what: str, command: str) -> str:
             f"user runs it in a terminal of their own: {command}")
 
 
+def _skipped() -> list[tuple[str, str]]:
+    """models.skipped_providers(), or none when OpenCode's config can't be read (doctor says so)."""
+    try:
+        return models.skipped_providers()
+    except (RuntimeError, OSError, ValueError):
+        return []
+
+
+def _runs_held(m: models.Model) -> bool:
+    """Whether an API model's key is one a task can run with: stored by /connect (the keyhole
+    holds it outside the lane), or an Ollama cloud model's, which this machine's Ollama holds and
+    no keyhole needs (runner.needs_keyhole). Refused, doctor's "set a role to use it" led nowhere,
+    with a /connect that changes nothing for Ollama (#1077, 2026-11-23)."""
+    return m.key == "stored" or (m.cloud and m.key == "ollama")
+
+
 def _route_api(mid: str, role: str) -> models.Model:
     """The API model a role may name: OpenCode's exact id (fragments never match an API id), of
-    kind api, with a key wb can hold (stored by /connect: the keyhole holds it outside the lane);
-    else exit 3 with discovery's why."""
+    kind api, with a key a task runs with (_runs_held); else exit 3 with discovery's why."""
     m = models.lookup(mid)
     if m is None:
         why = models.hosted_error()
@@ -2803,14 +2818,21 @@ def _route_api(mid: str, role: str) -> models.Model:
     if m.kind != "api":
         die(f"{mid} is a GPU model: wb route {role} --gpu {mid} pins it", 3)
     st = models.status(m)
-    if m.key != "stored" or (not st["available"] and not st["why"].startswith(HEALTH)):
+    # a server of the user's on another host, not opted in, reads as an API provider with no key:
+    # its own fix, never /connect, which a LAN server has no use for (#1109, 2026-11-23)
+    if not st["available"] and st["why"].startswith("no key for ") and \
+            (off := dict(_skipped()).get(m.provider)):
+        die(f"{mid} can't be a role's model: provider {m.provider}: {off}", 3)
+    if not _runs_held(m) or (not st["available"] and not st["why"].startswith(HEALTH)):
         why = st["why"] if not st["available"] else (
             f"can't run: needs a key wb can hold outside the lane ({models.provider_name(m)}'s is "
             + ("none: a free model takes no key" if m.key == "none" else
                "Ollama's own login" if m.key == "ollama" else m.key or "not stored") + ")")
         fix = models.remedy(m, st) if not st["available"] else \
             f"store an API key for {models.provider_name(m)} with /connect in OpenCode"
-        die(f"{mid} can't be a role's model: {why}" + (f": {fix}" if fix and fix not in why else ""), 3)
+        # once: "no key for p: run /connect …" came with its remedy's own /connect line (#1109)
+        said = fix and (fix in why or "/connect" in why)
+        die(f"{mid} can't be a role's model: {why}" + (f": {fix}" if fix and not said else ""), 3)
     return m
 
 
@@ -2963,6 +2985,9 @@ def _route_pane() -> dict:
         held = f"key in {raw[4:]}" if key == "env" else KEY_HELD.get(raw, raw)
         provs[pid] = {"name": str(p.get("name") or pid), "key": key,
                       **({} if key == "stored" else
+                         # its cloud models run through this machine's Ollama (#1077)
+                         {"why": "signed in through Ollama: its cloud models need no key here"}
+                         if raw == "ollama" else
                          {"why": f"can't run: needs a key wb can hold outside the lane ({held})" if raw
                           else "no key: /connect in OpenCode adds one"})}
     return {"spend_today": _spend_today(), "providers": provs}
@@ -4134,7 +4159,7 @@ def _models_json() -> dict:
     optimize.json and the cached catalog only: no server is asked (a sleeping LAN box held the
     pane's draw, #705, #819), no catalog rebuilt. `gpu`: [{id, label, window, sizes, cards}],
     cards the numbers of the cards its Ollama sees (models.card_numbers; None when unknown);
-    `api`: the models of providers whose key wb can hold (stored by /connect), [{id, name,
+    `api`: the models a task runs with (_runs_held: a key stored by /connect, or Ollama cloud), [{id, name,
     provider, provider_name, window, price {input, output} per million, free}]; `used`: the API
     models tasks ran on, newest first; `optimize`: {done_at, models, running}; `media`: the image
     and audio engines and their defaults (_media_json, #1047)."""
@@ -4145,7 +4170,7 @@ def _models_json() -> dict:
            for m in models.discover().values()]
     api = []
     for m in models._models_of(models._read_hosted()).values():
-        if m.key != "stored":
+        if not _runs_held(m):
             continue
         cost = next((c for c in m.config.get("cost") or [] if isinstance(c, dict)), None) \
             if isinstance(m.config.get("cost"), list) else m.config.get("cost")
@@ -6031,6 +6056,10 @@ def first_run() -> list[str]:
     out.append(f"ok  {len(found)} local model(s) registered" if found else NO_LOCAL_OPTIONAL if stored else
                "--  no local model registered yet: run /workbench in Claude Code, and Claude picks one "
                "for this machine (wb scout)")
+    # a provider of the user's that discovery passed over (another host, not opted in): its fix
+    # here too, as wb doctor and wb models say it; wb setup said nothing of it (#1109, 2026-11-23)
+    if not found and (skipped := _skipped()):
+        out.append("--  " + "; ".join(f"provider {pid}: {why}" for pid, why in skipped))
     out += api_key_lines(keys)
     v = lane.abi()
     out.append(f"ok  Landlock ABI {v}: each agent writes only inside its task" if v else

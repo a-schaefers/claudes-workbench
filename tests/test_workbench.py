@@ -28306,6 +28306,50 @@ class ApiDiscovery(Base):
         self.assertIn("--  ollama/gpt-oss:120b-cloud is an Ollama cloud model, an API model now: set a "
                       "role to use it", buf.getvalue())
 
+    def test_an_ollama_cloud_model_can_be_a_roles_model_as_doctor_says(self):
+        # #1077: doctor said "set a role to use it", and wb route refused every one with a /connect
+        # that changes nothing: this machine's Ollama holds the login, and no keyhole is needed
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"] = {"ollama": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
+                                      "models": {"gpt-oss:120b-cloud": {"limit": {"context": 131072}}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        mid = "ollama/gpt-oss:120b-cloud"
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):  # no model: doctor exits 1
+            cli.main(["doctor"])
+        self.assertIn(f"--  {mid} is an Ollama cloud model, an API model now: set a role to use it", buf.getvalue())
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            cli.main(["route", "trivial", mid, "--day-usd", "1"])  # exits 0: no SystemExit
+        self.assertNotIn("/connect", out.getvalue() + err.getvalue())
+        self.assertEqual(routes.read()["roles"]["trivial"]["api"], mid)
+        m, _, _, routed = routes.resolve("trivial", "trivial", None)
+        self.assertEqual((m.id, routed["via"]), (mid, "api"))   # what wb start runs
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["models", "--json"])
+        self.assertIn(mid, [a["id"] for a in json.loads(out.getvalue())["api"]])  # the pane's list too
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["route", "--json"])
+        self.assertNotIn("can't run", json.loads(out.getvalue())["providers"]["ollama"]["why"])
+
+    def test_a_lan_server_not_opted_in_gets_its_local_true_hint_from_setup_and_route_never_connect(self):
+        # #1109: wb setup said nothing of it, and wb route told the user to /connect a key, twice,
+        # for their own model server on another machine; only wb doctor gave the fix
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"] = {"lan": {"npm": "@ai-sdk/openai-compatible",
+                                   "options": {"baseURL": "http://192.0.2.50:8000/v1"},
+                                   "models": {"coder": {"limit": {"context": 65536}}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        hint = (f"provider lan: 192.0.2.50 isn't this machine; if it's your own model server (WSL2's Windows "
+                f"host, a box on the LAN), add {{\"lan\": {{\"local\": true}}}} to {self.models.overrides_path()}")
+        self.assertIn(f"--  {hint}", cli.first_run())
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as code, redirect_stderr(err):
+            cli.main(["route", "trivial", "lan/coder", "--day-usd", "1"])
+        self.assertEqual((code.exception.code, err.getvalue()), (3, f"wb: lan/coder can't be a role's model: {hint}\n"))
+
     def test_with_api_runs_off_wb_start_refuses_an_api_model_by_model_flag(self):
         # cli.API_RUNS is on since #1016 (wb start --role): the off path, kept
         err = io.StringIO()

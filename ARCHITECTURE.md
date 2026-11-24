@@ -3443,7 +3443,7 @@ GPU; wb route all both goes back to each role's own below)`); `--json` the norma
 `step` and `reconcile` rows of the day ledger, spend-api.jsonl; `usd` is `meter.today()`'s, the sum the
 cap is checked against) and `providers` (`{<id>: {name, key,
 why?}}` from the cached catalog: `key` `stored`, `env`, `oauth` or `none`, with the why for any but
-stored). While busy is `api` the show adds `When the GPU is busy: a role with an API model starts on
+stored; Ollama's, `signed in through Ollama: its cloud models need no key here`, #1077). While busy is `api` the show adds `When the GPU is busy: a role with an API model starts on
 it (wb route busy wait: queue instead)`.
 The changes (each one exit 3 with one line when refused, writing nothing):
 - `wb route <role> gpu|api` flips the selector; `api` with no API model kept: `<role> has no API
@@ -3458,11 +3458,13 @@ The changes (each one exit 3 with one line when refused, writing nothing):
   on API or the busy opt-in could send one there (`the day cap stays while <roles> can spend on API`).
 - `wb route busy wait|api` sets the busy opt-in (*When the GPU is busy*).
 - An API model is taken by its exact id only (`models.lookup`: fragments never match an API id,
-  #1013), of kind `api`, with a key wb can hold (`key == "stored"`: /connect saved one, which the
-  keyhole holds outside the lane), else refused with discovery's why (`cli._route_api`): `not in
+  #1013), of kind `api`, with a key a task runs with (`cli._runs_held`: `key == "stored"`, /connect
+  saved one, which the keyhole holds outside the lane; or an Ollama cloud model's `ollama`, the
+  login this machine's Ollama holds, which needs no keyhole, #1077), else refused with discovery's why (`cli._route_api`): `not in
   OpenCode's catalog: wb models lists the API models`, a GPU id (`… is a GPU model: wb route <role>
   --gpu <id> pins it`), no key (`… can't be a role's model: no key for <p>: run /connect in OpenCode
-  and add it`), an OAuth, environment, config, signing or Ollama login key, or a keyless free model
+  and add it`, said once; a configured provider on another host, not opted in, gets its
+  `local: true` hint instead, `provider <p>: <host> isn't this machine; …`, #1109), an OAuth, environment, config or signing key, or a keyless free model
   (`can't run: needs a key wb can hold outside the lane (…)`). A provider out of credit, rate-limited
   or unreachable is no refusal (`cli.HEALTH`): that passes. The kept API model of a role flipped to
   API is checked the same way.
@@ -5329,7 +5331,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
 |---|---|---|
-| `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, free}] (stored keys only), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
+| `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, free}] (stored keys and Ollama cloud only, `cli._runs_held`), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider never touched, one for another baseURL refuses; off this machine needs `local: true`); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | *Optimize*; `start` detached, refused while a task holds the GPU, stopped by a task that wants it; `--bench` then runs `wb bench run`; `apply` adds the measured window as its own entry (`optimize.entry_name`; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>`, `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
@@ -5726,7 +5728,9 @@ lane, never a secret): `ok  API keys: deepseek (stored via /connect); no role us
 `trivial and significant use it`), a `--` line for a key wb can't hold (`xai's key is in XAI_API_KEY:
 wb can't hold it outside the lane yet; /connect stores one it can`, `anthropic is signed in with
 OAuth: …`), `NO_KEY` for none. With a stored key and no local model the GPU lines read as optional
-(`NO_SERVER_OPTIONAL`, `NO_LOCAL_OPTIONAL`). No GPU is needed for a role on API (*Roles*). The plugin install copies only `mod/` into the plugin
+(`NO_SERVER_OPTIONAL`, `NO_LOCAL_OPTIONAL`). With no local model, a provider discovery passed over
+(`models.skipped_providers`: another host not opted in, disabled) adds its `--  provider <id>: <why>`
+line, the `local: true` hint as doctor gives it (#1109). No GPU is needed for a role on API (*Roles*). The plugin install copies only `mod/` into the plugin
 cache; `marketplace add` keeps a full clone (`installLocation` in `known_marketplaces.json`, or under
 `CLAUDE_CODE_PLUGIN_CACHE_DIR`), from which `wb setup` links `wb` and the skill. `wb update` (`/workbench-update` also
 reloads plugins) runs `claude plugin marketplace update workbench` and `claude plugin update workbench@workbench`; the
