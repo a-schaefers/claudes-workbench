@@ -38558,6 +38558,33 @@ class RoleResolution(Base):
         # a record of another model (a hand edit of `api`) is never said of this one
         self.assertEqual(routes.thinking_said({**stored["writing"], "api": "anthropic/other"}), "thinking off")
 
+    def test_a_failed_catalog_read_keeps_a_roles_thinks_record_through_an_unrelated_change(self):
+        # #1263's review (2026-11-24): with_thinks dropped the record of every role whose model
+        # the cached catalog missed, and after a failed read it holds no models for DOWN_SECS:
+        # the summary said `thinking off` again, and a change to another role wrote that to
+        # routes.json, so the mod's routesSummary said it until a later change
+        adaptive = api_entry("anthropic", "claude-sonnet-x", variants=[
+            {"id": v, "settings": {"thinking": {"type": "adaptive"}, "effort": v}} for v in ("low", "medium", "high")])
+        self.catalog([*ROLE_CATALOG, adaptive], ROLE_AUTH)
+        runner.models.hosted(fresh=True)
+        does = "thinking as the model's default (it lists no lower setting)"
+        mid = "anthropic/claude-sonnet-x"
+        self.set_role("writing", mid, "--day-usd", "5")
+        self.assertIn(f"writing API {mid}, {does}", routes.summary(routes.read()))
+        path = runner.models.hosted_path()
+        doc = json.loads(path.read_text())
+        path.write_text(json.dumps({**doc, "models": {}, "ts": time.time(), "error": "OpenCode's catalog timed out"}))
+        code, out, err = self.wb("route", "--json")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"writing API {mid}, {does}", json.loads(out)["summary"])
+        self.set_role("significant", "--thinking", "on")
+        stored = json.loads(self.routes.read_text())["roles"]
+        self.assertEqual(stored["writing"]["thinks"]["api"], mid)
+        self.assertIn(f"writing API {mid}, {does}", routes.summary(routes.read()))
+        # a record of the model the role had before is still dropped, not kept for a new one
+        moved = {"roles": {"writing": {**stored["writing"], "api": "anthropic/other"}}}
+        self.assertNotIn("thinks", routes.with_thinks(moved)["roles"]["writing"])
+
     def test_an_api_tasks_report_watch_line_and_commit_name_its_model_not_only_the_provider(self):
         # #1078 (audit 1 of 2.0): all read "DeepSeek (API)", so two roles on one provider looked
         # alike, and git history couldn't say which model wrote the code

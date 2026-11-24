@@ -3084,12 +3084,19 @@ const THINK_STOPS: [string, string, string][] = [
 ]
 // A role's thinking row: THINK_STOPS, each stop its API model can't keep saying what the model does
 // instead (the row's `thinks`, thinkingSaid's): `Off (default)`, `Faster and cheaper` sat on a model
-// that can't turn thinking off, so the user kept it and paid for its reasoning (#1263, 2026-11-24)
+// that can't turn thinking off, so the user kept it and paid for its reasoning (#1263, 2026-11-24).
+// Only a model's default or a thinking that stays on (runner's THINKING_DEFAULT, THINKING_STAYS) is
+// no cheaper: its lowest effort (THINKING_LOWEST, below the provider's default) still is, and the row
+// said On cost the same (#1263's review, 2026-11-24)
+const LOWEST_SAID = 'thinking at its lowest effort'
 export function thinkStops(row: Row): [string, string, string][] {
   const said = (v: string) => thinkingSaid({ ...row, thinking: v })
   const off = said('off'), on = said('on')
+  const offWhy = off.startsWith(LOWEST_SAID)
+    ? 'This model can\'t turn thinking off, but its lowest effort is still cheaper than On; for tasks started after this.'
+    : 'This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.'
   return [
-    off.startsWith('thinking off') ? THINK_STOPS[0]! : ['off', `Off (default): ${off}`, 'This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.'],
+    off.startsWith('thinking off') ? THINK_STOPS[0]! : ['off', `Off (default): ${off}`, offWhy],
     on.startsWith('thinking off') ? ['on', `On: ${on}`, 'This model doesn\'t reason, so this changes nothing; for tasks started after this.'] : THINK_STOPS[1]!,
   ]
 }

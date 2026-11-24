@@ -6433,6 +6433,12 @@ test('#1263: a role\'s thinking row and the roles\' summary say what its API mod
   expect(thinkStops({ api: 'deepseek/x', thinks: { api: 'deepseek/x', off: 'thinking off', on: 'thinking on (effort high)' } })).toEqual(plain)
   expect(thinkStops(row)[0]).toEqual(['off', `Off (default): ${does}`, 'This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.'])
   expect(thinkStops(row)[1]).toEqual(plain[1])
+  // #1263's review: a model that can't turn thinking off but runs at a lower effort is still cheaper off
+  const lowest = 'thinking at its lowest effort (it can\'t turn off)'
+  expect(thinkStops({ api: 'x/y', thinking: 'off', thinks: { api: 'x/y', off: lowest, on: 'thinking on (effort high)' } })[0])
+    .toEqual(['off', `Off (default): ${lowest}`, 'This model can\'t turn thinking off, but its lowest effort is still cheaper than On; for tasks started after this.'])
+  expect(thinkStops({ api: 'x/y', thinks: { api: 'x/y', off: 'thinking on (it can\'t turn off)', on: 'thinking on (it can\'t turn off)' } })[0]![2])
+    .toBe('This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.')
   const not = 'thinking off (the model doesn\'t reason)'
   expect(thinkStops({ api: 'x/y', thinks: { api: 'x/y', off: not, on: not } }).map(s => s[1])).toEqual(['Off (default)', `On: ${not}`])
   const { ui, w, label, clock } = await settingsTab($, on)

@@ -2988,8 +2988,9 @@ key `ollama`, #1077) and no role holding an API model, the
   `<label> thinking` (`thinkStops` over `THINK_STOPS`, `think-<role>`: `wb route <role> --thinking on|off`, for tasks
   started after it; a stop the role's API model can't keep says what it does instead, from the row's
   `thinks`: `Off (default): thinking as the model's default (it lists no lower setting)`, `This model
-  can't turn thinking off, so it isn't cheaper; …`, or `On: thinking off (the model doesn't reason)`,
-  #1263), and `Spend today: ≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14; catalog prices)`, without a
+  can't turn thinking off, so it isn't cheaper; …` (or, at `thinking at its lowest effort`, `This
+  model can't turn thinking off, but its lowest effort is still cheaper than On; …`), or `On: thinking
+  off (the model doesn't reason)`, #1263), and `Spend today: ≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14; catalog prices)`, without a
   cap `Spend today: ≈$0.42 (DeepSeek $0.42; catalog prices) · no day cap` (`spendLine`, `your prices` and no `≈` at the user's, #1135, its dollars by the Stats
   tab's `usd`, each provider by its name from `providers`, the Stats tab's ` · `). A press goes
   through `paneRoute`: `wb route --dry-run --json <args>`, and when it is gated the mod writes its
@@ -4262,8 +4263,10 @@ one that needed no yes only `gpu_by` and `gpu_ts`, so Claude's pin on a role on 
 of the user's yes as it was (a pin once rewrote `by` to `claude`, the user's own yes then reading as
 Claude's, 2026-11-23). Every role with an API model in the (cached) catalog gets its `thinks` read
 again (`routes.with_thinks`: `{api, off, on}`, `routes.model_thinks`, `routes.thinking_of` of each
-setting; none for a model not in it), so a reader with no catalog, the mod, says what the model
-does.
+setting), so a reader with no catalog, the mod, says what the model does; a model the catalog
+doesn't list now (none for `DOWN_SECS` after a failed read) keeps a record said of it and loses
+any other, so an outage neither says `thinking off` again nor writes the record away with an
+unrelated change (#1263's review).
 
 **What a role's thinking does** (#1263, after #1237): every view of a role's thinking says
 `routes.thinking_said(row)`, its `thinks` line for the setting while `thinks.api` is the role's
@@ -7305,7 +7308,8 @@ doc needs its own `!/` line).
   `routesPath` with `routes.path`) and the pane's rows (#1023); **`routes.summary`** ↔ the mod's `routesSummary` (the
   context block and the echo say it; `Routes` and register.test.tsx check one fixture each), and
   **`routes.thinking_said`** ↔ the mod's `thinkingSaid` (a role's `thinks`, #1263; `RoleResolution` and
-  register.test.tsx's #1263 test); **the change line**
+  register.test.tsx's #1263 test), and `runner.THINKING_LOWEST`'s opening ↔ `thinkStops`' `LOWEST_SAID` (the
+  lowest effort, still cheaper than On); **the change line**
   (`routes.change`, `cli.start_line`) → the mod's dialog, which shows what `wb route --dry-run --json` prints (an API
 start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --model` stays refused), and
   `route-ok.json`'s `approval` (`cli._route_argv`) ↔ `routes.approved`; **a `wb route` or `wb start` flag** →

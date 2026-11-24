@@ -208,14 +208,18 @@ def model_thinks(m) -> dict:
 
 def with_thinks(doc: dict, cached: bool = True) -> dict:
     """``doc`` with each role's `thinks` read again from the catalog (model_thinks) for its API
-    model, or none for one not in it. wb writes it with every change (cli._route_apply) so a
-    reader with no catalog, the mod's routesSummary, says what the model does (#1263)."""
+    model. wb writes it with every change (cli._route_apply) so a reader with no catalog, the
+    mod's routesSummary, says what the model does (#1263). A model the catalog doesn't list now
+    keeps a record said of it (`api` its id) and loses any other: hosted.json holds no models
+    for DOWN_SECS after a failed read, and dropping the record then said `thinking off` again,
+    and wrote that to routes.json with any change, one to another role too (#1263's review,
+    2026-11-24); thinking_said reads a record only while its `api` is the role's."""
     from . import models
     for row in doc["roles"].values():
         m = models.lookup(row["api"], cached=cached) if row.get("api") else None
         if m is not None and m.kind == "api":
             row["thinks"] = model_thinks(m)
-        else:
+        elif m is not None or not row.get("api") or (row.get("thinks") or {}).get("api") != row["api"]:
             row.pop("thinks", None)
     return doc
 
