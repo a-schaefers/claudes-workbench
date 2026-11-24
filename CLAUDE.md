@@ -90,7 +90,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   share): their `wb` commands. `progress.py`, `stats.py`, `lessons.py`: progress checks, the Stats
   tab, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
   inotify and pidfd waits. `chat.py` + `chat_static/`, `webpush.py`: the web chat. `try/`:
-  `wb try`'s sample.
+  `wb try`'s sample. `schedule.py`: `wb schedule` (a backlog on a timer, Claude headless: `claude -p`).
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time). `agent/WRITING.md`:
   the writing role's, in its place in every writing prompt: keep it short too (under 3,000 bytes).
 - `skill/workbench/`: the `/workbench` procedure; `skill/agents/`: other agents' skill for the chat's API. `mod/`: the plugin (`hooks/register.tsx`, with
@@ -163,7 +163,7 @@ Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`
 `~/.local/share/workbench/source`), `WB_ROUTES` (the roles; `wb start`'s local-only check reads it), `WB_AGENTS_MD`
 (the user's file for agents; the tests' own) (relative or `~` allowed: a new
 one joins `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; the agent's `WB_TASK`, `WB_RUN`,
-`WB_USER_PYTHONPATH`; `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
+`WB_USER_PYTHONPATH`; a scheduled fire's `WB_SCHEDULE` (its Claude's `wb accept --merge` refused); `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), `CLAUDECODE` (under it `wb patch send`
 sends and `wb route` changes the API side only on the mod's dialog's yes: `send-ok.json`,
 `route-ok.json`; `wb start --model` on an API model the same, `cli.start_gate`). Tests only: `WB_OPENCODE_BIN`,

@@ -1,4 +1,5 @@
 """End-to-end tests: real git, real runner processes, a fake opencode. Run: python3 -m unittest"""
+import argparse
 import ast
 import base64
 import collections
@@ -17417,6 +17418,258 @@ class Backlog(Base):
         run_wb("accept", "t-n3", "-m", "feat: one")
         self.start("t-n4", "ok", "--backlog", f"overnight-{time.strftime('%Y-%m-%d')}")
         self.assertTrue(store.Task("t-n4").exists)
+
+class ScheduledRuns(Base):
+    """Scheduled runs (#1204): wb start --after holds a task until its time; wb schedule writes the
+    user's timer, whose fire runs Claude headless on a backlog file and keeps a run history."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = Path(self.tmp.name)
+        self.bin = tmp / "sched-bin"
+        self.bin.mkdir()
+        self.calls = tmp / "systemctl-calls"
+        # a systemctl that logs each call, exiting FAKE_SYSTEMCTL_EXIT (0): never the user's manager
+        (self.bin / "systemctl").write_text('#!/bin/sh\necho "$*" >> "$FAKE_SYSTEMCTL_LOG"\n'
+                                            'exit "${FAKE_SYSTEMCTL_EXIT:-0}"\n')
+        # a claude that records its argv and environment, and prints a result as claude -p does
+        (self.bin / "claude").write_text(textwrap.dedent(f"""\
+            #!{sys.executable}
+            import json, os, sys
+            with open(os.environ["FAKE_CLAUDE_LOG"], "w") as f:
+                json.dump({{"argv": sys.argv[1:], "cwd": os.getcwd(),
+                           "env": {{k: os.environ.get(k) for k in ("WB_SCHEDULE", "CLAUDECODE",
+                                                                  "CLAUDE_CODE_SESSION_ID", "WB_HOME")}}}}, f)
+            print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "num_turns": 7,
+                              "usage": {{"input_tokens": 100, "output_tokens": 2000,
+                                        "cache_read_input_tokens": 50000, "cache_creation_input_tokens": 3000}}}}))
+            """))
+        for p in self.bin.iterdir():
+            p.chmod(0o755)
+        os.environ.update(PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}", FAKE_SYSTEMCTL_LOG=str(self.calls),
+                          FAKE_CLAUDE_LOG=str(tmp / "claude-call.json"), XDG_CONFIG_HOME=str(tmp / "xdg"))
+        self.backlog = tmp / "backlog.md"
+        self.backlog.write_text("Fix issues #1 and #2.\n")
+        awake = mock.patch.object(cli, "keep_awake", return_value=False)  # no inhibitor on the test's pid
+        awake.start()
+        self.addCleanup(awake.stop)
+
+    def fire(self, name="night") -> int:
+        from workbench import schedule
+        with redirect_stdout(io.StringIO()):
+            return schedule.fire(name)
+
+    def add(self, name="night", at="Sun 02:00", *extra):
+        return run_wb("schedule", "add", name, "--file", str(self.backlog), "--repo", str(self.repo),
+                      "--at", at, *extra)
+
+    def test_after_is_the_next_such_local_time(self):
+        now = time.mktime((2026, 11, 24, 23, 30, 0, 0, 0, -1))
+        self.assertEqual(cli.after_time("23:45", now), now + 15 * 60)
+        self.assertEqual(time.localtime(cli.after_time("02:00", now))[:5], (2026, 11, 25, 2, 0))
+        self.assertEqual(time.localtime(cli.after_time("23:30", now)).tm_mday, 25)  # now is not ahead
+        for bad in ("24:00", "2:5", "2am", ""):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                cli.after_time(bad, now)
+
+    def test_a_task_started_after_a_time_waits_queued_before_its_checkout_and_holds_no_gpu(self):
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        out = self.start("t-later", "ok", "--test", TEST_CMD, "--after", at)
+        self.assertIn(f"note: held until {at}", out.replace("Mon ", "").replace("Tue ", ""))
+        task = store.Task("t-later")
+        self.assertGreater(task.spec["not_before"], time.time() + 3600)
+        deadline = time.time() + 20
+        while not (task.status.get("last") or "").startswith("waiting until") and time.time() < deadline:
+            time.sleep(POLL)
+        self.assertEqual(task.status["phase"], "queued")
+        self.assertIn("(--after)", task.status["last"])
+        self.assertFalse(task.worktree.exists())  # nothing before its time, the checkout neither
+        self.assertIsNotNone(runner.held_until(task))
+        # it holds nothing until then: a start now doesn't count it as on its way to the GPU
+        self.assertNotIn("task t-later", cli._gpu_holders())
+        # its time come (task.json read again on the change): it runs as any task
+        store.write_json(task.dir / "task.json", {**task.spec, "not_before": round(time.time()) - 1})
+        st = wait_phase("t-later", {"review"})
+        self.assertTrue(st["tests"]["ok"])
+        self.assertIsNone(runner.held_until(task))
+
+    def test_a_held_task_stops_as_any_queued_one_and_its_resume_holds_it_again(self):
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        self.start("t-held", "ok", "--after", at)
+        task = store.Task("t-held")
+        deadline = time.time() + 20
+        while not (task.status.get("last") or "").startswith("waiting until") and time.time() < deadline:
+            time.sleep(POLL)
+        run_wb("stop", "t-held")
+        self.assertEqual(task.status["phase"], "stuck")
+        run_wb("resume", "t-held")
+        deadline = time.time() + 20
+        while not (task.status.get("last") or "").startswith("waiting until") and time.time() < deadline:
+            time.sleep(POLL)
+        self.assertIn("(--after)", task.status["last"])
+        self.assertFalse(task.worktree.exists())
+        run_wb("stop", "t-held")
+
+    def test_at_takes_days_and_a_time_for_systemd_and_launchd_alike(self):
+        from workbench import schedule
+        got = schedule.parse_at("Mon..Fri 1:30")
+        self.assertEqual(got["calendar"], "Mon,Tue,Wed,Thu,Fri *-*-* 01:30:00")
+        self.assertEqual([w["Weekday"] for w in got["launchd"]], [1, 2, 3, 4, 5])
+        self.assertEqual(schedule.parse_at("daily 03:00")["launchd"], [{"Hour": 3, "Minute": 0}])
+        self.assertEqual(schedule.parse_at("Sat-Sun 02:05")["calendar"], "Sat,Sun *-*-* 02:05:00")
+        self.assertEqual(schedule.parse_at("sunday 02:00")["said"], "Sun 02:00")
+        with mock.patch.object(schedule, "_macos", return_value=True), \
+                self.assertRaises(schedule.ScheduleError):
+            schedule.parse_at("weekly")
+
+    def test_add_writes_a_persistent_user_timer_and_rm_takes_it_away(self):
+        from workbench import schedule
+        out = self.add("night", "Sun 02:00", "--max-turns", "50")
+        self.assertIn("scheduled night: Sun 02:00", out)
+        units = Path(os.environ["XDG_CONFIG_HOME"]) / "systemd" / "user"
+        timer = (units / "wb-schedule-night.timer").read_text()
+        self.assertIn("OnCalendar=Sun *-*-* 02:00:00\n", timer)
+        self.assertIn("Persistent=true\n", timer)
+        service = (units / "wb-schedule-night.service").read_text()
+        self.assertIn('"schedule" "fire" "night"', service)
+        self.assertIn(f'"{ROOT / "bin" / "wb"}"', service)
+        self.assertIn(f'Environment="PATH={os.environ["PATH"]}"', service)  # where claude was found
+        self.assertIn(f'Environment="WB_HOME={store.home()}"', service)
+        self.assertIn("KillMode=process", service)
+        self.assertEqual(self.calls.read_text().splitlines(),
+                         ["--user daemon-reload", "--user enable --now wb-schedule-night.timer"])
+        self.assertEqual(schedule.read("night")["max_turns"], 50)
+        self.assertEqual(run_wb("schedule", "list").splitlines()[1], "  never fired yet")
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            self.add("night")  # a name is one schedule
+        self.assertIn("removed schedule night", run_wb("schedule", "rm", "night"))
+        self.assertFalse((units / "wb-schedule-night.timer").exists())
+        self.assertIn("--user disable --now wb-schedule-night.timer", self.calls.read_text())
+        self.assertIn("no schedules", run_wb("schedule", "list"))
+
+    def test_a_user_manager_that_refuses_the_timer_leaves_nothing_behind(self):
+        from workbench import schedule
+        os.environ["FAKE_SYSTEMCTL_EXIT"] = "1"
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            self.add()
+        self.assertIn("no systemd user manager takes the timer here", err.getvalue())
+        self.assertIn("wb schedule fire night", err.getvalue())
+        self.assertEqual(list((Path(os.environ["XDG_CONFIG_HOME"]) / "systemd" / "user").iterdir()), [])
+        self.assertIsNone(schedule.read("night"))
+
+    def test_on_macos_add_writes_a_launchd_agent_with_its_calendar(self):
+        import plistlib
+        from workbench import schedule
+        home = Path(self.tmp.name) / "home"
+        (self.bin / "launchctl").write_text('#!/bin/sh\necho "launchctl $*" >> "$FAKE_SYSTEMCTL_LOG"\n')
+        (self.bin / "launchctl").chmod(0o755)
+        with mock.patch.object(schedule, "_macos", return_value=True), \
+                mock.patch.object(Path, "home", return_value=home):
+            self.add("night", "Sat,Sun 02:00")
+            plist = plistlib.loads((home / "Library/LaunchAgents/workbench.schedule.night.plist").read_bytes())
+            self.assertEqual(plist["StartCalendarInterval"], [{"Hour": 2, "Minute": 0, "Weekday": 6},
+                                                              {"Hour": 2, "Minute": 0, "Weekday": 0}])
+            self.assertEqual(plist["ProgramArguments"][-3:], ["schedule", "fire", "night"])
+            self.assertIn(f"launchctl bootstrap gui/{os.getuid()} ", self.calls.read_text())
+            run_wb("schedule", "rm", "night")
+            self.assertFalse((home / "Library/LaunchAgents/workbench.schedule.night.plist").exists())
+
+    def test_a_fire_runs_claude_headless_on_the_backlog_and_records_the_run(self):
+        from workbench import schedule
+        self.add()
+        os.environ.update(CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="ses-day")  # fired from a session
+        batch = f"night-{time.strftime('%Y-%m-%d')}"
+        old = store.Task("t-tonight")  # a task headless Claude started in the batch
+        store.write_json(old.dir / "task.json", {"name": "t-tonight", "backlog": batch, "created_at": time.time()})
+        old.set_status(phase="review")
+        self.assertEqual(self.fire(), 0)
+        call = json.loads(Path(os.environ["FAKE_CLAUDE_LOG"]).read_text())
+        argv = call["argv"]
+        self.assertEqual(argv[:4], ["-p", "--output-format", "json", "--max-turns"])
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Bash,Read,Grep,Glob")
+        allowed = argv[argv.index("--allowedTools") + 1:argv.index("--disallowedTools")]
+        self.assertEqual(allowed, ["Bash(wb:*)", "Read", "Grep", "Glob"])
+        prompt = argv[argv.index("--") + 1]
+        self.assertIn("Fix issues #1 and #2.", prompt)
+        self.assertIn(f"--backlog {batch}", prompt)
+        self.assertIn(str(ROOT / "skill/workbench/SKILL.md"), prompt)
+        self.assertEqual(call["cwd"], str(self.repo))
+        # headless Claude's own: never the session it was fired from, and its wb accept never merges
+        self.assertEqual(call["env"], {"WB_SCHEDULE": "night", "CLAUDECODE": None,
+                                       "CLAUDE_CODE_SESSION_ID": None, "WB_HOME": str(store.home())})
+        row = schedule.runs("night")[-1]
+        self.assertEqual((row["outcome"], row["batch"]), ("ran", batch))
+        self.assertEqual(row["tasks"], [{"task": "t-tonight", "phase": "review"}])
+        self.assertEqual(row["claude"]["turns"], 7)
+        self.assertEqual(row["claude"]["cache_read"], 50000)
+        self.assertGreaterEqual(row["end"], row["ts"])
+        listed = run_wb("schedule", "list")
+        self.assertIn(f"ran · batch {batch} · 1 task(s) (1 review) · Claude 7 turns, 55K tokens", listed)
+        self.assertTrue(any(ok and "schedule night (Sun 02:00): last" in said
+                            for ok, said in schedule.doctor_lines()))
+
+    def test_a_fire_is_skipped_while_the_last_lives_and_without_room_for_api_money(self):
+        import fcntl
+        from workbench import schedule
+        self.add()
+        lock = schedule.lock_path("night")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock, "a") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            self.assertEqual(self.fire(), 0)
+            self.assertIsNotNone(schedule.running("night"))
+        self.assertEqual(schedule.runs("night")[-1]["why"], "the last fire is still running")
+        self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+        # a role on API with no day cap: headless, nobody can be asked for one
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"roles": {"significant": {
+            "via": "api", "api": "deepinfra/x"}}}))
+        self.assertEqual(self.fire(), 0)
+        row = schedule.runs("night")[-1]
+        self.assertEqual(row["outcome"], "skipped")
+        self.assertIn("significant role", row["why"])
+        self.assertIn("skipped: significant role", run_wb("schedule", "list"))
+        self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
+    def test_run_fires_now_in_the_background(self):
+        from workbench import schedule
+        self.add()
+        self.assertIn("fired night", run_wb("schedule", "run", "night"))
+        deadline = time.time() + 60
+        while not schedule.runs("night") and time.time() < deadline:
+            time.sleep(POLL)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "ran")
+        self.assertTrue(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
+    def test_wait_on_a_backlog_takes_its_tasks_alone(self):
+        # headless Claude in the repo would otherwise take the daytime session's tasks there by
+        # directory, and review them
+        self.start("t-in", "ok", "--backlog", "night-b", "--queue")
+        self.start("t-day", "ok", "--queue")
+        for n in ("t-in", "t-day"):
+            wait_phase(n, {"review"})
+        self.assertTrue(run_wb("wait", "--backlog", "night-b", "--timeout", "5").startswith("[review] t-in"))
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+            run_wb("wait", "--backlog", "night-b", "--timeout", "1")
+        self.assertEqual(e.exception.code, 2)
+        self.assertNotIn("already delivered", run_wb("wait", "t-day", "--timeout", "2"))
+
+    def test_a_scheduled_runs_claude_accepts_but_never_merges(self):
+        os.environ["WB_SCHEDULE"] = "night"
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-any", "--merge", "-m", "feat: x")
+        self.assertIn("never merges", err.getvalue())
+
+    def test_doctor_says_when_a_schedules_unit_is_gone(self):
+        from workbench import schedule
+        self.add()
+        (Path(os.environ["XDG_CONFIG_HOME"]) / "systemd/user/wb-schedule-night.timer").unlink()
+        [(ok, said)] = schedule.doctor_lines()
+        self.assertFalse(ok)
+        self.assertIn("its unit is gone", said)
+
 
 class Notes(Base):
     def test_notes_about_the_user_are_kept_short_and_numbered(self):
