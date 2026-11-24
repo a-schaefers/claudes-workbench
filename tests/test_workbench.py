@@ -19383,6 +19383,95 @@ class Setup(Base):
         with mock.patch.object(cli.sys, "platform", "linux"):
             self.assertIn(">> ~/.bashrc", cli.path_advice())
 
+    def test_with_the_plugin_installed_setup_and_doctor_leave_path_to_the_users_own_terminal(self):
+        # #1190: the plugin's bin/ puts wb on Claude Code's Bash PATH and the mod runs the
+        # marketplace clone's, so a PATH edit and a restart of Claude Code are no longer needed
+        home = Path(self.tmp.name) / "home"
+        os.environ.update(HOME=str(home), PATH=os.path.dirname(shutil.which("git")), SHELL="/bin/zsh")
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        os.environ.pop("CLAUDE_CODE_PLUGIN_CACHE_DIR", None)
+        plugins = home / ".claude/plugins"
+        plugins.mkdir(parents=True)
+        (plugins / "installed_plugins.json").write_text(
+            json.dumps({"version": 2, "plugins": {"workbench@workbench": []}}))
+        line = next(x for x in self.setup()[1].splitlines() if "isn't on PATH" in x)
+        self.assertIn("Claude Code runs wb from the plugin's bin/", line)
+        self.assertIn(">> ~/.zshrc; then open a new terminal", line)
+        self.assertNotIn("quit Claude Code", line)
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn("--  wb isn't on this shell's PATH: Claude Code gets it from the plugin's bin/", out)
+        self.assertNotIn("BAD wb isn't on PATH", out)
+        # Claude Code's Bash: the launcher on PATH runs the clone's wb, which is no other copy
+        cached = plugins / "cache/workbench/workbench/abc123"
+        shutil.copytree(runner.PKG_ROOT / "mod/.claude-plugin", cached / ".claude-plugin")
+        (cached / "bin").mkdir()
+        shutil.copy2(runner.PKG_ROOT / "mod/bin/wb", cached / "bin/wb")
+        os.environ["PATH"] = os.pathsep.join([os.environ["PATH"], str(cached / "bin")])
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn(f"ok  wb on PATH: {cached / 'bin/wb'} (the plugin's bin/: it runs the marketplace clone's)", out)
+        self.assertNotIn("wb comes from", out)
+        # under CLAUDE_CODE_PLUGIN_CACHE_DIR Claude Code lists its plugins there instead
+        os.environ["CLAUDE_CODE_PLUGIN_CACHE_DIR"] = str(home / "cache")
+        self.assertFalse(cli.mod_listed())
+        (home / "cache").mkdir()
+        shutil.copy2(plugins / "installed_plugins.json", home / "cache/installed_plugins.json")
+        self.assertTrue(cli.mod_listed())
+
+    def test_the_plugins_bin_wb_runs_the_marketplace_clone_where_claude_code_keeps_it(self):
+        # #1190: Claude Code copies only mod/ into its plugin cache and puts its bin/ on the Bash
+        # tool's PATH; mod/bin/wb looks where the mod's marketplaceClone does, in its order
+        tmp = Path(self.tmp.name)
+        home = tmp / "home"
+        home.mkdir()
+
+        def clone(at: Path, name: str):
+            (at / "bin").mkdir(parents=True)
+            (at / "bin/wb").write_text(f"#!/bin/sh\nprintf '{name}'; printf ' [%s]' \"$@\"\n")
+            (at / "bin/wb").chmod(0o755)
+
+        def run(cwd=home, **env):
+            r = subprocess.run([str(runner.PKG_ROOT / "mod/bin/wb"), "a b", "c"], cwd=cwd, capture_output=True,
+                               text=True, env={"HOME": str(home), "PATH": os.environ["PATH"], **env})
+            return r.returncode, r.stdout, r.stderr
+
+        def known(plugins: Path, at: Path):
+            plugins.mkdir(parents=True, exist_ok=True)
+            (plugins / "known_marketplaces.json").write_text(json.dumps(
+                {"workbench": {"source": {"source": "directory", "path": str(at)}, "installLocation": str(at)}}, indent=2))
+
+        # none: one line naming the fix, the exit a missing command's
+        code, out, err = run()
+        self.assertEqual(code, 127)
+        self.assertIn(f"isn't in known_marketplaces.json or at {home}/.claude/plugins/marketplaces/workbench: "
+                      "claude plugin marketplace add a-schaefers/claudes-workbench", err)
+        # the git marketplace's clone under ~/.claude, each argument as given
+        clone(home / ".claude/plugins/marketplaces/workbench", "git")
+        self.assertEqual(run(), (0, "git [a b] [c]", ""))
+        # known_marketplaces.json's installLocation first (a directory marketplace); one without a bin/wb is passed over
+        known(home / ".claude/plugins", tmp / "gone")
+        self.assertEqual(run()[1], "git [a b] [c]")
+        clone(tmp / "dev", "dev")
+        known(home / ".claude/plugins", tmp / "dev")
+        self.assertEqual(run()[1], "dev [a b] [c]")
+        # CLAUDE_CONFIG_DIR, as Claude Code reads it: a ~ or a path relative to here
+        clone(home / "cc/plugins/marketplaces/workbench", "cc")
+        self.assertEqual(run(CLAUDE_CONFIG_DIR="~/cc")[1], "cc [a b] [c]")
+        self.assertEqual(run(CLAUDE_CONFIG_DIR="cc")[1], "cc [a b] [c]")
+        # CLAUDE_CODE_PLUGIN_CACHE_DIR holds the clone and its known_marketplaces.json when set
+        clone(home / "cache/marketplaces/workbench", "cache")
+        self.assertEqual(run(CLAUDE_CODE_PLUGIN_CACHE_DIR="~/cache")[1], "cache [a b] [c]")
+        known(home / "cache", tmp / "dev")
+        self.assertEqual(run(CLAUDE_CODE_PLUGIN_CACHE_DIR=str(home / "cache"))[1], "dev [a b] [c]")
+        # an unreadable known_marketplaces.json is passed over, not a failure
+        (home / "cache/known_marketplaces.json").write_text("{not json")
+        self.assertEqual(run(CLAUDE_CODE_PLUGIN_CACHE_DIR=str(home / "cache"))[1], "cache [a b] [c]")
+        # this clone, end to end: the real bin/wb runs from it
+        known(home / ".claude/plugins", runner.PKG_ROOT)
+        r = subprocess.run([str(runner.PKG_ROOT / "mod/bin/wb"), "--version"], capture_output=True, text=True,
+                           env={**os.environ, "HOME": str(home)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"\d+\.\d+")
+
     def test_setup_ends_with_a_first_run_checklist_that_names_each_fix_and_no_model(self):
         # #111: what a working setup still needs, each line with its fix
         home = Path(self.tmp.name) / "home"

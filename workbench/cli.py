@@ -6340,18 +6340,51 @@ def logout_stops() -> list[str]:
     return out
 
 
-def path_advice() -> str:
+def path_advice(claude: bool = True) -> str:
     """How to put ~/.local/bin on PATH for the user's own shell, then restart Claude Code. "Add
     it" was all wb setup said, and on macOS, or in a Claude Code started from the Dock or an IDE,
-    PATH comes from places users don't know (#274, the audit of 1.2)."""
+    PATH comes from places users don't know (#274, the audit of 1.2). Without `claude`, for the
+    user's own terminal alone: the plugin's bin/ gives Claude Code its wb (#1190)."""
     shell = Path(os.environ.get("SHELL") or "sh").name
     if shell == "fish":
         how = "run: fish_add_path ~/.local/bin"
     else:
         rc = {"zsh": "~/.zshrc", "bash": "~/.bash_profile" if sys.platform == "darwin" else "~/.bashrc"}
         how = (f"run: echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> {rc.get(shell, '~/.profile')}")
+    if not claude:
+        return f"For {shell}, {how}; then open a new terminal"
     return (f"For {shell}, {how}; then quit Claude Code and start it again from a new terminal "
             "(the desktop app or an IDE too: each reads PATH only when it starts)")
+
+
+def plugins_dir() -> Path:
+    """Where Claude Code keeps its plugins, installed_plugins.json and known_marketplaces.json:
+    CLAUDE_CODE_PLUGIN_CACHE_DIR when set, else <CLAUDE_CONFIG_DIR or ~/.claude>/plugins."""
+    cache = os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR")
+    return Path(os.path.expanduser(cache)) if cache else context.claude_home() / "plugins"
+
+
+def mod_listed() -> bool:
+    """The Claude Code mod among the installed plugins. Its bin/wb launcher then puts wb on Claude
+    Code's Bash PATH and the mod runs the marketplace clone's (#1190), so ~/.local/bin off PATH
+    leaves only the user's own terminal without wb. False when unreadable; a mod loaded another
+    way (--plugin-dir, a dev mod) isn't listed."""
+    try:
+        return any(k.startswith("workbench@") for k in json.loads(
+            (plugins_dir() / "installed_plugins.json").read_text()).get("plugins", {}))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def plugin_launcher(path: str | Path) -> bool:
+    """`path` is the plugin's bin/wb launcher (mod/bin/wb, in Claude Code's copy of the plugin):
+    it runs the marketplace clone's bin/wb, not a copy of its own (#1190)."""
+    p = Path(path).resolve()
+    try:
+        return p.parent.name == "bin" and json.loads(
+            (p.parent.parent / ".claude-plugin/plugin.json").read_text()).get("name") == "workbench"
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def agents_md_note() -> str:
@@ -6394,8 +6427,12 @@ def cmd_setup(a):
         print(f"ok  {old} removed: /delegate is now /workbench")
     bindir = str(Path.home() / ".local/bin")
     if bindir not in os.environ.get("PATH", "").split(os.pathsep):
-        print(f"--  {bindir} isn't on PATH: Claude and the mod run wb by name (WB_BIN moves only "
-              f"the mod's calls). {path_advice()}")
+        if mod_listed():  # the plugin's bin/ and the mod's lookup cover Claude Code (#1190)
+            print(f"--  {bindir} isn't on PATH: Claude Code runs wb from the plugin's bin/ and the "
+                  f"marketplace clone, so only your own terminal lacks it. {path_advice(claude=False)}")
+        else:
+            print(f"--  {bindir} isn't on PATH: Claude and the mod run wb by name (WB_BIN moves only "
+                  f"the mod's calls). {path_advice()}")
     try:  # a minute or two, said up front; a task started meanwhile goes first
         for line in optimize.start(if_due=True):
             print(f"--  {line}")
@@ -6700,7 +6737,7 @@ def _mod_behind() -> str | None:
     said "up to date" while every new session opened a four-day-old pane, no splash, no modeline
     (2026-11-21). None when it is current, not installed from this clone, or unreadable."""
     try:
-        rows = json.loads((context.claude_home() / "plugins/installed_plugins.json").read_text()
+        rows = json.loads((plugins_dir() / "installed_plugins.json").read_text()
                           ).get("plugins", {}).get("workbench@workbench") or []
     except (OSError, ValueError, AttributeError):
         return None
@@ -7094,14 +7131,23 @@ def cmd_doctor(a):
     # Claude's Bash runs `wb` by name whatever WB_BIN says: WB_BIN only moves the mod's own calls
     # (the 2026-11-16 audit: doctor said ok beside "the mod can't run it")
     on_path, wb_bin = shutil.which("wb"), os.environ.get("WB_BIN")
+    # the plugin's bin/ launcher (Claude Code's Bash, #1190) runs the marketplace clone's wb, not
+    # a copy of its own: no "comes from" another copy
+    launcher = bool(on_path) and plugin_launcher(on_path)
     if on_path:
-        line(True, f"wb on PATH: {on_path}" + (f" (the mod runs WB_BIN={wb_bin})" if wb_bin else ""))
+        line(True, f"wb on PATH: {on_path}" + (" (the plugin's bin/: it runs the marketplace clone's)"
+                                               if launcher else "")
+             + (f" (the mod runs WB_BIN={wb_bin})" if wb_bin else ""))
+    elif mod_listed():  # Claude Code's Bash has the plugin's bin/, the mod the clone's (#1190)
+        print("--  wb isn't on this shell's PATH: Claude Code gets it from the plugin's bin/; for "
+              "your own terminal, " + (path_advice(claude=False) if (Path.home() / ".local/bin/wb").exists()
+                                       else "link bin/wb into a PATH directory (wb setup)"))
     else:
         linked = (Path.home() / ".local/bin/wb").exists()  # wb setup's link, not on PATH (#274)
         line(False, "wb isn't on PATH: Claude runs it by name in Bash, and the mod too; " +
              (path_advice() if linked else "link bin/wb into a PATH directory (wb setup)")
              + (f"; WB_BIN={wb_bin} covers only the mod's calls" if wb_bin else ""))
-    elsewhere("wb", wb_bin or on_path, PKG_ROOT / "bin/wb")
+    elsewhere("wb", wb_bin or (None if launcher else on_path), PKG_ROOT / "bin/wb")
     # a warning, not BAD: a desktop that never logs out is fine (#351). The chat's line only
     # with the chat on: nearly every desktop lingers off, and most never turn the chat on
     for why in logout_stops():
@@ -7329,11 +7375,7 @@ def cmd_doctor(a):
     elsewhere("/workbench", skill.parent, PKG_ROOT / "skill/workbench")
     if note := agents_md_note():
         print(note)
-    try:  # information only: a mod loaded another way (--plugin-dir, a dev mod) isn't listed here
-        listed = any(k.startswith("workbench@") for k in json.loads(
-            (context.claude_home() / "plugins/installed_plugins.json").read_text()).get("plugins", {}))
-    except (OSError, ValueError, AttributeError):
-        listed = False
+    listed = mod_listed()  # information only: a mod loaded another way isn't listed here
     stale = _mod_behind() if listed else None
     print(f"--  the Claude Code mod is installed as of {stale}, older than this clone's mod: wb update "
           "refreshes it" if stale else

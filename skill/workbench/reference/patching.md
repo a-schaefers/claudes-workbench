@@ -3,8 +3,7 @@
 Read from the /workbench skill when workbench itself misbehaves (a crash, a false report, a doc
 that is wrong), when `wb update` refuses over local changes or a patch that no longer applies,
 or when the user wants to change how workbench works for them. The contributor's rules are in
-CONTRIBUTING.md at the root of workbench's code (two directories above `readlink -f "$(command
--v wb)"`); read it, and that root's CLAUDE.md, before the first patch.
+CONTRIBUTING.md at the root of workbench's code (two directories above `readlink -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/workbench"`); read it, and that root's CLAUDE.md, before the first patch.
 
 ## Everybody, or just this user?
 Decide before you offer anything, and tell the user which and why in a line.
