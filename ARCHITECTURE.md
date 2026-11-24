@@ -382,9 +382,12 @@ call notes its session under `claude-sessions/<CLAUDE_PID>` below a `start` line
 adopted tasks, #719). Usage is per API call, once per `message.id`, charged only to that
 session's tasks:
 - a call whose Bash runs `wb … <task>` (split with `shlex`) is that task's, and so are the turn's
-  later calls, until a `wb` names others, `wb accept|discard` closes it (`CLOSING`), or an edit
+  later calls, until a `wb` names others, `wb accept|discard` closes it (`CLOSING`), an edit
   (`EDITS`) to a file outside the worktree not handed to `wb` (`HANDED`: `--spec`, `--message`,
-  `--file`);
+  `--file`), or a read (`READS`: Read, Grep, Glob; its `file_path`, else `path`, else the row's
+  `cwd`) outside the tasks' directories (`_read_theirs`: a turn that read other code after `wb
+  start` put 5344K on a trivial trial, #1123); a read for a review before a later `wb` naming the
+  task is still its own, taken back as the calls before that `wb` are (below);
 - the calls before a turn's first such `wb` are its tasks', back to the last call that ran any
   `wb` or edited another file (82K of other work once, 2026-11-17); a turn a wake opened (`WAKE`:
   the mod's `` [workbench] Task `<name>` `` at the prompt's start, after Claude Code's "The

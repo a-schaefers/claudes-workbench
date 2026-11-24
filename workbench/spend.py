@@ -86,19 +86,24 @@ CLOSING = {"accept", "discard"}  # past these, the session's work is no longer t
 
 
 EDITS = ("Edit", "Write", "NotebookEdit")  # Claude Code's tools that change a file
+READS = ("Read", "Grep", "Glob")  # and that read files: `file_path`, else `path` (none: the cwd)
 
 
 def _named(row: dict, names: set[str]) -> dict:
     """What an assistant message does that charging needs: the session's tasks its `wb` calls
-    name (`hit`) and close (`shut`), whether it ran `wb` at all, the files it edited, and the
-    specs it handed over (`wb start|next --spec`), and the tasks a `wb next` names (`nexts`)."""
-    out = {"hit": set(), "shut": set(), "wb": False, "edits": set(), "specs": set(), "nexts": set()}
+    name (`hit`) and close (`shut`), whether it ran `wb` at all, the files it edited and read
+    (`reads`: Read, Grep, Glob), and the specs it handed over (`wb start|next --spec`), and the
+    tasks a `wb next` names (`nexts`)."""
+    out = {"hit": set(), "shut": set(), "wb": False, "edits": set(), "specs": set(), "nexts": set(),
+           "reads": set()}
     for c in (row.get("message") or {}).get("content") or []:
         if not (isinstance(c, dict) and c.get("type") == "tool_use"):
             continue
         given = c.get("input") or {}
         if c.get("name") in EDITS:
             out["edits"].add(str(given.get("file_path") or given.get("notebook_path") or ""))
+        if c.get("name") in READS:
+            out["reads"].add(str(given.get("file_path") or given.get("path") or row.get("cwd") or ""))
         if c.get("name") != "Bash":
             continue
         for words in _wb_calls(str(given.get("command", ""))):
@@ -129,6 +134,12 @@ def _theirs(path: str, tasks: set[str], handed: set[str]) -> bool:
         path.startswith(str(store.Task(t).worktree) + "/") for t in tasks)
 
 
+def _read_theirs(path: str, tasks: set[str]) -> bool:
+    """Whether a read is the tasks' work: in one's directory (its worktree, report, logs)."""
+    return any(path == str(store.Task(t).dir) or path.startswith(str(store.Task(t).dir) + "/")
+               for t in tasks)
+
+
 def _usage(row: dict) -> dict:
     u = (row.get("message") or {}).get("usage") or {}
     split = u.get("cache_creation") or {}
@@ -151,7 +162,7 @@ def _events(rows: list[dict], names: set[str]) -> list:
             does = _named(row, names)
             mid = (row.get("message") or {}).get("id") or ("row", len(events))  # not deduplicated
             if mid in by_id:
-                for k in ("hit", "shut", "edits", "specs", "nexts"):
+                for k in ("hit", "shut", "edits", "specs", "nexts", "reads"):
                     by_id[mid][k] |= does[k]
                 by_id[mid]["wb"] |= does["wb"]
                 continue
@@ -180,9 +191,15 @@ def _charge(events: list) -> list[dict]:
                     break
                 w["names"], w["ahead"] = set(ev["hit"]), set(ev["nexts"])
             waiting, current = [], ev["hit"] - ev["shut"]
-        elif current and all(_theirs(p, current, set()) for p in ev["edits"]):
+        elif current and all(_theirs(p, current, set()) for p in ev["edits"]) \
+                and all(_read_theirs(p, current) for p in ev["reads"]):
             pass  # still the task's: reading its diff, its worktree, writing its feedback
-        else:  # another file edited: other work, until a `wb` names a task again
+        else:
+            # another file edited or read: other work, until a `wb` names a task again. Reads
+            # kept the charge: a turn that went on after `wb start` to read other code put 5344K
+            # on a trivial trial (#1123, 2026-11-23). A read for its review before a later `wb`
+            # naming it is still its own: that `wb` takes the calls back to the last one that
+            # ran `wb` or edited something else
             c["names"], current = set(), set()
             waiting.append((c, ev))
     return out
@@ -196,7 +213,9 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
     just before a turn's first such `wb` are its tasks' too (the reading and the spec before
     `wb start`), back to the last call that ran `wb` or edited a file other than its `--spec`;
     a wake's turn is the wake's task's. An edit to a file outside the tasks' worktrees, and not
-    one handed to `wb` (`HANDED`), ends the charge: that is other work.
+    one handed to `wb` (`HANDED`), ends the charge: that is other work; so does a read (Read,
+    Grep, Glob) outside the tasks' directories (#1123), which a later `wb` naming them takes
+    back with the calls before it.
     Charging whole turns was wrong: one long turn that also ran a task put 5.5M cached tokens
     of other work on it (rel090-check, 2026-11-17).
     Each subagent's transcript is a thread of its own, charged the same way (its prompt starts

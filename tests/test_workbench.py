@@ -15425,6 +15425,33 @@ class ClaudeSpend(Base):
         ])
         self.assertEqual(spend.usage(t3)["output"], 3 + 5 + 11 + 13 + 400 + 17 + 19 + 23)
 
+    def test_reading_other_files_after_wb_start_ends_the_tasks_charge(self):
+        # #1123 (2026-11-23): only an outside edit ended the charge, so a turn that went on to read
+        # other code after `wb start` charged it all to the task: 5344K on a trivial trial
+        from workbench import spend
+        t = self.task("t-x")
+
+        def reads(mid, at, out, tool="Read", **given):
+            return [{"type": "assistant", "timestamp": at, "cwd": "/r", "message": {
+                "id": mid, "role": "assistant", "usage": {"output_tokens": out},
+                "content": [{"type": "tool_use", "name": tool, "input": given}]}}]
+        self.transcript([
+            _turn("start it, then look into the keyhole", "2026-11-17T10:00:00Z"),
+            *_call("r0", "2026-11-17T10:00:01Z", 3),                        # reading for the spec
+            *_call("st", "2026-11-17T10:00:02Z", 5, "wb start t-x --trial --spec s.md"),
+            *_call("say", "2026-11-17T10:00:03Z", 7),                       # its reply: still t-x's
+            *(row for i in range(20)                                        # other code: nobody's
+              for row in reads(f"o{i}", f"2026-11-17T10:00:{10 + i}Z", 1000, file_path=f"/r/src/m{i}.py")),
+            *reads("g", "2026-11-17T10:00:40Z", 1000, "Grep", pattern="keyhole"),     # the cwd, /r
+            *_call("b", "2026-11-17T10:00:41Z", 1000, "grep -rn usage /r/src"),
+            _turn("[workbench] Task `t-x` is ready for review.", "2026-11-17T10:20:00Z"),
+            *_call("rp", "2026-11-17T10:20:01Z", 11, "wb report t-x"),
+            *reads("w", "2026-11-17T10:20:02Z", 13, file_path=str(t.worktree / "a.py")),  # its own
+            *reads("ctx", "2026-11-17T10:20:03Z", 17, file_path="/r/src/caller.py"),     # for the review
+            *_call("acc", "2026-11-17T10:20:04Z", 19, "wb accept t-x -m 'feat: x'"),
+        ])
+        self.assertEqual(spend.usage(t)["output"], 3 + 5 + 7 + 11 + 13 + 17 + 19)
+
     def test_the_weights_count_writes_reads_and_output_against_input(self):
         from workbench import spend
         self.assertEqual(spend.weighted({"input": 100, "cache_write_5m": 100, "cache_write_1h": 100,
