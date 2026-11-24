@@ -351,8 +351,8 @@ wb start <kebab-name> --spec <file|-> --repo <repo> --role significant|trivial|w
 ```
 `--auto-fix` defaults to 2 on the GPU and 1 on API.
 **An image the agent should see** (a mockup, a screenshot, an error capture, the user's upload):
-`--image <path>` (repeatable, up to 4; PNG, JPEG, GIF or WebP, 10 MiB at most) on `wb start`,
-`wb feedback` or `wb next`. Only for a model that takes images: otherwise it is refused in one
+`--image <path>` (repeatable, up to 4; PNG, JPEG, GIF or WebP, 10 MiB at most; 8 MiB in all,
+its earlier images counted) on `wb start`, `wb feedback` or `wb next`. Only for a model that takes images: otherwise it is refused in one
 line, and you describe it in the spec instead; never change the role or pass `--model` for it.
 Put the project's compiler, typecheck or lint ahead of the tests in `--test` (`mypy && pytest`):
 its errors reach the agent as auto-fix rounds, not your review. Only one the project runs or

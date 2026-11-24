@@ -4360,7 +4360,7 @@ def _spend_lead(task: store.Task, rnd: dict) -> str:
 
 
 def first_tokens(task: store.Task | None = None, prompt: str | None = None,
-                 fresh: bool | None = None) -> int:
+                 fresh: bool | None = None, images: int = 0) -> int:
     """What the next round's first request carries, in tokens as the keyhole's room counts a
     body (its bytes / 4), for the day cap's look ahead (meter.request_floor). Left out, a day
     within that request's input of the cap passed wb start, feedback, next, resume and _go_on,
@@ -4375,8 +4375,13 @@ def first_tokens(task: store.Task | None = None, prompt: str | None = None,
     True is a later round begun fresh (status `context` "fresh"), which the runner always hands
     over (fresh_reason, _start_fresh), session or not: judged from the status, a resume after a
     round that never made a session counted its bare prompt, under half the first request, and
-    the room refused it at the cap named (#1173's review, 2026-11-24)."""
+    the room refused it at the cap named (#1173's review, 2026-11-24). And each image the
+    session's requests carry at meter.IMAGE_TOKENS, as the room counts it: the task's own
+    (status `images`: a fresh session resends them all, a continued one has them in its history)
+    and ``images`` more, given now (--image); left out, wb start passed a task the room then
+    refused at its first request (#1199's review)."""
     st = task.status if task is not None else {}
+    pictures = sum(1 for r in st.get("images") or () if isinstance(r, dict)) + max(images, 0)
     if prompt is None:
         path = store.round_prompt(task, st.get("round", 1)) if task is not None else None
         prompt = path.read_text() if path is not None and path.is_file() else ""
@@ -4394,7 +4399,7 @@ def first_tokens(task: store.Task | None = None, prompt: str | None = None,
             size = len(handoff_prompt(task, "", prompt).encode())
         except Exception:  # an estimate: never a reason to refuse, so the most argv can carry
             size = PROMPT_ARG_MAX
-    return base + -(-min(size, PROMPT_ARG_MAX) // 4)
+    return base + -(-min(size, PROMPT_ARG_MAX) // 4) + pictures * meter.IMAGE_TOKENS
 
 
 def _go_on(task: store.Task, n: int, what: str) -> bool:

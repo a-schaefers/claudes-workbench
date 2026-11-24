@@ -192,7 +192,8 @@ def _coding_used(task: store.Task) -> None:
             {**x, "used": x.get("used") or (store.now() if _spent(x) else None)} for x in rows]})
 
 
-def _model_still_listed(task: store.Task, prompt: str | None = None, fresh: bool | None = None) -> None:
+def _model_still_listed(task: store.Task, prompt: str | None = None, fresh: bool | None = None,
+                        images: int = 0) -> None:
     """An API task's model must still be in OpenCode's catalog before feedback, next or resume
     writes a round: exit 3 with runner.left_catalog's line, never another model (#1016). And
     wb start's spend refusal (meter.refusal: no price, no day cap (#1089), today at the cap or
@@ -200,7 +201,8 @@ def _model_still_listed(task: store.Task, prompt: str | None = None, fresh: bool
     stopped at once as a spend `stuck`, a Claude wake for nothing, with a review counted or a
     step committed for a round that never ran (#1118, 2026-11-23). That request's input is the
     round's first (runner.first_tokens of ``prompt`` and ``fresh``): the session's context
-    left out, the check passed and the room refused it at once (#1173, 2026-11-24). Its advice
+    left out, the check passed and the room refused it at once (#1173, 2026-11-24); ``images``,
+    --image's, besides the task's own (#1199's review). Its advice
     is a running task's: the role on the GPU for the next tasks only, as this one keeps its API
     model (#1171)."""
     if task.spec.get("via") != "api":
@@ -208,7 +210,7 @@ def _model_still_listed(task: store.Task, prompt: str | None = None, fresh: bool
     if (m := models.lookup(task.spec.get("model") or "")) is None:
         die(runner.left_catalog(task), 3)
     if why := meter.refusal(m, task.spec.get("role"), task=task,
-                            tokens=runner.first_tokens(task, prompt, fresh)):
+                            tokens=runner.first_tokens(task, prompt, fresh, images)):
         die(why, 3)
 
 
@@ -1370,6 +1372,17 @@ def _no_base(repo: Path, base: str) -> str:
 # before any request, and the round would fail mid-task. At most IMAGE_MAX a command.
 IMAGE_MAX = 4
 IMAGE_BYTES = 10 * 1024 * 1024
+# A task's images in all, GPU or API (#1199's review): OpenCode 2.3.2 sends every image of the
+# session as base64 (4/3 of its bytes, the read tool's copy too) in each request, and its
+# boundImages (core/src/session/model-request.ts) swaps the oldest for "[This image was removed
+# to reduce the request size…]" once they pass IMAGE_BYTES_TRIGGER, 25 MiB of base64, cutting
+# down to IMAGE_BYTES_TARGET, 15 MiB, with nothing said to wb or Claude: two 10 MiB PNGs that
+# passed every other check left the agent one, four left it one. 8 MiB is 10.7 MiB of base64,
+# under the target, with room for one re-read under the trigger. On an API task it also keeps
+# the body well under the keyhole's BODY_CAP (32 MB, a 413 past it).
+OPENCODE_IMAGE_TRIGGER = 25 * 1024 * 1024
+OPENCODE_IMAGE_TARGET = 15 * 1024 * 1024
+IMAGE_TOTAL = 8 * 1024 * 1024
 IMAGE_KINDS = ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"GIF87a", ".gif"),
                (b"GIF89a", ".gif"))
 
@@ -1421,12 +1434,33 @@ def _images_fit(m: models.Model | None, model_id: str) -> None:
             "describe the image in the spec")
 
 
+def _images_room(found: list[tuple[Path, str]], task: store.Task | None = None) -> None:
+    """A task's images, its own (``task``: what a fresh session resends) and ``found``, at most
+    IMAGE_TOTAL in all, on any model: one line over it, before anything is written, as OpenCode
+    would drop the oldest unsaid (#1199's review)."""
+    if not found:
+        return
+    had = [runner.images_dir(task) / Path(str(r["file"])).name for r in
+           (task.status.get("images") or () if task is not None else ()) if isinstance(r, dict) and r.get("file")]
+    total = 0
+    for p in [path for path, _ in found] + had:
+        with contextlib.suppress(OSError):
+            total += p.stat().st_size
+    if total > IMAGE_TOTAL:
+        die(f"--image: {total / 2**20:.1f} MiB of images on this task{' with its own' if had else ''}, "
+            f"over {IMAGE_TOTAL >> 20} MiB in all (OpenCode drops the oldest unsaid past "
+            f"{OPENCODE_IMAGE_TRIGGER >> 20} MiB of base64 in a request): fewer or smaller images "
+            "(a crop, a JPEG), or describe the rest in the spec")
+
+
 def _task_images(task: store.Task, paths: list[str] | None) -> list[tuple[Path, str]]:
-    """wb feedback's and wb next's --image, checked against the task's own model."""
+    """wb feedback's and wb next's --image, checked against the task's own model and, with the
+    task's own images, against IMAGE_TOTAL (_images_room)."""
     shown = _images_given(paths)
     if shown:
         mid = task.spec.get("model") or ""
         _images_fit(models.lookup(mid), mid)
+        _images_room(shown, task)
     return shown
 
 
@@ -1509,7 +1543,7 @@ def cmd_start(a):
     _local_only_check(a, repo, role, _package(repo, Path(a.repo).resolve(), a.base))  # #1021
     # round 1's first request, input and all, for the day cap's look ahead: without its input a
     # start within that of the cap passed, then the room refused that request at once (#1173)
-    first = runner.first_tokens(prompt=spec_text)
+    first = runner.first_tokens(prompt=spec_text, images=len(shown))  # each image too (#1199's review)
     m, state, why, routed = pick_model(role, size, a.model, stack, a.name, tokens=first)
     # a rate limit or outage a task met on this provider (api-health.json) is no refusal: the
     # keyhole waits it out inside the round, which stops as rate_limited or outage if it holds.
@@ -1560,6 +1594,7 @@ def cmd_start(a):
                         "--queue starts it anyway, to wait behind; or do this step yourself"), 4)
     if shown:  # the model the task runs on, once nothing moves it (_busy_api above)
         _images_fit(m, m.id)
+        _images_room(shown)
 
     try:
         task.dir.mkdir(parents=True)
@@ -1829,7 +1864,8 @@ def cmd_feedback(a):
     # when that runs again: the text alone passed, and the room refused the rerun's first
     # request at once, a spend wake for nothing (the merge of #1173 and #1180, 2026-11-24)
     own = store.round_prompt(task, n).read_text() + "\n\n" if unsent else ""
-    _model_still_listed(task, own + said, True if a.fresh else False if a.keep_context else None)
+    _model_still_listed(task, own + said, True if a.fresh else False if a.keep_context else None,
+                        len(shown))
     _spec_gaps(task, a.spec_gap)
     dropped = _stale_notes(task)
     if unsent:
@@ -1968,7 +2004,7 @@ def cmd_next(a):
     shown = _task_images(task, getattr(a, "image", None))  # #1199: before the commit
     # after the spec, before the commit: the step's first request carries the session's context
     # and the spec with the protocol (#1173)
-    _model_still_listed(task, nxt + protocol_for(spec), True if a.fresh else None)
+    _model_still_listed(task, nxt + protocol_for(spec), True if a.fresh else None, len(shown))
     commit = _step_landed(task, step)
     measured = results.step(task, landed=True, since="HEAD~1" if commit else "HEAD", gaps=a.spec_gap)
     if not commit:
@@ -3297,8 +3333,12 @@ def _route_start(a) -> None:
         spec_text = "" if ns.spec == "-" else Path(ns.spec).read_text(encoding="utf-8", errors="replace")
     except OSError:
         spec_text = ""
-    # no price, no cap, or today at the cap (#1019, #1089): wb start's too
-    if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text)):
+    shown = _images_given(getattr(ns, "image", None))  # wb start's checks of --image (#1199)
+    if shown:
+        _images_fit(m, m.id)
+        _images_room(shown)
+    # no price, no cap, or today at the cap (#1019, #1089): wb start's too, its images counted
+    if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text, images=len(shown))):
         die(why, 3)
     # wb start's cheap refusals too, in place of a dialog for a start that then exits 1, 3 or 4
     # (#1104, 2026-11-23): the model can't run, a --base naming no commit, the provider's slots
