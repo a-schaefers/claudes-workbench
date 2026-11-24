@@ -2063,8 +2063,9 @@ const marksOf = (text: string, value: string) => (text.match(new RegExp(`"local_
 
 // Why Claude's edit of commands.json is refused, or '': only the user lifts a repo's local_only
 // (#1021). Refused: an edit that drops a `"local_only": true`, and one that writes a `false` the
-// text didn't have, since the nearest entry that states it decides (privacy.local_only): a
-// package's `false` under a local-only root lifted it (#1021's review). A text that isn't JSON
+// text didn't have: a package's `false` under a local-only root lifted it while the nearest entry
+// decided (#1021's review); since #1255 any entry's `true` holds for its whole repo, and the
+// guard stays, so Claude never writes the user's local_only either way. A text that isn't JSON
 // counts the marks instead. The file is matched by real path, so another spelling of it (`/./`,
 // a linked config directory) is the same file. A shell's write isn't seen here, as with
 // routes.json (#1014's gate).
@@ -2085,7 +2086,7 @@ async function localOnlyRefusal($: any, e: Row, path: string): Promise<string> {
     lifted = marksOf(text, 'false') > marksOf(now, 'false') ? ['a repo'] : []
   }
   const why = [...(dropped.length ? [`drops "local_only": true for ${dropped.join(', ')}`] : []),
-    ...(lifted.length ? [`sets "local_only" to something other than true for ${lifted.join(', ')} (the nearest entry that says it decides, so it lifts one above)`] : [])]
+    ...(lifted.length ? [`sets "local_only" to something other than true for ${lifted.join(', ')}`] : [])]
   if (!why.length) return ''
   return `workbench: not changed: this edit ${why.join(' and ')} in commands.json. ` +
     'Only the user lifts a repo\'s local_only (it keeps API models off that repo); tell them, and leave it as it is.'
