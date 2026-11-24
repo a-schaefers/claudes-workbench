@@ -395,6 +395,56 @@ class Lifecycle(Base):
                 self.assertGreater(sent.index("carry on"), sent.index(want))
                 self.assertEqual(task.status["round"], 2)
 
+    def test_feedback_on_a_fresh_round_never_sent_still_starts_it_in_a_fresh_session(self):
+        # #1230 (the 2.0 bar loop, round 4, 2026-11-24): wb resume or wb next --fresh, then the
+        # model server down before the round began, then the notice's "carry on": wb feedback
+        # cleared the round's `context`, and the resume ran in the old stuck session, its prompt
+        # saying it was a fresh one
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Step two: write 43 to second.txt.\n")
+        for name, then in (("t-ffresume", ("resume",)),
+                           ("t-ffnext", ("next", "--spec", str(step2), "-m", "feat: step one", "--fresh"))):
+            with self.subTest(name=name):
+                self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+                wait_phase(name, {"review"})
+                task = store.Task(name)
+                if then[0] == "resume":
+                    task.set_status(phase="stuck", last="stopped by the reviewer")  # as wb stop leaves it
+                old = task.status["session"]
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb(*then[:1], name, *then[1:])
+                self.assertEqual(task.status["context"], "fresh")
+                with mock.patch.object(runner, "_down", return_value=True), \
+                        mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+                    runner.drive(task)
+                self.assertEqual((task.status["phase"], task.status["round"]), ("failed", 2))
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb("feedback", name, "--text", "carry on")
+                self.assertEqual(task.status["context"], "fresh")
+                runner.drive(task)
+                st = task.status
+                self.assertEqual((st["phase"], st["round"]), ("review", 2), st.get("last"))
+                self.assertNotEqual(st["session"], old)
+                fresh = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0]
+                         if e.get("kind") == "fresh" and e.get("round") == 2]
+                self.assertEqual([e["text"] for e in fresh], [runner.FRESH_SAID + runner.ASKED_FRESH])
+
+    def test_feedback_with_keep_context_on_a_fresh_round_never_sent_keeps_the_session(self):
+        # #1230: the flag still says what the round does; only its absence leaves `context` alone
+        name = "t-ffkeep"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        task.set_status(phase="stuck", last="stopped by the reviewer")
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("resume", name)
+        with mock.patch.object(runner, "_down", return_value=True), \
+                mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+            runner.drive(task)
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", name, "--text", "carry on", "--keep-context")
+        self.assertEqual(task.status["context"], "keep")
+
     def test_feedback_added_to_a_round_never_sent_is_gathered_as_lessons_apart_from_the_rounds_own(self):
         # #1180 (its review, 2026-11-24): wb feedback's text after an unsent feedback round's own
         # prompt was read as part of its body, and "Also write 7 to extra.txt Review feedback from
