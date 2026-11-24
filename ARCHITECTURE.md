@@ -2907,7 +2907,10 @@ not an API model either, as `hosted()` knows them by name: add it by its cloud n
 `wb model add` refuses a cloud-named one unless models.json gives its id `"local": true`
 (`cloud_allowed`: the entry is then written, an API model still), and one under a plain name always
 (`local: true` let it in, as a model nothing could run); scout lists them apart; doctor says once `<id> is an Ollama cloud
-model, an API model now: set a role to use it`, skipping its other checks.
+model, an API model now: set a role to use it`, skipping its other checks, by name whatever the
+probed engine (`_ollama_ish`), and for a cloud name on a provider not like Ollama `<id> reads as an
+Ollama cloud model by its name, so wb runs it on neither side: rename its opencode.json entry` (#1074:
+one got the server checks, the other no word); scout's list says the same of each.
 
 **models.json** (`$WB_MODELS`, strict JSON, malformed breaks every command; `set_override` via
 `store.edit_config`): only what OpenCode can't say, keyed by provider or model id, model over

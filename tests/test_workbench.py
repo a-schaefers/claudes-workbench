@@ -28391,6 +28391,16 @@ class ApiDiscovery(Base):
         for size in ("significant", "trivial"):
             top, _ = router.choose(size)
             self.assertEqual(top.model.id, "ollama/qwen3:8b")
+        buf = io.StringIO()                                         # and doctor says which is which
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        self.assertIn("--  ollama/gpt-oss:120b-cloud is an Ollama cloud model, an API model now: set a "
+                      "role to use it", buf.getvalue())
+        self.assertIn("--  front/big-cloud reads as an Ollama cloud model by its name, so wb runs it on "
+                      "neither side: rename its opencode.json entry", buf.getvalue())
+        out = run_wb("scout")                                       # scout's list the same
+        self.assertIn("  ollama/gpt-oss:120b-cloud: an Ollama cloud model, an API model now", out)
+        self.assertIn("  front/big-cloud: named like an Ollama cloud model, so wb runs it on neither side", out)
 
     def test_with_api_runs_off_wb_start_refuses_an_api_model_by_model_flag(self):
         # cli.API_RUNS is on since #1016 (wb start --role): the off path, kept

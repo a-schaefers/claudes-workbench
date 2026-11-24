@@ -4602,8 +4602,10 @@ def cmd_scout(a):
         other = prov["engine"] != "ollama" and not models._fake() and \
             models._ask(f"{models.openai_base(prov['url'])}/models", prov["key"], timeout=1) is not None
         for name, e in prov["models"].items():
-            if prov["engine"] == "ollama" and models._cloud_name(name):  # off this machine (#1013)
-                print(f"  {pid}/{name}: an Ollama cloud model, an API model now (run only through a role)")
+            if models._cloud_name(name):  # off this machine (#1013), whatever the engine (#1074)
+                print(f"  {pid}/{name}: " + ("an Ollama cloud model, an API model now (run only through a role)"
+                                             if models._ollama_ish(pid, prov["url"], prov["engine"]) else
+                                             "named like an Ollama cloud model, so wb runs it on neither side"))
                 continue
             m = registered.get(f"{pid}/{name}")
             asked = served_name(name, e)  # the server's name for it: an alias's id (#588)
@@ -6590,8 +6592,15 @@ def cmd_doctor(a):
             print(f"--  provider {pid}: {prov['engine_note']}")
         ollama = prov["engine"] == "ollama"
         for name, e in prov["models"].items():
-            if ollama and models._cloud_name(name):  # a GPU candidate before #1013: said once
-                print(f"--  {pid}/{name} is an Ollama cloud model, an API model now: set a role to use it")
+            # whatever the probed engine, as discover() leaves it out: behind a proxy hiding
+            # /api/version, or `engine: server`, a cloud model got the server checks and no word,
+            # and one on a provider not like Ollama was on neither side, unsaid (#1074, 2026-11-23)
+            if models._cloud_name(name):  # a GPU candidate before #1013: said once
+                print(f"--  {pid}/{name} " + (
+                    "is an Ollama cloud model, an API model now: set a role to use it"
+                    if models._ollama_ish(pid, prov["url"], prov["engine"]) else
+                    "reads as an Ollama cloud model by its name, so wb runs it on neither side: rename "
+                    "its opencode.json entry (an `id` keeps the server's name)"))
                 continue
             said = (e.get("limit") or {}).get("context")
             asked = served_name(name, e)  # the server's name for it: an alias's id (#588)
