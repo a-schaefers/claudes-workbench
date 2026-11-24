@@ -793,10 +793,22 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   least the round's start), the round stops before any silence check: guard `rate_limited`
   ("<provider> rate-limited the agent's requests for 10 minutes (HTTP 429)") or `outage`
   ("<provider> didn't answer for 10 minutes (HTTP 503)", or the transport's reason); OpenCode
-  exiting on such a run sooner (its 10 retries) is the same stop. `queued` never stops a round.
-  A `provider.quota` (402) or `provider.auth` (401/403) error, or status `api_stop` (the keyhole's
-  quota stop, shared with #1019's spend stop; consumed by the stop), stops it at once: guard
-  `quota` or `auth`. `drive` runs a `rate_limited`/`outage` round again once (`_provider_revive`:
+  exiting on such a run sooner (its 10 retries) is the same stop. `queued` alone stops a round
+  only held `QUEUE_WAIT_S` (2 x `RATE_WAIT_S`, 20 minutes, from the queue's start until any answer:
+  OpenCode resends each request the provider closed unanswered, ten times, ~110 minutes on paused
+  clocks, #1083), or when OpenCode gives up on it, as an `outage` ("<provider> held the agent's
+  requests in its queue for 20 minutes without answering"); OpenCode giving up on answers cut short
+  (`provider.invalid-output`, "stream ended without finish_reason") is an `outage` too ("<provider>
+  cut its answers short (…)"). Status `api_stop` (the keyhole's quota stop, shared with #1019's
+  spend stop; consumed by the stop, and read first: the keyhole answers both with a 400) stops it
+  at once, and so does an error: `provider.quota` (402), guard `quota`; a 401, or a 403 (or a
+  `provider.auth` with no status) whose message names the key or token (`KEY_WORDS`), guard
+  `auth`; any other 403, a 400, 404, 405, 409, 410, 413, 415 or 422 (`REFUSED_CODES`), or a
+  `provider.content-filter`, `invalid-request`, `no-route` or `unsupported-operation`
+  (`REFUSED_KINDS`), guard `refused` ("<provider> refused the request (HTTP 404): <its message's
+  first line>": a moderation flag, a model gone, a schema rejected, the keyhole's own one-model
+  403; every 403 read as a refused key, and the rest failed as the agent's, #1084, #1082), but not
+  one over the window (`CONTEXT_WORDS`: the step's). `drive` runs a `rate_limited`/`outage` round again once (`_provider_revive`:
   a `load` event "<provider> rate-limited the round: it runs again once the cooldown ends", the
   lease stepped aside, a wait to the provider's `api-health.json` `until`, else `RATE_LIMIT_SECS`,
   at most `RATE_WAIT_S`, a steer note ending it into `_steer_round`, `wb stop` ending the runner),
@@ -805,7 +817,8 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb
   feedback <task> --text "carry on"` once the provider allows, and `wb route <role> gpu (the user's
   yes)` when the task has a role; top up or wait for the plan's reset; /connect for a refused
-  key). Its `stopped` event says `by: "provider"`, so it is never a lesson about the agent (the
+  key; for `refused`, `wb feedback` once what the provider said is fixed, and on a 404 `wb takeover`
+  or `wb discard` if it no longer serves the model, which wb never switches). Its `stopped` event says `by: "provider"`, so it is never a lesson about the agent (the
   same limit on three tasks of one account read as a recurring one). An `api_stop` whose guard is
   `spend` (#1019's day cap) stops the round the same way but is the user's budget, not the
   provider's: `cause` `spend`, `infra` `spend`, `by: "spend"` (`runner.stopped_by`, `SPEND`), no
@@ -1763,7 +1776,8 @@ skips the title request: OpenCode sends nothing to another model. An upstream er
 `events.jsonl` only as the keyhole redacted it, and a round that died on one says it in status
 `last` (`opencode exited 1: <error>`, API tasks only); a refused key or a spent balance the
 keyhole saw ends the round first as the provider's `auth` or `quota` stop, whose line names it
-(`<provider> refused the API key (HTTP 401)`, *The hold*, #1020).
+(`<provider> refused the API key (HTTP 401)`, *The hold*, #1020), and a request it refused for
+another reason as `refused`, with the provider's words (#1082, #1084).
 
 *The task's own catalog* (`rules/<task>/catalog.json`, #1013's comment, #1015). The agent's
 OpenCode fetches no catalog (#1010), so a model newer than its binary's bundled snapshot was
@@ -5962,7 +5976,8 @@ default, `FAKE_RETRY_EVERY` apart, each `{type: "retry", attempt, nextRetryAt, m
 (the same with `provider.transport` ECONNREFUSED, checked on 2.3.2), `api` (#1020: one request to a keyhole,
 `FAKE_API` "<base> <token> <model>", silent while held; a 429 or 5xx back is a `retry` and the request again, 10 at
 most, `FAKE_RETRY_EVERY` apart; 402 `provider.quota`, 401/403 `provider.auth`, any other `provider.invalid-request`
-(the fake's guess at OpenCode's type), exit 1; then as `ok`), `auth` (401, `provider.auth`) and `quota` (402, `provider.quota`), both at once with no retry, and `nokey`
+(the fake's guess at OpenCode's type), exit 1; a 200 event stream with no `finish_reason`, 2.3.2's `provider.invalid-output`
+retried `FAKE_CUT_RETRIES` times (10), then that error, #1083; then as `ok`), `auth` (401, `provider.auth`) and `quota` (402, `provider.quota`), both at once with no retry, and `nokey`
 (the no-route error); the upstream message (`FAKE_ERROR_BODY`) comes through verbatim in `message` and
 `response.body`. `http` (#1015) makes the request for real: the provider's `options` from `OPENCODE_CONFIG`, then
 `OPENCODE_CONFIG_CONTENT` over them, a POST to `<baseURL>/chat/completions` with `Authorization: Bearer <apiKey>`
@@ -6261,7 +6276,8 @@ doc needs its own `!/` line).
   or OpenCode cuts a held request itself; `runner.PROVIDER_GUARDS` → the `provider` cause and `runner.SPEND` → the
   `spend` cause (`runner.stopped_by`, also status `infra`, the `stopped` event's `by`, `bench.replay`'s `error`), both
   outside `results.THE_STEP`; `api_stop` is shared with #1019's spend stop (guard `spend`); `HOLD_CODES`/`QUOTA` → `note_api`'s states and
-  `_ProviderWait.on_retry`/`on_error`'s reading of OpenCode's `retry` and `error`.
+  `_ProviderWait.on_retry`/`on_error`'s reading of OpenCode's `retry` and `error` (`REFUSED_CODES`, `REFUSED_KINDS`,
+  `KEY_WORDS`, `CONTEXT_WORDS`: OpenCode's error types and the providers' words).
 - **A model server's API fields** (`models.server_facts`, `ollama_served_context`, `weights`) → `test_portable.py`'s
   `Real` tests, *Running your own server*.
 - **What `wb top` reads** (`live_used`, `window`, `round`, `round_started_at`, `load_secs`, `last`; a `step` row's

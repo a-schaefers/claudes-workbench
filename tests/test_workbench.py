@@ -29380,6 +29380,48 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(task.status["last"], "deepinfra refused the API key (HTTP 401)")
         self.assert_no_canary(self.all_files(task.dir), json.dumps(task.status))
 
+    def test_a_request_the_provider_refuses_stops_as_the_providers_with_its_reason_and_no_key_remedy(self):
+        # #1084: every 403 read as "refused the API key" with /connect, a moderation flag and the
+        # keyhole's own one-model 403 too. #1082: a 404 (a model gone) or a 400 schema rejection
+        # failed the task as the agent's, against its slice. A 401, or a 403 naming the key, is
+        # still the key's; a request over the window is still the step's
+        from workbench import results
+        self.local_api_model()
+        cases = [("t-mod", 403, "Your input was flagged for moderation: harassment", "refused"),
+                 ("t-404", 404, "The model `x` does not exist", "refused"),
+                 ("t-400", 400, "Invalid 'tools[3].function.parameters': schema not supported", "refused"),
+                 ("t-key", 403, "Invalid API key for this project", "auth"),
+                 ("t-ctx", 400, "This model's maximum context length is 131072 tokens", None)]
+        for name, code, message, guard in cases:
+            with self.subTest(name=name):
+                self.up.mode, self.up.status, self.up.message = "status", code, message
+                self.start_api(name, "http", spawn=False)
+                self.drive_here(name)
+                task = store.Task(name)
+                st = task.status
+                note = [r for r in store.notices() if r.get("task") == name][-1]
+                if guard is None:                                          # the step's, as before
+                    self.assertEqual((st["phase"], st.get("infra"), note["cause"]), ("failed", None, "agent"))
+                    continue
+                self.assertEqual((st["phase"], st["infra"], note["cause"]), ("stuck", "provider", "provider"))
+                self.assertFalse(results.step(task, landed=False)["stuck"])  # never the step's
+                if guard == "auth":
+                    self.assertEqual(st["last"], f"deepinfra refused the API key (HTTP {code})")
+                    self.assertIn("/connect", note["text"])
+                    continue
+                self.assertEqual(st["last"], f"deepinfra refused the request (HTTP {code}): {message}")
+                self.assertNotIn("API key", note["text"])
+                self.assertNotIn("/connect", note["text"])
+                self.assertIn(f'once what deepinfra said is fixed, wb feedback {name} --text "carry on"',
+                              note["text"])
+                self.assertEqual(f"wb takeover {name} or wb discard {name}" in note["text"], code == 404)
+        # the keyhole's own 403, a request for another model, is no key problem either
+        wait = runner._ProviderWait(store.Task("t-mod"), 1)
+        wait.on_error({"error": {"type": "provider.auth", "status": 403,
+                                 "message": "keyhole: this task may use only deepinfra/x"}})
+        self.assertEqual(wait.stop(time.time()),
+                         ("refused", "deepinfra refused the request (HTTP 403): keyhole: this task may use only deepinfra/x"))
+
     def test_a_proxy_in_the_agents_env_doesnt_catch_the_keyhole(self):
         self.local_api_model()
         os.environ["http_proxy"] = "http://127.0.0.1:9"              # nothing listens there
@@ -29917,11 +29959,12 @@ class _RateUpstream(http.server.BaseHTTPRequestHandler):
             while time.monotonic() < end:
                 chunk(b": keep-alive\n\n")
                 time.sleep(0.3)
-            ev = {"model": "deepseek-flash", "choices": [{"index": 0, "delta": {"content": "ok"},
-                                                          "finish_reason": "stop"}],
-                  "usage": {"prompt_tokens": 7, "completion_tokens": 1}}
-            chunk(f"data: {json.dumps(ev)}\n\n".encode())
-            chunk(b"data: [DONE]\n\n")
+            if not getattr(s, "unanswered", False):  # else the queue closes it unstarted (#1083)
+                ev = {"model": "deepseek-flash", "choices": [{"index": 0, "delta": {"content": "ok"},
+                                                              "finish_reason": "stop"}],
+                      "usage": {"prompt_tokens": 7, "completion_tokens": 1}}
+                chunk(f"data: {json.dumps(ev)}\n\n".encode())
+                chunk(b"data: [DONE]\n\n")
             self.wfile.write(b"0\r\n\r\n")
         except OSError:  # the keyhole hung up (a nudge stopped the round)
             self.close_connection = True
@@ -30126,6 +30169,39 @@ class RateLimits(Base):
         with mock.patch.object(self.kh_mod, "QUEUED_AFTER_S", 3600):  # without the mark
             runner.drive(other)
         self.assertGreaterEqual(other.status.get("nudges", 0), 1)
+
+    def test_a_provider_queue_that_never_answers_stops_as_its_outage_not_the_agents_failure(self):
+        # #1083: DeepSeek holds a request with keep-alives and closes it unstarted; the queue
+        # paused every clock, OpenCode resent it ten times (~110 minutes), then the round failed
+        # as the agent's (cause agent, against its slice). Now a queue OpenCode gives up on, or one
+        # held QUEUE_WAIT_S, is an `outage`: revived once, then stuck as the provider's
+        from workbench import results
+        os.environ["FAKE_CUT_RETRIES"] = "2"
+        self.up.unanswered = True
+        cases = [("t-qgone", None, r"^deepseek held the agent's requests in its queue for \d+ seconds without answering$"),
+                 ("t-qlong", 3, r"^deepseek held the agent's requests in its queue for \d+ seconds without answering$"),
+                 ("t-cut", None, r"^deepseek cut its answers short \(OpenAI Chat stream ended without finish_reason\)$")]
+        for name, bound, want in cases:
+            with self.subTest(name=name):
+                self.up.keepalive = 30 if bound else 0 if name == "t-cut" else 1.6
+                task = self.api_task(name, "api", "--think-timeout", "2", "--silence-timeout", "60")
+                self.keyhole(task, hold=60)
+                began = time.monotonic()
+                with mock.patch.object(self.kh_mod, "QUEUED_AFTER_S", 1), \
+                        mock.patch.object(runner, "RATE_WAIT_S", 1), \
+                        mock.patch.object(runner, "QUEUE_WAIT_S", bound or runner.QUEUE_WAIT_S):
+                    runner.drive(task)
+                st = task.status
+                self.assertEqual((st["phase"], st.get("infra")), ("stuck", "provider"), st.get("last"))
+                self.assertRegex(st["last"], want)
+                self.assertEqual(len(self.events(task, "load")), 1)     # revived once
+                n = self.notice(task)
+                self.assertEqual((n["kind"], n["cause"]), ("stuck", "provider"))
+                self.assertFalse(results.step(task, landed=False)["stuck"])
+                if name != "t-cut":
+                    self.assertIn("queued", [e["state"] for e in self.events(task, "rate_limited")])
+                if bound:
+                    self.assertLess(time.monotonic() - began, 30)        # never the 30 s queue
 
     def test_a_402_stops_the_round_at_once_with_the_remedy_and_no_revive(self):
         task = self.api_task("t-402", "api", "--silence-timeout", "30")

@@ -70,7 +70,10 @@ API models (#1011), as the spike for #1009 saw OpenCode 2.3.2 print them:
   FAKE_RETRY_OK: ratelimit's and down's retries end in an answer instead (the run goes on as ok)
   api    one model request to a keyhole, FAKE_API ("<base> <token> <model>"), silent while it waits;
          a 429 or 5xx back is a `retry` line and the request again (10 at most), another error
-         ends the run (402 provider.quota, 401/403 provider.auth); then as ok (#1020)
+         ends the run (402 provider.quota, 401/403 provider.auth); then as ok (#1020). A 200
+         event stream with no `finish_reason` (a provider queue closed unanswered) is 2.3.2's
+         `provider.invalid-output` "OpenAI Chat stream ended without finish_reason", status 200:
+         a `retry` line and the request again, FAKE_CUT_RETRIES times (10), then that error (#1083)
 The upstream error's message (FAKE_ERROR_BODY, else a stock one) comes through verbatim, in
 `message` and `response.body`, as in OpenCode (a key-like string in a 401's body reached
 stdout). WB_FAKE_CATALOG names a JSON file: a list of `api model.list` entries (`providerID`, `id`, `variants`, `cost`, `limit`…), or
@@ -340,13 +343,23 @@ def api_request() -> None:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     body = json.dumps({"model": model, "stream": True,
                        "messages": [{"role": "user", "content": "hi"}]}).encode()
+    cut = 0
     for attempt in range(1, 12):
         req = urllib.request.Request(base + "/chat/completions", data=body, headers={
             "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
         try:
             with opener.open(req, timeout=900) as r:
-                r.read()
-            return
+                got, sse = r.read(), "event-stream" in (r.headers.get("Content-Type") or "")
+            if not sse or b"finish_reason" in got:
+                return
+            cut += 1  # real OpenCode retries a stream that ended unfinished, then gives up (#1083)
+            err = {"type": "provider.invalid-output", "status": 200,
+                   "message": "OpenAI Chat stream ended without finish_reason"}
+            if cut > int(os.environ.get("FAKE_CUT_RETRIES", 10)):
+                fail(err["type"], err["message"], 200)
+            print(json.dumps({"type": "retry", "timestamp": t(), "sessionID": session,
+                              "messageID": "msg_fake", "attempt": cut + 1, "error": err}), flush=True)
+            continue
         except urllib.error.HTTPError as e:
             status, raw = e.code, e.read().decode(errors="replace")
         except OSError as e:

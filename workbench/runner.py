@@ -1258,7 +1258,23 @@ class _Clock:
 RATE_WAIT_S = 600
 RETRY_PAUSE_S = 60   # an API `retry` line pauses the clocks this long: OpenCode's own backoff
 HELD = ("rate_limited", "outage")
-PROVIDER_GUARDS = frozenset({*HELD, "quota", "auth"})  # stops that are the provider's (cause "provider")
+# `refused`: a request the provider turned down for a reason no retry or key fixes (a 404 for a
+# model gone, a 400/422 schema, a 403 moderation or permission): the agent's, with no remedy, or
+# under 403 "refused the API key" with /connect (#1082, #1084, 2026-11-23)
+PROVIDER_GUARDS = frozenset({*HELD, "quota", "auth", "refused"})  # stops that are the provider's (cause "provider")
+REFUSED_CODES = frozenset({400, 403, 404, 405, 409, 410, 413, 415, 422})
+REFUSED_KINDS = frozenset({"provider.content-filter", "provider.invalid-request", "provider.no-route",
+                           "provider.unsupported-operation"})
+# a 403 is the key's only when it says so: moderation, a model or region the key may not use and
+# the keyhole's own "this task may use only <model>" are 403s too (#1084)
+KEY_WORDS = re.compile(r"(?i)api.?key|token|credential|unauthori[sz]ed|authenticat")
+# a request over the model's window is the step's (too big a read), whoever answered it (#1082)
+CONTEXT_WORDS = re.compile(r"(?i)context.{0,20}(length|window|limit)|too many tokens|too long|"
+                           r"maximum.{0,30}tokens")
+# a provider queue (the keyhole's `queued`: SSE keep-alives only) pauses the clocks, and OpenCode's
+# ten retries of the requests it closed unanswered held a round ~110 minutes on paused clocks, then
+# failed it as the agent's (#1083, 2026-11-23): a queued run this long stops as an `outage`
+QUEUE_WAIT_S = 2 * RATE_WAIT_S
 # #1019's day spend cap: status `api_stop {guard: "spend"}` or its own stop between rounds. A cause
 # of its own, `spend`, outside results.THE_STEP like `provider`: the user's budget, never held
 # against the model or its slice (the engineer's call, 2026-11-23)
@@ -1335,6 +1351,8 @@ class _ProviderWait:
         self.was = False                # waiting at the last tick: the gap since counts as the wait
         self.fatal = None               # (guard, text): a 402 or 401 OpenCode gave up on at once
         self.held = False               # any wait this round (measure_speed skips the round)
+        self.queued_since = None        # a queue no answer has ended yet (#1083)
+        self.cut = ""                   # OpenCode's provider.invalid-output: answers that never ended
         st = task.status
         if self.api and (st.get("ratelimit_until") or st.get("ratelimit")):
             # a runner killed mid-hold left them: the new round starts with none (edge cases)
@@ -1357,6 +1375,8 @@ class _ProviderWait:
                 self._ended(now)
             was, self.was = self.was, False
             return was
+        if now_wait["kind"] == "queued" and self.queued_since is None:
+            self.queued_since = now_wait["since"]
         if self.run is None:
             self.run = {**now_wait, "held_since": None}
         else:
@@ -1386,21 +1406,32 @@ class _ProviderWait:
         self.retry_until = max(now + RETRY_PAUSE_S, later)
 
     def on_error(self, raw: dict) -> None:
-        """An OpenCode `error` line: a 402 (provider.quota) or 401/403 (provider.auth) ends the
-        round at once, the provider's; a rate limit or outage it gave up on, `end` stops."""
+        """An OpenCode `error` line: a 402 (provider.quota), a 401 or a 403 that names the key
+        (provider.auth), or a request the provider refused (REFUSED_CODES, REFUSED_KINDS; not one
+        over the window) ends the round at once, the provider's; a rate limit, an outage or
+        answers cut short (provider.invalid-output) it gave up on, `end` stops."""
         if not self.api:
             return
         err = raw.get("error") if isinstance(raw.get("error"), dict) else {}
         kind, code = str(err.get("type") or ""), err.get("status")
+        said = (str(err.get("message") or "").strip().splitlines() or [""])[0][:160]
         if kind == "provider.quota" or code == 402:
             self.fatal = ("quota", f"{self.provider} says the account is out of credit "
                                    f"(HTTP {code or 402})")
-        elif kind == "provider.auth" or code in (401, 403):
+        elif code == 401 or (kind == "provider.auth" and code is None) or \
+                (code == 403 and KEY_WORDS.search(said)):
             self.fatal = ("auth", f"{self.provider} refused the API key (HTTP {code or 401})")
+        elif (code in REFUSED_CODES or kind in REFUSED_KINDS or kind == "provider.auth") \
+                and not CONTEXT_WORDS.search(said):
+            self.fatal = ("refused", f"{self.provider} refused the request"
+                                     + (f" (HTTP {code})" if code else "") + (f": {said}" if said else ""))
+        elif kind == "provider.invalid-output":
+            self.cut = said or "its answer ended early"
 
     def answered(self) -> None:
-        """The model's own output: whatever OpenCode retried got through."""
+        """The model's own output: whatever OpenCode retried got through, out of any queue."""
         self.retry, self.retry_until = None, 0.0
+        self.queued_since, self.cut = None, ""
 
     def stop(self, now: float, gave_up: bool = False) -> tuple[str, str] | None:
         """(guard, text) when the provider ends the round: a quota or key error, the keyhole's (or
@@ -1408,14 +1439,21 @@ class _ProviderWait:
         run, OpenCode having exited on it)."""
         if not self.api:
             return None
-        if self.fatal:
-            return self.fatal
         stop = self.st.get("api_stop")
         if isinstance(stop, dict) and stop.get("guard"):
             # consumed: the next round starts clean. #1019's `spend` comes through here too:
-            # cause `spend`, not `provider` (stopped_by)
+            # cause `spend`, not `provider` (stopped_by). Before `fatal`: the keyhole answers its
+            # own quota and spend stops with a 400, which on_error would call `refused` (#1082)
             self.task.set_status(api_stop=None)
             return str(stop["guard"]), str(stop.get("text") or f"{self.provider} stopped the round")
+        if self.fatal:
+            return self.fatal
+        if self.queued_since is not None and (gave_up or (self.run and self.run["kind"] == "queued" and
+                                                           now - self.queued_since >= QUEUE_WAIT_S)):
+            return "outage", (f"{self.provider} held the agent's requests in its queue for "
+                              f"{_span(now - self.queued_since)} without answering")
+        if gave_up and self.cut:  # OpenCode's ten resends, every answer cut short
+            return "outage", f"{self.provider} cut its answers short ({self.cut})"
         run = self.run or ({**self.retry, "held_since": self.retry["since"]} if gave_up and self.retry else None)
         if not run or run["kind"] not in HELD or run["held_since"] is None:
             return None
@@ -3035,7 +3073,7 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
         if rnd.get("guard") in PROVIDER_GUARDS:
-            lines.append(provider_remedy(task, rnd["guard"]))
+            lines.append(provider_remedy(task, rnd["guard"], str(rnd.get("stuck") or "")))
     elif rnd.get("left_bg"):  # #658: what the agent left running, stopped with it
         lines.append("the agent left " + ", ".join(f"`{j}`" for j in rnd["left_bg"])
                      + " running in the background when its turn ended; stopped")
@@ -3827,18 +3865,25 @@ def _tests_gpu(task: store.Task, lease):
         yield
 
 
-def provider_remedy(task: store.Task, guard: str) -> str:
+def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
     """What to do about a stop that is the provider's (#1020): never a model or route switched
-    by wb or Claude (the 2.0 rules); `wb route` only with a role, and only with the user's yes."""
+    by wb or Claude (the 2.0 rules); `wb route` only with a role, and only with the user's yes.
+    ``said``: the stop's line, whose HTTP 404 may mean the model is gone (#1082)."""
     p, name = provider_of(task), task.name
     resume = f'wb feedback {name} --text "carry on"'
+    role = task.spec.get("role")
+    if guard == "refused":  # the provider's reason is in the STOPPED line: no wait or key fixes it
+        gone = (f"; if {p} no longer serves {task.spec.get('model')}, workbench never switches a "
+                f"task's model: wb takeover {name} or wb discard {name}") if "HTTP 404" in said else ""
+        return (f"the provider's stop, not the agent's: once what {p} said is fixed, {resume} "
+                f"resumes it" + gone
+                + (f"; or wb route {role} gpu (the user's yes) for the next tasks" if role else ""))
     if guard == "quota":
         return (f"the provider's stop, not the agent's: top up your {p} account, or wait for the "
                 f"plan's reset; then {resume} resumes it")
     if guard == "auth":
         return (f"the provider's stop, not the agent's: store {p}'s API key again with /connect "
                 f"in OpenCode; then {resume} resumes it")
-    role = task.spec.get("role")
     return (f"the provider's stop, not the agent's: {resume} resumes it once {p} allows"
             + (f"; or wb route {role} gpu (the user's yes) for the next tasks" if role else ""))
 
