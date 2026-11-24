@@ -4930,6 +4930,34 @@ class Context(Base):
         run_wb("discard", "t-sra")
         self.assertFalse(asides[0].exists())
 
+    def test_a_self_review_that_reads_past_the_explore_guard_and_leaves_the_tree_as_it_was_goes_to_review(self):
+        # #1168 (2026-11-24): a self-review breaks a check, sees a test fail and copies the file
+        # back, then reads on; its 41st call with no edit was the explore guard's stop, so a
+        # change whose tests passed woke Claude as stuck and its step was recorded stuck
+        self.start("t-srr", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srr", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 2, "self_review"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertNotIn("no_edit", st.get("guards") or {})
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-srr"]
+        self.assertEqual([r["kind"] for r in rows], ["review"])
+        self.assertIn("tests: PASS", rows[0]["text"])
+        self.assertIn("the tree as the round began; stopped as its finish", rows[0]["text"])
+        self.assertIn("the tree as the round began: stopped as its finish",
+                      run_wb("watch", "t-srr", "--once", "--no-color"))
+
+    def test_a_self_review_that_changed_the_tree_is_still_stopped_by_the_explore_guard(self):
+        # #1168's finish is for a tree as the round began: one the self-review left changed is
+        # an agent lost mid-edit, stopped as before (90 reads: the first 40 meet its edit's mark,
+        # which the guard takes for a shell edit and counts again from)
+        os.environ.update(FAKE_SELF_KEEP="1", FAKE_READS="90")
+        self.addCleanup(os.environ.pop, "FAKE_SELF_KEEP", None)
+        self.addCleanup(os.environ.pop, "FAKE_READS", None)
+        self.start("t-srk", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srk", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
+        self.assertIn("tool calls without changing a file", st["last"])
+
     def test_without_self_review_claude_is_woken_after_the_first_clean_round(self):
         self.start("t-nsr", "ok", "--test", TEST_CMD)
         self.assertEqual(wait_phase("t-nsr", {"review"})["round"], 1)
