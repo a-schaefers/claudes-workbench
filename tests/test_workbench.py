@@ -21522,6 +21522,38 @@ class KeepAwake(Base):
         with mock.patch.object(cli, "awake_how", return_value="systemd-inhibit"):
             self.assertIsNone(runner.awake_for_review(task))
 
+    def test_a_backlog_tasks_runner_holds_the_machine_awake_for_its_review_as_it_exits(self):
+        # the review of #1105 (2026-11-23): the test above calls awake_for_review itself, so
+        # dropping the runner's own call on its way out passed every test
+        claude = subprocess.Popen(["sleep", "30"])                    # Claude Code, for the test
+        self.addCleanup(claude.wait)
+        self.addCleanup(claude.kill)
+        self.addCleanup(signal.signal, signal.SIGTERM, signal.getsignal(signal.SIGTERM))
+        task = store.Task("t-batch")
+        task.dir.mkdir(parents=True)
+        store.write_json(task.dir / "task.json", {"name": "t-batch", "claude_pid": claude.pid, "backlog": "night"})
+        task.set_status(phase="running")
+        held = []
+        with mock.patch.object(sys, "argv", ["runner", "t-batch"]), \
+                mock.patch.object(runner, "drive", lambda t: t.set_status(phase="review")), \
+                mock.patch.object(cli, "awake_how", return_value="systemd-inhibit"), \
+                mock.patch.object(cli, "keep_awake", lambda pid, why: held.append((pid, why)) or True):
+            runner.main()
+        self.assertEqual([why for _, why in held], ["task t-batch waits on Claude's review"])
+        waiter = held[0][0]                                          # this process's child: reaped here
+
+        def exited(timeout):
+            end = time.monotonic() + timeout
+            while time.monotonic() < end:
+                if os.waitpid(waiter, os.WNOHANG)[0]:
+                    return True
+                time.sleep(0.05)
+            return False
+        self.assertFalse(exited(0.3))                                # held while Claude lives
+        claude.kill()
+        claude.wait()
+        self.assertTrue(exited(20))                                  # and let go once it exits
+
     def test_where_logind_refuses_a_sleep_lock_an_idle_lock_is_held(self):
         # polkit grants a sleep lock to a local active session only: over SSH, idle alone
         log = Path(self.tmp.name) / "inhibit.log"
