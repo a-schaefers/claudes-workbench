@@ -775,6 +775,35 @@ class Lifecycle(Base):
             self.assertIsNone(said(tail), tail)
         self.assertIsNone(said(f"/bin/sh: 1: x: not found\n{err.format(127)}", code=0))  # a passing run
 
+    def test_a_package_managers_run_wrapper_lines_are_read_past_to_the_scripts(self):
+        # #1243 (bar round 5 of 2.0): `pnpm test` and `yarn test` with jest not installed ended on
+        # their own lines, so #1229's check never saw the shell's not-found line: no check-in, and
+        # round 1 and both auto-fix rounds ran on correct code. The tails are pnpm 9.15's (it
+        # exits 1 and names no code, its labels between thin spaces), yarn 1.22's, and npm 12's
+        # in a workspace, verbatim.
+        said = lambda tail, code: runner.missing_command({"exit": code, "tail": tail})  # noqa: E731
+        ts, nf = "\u2009", "sh: line 1: jest: command not found"
+        warn = f"{ts}WARN{ts}  Local package.json exists, but node_modules missing, did you mean to install?"
+        pnpm = (f"> jsrepo@1.0.0 test /r\n> jest\n\n{nf}\n"
+                f"{ts}ELIFECYCLE{ts} Test failed. See above for more details.\n{warn}")
+        pnpm_r = (f"> a@1.0.0 test /r/pkgs/a\n> jest\n\n{nf}\n/r/pkgs/a:\n{ts}ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL{ts} "
+                  f"a@1.0.0 test: `jest`\nspawn ENOENT\n{warn}")
+        yarn = (f"yarn run v1.22.22\n$ jest\n/bin/{nf}\nerror Command failed with exit code 127.\n"
+                "info Visit https://yarnpkg.com/en/docs/cli/run for documentation about this command.")
+        npm_w = (f"npm notice run jest\n{nf}\nnpm error Lifecycle script `test` failed with error:\n"
+                 "npm error code 127\nnpm error path /r/pkgs/a\nnpm error workspace a@1.0.0\n"
+                 "npm error location /r/pkgs/a\nnpm error command failed\nnpm error command sh -c jest")
+        for tail, code in ((pnpm, 1), (pnpm_r, 1), (yarn, 127), (npm_w, 127)):
+            self.assertEqual(said(tail, code), "jest: command not found", tail)
+        # what isn't a missing tool still goes back: a failing test, a script the step makes, a
+        # code the wrapper names that isn't 127
+        for tail, code in ((pnpm.replace(nf, "Tests: 1 failed, 3 passed"), 1),
+                           (pnpm.replace(nf, "sh: line 1: ./made-by-the-step.sh: No such file or directory"), 1),
+                           (yarn.replace(nf, "FAIL src/a.test.js").replace("127.", "1."), 1),
+                           (yarn.replace("127.", "1."), 1),
+                           (npm_w.replace(nf, "x").replace("code 127", "code 1"), 1)):
+            self.assertIsNone(said(tail, code), tail)
+
     def test_a_tool_in_the_checkouts_ignored_venv_checks_in_at_once_and_skips_auto_fix(self):
         # #1206 (bar round 3 of 2.0): `--test .venv/bin/python …`, as Claude runs it in the user's
         # checkout, said `No such file or directory` in the worktree, which has no ignored .venv;

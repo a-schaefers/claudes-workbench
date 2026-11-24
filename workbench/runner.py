@@ -3377,16 +3377,29 @@ NO_MODULE = re.compile(r"(?P<py>\S*python[\w.]*): (No module named (?P<m>[\w.]+)
 TOOL_DIRS = (".venv/bin", "venv/bin", "node_modules/.bin", "vendor/bin")
 # bash's and zsh's line for a path that isn't there (dash's and ksh's is NOT_FOUND's)
 NO_SUCH = re.compile(r"no such file or directory: (?P<z>.+)$|(?P<n>[^:]+): No such file or directory$")
-# A task runner's own lines after its recipe's output: GNU make's `make: *** [Makefile:2: test]
-# Error 127` (it exits 2), a sub-make's `Leaving directory`, -k's `Target … not remade`, and
-# just's `error: Recipe `test` failed on line 2 with exit code 127`. Read as the last line, they
-# hid the shell's not-found line under `make test`, and round 1 and both auto-fix rounds ran on
-# correct code, each told the bug was the change's, where `npm test` checked in (#1229, bar
-# round 4, 2026-11-24). `make` or `just` is the recipe's exit, the first one up a sub-make's,
-# not its parent's Error 2.
-RUNNER_TAIL = re.compile(r"g?make(?:\[\d+\])?: (?:\*\*\* .*?(?: Error (?P<make>\d+))?|Leaving directory .*"
-                         r"|Target .* not remade because of errors\.)"
-                         r"|error: Recipe `[^`]*` failed (?:on line \d+ )?with exit code (?P<just>\d+)")
+# A task runner's own lines after its recipe's output, each runner's in one entry, its group (if
+# any) the recipe's exit: GNU make's `make: *** [Makefile:2: test] Error 127` (it exits 2), a
+# sub-make's `Leaving directory`, -k's `Target … not remade`; just's `error: Recipe `test` failed
+# on line 2 with exit code 127`. Read as the last line, they hid the shell's not-found line under
+# `make test`, and round 1 and both auto-fix rounds ran on correct code, each told the bug was the
+# change's, where `npm test` checked in (#1229, bar round 4, 2026-11-24). The package managers'
+# run wrappers did the same (#1243, bar round 5, 2026-11-24, on pnpm 9.15, yarn 1.22, npm 12):
+# pnpm's ` ELIFECYCLE  Test failed.`, ` ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  …` (`-r`, `--filter`:
+# after a `<dir>:` line, before `spawn ENOENT`) and ` WARN  … node_modules missing …`, which exit
+# 1 and say no code; yarn 1's `error Command failed with exit code 127.` and `info Visit
+# https://yarnpkg.com/…`; npm's in a workspace (`-w`), `npm error code 127` among its `npm error`
+# lines (npm 6's `npm ERR!`). A runner's next spelling is one more entry. Its code is the first
+# one up, a sub-make's, not its parent's Error 2; one that says none (pnpm) is the shell's, from
+# its not-found line (missing_command).
+RUNNER_LINES = (
+    r"g?make(?:\[\d+\])?: (?:\*\*\* .*?(?: Error (?P<make>\d+))?|Leaving directory .*"
+    r"|Target .* not remade because of errors\.)",
+    r"error: Recipe `[^`]*` failed (?:on line \d+ )?with exit code (?P<just>\d+)",
+    r"(?:ELIFECYCLE|ERR_PNPM_\w+|WARN)\s.*|/[^:]*:|spawn ENOENT",
+    r"error Command failed with exit code (?P<yarn>\d+)\.|info Visit https://yarnpkg\.com/\S* .*",
+    r"npm (?:error|ERR!)(?: (?:code|errno) (?P<npm>\d+)| .*)?",
+)
+RUNNER_TAIL = re.compile("|".join(RUNNER_LINES))
 # make's own line for a recipe it runs without a shell (no shell syntax in it) that execvp can't
 # find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229)
 MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
@@ -3408,15 +3421,19 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     (#1206); or Python's no-module line for `-m` at exit 1 (#1181). A tool the
     agent's environment lacks (one outside the agent's PATH, which python_env and agent_path
     trim), which no edit in a round can give it; else None. A module of ``task``'s own code
-    (own_module) is none: the step may make it. Under a task runner (`make test`, RUNNER_TAIL),
-    the recipe's exit and the line before the runner's own (#1229)."""
+    (own_module) is none: the step may make it. Under a task runner (`make test`, `pnpm test`,
+    RUNNER_TAIL), the recipe's exit and the line before the runner's own (#1229, #1243)."""
     if not r:
         return None
     code, lines, inner = r.get("exit"), (r.get("tail") or "").strip().splitlines(), None
+    wrapped = False
     while isinstance(code, int) and code and lines and (m := RUNNER_TAIL.fullmatch(lines[-1].strip())):
-        inner = m["make"] or m["just"] or inner
+        inner = m["make"] or m["just"] or m["yarn"] or m["npm"] or inner
+        wrapped = True
         lines.pop()
     code = int(inner) if inner else code
+    if wrapped and not inner and lines and NOT_FOUND.search(lines[-1]):
+        code = 127  # pnpm exits 1 and names no code: the shell's not-found line is its 127 (#1243)
     if code not in (1, 127):
         return None
     line = lines[-1].strip() if lines else ""
