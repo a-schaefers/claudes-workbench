@@ -1266,6 +1266,61 @@ class Lifecycle(Base):
         self.assertIn("the agent left `npm run dev` running in the background when its turn "
                       "ended; stopped", run_wb("report", "t-dev"))
 
+    def test_an_agent_done_when_the_rounds_wall_comes_ends_the_round_as_its_finish_not_stuck(self):
+        # #1160 (2026-11-24): the agent's last step ended its turn (reason stop) and OpenCode
+        # stayed open; the round's wall came first and stopped it as stuck, so its tests never
+        # ran, Claude got a stuck notice and the step's results row a guard
+        from workbench import results
+        self.start("t-wall", "stay", "--test", TEST_CMD, "--round-timeout", "10")
+        st = wait_phase("t-wall", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertFalse(st.get("guards"))
+        task = store.Task("t-wall")
+        evs = store.read_jsonl(task.dir / "events.jsonl")[0]
+        self.assertEqual([(e["how"], e.get("guard")) for e in evs if e.get("kind") == "round_end"],
+                         [("done", None)])
+        self.assertFalse([e for e in evs if e.get("kind") == "stopped"])
+        self.assertIn("lingered", {e.get("kind") for e in evs})
+        self.assertFalse([r for r in store.notices() if r.get("kind") in ("stuck", "failed")])
+        self.assertFalse(results.step(task, landed=False)["stuck"])
+        self.assertNotIn("guards", results.for_stats(task))
+        report = run_wb("report", "t-wall")
+        self.assertNotIn("STOPPED", report)
+        self.assertIn("OpenCode was still open after the agent's output ended; stopped", report)
+
+    def test_an_agent_done_when_silence_or_the_think_budget_comes_is_neither_stopped_nor_nudged(self):
+        # #1160 (2026-11-24): the same finished turn, met first by the silence or think guard
+        for name, flag in (("t-hush", "--silence-timeout"), ("t-think", "--think-timeout")):
+            self.start(name, "stay", "--test", TEST_CMD, flag, "2")  # one at a time: one GPU
+            st = wait_phase(name, {"review", "stuck", "failed"}, timeout=60)
+            self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1),
+                             (name, st.get("last")))
+            self.assertTrue(st["tests"]["ok"])
+            self.assertFalse(st.get("guards"))
+
+    def test_a_job_left_running_when_the_rounds_wall_comes_ends_the_round_as_left_in_the_background(self):
+        # #1160 (2026-11-24): the wall came before BG_GRACE's two minutes, and the finished
+        # work with its dev server was stopped as stuck, untested
+        self.start("t-devwall", "devserver", "--test", TEST_CMD, "--round-timeout", "10")
+        st = wait_phase("t-devwall", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertFalse(st.get("guards"))
+        self.assertIn("the agent left `npm run dev` running in the background when its turn "
+                      "ended; stopped", run_wb("report", "t-devwall"))
+
+    def test_an_agent_still_working_at_the_rounds_wall_is_stopped_as_stuck(self):
+        # #1160's fix ends a finished turn as done: a turn still going (a tool call that prints
+        # nothing) is stopped by the wall as before
+        self.start("t-busy", "toolhang", "--test", TEST_CMD, "--round-timeout", "3",
+                   "--silence-timeout", "120")
+        st = wait_phase("t-busy", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "stuck")
+        self.assertIn("limit", st["last"])
+        self.assertEqual(st.get("guards"), {"round": 1})
+        self.assertIsNone(st.get("tests"))
+
     def test_a_round_that_stalls_again_after_a_nudge_is_stopped_whatever_it_did_first(self):
         # A tool call before the stall let the nudged round be nudged again, round after round
         # with no end (the 2026-11-16 audit).

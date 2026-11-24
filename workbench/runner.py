@@ -1826,8 +1826,17 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             if why:
                 out["stuck"], out["guard"] = why, detector.guard
         quiet = clock.quiet(mono)
-        if waiting_bg and turn_over and not out["stuck"] and not asking \
-                and quiet > min(BG_GRACE, silence):
+        hush = wait_hush if waiting_bg else silence
+        # The agent's turn is over (its last step's reason `stop`) and OpenCode is still open:
+        # past BG_GRACE with a job in the background, or when the round's wall, silence or think
+        # guard comes due, the round ends as the agent's finish, never a guard's stop. Only the
+        # job's grace looked at the turn, so the wall, due 85 s after an agent's "Work is
+        # complete", stopped it as stuck: no tests, a false stuck notice, and a guard in the
+        # step's results row (#1160, 2026-11-24). An agent still working is stopped as before.
+        done = turn_over and not out["stuck"] and not asking and (
+            (waiting_bg and quiet > min(BG_GRACE, silence)) or clock.ran(mono) > wall
+            or quiet > hush or (think and heard and not waiting_bg and quiet > think))
+        if done and waiting_bg:
             # the agent finished and left a job running (a dev server): the round is done (#658)
             out["left_bg"] = bg_jobs or ["a background job"]
             task.event({"ts": store.now(), "round": n, "kind": "left_bg",  # not a guard's stop
@@ -1835,9 +1844,15 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                                 + " still running in the background: stopped"})
             _stop(proc)
             break
+        if done:  # nothing in the background it says: OpenCode stayed open, stopped (#1160)
+            out["lingered"] = True  # our stop's exit, not a crash, as below (#83)
+            task.event({"ts": store.now(), "round": n, "kind": "lingered",  # not a guard's stop
+                        "text": f"the agent's turn ended {_span(quiet)} ago and OpenCode was "
+                                "still open: stopped"})
+            _stop(proc)
+            break
         if not out["stuck"] and (why := provider.stop(now)):  # before silence: never "no output"
             out["guard"], out["stuck"] = why
-        hush = wait_hush if waiting_bg else silence
         if not out["stuck"] and clock.ran(mono) > wall:
             out["stuck"], out["guard"] = f"the round ran past its {int(wall // 60)}-minute limit", "round"
         if not out["stuck"] and not asking and quiet > hush:
@@ -3153,6 +3168,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     elif rnd.get("left_bg"):  # #658: what the agent left running, stopped with it
         lines.append("the agent left " + ", ".join(f"`{j}`" for j in rnd["left_bg"])
                      + " running in the background when its turn ended; stopped")
+    elif rnd.get("lingered"):  # #1160: the runner's stop, not OpenCode's exit code (#83)
+        lines.append("OpenCode was still open after the agent's output ended; stopped")
     elif rnd["exit"] not in (0, None):
         lines.append(f"opencode exited {rnd['exit']}"
                      + (": the round didn't finish; what it changed so far stays in the worktree"

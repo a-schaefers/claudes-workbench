@@ -340,6 +340,7 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 | mid-round handovers in one review round | more than `HANDOVER_MAX` (5) | `runner.drive` |
 | an API task's spend: today at the day cap, or the keyhole refused a request that could pass it (`spend`, *Spend*) | routes.json `day_usd` | `runner._spend_guard`, `runner._go_on` |
 | OpenCode alive after closing its output (#83): SIGTERM, then SIGKILL | the silence limit, at most `EXIT_GRACE` (30 s) | `runner.run_round` |
+| OpenCode open after the agent's turn ended (#1160): the round ends as its finish, not stuck | the round, silence or think limit | `runner.run_round` |
 
 Past the think budget (7 min, `--think-timeout`, 0 off; from the round's first output, paused
 on a background command) the runner interrupts with `runner.NUDGE` and raises a check-in; the
@@ -936,6 +937,12 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   passes, the round is done (a dev server never ends, #658): OpenCode stopped, `left_bg` recorded
   (from `jobs[]`; not `died`), a `left_bg {text}` event, then the tests; the report says `the agent
   left `<job>` running in the background when its turn ended; stopped`.
+- **A finished turn is never a guard's stop** (#1160): once the turn is over (and no question
+  is open), the round wall, silence or think guard coming due ends the round as the agent's
+  finish, not stuck and no guard counted: with a job in the background as `left_bg` above (the
+  wall came 85 s after an agent's "Work is complete", before `BG_GRACE`, and its round was stuck,
+  untested, a guard in its results row), else OpenCode stopped, `lingered` recorded (not `died`),
+  a `lingered {text}` event, then the tests. A turn still going is stopped by them as before.
 
 **Nothing a round starts outlives it** (`_end_agent`, after every round and in `main`'s
 `finally`): `_stop`, SIGKILL to the group, then `sweep`: the user's processes whose environment has
@@ -1165,7 +1172,9 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
    committed on delegate/<task> (wb next): wb discard <task> drops this step and keeps that
    branch; to land them instead, …` (`steps_line`: reset the worktree, `wb accept --force`; #494; also in the `SIGNAL_STOP` notice). After
    a crash with changes, `opencode exited N: the round didn't finish; what it changed so far stays
-   in the worktree (see …)`. `OpenCode resent N request(s) to the model's server: …` (#491).
+   in the worktree (see …)`. Stopped by the runner once the agent was done (`left_bg`; `lingered`, #83's too):
+   `the agent left `<job>` running in the background when its turn ended; stopped`, or `OpenCode
+   was still open after the agent's output ended; stopped` (#1160). `OpenCode resent N request(s) to the model's server: …` (#491).
 4. `tests: PASS|FAIL (`cmd`, exit N)`, 25 lines on a failure; `base check: …` while on the first
    step with no review round; `auto-fix rounds used: a/b`.
 5. `tools: name×n …`, up to four `tool error:` lines.
@@ -5996,7 +6005,7 @@ out, cache, cache_read, cache_write, reasoning?, cost?}` (reasoning apart from `
 which the handover check reads; `cost` OpenCode's `part.cost` in USD, only when a number: missing is unknown, never 0, #1022; the meter's step price too, #1019), `error {text}`, `retry {text, attempt}` (OpenCode resent a request). From the runner: `round`, `stopped {text}`, `steer
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),
 `autofix`, `self_review`, `reading_full`, `full`, `compacted {text}` (mid-round, and it carried on), `load` (a reload before a round), `limits {text}` (stretched),
-`left_bg {text}` (a job left in the background), `round_end {secs, how, guard?}` (stats recording on), `export` (the
+`left_bg {text}` (a job left in the background), `lingered {text}` (the turn over, OpenCode still open: stopped, #1160), `round_end {secs, how, guard?}` (stats recording on), `export` (the
 export failed: judged by `live_used`), `stopped {by: "signal"|"provider"|"spend"}` (`provider`: an API provider's stop, #1020; `spend`: the day's spend cap, #1019; `lessons.gather` skips any with `by`), `gpu {text}` (a load warning), `ask {id}`, `answer {id}`, `served {model, by, text}` (the keyhole: the served model changed; `wb watch` and `wb log` show the text), `rate_limited {provider, code, state, since, secs, text}` (a run of an API provider's waiting ended, or the round stopped: #1020), `backend {by, text}` (the keyhole: OpenRouter served a backend outside the task's `order`, `OpenRouter served <x>, not <order>`; a line in the round's report too, #1021). From
 `wb`: `spec_gap`, `next_step`, `stopped` (bail out), `resumed`, `allow`, `steer {now}`, `captain`, `takeover`, `coding` (the user allowed Claude an edit), `error`
 (`reap`: the runner died without a report).
@@ -6296,7 +6305,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `read`, `explore` (`FAKE_READS` small reads, then an edit: #1087), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
-`retry` (`FAKE_RETRY_EVERY`), `say`, `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of
+`retry` (`FAKE_RETRY_EVERY`), `say`, `stay` (as `ok`, then open and silent: #1160), `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of
 them, then `ok`'s answer). A new fake behaviour is a new scenario.
 
 **API models in the fake** (#1011, from the spike for #1009 on OpenCode 2.3.2; the real-OpenCode checks below hold on

@@ -2,6 +2,8 @@
 """Stands in for `opencode run --format json` in tests. FAKE_SCENARIO picks the behaviour:
 
   ok     write answer.txt = "42", say so
+  stay   as ok, then stays open for an hour, its output open and silent: the agent's turn over
+         (reason stop) and OpenCode not exiting (#1160)
   fix    first round writes "41" (wrong); a continued session (--session) writes "42"
   loop   run the same failing command over and over (the stuck detector should stop it)
   hang   print one event, then go silent (the silence timeout should stop it)
@@ -580,7 +582,7 @@ if scenario in ("ratelimit", "down") and os.environ.get("FAKE_RETRY_OK"):
 if scenario == "api":  # one request through a keyhole, then as ok (#1020)
     api_request()
     scenario = "ok"
-if scenario in ("ok", "fix"):
+if scenario in ("ok", "fix", "stay"):
     value = "41" if scenario == "fix" and "--session" not in args else "42"
     with open("answer.txt", "w") as fh:
         fh.write(value + "\n")
@@ -588,6 +590,8 @@ if scenario in ("ok", "fix"):
     emit("text", text=f"Wrote answer.txt = {value}."
          + (f"\nLesson: {os.environ['FAKE_LESSON']}" if os.environ.get("FAKE_LESSON") else ""))
     finish()
+    if scenario == "stay":
+        time.sleep(3600)
 elif scenario == "loop":
     for _ in range(10):
         tool("bash", {"command": "make test"}, status="error", error="make: *** No rule")
