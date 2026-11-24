@@ -31034,6 +31034,11 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.drive_here("t-explore")
         st = store.Task("t-explore").status
         self.assertEqual((st["window"], st["phase"]), (131072, "review"), st.get("last"))
+        # the GPU tasks are stopped at the 40th read, so the fake waits as long as it takes: its
+        # 2 s were too short for a loaded macOS runner, which read the 40th read after the write
+        # and lifted the guard for the edit (as it should, for an edit made through the shell),
+        # so t-explore-gpu64 went to review (nightly run 45362198509, 2026-11-24)
+        os.environ["FAKE_EXPLORE_PAUSE"] = "20"
         self.start("t-explore-gpu", "explore")
         st = wait_phase("t-explore-gpu", {"stuck"})
         self.assertEqual(st["window"], 32768)
