@@ -2634,10 +2634,16 @@ def api_hidden_refusal(task: store.Task, raw: str) -> str | None:
     return None
 
 
-def api_hidden_note() -> str:
+def api_hidden_note(task: store.Task) -> str:
     """wb start's note for an API task when a file API_HIDDEN names holds a credential, else '': the files,
     then the tools that don't run in its lane (API_HIDDEN_STOPS), those whose private-registry
-    installs fail and what else fails (API_HIDDEN_FAILS: Hugging Face's gated models, #1092)."""
+    installs fail and what else fails (API_HIDDEN_FAILS: Hugging Face's gated models, #1092).
+    '' where ``task`` has no lane to hide them: no Landlock, or the lane off."""
+    # Without a lane nothing is hidden: the agent reads the file and Maven runs. On macOS every
+    # API start said otherwise, so Claude, as the skill says, told the user the repo won't build
+    # on API and that the token couldn't reach the provider (#1156, 2026-11-24)
+    if not lane.abi() or writable(task) is None:
+        return ""
     home = os.path.realpath(Path.home())
     tools = _api_hidden_tools()
     there = sorted(tools)  # each there and holding a credential (a file, or NuGet's config/)

@@ -1671,7 +1671,9 @@ deliberately hostile process.
   `API_HIDDEN_TOOL`, by name or by folder and name for `.bundle/config`): `note: an API task can't
   read ~/.m2/settings.xml, ~/.npmrc (each holds a credential, which would reach the provider): in
   its lane Maven stops on every run, and npm installs from a private registry fail` (`it holds` for
-  one). A git URL with a login can't be hidden (git reads `.git/config` and `~/.gitconfig` to
+  one). Only where the task has a lane to hide them: without Landlock (macOS, a kernel without it)
+  or with the lane off (`"paths": ["*"]`) the agent reads them and the tools run, so there is no
+  note (#1156: every macOS API start said Maven stopped). A git URL with a login can't be hidden (git reads `.git/config` and `~/.gitconfig` to
   run), so `wb start` names the files that hold one instead (`context.git_url_note`, #1072): `git
   config --show-origin --get-regexp` over `GIT_URL_KEYS` (remotes' `url`/`pushurl`, `url.*.insteadOf`),
   matched by `GIT_URL_LOGIN` (any URL with a password, or an http(s) one whose user alone looks
