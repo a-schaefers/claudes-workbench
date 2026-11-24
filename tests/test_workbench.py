@@ -33316,9 +33316,17 @@ class ApiSpend(Base):
         self.spent(4.8)
         start = ("start", "t-big", "--spec", str(big), "--repo", str(self.repo), "--model", SPEND_TIER,
                  "--no-base-check")
-        # the dialog's dry run (_route_start) first, then wb start itself
-        for args in (("route", "--dry-run", "--json", "--start", *start[1:]), start):
-            self.cap(5)
+        # wb start's main API path: --role, its model from routes.json (routes.resolve)
+        role = ("start", "t-big", "--spec", str(big), "--repo", str(self.repo), "--role", "significant",
+                "--no-base-check")
+
+        def role_cap(usd):
+            store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": usd, "roles": {
+                "significant": {"via": "api", "api": SPEND_TIER}}})
+        # the dialog's dry run (_route_start) first, then wb start itself, by --model and by --role
+        for i, (args, cap) in enumerate(((("route", "--dry-run", "--json", "--start", *start[1:]), self.cap),
+                                         (start, self.cap), (role, role_cap))):
+            cap(5)
             err = io.StringIO()
             with (self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True),
                   mock.patch.object(cli, "spawn_runner") as spawned):
@@ -33327,12 +33335,46 @@ class ApiSpend(Base):
             self.assertIn("a cap of at least", err.getvalue())
             spawned.assert_not_called()
             self.assertFalse(store.Task("t-big").dir.exists())
-            self.cap(need(err.getvalue()))
-            room = self.meter.for_task(self.api_task(f"t-big-{args[0]}", SPEND_TIER), m)
-            self.assertGreaterEqual(room.room({"max_tokens": 32768}, 65_000 + size), 0, args[0])
+            cap(need(err.getvalue()))
+            room = self.meter.for_task(self.api_task(f"t-big-{i}", SPEND_TIER), m)
+            self.assertGreaterEqual(room.room({"max_tokens": 32768}, 65_000 + size), 0, args)
+            cap(need(err.getvalue()))   # api_task wrote routes.json's roles again
         with mock.patch.object(cli, "API_RUNS", True), mock.patch.object(cli, "spawn_runner") as spawned:
-            run_wb(*start)                                    # the cap it named: it starts
+            run_wb(*role)                                     # the cap it named: it starts
         spawned.assert_called_once()
+        self.assertEqual(store.Task("t-big").spec["role"], "significant")
+
+    def test_a_large_next_spec_counts_in_wb_nexts_look_ahead_so_the_cap_it_names_lets_the_step_through(self):
+        # #1173's review (2026-11-24): with a small next spec only the carried context tipped the
+        # look ahead, so wb next passing its step's prompt went untested: left out, wb next passed
+        # at $5 and committed the step, and the round's first request was over the cap
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        m = runner.models.lookup(SPEND_TIER)
+        task = self.api_task("t-cap-big-next", SPEND_TIER, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        task.set_status(live_used={"session": task.status["session"], "used": 20_000})
+        nxt = Path(self.tmp.name) / "big-next.md"
+        nxt.write_text("Step two: take each case.\n" + "- a case of the parser's, one line\n" * 2300)
+        self.cap(5)
+        self.spent(4.6)
+        rnd = task.status["round"]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("next", "t-cap-big-next", "--spec", str(nxt), "-m", "step one")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.assertFalse(task.round_dir(rnd + 1).exists())
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("next", "t-cap-big-next", "--spec", str(nxt), "-m", "step one")
+        spawned.assert_called_once()
+        prompt = len(task.round_dir(rnd + 1).joinpath("prompt.md").read_bytes())
+        self.assertGreater(prompt, 78_000)
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 20_000 * 4 + prompt), 0)
 
     def test_feedbacks_text_and_a_resumes_handoff_count_in_the_look_ahead(self):
         # #1173's review (2026-11-24): feedback's first request carries its text on the session's
@@ -36655,6 +36697,23 @@ class BusyGpu(Base):
                                f"{role} role: API spend today is $5 of the $5 day cap"):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + "trivial role: API spend today is $5 of the $5 day cap")
+        # round 1's input (#1173's review): the start's own, else a fresh session's least
+        seen = []
+        real = cli.meter.refusal
+        with mock.patch.object(cli.meter, "refusal",
+                               lambda m, role, advice=True, tokens=None: seen.append(tokens) or real(
+                                   m, role, advice=advice, tokens=tokens)):
+            self.assertIsInstance(cli._busy_api("trivial", asked, self.repo, None, 40_123), tuple)
+            self.assertIsInstance(cli._busy_api("trivial", asked, self.repo, None), tuple)
+            big = Path(self.tmp.name) / "big-busy.md"
+            big.write_text("Make the parser take every case below.\n" + "- a case of the parser's, one line\n" * 2300)
+            code, out, err = self.wb("start", "t-busy-big", "--spec", str(big), "--repo", str(self.repo),
+                                     "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        first = runner.first_tokens(prompt=big.read_text())
+        self.assertGreater(first, cli.meter.FIRST_TOKENS)
+        self.assertEqual(seen[:2], [40_123, cli.meter.FIRST_TOKENS])
+        self.assertIn(first, seen[2:])                       # the busy start's, its spec in it
         with mock.patch.object(cli.privacy, "local_only", lambda repo, sub: str(repo)):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + f"{self.repo.name} is kept local ({self.repo})")
