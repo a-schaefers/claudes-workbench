@@ -8,6 +8,8 @@
          answer.txt = "42" with write (#1210)
   buildout  dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names
          neither, then answer.txt = "42" with write (#1210's review)
+  pkgbuild  a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind
+         one `python -m build`, then answer.txt = "42" with write (#1210's second review)
   stay   as ok, then stays open for an hour, its output open and silent: the agent's turn over
          (reason stop) and OpenCode not exiting (#1160)
   fix    first round writes "41" (wrong); a continued session (--session) writes "42"
@@ -699,6 +701,18 @@ elif scenario == "buildout":  # #1210's review: the agent's own build, its outpu
         with open(os.path.join("dist", name), "w") as fh:
             fh.write(text)
     tool("bash", {"command": "npm run build", "description": "Build"}, output="> tsc\n")
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42\n"})
+    emit("text", text="Built, and wrote answer.txt = 42.")
+    finish()
+elif scenario == "pkgbuild":  # #1210's second review: a read of pkg/a.py, then build/lib's copy
+    tool("bash", {"command": "grep -n answer pkg/a.py", "description": "Read"}, output="1:# a\n")
+    os.makedirs(os.path.join("build", "lib", "pkg"), exist_ok=True)
+    for m in ("__init__", "a", "b"):
+        with open(os.path.join("build", "lib", "pkg", m + ".py"), "w") as fh:
+            fh.write("# " + m + "\n")
+    tool("bash", {"command": "python -m build", "description": "Build"}, output="ok\n")
     with open("answer.txt", "w") as fh:
         fh.write("42\n")
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42\n"})

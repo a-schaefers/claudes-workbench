@@ -2780,6 +2780,52 @@ class Lifecycle(Base):
             run_wb("accept", "t-sh", "-m", "feat: one", "--merge")
         self.assertIn("not committed: git ignores files written in the worktree (lib/util.py)", err.getvalue())
 
+    def test_a_source_file_a_shell_row_reads_does_not_name_the_copy_a_build_makes_of_it(self):
+        # #1210's second review (2026-11-24): every row's words in one set, matched by suffix, so
+        # `grep -n answer pkg/a.py` named setuptools' build/lib/pkg/a.py: the NOTE said the agent
+        # wrote it, accept --merge was refused, and --include put a third of build/lib on main
+        (self.repo / ".gitignore").write_text("build/\n")
+        (self.repo / "pkg").mkdir()
+        for m in ("__init__", "a", "b"):
+            (self.repo / "pkg" / f"{m}.py").write_text(f"# {m}\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "pkg"], check=True)
+        self.start("t-p", "pkgbuild", "--test", TEST_CMD)
+        wait_phase("t-p", {"review"})
+        t = store.Task("t-p")
+        built = ["build/lib/pkg/__init__.py", "build/lib/pkg/a.py", "build/lib/pkg/b.py"]
+        self.assertEqual(runner.shell_wrote(t), [])
+        self.assertEqual(runner.shell_left(t), built)
+        self.assertNotIn("git ignores files the agent wrote", run_wb("report", "t-p"))
+        out = run_wb("accept", "t-p", "-m", "feat: one", "--merge")
+        self.assertIn("merged into main", out)
+        self.assertIn(f"leaves out as build or test output ({', '.join(built)})", out)
+
+    def test_a_shell_row_names_a_file_by_its_path_from_the_workdir_or_its_name_in_a_directory_it_names(self):
+        # #1210's second review (2026-11-24): row by row and exact, not a suffix of any word, so
+        # `cat package.json` names no library build's dist/package.json
+        wt = Path("/w/t")
+
+        def named(cmds, path, subdir=""):
+            rows = [{"kind": "tool", "tool": "bash", "names": events.shell_names(c)} for c in cmds]
+            return runner._rows_name(rows, wt, subdir)(path)
+        self.assertFalse(named(["grep -n answer pkg/a.py", "python -m build"], "build/lib/pkg/a.py"))
+        self.assertFalse(named(["cat package.json", "npm run build"], "dist/package.json"))
+        self.assertFalse(named(["cat > util.py"], "lib/util.py"))
+        self.assertFalse(named(["cat lib/x.py", "cat > util.py"], "lib/util.py"))   # another row's dir
+        self.assertTrue(named(["mkdir -p lib && cat > lib/util.py <<X\nx\nX"], "lib/util.py"))
+        self.assertTrue(named(["mv util.py lib/"], "lib/util.py"))
+        self.assertTrue(named(["cp pkg/a.py build/"], "build/a.py"))
+        self.assertTrue(named(["cd lib && cat > util.py <<X\nx\nX"], "lib/util.py"))
+        self.assertTrue(named(["cd lib && mv x/util.py sub/"], "lib/sub/util.py"))
+        self.assertTrue(named(["cat > /w/t/lib/util.py"], "lib/util.py"))         # absolute: the worktree's
+        self.assertFalse(named(["cat > /elsewhere/lib/util.py"], "lib/util.py"))
+        self.assertTrue(named(["cat > src/x.ts"], "pkgs/a/src/x.ts", "pkgs/a"))    # a monorepo's workdir
+        self.assertTrue(named(["cat > ../b/x.ts"], "pkgs/b/x.ts", "pkgs/a"))
+        self.assertTrue(named(["node dist/index.js"], "dist/index.js"))           # reading as writing
+        old = {"kind": "tool", "tool": "bash", "brief": "cat > lib/util.py <<X"}  # a row without names
+        self.assertTrue(runner._rows_name([old], wt)("lib/util.py"))
+
     def test_a_shell_line_names_the_files_it_may_write_paths_first(self):
         # #1210's review (2026-11-24): `npm run build` names none of its dist/, and the agent's
         # redirect, mv or heredoc'd script names the module it wrote
@@ -2790,6 +2836,10 @@ class Lifecycle(Base):
                          "lib/util.py")
         self.assertEqual(events.shell_names("mv util.py lib/util.py; tsc --outDir=build/lib")[:3],
                          ["lib/util.py", "build/lib", "util.py"])
+        # a word after a cd is joined to it; after one to where no word says, kept as it is
+        self.assertEqual(events.shell_names("cd lib && cat > util.py")[:2], ["lib/cat", "lib/util.py"])
+        self.assertIn("../x.py", events.shell_names("cd .. && cat > x.py"))
+        self.assertIn("util.py", events.shell_names('cd "$D" && cat > util.py'))
         self.assertLessEqual(len(events.shell_names(" ".join(f"w{i}" for i in range(5000)))),
                              events.NAMES_MAX)
 

@@ -73,15 +73,49 @@ NAME_LEN = 300
 
 def shell_names(command: str) -> list[str]:
     """The words of a shell line that may name a file it wrote, paths first (a word with `/`,
-    then one with `.`), each once, NAMES_MAX of them. Build output under an ignored dist/ was
-    taken for the agent's work and refused at accept, though `npm run build` names none of it,
-    while `cat > lib/util.py <<EOF` names its file (#1210's review, 2026-11-24)."""
-    words = dict.fromkeys(w for w in _NAME_SPLIT.split(command or "")
-                          if w and len(w) <= NAME_LEN and not w.startswith("-")
-                          and re.search(r"[A-Za-z0-9]", w))
+    then one with `.`), each once, NAMES_MAX of them; a word after a `cd` (or `pushd`) in the
+    line joined to its directory, so `cd lib && cat > util.py` gives lib/util.py, and an
+    absolute one kept whole (runner._shell_named resolves both against the workdir). Build
+    output under an ignored dist/ was taken for the agent's work and refused at accept, though
+    `npm run build` names none of it, while `cat > lib/util.py <<EOF` names its file (#1210's
+    review, 2026-11-24)."""
+    words: dict[str, None] = {}
+    cwd = ""                                               # where the line is, from the workdir
+    for part in _simple_commands(command or ""):
+        here = [w for w in _NAME_SPLIT.split(part)
+                if w and len(w) <= NAME_LEN and not w.startswith("-") and re.search(r"[A-Za-z0-9]", w)]
+        for w in here:
+            words.setdefault(_joined(cwd, w))
+        if (target := _cd_target(part)) is not None:
+            cwd = _joined(cwd, target) if target and cwd is not None else None
     ranked = ([w for w in words if "/" in w] + [w for w in words if "/" not in w and "." in w]
               + [w for w in words if "/" not in w and "." not in w])
     return ranked[:NAMES_MAX]
+
+
+def _joined(cwd: str | None, word: str) -> str:
+    """A word of a simple command run in `cwd` (relative to the line's start; None after a `cd`
+    to where no word says: `cd $D`, `cd -`), as a path from the line's start."""
+    if not cwd or word.startswith("/"):
+        return word
+    return os.path.normpath(os.path.join(cwd, word))
+
+
+def _cd_target(part: str) -> str | None:
+    """The directory a simple command `cd`s to: None if it isn't one, "" if no word says
+    (`cd`, `cd -`, `cd "$D"`, `cd ~/x`)."""
+    try:
+        words = shlex.split(part)
+    except ValueError:
+        words = part.split()
+    while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+        words.pop(0)
+    if not words or words[0] not in ("cd", "pushd"):
+        return None
+    args = [w for w in words[1:] if not w.startswith("-")]
+    if not args or re.search(r"[$~`*?]", args[0]):
+        return ""
+    return args[0]
 
 
 def shell_programs(command: str) -> list[str]:

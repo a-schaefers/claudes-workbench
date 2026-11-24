@@ -2732,8 +2732,8 @@ def shell_wrote(task: store.Task) -> list[str]:
     """The ignored files changed in the worktree since the agent's first round (status
     `agent_from`) that look written by hand (gitops.hand_written), less what the runner's test
     runs wrote (status `test_wrote`), and that one of the agent's shell rows names (its path, or
-    its name alone: _shell_named): the agent's shell's, which no edit row shows. An agent's
-    `mkdir -p lib && cat > lib/util.py <<EOF` under Python.gitignore's lib/ was in no diff (the
+    its name in a directory the row names: _shell_named): the agent's shell's, which no edit row
+    shows. An agent's `mkdir -p lib && cat > lib/util.py <<EOF` under Python.gitignore's lib/ was in no diff (the
     review's "all of it"), no NOTE and no commit: wb accept --merge exited 0, main imported a
     module that was deleted with the worktree (#1210, 2026-11-24). Named, not all of them: the
     dist/index.js of the agent's own `npm run build` (or tsc's, `python -m build`'s build/lib, an
@@ -2752,26 +2752,50 @@ def shell_left(task: store.Task) -> list[str]:
 
 
 def _shell_named(task: store.Task):
-    """Whether one of the agent's shell rows names a worktree-relative path: a word equal to it,
-    one ending in it (absolute), one it ends in (relative to the workdir: a monorepo's package),
-    or, a word without `/`, its name (`cd lib && cat > util.py`, `mv util.py lib/`). Every shell
-    row, a failed one too: `cat > lib/util.py <<EOF && pytest` that fails still wrote the module,
-    and dropping it is the loss #1210 was. A row from before `names` was kept: its brief's words.
-    Reading as writing: `node dist/index.js` after the build names it too, and refuses it."""
-    words: set[str] = set()
-    for r in store.read_jsonl(task.dir / "events.jsonl")[0]:
-        if r.get("kind") == "tool" and r.get("tool") in ("shell", "bash"):
-            names = r.get("names")
-            if not isinstance(names, list):
-                names = shell_names(str(r.get("brief") or ""))
-            words.update(os.path.normpath(str(w)).lstrip("/") if "/" in str(w) else str(w)
-                         for w in names if w)
-    bare = {w for w in words if "/" not in w}
-    paths = [w for w in words if "/" in w]
+    """Whether one of the agent's shell rows names a worktree-relative path: a word of its
+    `names` resolved against the workdir (an absolute one against the worktree; a word after a
+    `cd` in the row already joined to it, events.shell_names) equal to it, or its name a word's
+    last part with the file in a directory the same row names (`mv util.py lib/`, `cp
+    src/a.py build/`). Row by row and exact: one set of every row's words, matched by suffix,
+    took `grep -n answer pkg/a.py` for a name of setuptools' build/lib/pkg/a.py, and `cat
+    package.json` for a library build's dist/package.json, refused at accept (#1210's review,
+    2026-11-24). Every shell row, a failed one too: `cat > lib/util.py <<EOF && pytest` that
+    fails still wrote the module, and dropping it is the loss #1210 was. A row from before
+    `names` was kept: its brief's words. Reading as writing: `node dist/index.js` after the
+    build names it too, and refuses it."""
+    rows = [r for r in store.read_jsonl(task.dir / "events.jsonl")[0]
+            if r.get("kind") == "tool" and r.get("tool") in ("shell", "bash")]
+    return _rows_name(rows, task.worktree, task.spec.get("subdir", ""))
+
+
+def _rows_name(rows: list[dict], worktree: Path, subdir: str = ""):
+    """_shell_named's test, on its rows: which worktree-relative paths they name."""
+    roots = list(dict.fromkeys(str(r) for r in (worktree, os.path.realpath(worktree))))
+    base = os.path.normpath(subdir or ".")
+
+    def inside(w: str) -> str | None:
+        if w.startswith("/"):
+            w = os.path.normpath(w)
+            rel = next((w[len(r):].lstrip("/") or "." for r in roots
+                        if w == r or w.startswith(r.rstrip("/") + "/")), None)
+            return rel and os.path.normpath(rel)
+        rel = os.path.normpath(os.path.join(base, w))
+        return None if rel == ".." or rel.startswith("../") else rel
+
+    named_rows: list[tuple[set[str], set[str]]] = []
+    for r in rows:
+        names = r.get("names")
+        if not isinstance(names, list):
+            names = shell_names(str(r.get("brief") or ""))
+        words = [str(w) for w in names if w]
+        paths = {p for p in map(inside, words) if p}
+        named_rows.append((paths, {w.rstrip("/").rsplit("/", 1)[-1] for w in words}))
 
     def named(p: str) -> bool:
-        return (p.rsplit("/", 1)[-1] in bare
-                or any(w == p or w.endswith("/" + p) or p.endswith("/" + w) for w in paths))
+        p = os.path.normpath(p)
+        where, name = os.path.split(p)
+        return any(p in paths or (name in names and (where or ".") in paths)
+                   for paths, names in named_rows)
     return named
 
 

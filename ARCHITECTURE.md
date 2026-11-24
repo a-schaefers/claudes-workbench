@@ -961,13 +961,18 @@ it deleted (#1210). So `runner.shell_wrote` counts too: what `gitops.hand_writte
 changed since the agent's first round (status `agent_from`, set once, after the checkout, setup,
 `--copy` and base check), less what the runner's own test runs changed (status `test_wrote`, kept
 by `run_tests` after each: a Maven run's surefire reports are no one's work), that one of the
-agent's shell rows names (`runner._shell_named`: a word of its `names`, `events.shell_names`,
-equal to the path, ending in it or it in the word, or a word without `/` its file name; every
-shell row, a failed one too; an older row without `names`, its brief's words). Unnamed, it was all
+agent's shell rows names (`runner._shell_named`, row by row and exact: a word of its `names`,
+`events.shell_names`, which joins a word after a `cd` or `pushd` in the row to its directory,
+resolved against the workdir, an absolute one against the worktree, equal to the path; or the
+file's name a word's last part, the file in a directory the same row names, as `mv util.py lib/`;
+every shell row, a failed one too; an older row without `names`, its brief's words). One set of
+every row's words, matched by suffix, took `grep -n answer pkg/a.py` for a name of `python -m
+build`'s `build/lib/pkg/a.py`, and `cat package.json` for a library build's `dist/package.json`
+(#1210's second review). Unnamed, it was all
 of them, and the `dist/` of the agent's own `npm run build` (tsc's, `python -m build`'s
 `build/lib`, an `mvn test` wider than `--test`) was "files the agent wrote", refused at every
 accept, and `--include` put build output on main (#1210's review); naming reads as writing, so a
-`node dist/index.js` names that file. The report's NOTE names `shell_wrote`, less status
+`node dist/index.js` names that file, and `ls build/lib/pkg && cat pkg/a.py` its copy. The report's NOTE names `shell_wrote`, less status
 `hand_wrote`; the rest (`runner.shell_left`: the unnamed and `hand_written`'s rest, less
 `test_wrote`, the edit rows' and `hand_wrote`) joins `hand_left`'s note and `left-out/` copy. Nor did Claude's files
 count, which no event shows: a module written under `lib/` after `wb takeover` was lost (#1179).
@@ -6287,7 +6292,7 @@ off), not `wb start`'s.
 
 **events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?, path?, paths?, programs?, names?}`
 (`brief`: command, path, pattern, url, query or description, 90 chars; a skill's id; a patch's first
-file; `path` an edit's or a read's whole path; `paths` the files a `patch` wrote, `events.patched`, #1148; a shell row's `programs`, `events.shell_programs`, 8, and `names`, the words that may name a file it wrote, paths first, `events.shell_names`, `NAMES_MAX` 300: `runner.shell_wrote`, #1210), `text {text}` (2000), `step {in,
+file; `path` an edit's or a read's whole path; `paths` the files a `patch` wrote, `events.patched`, #1148; a shell row's `programs`, `events.shell_programs`, 8, and `names`, the words that may name a file it wrote, paths first, a word after a `cd` joined to its directory, `events.shell_names`, `NAMES_MAX` 300: `runner.shell_wrote`, #1210), `text {text}` (2000), `step {in,
 out, cache, cache_read, cache_write, reasoning?, cost?}` (reasoning apart from `out`; `cache` the read and write summed,
 which the handover check reads; `cost` OpenCode's `part.cost` in USD, only when a number: missing is unknown, never 0, #1022; the meter's step price too, #1019), `error {text}`, `retry {text, attempt}` (OpenCode resent a request). From the runner: `round`, `stopped {text}`, `steer
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),
@@ -6588,7 +6593,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
-`ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > … <<X`, main.py and answer.txt with `write`: #1210), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
+`ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > … <<X`, main.py and answer.txt with `write`: #1210), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
 `read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
