@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, agentOf, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, spendLine, apiParts, splashTarget, statsLines, usd, wrapParts, wrapWords } from './register.js'
+import { absolutePath, agentOf, isAbort, rolesRead, wbThrew, type WbRun, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, spendLine, apiParts, splashTarget, statsLines, usd, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
@@ -6183,6 +6183,50 @@ test('#1023: with no provider connected and no API role the API group is one lin
   expect((await texts()).filter(t => t === 'wb is older than the mod: wb update').length).toBeGreaterThan(0)
   for (const key of ['agents', 'busy', 'role-trivial', 'api-trivial', 'cap']) expect(await ui.find({ key })).toBeUndefined()
   expect(await ui.find({ key: 'coding' })).toBeDefined()                   // the rest as always
+  await ui.unmount()
+})
+
+// #1142 (2026-11-23): after /reload-plugins the tab showed "could not run wb route --json:
+// HooksError: workbench: $.process.run(wb) aborted" for ROLES_CACHE_MS: an aborted read was taken
+// for wb failing, and kept. The kit can't make $.process.run abort (a test hook that throws is
+// skipped), so the abort is checked on the functions rolesNow and runWb decide with.
+const ABORTED = new Error('HooksError: workbench: $.process.run(wb) aborted')
+test('#1142: an aborted $.process.run is not wb failing: it says nothing, and isAbort tells it from wb not running', () => {
+  expect(wbThrew(['route', '--json'], ABORTED)).toEqual({ ok: false, out: '', aborted: true })
+  expect(wbThrew(['route', '--json'], new Error('spawn wb ENOENT'))).toEqual({ ok: false, out: 'could not run wb route --json: Error: spawn wb ENOENT' })
+  expect(isAbort(Object.assign(new Error('The operation was cancelled'), { name: 'AbortError' }))).toBe(true)
+  expect(isAbort(new Error('timed out after 15000 ms'))).toBe(false)
+})
+
+test('#1142: an aborted roles read leaves the last good roles drawn and keeps nothing, so the next draw reads again; with none it draws nothing', () => {
+  const good = (o: unknown): WbRun => ({ ok: true, out: JSON.stringify(o) })
+  const routes = { v: 1, use: 'both', roles: { significant: { via: 'gpu', gpu: 'auto', thinking: 'off' } } }
+  const models = { gpu: [], api: [] }
+  const read = rolesRead(null, 1000, good(routes), good(models))
+  expect([read.keep, read.shown.why, read.shown.routes?.use]).toEqual([true, '', 'both'])
+  const aborted = wbThrew(['route', '--json'], ABORTED)
+  for (const [r, m] of [[aborted, null], [good(routes), aborted]] as [WbRun, WbRun | null][]) {
+    expect(rolesRead(read.shown, 20_000, r, m)).toEqual({ shown: read.shown, keep: false })     // the last good, not kept
+    expect(rolesRead(null, 20_000, r, m)).toEqual({ shown: { at: 20_000, routes: null, models: null, why: '' }, keep: false })  // nothing
+  }
+})
+
+test('#1142: a real wb failure still shows wb\'s own line, is never kept, and the next draw reads again', { timeoutMs: 20_000 }, async ($, on) => {
+  const failed = rolesRead(null, 1000, { ok: false, out: 'Traceback (most recent call last):\nwb: routes.json is not valid JSON: line 3' }, { ok: true, out: '{"gpu": []}' })
+  expect([failed.keep, failed.shown.why, failed.shown.routes]).toEqual([false, 'wb: routes.json is not valid JSON: line 3', null])
+  const { ui, w, texts, clock } = await settingsTab($, on)
+  w.routeCode = 1
+  w.routeOut = 'Traceback (most recent call last):\nwb: routes.json is not valid JSON: line 3'
+  await clock.advance(11_000)                                           // past the roles' cache
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  expect(await texts()).toContain('wb: routes.json is not valid JSON: line 3')
+  expect(await ui.find({ key: 'role-trivial' })).toBeUndefined()
+  w.routeCode = 0                                                       // fixed: read again at once, no cache held
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  expect(await ui.find({ key: 'role-trivial' })).toBeDefined()
+  expect(await texts()).not.toContain('wb: routes.json is not valid JSON: line 3')
   await ui.unmount()
 })
 

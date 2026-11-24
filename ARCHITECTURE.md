@@ -2581,6 +2581,9 @@ user sees.
   2026-11-21). A failed `wb` call toasts its last line.
   **The roles in Settings** (#1023): read through `rolesNow` (`wb route --json` and `wb models
   --json`, neither asking a server; kept `ROLES_CACHE_MS` 10 s in `mem.roles`, dropped after a pick).
+  Only wb's answer is kept (`rolesRead`, #1142): the roles, or `wb is older than the mod`; a failed
+  read (routes.json broken) shows wb's line and is read again on the next draw, and an aborted one
+  draws the last good roles (with none, nothing) and is read again too.
   Shared: **Agents** (`AGENTS_STOPS`, key `agents`: `wb route all gpu|api|both`), **When the GPU is
   busy** (`BUSY_STOPS`, `busy`: `Wait (default)`, `Use the role's API model`; `wb route busy wait|api`),
   one row per role by its label (`roleStops`, `role-<role>`: `wb route <role> gpu|api`; api reads
@@ -5192,7 +5195,11 @@ timer polls with no events child, a task queued/running/testing/asking, a turn q
 clears the link and ends away, `back`); while on,
 every 10 minutes `wb chat url` refreshes the link (`chatLink`; only a `…#token=…` URL). Limits: `wb`
 120 s (`wb update` 600 s), `wb watch` and `tail` 30 s, `kill -0` 5 s. `runWb` returns the exit
-status: a failing `wb` is said as a failure (`brief`), never passed on as its answer. Growing files
+status: a failing `wb` is said as a failure (`brief`), never passed on as its answer. A call the
+engine aborted (a plugin reload, a superseding redraw: `isAbort`, `wbThrew`) is `aborted`, with no
+message: not wb failing, so nothing says `could not run wb` (nor `wb status failed`), and a read the pane keeps (the roles,
+the probe row, the saving, the chat link, the Stats feed) keeps its last value and reads again
+(#1142). Growing files
 are read by `readTail`: whole up to 1 MiB (events 64 KiB), else `tail -c` from a whole line, since
 `$.fs.read` rejects a file over 4 MiB (no wake came again, the 2026-11-16 audit).
 
