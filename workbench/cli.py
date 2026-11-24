@@ -1706,6 +1706,15 @@ def cmd_feedback(a):
     # step went badly, shrinking the model's slice (#1153, 2026-11-24). drive clears `infra` at
     # each round's start, so a task in review never has it.
     resumed = bool(st.get("infra"))
+    # ... and no review for round_asks either: it stopped at this round, so a later handover or
+    # wb resume carried only "carry on" and dropped the review feedback the stop interrupted
+    # (#1169, 2026-11-24). Unlinked otherwise: a feedback that died before its round was counted
+    # leaves round n's directory for the next one.
+    mark = task.round_dir(n) / runner.RESUMED
+    if resumed:
+        mark.touch()
+    else:
+        mark.unlink(missing_ok=True)
     reviews = st.get("reviews", 0) + (0 if resumed else 1)
     handled = store.now()  # everything before the new round; what its runner raises stays news
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)

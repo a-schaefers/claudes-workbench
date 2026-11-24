@@ -4465,6 +4465,12 @@ RESUME = ("Claude stopped your last session and is resuming the task in a fresh 
 NUDGED = "nudged"
 
 
+# A wb feedback round after a stop that wasn't the agent's (status `infra`: the provider's, a
+# reaped runner's): its "carry on" is under FEEDBACK_HEAD but is no review, so round_asks keeps
+# it and walks on to the feedback the stop interrupted (#1169).
+RESUMED = "resumed"
+
+
 # Claude's notes folded into a round's prompt after its opening (a carry-on, a resume, the
 # notes that came before the round began): round_asks skips a carry-on or resume whole, so it
 # reads them from here (#677).
@@ -4485,7 +4491,9 @@ def round_asks(task: store.Task, n: int) -> list[str]:
     feedback: what a fresh session taking over mid-round must still carry out. A handover's own
     carry-on adds nothing (it is skipped). Seen 2026-11-16: two handovers in a feedback round
     each said only "carry on with the task", and the fresh sessions, finding the tests green,
-    reported done with the feedback never made. A resume (wb resume) is skipped the same way."""
+    reported done with the feedback never made. A resume (wb resume) is skipped the same way,
+    and a feedback round after an infra stop (RESUMED) is no stop: its "carry on" once hid the
+    review feedback before it (#1169)."""
     first = task.status.get("step_round") or 1
     out: list[str] = []
     for r in range(n, first, -1):
@@ -4499,7 +4507,7 @@ def round_asks(task: store.Task, n: int) -> list[str]:
                 out.insert(0, kept)
             continue
         out.insert(0, raw)
-        if raw.startswith(lessons.FEEDBACK_HEAD):
+        if raw.startswith(lessons.FEEDBACK_HEAD) and not (task.round_dir(r) / RESUMED).exists():
             break
     return out
 
