@@ -19572,6 +19572,17 @@ class Stats(Base):
         self.assertIn("(1 discard put down to the spec left out)", out)
         self.assertIn("(2 discards put down to the spec left out)", results.table())
 
+    def test_a_spec_gap_discard_after_a_stop_from_outside_counts_as_a_spec_gap_in_both_views(self):
+        # #1245 (2026-11-24): a wb discard --spec-gap taken after the day cap stopped the task was
+        # left out of the Stats feed's spec_gaps while wb stats' table counted it: one history, two
+        # answers
+        from workbench import results, stats
+        self.rows({"ts": time.time(), "outcome": "accepted", "ran": True},
+                  {"ts": time.time(), "outcome": "discarded", "ran": True, "spec_gaps": ["x"],
+                   "infra": "spend"})
+        self.assertTrue(results.table().endswith("(1 discard put down to the spec left out)"))
+        self.assertEqual(stats.feed()["periods"]["all"].get("spec_gaps"), 1)
+
     def test_two_settings_changed_at_once_both_stay(self):
         # #564: each wrote back the snapshot it read, so one change was lost while both said it took.
         # Each process waits after its read until the other has read too (or a second passes: under
@@ -19832,6 +19843,7 @@ class Stats(Base):
         bests = stats.feed()["bests"]
         self.assertEqual((bests["largest_first_try"]["task"], bests["largest_first_try"]["lines"]), ("t-a", 20))
         self.assertEqual(bests["fastest"]["task"], "t-a")
+
     def test_a_discarded_chain_stopped_from_outside_its_step_credits_its_landed_steps_whole(self):
         # #1245: the step the day cap (or the provider, a restart) ended isn't the agent's to fail;
         # with none of its steps kept, the discard says nothing of the model
@@ -19844,7 +19856,6 @@ class Stats(Base):
         self.assertFalse(tuning.judged({**row, "landed_steps": 0}))
         self.assertFalse(tuning.judged({"outcome": "discarded", "steps": [{}], "infra": "local_only",
                                         "ran": True}))
-
 
     def test_a_spec_gap_discard_counts_in_the_saved_milestone_as_in_the_saving(self):
         # #569: the milestone left out the discard's cost, so "100K saved" showed above an
@@ -34410,9 +34421,11 @@ class RateLimits(Base):
         row = store.results()[-1]
         self.assertIs(row["steps"][-1]["stuck"], False)
         self.assertEqual((router.slice(m).files, router.slice(m).lines), (before.files, before.lines))
-        # the same stop as the step's own (cause "guard"): stuck, and the slice shrinks
+        # the same stop as the step's own (cause "guard"): stuck, and the slice shrinks; the row's
+        # `infra` (the provider's stop) stays out, or stopped_outside leaves the copy unjudged (#1245)
         store.append_jsonl(store.home() / "results.jsonl",
-                           {**row, "ts": time.time(), "steps": [{**row["steps"][-1], "stuck": True}]})
+                           {**{k: v for k, v in row.items() if k != "infra"}, "ts": time.time(),
+                            "steps": [{**row["steps"][-1], "stuck": True}]})
         self.assertLess(router.slice(m).files, before.files)
 
     def test_the_carry_on_after_a_providers_stop_is_not_counted_as_a_review_round(self):

@@ -2620,7 +2620,8 @@ no reader. What the router, tuning, savings and progress read is outside the set
 milestones): every non-trial row. An empty section is left out, never zeros (a new install: `{ts,
 until, settings, tasks: 0}`); `until` is the next local midnight (`_midnight`), when the pane
 re-reads. Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `accepted_pct`,
-`active_minutes`, `savings` with `score`, `spec_gaps`, `energy` `{wh, cost?}` from every row's
+`active_minutes`, `savings` with `score`, `spec_gaps` (one after a stop that wasn't the step's
+counted too, as `results.table` does, #1245), `energy` `{wh, cost?}` from every row's
 `gpu_wh` that measured them, another machine's GPU and API rows left out, #568, #569; `api`, below), `streak` `{current, best,
 days}` (local days with a task landed; the current run ends today or yesterday, else 0, and an
 ended run is never mentioned), `bests`
