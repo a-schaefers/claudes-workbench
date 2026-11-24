@@ -163,7 +163,9 @@ Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`
 `~/.local/share/workbench/source`), `WB_ROUTES` (the roles; `wb start`'s local-only check reads it), `WB_AGENTS_MD`
 (the user's file for agents; the tests' own) (relative or `~` allowed: a new
 one joins `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; the agent's `WB_TASK`, `WB_RUN`,
-`WB_USER_PYTHONPATH`; `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
+`WB_USER_PYTHONPATH`; OpenCode's `OTEL_EXPORTER_OTLP_ENDPOINT` (the user's: with it set, the round's
+tags join `OTEL_RESOURCE_ATTRIBUTES`, `runner.otel_env`), `OTEL_EXPORTER_OTLP_HEADERS` (dropped,
+`SECRET_ENV`: commands.json `env` passes one on purpose); `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), `CLAUDECODE` (under it `wb patch send`
 sends and `wb route` changes the API side only on the mod's dialog's yes: `send-ok.json`,
 `route-ok.json`; `wb start --model` on an API model the same, `cli.start_gate`). Tests only: `WB_OPENCODE_BIN`,
@@ -214,6 +216,9 @@ what: ARCHITECTURE.md, *The tests*; the detail: *The runner, inside*, *What the 
 - `OPENCODE_DB` moves only the db (the data dir's `auth.json` is still imported into it);
   `XDG_DATA_HOME` moves the whole data dir (`opencode debug paths`), so agents get the task's.
   It picks a command's flags by `$SHELL`'s name (zsh's `+o nomatch`): the shim bears its shell's.
+- With `OTEL_EXPORTER_OTLP_ENDPOINT` set it exports traces and logs there (OTLP/HTTP JSON; its
+  config key is unsupported); one entry of `OTEL_RESOURCE_ATTRIBUTES` it can't decode drops them
+  all; its `cli starting` log record carries the argv, the prompt in it.
 - The user's global MCP servers start even when `"enabled": false`, and a provider's
   `headerTimeout`/`chunkTimeout` cut a slow request: the layer undoes both (an API provider's
   header wait is 600 s, not none).
