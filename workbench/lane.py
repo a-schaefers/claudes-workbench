@@ -9,7 +9,9 @@ credentials live; running a program reads it, so it must be readable too). Where
 bus, the SSH and GPG agents: `--unix` names the places that may), an abstract socket, or a signal
 to a process outside it (the runner, other tasks, Claude Code). From ABI 4 it refuses a TCP connect
 to each `--deny-port` (context.deny_ports: local daemons that take commands, a debugger's port),
-on any address: Landlock only allows ports, so every other port gets a rule. Listing directories,
+on any address: Landlock only allows ports, so every other port gets a rule; its rule sees TCP
+sockets only, so a seccomp filter refuses making an MPTCP or SMC one then, and io_uring (which
+makes sockets past the filter), as a kernel without them does. Listing directories,
 binding and the rest of the network stay as they were. Landlock doesn't cover metadata: chmod,
 chown, utimes and xattrs on a file outside the lane still succeed. A write or a denied connect
 fails with "Permission denied", and the agent asks Claude for the directory (`wb allow --path`)
@@ -25,6 +27,7 @@ library here: it runs before every round.
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import platform
 import signal
@@ -45,6 +48,23 @@ REFER, TRUNCATE = 1 << 13, 1 << 14               # ABI 2 and 3
 RESOLVE_UNIX = 1 << 16                           # ABI 9: connect to a socket made outside
 SCOPE_ABSTRACT_UNIX, SCOPE_SIGNAL = 1, 2         # ABI 6: ruleset_attr.scoped
 CONNECT_TCP = 1 << 1                             # ABI 4: ruleset_attr.handled_access_net
+
+# seccomp, for the stream sockets Landlock's TCP rule doesn't see (#1197's review, 2026-11-24):
+# an MPTCP socket (protocol 262) connected to a denied port on Linux 7.2, ABI 10, and SMC's
+# hands its connect to a kernel TCP socket; io_uring makes sockets with no socket(2) to filter
+PR_SET_SECCOMP, SECCOMP_MODE_FILTER = 22, 2
+RET_ALLOW, RET_ERRNO = 0x7FFF0000, 0x00050000
+LD_ABS, JEQ, RET = 0x20, 0x15, 0x06              # BPF_LD|W|ABS, BPF_JMP|JEQ|K, BPF_RET|K
+AF_INET, AF_INET6, AF_SMC = 2, 10, 43
+IPPROTO_SMC, IPPROTO_MPTCP = 256, 262
+X86_64, X32 = 0xC000003E, 0x40000000           # x32's bit on x86_64's syscall numbers
+IO_URING_SETUP = 425                              # the same on every arch the unified table has
+# AUDIT_ARCH_* and socket(2)'s number on it, the compat ones too (a 32-bit program on a 64-bit
+# kernel). socketcall(2) (i386, ppc, s390) passes its arguments in memory, which seccomp can't
+# read: a 32-bit x86 program calling it still makes an MPTCP socket
+SOCKET_NR = {X86_64: (41, X32 | 41), 0x40000003: (359,), 0xC00000B7: (198,),
+             0x40000028: (281,), 0xC00000F3: (198,), 0xC0000102: (198,), 0xC0000015: (326,),
+             0x80000015: (326,), 0x00000014: (326,), 0x80000016: (359,), 0x00000016: (359,)}
 
 
 def _libc():
@@ -141,7 +161,68 @@ def restrict(writable: list[str], readable: list[str] | None = None,
             raise OSError(ctypes.get_errno(), "landlock_restrict_self")
     finally:
         os.close(fd)
+    if net:  # else a denied port is a socket(…, 262) away
+        refuse_unseen_streams(libc)
     return version
+
+
+def stream_filter() -> bytes:
+    """The seccomp program refusing what Landlock's TCP rule doesn't see: an MPTCP or SMC socket
+    on IPv4 or IPv6 gets EPROTONOSUPPORT (as on a kernel without them: curl --mptcp and the
+    rest fall back to TCP, which the rule covers), an AF_SMC one EAFNOSUPPORT, io_uring_setup
+    ENOSYS (as where it's off). Everything else is allowed."""
+    big = sys.byteorder == "big"
+    arg = lambda i: 16 + 8 * i + (4 if big else 0)  # noqa: E731 an int argument's low word
+    prog: list[tuple] = [("ld", 4)]                 # seccomp_data.arch
+    arches = sorted(SOCKET_NR)
+    prog += [("jeq", a, f"arch{a}") for a in arches] + [("ret", RET_ALLOW)]
+    for a in arches:
+        prog += [("label", f"arch{a}"), ("ld", 0)]   # seccomp_data.nr
+        prog += [("jeq", nr, "socket") for nr in SOCKET_NR[a]]
+        prog += [("jeq", nr, "nosys") for nr in (IO_URING_SETUP, X32 | IO_URING_SETUP)[
+            :2 if a == X86_64 else 1]]
+        prog.append(("ret", RET_ALLOW))
+    prog += [("label", "socket"), ("ld", arg(0)), ("jeq", AF_SMC, "noaf"),
+             ("jeq", AF_INET, "proto"), ("jeq", AF_INET6, "proto"), ("ret", RET_ALLOW),
+             ("label", "proto"), ("ld", arg(2)), ("jeq", IPPROTO_MPTCP, "noproto"),
+             ("jeq", IPPROTO_SMC, "noproto"), ("ret", RET_ALLOW),
+             ("label", "noproto"), ("ret", RET_ERRNO | errno.EPROTONOSUPPORT),
+             ("label", "noaf"), ("ret", RET_ERRNO | errno.EAFNOSUPPORT),
+             ("label", "nosys"), ("ret", RET_ERRNO | errno.ENOSYS)]
+    at, n = {}, 0
+    for op in prog:
+        if op[0] == "label":
+            at[op[1]] = n
+        else:
+            n += 1
+    out, n = [], 0
+    for op in prog:
+        if op[0] == "label":
+            continue
+        n += 1
+        if op[0] == "ld":
+            out.append(struct.pack("=HBBI", LD_ABS, 0, 0, op[1]))
+        elif op[0] == "ret":
+            out.append(struct.pack("=HBBI", RET, 0, 0, op[1]))
+        else:  # true: the label, relative to the next instruction; false: the next
+            jt = at[op[2]] - n
+            if not 0 <= jt < 256:
+                raise ValueError(f"seccomp jump {jt}")
+            out.append(struct.pack("=HBBI", JEQ, jt, 0, op[1]))
+    return b"".join(out)
+
+
+def refuse_unseen_streams(libc) -> None:
+    """Install stream_filter on this process and what it execs (no-new-privileges is set)."""
+    code = stream_filter()
+    buf = ctypes.create_string_buffer(code, len(code))
+
+    class Prog(ctypes.Structure):  # struct sock_fprog
+        _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
+    prog = Prog(len(code) // 8, ctypes.addressof(buf))
+    mode = ctypes.c_ulong(SECCOMP_MODE_FILTER)
+    if libc.prctl(PR_SET_SECCOMP, mode, ctypes.byref(prog), 0, 0) < 0:
+        raise OSError(ctypes.get_errno(), "seccomp")
 
 
 def _allow_ports(libc, fd: int, deny: set[int]) -> None:

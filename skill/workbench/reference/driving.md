@@ -45,7 +45,7 @@ check-in, when an agent asks for a command or a directory, a spec needs web rese
   (Docker's and Podman's API 2375 and 2376, adb 5037, GDB servers 3333 and 2331, Chrome's
   DevTools 9222, Node's inspector 9229), listening or not; every other port, the model's and the
   keyhole's included, stays open. A request names a `port`: `wb allow <name> --port <N>`
-  (`--always` keeps it in commands.json's `ports`). Grant one only when the task's own tests
+  (`--always` keeps it in commands.json's `ports`; `wb start --allow-port <N>` up front). Grant one only when the task's own tests
   serve on it (a suite that starts Chrome on 9222 or a Node server with `--inspect`); a daemon
   of the user's there runs code outside the lane, so a Docker API on 2375 is root on the machine.
 

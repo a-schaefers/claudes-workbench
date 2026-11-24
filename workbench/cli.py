@@ -1587,6 +1587,7 @@ def cmd_start(a):
     context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
     context.grant(task, "test_tools", tools)
     context.grant(task, "paths", lane_dirs)
+    context.grant(task, "ports", list(dict.fromkeys(a.allow_port or [])))  # the bench's replays
     fixed = _fixed_line(task, m)  # before the runner, which writes the same rules files
     spawn_runner(task)
     print(f"started {a.name} on {f'{m.id} (API)' if api else m.label} · branch {gitops.branch_name(a.name)} · "
@@ -7057,8 +7058,13 @@ def _tcp_refused() -> tuple[bool, str]:
         srv.bind(("127.0.0.1", 0))
         srv.listen()
         port = srv.getsockname()[1]
+        # an MPTCP socket too, which Landlock's rule doesn't see (#1197's review): the lane's
+        # seccomp filter refuses making one, as a kernel without MPTCP does
         probe = [sys.executable, "-c", "import socket,sys\ntry:\n socket.create_connection("
-                 f"('127.0.0.1', {port}), 5)\nexcept PermissionError:\n sys.exit(13)"]
+                 f"('127.0.0.1', {port}), 5)\nexcept PermissionError:\n pass\nelse:\n"
+                 " sys.exit('the connect went through')\ntry:\n socket.socket(2, 1, 262)"
+                 f".connect(('127.0.0.1', {port}))\nexcept OSError:\n sys.exit(13)\n"
+                 "sys.exit('an MPTCP socket connected')"]
         r = subprocess.run(lane.wrap([inside], probe, deny_ports=[port]), capture_output=True,
                            text=True, timeout=30)
     if r.returncode == 13:
@@ -7512,6 +7518,8 @@ def parser() -> argparse.ArgumentParser:
                    help="let the agent run a command outside the everyday list, e.g. \"curl *\"")
     s.add_argument("--allow-path", action="append", metavar="DIR",
                    help="let the agent read and write this directory outside its lane")
+    s.add_argument("--allow-port", action="append", metavar="N", type=tcp_port,
+                   help="let the agent connect to this TCP port, which the lane refuses")
     s.add_argument("--skill", action="append", metavar="NAME",
                    help="hand the agent this library skill (repeatable; wb skill list)")
     s.add_argument("--setup", metavar="CMD",
