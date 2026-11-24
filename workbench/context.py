@@ -2645,9 +2645,14 @@ def api_hidden_note() -> str:
             f"in its lane {', and '.join(said)}")
 
 
-# A git URL with a login in it: an http(s) one with any user (a token is often the user alone,
-# https://<token>@host), or any with a password; not ssh://git@host, whose user is no secret
-GIT_URL_LOGIN = re.compile(r"(?i)\bhttps?://[^\s/@]+@|\b[a-z][\w+.-]*://[^\s/@:]*:[^\s/@]+@")
+# A git URL with a login in it: any with a password, or an http(s) one whose user alone looks
+# like a token (https://<token>@host): a known prefix, or 20 or more letters, digits and _ with
+# a digit among them. Not an account name: Azure DevOps' https://<org>@dev.azure.com and
+# Bitbucket's https://<user>@bitbucket.org, their default clone URLs, got the note on every API
+# start (#1072's review, 2026-11-23); nor ssh://git@host
+GIT_URL_LOGIN = re.compile(r"\bhttps?://(?:(?:gh[pousr]_|github_pat_|glpat-|x-access-token|oauth2)"
+                           r"[^\s/@:]*|(?=[^\s/@:]*\d)\w{20,})@|\b[a-z][\w+.-]*://[^\s/@:]*:[^\s/@]+@",
+                           re.I | re.A)
 # the git config keys that hold a URL: remotes' and insteadOf rules' (the URL is in the key)
 GIT_URL_KEYS = r"^(remote\..*\.(push)?url|url\..*\.(push)?insteadof)$"
 

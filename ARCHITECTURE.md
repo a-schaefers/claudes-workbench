@@ -1503,8 +1503,10 @@ deliberately hostile process.
   one). A git URL with a login can't be hidden (git reads `.git/config` and `~/.gitconfig` to
   run), so `wb start` names the files that hold one instead (`context.git_url_note`, #1072): `git
   config --show-origin --get-regexp` over `GIT_URL_KEYS` (remotes' `url`/`pushurl`, `url.*.insteadOf`),
-  matched by `GIT_URL_LOGIN` (an http(s) URL with any user, since a token can be the user alone, or
-  any URL with a password; not `ssh://git@`): `note: an API task can read the login in a git URL in
+  matched by `GIT_URL_LOGIN` (any URL with a password, or an http(s) one whose user alone looks
+  like a token, a known prefix such as `ghp_` or `glpat-`, or 20 or more letters, digits and `_`
+  with a digit; not an account name, Azure DevOps' `https://<org>@dev.azure.com` or Bitbucket's
+  `https://<user>@bitbucket.org`, nor `ssh://git@`): `note: an API task can read the login in a git URL in
   <repo>/.git/config (`git remote -v`, which would send it to the provider): keep the token in a
   credential helper instead (…)`, never the URL. The writable homes `.m2`, `.gradle`, `.hex` and `.nuget` are split around a hidden one,
   what each makes at its top made first (`SPLIT_MADE`: Gradle's `caches/`, `daemon/`, `native/`,

@@ -31398,6 +31398,28 @@ class Privacy(_KeyholeTest):
             self.assertNotIn("git URL", out)
             wait_phase("t-url2", ("review",))
 
+    def test_an_account_name_in_a_clone_url_is_no_login(self):
+        # #1072's review (2026-11-23): any http(s) user counted, so Azure DevOps' and Bitbucket's
+        # default clone URLs got a false "keep the token in a credential helper" on every API start
+        login = context.GIT_URL_LOGIN.search
+        for url in ("https://contoso@dev.azure.com/contoso/app/_git/app",
+                    "https://contoso-engineering-team-eu@dev.azure.com/contoso-engineering-team-eu/app",
+                    "https://jsmith@bitbucket.org/team/app.git", "ssh://git@gitlab.example.com/team/app.git"):
+            self.assertIsNone(login(url), url)
+        for url in ("https://ghp_" + "Ab1" * 12 + "@github.com/team/app.git",
+                    "https://glpat-FAKEFAKE@gitlab.example.com/", "https://x-access-token:FAKE@github.com/t/a",
+                    "https://" + "k3x" * 18 + "@dev.azure.com/contoso/app",     # an Azure PAT as the user
+                    "https://jsmith:app-password@bitbucket.org/team/app.git"):
+            self.assertIsNotNone(login(url), url)
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for v in ("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"):
+                os.environ.pop(v, None)
+            subprocess.run(["git", "-C", str(self.repo), "remote", "add", "origin",
+                            "https://contoso@dev.azure.com/contoso/app/_git/app"], check=True)
+            self.assertEqual(context.git_url_note(self.repo), "")
+
     # 8, 9: OpenRouter
 
     def test_an_openrouter_id_needs_its_backends_named_and_its_requests_go_to_them_alone(self):
