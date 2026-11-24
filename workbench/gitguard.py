@@ -146,10 +146,10 @@ def _config_plain(rest: list[str]) -> list[str]:
 
 
 def config_files(rest: list[str], opts: list[str]) -> list[str] | None:
-    """The files a `git config` write with --global, --system or -f writes (the ones it may),
-    or None when it writes the repository's own config. Decided by the cwd's repository, a
-    fixture's `git config --global user.name t` with HOME pointed at its temp directory, run
-    from the worktree, was refused, and the base check and every round failed on it (#794, the
+    """The file a `git config` write with --global, --system or -f writes, as a list, or None
+    when it writes the repository's own config. Decided by the cwd's repository, a fixture's
+    `git config --global user.name t` with HOME pointed at its temp directory, run from the
+    worktree, was refused, and the base check and every round failed on it (#794, the
     second 2026-11-21 audit). The user's own (user_configs) main refuses: only the lane kept
     them out of reach, and without one (macOS) the agent rewrote ~/.gitconfig (#1120)."""
     env, where = os.environ, _where(opts)
@@ -162,9 +162,13 @@ def config_files(rest: list[str], opts: list[str]) -> list[str] | None:
         if name == "--global":
             if env.get("GIT_CONFIG_GLOBAL"):
                 return [os.path.join(where, env["GIT_CONFIG_GLOBAL"])]
+            # the one file git writes (builtin/config.c): ~/.gitconfig, but the XDG file when only
+            # that one exists. Both candidates refused a fixture that moved HOME alone while the
+            # user exported XDG_CONFIG_HOME, the user's XDG file one of them (#1120's review)
             home = env.get("HOME") or os.path.expanduser("~")
             xdg = env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
-            return [os.path.join(home, ".gitconfig"), os.path.join(xdg, "git", "config")]
+            dot, xdg = os.path.join(home, ".gitconfig"), os.path.join(xdg, "git", "config")
+            return [xdg if not os.access(dot, os.R_OK) and os.access(xdg, os.R_OK) else dot]
         if name == "--system":
             return [env.get("GIT_CONFIG_SYSTEM") or "/etc/gitconfig"]
         value = value if eq else (rest[i + 1] if i + 1 < len(rest) else "")

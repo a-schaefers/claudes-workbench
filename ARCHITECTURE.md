@@ -4195,10 +4195,12 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   (builds that init their own submodules went red, #885). Reads run with `GIT_OPTIONAL_LOCKS=0` (no
   index refresh while Claude diffs) and the pins. A write is refused with `REFUSAL` in the task's
   repository (`protected`; a `config --global|--system|-f` write judged by its file,
-  `config_files`: refused on the user's own `~/.gitconfig`, `$XDG_CONFIG_HOME/git/config`,
+  `config_files`, the one git writes, so `--global` is `~/.gitconfig` unless only the XDG file
+  exists: refused on the user's own `~/.gitconfig`, `$XDG_CONFIG_HOME/git/config`,
   `GIT_CONFIG_GLOBAL` or system file, `user_configs` as the environment named them at install,
   which only the lane kept out of reach: without one, macOS, `git config --global user.name` rewrote
-  the user's, #1120; a fixture's temp `HOME` still writes, #794) or any repository outside the temp roots, the worktree and the lane's writable
+  the user's, #1120; a fixture's temp `HOME` still writes, #794, with the user's `XDG_CONFIG_HOME`
+  exported too, #1120's review) or any repository outside the temp roots, the worktree and the lane's writable
   dirs; outside any repository it passes, and throwaway repos there pass (test suites, #444;
   pre-commit, uv, Go, Bazel caches, #665). The roots are fixed at install, so `TMPDIR` can't make a
   project scratch. `init`/`clone` are judged by where the repo lands (`new_repo`, `nested`, else
