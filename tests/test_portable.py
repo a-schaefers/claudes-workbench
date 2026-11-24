@@ -1427,6 +1427,21 @@ class Real(unittest.TestCase):
                                                              "/api/v1/models/load"])
                 else:                                             # another machine's GPU: left be
                     self.assertEqual(loaded, {"a": 32768, "b": 32768})
+                # b, the task's own, already loaded beside a: a let go, b kept (not dropped, to
+                # reload just in time with LM Studio's default window: #645)
+                loaded.update(a=32768, b=32768)
+                posts.clear()
+                models.make_resident(found["win/b"], say=said.append)
+                if shared:
+                    self.assertEqual(loaded, {"b": 32768})
+                    self.assertEqual(posts, [("/api/v1/models/unload", {"instance_id": "a"})])
+                else:
+                    self.assertEqual((loaded, posts), ({"a": 32768, "b": 32768}, []))
+                # a, a task's beside it (keep), is ours too: nothing to free, nothing unloaded
+                loaded.update(a=32768, b=32768)
+                posts.clear()
+                self.assertEqual(models.make_resident(found["win/b"], say=said.append, keep=("win/a",)), 0.0)
+                self.assertEqual((loaded, posts), ({"a": 32768, "b": 32768}, []))
                 self.assertFalse([s for s in said if "can't stop" in s])  # never stopped
 
     def test_an_idle_lm_studio_neither_empties_the_gpu_of_ollamas_models_nor_stops_a_respread(self):
