@@ -978,8 +978,12 @@ in the worktree (#1211's review; with `--no-base-check`, or a command that stops
 it writes, it is the worktree's runs alone). One kept in
 `hand_wrote` before a run wrote there moves to `hand_left` once one does (`runner._by_hand`), so a
 report from a test the runner hadn't run yet stops refusing; one written by a command the runner
-never runs is still taken for Claude's. The rest it finds changed that a person
-might have written, text outside a cache, under `BUILD_FILES` text files in its group, of any name
+never runs is still taken for Claude's, so a build Claude runs that isn't the task's (`mvn test`
+beside a `--test` of `grep`, `tsc` beside jest's) is refused until its output goes or `--include`
+(still open in #1211: telling Claude's writes apart needs the mod to record them, a hook on Write
+and Edit; a directory where the same window changed files the filters drop was rejected as the
+sign, as it would send #1179's module under `lib/`, beside Claude's `.csv`, to `hand_left`).
+The rest it finds changed that a person might have written, text outside a cache, under `BUILD_FILES` text files in its group, of any name
 (the one filter waived), is never dropped without a word (`runner.hand_left`, status `hand_left`: a
 `.csv` beside Claude's module under `lib/` went with the worktree, `--include` or not, #1179's
 review; bytecode and an install's files aren't named: unfiltered, a test run's `.pyc` was named at
