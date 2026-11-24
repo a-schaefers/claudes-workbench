@@ -1770,14 +1770,17 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                     if changed and floor is None:  # it changed nothing by the step before
                         floor = last_step[1]
                         task.set_status(session_floor=floor)
-                    if changed and not keep and not out["full"] \
+                    # and not on its turn's last step (#1151): the agent is done, so the event,
+                    # and fresh_reason (the export counts the compaction) starts any next round fresh
+                    if changed and not keep and not out["full"] and not turn_over \
                             and fresh_at * window - floor >= HANDOVER_ROOM * window:
                         out["full"], out["compacted"] = min(before, window), True
                     else:
                         task.event({"ts": store.now(), "round": n, "kind": "compacted",
                                     "text": f"OpenCode compacted the agent's session mid-round at "
-                                            f"{min(100, 100 * before // window)}% of its window: it "
-                                            f"works on from its own summary"})
+                                            f"{min(100, 100 * before // window)}% of its window: "
+                                            + ("its turn ended there" if turn_over else
+                                               "it works on from its own summary")})
                 if used:
                     last_step, pending = (sid, used), 0
                 if floor is None and window:
@@ -1793,7 +1796,12 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                             out["reading_full"] = used
                             _reading_full(task, n, used, window)
                     elif fresh_at * window - floor >= HANDOVER_ROOM * window:
-                        out["full"] = used
+                        # Not on the step that ended the agent's turn (reason `stop`): it is done,
+                        # and a handover there killed it and paid a fresh session to redo the
+                        # round, whose summary Claude got instead (#1151, 2026-11-24). The round
+                        # ends as it would; fresh_reason starts any next one fresh.
+                        if not turn_over:
+                            out["full"] = used
                     elif not out.get("reading_full"):
                         out["reading_full"] = used
                         _reading_full(task, n, used, window, floor)

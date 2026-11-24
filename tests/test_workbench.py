@@ -4333,6 +4333,34 @@ class Context(Base):
         self.assertIn("42", store.Task("t-c4").worktree.joinpath("answer.txt").read_text())
         self.assertIn("reached 76% of its window", run_wb("watch", "t-c4", "--once", "--no-color"))
 
+    def test_a_session_past_fresh_at_only_on_the_step_that_ends_its_turn_is_not_handed_over(self):
+        # #1151 (bar round 1, #1030): the agent's last step (reason stop) crossed fresh_at after it
+        # had finished, and the runner killed it there and paid a fresh session to redo the
+        # round; Claude got the successor's summary instead of the agent's own
+        os.environ["FAKE_FILL"] = "20200"  # the export's last step: the between-rounds check's
+        self.start("t-1151", "donefull", "--test", TEST_CMD, "--no-self-review")
+        st = wait_phase("t-1151", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st.get("handovers", 0), st["round"]), ("review", 0, 1))
+        self.assertEqual(len(self.runs()), 1)                     # one agent run
+        self.assertTrue(st["tests"]["ok"])
+        kinds = {e.get("kind") for e in store.read_jsonl(store.Task("t-1151").dir / "events.jsonl")[0]}
+        self.assertFalse(kinds & {"full", "fresh"}, kinds)
+        report = run_wb("report", "t-1151")
+        self.assertIn("Done: answer.txt = 42.", report)           # the agent's own summary
+        self.assertIn("the next round starts a fresh session", report)  # a later round still is
+
+    def test_a_compaction_seen_on_the_step_that_ends_the_agents_turn_is_said_not_handed_over(self):
+        # #1151: the compacted-between-steps branch (#774) handed over a finished agent too
+        os.environ.update(FAKE_COMPACT_DONE="1", FAKE_COMPACTED="1")  # the export: compacted
+        self.start("t-1151c", "compact", "--test", TEST_CMD, "--no-self-review")
+        st = wait_phase("t-1151c", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st.get("handovers", 0), len(self.runs())), ("review", 0, 1))
+        evs = [e for e in store.read_jsonl(store.Task("t-1151c").dir / "events.jsonl")[0]
+               if e.get("kind") in ("compacted", "full", "fresh")]
+        self.assertEqual([e["kind"] for e in evs], ["compacted"])
+        self.assertIn("its turn ended there", evs[0]["text"])
+        self.assertIn("the next round starts a fresh session", run_wb("report", "t-1151c"))
+
     def test_a_full_windows_fresh_session_says_fresh_in_round_for(self):
         # #1048: the pane's stage reads `round 2 · fresh session` from it
         self.start("t-rfresh", "fill", "--test", TEST_CMD, "--no-self-review")
