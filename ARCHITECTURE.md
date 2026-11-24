@@ -357,8 +357,8 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 
 | Guard | Default | Set by |
 |---|---|---|
-| the same tool call in a row (its input hashed, cut to 400 characters, #497) | 4 | `events.StuckDetector` |
-| failing tool calls in a row | 6 | |
+| the same tool call in a row (its input hashed, cut to 400 characters, #497) | 4; in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, as below: #1250) | `events.StuckDetector` |
+| failing tool calls in a row | 6; the same (#1250) | |
 | calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18; a relative path is the workdir's, and a `patch` counts if any file it wrote is the task's, #1148) | 40; an API task's 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring); a GPU task's stays 40 at any window, as in 1.91.x; in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, #1168; its fresh session after a full window too, #1188, the round a nudge or a note starts in it, #1207, and the round `wb resume` starts after it, #1228) | |
 | no output (not while waiting on Claude; a background job gets the test timeout if longer) | 15 min | `--silence-timeout` |
 | one round, waits on Claude excluded | 40 min | `--round-timeout` |
@@ -394,7 +394,9 @@ it ran at) gets one more round, `runner.SELF_REVIEW` (its file copied aside into
 `aside/` in its runtime dir, `runner.self_review_aside`: `/tmp/f.c` was one name for every task,
 #1085),
 Claude's own review checks (each rejection proved by breaking its check and seeing a test fail).
-Such a round reads and runs by design: when the calls-without-an-edit guard comes due in it
+Such a round reads and runs by design: when one of `events.StuckDetector`'s guards comes due in it
+(calls without an edit, #1168; the same call in a row or failing calls in a row, #1250: a 9B
+ran the acceptance command four times over on its green tree and was stopped as stuck)
 (status `round_for` `self_review`, or a round carrying it on, `runner.SELF_REVIEW_ROUNDS`:
 `fresh` past a full window, #1188, `steer` after the think nudge or Claude's note, #1207,
 `resume` when `wb resume`, or `wb feedback` after an `infra` stop, continues one stopped from
@@ -403,7 +405,7 @@ tree its tests passed on (status `self_review_tree`, `gitops.mark` as it was que
 `runner.green_tree`), the round ends as the agent's finish, not stuck and no guard
 counted (`settled` recorded, not `died`; a `settled {text}` event; the report's `self-review: N
 tool calls without changing a file in the task, the tree its tests passed on; stopped as its
-finish`), then the tests and review: a green change woke Claude as stuck and its step was
+finish`, or the guard's own words), then the tests and review: a green change woke Claude as stuck and its step was
 recorded stuck (#1168). A tree it changed is stopped as before, and so is a fresh, steered or
 resumed session's tree as the round before left it, a check maybe still commented out (#1188).
 On by default because a feedback round costs a whole wake (2026-11-18); a model it doesn't help
@@ -1113,7 +1115,8 @@ id, tool tally, `status.last`, texts, and per `step` the context (input + cache 
 output + reasoning) against the handover point. Every pass, in order, whatever the line was (a
 `continue` past them let unknown events outrun `--round-timeout` and `--now`, #195): asking (phase
 `asking`, time not counted), the round clock, silence, the think nudge, a guard stop (a no-edit stop
-checks `gitops.mark` first, so shell edits count), a handover, a check-in, a `--now` note
+checks `gitops.mark` first, so shell edits count; any guard on a self-review's green tree is its
+finish, `settled`: #1168, #1250), a handover, a check-in, a `--now` note
 (`interrupted`). `_stop`: SIGTERM to the group, 10 s, SIGKILL. `status.agent_pid` lets `wb stop` end
 it; a round ending mid-question clears `asking`. Non-object JSON lines are skipped; `normalize`
 reads wrongly shaped parts as empty and stamps a missing `timestamp` with the read time
@@ -1511,7 +1514,7 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
    in the worktree (see …)`. Stopped by the runner once the agent was done (`left_bg`; `lingered`, #83's too;
    `settled`): `the agent left `<job>` running in the background when its turn ended; stopped`, `OpenCode
    was still open after the agent's output ended; stopped` (#1160), or `self-review: … the tree its
-   tests passed on; stopped as its finish` (#1168). `OpenCode resent N request(s) to the model's server: …` (#491).
+   tests passed on; stopped as its finish` (#1168, #1250). `OpenCode resent N request(s) to the model's server: …` (#491).
 4. `tests: PASS|FAIL (`cmd`, exit N)`, 25 lines on a failure; `base check: …` while on the first
    step with no review round; `auto-fix rounds used: a/b`.
 5. `tools: name×n …`, up to four `tool error:` lines.
@@ -6496,7 +6499,7 @@ off), not `wb start`'s.
 | `reviews` | review rounds this step (`wb feedback` +1, none after an `infra` stop, #1153; `wb next` resets) |
 | `auto_fixes`, `auto_fixes_total` | since the last review or step; earlier |
 | `self_reviewed` | `[steps, reviews]` at the last self-review (once per review round) |
-| `self_review_tree` | `gitops.mark` of the tree the last self-review was queued on, its tests green; carried to the `fresh`, `steer` or `resume` round that follows one of `runner.SELF_REVIEW_ROUNDS` (a handover, the think nudge, Claude's note: #1207; `wb resume`, `wb feedback` after an `infra` stop: #1228), dropped (null) by one after any other round (`runner.carried_tree`, in `_full_round`, `_steer_round`, `cli._resume` and `cmd_feedback`); the explore guard's finish holds to it (`runner.green_tree`, #1188) |
+| `self_review_tree` | `gitops.mark` of the tree the last self-review was queued on, its tests green; carried to the `fresh`, `steer` or `resume` round that follows one of `runner.SELF_REVIEW_ROUNDS` (a handover, the think nudge, Claude's note: #1207; `wb resume`, `wb feedback` after an `infra` stop: #1228), dropped (null) by one after any other round (`runner.carried_tree`, in `_full_round`, `_steer_round`, `cli._resume` and `cmd_feedback`); the self-review's finish at a `StuckDetector` guard holds to it (`runner.green_tree`, #1188, #1250) |
 | `reviewed` | `{step, tree}`: the tree the last review notice showed (`gitops.snapshot`, bulky new files left out); the next shows the diff since (the whole diff once git gc pruned it) |
 | `tests` | `{ok, exit, tail, round, lane?, proxy?, hang?}` (`exit`: code, `timeout`, `output limit`; `lane`: devices refused; `proxy`: variables left out, on a connection failure; `hang`: `{base, limit}`, a timeout where the base check ran it in a quarter of the limit or less) |
 | `base_check` | `{ok, exit, tail, limit, secs, cmd}`, `runner.base_check` in the lane before round 1, with `--test` and no `--no-base-check` (`exit` may be `"timeout"`, `"setup failed"`, `"filtered"`: not the task's bytes) |
@@ -6560,7 +6563,7 @@ out, cache, cache_read, cache_write, reasoning?, cost?}` (reasoning apart from `
 which the handover check reads; `cost` OpenCode's `part.cost` in USD, only when a number: missing is unknown, never 0, #1022; the meter's step price too, #1019), `error {text}`, `retry {text, attempt}` (OpenCode resent a request). From the runner: `round`, `stopped {text}`, `steer
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),
 `autofix`, `self_review`, `reading_full`, `full`, `compacted {text}` (mid-round, and it carried on), `load` (a reload before a round), `limits {text}` (stretched),
-`left_bg {text}` (a job left in the background), `lingered {text}` (the turn over, OpenCode still open: stopped, #1160), `settled {text}` (a self-review round at the explore guard, on the tree its tests passed on: stopped as its finish, #1168, #1188, #1207, #1228), `round_end {secs, how, guard?}` (stats recording on), `export` (the
+`left_bg {text}` (a job left in the background), `lingered {text}` (the turn over, OpenCode still open: stopped, #1160), `settled {text}` (a self-review round at a `StuckDetector` guard, on the tree its tests passed on: stopped as its finish, #1168, #1188, #1207, #1228, #1250), `round_end {secs, how, guard?}` (stats recording on), `export` (the
 export failed: judged by `live_used`), `stopped {by: "signal"|"provider"|"spend"|"local_only"}` (`provider`: an API provider's stop, #1020; `spend`: the day's spend cap, #1019; `local_only`: an API task's repo marked local-only, `runner.LOCAL_ONLY`, #1215; `lessons.gather` skips any with `by`), `gpu {text}` (a load warning), `ask {id}`, `answer {id}`, `served {model, by, text}` (the keyhole: the served model changed; `wb watch` and `wb log` show the text), `rate_limited {provider, code, state, since, secs, text}` (a run of an API provider's waiting ended, or the round stopped: #1020), `backend {by, text}` (the keyhole: OpenRouter served a backend outside the task's `order`, `OpenRouter served <x>, not <order>`; a line in the round's report too, #1021). From
 `wb`: `spec_gap`, `next_step`, `stopped` (bail out), `resumed`, `allow`, `steer {now}`, `captain`, `takeover`, `coding` (the user allowed Claude an edit), `error`
 (`reap`: the runner died without a report).
@@ -6861,7 +6864,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_PAD` (that many characters before the Lesson line, #1186), `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > util.py <<X` with `workdir` lib/, main.py and answer.txt with `write`: #1210, its third review), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
-`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188; `FAKE_SELF_STALL`: it breaks it and goes silent, the run after a nudge or a note restores it: #1207), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
+`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_RERUN`: those calls rerun the acceptance command, `FAKE_SELF_MISS`: the reads fail, #1250; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188; `FAKE_SELF_STALL`: it breaks it and goes silent, the run after a nudge or a note restores it: #1207), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
 `retry` (`FAKE_RETRY_EVERY`), `say`, `stay` (as `ok`, then open and silent: #1160), `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of

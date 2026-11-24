@@ -6645,6 +6645,41 @@ class Context(Base):
         self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
         self.assertIn("tool calls without changing a file", st["last"])
 
+    def test_a_self_review_that_reruns_the_acceptance_command_on_the_green_tree_goes_to_review(self):
+        # #1250 (2026-11-24): a 9B's self-review ended "Now the final acceptance run:" four
+        # times over; #1168's finish was the explore guard's alone, so the repeat guard stopped
+        # a change whose tests passed as stuck: a stuck notice, no tests line, the step stuck
+        os.environ["FAKE_SELF_RERUN"] = "1"
+        self.start("t-sre", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-sre", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 2, "self_review"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertNotIn("repeat", st.get("guards") or {})
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-sre"]
+        self.assertEqual([r["kind"] for r in rows], ["review"])
+        self.assertIn("tests: PASS", rows[0]["text"])
+        self.assertIn("self-review: the same call 4 times in a row", rows[0]["text"])
+        from workbench import results
+        self.assertFalse(results.step(store.Task("t-sre"), landed=False)["stuck"])  # the router's
+
+    def test_a_self_review_whose_reads_fail_on_the_green_tree_goes_to_review(self):
+        # #1250: the error-streak guard is the detector's too, so on the tree its tests passed
+        # on a string of failing calls ends the round as its finish, as the explore guard does
+        os.environ["FAKE_SELF_MISS"] = "1"
+        self.start("t-srm", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srm", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"]), ("review", 2))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertNotIn("errors", st.get("guards") or {})
+
+    def test_a_self_review_that_reruns_a_command_on_a_changed_tree_is_still_stopped_by_the_repeat_guard(self):
+        # #1250's finish, like #1168's, is for the green tree: one left changed is stopped
+        os.environ.update(FAKE_SELF_RERUN="1", FAKE_SELF_KEEP="1")
+        self.start("t-srx", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srx", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
+        self.assertIn("the same call 4 times in a row", st["last"])
+
     def test_a_self_review_begun_in_a_fresh_session_that_reads_past_the_explore_guard_goes_to_review(self):
         # #1188 (2026-11-24): the five recorded trips (bench-big-compaction, big-logout,
         # big-this-host) each had round 1's session compacted, so the self-review began in a
