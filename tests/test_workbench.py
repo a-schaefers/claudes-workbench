@@ -1042,6 +1042,102 @@ class Lifecycle(Base):
                            (npm_w.replace(nf, "x").replace("code 127", "code 1"), 1)):
             self.assertIsNone(said(tail, code), tail)
 
+    def test_a_wrappers_own_not_found_line_checks_in_at_once_and_skips_auto_fix(self):
+        # #1256 (bar round 6 of 2.0): `poetry run pytest` with the in-project venv wb asks for
+        # still empty says Poetry's `Command not found: pytest` and exits 1, which no pattern read:
+        # no check-in, and round 1 and both auto-fix rounds ran on correct code. The fake poetry
+        # prints Poetry 2.5's lines and exit, verbatim.
+        bin_dir = Path(self.tmp.name) / "fakebin"
+        bin_dir.mkdir()
+        (bin_dir / "poetry").write_text('#!/bin/sh\n[ "$1" = run ] || exit 2\n'
+                                        'echo "Creating virtualenv repo in $PWD/.venv"\n'
+                                        'echo "Command not found: $2"\nexit 1\n')
+        (bin_dir / "poetry").chmod(0o755)
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+        self.start("t-po", "ok", "--test", "poetry run nosuch-tool-1256 -q", "--auto-fix", "2",
+                   "--no-self-review")
+        st = wait_phase("t-po", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 1))
+        task = store.Task("t-po")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-po" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertIn("can't run in the agent's environment: nosuch-tool-1256: command not found "
+                      "(exit 1 on the base)", checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: nosuch-tool-1256: "), summary)
+
+    def test_a_sourced_venv_the_worktree_lacks_checks_in_at_once_and_skips_auto_fix(self):
+        # #1258 (bar round 6 of 2.0): `source .venv/bin/activate && …`, a form #196 cites, with
+        # the venv ignored and no --setup: bash exits 1 (dash 2), not 127, so #1206's check never
+        # read its No such file line, and round 1 and both auto-fix rounds ran on correct code
+        (self.repo / ".gitignore").write_text(".venv/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        cmd = ". .venv/bin/activate && python3 -c \"assert open('answer.txt').read().strip() == '42'\""
+        self.start("t-act", "ok", "--test", cmd, "--auto-fix", "2", "--no-self-review")
+        st = wait_phase("t-act", {"review"})
+        self.assertIn(st["base_check"]["exit"], (1, 2))  # bash's, or dash's
+        self.assertEqual(st["round"], 1)
+        task = store.Task("t-act")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-act" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertIn("can't run in the agent's environment: .venv/bin/activate: not in the worktree "
+                      "(.venv/ is an install's, never checked out)", checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: .venv/bin/activate: "), summary)
+
+    def test_a_name_any_wrapper_could_not_start_is_missing_when_it_resolves_nowhere(self):
+        # #1256, #1258, #1262 (bar round 6 of 2.0): each wrapper's wording was a pattern of its
+        # own, and each round found one more missed; now any wrapper's line at its own exit counts
+        # when the name it gives is a word of the command that doesn't resolve on the agent's PATH
+        said = lambda tail, code, cmd=None: runner.missing_command(  # noqa: E731
+            {"exit": code, "tail": tail, **({"cmd": cmd} if cmd else {})})
+        nf = "nosuch-tool-1256: command not found"
+        venv = ".venv/bin/{}: not in the worktree (.venv/ is an install's, never checked out)"
+        # Poetry 2.5, uv, cargo, bundler (its hint after its line)
+        for tail, code, cmd in (
+                ("Creating virtualenv p in /r/.venv\nCommand not found: nosuch-tool-1256", 1,
+                 "poetry run nosuch-tool-1256 -q"),
+                ("error: Failed to spawn: `nosuch-tool-1256`\n  Caused by: No such file or directory "
+                 "(os error 2)", 2, "uv run nosuch-tool-1256"),
+                ("error: no such command: `nosuch-tool-1256`\n\nhelp: view all installed commands with "
+                 "`cargo --list`\nhelp: find a package to install `nosuch-tool-1256` with `cargo search "
+                 "cargo-nosuch-tool-1256`", 101, "cargo nosuch-tool-1256 run"),
+                ("bundler: command not found: nosuch-tool-1256\nInstall missing gem executables with "
+                 "`bundle install`", 127, "bundle exec nosuch-tool-1256")):
+            self.assertEqual(said(tail, code, cmd), nf, tail)
+        # a sourced venv in bash (exit 1), zsh, dash (exit 2), and behind make, whose recipe the
+        # command doesn't name (#1258)
+        for tail, code in (("/usr/bin/bash: line 1: .venv/bin/activate: No such file or directory", 1),
+                           ("zsh:source:1: no such file or directory: .venv/bin/activate", 1),
+                           ("/bin/sh: 1: .: cannot open .venv/bin/activate: No such file", 2)):
+            self.assertEqual(said(tail, code, "source .venv/bin/activate && pytest"),
+                             venv.format("activate"), tail)
+        self.assertEqual(said("/bin/sh: 1: .: cannot open .venv/bin/activate: No such file\n"
+                              "make: *** [Makefile:2: test] Error 2", 2, "make test"), venv.format("activate"))
+        # macOS's make 3.81 execs a one-word recipe itself: `Command not found`, capitalized (#1262)
+        err = "make: *** [test] Error 127"
+        self.assertEqual(said(f"pytest -q\nmake: nosuch-tool-1262: Command not found\n{err}", 2),
+                         "nosuch-tool-1262: command not found")
+        self.assertEqual(said(f"make: .venv/bin/pytest: Command not found\n{err}", 2), venv.format("pytest"))
+        self.assertEqual(said("make[1]: nosuch-tool-1262: Command not found\nmake[1]: *** [test] Error 127\n"
+                              "make[1]: Leaving directory '/r/sub'\nmake: *** [all] Error 2", 2),
+                         "nosuch-tool-1262: command not found")
+        # what isn't a missing tool still goes back: a name that resolves (wrappers search the
+        # agent's PATH too), one the command doesn't name, a file the test reads or the step
+        # makes, a path outside TOOL_DIRS, and no command to check the name against
+        for tail, code, cmd in (("Command not found: python3", 1, "poetry run python3 x.py"),
+                                ("Command not found: nosuch-tool-1256", 1, "poetry run pytest"),
+                                ("cat: answer.txt: No such file or directory", 1, "cat answer.txt"),
+                                ("ERROR: file or directory not found: test_new.py", 4, "pytest test_new.py"),
+                                ("bash: line 1: ./check.sh: No such file or directory", 1, "./check.sh"),
+                                ("Command not found: nosuch-tool-1256", 1, None)):
+            self.assertIsNone(said(tail, code, cmd), tail)
+
     def test_a_tool_in_the_checkouts_ignored_venv_checks_in_at_once_and_skips_auto_fix(self):
         # #1206 (bar round 3 of 2.0): `--test .venv/bin/python …`, as Claude runs it in the user's
         # checkout, said `No such file or directory` in the worktree, which has no ignored .venv;

@@ -3366,8 +3366,10 @@ def hang(task: store.Task, limit: int) -> dict | None:
 # (`./check.sh`) says on the base too in bash and zsh; dash says `./check.sh: not found` for it,
 # so a name with a `/` is never a missing tool (nightly run 45362198509, 2026-11-24: under a
 # dash $SHELL a --test the step was to make checked in at once as a tool the agent lacks), but
-# one in an install's TOOL_DIRS (#1206).
-NOT_FOUND = re.compile(r"command not found: (?P<z>.+)$|(?P<n>[^:]+): (?:command )?not found$")
+# one in an install's TOOL_DIRS (#1206). `Command` in any case: macOS's make 3.81 says `make:
+# <name>: Command not found` for a recipe it execs itself (#1262), Poetry `Command not found:
+# <name>` (#1256).
+NOT_FOUND = re.compile(r"(?i:command) not found: (?P<z>.+)$|(?P<n>[^:]+): (?:(?i:command) )?not found$")
 # Python's own line for `python -m <module>` it can't import (exit 1): a test runner missing from
 # the agent's Python (`python3 -m pytest` on a system Python without it, or with the user's venv
 # that python_env leaves out) ran round 1 and both auto-fix rounds on correct code, each told the
@@ -3412,6 +3414,19 @@ RUNNER_TAIL = re.compile("|".join(RUNNER_LINES))
 # make's own line for a recipe it runs without a shell (no shell syntax in it) that execvp can't
 # find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229)
 MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
+# A wrapper's own words for a program it couldn't start, at its own exit, not the shell's 127
+# (missing_tool): Poetry's `Command not found: <name>` (exit 1, #1256), uv's `Failed to spawn:
+# `<name>``, cargo's `no such command: `<name>``, bundler's `command not found: <name>` above its
+# hint; and for a path, a file the shell couldn't open, `source .venv/bin/activate` at exit 1 in
+# bash (dash's `.: cannot open <path>`, exit 2, #1258). Each wrapper's wording was a pattern of its
+# own, and each bar round found one more missed (#1206, #1229, #1243, #1256, #1258, #1262): what
+# decides is whether the name the line gives resolves where the tests ran, not the wording.
+TOOL_GONE = re.compile(r"(?i)command not found|no such command|failed to spawn")
+PATH_GONE = re.compile(r"(?i)no such file or directory|cannot open|can't open")
+GONE_WORD = re.compile(r"[^\s:`'\"()\[\],;]+")
+# the tail's last lines (not blank) missing_tool reads up through: a wrapper's hint or cause
+# comes after its line (bundler's `Install missing gem executables`, cargo's two `help:` lines)
+GONE_LINES = 3
 # wb's words for a tool not checked out (missing_command), the same in every shell, and its path
 NOT_CHECKED_OUT = re.compile(r"(?P<p>[^:]+): not in the worktree \(")
 # What gives the agent's environment that command, for the check-in and the skipped auto-fix
@@ -3433,7 +3448,9 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     (own_module) is none: the step may make it; nor is a console script of its own
     (own_command), by name with the worktree's venv there, or by its path in a TOOL_DIRS
     directory the worktree has (#1244). Under a task runner (`make test`, `pnpm test`,
-    RUNNER_TAIL), the recipe's exit and the line before the runner's own (#1229, #1243)."""
+    RUNNER_TAIL), the recipe's exit and the line before the runner's own (#1229, #1243). At any
+    other exit, a wrapper's own (`poetry run`, a sourced venv), missing_tool: the name its line
+    gives, which doesn't resolve where the tests run (#1256, #1258)."""
     if not r:
         return None
     code, lines, inner = r.get("exit"), (r.get("tail") or "").strip().splitlines(), None
@@ -3445,30 +3462,87 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     code = int(inner) if inner else code
     if wrapped and not inner and lines and NOT_FOUND.search(lines[-1]):
         code = 127  # pnpm exits 1 and names no code: the shell's not-found line is its 127 (#1243)
-    if code not in (1, 127):
+    if not isinstance(code, int) or not code:
         return None
     line = lines[-1].strip() if lines else ""
     if code == 127:
         name = missing_name(line) or ((m := MAKE_EXEC.fullmatch(line)) and m["n"].strip())
         if name and "/" not in name:
-            # one the step's reinstall puts in the worktree's venv, first on the agent's PATH (#1244)
-            return None if task and context.own_venv(task) and own_command(task, name) \
-                else f"{name}: command not found"
+            return _missing_bare(name, task)
         # a path: a script the step may make, but not a tool an install puts there (#1206)
-        path = name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip())
-        if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
-            s = f"/{path}"
-            where, tool = s[1:s.find(f"/{top}/") + 1 + len(top)], path.rsplit("/", 1)[-1]
-            # an install dir the setup made in the worktree: never "never checked out", and a
-            # console script the step adds to it is the step's own (#1244, bar round 5, 2026-11-24)
-            if task and not os.path.isabs(path) and (task.workdir / where).is_dir():
-                return None if own_command(task, tool) else \
-                    f"{path}: not in the worktree ({where}/ is there, without {tool})"
-            return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
-        return None
+        if path := name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip()):
+            return _missing_path(path, task)
     if code == 1 and (m := NO_MODULE.fullmatch(line)):
         return None if task and own_module(task, m["m"] or m["d"], m["py"]) else line
+    return missing_tool(lines, r.get("cmd") or (task.spec.get("test_cmd") if task else None),
+                        task, wrapped)
+
+
+def _missing_bare(name: str, task: store.Task | None) -> str | None:
+    """wb's line for command ``name`` not found: none for one the step's reinstall puts in the
+    worktree's venv, first on the agent's PATH (#1244)."""
+    return None if task and context.own_venv(task) and own_command(task, name) \
+        else f"{name}: command not found"
+
+
+def _missing_path(path: str, task: store.Task | None) -> str | None:
+    """wb's line for ``path`` not there, when it is a tool an install puts in TOOL_DIRS (#1206);
+    else None, a script the step may make."""
+    if not (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
+        return None
+    s = f"/{path}"
+    where, tool = s[1:s.find(f"/{top}/") + 1 + len(top)], path.rsplit("/", 1)[-1]
+    # an install dir the setup made in the worktree: never "never checked out", and a
+    # console script the step adds to it is the step's own (#1244, bar round 5, 2026-11-24)
+    if task and not os.path.isabs(path) and (task.workdir / where).is_dir():
+        return None if own_command(task, tool) else \
+            f"{path}: not in the worktree ({where}/ is there, without {tool})"
+    return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
+
+
+def missing_tool(lines: list[str], cmd: str | None, task: store.Task | None = None,
+                 wrapped: bool = False) -> str | None:
+    """A tool missing at an exit that isn't the shell's 127, read the same for every wrapper
+    (`poetry run`, `uv run`, `bundle exec`, `cargo <sub>`, a sourced venv): one of the tail's
+    last GONE_LINES lines says it couldn't start or open a name (TOOL_GONE, PATH_GONE), and that
+    name doesn't resolve where the tests run. A bare name: a word of acceptance command ``cmd``
+    (what no round changes) not on the agent's PATH (on_agent_path), where every wrapper looks
+    too (Poetry, uv and pipenv put their venv's `bin` ahead of it), and not a console script of
+    the step's own; never one a runner's recipe names, which the command doesn't (a code the
+    runner names stays its own). A path: one in TOOL_DIRS the worktree hasn't, named by the
+    command or under a runner (`make test` sourcing `.venv/bin/activate`). wb's own wording, as
+    missing_command's. Poetry's `Command not found: pytest` at exit 1 (#1256), `source
+    .venv/bin/activate && pytest` at bash's 1 or dash's 2 (#1258) each ran round 1 and every
+    auto-fix round on correct code, told the bug was the change's (bar round 6, 2026-11-24)."""
+    words = command_words(cmd)
+    for line in reversed([ln for ln in map(str.strip, lines) if ln][-GONE_LINES:]):
+        tool, opened = TOOL_GONE.search(line), PATH_GONE.search(line)
+        if not (tool or opened):
+            continue
+        named = [missing_name(line), (m := NO_SUCH.search(line)) and (m["z"] or m["n"])]
+        named += GONE_WORD.findall(line[(tool or opened).end():])
+        for w in dict.fromkeys(n.strip().rstrip(".") for n in named if n):
+            if "/" in w:
+                there = task and not os.path.isabs(w) and (task.workdir / w).exists()
+                if (w in words or wrapped) and not there and (said := _missing_path(w, task)):
+                    return said
+            elif tool and w in words and re.match(r"[A-Za-z_]", w) and not on_agent_path(w, task):
+                if said := _missing_bare(w, task):
+                    return said
     return None
+
+
+def on_agent_path(name: str, task: store.Task | None = None) -> bool:
+    """Whether command ``name`` resolves on the PATH the tests run with: the runner's, the
+    user's checkout's venvs off it and the worktree's own first (context.python_env), on WSL
+    without the Windows drives (context.agent_path)."""
+    env = dict(os.environ)
+    if task is not None:
+        try:
+            context.python_env(task, env)
+        except (KeyError, AttributeError, OSError):  # a stand-in task: the runner's PATH
+            pass
+    return shutil.which(name, path=context.agent_path(env.get("PATH") or os.defpath)) is not None
 
 
 def _missing_key(line: str | None) -> str | None:
