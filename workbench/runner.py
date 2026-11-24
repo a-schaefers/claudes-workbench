@@ -9,6 +9,7 @@ loops, errors repeatedly, goes silent or runs too long. After a clean round the 
 command runs in the worktree, in the agent's lane; a failure goes back to the agent on its own while auto-fix rounds remain, so
 Claude is only woken for work that passes, or for a task that has run out of road.
 """
+import configparser
 import contextlib
 import ctypes
 import hashlib
@@ -26,6 +27,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import traceback
 import uuid
 import zlib
@@ -3369,8 +3371,9 @@ NO_MODULE = re.compile(r"(?P<py>\S*python[\w.]*): (No module named (?P<m>[\w.]+)
                        r"specification for '(?P<d>[\w.]+)' \(ModuleNotFoundError: No module named "
                        r"'[\w.]+'\))")
 # Where an install puts its tools (a venv's, npm's, Composer's), at any depth: ignored, so never
-# in a task's worktree (cli._missing_dirs says so at start), and never what a step makes, unlike
-# a build's output (`cargo build && target/debug/newbin`) or a script (`./check.sh`). A --test of
+# in a task's worktree but for a --setup's (cli._missing_dirs says so at start), and never what a
+# step makes but for its own console script (own_command, #1244), unlike a build's output (`cargo
+# build && target/debug/newbin`) or a script (`./check.sh`). A --test of
 # `.venv/bin/pytest` or `node_modules/.bin/jest`, as Claude runs it in the user's checkout, said
 # `No such file or directory` there, read as a script the step makes, and ran round 1 and both
 # auto-fix rounds on correct code, each told the bug was the change's (#1206, 2026-11-24).
@@ -3408,7 +3411,9 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     (#1206); or Python's no-module line for `-m` at exit 1 (#1181). A tool the
     agent's environment lacks (one outside the agent's PATH, which python_env and agent_path
     trim), which no edit in a round can give it; else None. A module of ``task``'s own code
-    (own_module) is none: the step may make it. Under a task runner (`make test`, RUNNER_TAIL),
+    (own_module) is none: the step may make it; nor is a console script of its own
+    (own_command), by name with the worktree's venv there, or by its path in a TOOL_DIRS
+    directory the worktree has (#1244). Under a task runner (`make test`, RUNNER_TAIL),
     the recipe's exit and the line before the runner's own (#1229)."""
     if not r:
         return None
@@ -3423,10 +3428,19 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     if code == 127:
         name = missing_name(line) or ((m := MAKE_EXEC.fullmatch(line)) and m["n"].strip())
         if name and "/" not in name:
-            return f"{name}: command not found"
+            # one the step's reinstall puts in the worktree's venv, first on the agent's PATH (#1244)
+            return None if task and context.own_venv(task) and own_command(task, name) \
+                else f"{name}: command not found"
         # a path: a script the step may make, but not a tool an install puts there (#1206)
         path = name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip())
         if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
+            s = f"/{path}"
+            where, tool = s[1:s.find(f"/{top}/") + 1 + len(top)], path.rsplit("/", 1)[-1]
+            # an install dir the setup made in the worktree: never "never checked out", and a
+            # console script the step adds to it is the step's own (#1244, bar round 5, 2026-11-24)
+            if task and not os.path.isabs(path) and (task.workdir / where).is_dir():
+                return None if own_command(task, tool) else \
+                    f"{path}: not in the worktree ({where}/ is there, without {tool})"
             return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
         return None
     if code == 1 and (m := NO_MODULE.fullmatch(line)):
@@ -3477,14 +3491,8 @@ def own_module(task: store.Task, module: str, python: str = "python3") -> bool:
             return True
     except (gitops.GitError, KeyError, OSError):
         pass
-    try:
-        spec = current_task_prompt(task)
-    except OSError:
+    if (spec := step_spec(task)) is None:
         return False
-    # the spec alone: the protocol after it names the acceptance command (cli.test_line), so
-    # every dotted `-m` of --test read as the repo's own, and a tool the agent's environment
-    # lacks never checked in nor skipped auto-fix (#1181's second review, 2026-11-24)
-    spec = re.sub(r"The acceptance command is `[^`\n]*`", "", spec.split(PROTOCOL_FOLD, 1)[0])
     path = module.replace(".", "/")
     if any(f"/{p}".endswith(f"/{path}.py") or f"/{path}/" in f"/{p}"
            for p in context.spec_paths(spec)):  # pkg/newcli.py, pkg/newcli/__main__.py
@@ -3497,6 +3505,87 @@ def own_module(task: store.Task, module: str, python: str = "python3") -> bool:
     # counted whenever the spec named it, "with pytest tests" on a machine without pytest ran
     # round 1 and both auto-fix rounds on correct code again, #1181's incident (#1209, 2026-11-24)
     return spec_makes(spec, top) and not user_imports(top, python)
+
+
+def step_spec(task: store.Task) -> str | None:
+    """The step's spec, without the acceptance command: the spec alone, as the protocol after it
+    names the acceptance command (cli.test_line), so every dotted `-m` of --test read as the
+    repo's own, and a tool the agent's environment lacks never checked in nor skipped auto-fix
+    (#1181's second review, 2026-11-24). None when the prompt can't be read."""
+    try:
+        spec = current_task_prompt(task)
+    except OSError:
+        return None
+    return re.sub(r"The acceptance command is `[^`\n]*`", "", spec.split(PROTOCOL_FOLD, 1)[0])
+
+
+def own_command(task: store.Task, name: str) -> bool:
+    """Whether command ``name`` (`mycli`) is a console script of the step's own, which a round's
+    `pip install -e .` puts in the worktree's venv: declared where the tests run, in the package
+    or at the top (declared_scripts), or one the spec makes (spec_makes_command) that isn't on
+    the user's own PATH either. Counted as a tool the agent lacks, `--setup 'python3 -m venv .venv
+    && .venv/bin/pip install -e .' --test 'mycli check'` for a step adding it checked in before
+    round 1 with a false "no round can fix that ... or wb discard", and when round 1 hadn't
+    reinstalled, skipped the auto-fix round that would have (#1244, bar round 5, 2026-11-24)."""
+    if any(name in declared_scripts(d) for d in dict.fromkeys((task.workdir, task.worktree))):
+        return True
+    spec = step_spec(task)
+    return bool(spec) and spec_makes_command(spec, name) and not shutil.which(name)
+
+
+# A console-script line (`mycli = "pkg.cli:main"`, setup.py's `"mycli=pkg.cli:main"`): its name
+SCRIPT_LINE = re.compile(r"(?<![\w.-])[`'\"]?(?P<n>[\w.-]+)[`'\"]?\s*=\s*[`'\"]?[\w.]+\s*:\s*[\w.]+")
+
+
+def declared_scripts(where: Path) -> set[str]:
+    """The console scripts the Python project in ``where`` declares: pyproject.toml's
+    [project.scripts], [project.gui-scripts] and [tool.poetry.scripts], setup.cfg's and
+    setup.py's console_scripts and gui_scripts. Nothing for a file that isn't there or won't
+    parse."""
+    names: set[str] = set()
+    try:
+        data = tomllib.loads((where / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # tomllib.TOMLDecodeError, UnicodeDecodeError
+        data = {}
+    project, tool = data.get("project"), data.get("tool")
+    tables = [project.get(k) for k in ("scripts", "gui-scripts")] if isinstance(project, dict) else []
+    if isinstance(tool, dict) and isinstance(poetry := tool.get("poetry"), dict):
+        tables.append(poetry.get("scripts"))
+    names.update(k for t in tables if isinstance(t, dict) for k in t)
+    cfg = configparser.ConfigParser(interpolation=None)
+    try:
+        cfg.read_string((where / "setup.cfg").read_text(encoding="utf-8"))
+        for key in ("console_scripts", "gui_scripts"):
+            names.update(m["n"] for m in SCRIPT_LINE.finditer(
+                cfg.get("options.entry_points", key, fallback="")))
+    except (OSError, ValueError, configparser.Error):
+        pass
+    try:
+        setup = (where / "setup.py").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        setup = ""
+    if "_scripts" in setup:
+        names.update(m["n"] for m in SCRIPT_LINE.finditer(setup))
+    return names
+
+
+# What a console script is called in a spec, for spec_makes_command
+COMMAND_NOUN = (r"(?:console[ -]scripts?|scripts?|commands?|entry[ -]points?|executables?|CLIs?|"
+                r"binar(?:y|ies))")
+
+
+def spec_makes_command(spec: str, name: str) -> bool:
+    """Whether the spec presents command ``name`` as one the step makes: its console-script line
+    (`mycli = "pkg.cli:main"`), or the name beside a command's noun in a sentence that makes
+    something ("Add the `mycli` console script", "add a command named mycli"). Not merely named
+    ("make `mycli check` pass", "add a script that runs pytest")."""
+    if any(m["n"] == name for m in SCRIPT_LINE.finditer(spec)):
+        return True
+    n, q = re.escape(name), r"[`'\"]?"
+    named = re.compile(rf"\b{COMMAND_NOUN}\s+(?:(?:called|named)\s+)?{q}{n}{q}(?![\w-]|\.\w)|"
+                       rf"(?<![\w./-]){q}{n}{q}\s+{COMMAND_NOUN}\b", re.I)
+    return any(named.search(s) and re.search(MAKING, s, re.I)
+               for s in re.split(r"(?<=[.!?])\s+|\n", spec))
 
 
 # Words that say a sentence makes something, for spec_makes.

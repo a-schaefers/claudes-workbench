@@ -377,7 +377,7 @@ at ~36 tokens/s; slower models get longer ones, never shorter (*Budgets and spee
 2, counted since the last review round or step) goes back as `auto_fix_prompt` (fix the code,
 don't weaken tests, check its own expected values by hand, never blame the compiler: 2026-11-18)
 without waking Claude. `not_the_code` (#496: a timeout, a lane-refused device, `lane_refused`,
-#331; a command or Python module not found, `missing_command` (not the repo's own, `own_module`: a `<top>/` or `<top>.py`, or `src/<top>`, in the worktree, which a `--setup` may generate, or at the base commit, or one whose file or dotted name the spec gives, or a top-level name the spec makes, `spec_makes` (its `<name>/` path, or a package or module so named in a sentence that makes something: `Make a new Python package answerpkg`), that the user's own environment can't import either, `user_imports`, #1209; one the spec merely names, `with pytest tests`, `python3 -m pytest -q`, still counts as a tool, #1209's review), with the same line as the base check's (wb's `<name>: command not found` in every shell, or `<path>: not in the worktree (…)` for a tool in an install's `TOOL_DIRS`, #1206; for a Python module the same module, `_missing_key`, as the line starts with the interpreter's path, a `--setup` .venv's in the base check's scratch checkout and in the worktree, #1181's review) for the same
+#331; a command or Python module not found, `missing_command` (not the repo's own, `own_module`: a `<top>/` or `<top>.py`, or `src/<top>`, in the worktree, which a `--setup` may generate, or at the base commit, or one whose file or dotted name the spec gives, or a top-level name the spec makes, `spec_makes` (its `<name>/` path, or a package or module so named in a sentence that makes something: `Make a new Python package answerpkg`), that the user's own environment can't import either, `user_imports`, #1209; one the spec merely names, `with pytest tests`, `python3 -m pytest -q`, still counts as a tool, #1209's review; nor a console script of the step's own, `own_command`, declared in the project or made by the spec, #1244), with the same line as the base check's (wb's `<name>: command not found` in every shell, or `<path>: not in the worktree (…)` for a tool in an install's `TOOL_DIRS`, #1206; for a Python module the same module, `_missing_key`, as the line starts with the interpreter's path, a `--setup` .venv's in the base check's scratch checkout and in the worktree, #1181's review) for the same
 command, #1152, #1181, or, unless a base check passed the same command (when none ran it, `wb next --test`, `--no-base-check`, #1172, or it failed before reaching the tool, an `&&` chain's first command, #1208), a
 tool or `-m` module the command itself names, `_missing_word` in `command_words`, not one a script it runs names,
 which the step may write; its fix `GIVE_TOOL`) gets none: review, status `last` the cause, the report led by `auto-fix skipped: <cause>`
@@ -1444,9 +1444,20 @@ its command (`missing_command`: exit 127, the tail's last line `NOT_FOUND`'s, ba
 make, nor a name with a `/`, which dash says `not found` for; worded by wb, `<name>: command not
 found`, the same in every shell, nightly run 45362198509; #1152; but a path in an install's
 `TOOL_DIRS` (`.venv/bin`, `venv/bin`, `node_modules/.bin`, `vendor/bin`, at any depth), bash's and
-zsh's `NO_SUCH` or dash's `not found`, which a worktree never has and a step never makes, unlike a
-build's output (`target/debug/newbin`), is one, `<path>: not in the worktree (.venv/ is an
-install's, never checked out)`, `NOT_CHECKED_OUT` for `missing_name`, #1206; or exit 1, the last line `NO_MODULE`'s, Python's `<path>/python3: No module named <m>`
+zsh's `NO_SUCH` or dash's `not found`, which a worktree never has but for a `--setup`'s and a step
+never makes, unlike a build's output (`target/debug/newbin`), is one, `<path>: not in the worktree
+(.venv/ is an install's, never checked out)`, or for a relative path whose `TOOL_DIRS` directory
+the worktree has, `<path>: not in the worktree (.venv/bin/ is there, without <name>)`,
+`NOT_CHECKED_OUT` for `missing_name`, #1206; but not a console script of the step's own
+(`own_command`, by name when the worktree has its own venv, `context.own_venv`, or by such a
+path: one the project where the tests run, or at the worktree's top, declares,
+`declared_scripts`: pyproject.toml's `[project.scripts]`, `[project.gui-scripts]` or
+`[tool.poetry.scripts]`, setup.cfg's or setup.py's `console_scripts` or `gui_scripts`; or one the
+spec, `step_spec`, makes, `spec_makes_command`: its `<name> = pkg.mod:func` line, or the name
+beside a command's noun, `COMMAND_NOUN`, `console script`, `command`, `entry point`, in a sentence
+with a making word, and not on the user's own PATH either; `mycli check` for a step adding `mycli`
+to the setup's `.venv`, which the agent's `pip install -e .` makes, checked in "no round can fix
+that" and skipped the auto-fix round that would have, #1244); or exit 1, the last line `NO_MODULE`'s, Python's `<path>/python3: No module named <m>`
 for `-m` (or its `Error while finding module specification` for a dotted one's parent), not an
 import error inside the tests, nor a module of the repo's own code (`own_module`: its top-level
 name a `<top>/` or `<top>.py` where the tests run, or under its `src/`, in the worktree or at the
@@ -1457,7 +1468,7 @@ sentence with a making word, `MAKING`) that the user's own environment can't imp
 `python_env` keeps from the agent and the user's PYTHONPATH; `python3 -m answerpkg` for a spec
 making it checked in falsely, #1209; a name the spec merely gives, `with pytest tests`, or beside
 `-m`, is a tool, as any bare name counted ran #1181's incident again on a machine without pytest,
-#1209's review), the spec alone, before `runner.PROTOCOL_FOLD`, never the
+#1209's review), the spec alone (`step_spec`), before `runner.PROTOCOL_FOLD`, never the
 protocol's acceptance line, which names --test's own `-m` and so made every dotted one the repo's:
 `python3 -m pkg.newcli` for a step adding `pkg/newcli.py`), which the step may make, as a script, #1181; under a task runner, `make test`, the line before the runner's own, `RUNNER_TAIL` (GNU make's `make: *** [Makefile:2: test] Error <n>`, exit 2, a sub-make's `Leaving directory`, `-k`'s `Target … not remade`, just's `Recipe … failed … with exit code <n>`), at the recipe's exit, the first one up, a sub-make's, and make's own `make: <name>: No such file or directory` for a recipe it runs without a shell, `MAKE_EXEC`, a name not on PATH, #1229; the warning ends `GIVE_TOOL`, a
 module's fix the worktree's `.venv`), a note past 120 s
@@ -1512,7 +1523,7 @@ by prefix; rewording one silently changes those:
 
 | Text | Written by | Read by |
 |---|---|---|
-| `\n---\nHow to work` (`cli.PROTOCOL`, `cli.WRITING_PROTOCOL`) | `wb start`, `wb next` | `transcript` folds it away, `bench.FOLD`, `runner.outline_section`'s split (up to `{branch}`), `runner.own_module` (`PROTOCOL_FOLD`: the spec before it) |
+| `\n---\nHow to work` (`cli.PROTOCOL`, `cli.WRITING_PROTOCOL`) | `wb start`, `wb next` | `transcript` folds it away, `bench.FOLD`, `runner.outline_section`'s split (up to `{branch}`), `runner.step_spec` (`PROTOCOL_FOLD`: the spec before it, for `own_module` and `own_command`) |
 | `Lesson:` lines in the agent's summary | the protocol asks for them | `lessons` |
 | `Review feedback from the senior reviewer` (`lessons.FEEDBACK_HEAD`) | `wb feedback` | `lessons` (feedback items), `round_asks` (stops there, but not at a round marked `resumed`, #1169), `transcript` (label) |
 | `The acceptance tests fail` | the auto-fix round | `transcript` |
