@@ -22,7 +22,7 @@ Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
         steer.jsonl, acked, context.md
         runner.log          the runner's own stdout/stderr
         base-tests.txt      the base check: the acceptance command on the base, before round 1
-        rounds/<n>/prompt.md, instructions.md, summary.md, tests.txt
+        rounds/<n>/prompt.md, instructions.md, summary.md, final.md, tests.txt
         ask/<id>.json, ask/<id>.answer   the agent's questions and Claude's answers
         worktree/           the git worktree the agent works in (branch delegate/<name>)
     Of a task's directory the agent's lane writes only worktree/ and ask/ (context.writable).

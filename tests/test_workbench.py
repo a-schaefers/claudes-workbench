@@ -27338,6 +27338,43 @@ class SkillLearning(Base):
         log = skills._git("log", "-1", "--format=%B")
         self.assertIn(f"Source: {src} skills/good, MIT", log)
 
+    def test_a_long_final_message_is_kept_whole_and_the_report_shows_its_end_and_lessons_come_from_it(self):
+        # #1186: the report cut the message head-only at 2,500 characters, so the Lesson line the
+        # protocol puts last was lost to Claude and to lessons.py alike (75 of 409 summaries)
+        from workbench import lessons, runner
+        os.environ.update(FAKE_LESSON="a long report still ends with its lesson", FAKE_PAD="3000")
+        self.start("t-1186", "fix", "--auto-fix", "0", "--test", TEST_CMD)
+        wait_phase("t-1186", {"review"})
+        task = store.Task("t-1186")
+        final = task.round_dir(1).joinpath("final.md").read_text()
+        self.assertTrue(final.startswith("Wrote answer.txt = 41.\nChecked the answer file."))
+        self.assertTrue(final.endswith("\nLesson: a long report still ends with its lesson\n"))
+        said = (task.round_dir(1).joinpath("summary.md").read_text()
+                .split("agent's summary:\n", 1)[1].split("\n\nfiles changed:", 1)[0])
+        self.assertEqual(said, runner.cut_final(final.strip(), task.round_dir(1) / "final.md"))
+        self.assertTrue(said.startswith("Wrote answer.txt = 41."))
+        self.assertIn(f" chars cut: {task.round_dir(1) / 'final.md'}]\n", said)
+        self.assertTrue(said.endswith("Lesson: a long report still ends with its lesson"))
+        self.assertEqual([x["text"] for x in lessons.gather(task) if x["kind"] == "agent"],
+                         ["a long report still ends with its lesson"])
+        # read from the whole text, not the report: a Lesson line in the part the cut left out
+        task.round_dir(1).joinpath("final.md").write_text("x\n" * 1000 + "Lesson: one in the middle\n"
+                                                          + "y\n" * 1000)
+        self.assertEqual([x["text"] for x in lessons.gather(task) if x["kind"] == "agent"],
+                         ["one in the middle"])
+        task.round_dir(1).joinpath("final.md").unlink()   # a round from before final.md: its report's
+        self.assertEqual([x["text"] for x in lessons.gather(task) if x["kind"] == "agent"],
+                         ["a long report still ends with its lesson"])
+
+    def test_a_final_message_within_the_cap_is_shown_whole_and_a_longer_one_as_its_head_and_tail(self):
+        from workbench import runner  # #1186
+        where = Path("/state/tasks/t/rounds/1/final.md")
+        self.assertEqual(runner.cut_final("w" * 2500, where), "w" * 2500)   # as it was before
+        long = "h" * 2000 + "t" * 1000
+        shown = runner.cut_final(long, where)
+        self.assertEqual(shown, "h" * 1650 + f"\n[… 550 chars cut: {where}]\n" + "t" * 800)
+        self.assertLessEqual(len(shown), 2500 + 80)
+
     def test_a_task_leaves_its_lessons_and_a_repeated_one_stands_out(self):
         os.environ["FAKE_LESSON"] = "the answer file needs a trailing newline, or grep -x misses it"
         out = self.start("t-l1", "fix", "--auto-fix", "0", "--test", TEST_CMD)

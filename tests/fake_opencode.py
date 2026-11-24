@@ -658,7 +658,11 @@ if scenario in ("ok", "fix", "stay"):
     with open("answer.txt", "w") as fh:
         fh.write(value + "\n")
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": value})
+    # FAKE_PAD: that many characters of words between the first line and the Lesson, a final
+    # message past the report's cut (#1186)
+    pad = int(os.environ.get("FAKE_PAD") or 0)
     emit("text", text=f"Wrote answer.txt = {value}."
+         + (("\n" + ("Checked the answer file. " * (pad // 25 + 1))[:pad].strip()) if pad else "")
          + (f"\nLesson: {os.environ['FAKE_LESSON']}" if os.environ.get("FAKE_LESSON") else ""))
     finish()
     if scenario == "stay":

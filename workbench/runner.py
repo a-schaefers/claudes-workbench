@@ -3362,6 +3362,38 @@ RULES_GONE = ("note: until this round this task's agent read {claude}/CLAUDE.md 
               "for every task, the user puts it in {mine}: tell them")
 
 
+# The agent's final message in the round report: whole up to SUMMARY_MAX characters, else its head
+# and its tail around a marker naming FINAL_MD, the whole text. It was cut head-only at 2,500,
+# which dropped the end, where PROTOCOL puts the assumptions, the rule-to-test list and `Lesson:`:
+# 75 of 409 summaries sat at the cap, and their Lesson lines were lost to lessons.py too (#1186,
+# 2026-11-24). The tail is sized from the uncapped ones: every Lesson line started within 421
+# characters of the end, and 90% of the last assumption lines within 617.
+SUMMARY_MAX, SUMMARY_HEAD, SUMMARY_TAIL = 2500, 1650, 800
+FINAL_MD = "final.md"
+
+
+def final_text(rnd: dict) -> str | None:
+    """The agent's last message in the round, whole; None when it wrote none."""
+    return rnd["texts"][-1].strip() if rnd["texts"] else None
+
+
+def cut_final(final: str, path) -> str:
+    """``final`` as the round report shows it: whole, or head and tail with what was cut and
+    where the whole text is (#1186)."""
+    if len(final) <= SUMMARY_MAX:
+        return final
+    cut = len(final) - SUMMARY_HEAD - SUMMARY_TAIL
+    return f"{final[:SUMMARY_HEAD]}\n[… {cut:,} chars cut: {path}]\n{final[-SUMMARY_TAIL:]}"
+
+
+def write_report(task: store.Task, n: int, rnd: dict, text: str) -> None:
+    """Round n's summary.md, and first the agent's whole final message beside it, FINAL_MD,
+    which the report's cut names and lessons.py reads (#1186)."""
+    if (final := final_text(rnd)) is not None:
+        task.round_dir(n).joinpath(FINAL_MD).write_text(final + "\n")
+    task.round_dir(n).joinpath("summary.md").write_text(text)
+
+
 def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     """The compact report Claude reads; kept short on purpose, the diff is fetched separately."""
     spec, st = task.spec, task.status
@@ -3445,8 +3477,10 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     lines.append(f"tools: {tools}")
     for err in rnd["errors"][-4:]:
         lines.append(f"tool error: {err[:200]}")
-    final = (rnd["texts"][-1] if rnd["texts"] else "(the agent wrote no final message)").strip()
-    lines += ["", "agent's summary:", final[:2500], ""]
+    final = final_text(rnd)
+    final = ("(the agent wrote no final message)" if final is None
+             else cut_final(final, task.round_dir(n) / FINAL_MD))
+    lines += ["", "agent's summary:", final, ""]
     files = gitops.changed(task.worktree)
     lines += ["files changed:", "\n".join(gitops.brief(files.splitlines(), status=True)) or "(none)"]
     for d, k in gitops.build_dirs(task.worktree, files)[:gitops.CHANGED_SHOWN]:
@@ -4596,7 +4630,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 continue
             if rnd["stuck"] or died(rnd):
                 text = _spend_lead(task, rnd) + summary_text(task, n, rnd, None) + _undelivered(task)
-                task.round_dir(n).joinpath("summary.md").write_text(text)
+                write_report(task, n, rnd, text)
                 phase = "stuck" if rnd["stuck"] else "failed"
                 # its server gone again after the round's one revive: the machine's, not the
                 # step's, so the model's slice isn't shrunk for it (#657)
@@ -4638,7 +4672,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 if not _go_on(task, n, "Claude's note"):
                     return
                 continue
-            task.round_dir(n).joinpath("summary.md").write_text(text)
+            write_report(task, n, rnd, text)
             used = task.status.get("auto_fixes", 0)
             if tests and not tests["ok"] and not skip and used < int(task.spec.get("auto_fix", 0)):
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)

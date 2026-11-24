@@ -144,11 +144,13 @@ def gather(task: store.Task, outcome: str | None = None) -> list[dict]:
         for body in round_feedback(task, rnd):
             for item in items(body):
                 add("feedback", rnd, item)
-        summary = d / "summary.md"
-        if summary.is_file() and outcome != "discarded":
-            said = summary.read_text().split("agent's summary:", 1)[-1]
-            for m in LESSON.finditer(said):
-                add("agent", rnd, m.group(1).strip()[:400])
+        # the agent's whole final message, which the report may cut (#1186); a round from before
+        # final.md, its report's section
+        summary, final = d / "summary.md", d / "final.md"
+        said = ("" if outcome == "discarded" else final.read_text() if final.is_file()
+                else summary.read_text().split("agent's summary:", 1)[-1] if summary.is_file() else "")
+        for m in LESSON.finditer(said):
+            add("agent", rnd, m.group(1).strip()[:400])
     for e in store.read_jsonl(task.dir / "events.jsonl")[0]:
         if e.get("kind") == "stopped" and e.get("text") and not e.get("by"):  # the guard's, not a person's
             add("stopped", e.get("round"), f"the guard stopped the agent: {e['text'][:300]}")
