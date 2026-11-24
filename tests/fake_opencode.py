@@ -145,7 +145,10 @@ rows record it as `models_path`, and OPENCODE_CONFIG_CONTENT as `content`.
   http   a model request as OpenCode makes one, through its config (#1015): the run's provider's
          options from OPENCODE_CONFIG, then OPENCODE_CONFIG_CONTENT over them; POST
          <baseURL>/chat/completions with `Authorization: Bearer <apiKey>` (an `anthropic`
-         provider: <baseURL>/messages?beta=true with `x-api-key`), through urllib, so the
+         provider: <baseURL>/messages?beta=true with `x-api-key`; `google`, as 2.3.2's Gemini
+         route: <baseURL>/models/<id>:streamGenerateContent?alt=sse with `x-goog-api-key` and
+         no `model` in the body; `azure`: <baseURL>/chat/completions with `api-key`, as its
+         package posts to a base that isn't `*.openai.azure.com`), through urllib, so the
          environment's http_proxy and no_proxy apply as they do to OpenCode's fetch. A 2xx is
          `ok` (it writes 42); another status is OpenCode's error for it, the upstream's message
          verbatim (`provider.auth` for 401/403 or, as 2.3.2, "Incorrect API key provided",
@@ -584,12 +587,18 @@ if scenario == "http" and args and args[0] == "run":  # a model request through 
         opts.update(((doc.get("provider") or {}).get(pid) or {}).get("options") or {})
     base = str(opts.get("baseURL") or "").rstrip("/")
     key = str(opts.get("apiKey") or "")
+    msgs = {"model": rest.partition("#")[0], "stream": True,
+            "messages": [{"role": "user", "content": args[-1][:200]}]}
     if pid == "anthropic":
         url, heads = f"{base}/messages?beta=true", {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    elif pid == "google":  # #1192: the model in the path, SSE pinned by the query
+        url, heads = f"{base}/models/{msgs['model']}:streamGenerateContent?alt=sse", {"x-goog-api-key": key}
+        msgs = {"contents": [{"role": "user", "parts": [{"text": args[-1][:200]}]}]}
+    elif pid == "azure":
+        url, heads = f"{base}/chat/completions", {"api-key": key}
     else:
         url, heads = f"{base}/chat/completions", {"Authorization": f"Bearer {key}"}
-    body = json.dumps({"model": rest.partition("#")[0], "stream": True,
-                       "messages": [{"role": "user", "content": args[-1][:200]}]}).encode()
+    body = json.dumps(msgs).encode()
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={**heads, "Content-Type": "application/json"})
 
