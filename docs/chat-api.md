@@ -9,7 +9,8 @@ This page is the reference for both. The internals are in ARCHITECTURE.md, *The 
 **Handing it to another agent:** make it a token (`wb chat token add my-agent`) and point it at
 `skill/agents/claude-workbench/` in this repository. That directory is a portable skill (the
 agentskills.io format, `SKILL.md` with `name` and `description`), and its `scripts/ask_claude.py`
-does the whole flow below with the standard library alone.
+does the whole flow below with the standard library alone. An agent that speaks MCP uses its
+`scripts/mcp_server.py` instead ([An MCP server](#an-mcp-server)).
 
 ## Contents
 - [Base URL and auth](#base-url-and-auth)
@@ -17,6 +18,7 @@ does the whole flow below with the standard library alone.
 - [Retry safety](#retry-safety)
 - [The agent flow, end to end](#the-agent-flow-end-to-end)
 - [An agent's view](#an-agents-view)
+- [An MCP server](#an-mcp-server)
 - [Endpoints](#endpoints)
 - [Rows: messages and asks](#rows-messages-and-asks)
 - [The stream's events](#the-streams-events)
@@ -189,6 +191,48 @@ An agent's token reads only its own conversation:
 - **`/api/health`** and the `listener` are as for the user.
 
 The user's own token reads everything, as below.
+
+## An MCP server
+
+`skill/agents/claude-workbench/scripts/mcp_server.py` puts the agent flow behind three MCP tools,
+for an agent or tool that speaks MCP. It is a stdio server (newline-delimited JSON-RPC), standard
+library only, started by the agent's MCP client. It reads the same `CLAUDE_WB_URL` and
+`CLAUDE_WB_TOKEN` as `ask_claude.py`, from its environment.
+
+It is for the user's own agents on this machine, talking to the user's own Claude Code session.
+It listens on nothing but stdio. It refuses a `CLAUDE_WB_URL` whose host isn't this machine's
+(`localhost`, `127.*`, `::1`): every tool says so, and nothing is sent. It follows no redirect.
+
+- **`ask_claude {text, key?}`**: checks `/api/health` (not listening: refused, nothing sent), sends
+  the request and returns its id at once. `key` (optional, 1 to 64 of `A-Z a-z 0-9 . _ : -`; a new
+  one per call by default) goes as the send's `cid` and its `Idempotency-Key` header, so a retry
+  under the same key lands once. A send cut off by a restart is sent again under it.
+- **`get_reply {id, wait?}`**: Claude's replies to that request and its status:
+  - `done`: the turn that took it has ended. A later report can still come (its reply says so);
+    `get_reply` shows it then.
+  - `still working`.
+  - `waiting on the user`: paused on the user's yes, not stuck.
+  - `queued`: no session listens yet.
+  - `expired`: unread past 6 hours, never passed on.
+
+  It holds up to `wait` seconds (default 20, at most 300) for the turn to end.
+- **`list_requests {}`**: the agent's 20 newest requests, how far each got, and whether Claude
+  listens.
+
+The config, one line. For OpenCode (`opencode.json`; `codemode: false` offers the tools as
+themselves, not behind `execute`):
+
+```json
+"mcp": {"servers": {"claude-workbench": {"type": "local", "command": ["python3", "/path/to/workbench/skill/agents/claude-workbench/scripts/mcp_server.py"], "environment": {"CLAUDE_WB_URL": "http://localhost:1337", "CLAUDE_WB_TOKEN": "wba-…"}, "codemode": false}}}
+```
+
+For clients that read an `mcpServers` map (Cursor's `mcp.json`, Gemini CLI's `settings.json`):
+
+```json
+"mcpServers": {"claude-workbench": {"command": "python3", "args": ["/path/to/workbench/skill/agents/claude-workbench/scripts/mcp_server.py"], "env": {"CLAUDE_WB_URL": "http://localhost:1337", "CLAUDE_WB_TOKEN": "wba-…"}}}
+```
+
+The token is the agent's own (`wb chat token add <name>`), with an agent's view and limits.
 
 ## Endpoints
 
