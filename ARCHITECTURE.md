@@ -327,10 +327,13 @@ credit or quota (<why>): top it up, or wait for the plan's reset; wb asks it aga
 gives up)`, on a watch of `$WB_HOME` (an `ok` or the keyhole's next mark wakes it), looking again at
 most every `API_WAIT`'s 30 s; past the mark's `until` one runner asks (the mark held
 `CREDIT_RECHECK_SECS` more under its lock, `asked_by` that task) and the others wait for its
-answer. That runner's round (`models.credit_recheck` says this load made it the one to ask:
-`NoLease.recheck`) that meets the 402 again before any answer (`quota`, not `answered`) goes back
-to waiting in `drive`, the 402's new mark held, with no stop or notice of its own: stopped, each
-waiter in turn woke Claude, 900 s apart, with the same stop (#1216). The tasks queued behind a 402 each sent a round, met the 402 and woke Claude with a stop of
+answer. That runner's round (`models.credit_recheck` says this load, after it waited, made it the
+one to ask: `NoLease.recheck`) that meets the 402 again before any answer (`quota`, not
+`answered`) goes back to waiting in `drive`, the 402's new mark held, with no stop or notice of its
+own: stopped, each waiter in turn woke Claude, 900 s apart, with the same stop (#1216). A turn
+handed with no wait first (a new `wb start`, or a running task's next round, past an expired mark)
+is no recheck: its 402 is the first since, and stops it with its notice (counted as one, it waited
+forever untold: the review of #1216). The tasks queued behind a 402 each sent a round, met the 402 and woke Claude with a stop of
 its own, though wb start refused in that state (#1178). A mark `asked_by` the task is its turn: `wb
 feedback` or `wb resume` of a task its provider stopped (status `infra: provider`, an API task)
 hands it the turn first (`cli._credit_turn`, `models.credit_ask`: `asked_by` it, `until` moved
@@ -1051,7 +1054,7 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   lease stepped aside, a wait to the provider's `api-health.json` `until`, else `RATE_LIMIT_SECS`,
   at most `RATE_WAIT_S`, a steer note ending it into `_steer_round`, `wb stop` ending the runner),
   continuing the session: one revive a round, as a revive re-sends the whole context, which costs
-  money. A quota stop of a recheck (`NoLease.recheck`, the round never `answered`) waits as
+  money. A quota stop of a recheck (`NoLease.recheck`: a turn handed after a wait, the round never `answered`) waits as
   queued again, a `load` event "<provider> is still out of credit: the task waits as queued
   again" and no notice (#1216). A second stop, or a quota, key, setup or refused stop, ends it `stuck` with `cause` `provider`, `infra`
   `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb

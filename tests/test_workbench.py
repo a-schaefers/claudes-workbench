@@ -31979,6 +31979,28 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                           for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["kind"] != "review"],
                          [("t-paid", "stuck", "provider")])
 
+    def test_a_new_start_past_an_expired_402_mark_that_meets_the_402_stops_with_its_notice(self):
+        # the review of #1216 (2026-11-24): NoLease.load took its first credit_recheck as a
+        # recheck, so a start past an expired mark, with no `ok` since, that met the 402 went back
+        # to waiting with no stop or notice: queued forever, Claude never told. Only a turn handed
+        # after a wait is a recheck; this one is the first 402 since, and stops
+        self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.models.note_api("deepinfra", "no_credit", "HTTP 402", until=time.time() - 1)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        self.start_api("t-new", "http", spawn=False)
+        driver = threading.Thread(target=self.drive_here, args=("t-new",), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 60)
+        driver.join(20)
+        task = store.Task("t-new")
+        self.assertFalse(driver.is_alive(), task.status)
+        self.assertEqual((task.status["phase"], task.status.get("infra")), ("stuck", "provider"), task.status)
+        self.assertEqual(len(self.up.seen), 1)
+        self.assertEqual([(r["task"], r["kind"], r.get("cause"))
+                          for r in store.read_jsonl(store.home() / "notify.jsonl")[0]],
+                         [("t-new", "stuck", "provider")])
+
     def test_with_unload_for_tests_an_api_tasks_tests_run_under_this_machines_pool(self):
         from workbench import verify
         used = []

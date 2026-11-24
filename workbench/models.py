@@ -1729,9 +1729,10 @@ def credit_turn(pid: str, task: str = "") -> dict | None:
 
 def credit_recheck(pid: str, task: str = "") -> tuple[dict | None, bool]:
     """credit_turn's answer, and whether this call made ``task`` the one to ask the provider
-    again past the mark's `until`: a recheck, whose 402 is the stop Claude was already told of,
-    so its round goes back to waiting with no stop of its own (#1216, 2026-11-24). The user's
-    resume (credit_ask) is no recheck: its 402 still stops it."""
+    again past the mark's `until`. NoLease.load counts it a recheck only after a wait: then its
+    402 is the stop Claude was already told of, so its round goes back to waiting with no stop of
+    its own (#1216, 2026-11-24). A turn with no wait first (a new start past an expired mark)
+    and the user's resume (credit_ask) are no recheck: their 402 still stops them."""
     def waits(row: dict) -> dict | None:
         return None if row["state"] != "no_credit" or (task and row.get("asked_by") == task) else row
     if (row := api_health(pid)) is not None:
@@ -3861,7 +3862,7 @@ class NoLease:
         self.pool = None
         self.aside = False
         self.loaded = True
-        self.recheck = False  # this load made it the one to ask again past a 402's mark (#1216)
+        self.recheck = False  # this load waited, then was the one to ask again past a 402's mark (#1216)
         self.fd: int | None = None
         self.path: Path | None = None
 
@@ -3915,7 +3916,11 @@ class NoLease:
         pid = self.m.provider or api_provider(self.m)
         self.recheck = False
         try:
-            row, self.recheck = credit_recheck(pid, self.task)
+            # a turn handed here, with no wait first, is no recheck: a new start (or a next round)
+            # past an expired mark is the first to meet the 402 since, and its stop is the one
+            # notice Claude gets; counted as one, it waited forever untold (the review of #1216,
+            # 2026-11-24). Only the turn handed after a wait below is a recheck
+            row = credit_recheck(pid, self.task)[0]
         except Exception:  # an unreadable file: the round's keyhole answers instead
             return 0.0
         if row is None:
@@ -3940,7 +3945,7 @@ class NoLease:
                 try:
                     row, self.recheck = credit_recheck(pid, self.task)
                 except Exception:
-                    row = None
+                    row, self.recheck = None, False
         if held:  # not on a stop (wb stop's signal): that runner sends nothing more
             self.__enter__()
         return 0.0
