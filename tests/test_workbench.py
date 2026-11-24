@@ -23805,6 +23805,17 @@ class WebChat(Base):
         self.assertEqual(self.call("/api/prefs", {"away": "ask"}, token=self.chat.token())[0], 200)  # the user's: all of it
         self.assertIn("my-agent  since ", run_wb("chat", "token", "list"))
 
+    def test_an_agent_token_from_another_machine_is_refused_while_the_users_token_still_works(self):
+        # agents are this machine's own (owner, 2026-11-23): a chat bound to the tailnet for the
+        # user's phone answered an agent token from any peer on it
+        tok = self._agent()
+        self.assertEqual(self.call("/api/state", token=tok)[0], 200)
+        with mock.patch.object(self.chat.Handler, "_from_loopback", lambda self: False):
+            code, r = self.call("/api/state", token=tok)
+            self.assertEqual((code, r["error"]), (403, "agent tokens work only from this machine (localhost)"))
+            self.assertEqual(self.call("/api/send", {"text": "hi"}, token=tok)[0], 403)
+            self.assertEqual(self.call("/api/state", token=self.chat.token())[0], 200)  # the user's phone
+
     def test_a_revoked_agent_token_gets_401_and_names_are_checked(self):
         tok = self._agent()
         self.assertEqual(self.call("/api/state", token=tok)[0], 200)

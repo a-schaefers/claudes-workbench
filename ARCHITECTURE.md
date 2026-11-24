@@ -4786,7 +4786,7 @@ client; the server needs no browser.
   `chat-agents.json` beside the token file (`chat.agents_path`, 0600, under `chat-agents.lock`);
   `list`, `revoke` (`chat.agent_revoke`). `Handler._authed` returns `"user"` or `"agent <name>"`
   (`chat.agent_for`, constant time, the file read per request so a revoke is at once) and sets
-  `Handler.agent`; a held wait or open stream checks again at every wake (`Handler._revoked`:
+  `Handler.agent`; an agent token from a peer that isn't loopback (`Handler._from_loopback`: `127.*`, `::1`) is 403 `agent tokens work only from this machine (localhost)` whatever the bind, as agents are this machine's own (owner, 2026-11-23), while the user's token still works from the tailnet or LAN; a held wait or open stream checks again at every wake (`Handler._revoked`:
   both went on reading its replies after a revoke, the #1042 review). An agent gets 403 `agent tokens can't …` on `AGENT_DENIED` (`/api/answer`,
   `/api/prefs`, `/api/push`, `/api/active`, `/api/seen`), and 429 `{error, retry_after}` past
   `AGENT_SENDS_PER_MIN` 30 sends in any 60 s (`chat.RateLimit`, per agent, in the server's memory).
