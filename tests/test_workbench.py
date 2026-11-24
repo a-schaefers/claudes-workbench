@@ -4525,6 +4525,8 @@ class Lifecycle(Base):
         """wb accept --merge in the background, its signer in the main checkout (the merge's or
         the squash's commit, not the task's) waiting ``wait`` s: (wb, its git, the signer), once
         the signer is running."""
+        # its sleep outlives a SIGKILLed signer (an orphan init reaps): left by design (#1225's CI)
+        self.leaves_behind(f"sleep {wait}")
         pidfile = Path(self.tmp.name) / f"{name}.signer"
         prog = Path(self.tmp.name) / f"{name}-gpg"
         here = shlex.quote(os.path.realpath(self.repo))  # not wb start's dry run there
