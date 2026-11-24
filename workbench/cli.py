@@ -2512,21 +2512,23 @@ def _resume(task: store.Task) -> None:
     _say(lessons.nudge(task))
 
 
-def _lane_dir(raw: str, guard: set[str] = frozenset()) -> str:
+def _lane_dir(raw: str, guard: set[str] = frozenset(), task: store.Task | None = None) -> str:
     """A directory Claude adds to an agent's lane, made if it isn't there yet (the kernel's rule
     is on a real directory). Not through a link: the agent can plant one in its lane (/tmp/out ->
     another project), and the grant went to the link's target (the 2026-11-16 audit), so Claude
     names the real directory itself; nor a place the lane hides (context.lane_refusal); nor a
     place in the task's repo or its git directory (`guard`, context.repo_dirs), which
     context.writable leaves out of every lane: the grant was said "allowed", the agent restarted,
-    and its retry was refused again (the 0.90 review). One that holds the repo is split around it."""
+    and its retry was refused again (the 0.90 review); nor, for ``task``, a file its API lane hides
+    (context.api_hidden_refusal, #1093). One that holds the repo is split around it."""
     if raw == "*":
         return raw  # the lane off for this task
     given = os.path.abspath(os.path.expanduser(raw))
     real = os.path.realpath(given)
     if real != given:
         die(f"{raw} is a link to {real}: allow {real} itself if that is what the task needs")
-    if why := context.lane_refusal(real) or context.kept_out(real):
+    if why := context.lane_refusal(real) or context.kept_out(real) or (
+            task and context.api_hidden_refusal(task, real)):
         die(why)  # kept_out: writable() would split the grant away, the retry refused (#912)
     if any(real == g or context._under(real, g) for g in guard):
         die(f"{raw}: inside the task's own repo or its git directory, which no lane may write (wb's "
@@ -2564,7 +2566,7 @@ def cmd_allow(a):
     once so the new rule applies (OpenCode reads it at start, the lane is drawn at start)."""
     task = need(a.name)
     pats = [p.strip() for p in a.pattern if p.strip()]
-    dirs = [_lane_dir(p, context.repo_dirs(task)) for p in a.path or [] if p.strip()]
+    dirs = [_lane_dir(p, context.repo_dirs(task), task) for p in a.path or [] if p.strip()]
     if not pats and not dirs:
         die("nothing to allow")
     context.commands_conf()  # refused unless it parses, before any grant: rewriting it would lose it

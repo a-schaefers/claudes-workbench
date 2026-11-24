@@ -31242,6 +31242,40 @@ class Privacy(_KeyholeTest):
         self.assertNotIn(str(moved), api)
         self.assertIn(str(moved / "hub"), api)
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_a_test_refused_on_an_api_hidden_file_names_no_grant(self):
+        # #1093 (2026-11-23): the report said `wb allow --path ~/.m2/settings.xml`, wb allow saved
+        # it, and the paid feedback round was refused the same way: api_hidden wins over a grant
+        home = Path(self.tmp.name) / "home"
+        (home / ".m2").mkdir(parents=True)
+        settings = home / ".m2" / "settings.xml"
+        settings.write_text("<settings><servers><server><id>r</id><password>p</password>"
+                            "</server></servers></settings>")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for v in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
+                os.environ.pop(v, None)
+            api, gpu = self.bare("t-hid-api", "api"), self.bare("t-hid-gpu", "gpu")
+            out = f"[ERROR] Non-readable settings {settings}: Permission denied"
+            self.assertEqual(runner.lane_refused(api, out), [str(settings)])
+            self.assertIsNone(runner.lane_grant(str(settings), api))
+            line = runner.not_the_code(api, {"ok": False, "exit": 1, "lane": [str(settings)]})
+            self.assertIn(f"the lane refused {settings}: an API task's lane hides it (it holds a "
+                          "credential, which would reach the provider), so no grant reaches it", line)
+            self.assertNotIn("wb allow", line)
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()) as err:
+                run_wb("allow", "t-hid-api", "--path", str(settings))
+            self.assertIn("an API task's lane hides it", err.getvalue())
+            self.assertNotIn(str(settings), context.lane_paths(api))
+            # the agent's own request for it names no grant either
+            notice = runner.ask_mcp.notice(api, "q1", {"question": "need Maven's settings", "command": "",
+                                                       "path": str(settings), "context": ""})
+            self.assertIn("No grant reaches it", notice)
+            self.assertNotIn("wb allow", notice)
+            # a GPU task's lane reads it: a refusal there is the grant's to fix
+            self.assertEqual(runner.lane_grant(str(settings), gpu), str(settings))
+            self.assertIn(f"wb allow t-hid-gpu --path {settings}",
+                          runner.not_the_code(gpu, {"ok": False, "exit": 1, "lane": [str(settings)]}))
+
     def test_the_start_says_which_token_files_an_api_lane_hides_and_a_gpu_start_doesnt(self):
         home = Path(self.tmp.name) / "home"
         home.mkdir()

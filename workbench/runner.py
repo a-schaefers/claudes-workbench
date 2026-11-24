@@ -2098,7 +2098,10 @@ def lane_refused(task: store.Task, output: str) -> list[str]:
         if not REFUSAL.search(line):
             continue
         for path in refused_paths(line):
-            grant = lane_grant(path)
+            if path not in found and context.api_hidden_refusal(task, path) and runner_may(path):
+                found.append(path)  # named as hidden, with no grant (#1093)
+                continue
+            grant = lane_grant(path, task)
             if path not in found and grant and (not any(
                     path == w or path.startswith(str(w).rstrip("/") + "/") for w in places)
                     or sockets is not None and is_socket(path) and not any(
@@ -2130,7 +2133,7 @@ def is_socket(path: str) -> bool:
         return False
 
 
-def lane_grant(path: str) -> str | None:
+def lane_grant(path: str, task: store.Task | None = None) -> str | None:
     """The `wb allow --path` that reaches a refused path: /dev/pts for a pty, itself when it
     exists (a directory, a device node, a socket) or is a device node, else the nearest directory that does; the
     toolchain home it falls in when that isn't made yet, or the one below it (`~/go`: `go/pkg`,
@@ -2138,8 +2141,11 @@ def lane_grant(path: str) -> str | None:
     home it is in (context.gem_home_of, #832); then, while that place holds what the lane is split around
     (context.split_points: a grant of it would be split again), the next directory down
     towards the path. None when no grant can (`/`, the home directory, a secret:
-    context.lane_refusal)."""
+    context.lane_refusal; for ``task``, a file its API lane hides: context.api_hidden, #1093)."""
     target = real = os.path.realpath(path)
+    hidden = context.api_hidden(task) if task else set()
+    if any(target == h or context._under(target, h) for h in hidden):
+        return None  # hidden over any grant (#1093)
     if real == "/dev/pts" or real.startswith("/dev/pts/"):
         return "/dev/pts"  # every pty, not the one index this run got (#829)
     while not os.path.exists(real) and not real.startswith("/dev/"):  # a node: itself, or /dev
@@ -2153,7 +2159,7 @@ def lane_grant(path: str) -> str | None:
         return None
     if real in context.secret_sockets():
         return real  # Docker Desktop's, in .docker: connected to alone (#441)
-    out = context.split_points()
+    out = context.split_points() | hidden
     while real != target and context._under(target, real) and \
             any(context._under(h, real) for h in out):
         real = os.path.join(real, target[len(real):].strip("/").split("/")[0])
@@ -2707,8 +2713,10 @@ def _prepare_now(task: store.Task) -> bool:
     proxy = f"\n{proxy_line(gone)}, if the setup needed it" if (gone := proxy_gap(output)) else ""
     # what the lane refused, as a test run's report names it: a first `npm ci` failed on a
     # ~/.npm not made yet, and the notice named no grant (#824)
-    proxy += "".join(f"\nthe lane refused {shlex.quote(n)}: wb allow {task.name} --path "
-                     f"{shlex.quote(lane_grant(n) or n)}, if the setup needs it"
+    proxy += "".join(f"\nthe lane refused {shlex.quote(n)}: {context.API_HIDDEN_WHY}"
+                     if context.api_hidden_refusal(task, n) else  # (#1093)
+                     f"\nthe lane refused {shlex.quote(n)}: wb allow {task.name} --path "
+                     f"{shlex.quote(lane_grant(n, task) or n)}, if the setup needs it"
                      for n in lane_refused(task, output))
     task.set_status(phase="failed", last=what, infra="setup", failed_before="setup")  # #508
     # resume, not discard and start again: the agent never ran, and wb resume sets up again (#581)
@@ -3037,7 +3045,11 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         if not tests["ok"]:
             lines.append("```\n" + "\n".join(tests["tail"].splitlines()[-25:]) + "\n```")
         for node in tests.get("lane") or ():
-            grant = lane_grant(node) or node
+            if context.api_hidden_refusal(task, node):  # no grant reaches it (#1093)
+                lines.append(f"the lane refused {shlex.quote(node)}: {context.API_HIDDEN_WHY} "
+                             "(not the agent's bug)")
+                continue
+            grant = lane_grant(node, task) or node
             lines.append(f"the lane refused {shlex.quote(node)}: wb allow {task.name} --path "
                          f"{shlex.quote(grant)} if the "
                          "tests need it (not the agent's bug)")
@@ -3443,10 +3455,15 @@ def not_the_code(task: store.Task, tests) -> str:
     if nodes := tests.get("lane"):
         # the grant that reaches each, as the report names it: the path itself, when it was a
         # file not made yet, sent Claude's `wb allow --path` to make a directory of that name (#670)
-        grants = list(dict.fromkeys(lane_grant(n) or n for n in nodes))
-        return (f"the lane refused {', '.join(map(shlex.quote, nodes))}: "
+        # and one an API lane hides, which no grant reaches, as that (#1093)
+        hidden = [n for n in nodes if context.api_hidden_refusal(task, n)]
+        nodes = [n for n in nodes if n not in hidden]
+        grants = list(dict.fromkeys(lane_grant(n, task) or n for n in nodes))
+        said = [f"the lane refused {', '.join(map(shlex.quote, nodes))}: "
                 + "; ".join(f"wb allow {task.name} --path {shlex.quote(g)}" for g in grants)
-                + ", then wb feedback, if the tests need it")
+                + ", then wb feedback, if the tests need it"] if nodes else []
+        return "; ".join(said + [f"the lane refused {', '.join(map(shlex.quote, hidden))}: "
+                                 f"{context.API_HIDDEN_WHY}"] if hidden else said)
     return ""
 
 

@@ -2563,6 +2563,23 @@ def api_hidden(task: store.Task) -> set[str]:
     return api_hidden_paths() if task.spec.get("via") == "api" else set()
 
 
+# Why no grant reaches a file api_hidden keeps out: readable() and writable() hide it over any
+# grant, so a test refused on ~/.m2/settings.xml named `wb allow --path` for it, wb allow saved
+# it, and the paid feedback round was refused the same way (#1093, 2026-11-23)
+API_HIDDEN_WHY = ("an API task's lane hides it (it holds a credential, which would reach the "
+                  "provider), so no grant reaches it: name the credential by an environment "
+                  "reference in it instead, or run the task on the GPU")
+
+
+def api_hidden_refusal(task: store.Task, raw: str) -> str | None:
+    """Why ``raw`` can't join ``task``'s lane when it is (in) a file its API lane hides
+    (api_hidden, API_HIDDEN_WHY), else None."""
+    real = os.path.realpath(Path(raw).expanduser())
+    if any(real == h or _under(real, h) for h in api_hidden(task)):
+        return f"{raw}: {API_HIDDEN_WHY}"
+    return None
+
+
 def api_hidden_note() -> str:
     """wb start's note for an API task when a file API_HIDDEN names holds a credential, else '': the files,
     then the tools that don't run in its lane (API_HIDDEN_STOPS), those whose private-registry
