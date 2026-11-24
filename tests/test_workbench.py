@@ -5076,6 +5076,10 @@ class RepoMoved(Base):
         last = [r for r in store.notices() if r["task"] == "t-776"][-1]
         self.assertEqual(last["kind"], "failed")
         self.assertNotIn("Traceback", last["text"])
+        # #1247 (bar loop round 5, 2026-11-24): cause-less, the mod's wake said wb feedback, whose
+        # runner fails at once on the moved repo; with one outside the step it names relocate
+        self.assertEqual(last["cause"], "repo")
+        self.assertNotIn(last["cause"], cli.results.THE_STEP)
 
     def test_a_moved_repo_is_relocated_and_its_task_accepts(self):
         for name in ("t-m1", "t-m2"):
@@ -38334,6 +38338,11 @@ class RoleResolution(Base):
         self.assertEqual(rounds, [])
         note = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r.get("task") == "t-left"][-1]
         self.assertEqual(note["text"], line)
+        # #1247 (bar loop round 5, 2026-11-24): cause-less, the mod's wake ended with the failed
+        # one's "wb feedback … or wb discard", refused above; a cause outside the step's says
+        # "do as the notice says" (register.test.tsx's #1247 test)
+        self.assertEqual(note["cause"], "catalog")
+        self.assertNotIn(note["cause"], cli.results.THE_STEP)
 
     def test_a_catalog_that_cant_be_read_never_reads_as_the_model_having_left(self):
         # #1016's review: a failed read lists nothing (models.hosted is {}), and the task was

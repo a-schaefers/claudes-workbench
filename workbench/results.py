@@ -53,7 +53,9 @@ def step(task: store.Task, landed: bool, since: str = "HEAD", gaps=None) -> dict
 # cli.reap: killed, out of memory, a reboot), a model server gone again after the round's one
 # revive (`server`, #657), an API provider's rate limit, outage, quota or refused key (`provider`,
 # runner.PROVIDER_GUARDS, #1020), the day's API spend cap (`spend`, runner.SPEND, #1019: the user's
-# budget, not the model's), workbench updated under the task (`updated`, runner._updated). Counted
+# budget, not the model's), workbench updated under the task (`updated`, runner._updated), and the
+# failures whose text names their own remedy (`checkout`, `setup`, `repo`, `catalog`, `model`,
+# `disk`: #1247, so the mod's wake names that remedy and not wb feedback). Counted
 # as stuck, a laptop shut down mid-step shrank the model's slice for good (#582, the audit of
 # 1.90), and so did an update mid-step until it had a cause (#660): an allowlist, so the next
 # stop from outside the step can't slip in. Notices from before `cause` are known by their text.

@@ -1250,6 +1250,44 @@ test('#1232: a stop for a repo marked local-only wakes Claude to takeover or dis
   expect(toasts.join('\n')).not.toContain('got stuck')
 })
 
+test('#1247: a stop outside the step wakes Claude to do as its notice says, never to steer it with feedback', async ($, on) => {
+  // bar loop round 5 (2026-11-24): a model gone from OpenCode's catalog (cause `catalog`) and a
+  // moved repo (`repo`) woke as "failed" ending "then wb feedback … or wb discard": wb refuses the
+  // first with exit 3, and the second ran a runner that failed at once, next to the notice's own
+  // takeover or relocate. One rule, any cause outside results.THE_STEP; `agent` keeps its own.
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  for (const n of ['a', 'b', 'c']) task(files, n, 'failed')
+  notice(files, { ts: ts0, task: 'a', kind: 'failed', cause: 'catalog',
+    text: 'task a: deepseek/deepseek-flash left OpenCode\'s catalog: workbench never switches a task\'s ' +
+      'model. wb takeover a to finish it, or wb discard a' })
+  notice(files, { ts: ts0 + 1, task: 'b', kind: 'failed', cause: 'repo',
+    text: 'task b: /src/b moved or was deleted: wb relocate b --repo <its new path>, then wb resume' })
+  notice(files, { ts: ts0 + 2, task: 'c', kind: 'failed', round: 1, cause: 'agent',
+    text: 'task c: round 1: opencode exited 1' })
+  fakeTasks(on, files, ['a', 'b', 'c'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  for (let i = 0; i < 4 && woken.length < 3; i++) await clock.advance(3000)
+  expect(woken).toHaveLength(3)
+  const [a, b, c] = ['a', 'b', 'c'].map(n => woken.find(w => w.includes(`Task \`${n}\``)) ?? '')
+  for (const [w, n] of [[a, 'a'], [b, 'b']]) {
+    expect(w).toContain(`[workbench] Task \`${n}\` failed (not its agent's doing).`)
+    expect(w).toContain('its remedy is the notice\'s own, above: do what it names')
+    expect(w).not.toContain(`then \`wb feedback ${n} --message <file>\``)
+  }
+  expect(a).toContain('wb takeover a to finish it, or wb discard a')
+  expect(b).toContain('wb relocate b --repo')
+  // the agent's own failure keeps the failed wake's next step
+  expect(c).toContain('[workbench] Task `c` failed.')
+  expect(c).toContain('then `wb feedback c --message <file>` or `wb discard c`')
+  expect(toasts.join('\n')).toContain('workbench: a failed (not its agent\'s doing)')
+})
+
 test('two wakes due in one turn both arrive, the second after the first one\'s turn', async ($, on) => {
   // the 2026-11-16 audit: the second report never came, only a rewake a minute later
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

@@ -3101,7 +3101,9 @@ CHECKOUT_SPARE = 2 * 10**9
 
 def _checkout_failed(task: store.Task, what: str, fix: str) -> bool:
     task.set_status(phase="failed", last=what[:200])
-    task.notify("failed", f"task {task.name}: {what}, before any round. {fix}")
+    # a `cause` outside results.THE_STEP, as every stop with its remedy in the text: the mod's
+    # wake then says to do as the notice says, never the failed wake's wb feedback (#1247)
+    task.notify("failed", f"task {task.name}: {what}, before any round. {fix}", cause="checkout")
     return False
 
 
@@ -3286,7 +3288,7 @@ def _prepare_now(task: store.Task) -> bool:
     # resume, not discard and start again: the agent never ran, and wb resume sets up again (#581)
     task.notify("failed", f"task {task.name}: {what} before any round "
                 f"({task.dir / 'setup.txt'}):\n{tail}{proxy}\nfix it, then wb resume {task.name}: "
-                "it sets the worktree up again (the agent never ran)")
+                "it sets the worktree up again (the agent never ran)", cause="setup")  # #1247
     return False
 
 
@@ -4426,7 +4428,9 @@ def _repo_gone(task: store.Task) -> None:
     text = (f"{task.spec['repo']} moved or was deleted: wb relocate {task.name} --repo <its new "
             "path>, then wb resume")
     task.set_status(phase="failed", last=text[:200])
-    task.notify("failed", f"task {task.name}: {text}")
+    # its cause, so the mod's wake names the notice's relocate, not wb feedback: a runner that
+    # fails at once on the moved repo and wakes Claude again (the bar loop, #1247, 2026-11-24)
+    task.notify("failed", f"task {task.name}: {text}", cause="repo")
 
 
 def left_catalog(task: store.Task) -> str:
@@ -4449,7 +4453,10 @@ def _left_catalog(task: store.Task) -> None:
     text = left_catalog(task)
     task.set_status(phase="failed", last=text[:200], infra="model",
                     **({} if ran(task) else {"failed_before": "load"}))
-    task.notify("failed", text)
+    # its cause, so the mod's wake names the notice's takeover or discard: it ended "wb feedback
+    # … or wb discard", and wb feedback, next and resume refuse the task with exit 3 (the bar
+    # loop, #1247, 2026-11-24). An unread catalog's line names its own remedy, resume, as well.
+    task.notify("failed", text, cause="catalog")
 
 
 def _load_failed(task: store.Task, e: Exception, api: bool = False) -> None:
@@ -4472,7 +4479,8 @@ def _load_failed(task: store.Task, e: Exception, api: bool = False) -> None:
                 + (f"\nthe agent never ran: once the model can, wb resume {task.name} starts it"
                    if never else
                    f"\nround {n} never reached the agent: once the model can run, wb feedback "
-                   f"{task.name} --text \"carry on\" sends its prompt" if not reached(task, n) else ""))
+                   f"{task.name} --text \"carry on\" sends its prompt" if not reached(task, n) else ""),
+                cause="model")  # the remedy is the text's, not the failed wake's feedback (#1247)
 
 
 # The keyhole (#1012): an API model's key stays in the runner, and OpenCode gets the keyhole's
@@ -5659,7 +5667,8 @@ def main():
                             infra="disk full" if full else "crash")
             task.notify("failed", f"task {task.name}: the disk is full ({store.home()}); free "
                         f"some, then wb resume {task.name}" if full else
-                        f"task {task.name}: the runner crashed\n{err[-1500:]}")
+                        f"task {task.name}: the runner crashed\n{err[-1500:]}",
+                        **({"cause": "disk"} if full else {}))  # its remedy is the text's (#1247)
         except OSError as again:
             # no room even for this: wb's reap fails the task, naming the disk, once it can
             # write (#342, the audit of 1.4)
