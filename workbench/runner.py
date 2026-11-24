@@ -1254,6 +1254,16 @@ def _steer_bell(task: store.Task, proc, q: queue.Queue) -> None:
 PROMPT_ARG_MAX = 100_000
 
 
+# Round n's message sent again in its place when the round runs again after its provider or
+# server stopped it (_run_again): OpenCode keeps a failed run's message in the session, and
+# prompt.md sent again with --session put the spec and protocol there once per try. A waiter's
+# 15-minute rechecks through a night out of credit left dozens of copies, all billed at the
+# top-up's first request and past a 131K window (#1235, 2026-11-24). Its opening: transcript's label.
+RERUN = ("The round was cut off by the model's provider or server, not by you, and goes on here: "
+         "carry out the instructions you were last given above, from where the work stands "
+         "(some of it may be done: look at the files first).")
+
+
 # The round's guards run on the monotonic clock, which a suspend doesn't advance and NTP never
 # steps: on the wall clock a laptop shut for 20 minutes woke to a round stopped for silence (the
 # 2026-11-16 audit). A loop pass far longer than its 5 s wait means the process was frozen (a
@@ -1611,16 +1621,19 @@ def no_edit_limit(window, *, api: bool) -> int:
 
 
 # The rounds that carry a self-review on, as status round_for: the self-review's own, the fresh
-# session taking a full one over (#1188), and a steer round, the runner's think nudge or Claude's
-# note, mid-round or after (#1207). Each keeps the self-review's green tree only when the round
-# before was one of these too (carried_tree), so any other round's handover or note drops it.
-SELF_REVIEW_ROUNDS = ("self_review", "fresh", "steer")
+# session taking a full one over (#1188), a steer round, the runner's think nudge or Claude's
+# note, mid-round or after (#1207), and a resume, wb resume's or wb feedback's after an infra
+# stop, of a round stopped from outside (an update, wb stop, a signal, a reaped runner: #1228).
+# Each keeps the self-review's green tree only when the round before was one of these too
+# (carried_tree), so any other round's handover, note or resume drops it.
+SELF_REVIEW_ROUNDS = ("self_review", "fresh", "steer", "resume")
 
 
 def carried_tree(task: store.Task) -> str | None:
     """Status `self_review_tree` for the next round when it carries on this one (a handover, a
-    steer round), None when this round is no part of a self-review: what _full_round and
-    _steer_round write, so the key outlives only the rounds that carry a self-review on."""
+    steer round, a resume), None when this round is no part of a self-review: what _full_round,
+    _steer_round, wb resume and wb feedback's infra resume write, so the key outlives only the
+    rounds that carry a self-review on."""
     st = task.status
     return st.get("self_review_tree") if st.get("round_for") in SELF_REVIEW_ROUNDS else None
 
@@ -1629,12 +1642,13 @@ def green_tree(task: store.Task, began: str) -> str | None:
     """The tree (gitops.mark) the self-review this round is part of began on, the one the last
     round's tests passed on (status `self_review_tree`), or None when the round is no part of a
     self-review (SELF_REVIEW_ROUNDS: round_for `self_review`, `fresh` for the session carrying
-    one on past a full window, `steer` for the round a nudge or a note started in one). Those
-    began on the tree as the round before left it, maybe a check still commented out, so their
-    own start is no test; held to none, the explore stop of a fresh one was a stuck notice on a
-    green change, the step counted against it (#1188, 2026-11-24), and a nudged or steered one's
-    still was (#1207, 2026-11-24). A task queued before the key: the round's own start, as #1168
-    had it."""
+    one on past a full window, `steer` for the round a nudge or a note started in one, `resume`
+    for the one wb resume started after it). Those began on the tree as the round before left
+    it, maybe a check still commented out, so their own start is no test; held to none, the
+    explore stop of a fresh one was a stuck notice on a green change, the step counted against
+    it (#1188, 2026-11-24), a nudged or steered one's still was (#1207, 2026-11-24), and a
+    resumed one's after an update or wb stop still was (#1228, 2026-11-24). A task queued before
+    the key: the round's own start, as #1168 had it."""
     st = task.status
     if st.get("round_for") == "self_review":
         return st.get("self_review_tree", began)
@@ -1650,13 +1664,22 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                             "--format", "json", "--title", f"wb: {task.name}"]
     began = gitops.mark(task.worktree)  # the tree as the round began
     marks = {began}  # and as the session began
-    if st.get("session"):
+    new_session = not st.get("session")
+    if not new_session:
         cmd += ["--session", st["session"]]
         marks.add(st.get("session_mark"))
     else:
         task.set_status(session_mark=next(iter(marks)), session_floor=None)
     floor = task.status.get("session_floor")  # the context the session had read when it began work
     note = skills_note(task, n)
+    if (again := st.get("unanswered")) is not None:  # one run's: _run_again sets it for the next
+        task.set_status(unanswered=None)
+        if not new_session and (again.get("round"), again.get("session")) == (n, st["session"]):
+            # the session holds the round's message already (#1235), but not what came after
+            # it: a note _early_notes folded in since (or a skills change, `note`) went nowhere
+            # while counted delivered (the review of #1235, 2026-11-24)
+            since = prompt[int(again.get("at") or len(prompt)):].strip()
+            prompt = RERUN + ("\n\n" + since if since else "")
     if len((note + prompt).encode()) > PROMPT_ARG_MAX:
         prompt = (f"Your instructions for this round are long, so they are in the file "
                   f"{task.round_dir(n) / 'prompt.md'}. Read all of it first (in parts if it is "
@@ -1675,6 +1698,14 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         (ask_mcp.ask_dir(task) / ask_mcp.LISTED).unlink()  # lost ask tool could fire only there (#481)
     except OSError:
         pass
+    # Both before OpenCode starts: each clears what an old round left in status (the meter an
+    # `api_stop`, the wait the rate-limit keys) and zeroes the round's figures, and after the
+    # spawn they cleared what this round's first request had just written. A 402's stop the
+    # keyhole wrote went, the round read the keyhole's 400 alone as `refused`, and a waiter's
+    # recheck that met the 402 again stopped as stuck rather than wait again, waking Claude
+    # (#1240, 2026-11-24: #1216's test failing at random on CI)
+    provider = _ProviderWait(task, n)  # an API provider's rate limit, outage or queue (#1020)
+    spend = _spend_round(task, n)  # an API task's meter (#1019), else None
     log = open(task.dir / "runner.log", "a")
     proc = subprocess.Popen(cmd, cwd=task.workdir, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=log, encoding="utf-8",
@@ -1708,7 +1739,6 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
     started = time.time()  # the wall clock, for check-ins: they compare with timestamps in files
     clock = _Clock(time.monotonic())
-    provider = _ProviderWait(task, n)  # an API provider's rate limit, outage or queue (#1020)
     prior = float(task.status.get("active_s") or 0)  # earlier rounds' active work
     # what the ETA and the progress checks compare: this step's alone (#815)
     step_prior = prior - float(task.status.get("step_active_s") or 0)
@@ -1723,7 +1753,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # OpenCode sent again, each with why
     out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [], "retries": [],
            "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None, "guard": None,
-           "answered": False}
+           "answered": False, "new_session": new_session, "reached": False}
     window = st.get("window")
     fresh_at = tuning.value(task, "fresh_at")
     # The last step's (session, context, prompt): a later step in it whose prompt is smaller by
@@ -1740,7 +1770,6 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # from a step at 40K compacted the session with no step near the point (#1086, 2026-11-23)
     pending = 0
     opened: dict = {}  # the questions open this round (ask_mcp.relay)
-    spend = _spend_round(task, n)  # an API task's meter (#1019), else None
     warmed = time.monotonic()  # the model's keep-alive, renewed while the round waits (#864)
     while True:
         try:  # woken by the agent's output or a steer note; the timeout runs the clocks below
@@ -1784,8 +1813,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 turn_over = (raw.get("part") or {}).get("reason") == "stop"
             elif raw.get("type") not in ("retry", None):
                 turn_over = False
-            if raw.get("sessionID") and not task.status.get("session"):
-                task.set_status(session=raw["sessionID"])
+            if raw.get("sessionID"):  # OpenCode has the round's message in its session
+                out["reached"] = True
+                if not task.status.get("session"):
+                    task.set_status(session=raw["sessionID"])
             row = normalize(raw, n)
             if row is None:
                 continue
@@ -2750,29 +2781,133 @@ def agent_wrote(task: store.Task) -> list[str]:
 def hand_wrote(task: store.Task) -> list[str]:
     """The ignored files written by hand in the worktree while no runner ran (gitops.hand_written):
     Claude's after a takeover or in a review fix, which the agent's events never show (#1179,
-    2026-11-24). Kept in status `hand_wrote` by each runner that starts, and since the agent last
-    stopped (`hands_off_at`)."""
+    2026-11-24), less what a build or test command of Claude's wrote (_claude_built), plus what
+    Claude's edit tools wrote there (the mod's rows, CLAUDE_CALLS, #1211). Kept in status
+    `hand_wrote` by each runner that starts, and since the agent last stopped (`hands_off_at`)."""
     return _by_hand(task)[0]
 
 
 def hand_left(task: store.Task) -> list[str]:
     """The rest of the ignored files changed while no runner ran, outside a cache, that
-    hand_written took for a build's or a test run's: the commit leaves them out, said (#1179's
-    review, 2026-11-24). Kept in status `hand_left` as `hand_wrote` is; only those still there."""
+    hand_written took for a build's or a test run's, or a build or test command of Claude's
+    wrote (_claude_built, #1211): the commit leaves them out, said (#1179's review, 2026-11-24).
+    Kept in status `hand_left` as `hand_wrote` is; only those still there."""
     return [p for p in _by_hand(task)[1] if os.path.isfile(os.path.join(task.worktree, p))]
 
 
 def _by_hand(task: store.Task) -> tuple[list[str], list[str]]:
     wrote, left = set(task.status.get("hand_wrote") or []), set(task.status.get("hand_left") or [])
     ran = task.status.get("ran_wrote") or []
+    calls = claude_calls(task)
+    edited = _claude_edited(task, calls)
     if since := task.status.get("hands_off_at"):
         rest: list[str] = []
-        wrote |= set(gitops.hand_written(task.worktree, since, rest, ran))
-        left |= set(rest)
+        kept = gitops.hand_written(task.worktree, since, rest, ran)
+        built = _claude_built(task, calls, since, kept, edited)
+        wrote |= (set(kept) - built) | set(gitops.ignored_files(task.worktree, edited))
+        left |= set(rest) | built
     # one kept before a run wrote there is the run's too: Claude's first rerun of a test the
-    # runner hadn't run yet stayed in hand_wrote, refusing every accept after (#1211)
-    moved = {p for p in wrote if gitops.under(p, ran)}
+    # runner hadn't run yet stayed in hand_wrote, refusing every accept after (#1211); never
+    # one Claude's own edit tools wrote
+    moved = {p for p in wrote if gitops.under(p, ran) and p not in edited}
     return sorted(wrote - moved), sorted((left | moved) - (wrote - moved))
+
+
+# rules/<task>/claude-calls/<id>.json: the mod's row of each of Claude's own tool calls in the
+# task's worktree (a Bash command that names the task's directory or runs in it, an edit tool's
+# file there), {tool, at, end (epoch seconds), command and cwd, or path} (#1211)
+CLAUDE_CALLS = "claude-calls"
+CLAUDE_EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
+# A file's times may be whole seconds (HFS+, a FAT or 9p mount): what a call wrote can read up to
+# that much before the call began
+CALL_SLACK = 2.0
+CALL_NAMES = 5000  # words of a Claude command read for names: a heredoc of a module is thousands
+
+
+def claude_calls(task: store.Task) -> list[dict]:
+    """The mod's rows of Claude's own tool calls in the worktree (CLAUDE_CALLS); [] without the
+    mod, or before it kept them."""
+    d = context.rules_dir(task) / CLAUDE_CALLS
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        r = store.read_json(d / n) if n.endswith(".json") else None
+        if isinstance(r, dict) and all(isinstance(r.get(k), (int, float)) for k in ("at", "end")):
+            out.append(r)
+    return out
+
+
+def _claude_edited(task: store.Task, calls: list[dict]) -> set[str]:
+    """The worktree's files Claude's edit tools wrote (CLAUDE_CALLS' rows), relative to it: by
+    hand, whatever else changed there."""
+    root = os.path.realpath(task.worktree)
+    out = set()
+    for r in calls:
+        if r.get("tool") in CLAUDE_EDIT_TOOLS and isinstance(p := r.get("path"), str) and p:
+            full = os.path.realpath(os.path.join(str(r.get("cwd") or root), p))
+            if full.startswith(root + os.sep):
+                out.add(os.path.relpath(full, root))
+    return out
+
+
+def _expanded(command: str) -> str:
+    """A Claude command with `~`, $HOME and $WB_HOME spelled out, so that `cd ~/.local/state/…
+    /worktree && cat > lib/a.py` names lib/a.py, not `*/lib/a.py` alone."""
+    end = r"(?=/|$|[\s'\";&|)])"
+    command = re.sub(r"\$(?:\{WB_HOME\}|WB_HOME)" + end, lambda _: str(store.home()), command)
+    command = re.sub(r"\$(?:\{HOME\}|HOME)" + end, lambda _: os.path.expanduser("~"), command)
+    return re.sub(r"(?<![^\s'\"=:;&|(])~" + end, lambda _: os.path.expanduser("~"), command)
+
+
+def _claude_built(task: store.Task, calls: list[dict], since: float, kept: list[str],
+                  edited: set[str]) -> set[str]:
+    """Of hand_written's ``kept``, the files a Bash command of Claude's wrote as a build or a
+    test run does: changed while one ran (its `at` to `end`), named by none of Claude's commands
+    since ``since`` (the file, or its name in a directory the same command names: _rows_name's
+    test, as `cat > lib/a.py <<EOF` or `cp a.py lib/` name it), its ignored directories named by
+    none of the commands that ran then (`cp -r drafts/* lib/`), and not written with Claude's
+    edit tools. `mvn test`, tsc or `jest --coverage` that Claude ran beside a --test of another
+    command wrote reports, dist/*.d.ts and coverage/ that wb accept and wb next refused as files
+    written by hand (#1211, 2026-11-24). A file changed while no command of Claude's ran stays
+    Claude's: without the mod nothing is told apart, and dropping a hand-written file loses work
+    while a false refusal costs a look."""
+    shells = [r for r in calls if r.get("tool") == "Bash" and isinstance(r.get("command"), str)
+              and r["end"] >= since - CALL_SLACK]
+    if not shells or not kept:
+        return set()
+    rows = []
+    roots = tuple(dict.fromkeys(str(x).rstrip("/") + "/" for x in (task.worktree, os.path.realpath(task.worktree))))
+    for r in shells:
+        names = shell_names(_expanded(r["command"]), CALL_NAMES)
+        # an absolute word through a link to the worktree, as its real path
+        names = [os.path.realpath(w) if w.startswith("/") and not (w + "/").startswith(roots) else w
+                 for w in names]
+        cwd = r.get("cwd") if isinstance(r.get("cwd"), str) and r["cwd"].startswith("/") else ""
+        if not cwd:  # run where no row says: a relative word, by that path in any directory
+            names = [w if w.startswith(("/", ANYWHERE)) else ANYWHERE + w for w in names]
+        rows.append({"names": names, "workdir": cwd})
+    named, words = _rows_name(rows, task.worktree), _row_words(rows, task.worktree)
+    dirs = gitops.ignored_dirs(task.worktree)
+    out = set()
+    for p in kept:
+        if p in edited or named(p):
+            continue
+        try:
+            st = os.lstat(os.path.join(task.worktree, p))
+        except OSError:
+            continue
+        t = max(st.st_mtime, st.st_ctime)
+        ran = [w for r, w in zip(shells, words)
+               if r["at"] - CALL_SLACK <= t <= r["end"] + gitops.CLOCK_SLACK]
+        parts = p.split("/")[:-1]
+        ups = [d for i in range(1, len(parts) + 1) if gitops.under(d := "/".join(parts[:i]), dirs)]
+        if ran and not any(d in paths or any(d == a or d.endswith("/" + a) for a in anywhere)
+                           for paths, _, anywhere in ran for d in ups):
+            out.add(p)
+    return out
 
 
 def _ran_wrote(task: store.Task, since: float) -> None:
@@ -2855,6 +2990,20 @@ def _shell_named(task: store.Task):
 
 def _rows_name(rows: list[dict], worktree: Path, subdir: str = ""):
     """_shell_named's test, on its rows: which worktree-relative paths they name."""
+    named_rows = _row_words(rows, worktree, subdir)
+
+    def named(p: str) -> bool:
+        p = os.path.normpath(p)
+        where, name = os.path.split(p)
+        return any(p in paths or (name in names and (where or ".") in paths)
+                   or any(p == a or p.endswith("/" + a) for a in anywhere)
+                   for paths, names, anywhere in named_rows)
+    return named
+
+
+def _row_words(rows: list[dict], worktree: Path, subdir: str = "") -> list[tuple[set, set, set]]:
+    """Each row's (worktree-relative paths its words name, its words' last parts, its `*/<word>`
+    words' paths, events.ANYWHERE), in the rows' order: _rows_name's, and _claude_built's."""
     roots = list(dict.fromkeys(str(r) for r in (worktree, os.path.realpath(worktree))))
     base = os.path.normpath(subdir or ".")
 
@@ -2869,7 +3018,7 @@ def _rows_name(rows: list[dict], worktree: Path, subdir: str = ""):
         rel = os.path.normpath(os.path.join(base, w))
         return None if rel == ".." or rel.startswith("../") else rel
 
-    named_rows: list[tuple[set[str], set[str]]] = []
+    named_rows: list[tuple[set, set, set]] = []
     for r in rows:
         names = r.get("names")
         if not isinstance(names, list):
@@ -2880,14 +3029,7 @@ def _rows_name(rows: list[dict], worktree: Path, subdir: str = ""):
         words = [w for w in words if not w.startswith(ANYWHERE)]
         paths = {p for p in (inside(w, wd) for w in words) if p}
         named_rows.append((paths, {w.rstrip("/").rsplit("/", 1)[-1] for w in words}, anywhere))
-
-    def named(p: str) -> bool:
-        p = os.path.normpath(p)
-        where, name = os.path.split(p)
-        return any(p in paths or (name in names and (where or ".") in paths)
-                   or any(p == a or p.endswith("/" + a) for a in anywhere)
-                   for paths, names, anywhere in named_rows)
-    return named
+    return named_rows
 
 
 def _by_shell(task: store.Task) -> tuple[list[str], list[str]]:
@@ -3235,6 +3377,19 @@ NO_MODULE = re.compile(r"(?P<py>\S*python[\w.]*): (No module named (?P<m>[\w.]+)
 TOOL_DIRS = (".venv/bin", "venv/bin", "node_modules/.bin", "vendor/bin")
 # bash's and zsh's line for a path that isn't there (dash's and ksh's is NOT_FOUND's)
 NO_SUCH = re.compile(r"no such file or directory: (?P<z>.+)$|(?P<n>[^:]+): No such file or directory$")
+# A task runner's own lines after its recipe's output: GNU make's `make: *** [Makefile:2: test]
+# Error 127` (it exits 2), a sub-make's `Leaving directory`, -k's `Target … not remade`, and
+# just's `error: Recipe `test` failed on line 2 with exit code 127`. Read as the last line, they
+# hid the shell's not-found line under `make test`, and round 1 and both auto-fix rounds ran on
+# correct code, each told the bug was the change's, where `npm test` checked in (#1229, bar
+# round 4, 2026-11-24). `make` or `just` is the recipe's exit, the first one up a sub-make's,
+# not its parent's Error 2.
+RUNNER_TAIL = re.compile(r"g?make(?:\[\d+\])?: (?:\*\*\* .*?(?: Error (?P<make>\d+))?|Leaving directory .*"
+                         r"|Target .* not remade because of errors\.)"
+                         r"|error: Recipe `[^`]*` failed (?:on line \d+ )?with exit code (?P<just>\d+)")
+# make's own line for a recipe it runs without a shell (no shell syntax in it) that execvp can't
+# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229)
+MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
 # wb's words for a tool not checked out (missing_command), the same in every shell, and its path
 NOT_CHECKED_OUT = re.compile(r"(?P<p>[^:]+): not in the worktree \(")
 # What gives the agent's environment that command, for the check-in and the skipped auto-fix
@@ -3253,13 +3408,20 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     (#1206); or Python's no-module line for `-m` at exit 1 (#1181). A tool the
     agent's environment lacks (one outside the agent's PATH, which python_env and agent_path
     trim), which no edit in a round can give it; else None. A module of ``task``'s own code
-    (own_module) is none: the step may make it."""
-    if not r or r.get("exit") not in (1, 127):
+    (own_module) is none: the step may make it. Under a task runner (`make test`, RUNNER_TAIL),
+    the recipe's exit and the line before the runner's own (#1229)."""
+    if not r:
         return None
-    last = (r.get("tail") or "").strip().splitlines()[-1:]
-    line = last[0].strip() if last else ""
-    if r["exit"] == 127:
-        name = missing_name(line)
+    code, lines, inner = r.get("exit"), (r.get("tail") or "").strip().splitlines(), None
+    while isinstance(code, int) and code and lines and (m := RUNNER_TAIL.fullmatch(lines[-1].strip())):
+        inner = m["make"] or m["just"] or inner
+        lines.pop()
+    code = int(inner) if inner else code
+    if code not in (1, 127):
+        return None
+    line = lines[-1].strip() if lines else ""
+    if code == 127:
+        name = missing_name(line) or ((m := MAKE_EXEC.fullmatch(line)) and m["n"].strip())
         if name and "/" not in name:
             return f"{name}: command not found"
         # a path: a script the step may make, but not a tool an install puts there (#1206)
@@ -3267,7 +3429,7 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
         if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
             return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
         return None
-    if r["exit"] == 1 and (m := NO_MODULE.fullmatch(line)):
+    if code == 1 and (m := NO_MODULE.fullmatch(line)):
         return None if task and own_module(task, m["m"] or m["d"], m["py"]) else line
     return None
 
@@ -4584,6 +4746,26 @@ def _provider_revive(task: store.Task, n: int, rnd: dict, lease) -> bool:
     return not pending_steer(task)
 
 
+def _run_again(task: store.Task, n: int, rnd: dict) -> None:
+    """Before round n runs again in drive because its provider or server stopped it (#1020's
+    revive, a server's, a 402 recheck's, #1216): never its prompt.md into a session that holds it
+    already (#1235). A session this run began that nothing answered holds that message alone: it
+    is dropped, and the round begins anew. One that holds more (earlier rounds, work done) is
+    sent RERUN instead (status `unanswered`, for run_round), and after it what prompt.md gained
+    since (a note _early_notes folded in). A run that printed no event (none shows OpenCode had
+    the session) sends prompt.md again, as before."""
+    sid = task.status.get("session")
+    if not sid or not rnd.get("reached"):
+        return
+    if rnd.get("new_session") and not rnd.get("answered"):
+        # a new session hears the skills again, as _start_fresh's: skills_told kept from the
+        # dropped one left the next session without them (the review of #1235, 2026-11-24)
+        task.set_status(session=None, skills_told=None)
+    else:  # `at`: prompt.md as sent (add_to_round strips it before appending), for what follows
+        sent = task.round_dir(n).joinpath("prompt.md").read_text().rstrip()
+        task.set_status(unanswered={"round": n, "session": sid, "at": len(sent)})
+
+
 def _rejoin(task: store.Task, lease) -> None:
     """Back on the GPU before a round, after the tests or a server's wait let it go (#257):
     queued, in its first-come place, when the GPU is someone else's meanwhile."""
@@ -4940,6 +5122,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 revived = n
                 if not _provider_revive(task, n, rnd, lease):
                     _steer_round(task, n, False)
+                else:
+                    _run_again(task, n, rnd)
                 if not _go_on(task, n, "the round again"):  # the day cap holds here too (#1019)
                     return
                 continue
@@ -4951,6 +5135,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 task.event({"ts": store.now(), "round": n, "kind": "load",
                             "text": f"{provider_of(task)} is still out of credit: the task waits "
                                     "as queued again"})
+                _run_again(task, n, rnd)
                 if not _go_on(task, n, "the round again"):
                     return
                 continue
@@ -4975,6 +5160,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                         _wait_up(task, m)
                     except RuntimeError as e:
                         return _load_failed(task, e)
+                _run_again(task, n, rnd)
                 if not _go_on(task, n, "the round again"):
                     return
                 continue

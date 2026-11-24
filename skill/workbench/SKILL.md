@@ -46,7 +46,7 @@ it works, explain the why in feedback.
 
 **Commits are the user's.** Delegated work is committed under the user's own git identity with
 no `Co-Authored-By` or other AI credit line; `wb accept` writes only the task's provenance
-trailers. Don't add one yourself. When `wb start` or `wb accept` says the signing key needs
+trailers. Don't add one yourself. When `wb start`, `wb accept` or `wb init` says the signing key needs
 unlocking, ask the user to unlock it (`ssh-add`, or one GPG signature in their terminal); when
 it says the signer asks for a touch or an approval, tell the user before `wb accept`, which waits
 for it; use `--no-sign` only when they say unsigned is fine.
@@ -560,8 +560,9 @@ generated files. When the bulk additions or large binaries belong in the commit,
 `--include` to `wb next` or `wb accept` after reviewing them. `NOTE: git ignores files the agent
 wrote` (with its edit tools, or a shell command that names them) names files no diff shows and no commit takes: read them, then `--include` lands them. A
 file you write under an ignored path (a takeover, a fix) is refused the same way: `--include`;
-not what your rerun of the task's `--test` or setup writes where its own run wrote. Another
-build you run there (`tsc` when the test is jest's) is: delete its output before `wb next`/`accept`.
+not what your rerun of the task's `--test` or setup writes, nor another build you run there
+(`tsc` when the test is jest's): that is left out as below. So write your own files there with
+your edit tools or a command that names them, not with a script that doesn't.
 `note: git ignores N more files … leaves out as build or test output` names the rest you or the
 agent changed there: `wb next`'s stay in the worktree (`git -C <worktree> add -f <file>` keeps one), `wb
 accept`'s are copied to the task's `left-out/` before the worktree goes.

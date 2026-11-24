@@ -16,6 +16,7 @@
   let viewing = null, sweeping = false  // the photo the viewer shows; a sweep of object URLs queued (#746)
   let nearView = null  // loads the thread's thumbnails as they near the view (#754)
   const nearLater = new Set()  // thumbnails seen near the view before the server's thread was in
+  let drawnAt = 0  // when render() last drew the thread (performance.now()): an older nearness is stale
   const DEAD_MS = 40000          // the server pings every 15 s: this long silent means the line is dead
   const CONNECT_MS = 12000       // a connection that never answers: dial again
   const HIDDEN_GRACE_MS = 60000  // a hidden page keeps its stream this long, then lets go
@@ -91,14 +92,19 @@
   const reduced = matchMedia('(prefers-reduced-motion: reduce)')
 
   // ---- sticky follow (stays at the newest line unless the reader scrolls up) ----
-  let follow = true, lastTop = 0, touchY = 0
+  let follow = true, lastTop = 0, lastHeight = 0, touchY = 0
   const nearEnd = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60
   const release = () => { follow = false; jump.hidden = nearEnd() }
   scroller.addEventListener('scroll', () => {
-    const top = scroller.scrollTop
+    const top = scroller.scrollTop, height = scroller.scrollHeight
+    // A scroll that came with the thread's height changing is the layout's, not the reader's:
+    // the saved thread's images loading after a reload grew it and moved scrollTop up 24 px, that
+    // read as the reader going up, and the server's thread was then drawn with the view left mid-
+    // thread, far from the newest line (#1223, under load; CI saw its photo fetched). A wheel or a
+    // finger still releases at once
     if (top > lastTop + 2 && nearEnd()) follow = true       // the reader came back down
-    else if (top < lastTop - 2 && !nearEnd()) follow = false // the reader went up
-    lastTop = top
+    else if (top < lastTop - 2 && !nearEnd() && height === lastHeight) follow = false // the reader went up
+    lastTop = top; lastHeight = height
     jump.hidden = follow || nearEnd()
   }, { passive: true })
   scroller.addEventListener('wheel', e => { if (e.deltaY < 0) release() }, { passive: true })
@@ -109,7 +115,7 @@
     touchY = y
   }, { passive: true })
   const toEnd = force => {
-    if (force || follow) { scroller.scrollTop = scroller.scrollHeight; lastTop = scroller.scrollTop; follow = true; jump.hidden = true }
+    if (force || follow) { scroller.scrollTop = scroller.scrollHeight; lastTop = scroller.scrollTop; lastHeight = scroller.scrollHeight; follow = true; jump.hidden = true }
   }
   jump.addEventListener('click', () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' }))
 
@@ -359,6 +365,7 @@
     sweepSoon()
     toEnd()
     if (list.length) firstVisit = false
+    drawnAt = performance.now()
   }
 
   // An ask: a permission (Allow, Deny), a finished plan (Approve, Keep planning with a note) or
@@ -1079,10 +1086,19 @@
   // fetched whole, though the newer messages then put it far above the view (CI, 2026-11-24). One
   // left for later is looked at again once the server's thread is drawn (`nearAgain`), or at once
   // when that thread came while this browser's own store was still being asked.
+  // An entry is measured at a frame and delivered as a later task, so a render can come between:
+  // the saved thread's photo, measured near its end, was delivered after the server's thread had
+  // put it far above and fetched whole (CI, 2026-11-24, #1223). One measured before the last
+  // render is observed afresh, to be judged where that render put it.
   function whenNear(el, load) {
     if (!('IntersectionObserver' in window)) return load()
     nearView = nearView || new IntersectionObserver(es => {
-      for (const e of es) if (e.isIntersecting) { nearView.unobserve(e.target); e.target.wbLoad() }
+      for (const e of es) {
+        if (!e.isIntersecting) continue
+        nearView.unobserve(e.target)
+        if (e.time < drawnAt) nearView.observe(e.target)
+        else e.target.wbLoad()
+      }
     }, { root: document.querySelector('main'), rootMargin: '600px 0px' })
     el.wbLoad = load; nearView.observe(el)
   }

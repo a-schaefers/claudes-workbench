@@ -619,6 +619,56 @@ class Lifecycle(Base):
                 self.assertGreater(sent.index("carry on"), sent.index(want))
                 self.assertEqual(task.status["round"], 2)
 
+    def test_feedback_on_a_fresh_round_never_sent_still_starts_it_in_a_fresh_session(self):
+        # #1230 (the 2.0 bar loop, round 4, 2026-11-24): wb resume or wb next --fresh, then the
+        # model server down before the round began, then the notice's "carry on": wb feedback
+        # cleared the round's `context`, and the resume ran in the old stuck session, its prompt
+        # saying it was a fresh one
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Step two: write 43 to second.txt.\n")
+        for name, then in (("t-ffresume", ("resume",)),
+                           ("t-ffnext", ("next", "--spec", str(step2), "-m", "feat: step one", "--fresh"))):
+            with self.subTest(name=name):
+                self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+                wait_phase(name, {"review"})
+                task = store.Task(name)
+                if then[0] == "resume":
+                    task.set_status(phase="stuck", last="stopped by the reviewer")  # as wb stop leaves it
+                old = task.status["session"]
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb(*then[:1], name, *then[1:])
+                self.assertEqual(task.status["context"], "fresh")
+                with mock.patch.object(runner, "_down", return_value=True), \
+                        mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+                    runner.drive(task)
+                self.assertEqual((task.status["phase"], task.status["round"]), ("failed", 2))
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb("feedback", name, "--text", "carry on")
+                self.assertEqual(task.status["context"], "fresh")
+                runner.drive(task)
+                st = task.status
+                self.assertEqual((st["phase"], st["round"]), ("review", 2), st.get("last"))
+                self.assertNotEqual(st["session"], old)
+                fresh = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0]
+                         if e.get("kind") == "fresh" and e.get("round") == 2]
+                self.assertEqual([e["text"] for e in fresh], [runner.FRESH_SAID + runner.ASKED_FRESH])
+
+    def test_feedback_with_keep_context_on_a_fresh_round_never_sent_keeps_the_session(self):
+        # #1230: the flag still says what the round does; only its absence leaves `context` alone
+        name = "t-ffkeep"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        task.set_status(phase="stuck", last="stopped by the reviewer")
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("resume", name)
+        with mock.patch.object(runner, "_down", return_value=True), \
+                mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+            runner.drive(task)
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", name, "--text", "carry on", "--keep-context")
+        self.assertEqual(task.status["context"], "keep")
+
     def test_feedback_added_to_a_round_never_sent_is_gathered_as_lessons_apart_from_the_rounds_own(self):
         # #1180 (its review, 2026-11-24): wb feedback's text after an unsent feedback round's own
         # prompt was read as part of its body, and "Also write 7 to extra.txt Review feedback from
@@ -897,6 +947,57 @@ class Lifecycle(Base):
         st = wait_phase("t-nf2", {"review"})
         self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 2))
         self.assertFalse([r for r in store.notices() if r["task"] == "t-nf2" and r["kind"] == "checkin"])
+
+    @unittest.skipUnless(shutil.which("make"), "no make")
+    def test_a_command_not_found_behind_make_test_checks_in_at_once_and_skips_auto_fix(self):
+        # #1229 (bar round 4 of 2.0): make ends with its own `make: *** [Makefile:2: test] Error
+        # 127` and exits 2, so #1152's check never saw the not-found line: no check-in, and round 1
+        # and both auto-fix rounds ran on correct code, each told the bug was in the change
+        (self.repo / "Makefile").write_text("test:\n\tnosuch-tool-1229 --check answer.txt\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "Makefile"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "make"], check=True)
+        self.start("t-mk", "ok", "--test", "make test", "--auto-fix", "2", "--no-self-review")
+        st = wait_phase("t-mk", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (2, 1))
+        task = store.Task("t-mk")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-mk" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertIn("can't run in the agent's environment: nosuch-tool-1229: command not found "
+                      "(exit 2 on the base)", checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: nosuch-tool-1229: "), summary)
+
+    def test_a_task_runners_own_last_lines_are_read_past_to_the_recipes(self):
+        # #1229: make's and just's lines after the recipe's, at the recipe's exit code (a
+        # sub-make's, not its parent's Error 2); make's own line for a recipe it runs without a
+        # shell; a script the step makes, or a failure that isn't a missing tool, still goes back
+        said = lambda tail, code=2: runner.missing_command({"exit": code, "tail": tail})  # noqa: E731
+        err = "make: *** [Makefile:2: test] Error {}"
+        for last in ("make: nosuch-tool-1229: No such file or directory",
+                     "/bin/sh: line 1: nosuch-tool-1229: command not found",
+                     "/bin/sh: 1: nosuch-tool-1229: not found"):
+            self.assertEqual(said(f"x\n{last}\n{err.format(127)}\n"), "nosuch-tool-1229: command not found", last)
+        self.assertEqual(said("make -C sub test\nmake[1]: Entering directory '/r/sub'\n"
+                              "make[1]: nosuch-tool-1229: No such file or directory\n"
+                              "make[1]: *** [Makefile:2: test] Error 127\nmake[1]: Leaving directory "
+                              "'/r/sub'\nmake: *** [Makefile:5: all] Error 2\n"), "nosuch-tool-1229: command not found")
+        self.assertEqual(said(f"make: nosuch-tool-1229: No such file or directory\n{err.format(127)}\n"
+                              "make: Target 'test' not remade because of errors.\n"), "nosuch-tool-1229: command not found")
+        self.assertEqual(said(f"make: .venv/bin/pytest: No such file or directory\n{err.format(127)}"),
+                         ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+        self.assertEqual(said(f"/usr/bin/python3: No module named nosuch_mod\n{err.format(1)}"),
+                         "/usr/bin/python3: No module named nosuch_mod")
+        self.assertEqual(said("sh: 1: nosuch-tool-1229: not found\nerror: Recipe `test` failed on line 2 "
+                              "with exit code 127", code=127), "nosuch-tool-1229: command not found")
+        for tail in (f"make: ./made-by-the-step.sh: No such file or directory\n{err.format(127)}",
+                     f"cat: answer.txt: No such file or directory\n{err.format(1)}",
+                     f"make: nosuch-tool-1229: No such file or directory\n{err.format(1)}",
+                     "make: *** No rule to make target 'test'.  Stop.",
+                     "python3: No module named x"):
+            self.assertIsNone(said(tail), tail)
+        self.assertIsNone(said(f"/bin/sh: 1: x: not found\n{err.format(127)}", code=0))  # a passing run
 
     def test_a_tool_in_the_checkouts_ignored_venv_checks_in_at_once_and_skips_auto_fix(self):
         # #1206 (bar round 3 of 2.0): `--test .venv/bin/python …`, as Claude runs it in the user's
@@ -3370,6 +3471,96 @@ class Lifecycle(Base):
         self.assertIn("answer.txt", tree)
         self.assertFalse([p for p in tree if p.startswith("target/")], tree)
 
+    def claude_ran(self, t, typed, write=None, cwd=None, edits=()):
+        """Claude's Bash call as the mod keeps it (runner.CLAUDE_CALLS): ``typed`` is what Claude
+        typed, ``write(worktree)`` what it did; ``edits``, files its edit tools wrote meanwhile."""
+        at = time.time()
+        if write:
+            write(t.worktree)
+        end = time.time()
+        d = context.rules_dir(t) / runner.CLAUDE_CALLS
+        d.mkdir(parents=True, exist_ok=True)
+        n = len(list(d.iterdir()))
+        (d / f"{int(at * 1000)}-b{n}.json").write_text(json.dumps(
+            {"tool": "Bash", "command": typed, "cwd": str(cwd or t.worktree), "at": at, "end": end}))
+        for i, p in enumerate(edits):
+            (d / f"{int(at * 1000)}-e{n}{i}.json").write_text(json.dumps(
+                {"tool": "Write", "path": str(t.worktree / p), "at": at, "end": end}))
+
+    def test_a_build_claude_runs_that_isnt_the_tasks_is_left_out_once_the_mod_kept_its_call(self):
+        # #1211 (bar round 3 of 2.0, 2026-11-24): `mvn test` that Claude ran beside a --test of
+        # grep wrote reports that wb accept and wb next refused as files written by hand, the
+        # runner's own runs never writing there. The mod keeps Claude's calls in the worktree:
+        # what changed while `mvn test` ran, named by none of Claude's commands, is its output
+        self.maven_repo()
+        self.start("t-other", "ok", "--test", TEST_CMD)
+        wait_phase("t-other", {"review"})
+        t = store.Task("t-other")
+        self.assertFalse(t.status.get("ran_wrote"))
+        subprocess.run(["sh", "-c", self.MVN_TEST], cwd=t.worktree, check=True)  # no row: no mod
+        reports = ["target/classes/application.properties",
+                   "target/surefire-reports/TEST-app.AppTest.xml",
+                   "target/surefire-reports/app.AppTest.txt"]
+        self.assertEqual(runner.hand_wrote(t), reports)        # refused, as before: nothing tells
+        shutil.rmtree(t.worktree / "target")
+        self.claude_ran(t, f"cd {t.worktree} && mvn -q test",
+                        lambda wt: subprocess.run(["sh", "-c", self.MVN_TEST], cwd=wt, check=True))
+        self.assertEqual(runner.hand_wrote(t), [])
+        self.assertEqual(runner.hand_left(t), reports)
+        out = run_wb("accept", "t-other", "-m", "feat: one", "--merge")
+        self.assertIn("accepted t-other", out)
+        self.assertIn(f"which the commit leaves out as build or test output ({', '.join(reports)}): "
+                      "a copy is in ", out)
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("answer.txt", tree)
+        self.assertFalse([p for p in tree if p.startswith("target/")], tree)
+
+    def test_a_file_claude_writes_by_hand_beside_a_build_it_runs_is_still_refused(self):
+        # #1211 (2026-11-24): telling a build's output from Claude's own files must never drop a
+        # module Claude wrote (#1179): one its edit tools wrote while the build ran, one a command
+        # of its names (a heredoc, $WB_HOME spelled), one in an ignored folder a command names (a
+        # cp into vendor/), and one written while no call of its ran. The cp names vendor/, never
+        # lib/: every row is within CALL_SLACK of the others, so a cp into lib/ kept the heredoc's
+        # files by itself and a break of the name check passed (#1211's review, 2026-11-24)
+        (self.repo / ".gitignore").write_text("lib/\ntarget/\nvendor/\n")
+        (self.repo / "pom.xml").write_text("<project/>\n")
+        (self.repo / "main.py").write_text("from lib import helper\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "lib"], check=True)
+        self.start("t-hand", "ok", "--test", TEST_CMD)
+        wait_phase("t-hand", {"review"})
+        t = store.Task("t-hand")
+        drafts = Path(self.tmp.name) / "drafts"
+        drafts.mkdir()
+        (drafts / "copied.py").write_text("y = 2\n")
+
+        def mvn_and_write(wt):
+            subprocess.run(["sh", "-c", self.MVN_TEST], cwd=wt, check=True)
+            (wt / "lib").mkdir(exist_ok=True)
+            (wt / "lib" / "helper.py").write_text("x = 1\n")             # its Write tool, meanwhile
+        self.claude_ran(t, "mvn -q test", mvn_and_write, edits=["lib/helper.py"])
+        self.claude_ran(t, f"cd {t.worktree} && cat > lib/util.py <<'X'\nz = 3\nX",
+                        lambda wt: (wt / "lib" / "util.py").write_text("z = 3\n"))
+        self.claude_ran(t, f"mkdir -p vendor && cp -r {drafts}/* vendor/",
+                        lambda wt: ((wt / "vendor").mkdir(),
+                                    shutil.copy(drafts / "copied.py", wt / "vendor" / "copied.py")))
+        self.claude_ran(t, 'cd "$WB_HOME/tasks/t-hand/worktree" && cat > lib/spelled.py',
+                        lambda wt: (wt / "lib" / "spelled.py").write_text("t = 4\n"), cwd="/")
+        time.sleep(0.1)
+        (t.worktree / "lib" / "later.py").write_text("w = 5\n")         # while no call of Claude's ran
+        mine = ["lib/helper.py", "lib/later.py", "lib/spelled.py", "lib/util.py", "vendor/copied.py"]
+        self.assertEqual(runner.hand_wrote(t), mine)
+        self.assertIn("target/surefire-reports/TEST-app.AppTest.xml", runner.hand_left(t))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-hand", "-m", "feat: one")
+        self.assertIn(f"not committed: git ignores files written in the worktree ({', '.join(mine)})",
+                      err.getvalue())
+        # an edit tool's file is Claude's even where the runner's own run wrote (ran_wrote)
+        t.set_status(ran_wrote=["lib", "target", "vendor"])
+        self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
+
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
         # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,
         # and git said "unknown revision"
@@ -4321,6 +4512,92 @@ class Lifecycle(Base):
                                                  "--merge", "--no-sign"))  # the retry lands it
         self.assertNotIn("gpgsig", g("cat-file", "commit", "main"))
         self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
+
+    def _killed_accept(self, name: str, how: str, wait: int) -> tuple[subprocess.Popen, int, int]:
+        """wb accept --merge in the background, its signer in the main checkout (the merge's or
+        the squash's commit, not the task's) waiting ``wait`` s: (wb, its git, the signer), once
+        the signer is running."""
+        pidfile = Path(self.tmp.name) / f"{name}.signer"
+        prog = Path(self.tmp.name) / f"{name}-gpg"
+        here = shlex.quote(os.path.realpath(self.repo))  # not wb start's dry run there
+        prog.write_text(f"#!/bin/sh\npayload=$(cat)\nif [ \"$(pwd -P)\" = {here} ] && ! printf '%s' "
+                        f"\"$payload\" | grep -q 'can it sign'; then echo $$ > {shlex.quote(str(pidfile))}; "
+                        f"sleep {wait}; fi\n"
+                        "printf '\\n[GNUPG:] SIG_CREATED D 22 8 00 0 FAKE\\n' >&2\n"
+                        "printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nmade up\\n-----END PGP SIGNATURE-----\\n'\n")
+        prog.chmod(0o755)
+        subprocess.run(["git", "-C", str(self.repo), "config", "commit.gpgsign", "true"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "gpg.program", str(prog)], check=True)
+        self.start(name, "ok")
+        wait_phase(name, {"review"})
+        wb = subprocess.Popen([sys.executable, str(ROOT / "bin" / "wb"), "accept", name, "-m",
+                               "feat: answer", "--merge", "--merge-as", how],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: wb.poll() is None and wb.kill())
+        deadline = time.monotonic() + 30
+        while not (pidfile.exists() and pidfile.read_text().strip()):
+            self.assertLess(time.monotonic(), deadline, "the signer never ran")
+            time.sleep(0.05)
+        signer = int(pidfile.read_text())
+        git = int(Path(f"/proc/{signer}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        return wb, git, signer
+
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "reads parents from /proc")
+    def test_an_accept_merge_sigkilled_with_its_git_while_signing_is_merged_by_the_retry(self):
+        # #1231 (bar round 4): kill -9 of wb and its git while the signer waited left MERGE_HEAD
+        # and the staged merge (a squash: the staged squash); the retry called them uncommitted
+        # changes, printed a hand-merge line git refused, and closed the task unmerged (exit 5)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout
+        for how in ("merge", "squash"):
+            name = f"t-k{how[0]}"
+            wb, git, signer = self._killed_accept(name, how, 30)
+            for pid in (wb.pid, git, signer):
+                os.kill(pid, signal.SIGKILL)
+            wb.wait(timeout=5)
+            deadline = time.monotonic() + 10
+            while Path(f"/proc/{git}").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)  # reaped by init, not by us
+            staged = g("status", "--porcelain", "--untracked-files=no")
+            self.assertIn("answer.txt", staged, how)          # the half-made merge is there
+            out = run_wb("accept", name, "-m", "feat: answer", "--merge", "--no-sign")
+            self.assertIn("merged into main", out, how)
+            self.assertNotEqual(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "-q",
+                                                "--verify", "MERGE_HEAD"]).returncode, 0, how)
+            self.assertEqual(g("status", "--porcelain", "--untracked-files=no"), "", how)
+            self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42", how)
+            tip = store.Task(name).status["tip"]
+            if how == "merge":
+                self.assertEqual(g("rev-parse", "HEAD^2").strip(), tip)
+            else:
+                self.assertEqual(g("log", "-1", "--format=%s %P"), f"feat: answer {g('rev-parse', 'HEAD~1').strip()}\n")
+            g("reset", "-q", "--hard", "HEAD~1")  # the next one from the same base
+
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "reads parents from /proc")
+    def test_an_accept_merge_sigkilled_alone_leaves_no_merge_under_way_for_the_retry(self):
+        # #1231: with only wb killed, its signing git (a session of its own) made the merge
+        # commit, then died of SIGPIPE printing it before removing MERGE_HEAD; the retry said
+        # merged with the checkout still mid-merge, and the user's next commit became a merge
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout
+        wb, git, _ = self._killed_accept("t-ka", "merge", 2)
+        wb.kill()
+        wb.wait(timeout=5)
+        deadline = time.monotonic() + 20
+        while Path(f"/proc/{git}").exists():  # git finishes the commit by itself
+            self.assertLess(time.monotonic(), deadline, "git never finished")
+            time.sleep(0.05)
+        merging = lambda: subprocess.run(["git", "-C", str(self.repo), "rev-parse", "-q",  # noqa
+                                          "--verify", "MERGE_HEAD"]).returncode == 0
+        self.assertFalse(merging())
+        tip = store.Task("t-ka").status["tip"]
+        self.assertEqual(g("rev-parse", "main^2").strip(), tip)
+        # as a git that died before removing MERGE_HEAD left it: the retry quits the merge
+        Path(self.repo, g("rev-parse", "--git-path", "MERGE_HEAD").strip()).write_text(tip + "\n")
+        self.assertTrue(merging())
+        self.assertIn("merged into main", run_wb("accept", "t-ka", "-m", "feat: answer", "--merge"))
+        self.assertFalse(merging())
+        self.assertEqual(g("rev-parse", "main^2").strip(), tip)
 
     def test_accept_merge_no_sign_merges_unsigned_when_the_key_cannot_sign(self):
         # #420 (Codex's 20 too): --no-sign let the task's commit through, then the merge signed,
@@ -6096,6 +6373,75 @@ class Context(Base):
         self.assert_the_next_run_is_handed_to_a_fresh_session(dead)
         self.assertIn("question.txt", self.runs()[-1]["prompt"])
 
+    def test_a_round_run_again_after_its_server_died_goes_on_in_its_session_without_its_prompt_again(self):
+        # #1235 (bar loop round 4, 2026-11-24): a round run again after its server went away sent
+        # prompt.md again with --session, and OpenCode keeps a failed run's message: the session
+        # held the round's instructions twice (a 402 recheck's, once per recheck). A session that
+        # holds them, and round 1's work, is told only to carry them out
+        from workbench import transcript
+        self.start("t-1235", "ok", "--test", TEST_CMD, "--no-self-review")
+        wait_phase("t-1235", {"review"})
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", "t-1235", "--message", str(self.feedback))
+        task = store.Task("t-1235")
+        session = task.status["session"]
+        os.environ["FAKE_EXIT"] = "1"                 # killed after the model's first words
+        before = len(self.runs())
+        gone = lambda m: "FAKE_EXIT" in os.environ and len(self.runs()) > before  # noqa: E731
+        try:                                          # its server gone under the round, then back
+            with mock.patch.object(runner, "_down", side_effect=gone), \
+                    mock.patch.object(runner, "_stopped", return_value=False), \
+                    mock.patch.object(runner, "_wait_up",
+                                      side_effect=lambda t, m: (os.environ.pop("FAKE_EXIT"), m)[1]):
+                runner.drive(task)
+        finally:
+            runner._end_agent(task)
+            task.set_status(pid=None)
+            runner.CURRENT.clear()
+        st = task.status
+        self.assertEqual((st["phase"], st["round"], st["session"]), ("review", 2, session), st)
+        self.assertIsNone(st.get("unanswered"))
+        feedback, again = self.runs()[-2:]
+        self.assertEqual((feedback["session"], again["session"]), (True, True))
+        self.assertIn("Add a trailing comment line.", feedback["prompt"])
+        self.assertEqual(again["prompt"], runner.RERUN)
+        self.assertEqual(transcript._user_message(runner.RERUN, False)[0],
+                         "workbench → agent · the round again, after its provider or server stopped it")
+
+    def test_a_note_sent_while_the_server_was_down_reaches_the_round_run_again_after_rerun(self):
+        # the review of #1235 (2026-11-24): a note `wb steer` queued while the round waited to
+        # run again was folded into prompt.md by _early_notes and counted delivered, then RERUN
+        # replaced prompt.md whole: the agent never got it. It goes after RERUN, once
+        self.start("t-n1235", "ok", "--test", TEST_CMD, "--no-self-review")
+        wait_phase("t-n1235", {"review"})
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", "t-n1235", "--message", str(self.feedback))
+        task = store.Task("t-n1235")
+        os.environ["FAKE_EXIT"] = "1"                 # killed after the model's first words
+        before = len(self.runs())
+        gone = lambda m: "FAKE_EXIT" in os.environ and len(self.runs()) > before  # noqa: E731
+
+        def up(t, m):                                 # back, and a note came in meanwhile
+            os.environ.pop("FAKE_EXIT")
+            store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": "NOTE-1235: also say 42."})
+            return m
+        try:
+            with mock.patch.object(runner, "_down", side_effect=gone), \
+                    mock.patch.object(runner, "_stopped", return_value=False), \
+                    mock.patch.object(runner, "_wait_up", side_effect=up):
+                runner.drive(task)
+        finally:
+            runner._end_agent(task)
+            task.set_status(pid=None)
+            runner.CURRENT.clear()
+        feedback, again = self.runs()[-2:]
+        self.assertEqual((feedback["session"], again["session"]), (True, True))
+        self.assertNotIn("NOTE-1235", feedback["prompt"])
+        self.assertTrue(again["prompt"].startswith(runner.RERUN + "\n\n"), again["prompt"])
+        self.assertEqual(again["prompt"].count("NOTE-1235: also say 42."), 1, again["prompt"])
+        self.assertNotIn("Add a trailing comment line.", again["prompt"])   # the round's, not again
+        self.assertEqual(task.status.get("steer_taken"), 1)
+
     def test_a_fresh_round_run_again_after_its_server_died_is_handed_over_once(self):
         # #780 (the second 2026-11-21 audit): a round that began fresh, revived before its first
         # event, ran _start_fresh again: the handoff went over instructions.md and was wrapped in
@@ -6452,6 +6798,58 @@ class Context(Base):
         runner._steer_round(t, 5, True)
         self.assertEqual((t.status["round_for"], t.status["self_review_tree"]), ("steer", None))
         self.assertIsNone(runner.green_tree(t, "began"))
+
+    def test_a_self_review_stopped_mid_check_and_resumed_that_reads_on_its_green_tree_goes_to_review(self):
+        # #1228 (bar loop round 4, 2026-11-24): wb resume started round 3 with round_for `resume`
+        # and no self_review_tree, so the resumed self-review, its check copied back and reading
+        # on, was stopped as stuck on a green change (90 reads: its copy back is a change, so the
+        # guard counts again from it), the step counted against the model
+        os.environ.update(FAKE_SELF_STALL="1", FAKE_READS="90")
+        self.start("t-srr", "selfreads", "--test", TEST_CMD, "--self-review")
+        t = store.Task("t-srr")
+        deadline = time.time() + 30
+        while not (t.status.get("round") == 2 and (t.worktree / "answer.txt").is_file()
+                   and (t.worktree / "answer.txt").read_text() == "41\n"):
+            self.assertLess(time.time(), deadline, "the self-review never began its check")
+            time.sleep(POLL)
+        run_wb("stop", "t-srr")
+        self.assertEqual((t.status["phase"], t.status["round_for"]), ("stuck", "self_review"))
+        os.environ.pop("FAKE_SELF_STALL")  # the resumed session copies the check back and reads on
+        self.assertIn("resumed t-srr in a fresh session (round 3)", run_wb("resume", "t-srr"))
+        st = wait_phase("t-srr", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 3, "resume"), st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertNotIn("no_edit", st.get("guards") or {})
+
+    def test_a_resume_keeps_a_self_reviews_green_tree_and_drops_any_other_rounds(self):
+        # #1228: the update path, a self-review written as round 2 and stopped before it ran, then
+        # wb resume; a resume after a resume; a resume of a feedback round, its key a stale one;
+        # and wb feedback after an infra stop of a self-review, the other round_for `resume`
+        self.start("t-srz", "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+        wait_phase("t-srz", {"review"})
+        t = store.Task("t-srz")
+        t.round_dir(2).mkdir(parents=True, exist_ok=True)
+        t.round_dir(2).joinpath("prompt.md").write_text("Before Claude reviews this, check it.")
+        t.set_status(phase="stuck", last="stopped by the reviewer", round=2, round_for="self_review",
+                     self_review_tree="green")
+
+        def resume():
+            t.set_status(phase="stuck", last="stopped by the reviewer")
+            with mock.patch.object(cli, "spawn_runner"):
+                run_wb("resume", "t-srz")
+            return t.status["round"], t.status["round_for"], runner.green_tree(t, "began")
+
+        self.assertEqual(resume(), (3, "resume", "green"))
+        self.assertEqual(resume(), (4, "resume", "green"))
+        t.set_status(round_for="feedback")  # its self_review_tree still the old "green"
+        self.assertEqual(resume(), (5, "resume", None))
+        self.assertIsNone(t.status["self_review_tree"])
+        t.set_status(phase="stuck", round_for="self_review", self_review_tree="green", infra="provider")
+        t.event({"ts": store.now(), "round": 5, "kind": "round"})  # it reached the agent
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", "t-srz", "--text", "carry on")
+        self.assertEqual((t.status["round"], t.status["round_for"], runner.green_tree(t, "began")),
+                         (6, "resume", "green"))
 
     def test_without_self_review_claude_is_woken_after_the_first_clean_round(self):
         self.start("t-nsr", "ok", "--test", TEST_CMD)
@@ -18375,6 +18773,34 @@ class Try(Base):
             self.assertIn("no user.name/user.email", err.getvalue())
         self.assertEqual(list(cli.try_dir().glob("*")) if cli.try_dir().exists() else [], [])
 
+    def test_wb_try_starts_an_unsigned_sample_whatever_key_the_users_git_signs_with(self):
+        # #1226 (bar loop round 4): wb init's first commit signed as the user's git said, with no
+        # terminal guard or time limit, so a passphrase SSH key failed wb try at once with git's
+        # raw error, a pinentry nobody answered hung it, and wb try had no --no-sign
+        cfg = Path(self.tmp.name) / "signing.gitconfig"
+        hang = Path(self.tmp.name) / "gpg-that-never-answers"
+        hang.write_text("#!/bin/sh\nexec sleep 20\n")
+        hang.chmod(0o755)
+        signers = [f"[gpg]\n\tprogram = {hang}\n"]
+        if shutil.which("ssh-keygen"):
+            key = Path(self.tmp.name) / "locked"
+            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "a passphrase", "-f", str(key)],
+                           check=True)
+            signers.append(f"[gpg]\n\tformat = ssh\n[user]\n\tsigningkey = {key}\n")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(cfg), GIT_CONFIG_NOSYSTEM="1", FAKE_SCENARIO="ok")
+        os.environ.pop("SSH_AUTH_SOCK", None)
+        for n, signer in enumerate(signers, 1):
+            cfg.write_text("[user]\n\temail = t@t\n\tname = t\n[commit]\n\tgpgsign = true\n" + signer)
+            t0 = time.monotonic()
+            out = run_wb("try", "--model", "mimo")
+            self.assertLess(time.monotonic() - t0, 15)                      # no prompt waited on
+            self.assertNotIn("needs unlocking", out)
+            self.assertIs(store.Task(f"try-{n}").spec["sign"], False)       # its accept too
+            body = gitops.git(cli.try_dir() / str(n), "cat-file", "commit", "HEAD")
+            self.assertNotIn("gpgsig", body)
+            wait_phase(f"try-{n}", {"review"})
+            run_wb("discard", f"try-{n}")
+
     def test_the_hidden_check_reports_a_sample_its_python_cannot_read(self):
         # #530: it caught only ImportError, so a SyntaxError crashed it with a traceback
         work = Path(self.tmp.name) / "unreadable"
@@ -22079,6 +22505,54 @@ class Projects(Base):
         (d / "AGENTS.md").write_text("# rules\n")
         self.assertIn("nothing to commit: CLAUDE.md is gitignored", run_wb("init", str(d)))
         self.assertEqual(self.git(d, "ls-files"), ".gitignore")
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_init_with_a_key_that_needs_unlocking_says_how_at_once_and_no_sign_commits_unsigned(self):
+        # #1226 (bar loop round 4): wb init committed through plain git, so a passphrase key no
+        # agent held failed with git's raw "incorrect passphrase supplied", and with a terminal
+        # (WSL2) waited on a prompt until Claude's Bash limit killed it
+        key = Path(self.tmp.name) / "locked"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "a passphrase", "-f", str(key)],
+                       check=True)
+        cfg = Path(self.tmp.name) / "signing.gitconfig"
+        cfg.write_text(f"[user]\n\temail = t@t\n\tname = t\n\tsigningkey = {key}\n"
+                       "[commit]\n\tgpgsign = true\n[gpg]\n\tformat = ssh\n")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(cfg), GIT_CONFIG_NOSYSTEM="1")
+        os.environ.pop("SSH_AUTH_SOCK", None)
+        d = Path(self.tmp.name) / "init-signed"
+        t0 = time.monotonic()
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()) as err:
+            run_wb("init", str(d))
+        self.assertLess(time.monotonic() - t0, 30)
+        self.assertIn("not committed: commits here are signed and the key needs unlocking first: "
+                      "ssh-add", err.getvalue())
+        self.assertIn("or --no-sign", err.getvalue())
+        self.assertIn("initial commit", run_wb("init", str(d), "--no-sign"))
+        self.assertNotIn("gpgsig", self.git(d, "cat-file", "commit", "HEAD"))
+        # the link's commit in a repo with commits: said, and committed by the --no-sign rerun
+        (d / "CLAUDE.md").write_text("# rules\n")
+        self.git(d, "add", "CLAUDE.md"); self.git(d, "-c", "commit.gpgsign=false", "commit", "-qm", "docs")
+        before = self.git(d, "rev-parse", "HEAD")
+        out = run_wb("init", str(d))
+        self.assertIn("AGENTS.md → CLAUDE.md, not committed: commits here are signed", out)
+        self.assertEqual(self.git(d, "rev-parse", "HEAD"), before)
+        self.assertIn("committed", run_wb("init", str(d), "--no-sign"))
+        self.assertEqual(self.git(d, "show", "HEAD:AGENTS.md"), "CLAUDE.md")
+        self.assertNotIn("gpgsig", self.git(d, "cat-file", "commit", "HEAD"))
+        self.assertEqual(self.git(d, "status", "--porcelain"), "")
+        self.assertIn("already set up", run_wb("init", str(d)))
+        # a pinentry nobody answers: refused within COMMIT_SECS, not waited on forever
+        hang = Path(self.tmp.name) / "gpg-that-never-answers"
+        hang.write_text("#!/bin/sh\ncase \"$*\" in *--list-secret-keys*) exit 0;; esac\nexec sleep 20\n")
+        hang.chmod(0o755)
+        cfg.write_text(f"[user]\n\temail = t@t\n\tname = t\n[commit]\n\tgpgsign = true\n"
+                       f"[gpg]\n\tprogram = {hang}\n")
+        t0 = time.monotonic()
+        with mock.patch.object(gitops, "COMMIT_SECS", 2), self.assertRaises(SystemExit), \
+                redirect_stderr(io.StringIO()) as err:
+            run_wb("init", str(Path(self.tmp.name) / "init-hung"))
+        self.assertLess(time.monotonic() - t0, 15)
+        self.assertIn("not committed: commits here are signed", err.getvalue())
 
     def identity(self):
         cfg = Path(self.tmp.name) / "gitconfig"
@@ -29608,6 +30082,49 @@ class RealOpenCodeAPI(_KeyholeTest):
         self.assertEqual(got, [{"prompt_tokens": 7, "completion_tokens": 3}])    # once
         self.assertEqual(len(self.up.seen), 1)
 
+    def test_a_usage_cost_comes_back_as_the_step_cost_and_the_meter_books_it_once(self):
+        # #1234 (2026-11-24): OpenCode 2.3.2 takes a usage's own `cost` as its step figure (its
+        # chat, Responses and Messages usage all read it), the catalog's estimate only without
+        # one, and never DeepInfra's estimated_cost; the meter compared a usage.cost row at the
+        # catalog's, so a response billed past its listed price booked its excess twice
+        from workbench import meter
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        tmp = Path(self.tmp.name)
+        usage = {"prompt_tokens": 1000, "completion_tokens": 100}
+        for field in ("cost", "estimated_cost"):
+            m = self.model()
+            m.kind = "api"
+            m.config = {"cost": [{"input": 1, "output": 2}]}               # 0.0012 for usage
+            mt = meter.Meter(self.task, m)
+            mt.begin(1)
+            kh = self.keyhole(m, on_usage=mt.on_usage)
+            self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+            self.up.pieces = [f"data: {json.dumps(ev)}\n\n".encode() for ev in (
+                {"model": m.name, "choices": [{"index": 0, "delta": {"content": "ok"}}]},
+                {"model": m.name, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                 "usage": {**usage, field: 0.5}})] + [b"data: [DONE]\n\n"]
+            layer = tmp / f"layer-{field}.json"
+            layer.write_text(json.dumps({"provider": {"deepinfra": {"options": self.kh_mod.layer_options(kh)}}}))
+            r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", m.id,
+                                "--format", "json", "say ok"], cwd=self.repo,
+                               env=self.scratch_env(layer, field), capture_output=True, text=True,
+                               timeout=180)
+            self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
+            [part] = [e["part"] for e in map(json.loads, (x for x in r.stdout.splitlines()
+                                                          if x.startswith("{")))
+                      if e.get("type") == "step_finish"]
+            kh.close()
+            if field == "cost":
+                self.assertEqual(part["cost"], 0.5)                         # the provider's own
+                mt.step(part)
+                rows = [x for x in store.read_jsonl(meter.ledger_path())[0] if x["task"] == self.task.name]
+                self.assertEqual([(x["kind"], x["usd"], x.get("own")) for x in rows],
+                                 [("step", 0.5, "cost")])                    # no reconcile row
+                meter.ledger_path().unlink()
+            else:
+                self.assertGreater(part["cost"], 0)                         # the catalog's estimate
+                self.assertLess(part["cost"], 0.01)
+
     def scratch_env(self, layer, name, models_path=None):
         """Real OpenCode's environment with nothing of the user's: scratch homes, no catalog
         fetch, the layer, and the task's catalog file when given."""
@@ -31199,6 +31716,29 @@ class ApiHarness(Base):
                              (kind, int(status), "no: sk-test-0123456789abcdef"))  # verbatim
             self.assertEqual(len(out.read_text().splitlines()), 1)              # no retry
 
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_keeps_a_402_runs_message_in_its_session_so_a_run_again_sends_only_rerun(self):
+        # #1235 (bar loop round 4, 2026-11-24), what runner._run_again relies on: a run that met
+        # a 402 printed its session's id and kept its message there, so prompt.md sent again with
+        # --session went twice (once a recheck); RERUN in its place, the round's prompt goes once
+        entry = self.real_model("deepinfra")
+        port, out, _ = self.capture("real-rerun", CAPTURE_STATUS="402", CAPTURE_STATUS_TIMES="1")
+        env = self.real_env(self.layer(port, "deepinfra"))
+
+        def run(*argv):
+            p = subprocess.run(["opencode", "run", "--standalone", "-m", f"deepinfra/{entry['id']}",
+                                "--title", "t", "--format", "json", *argv], cwd=self.oc_cwd(),
+                               env=env, capture_output=True, text=True, timeout=90)
+            return p.returncode, [json.loads(x) for x in p.stdout.splitlines() if x.startswith("{")]
+        code, rows = run("--", "MARK-1235: say ok")
+        self.assertEqual((code, rows[-1]["error"]["type"]), (1, "provider.quota"), rows)
+        session = rows[-1]["sessionID"]
+        code, rows = run("--session", session, "--", runner.RERUN)
+        self.assertEqual(code, 0, rows)
+        [sent] = [b for b in map(json.loads, out.read_text().splitlines()[1:]) if b.get("tools")]
+        users = json.dumps([m for m in sent["messages"] if m["role"] == "user"])
+        self.assertEqual((users.count("MARK-1235"), users.count("The round was cut off")), (1, 1), users)
+
 
 
 def api_entry(pid, mid, context=200000, **extra):
@@ -32333,6 +32873,47 @@ class Routes(Base):
                          "trivial: API model deepseek/deepseek-flash → anthropic/claude-haiku-5-5 (Anthropic), "
                          "used from the next start")
 
+    def test_under_agents_api_a_roles_new_api_model_is_said_as_the_next_starts_and_only_its_move_as_held(self):
+        # #1236 (2026-11-24): `wb route trivial <id>`, the form the skill prescribes, said the
+        # whole change waited for Agents on Both, but the role's next start ran on the new model
+        held = "Agents is API, so the move of trivial to API applies once Agents is Both (wb route all both)"
+        self.path.write_text(json.dumps({"v": 1, "day_usd": 5, "use": "api", "roles": {r: {
+            "via": "gpu", "api": "deepseek/deepseek-flash"} for r in routes.ROLES}}))
+        asked = self.dry("trivial", "deepseek/deepseek-v4-pro")
+        self.assertEqual((asked["change"], asked["gate"]), (
+            "trivial: API model deepseek/deepseek-flash → deepseek/deepseek-v4-pro (DeepSeek), used from the "
+            f"next start · GPU → API deepseek/deepseek-v4-pro; {held}", True))
+        self.assertEqual(self.route("trivial", "deepseek/deepseek-v4-pro")[0], 0)
+        m, _, _, routed = routes.resolve("trivial", "trivial", None)
+        self.assertEqual((m.id, routed["via"]), ("deepseek/deepseek-v4-pro", "api"))   # as the line said
+        # the same model, moved: nothing changes until Both
+        self.assertEqual(self.dry("significant", "api")["change"],
+                         "significant: GPU → API deepseek/deepseek-flash; Agents is API, so the move of significant "
+                         "to API applies once Agents is Both (wb route all both)")
+        # a role already on API given a new model: all of it now, nothing held
+        self.assertEqual(self.dry("trivial", "deepseek/deepseek-flash")["change"],
+                         "trivial: API deepseek/deepseek-v4-pro → API deepseek/deepseek-flash · your code goes to "
+                         "DeepSeek · thinking off · cap $5/day")
+        # several roles in one change: the same, the moves named
+        self.assertEqual(routes.change_pairs(routes.read(), [("significant", "api", "deepseek/deepseek-v4-pro"),
+                                                             ("trivial", "gpu", None)]).line,
+                         "significant: API model deepseek/deepseek-flash → deepseek/deepseek-v4-pro (deepseek), used "
+                         "from the next start · GPU → API deepseek/deepseek-v4-pro · trivial: API "
+                         "deepseek/deepseek-v4-pro → GPU · your code goes to deepseek · thinking off · cap $5/day · "
+                         "Agents is API, so the moves of significant to API, trivial to the GPU apply once Agents is "
+                         "Both (wb route all both)")
+
+    def test_under_agents_api_a_roles_held_move_still_says_what_its_model_does_with_thinking(self):
+        # #1236 and #1237 met in the bar4 merge (2026-11-24): #1236's held move restates the
+        # role's clauses through a second _role_part, which dropped #1237's `thinks`, so under
+        # Agents API the thinking clause said the role's setting again, not what the model does
+        doc = {"v": 1, "day_usd": 5, "use": "api", "roles": {r: {
+            "via": "gpu", "gpu": None, "api": "deepseek/deepseek-flash", "thinking": "off"} for r in routes.ROLES}}
+        line = routes.change(doc, "significant", via="api", thinking="on",
+                             thinks=lambda mid, t: f"{mid} thinks {t}").line
+        self.assertIn("thinking off → on: deepseek/deepseek-flash thinks on", line)
+        self.assertIn("the move of significant to API applies once Agents is Both", line)
+
     def test_thinking_turned_on_while_a_roles_api_side_is_dormant_is_named_by_the_yes_that_sends_it_there(self):
         # #1177 (2026-11-24): thinking on a GPU role (an API model kept, or none yet) needs no
         # dialog, but the later yes to Agents API, busy api or a new API model never said it, so
@@ -32362,7 +32943,7 @@ class Routes(Base):
                 self.assertTrue(asked["gate"])
                 self.assertIn("thinking on", asked["change"])
         self.assertIn("when the GPU is busy, writing starts on its API model (your code goes to Anthropic "
-                      "(writing); thinking on (writing); cap $5/day)", asked["change"])
+                      "(writing); thinking on (effort high) (writing); cap $5/day)", asked["change"])  # #1237: its effort
 
     def test_a_kept_api_model_is_checked_again_when_its_role_goes_back_to_api(self):
         # ARCHITECTURE.md, *Roles*: the kept model must still be one the role may run
@@ -32932,6 +33513,7 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.start_api("t-paid", "http", spawn=False)
         self.start_api("t-behind", "http", "--queue", spawn=False)   # queued before the 402
         self.drive_here("t-paid")
+        os.environ["FAKE_RUNS"] = runs = str(Path(self.tmp.name) / "runs.jsonl")  # t-behind's
         paid = store.Task("t-paid")
         self.assertEqual((paid.status["phase"], paid.status.get("infra")), ("stuck", "provider"), paid.status)
         self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
@@ -32970,6 +33552,68 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual([(r["task"], r["kind"], r.get("cause"))
                           for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["kind"] != "review"],
                          [("t-paid", "stuck", "provider")])
+        # #1235 (bar loop round 4, 2026-11-24): each recheck sent prompt.md again with --session,
+        # and OpenCode keeps a failed run's message, so the top-up's request billed one copy of the
+        # spec and protocol per recheck. A session no answer came in is dropped: each try is a
+        # fresh one, with the round's prompt once
+        rows = [json.loads(x) for x in Path(runs).read_text().splitlines()]
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertEqual([(r["session"], r["prompt"].endswith(prompt)) for r in rows], [(False, True)] * 3, rows)
+
+    def test_a_402_answered_before_the_runner_reads_its_round_is_still_the_quota_stop_so_a_waiter_waits_again(self):
+        # #1240 (2026-11-24): the meter's begin cleared `api_stop` after OpenCode had started, so
+        # on a loaded machine the keyhole's 402 stop went before the round read it, the round
+        # took the keyhole's 400 alone as `refused`, and a waiter's recheck stopped as stuck
+        # (#1216's test, failing at random on CI). Here the round is read only once OpenCode
+        # has exited: that ordering at its worst, every time
+        self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.start_api("t-paid", "http", spawn=False)
+        self.start_api("t-behind", "http", "--queue", spawn=False)
+        real = subprocess.Popen
+
+        def late(cmd, *a, **k):
+            proc = real(cmd, *a, **k)
+            if isinstance(cmd, list) and "--format" in cmd:  # OpenCode's run: over before it is read
+                proc.wait(30)
+            return proc
+        slow = mock.patch.object(runner.subprocess, "Popen", late)
+        slow.start()
+        self.addCleanup(slow.stop)
+        self.drive_here("t-paid")
+        paid = store.Task("t-paid")
+        self.assertEqual((paid.status["phase"], paid.status.get("guards")), ("stuck", {"quota": 1}), paid.status)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        task = store.Task("t-behind")
+        path = self.models.api_health_path()
+
+        def recheck_due():                                            # the mark's 900 s run out
+            with store.locked(path.with_name(path.name + ".lock")):
+                doc = store.read_json(path, {})
+                doc["deepinfra"]["until"] = time.time() - 1
+                store.write_json(path, doc)
+
+        def waits(rechecks):
+            deadline = time.time() + 30
+            while not (len(self.up.seen) == 1 + rechecks and task.status.get("phase") == "queued"
+                       and (task.status.get("last") or "").startswith("waiting: deepinfra is out of credit")
+                       and sum("still out of credit" in (e.get("text") or "")
+                               for e in store.read_jsonl(task.dir / "events.jsonl")[0]) == rechecks):
+                self.assertLess(time.time(), deadline, (len(self.up.seen), task.status))
+                self.assertTrue(driver.is_alive(), task.status)
+                time.sleep(POLL)
+        driver = threading.Thread(target=self.drive_here, args=("t-behind",), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 60)
+        waits(0)                                                      # in load's wait, not before it
+        recheck_due()
+        waits(1)                                                      # the 402 again: waiting
+        self.up.mode, self.up.status = "ok", 200                      # the user tops up
+        recheck_due()
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual(len(self.up.seen), 3)                        # the 402, the recheck, its round
 
     def test_a_new_start_past_an_expired_402_mark_that_meets_the_402_stops_with_its_notice(self):
         # the review of #1216 (2026-11-24): NoLease.load took its first credit_recheck as a
@@ -33902,7 +34546,8 @@ class RateLimits(Base):
     def test_a_provider_that_only_rate_limits_is_revived_once_then_stuck_as_the_providers(self):
         from workbench import results
         from workbench import lessons
-        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5")
+        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5",
+                          FAKE_RUNS=str(Path(self.tmp.name) / "runs.jsonl"))
         task = self.api_task("t-only", "ratelimit", "--silence-timeout", "2", "--think-timeout", "2")
         # its role on API, as an API task's is: the advice's way off API is read there (#1218)
         Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "roles": {
@@ -33925,6 +34570,11 @@ class RateLimits(Base):
         self.assertEqual(load["text"], "deepseek rate-limited the round: it runs again once the cooldown ends")
         self.assertEqual(len(self.events(task, "stopped")), 2)      # once, revived, then again
         self.assertEqual(len(self.events(task, "rate_limited")), 2)
+        # #1235: the revive sent prompt.md again into the session its unanswered try began, which
+        # OpenCode keeps that try's message in: dropped, the round begins anew with it once
+        rows = [json.loads(x) for x in Path(os.environ["FAKE_RUNS"]).read_text().splitlines()]
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertEqual([(r["session"], r["prompt"].endswith(prompt)) for r in rows], [(False, True)] * 2, rows)
         n = self.notice(task)
         self.assertEqual((n["kind"], n["cause"]), ("stuck", "provider"))
         self.assertNotIn(n["cause"], results.THE_STEP)
@@ -33933,6 +34583,24 @@ class RateLimits(Base):
         self.assertIn('wb feedback t-only --text "carry on" resumes it once deepseek allows; or '
                       'wb route significant gpu (the user\'s yes) for the next tasks', n["text"])
         self.assertIsNone(runner.read_bound(task, 1, {"guard": "rate_limited", "waited": 900}))
+
+    def test_a_revived_rounds_new_session_still_hears_the_skills(self):
+        # the review of #1235 (2026-11-24): _run_again dropped the unanswered try's session but
+        # kept the skills_told that try set, so the new session got skills_note's empty change
+        # and never heard the skills Claude picked; dropped, it hears them again, as _start_fresh's
+        run_wb("skill", "add", "alpha", "--from", str(write_skill(Path(self.tmp.name) / "drafts" / "alpha",
+               "alpha", "Use when ALPHA.", "Steps.\n")), "-m", "a")
+        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5",
+                          FAKE_RUNS=str(Path(self.tmp.name) / "runs.jsonl"))
+        task = self.api_task("t-sk1235", "ratelimit", "--silence-timeout", "2", "--think-timeout", "2",
+                             "--skill", "alpha")
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "roles": {
+            "significant": {"via": "api", "api": task.spec["model"]}}}))
+        with mock.patch.object(runner, "RATE_WAIT_S", 3):
+            runner.drive(task)
+        rows = [json.loads(x) for x in Path(os.environ["FAKE_RUNS"]).read_text().splitlines()]
+        self.assertEqual([(r["session"], "Claude picked these skills" in r["prompt"]) for r in rows],
+                         [(False, True)] * 2, rows)
 
     def test_a_providers_stop_is_not_held_against_the_steps_size(self):
         from workbench import models, results, router
@@ -34416,7 +35084,7 @@ class ApiSpend(Base):
         self.spent(9.0, day="2000-01-01")                        # another day's: not today's
         for model, said in ((SPEND_M, f"{SPEND_M}: API spend today is ≈$5.03 of the $5 day cap (it "
                                       "resets at local midnight). Ask the user: a higher cap (wb route cap "
-                                      "<usd>), the role on the GPU (wb route <role> gpu), or tomorrow"),
+                                      "<usd>), a GPU model, or tomorrow"),  # a --model start's (#1233)
                             (SPEND_NONE, f"{SPEND_NONE}: OpenCode's catalog gives no price for it, so the "
                                          "day cap can't be kept")):
             err = io.StringIO()
@@ -34432,6 +35100,33 @@ class ApiSpend(Base):
         with mock.patch.object(cli, "spawn_runner"):          # a GPU model starts as ever
             self.assertIn("started t-gpu", self.start("t-gpu", "ok"))
         self.assertFalse(task_rows := self.rows("t-gpu"), task_rows)
+
+    def test_a_model_start_at_or_near_the_day_cap_offers_a_gpu_model_never_a_role_change(self):
+        # #1233 (2026-11-24): a --model start's advice was routes.off_api(None)'s placeholder,
+        # `wb route <role> gpu`: with the role on the GPU already, or under Agents API (#1218), it
+        # changed nothing for this start, and the retry was refused with the same line
+        argv = ("t-mcap", "--spec", str(self.spec), "--repo", str(self.repo), "--model", SPEND_M,
+                "--no-base-check")
+        for use in ("both", "api"):
+            store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "use": use, "day_usd": 5, "roles": {
+                "trivial": {"via": "gpu", "api": SPEND_M}}})
+            self.meter.ledger_path().unlink(missing_ok=True)
+            for spent, more in ((4.99, "a cap of at least $"), (0.01, "a higher cap")):  # near it, then at it
+                self.spent(spent)
+                for args in (("route", "--dry-run", "--json", "--start", *argv), ("start", *argv)):
+                    err = io.StringIO()
+                    with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+                          mock.patch.object(cli, "API_RUNS", True), mock.patch.object(cli, "spawn_runner") as spawned):
+                        run_wb(*args)
+                    said = err.getvalue()
+                    self.assertEqual(e.exception.code, 3, (use, spent, args[0], said))
+                    self.assertIn(f"{SPEND_M}: API spend today is", said)
+                    self.assertIn(f". Ask the user: {more}", said)
+                    self.assertIn(" (wb route cap <usd>), a GPU model, or tomorrow", said)
+                    self.assertNotIn("wb route <role>", said)
+                    self.assertNotIn("wb route all", said)
+                    spawned.assert_not_called()
+                    self.assertFalse(store.Task("t-mcap").dir.exists())
 
     def test_a_role_on_an_unpriced_model_is_refused_at_start_and_stopped_however_it_started(self):
         # wave 2's review: #1016's routes.resolve never asked meter.refusal for a role's API model,
@@ -34650,8 +35345,9 @@ class ApiSpend(Base):
         mt.step({"cost": 0.1, "tokens": {"input": 100}})       # OpenCode's says less: nothing booked
         self.assertEqual(len(self.rows("t-kh-meter")), 3)
         mt.step({"cost": 3.0, "tokens": {"input": 100}})       # more than all three: the difference,
-        (rec,) = self.rows("t-kh-meter", "reconcile")          # the provider's own row at its catalog figure (#1165)
-        self.assertAlmostEqual(rec["usd"], 3.1 - (a["usd"] + b["usd"] + c["metered"]), places=9)
+        (rec,) = self.rows("t-kh-meter", "reconcile")          # a usage.cost row as booked: OpenCode
+        # reports that same figure (#1234, 2026-11-24); an estimated_cost one at its catalog's (#1165)
+        self.assertAlmostEqual(rec["usd"], 3.1 - (a["usd"] + b["usd"] + c["usd"]), places=9)
         mt.step({"cost": 0.5, "tokens": {"input": 100}})       # after a reconcile: only its own
         self.assertEqual([round(r["usd"], 9) for r in self.rows("t-kh-meter", "reconcile")][1:], [0.5])
         self.assertEqual(self.meter.usage_tokens({"input_tokens": 50, "output_tokens": 20,  # Responses
@@ -35523,7 +36219,8 @@ class ApiSpendKeyhole(_KeyholeTest):
             self.assertEqual({k: results.api_usage(self.task)[k] for k in ("cost", "source", "prices")},
                              {"cost": 0.392, "source": "metered", "prices": "provider"})
         mt.on_usage({**tok, "cost": 0.5})          # OpenRouter's usage.cost, under its catalog figure
-        mt.step({"cost": 0.8, "tokens": {"input": 1_000_000, "output": 1_000_000}})
+        # OpenCode's step figure is that usage.cost too, not the catalog's 0.8 (#1234)
+        mt.step({"cost": 0.5, "tokens": {"input": 1_000_000, "output": 1_000_000}})
         self.assertEqual([r["kind"] for r in store.read_jsonl(meter.ledger_path())[0]], ["step"] * 2)
         mt.step({"cost": 0.3, "tokens": {"input": 1}})   # a response the keyhole never saw: booked
         self.assertEqual([round(r["usd"], 9) for r in store.read_jsonl(meter.ledger_path())[0]
@@ -35571,6 +36268,43 @@ class ApiSpendKeyhole(_KeyholeTest):
         with mock.patch.object(results, "_session_cost", side_effect=[2.4, None]):
             got = results.api_usage(self.task)
         self.assertEqual((got["cost"], got["source"]), (1.976, "mixed"))
+
+    def test_a_usage_cost_above_the_catalogs_is_booked_once_and_the_task_closes_at_the_bill(self):
+        # #1234 (2026-11-24): OpenCode 2.3.2 reports a usage's own `cost` as its step and export
+        # figure (it never reads DeepInfra's estimated_cost), but the meter compared OpenRouter's
+        # usage.cost at its catalog figure: a response billed past its listed price (a price
+        # fallback, a pinned backend) booked the excess again as a reconcile row, $0.15 in the
+        # ledger for a $0.1125 bill at 1.5x, `(catalog prices)`, the day cap at 75% of real spend
+        from workbench import meter, results
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        m = self.model("openrouter", "vendor/m1", "/api/v1", "@openrouter/ai-sdk-provider")
+        m.kind = "api"
+        m.config = {"cost": [{"input": 0.2, "output": 0.6}]}                 # 0.8 for MTOK
+        store.write_json(self.task.dir / "task.json", {**self.task.spec, "via": "api", "model": m.id})
+        mt = meter.Meter(self.task, m)
+        mt.begin(1)
+        for _ in range(2):
+            mt.on_usage({**self.MTOK, "cost": 1.2})                         # billed at 1.5x
+            mt.step({**self.STEP, "cost": 1.2})                             # OpenCode says the same
+        mt.end_round({"s1": {"info": {"cost": 2.4}}})
+        rows = store.read_jsonl(meter.ledger_path())[0]
+        self.assertEqual([(r["kind"], r["source"], r.get("own")) for r in rows],
+                         [("step", "provider", "cost")] * 2)
+        self.assertEqual({k: self.task.status["api"][k] for k in ("usd", "at_catalog", "prices")},
+                         {"usd": 2.4, "at_catalog": 2.4, "prices": "provider"})
+        self.assertEqual(meter.tail(m), " · today $2.40 of $100")
+        self.task.set_status(session="ses_1")
+        with mock.patch.object(results, "_session_cost", return_value=2.4):     # the export's
+            got = results.api_usage(self.task)
+        self.assertEqual({k: got[k] for k in ("cost", "prices")}, {"cost": 2.4, "prices": "provider"})
+        again = meter.Meter(self.task, m)                                   # round 2's runner
+        again.begin(2)
+        self.assertEqual((again.total, again.at_catalog), (2.4, 2.4))
+        again.end_round({"s1": {"info": {"cost": 2.4}}})
+        self.assertEqual(len(store.read_jsonl(meter.ledger_path())[0]), 2)
+        mt.step({"cost": 0.3, "tokens": {"input": 1}})       # a response the keyhole never saw
+        self.assertEqual([(r["kind"], round(r["usd"], 9)) for r in store.read_jsonl(meter.ledger_path())[0]
+                          if r["kind"] == "reconcile"], [("reconcile", 0.3)])
 
     def test_an_export_a_rounding_past_the_status_at_catalog_leaves_paid_at_the_providers_own_figure(self):
         # #1220 (2026-11-24): status api.at_catalog is written to 6 places and the export isn't, so
@@ -35903,12 +36637,13 @@ class Privacy(_KeyholeTest):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
         (self.repo / "local.cfg").write_text("db=dev\n")
         self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["local.cfg"]}}}))
+        self.role(via="api", api=FLASH)                          # the start's role, on API
         with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
             self.start_api("t-cp1")
         self.assertEqual(cm.exception.code, 3)
         self.assertIn('commands.json "repos" copies local.cfg into every task, and this one is on '
-                      "API (DeepInfra): name it (--copy local.cfg) to send it, or put the role on "
-                      "the GPU", err.getvalue())
+                      "API (DeepInfra): name it (--copy local.cfg) to send it, or put significant on "
+                      "the GPU (wb route significant gpu)\n", err.getvalue())
         out = self.start_api("t-cp2", None, "--copy", "local.cfg")
         self.assertIn("and local.cfg (--copy) to DeepInfra", out)
         self.assertEqual(store.Task("t-cp2").spec["copy"], ["local.cfg"])
@@ -35939,8 +36674,10 @@ class Privacy(_KeyholeTest):
         (self.repo / "node_modules" / "root-only").mkdir(parents=True)
         (app / "node_modules" / "app-only").mkdir(parents=True)
         self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["node_modules"]}}}))
+        self.role(via="api", api=FLASH)
         refusal = ('commands.json "repos" copies node_modules into every task, and this one is on API '
-                   "(DeepInfra): name it (--copy ../../node_modules) to send it, or put the role on the GPU")
+                   "(DeepInfra): name it (--copy ../../node_modules) to send it, or put significant on "
+                   "the GPU (wb route significant gpu)")
         for name, extra in (("t-pk1", ()), ("t-pk2", ("--copy", "node_modules"))):  # the package's
             with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
                 self.start_api(name, None, *extra, repo=app)
@@ -37372,6 +38109,46 @@ class RoleResolution(Base):
         self.assertEqual(code, 0)
         self.assertNotIn("this task sends", out)
 
+    def test_a_model_that_cant_turn_thinking_off_is_said_so_in_the_dialog_the_start_line_and_task_json(self):
+        # #1237 (2026-11-24): an Anthropic adaptive model with no `none` runs on its bare id,
+        # thinking as its default, but the dialog, the start line, task.json's route and wb watch's
+        # routed line all said the role's setting, `thinking off`: the user agreed to no reasoning
+        # and paid for it at the output rate
+        adaptive = api_entry("anthropic", "claude-sonnet-x", variants=[
+            {"id": v, "settings": {"thinking": {"type": "adaptive"}, "effort": v}} for v in ("low", "medium", "high")])
+        self.catalog([*ROLE_CATALOG, adaptive], ROLE_AUTH)
+        runner.models.hosted(fresh=True)
+        does = "thinking as the model's default (it lists no lower setting)"
+        mid = "anthropic/claude-sonnet-x"
+        code, out, err = self.wb("route", "--dry-run", "--json", "significant", mid, "--day-usd", "5")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["change"],
+                         f"significant: GPU → API {mid} · your code goes to Anthropic · {does} · cap $5/day")
+        self.set_role("significant", mid, "--day-usd", "5")
+        code, out, err = self.begin("t1", "--size", "significant")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f" · significant role, set by you {time.strftime('%m-%d')} · {does} · today $0.00 of $5", out)
+        self.assertNotIn("thinking off", out)
+        sp = store.Task("t1").spec
+        self.assertEqual((sp["opencode_model"], sp["thinking"], sp["thinking_shown"]), (mid, "off", does))
+        self.assertTrue(sp["route"].endswith(f" · {does}"), sp["route"])
+        rows = [json.loads(x) for x in self.wb("watch", "t1", "--json")[1].splitlines()]
+        self.assertTrue(rows[1]["t"].endswith(f" · {does}"), rows[1])   # as the meta line above it says
+        # the --model dialog said `thinking off` whatever the model
+        self.assertEqual(cli.start_line("t2", runner.models.lookup(mid)),
+                         f"start t2 on API {mid} (not a role's choice) · your code goes to Anthropic · {does}")
+        # turning thinking on or off says what the model does with it
+        code, out, err = self.wb("route", "--dry-run", "--json", "significant", "--thinking", "on")
+        self.assertEqual(json.loads(out)["change"], "significant: thinking off → on (effort high)", err)
+        self.set_role("significant", "--thinking", "on")
+        code, out, err = self.wb("route", "--dry-run", "--json", "significant", "--thinking", "off")
+        self.assertEqual(json.loads(out)["change"], f"significant: thinking on → off: {does}", err)
+        # Agents to API, a role on the GPU with the model kept: the yes names its thinking too
+        self.set_role("significant", "--thinking", "off")
+        self.set_role("significant", "gpu")
+        code, out, err = self.wb("route", "--dry-run", "--json", "all", "api")
+        self.assertIn(f"{does} (significant)", json.loads(out)["change"], err)
+
     def test_an_api_tasks_report_watch_line_and_commit_name_its_model_not_only_the_provider(self):
         # #1078 (audit 1 of 2.0): all read "DeepSeek (API)", so two roles on one provider looked
         # alike, and git history couldn't say which model wrote the code
@@ -37657,6 +38434,41 @@ class RoleResolution(Base):
             "; or wb route busy wait (the user's yes) for the next tasks"))
         self.routes.write_text("{")                                      # unreadable: the role's own, as before
         self.assertEqual(routes.off_api("trivial")[2], "wb route trivial gpu")
+
+    def test_a_standing_copy_refusal_names_a_way_off_api_that_works_and_the_dry_run_refuses_it_before_the_dialog(self):
+        # #1227 (2026-11-24, #1218's fix missed it): the refusal of a standing commands.json copy
+        # always said "or put the role on the GPU", a no-op under Agents API and for a --model
+        # start, so the retry was refused the same way; and the mod's dry run never checked it,
+        # so the dialog asked the user to approve a start wb start then refused
+        (self.repo / ".gitignore").write_text("data/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore data"], check=True)
+        (self.repo / "data").mkdir()
+        (self.repo / "data" / "f").write_text("x\n")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"copy": ["data"]}}}))
+        self.set_role("trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")  # its own side: GPU
+        self.set_role("all", "api")
+        code, _, err = self.begin("t-role", "--role", "trivial")
+        self.assertEqual((code, err), (3, 'wb: commands.json "repos" copies data into every task, and this one '
+                                          "is on API (DeepSeek): name it (--copy data) to send it, or set Agents "
+                                          "to Both or GPU (wb route all both|gpu)\n"))
+        os.environ["CLAUDECODE"] = "1"
+        argv = ["t-m", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "deepseek/deepseek-v4-pro"]
+        line = ('wb: commands.json "repos" copies data into every task, and this one is on API (DeepSeek): '
+                "name it (--copy data) to send it, or a GPU model\n")
+        self.assertEqual(self.wb("route", "--dry-run", "--json", "--start", *argv), (3, "", line))  # no dialog
+        ok = store.home() / "route-ok.json"
+        m = runner.models.lookup("deepseek/deepseek-v4-pro")
+        store.write_json(ok, {"start": {"task": "t-m", "model": m.id}, "change": cli.start_line("t-m", m),
+                              "at": time.time()})
+        self.assertEqual(self.wb("start", *argv), (3, "", line))
+        self.assertTrue(ok.exists())                                      # the yes never used up
+        self.assertFalse(store.Task("t-m").exists)
+        for said in (err, line):
+            self.assertNotIn("wb route trivial gpu", said)
+        code, out, err = self.wb("route", "--dry-run", "--json", "--start", *argv, "--copy", "data")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["gate"])                          # named: the dialog, as before
 
     def test_an_unreadable_routes_json_stops_the_start(self):
         self.routes.write_text("{")
@@ -38597,6 +39409,8 @@ class BusyGpu(Base):
             line = cli._busy_api("trivial", self.asked(), self.repo, None)
             self.assertIsInstance(line, str)
             self.assertIn("can't take it: commands.json \"repos\" copies .env.local into every task", line)
+            # no way off API for a role on the GPU already: "or put the role on the GPU" was one (#1227)
+            self.assertTrue(line.endswith("name it (--copy .env.local) to send it"), line)
             self.assertIsInstance(cli._busy_api("trivial", self.asked(copy=[".env.local"]), self.repo, None), tuple)
 
     def test_a_busy_start_on_an_openrouter_role_carries_its_backends(self):
