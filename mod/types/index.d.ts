@@ -89,7 +89,8 @@ export type WbPane = { tab: string; open: string; focus: string; minimized: bool
 
 /** `wb route --json` as the Settings tab reads it (#1023): routes.json normalized (`use` the Agents
  * switch, `busy` the busy-GPU opt-in, the day cap, each role's selector and both models), spend
- * today from the day ledger, and each API provider's key state (only `stored` runs). */
+ * today from the day ledger, and each API provider's key state (`stored`, `copilot` and an `env`
+ * one with `runs` run tasks; `ollama` runs its cloud models). */
 export type WbRoutes = {
   v: 1
   use: 'gpu' | 'api' | 'both'
@@ -99,8 +100,9 @@ export type WbRoutes = {
     thinking: 'off' | 'on'; label: string }>
   /** `prices`: the dollars' basis (meter.basis, #1135): catalog (an estimate, ≈), yours (wb model price), provider */
   spend_today: { usd: number; prices?: 'catalog' | 'yours' | 'provider'; by_provider: Record<string, number> }
-  // runs: a key in the environment the keyhole reads (#1189), which runs tasks as a stored one does
-  providers: Record<string, { name: string; key: 'stored' | 'ollama' | 'env' | 'oauth' | 'none'; why?: string; runs?: boolean }>
+  // runs: a key in the environment the keyhole reads (#1189), which runs tasks as a stored one does;
+  // copilot: GitHub Copilot's sign-in, held as a key (#1191)
+  providers: Record<string, { name: string; key: 'stored' | 'copilot' | 'ollama' | 'env' | 'oauth' | 'none'; why?: string; runs?: boolean }>
 }
 
 /** `wb models --json` (#1023): the GPU models (cards: the numbers its Ollama sees, null unknown),

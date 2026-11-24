@@ -1004,6 +1004,9 @@ CATALOG_TIMEOUT = 30     # a read past it fails, cached as one for DOWN_SECS
 OLLAMA_CLOUD = "Ollama cloud (ollama.com)"
 # Providers that sign each request with cloud credentials (SigV4, Vertex): no key wb can hold
 SIGNING = frozenset({"amazon-bedrock", "google-vertex", "google-vertex-anthropic"})
+# of those, the ones whose stored API key OpenCode sends as a bearer ahead of signing (Bedrock's,
+# #1192): "stored", which the keyhole holds; any other login still signs
+KEYED_SIGNING = frozenset({"amazon-bedrock"})
 # GitHub Copilot's sign-in (#1191): OpenCode 2.3.2's device login stores the GitHub token as
 # `access` and `refresh` alike with `expires: 0` (core/src/plugin/provider/github-copilot.ts), a
 # token that never rotates, so the keyhole holds it as it holds a key (Model.key "copilot")
@@ -1027,9 +1030,8 @@ def signin(pid: str) -> tuple[str, str, str] | None:
         return ("the OpenCode Console", "its tokens rotate, and the keyhole doesn't speak "
                 "its API (SystemOne) yet", "a model of another provider can run")
     return None
-# of those, the ones whose stored API key OpenCode sends as a bearer ahead of signing (Bedrock's,
-# #1192): "stored", which the keyhole holds; any other login still signs
-KEYED_SIGNING = frozenset({"amazon-bedrock"})
+
+
 API_STATES = ("no_credit", "rate_limited", "unreachable")
 RATE_LIMIT_SECS = 60     # a 429 without Retry-After: how long its provider reads rate-limited
 # A 402 or a plan limit with no `until` held forever: only a 2xx cleared it, and wb start refused
