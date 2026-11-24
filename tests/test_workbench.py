@@ -816,7 +816,11 @@ class Lifecycle(Base):
                    "--test", "python3 -m nosuch_module_1181v -q", "--auto-fix", "2", "--no-self-review")
         st = wait_phase("t-venv", {"review"}, timeout=120)
         task = store.Task("t-venv")
-        self.assertRegex(st["base_check"]["tail"], r"/\.venv/bin/python3?: No module named nosuch_module_1181v")
+        # the interpreter the base check names is the scratch .venv's here, the hosted Python's on
+        # CI (its venv reports the base executable): either way never the worktree's (#1184's CI)
+        self.assertRegex(st["base_check"]["tail"], r"python3?: No module named nosuch_module_1181v")
+        self.assertEqual(runner._missing_key("/var/tmp/x/.venv/bin/python3: No module named nosuch_module_1181v"),
+                         runner._missing_key("/usr/bin/python3: No module named nosuch_module_1181v"))
         self.assertNotIn(str(task.worktree), st["base_check"]["tail"])  # the scratch checkout's
         self.assertEqual(st["round"], 1)
         self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
