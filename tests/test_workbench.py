@@ -419,6 +419,35 @@ class Lifecycle(Base):
                 self.assertEqual(task.status["round"], 2)
                 self.assertEqual([x["text"] for x in lessons.gather(task) if x["kind"] == "feedback"], want)
 
+    def test_feedback_is_gathered_once_unchanged_after_a_handover_or_a_resume_that_carries_it(self):
+        # #1180's review (2026-11-24): lessons.feedback read any FEEDBACK_HEAD paragraph, and a
+        # handover's carry-on or a resume copies the earlier feedback whole into "What you were
+        # asked to do": each item was recorded again under the new round, the last one with the
+        # agent's last words before the switch joined on
+        from workbench import lessons
+        fb = "1. Rename x to answer.\n2. Keep the number on its own line."
+        want = [(2, "Rename x to answer."), (2, "Keep the number on its own line.")]
+        for name, how in (("t-lhand", "handover"), ("t-lres", "resume")):
+            with self.subTest(how=how):
+                self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+                wait_phase(name, {"review"})
+                task = store.Task(name)
+                os.environ["FAKE_SCENARIO"] = "fill" if how == "handover" else "ok"
+                run_wb("feedback", name, "--text", fb)
+                wait_phase(name, {"review"})
+                if how == "resume":
+                    task.set_status(phase="stuck")
+                    with mock.patch.object(cli, "spawn_runner"):
+                        run_wb("resume", name)
+                carried = store.round_prompt(task, 3).read_text()
+                self.assertTrue(carried.startswith((runner.CARRY_ON, runner.RESUME)[how == "resume"][:60]), carried)
+                self.assertIn("Rename x to answer.", carried)       # the feedback, copied whole
+                self.assertEqual([(x["round"], x["text"]) for x in lessons.gather(task)
+                                  if x["kind"] == "feedback"], want)
+        self.assertEqual(lessons.feedback(runner.CARRY_ON.format(
+            asked=runner.ASKED.format(lessons.FEEDBACK_HEAD + " Make exactly these changes:\n\n" + fb),
+            last="> x")), [])
+
     def test_a_round_start_records_the_typical_length_and_how_many_tasks_back_it(self):
         # #1048: the pane sets a task's active work against its typical length (`~6m left`) with
         # no read of results.jsonl of its own, and only when enough timed tasks back it

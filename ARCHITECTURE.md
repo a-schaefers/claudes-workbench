@@ -1355,7 +1355,7 @@ by prefix; rewording one silently changes those:
 | `INTERRUPT_HEAD`, `NOTE_HEAD` | `_steer_round` | `transcript` |
 | `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's) |
 | `Claude picked these skills`, `Claude handed you more skills`, `Claude took back:` | `skills_note` | `transcript.SKILLS_HEADS` (skips the note to label what follows) |
-| `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`) |
+| `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`), `lessons.feedback` (none of their copied feedback) |
 | `agent's summary:` | `summary_text` | `lessons` |
 | `--title "wb: <task>"` | `run_round` | `transcript.find_session` |
 | `Outline of <file> (from probe symbols):` (`context.OUTLINE_HEAD`), `… N more: `+"`probe symbols <file>`"+` (`OUTLINE_MORE`) | `runner.add_outline`, after round 1's protocol (probe on, *Experiments*) | nothing by prefix: being after the protocol, `transcript`'s fold and `bench._spec_of` leave it out of the spec (a replay makes its own) |
@@ -4375,7 +4375,10 @@ lessons. Kinds: `feedback` (each numbered item, `N.` or `N)`, of a round prompt,
 `instructions.md` after a handover, opening `FEEDBACK_HEAD`, "Review feedback from the senior
 reviewer.", ≤600 characters; `lessons.feedback` reads each `FEEDBACK_HEAD` paragraph's body on its
 own, up to a folded `NOTE_HEAD` note, so wb feedback's text added to a round never sent,
-`runner.add_to_round`, is never joined to the round's own last item, #1180); `agent` (`Lesson: …` lines in `summary.md`, which PROTOCOL asks for;
+`runner.add_to_round`, is never joined to the round's own last item, #1180; a round whose prompt
+isn't a feedback is read only for that added text, from its `notes.md` (`lessons.round_feedback`),
+and a `CARRY_ON` or `RESUME` prompt, which copies the earlier feedback whole, for none of its own:
+read, each item was recorded again under the handover's or resume's round, #1180's review); `agent` (`Lesson: …` lines in `summary.md`, which PROTOCOL asks for;
 skipped for a discarded task, whose open ones close as dropped: dead ends, not a recipe); `stopped`
 ("the guard stopped the agent: …", not a stop with `by`); `question` (each answered ask, `wb allow`
 included); `spec` ("the spec missed: …", from `status.spec_gaps`, for Claude's spec checklist);

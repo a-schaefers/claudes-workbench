@@ -99,13 +99,33 @@ def feedback(prompt: str) -> list[str]:
     note sent before a round began goes after it too (_early_notes): read as one body from the
     first blank line on, the second feedback's head and its "carry on" were joined to the last
     item, a garbled lesson of its own (#1180, 2026-11-24). So each FEEDBACK_HEAD paragraph opens
-    a feedback, wherever it is (a wb next step's unsent round's too), and a folded note ends it."""
-    from .runner import NOTE_HEAD  # runner imports this module
+    a feedback, wherever it is (a wb next step's unsent round's too), and a folded note ends it.
+    A handover's carry-on (CARRY_ON) or a resume's (RESUME) holds none of its own: it copies the
+    earlier rounds' feedback whole, which each recorded again under the new round, the last item
+    with the agent's last words joined on (the review of #1180, 2026-11-24)."""
+    from .runner import CARRY_ON, NOTE_HEAD, RESUME  # runner imports this module
+    if prompt.startswith((CARRY_ON[:60], RESUME[:60])):
+        return []
     out = []
     for part in re.split(r"\n\n(?=" + re.escape(FEEDBACK_HEAD) + ")", prompt):
         if part.startswith(FEEDBACK_HEAD):
             out.append(part.split("\n\n", 1)[-1].split("\n\n" + NOTE_HEAD, 1)[0])
     return out
+
+
+def round_feedback(task: store.Task, rnd: int) -> list[str]:
+    """The review feedback round ``rnd`` gave (feedback's bodies): its prompt's when the prompt is
+    a feedback (a fresh session's handoff took prompt.md's place: store.round_prompt), else only
+    what wb feedback added to the round before it was sent (runner.add_to_round, kept in its
+    notes.md too): a carry-on or a resume copies the earlier feedback whole, and a spec or a wb
+    next step could quote the head (the review of #1180, 2026-11-24)."""
+    from .runner import FOLDED  # runner imports this module
+    prompt = store.round_prompt(task, rnd)
+    text = prompt.read_text() if prompt.is_file() else ""
+    if not text.startswith(FEEDBACK_HEAD):
+        folded = task.round_dir(rnd) / FOLDED
+        text = folded.read_text() if folded.is_file() else ""
+    return feedback(text)
 
 
 def gather(task: store.Task, outcome: str | None = None) -> list[dict]:
@@ -121,8 +141,7 @@ def gather(task: store.Task, outcome: str | None = None) -> list[dict]:
 
     for d in sorted(task.dir.glob("rounds/*"), key=lambda p: int(p.name) if p.name.isdigit() else 0):
         rnd = int(d.name) if d.name.isdigit() else 0
-        prompt = store.round_prompt(task, rnd)  # a fresh session's handoff took prompt.md's place
-        for body in feedback(prompt.read_text()) if prompt.is_file() else ():
+        for body in round_feedback(task, rnd):
             for item in items(body):
                 add("feedback", rnd, item)
         summary = d / "summary.md"
