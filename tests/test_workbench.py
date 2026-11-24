@@ -749,7 +749,12 @@ class Lifecycle(Base):
         self.assertNotIn("auto-fix skipped", (task.round_dir(1) / "summary.md").read_text())
         # a module that is nowhere in the repo yet, but the spec names it: its file, or its
         # dotted name; a top-level one the spec names alone (`pytest`) is still a missing tool
+        # when the user's own environment imports it (#1209)
         line = lambda m: {"exit": 1, "tail": f"/usr/bin/python3: No module named {m}"}  # noqa
+        tools = Path(self.tmp.name) / "user-site"
+        (tools / "pytest").mkdir(parents=True)
+        (tools / "pytest" / "__init__.py").write_text("")
+        self.enterContext(mock.patch.dict(os.environ, {context.USER_PYTHONPATH: str(tools)}))
         prompt = store.round_prompt(task, 1)
         # as wb start writes it: the spec, then the protocol, whose acceptance line names --test's
         # own module, which counts for nothing (#1181's second review)
@@ -766,6 +771,33 @@ class Lifecycle(Base):
                          "/usr/bin/python3: No module named pytest")
         self.assertEqual(runner.missing_command(line("elsewhere.cli"), task),
                          "/usr/bin/python3: No module named elsewhere.cli")
+
+    def test_a_new_top_level_package_the_spec_names_goes_back_to_the_agent_and_a_src_layout_counts(self):
+        # #1209 (bar round 3 of 2.0): `python3 -m answerpkg` for a spec making answerpkg was taken
+        # for a tool the agent's environment lacks, as a top-level name the spec named counted only
+        # dotted: a check-in before round 1 saying no round can fix that, and auto-fix skipped
+        self.spec.write_text("Make a new Python package answerpkg1209 whose `python3 -m "
+                             "answerpkg1209` prints 42.\n")
+        self.start("t-new", "ok", "--test", "python3 -m answerpkg1209", "--auto-fix", "1",
+                   "--no-self-review")
+        st = wait_phase("t-new", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 2))
+        self.assertIn("No module named answerpkg1209", st["base_check"]["tail"])
+        self.assertFalse([r for r in store.notices() if r["task"] == "t-new" and r["kind"] == "checkin"])
+        task = store.Task("t-new")
+        self.assertIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        self.assertNotIn("auto-fix skipped", (task.round_dir(1) / "summary.md").read_text())
+        # one the user's own environment imports is still a tool the agent's lacks (#1181)
+        tools = Path(self.tmp.name) / "user-site"
+        (tools / "answerpkg1209").mkdir(parents=True)
+        (tools / "answerpkg1209" / "__init__.py").write_text("")
+        line = {"exit": 1, "tail": "/usr/bin/python3: No module named answerpkg1209"}
+        with mock.patch.dict(os.environ, {context.USER_PYTHONPATH: str(tools)}):
+            self.assertEqual(runner.missing_command(line, task), line["tail"])
+            # a src layout's package, which the spec need not name, is the repo's own
+            store.round_prompt(task, 1).write_text("Print 42.\n")
+            (task.worktree / "src" / "answerpkg1209").mkdir(parents=True)
+            self.assertIsNone(runner.missing_command(line, task))
 
     def test_a_dotted_module_the_agents_environment_lacks_checks_in_though_the_acceptance_line_names_it(self):
         # #1181's second review (2026-11-24): own_module read the whole round 1 prompt, whose
