@@ -33274,7 +33274,10 @@ class Privacy(_KeyholeTest):
         typed = self.repo.with_name(self.repo.name.swapcase())       # ext4 keeps the two apart
         self.local_only(key=typed)
         self.role(via="api", api=FLASH)
-        self.assertIsNone(cli.privacy.local_only(self.repo))         # case counts where the FS keeps it
+        # case counts where the FS keeps it; on a real APFS (the macOS runners) the key holds
+        # unpatched: the test assumed ext4 (nightly run 45362198509, 2026-11-24)
+        folds = store.folds_case(self.repo)
+        self.assertEqual(cli.privacy.local_only(self.repo), str(typed) if folds else None)
         with mock.patch.object(store, "folds_case", lambda p: True):  # as on APFS
             self.assertEqual(cli.privacy.local_only(self.repo), str(typed))
             code, err = self.fails("start", "t-lo-case", "--spec", str(self.spec), "--repo", str(self.repo))
@@ -33297,9 +33300,11 @@ class Privacy(_KeyholeTest):
         def as_on_apfs(p):  # the key exists as typed: git finds the repo, its `.git` joined to `p`
             c = common(on_disk(p))
             return typed / c.relative_to(real) if c and Path(p).is_relative_to(typed) else c
+        folds = store.folds_case(wt)                                  # a real APFS: held as is
         with mock.patch.object(context.gitops, "common_dir", as_on_apfs), \
                 mock.patch.object(context.gitops, "toplevel", lambda p: top(on_disk(p))):
-            self.assertIsNone(cli.privacy.local_only(wt))            # case counts where the FS keeps it
+            # case counts where the FS keeps it (nightly run 45362198509, 2026-11-24: not on macOS)
+            self.assertEqual(cli.privacy.local_only(wt), str(typed) if folds else None)
             with mock.patch.object(store, "folds_case", lambda p: True):
                 self.assertEqual(cli.privacy.local_only(wt), str(typed))
 
