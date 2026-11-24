@@ -6317,6 +6317,58 @@ class Context(Base):
         self.assertEqual((t.status["round_for"], t.status["self_review_tree"]), ("steer", None))
         self.assertIsNone(runner.green_tree(t, "began"))
 
+    def test_a_self_review_stopped_mid_check_and_resumed_that_reads_on_its_green_tree_goes_to_review(self):
+        # #1228 (bar loop round 4, 2026-11-24): wb resume started round 3 with round_for `resume`
+        # and no self_review_tree, so the resumed self-review, its check copied back and reading
+        # on, was stopped as stuck on a green change (90 reads: its copy back is a change, so the
+        # guard counts again from it), the step counted against the model
+        os.environ.update(FAKE_SELF_STALL="1", FAKE_READS="90")
+        self.start("t-srr", "selfreads", "--test", TEST_CMD, "--self-review")
+        t = store.Task("t-srr")
+        deadline = time.time() + 30
+        while not (t.status.get("round") == 2 and (t.worktree / "answer.txt").is_file()
+                   and (t.worktree / "answer.txt").read_text() == "41\n"):
+            self.assertLess(time.time(), deadline, "the self-review never began its check")
+            time.sleep(POLL)
+        run_wb("stop", "t-srr")
+        self.assertEqual((t.status["phase"], t.status["round_for"]), ("stuck", "self_review"))
+        os.environ.pop("FAKE_SELF_STALL")  # the resumed session copies the check back and reads on
+        self.assertIn("resumed t-srr in a fresh session (round 3)", run_wb("resume", "t-srr"))
+        st = wait_phase("t-srr", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 3, "resume"), st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertNotIn("no_edit", st.get("guards") or {})
+
+    def test_a_resume_keeps_a_self_reviews_green_tree_and_drops_any_other_rounds(self):
+        # #1228: the update path, a self-review written as round 2 and stopped before it ran, then
+        # wb resume; a resume after a resume; a resume of a feedback round, its key a stale one;
+        # and wb feedback after an infra stop of a self-review, the other round_for `resume`
+        self.start("t-srz", "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+        wait_phase("t-srz", {"review"})
+        t = store.Task("t-srz")
+        t.round_dir(2).mkdir(parents=True, exist_ok=True)
+        t.round_dir(2).joinpath("prompt.md").write_text("Before Claude reviews this, check it.")
+        t.set_status(phase="stuck", last="stopped by the reviewer", round=2, round_for="self_review",
+                     self_review_tree="green")
+
+        def resume():
+            t.set_status(phase="stuck", last="stopped by the reviewer")
+            with mock.patch.object(cli, "spawn_runner"):
+                run_wb("resume", "t-srz")
+            return t.status["round"], t.status["round_for"], runner.green_tree(t, "began")
+
+        self.assertEqual(resume(), (3, "resume", "green"))
+        self.assertEqual(resume(), (4, "resume", "green"))
+        t.set_status(round_for="feedback")  # its self_review_tree still the old "green"
+        self.assertEqual(resume(), (5, "resume", None))
+        self.assertIsNone(t.status["self_review_tree"])
+        t.set_status(phase="stuck", round_for="self_review", self_review_tree="green", infra="provider")
+        t.event({"ts": store.now(), "round": 5, "kind": "round"})  # it reached the agent
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", "t-srz", "--text", "carry on")
+        self.assertEqual((t.status["round"], t.status["round_for"], runner.green_tree(t, "began")),
+                         (6, "resume", "green"))
+
     def test_without_self_review_claude_is_woken_after_the_first_clean_round(self):
         self.start("t-nsr", "ok", "--test", TEST_CMD)
         self.assertEqual(wait_phase("t-nsr", {"review"})["round"], 1)

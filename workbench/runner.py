@@ -1611,16 +1611,19 @@ def no_edit_limit(window, *, api: bool) -> int:
 
 
 # The rounds that carry a self-review on, as status round_for: the self-review's own, the fresh
-# session taking a full one over (#1188), and a steer round, the runner's think nudge or Claude's
-# note, mid-round or after (#1207). Each keeps the self-review's green tree only when the round
-# before was one of these too (carried_tree), so any other round's handover or note drops it.
-SELF_REVIEW_ROUNDS = ("self_review", "fresh", "steer")
+# session taking a full one over (#1188), a steer round, the runner's think nudge or Claude's
+# note, mid-round or after (#1207), and a resume, wb resume's or wb feedback's after an infra
+# stop, of a round stopped from outside (an update, wb stop, a signal, a reaped runner: #1228).
+# Each keeps the self-review's green tree only when the round before was one of these too
+# (carried_tree), so any other round's handover, note or resume drops it.
+SELF_REVIEW_ROUNDS = ("self_review", "fresh", "steer", "resume")
 
 
 def carried_tree(task: store.Task) -> str | None:
     """Status `self_review_tree` for the next round when it carries on this one (a handover, a
-    steer round), None when this round is no part of a self-review: what _full_round and
-    _steer_round write, so the key outlives only the rounds that carry a self-review on."""
+    steer round, a resume), None when this round is no part of a self-review: what _full_round,
+    _steer_round, wb resume and wb feedback's infra resume write, so the key outlives only the
+    rounds that carry a self-review on."""
     st = task.status
     return st.get("self_review_tree") if st.get("round_for") in SELF_REVIEW_ROUNDS else None
 
@@ -1629,12 +1632,13 @@ def green_tree(task: store.Task, began: str) -> str | None:
     """The tree (gitops.mark) the self-review this round is part of began on, the one the last
     round's tests passed on (status `self_review_tree`), or None when the round is no part of a
     self-review (SELF_REVIEW_ROUNDS: round_for `self_review`, `fresh` for the session carrying
-    one on past a full window, `steer` for the round a nudge or a note started in one). Those
-    began on the tree as the round before left it, maybe a check still commented out, so their
-    own start is no test; held to none, the explore stop of a fresh one was a stuck notice on a
-    green change, the step counted against it (#1188, 2026-11-24), and a nudged or steered one's
-    still was (#1207, 2026-11-24). A task queued before the key: the round's own start, as #1168
-    had it."""
+    one on past a full window, `steer` for the round a nudge or a note started in one, `resume`
+    for the one wb resume started after it). Those began on the tree as the round before left
+    it, maybe a check still commented out, so their own start is no test; held to none, the
+    explore stop of a fresh one was a stuck notice on a green change, the step counted against
+    it (#1188, 2026-11-24), a nudged or steered one's still was (#1207, 2026-11-24), and a
+    resumed one's after an update or wb stop still was (#1228, 2026-11-24). A task queued before
+    the key: the round's own start, as #1168 had it."""
     st = task.status
     if st.get("round_for") == "self_review":
         return st.get("self_review_tree", began)
