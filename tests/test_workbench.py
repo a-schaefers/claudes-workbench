@@ -5225,8 +5225,24 @@ class Context(Base):
         self.assertEqual((st["phase"], st["handovers"]), ("review", 1), st.get("last"))
         self.assertTrue(self.runs()[1]["prompt"].startswith(
             "You are picking this task up in a fresh session (OpenCode had to compact the last session"))
-        self.assertTrue(runner.compacted_between(("s", 9900), "s", 4900, 0.5 * 32768, 32768, pending=12000))
-        self.assertFalse(runner.compacted_between(("s", 9900), "s", 4900, 0.5 * 32768, 32768))
+        self.assertTrue(runner.compacted_between(("s", 9900, 9800), "s", 4000, 0.5 * 32768, 32768, pending=12000))
+        self.assertFalse(runner.compacted_between(("s", 9900, 9800), "s", 4000, 0.5 * 32768, 32768))
+
+    def test_a_long_think_is_not_read_as_a_compaction_and_leaves_the_floor_at_what_was_read(self):
+        # #1219 (bar round 3, #1030): MiMo on a 32K window at fresh_at 0.5 thought 8192 tokens,
+        # counted in the step's output and never sent back; the next step's context (5414) was
+        # under half of that step's (13393) with the history kept, so a 'compacted' event said a
+        # compaction that never happened, the floor became 13393 (true ~5.2K), and in round 2
+        # the fresh-session handover at 50% was refused ('had read 40%'), so OpenCode compacted
+        self.assertFalse(runner.compacted_between(("s", 291 + 4910 + 8192, 291 + 4910), "s",
+                                                  40 + 5197, 0.5 * 32768, 32768))
+        store.home().joinpath("tuning.json").write_text('{"fresh_at": 0.5, "self_review": 0}')
+        self.start("t-1219", "think", "--test", TEST_CMD)
+        st = wait_phase("t-1219", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st.get("handovers", 0)), ("review", 0))
+        self.assertEqual(st["session_floor"], 40 + 5197)      # its prompt, never the think in it
+        kinds = {e.get("kind") for e in store.read_jsonl(store.Task("t-1219").dir / "events.jsonl")[0]}
+        self.assertFalse(kinds & {"compacted", "reading_full", "full"}, kinds)
 
     def test_a_session_compacted_mid_round_with_no_room_for_a_successor_is_said_and_carries_on(self):
         # #774: with its reading near the handover point, a successor would have no room: it
@@ -5685,7 +5701,7 @@ class Context(Base):
         self.start("t-c10", "floor", "--test", TEST_CMD)
         st = wait_phase("t-c10", {"review", "stuck", "failed"}, timeout=60)
         self.assertEqual((st["phase"], st.get("handovers", 0), len(self.runs())), ("review", 0, 1))
-        self.assertEqual(st["session_floor"], 17000)
+        self.assertEqual(st["session_floor"], 16900)           # its prompt at its first change (#1219)
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-c10"]
         self.assertEqual([r["kind"] for r in rows], ["review"])
         self.assertIn("reached 76% of its window and had read 51% before its first change",
@@ -5698,7 +5714,7 @@ class Context(Base):
         os.environ["FAKE_FILL"] = "25000"                   # the export: 76% of the 32K window
         self.start("t-781", "floor", "--auto-fix", "1", "--no-base-check", "--test", "exit 1")
         st = wait_phase("t-781", {"review", "stuck", "failed"}, timeout=60)
-        self.assertEqual((st["phase"], st["round"], st["session_floor"]), ("review", 2, 17000))
+        self.assertEqual((st["phase"], st["round"], st["session_floor"]), ("review", 2, 16900))
         first, second = self.runs()[:2]
         self.assertTrue(second["session"])                  # the same session, not a re-read
         self.assertEqual(second["prompt"].split("\n")[0][:30], "The acceptance tests fail. Com")

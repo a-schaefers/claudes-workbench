@@ -1089,7 +1089,8 @@ Claude read the diff.
 - *Mid-round*, at each `step_finish`: past `fresh_at × window` a fresh session takes over
   (`_full_round`), only when this session changed a file (`gitops.mark`, a hash of the diff and
   untracked files, moved) and
-  `status.session_floor` (its context at its first change) sits `HANDOVER_ROOM` (a quarter of the
+  `status.session_floor` (its prompt, input and cache, at its first change: never the step's
+  output, where a thinking model's long think is counted and never sent back, #1219) sits `HANDOVER_ROOM` (a quarter of the
   window) below the point (seen: twenty handovers with no edit). Otherwise it carries on and a
   `reading_full` event (`_reading_full`, once a round) becomes the report's `reading:` line, waking
   no one. At most `HANDOVER_MAX` a runner, then stuck (2026-11-16 audit: hours of handovers, Claude
@@ -1097,11 +1098,13 @@ Claude read the diff.
   ends the agent's turn (`step_finish` reason `stop`, `turn_over`): it is done, so the round ends
   as it would and the between-rounds check starts any next round fresh (#1151: a finished agent
   was killed there and a fresh session paid to redo the round). A compaction between steps
-  (`compacted_between`, #774: `run --format json` prints none, so a step under half the last
-  one's, which was within `fresh_ceiling`'s margin with the tool output since counted in, each
+  (`compacted_between`, #774: `run --format json` prints none, so a step whose prompt, input and cache, is
+  under half the last one's, whose context was within `fresh_ceiling`'s margin with the tool output since counted in, each
   tool row's `part.state.output` at `context.CHARS_PER_TOKEN` a token, as OpenCode compacts with
   it in: parallel reads from a step well under the point went unseen, #1086) hands over given a change and room (the floor,
-  or the last step's context when nothing changed before it; status `full_compacted`, reason
+  or the last step's prompt when nothing changed before it; prompts, not contexts: a
+  thinking model's 8K think in the last step's output, never sent back, read as a compaction
+  with the history kept, inflated the floor and blocked the real handover, #1219; status `full_compacted`, reason
   `COMPACTED`), else a `compacted` event ("…: its turn ended there" on its turn's last step). A *failed* compaction (`error` type `compaction.failed`, or a message
   opening "Compaction ", `events.compaction_failed`) hands over at once whatever the exit, change,
   `keep` or room: `full` the last step's context (else the window), `compacted` and
@@ -6243,7 +6246,7 @@ off), not `wb start`'s.
 | `unrecorded` | `{outcome, step, extra}` until the results row is written: what a retried accept/discard writes |
 | `closing` | `wb accept` after its commit: `{commit, step, merge, merge_into, merge_as, sign, merge_from?, merged_head?}`, with `tip`; `sign` false keeps a retry's merge unsigned; a retry uses that object and destination (`gitops.squashed` from `merge_from`), a recovered refusal still exits 5 (#246, #432); while it stands, discard, feedback, next, resume, takeover refuse (`cli._accepting`) |
 | `grants_kept` | `{allow, paths}` at close, for `context.grants` afterwards (`wb bench add`) |
-| `session`, `sessions`, `session_mark`, `session_floor` | the session; earlier ones; `gitops.mark` at its start; context read at its first change |
+| `session`, `sessions`, `session_mark`, `session_floor` | the session; earlier ones; `gitops.mark` at its start; its prompt (input and cache) at its first change |
 | `claude_rules_gone` | the round whose layer deleted an earlier wb's copy of Claude's global files (`runner.write_config_layer`, #1119): that round's report adds `runner.RULES_GONE` |
 | `opencode_home` | `true` once a round ran in the task's own OpenCode home (`run_round`, #1010); a `session` without it began in the user's store, and the next round starts fresh (`fresh_reason`: `OLD_STORE`, the old session's last words exported from there) |
 | `context` | one-round instruction: `fresh`, `keep`, `full` |
@@ -6573,7 +6576,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
-`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
+`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
 `retry` (`FAKE_RETRY_EVERY`), `say`, `stay` (as `ok`, then open and silent: #1160), `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of

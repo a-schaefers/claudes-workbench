@@ -1673,11 +1673,14 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
            "answered": False}
     window = st.get("window")
     fresh_at = tuning.value(task, "fresh_at")
-    # The last step's (session, context): a later step in it carrying under half of one that was
-    # near the handover point is OpenCode's compaction, which `run --format json` doesn't print.
-    # One tool result bigger than the margin before it (a long file, a test log) compacted the
-    # session between two steps, and the agent worked on from its summary (#774).
-    last_step: tuple = (None, 0)
+    # The last step's (session, context, prompt): a later step in it whose prompt is under half
+    # of one whose context was near the handover point is OpenCode's compaction, which `run
+    # --format json` doesn't print. One tool result bigger than the margin before it (a long
+    # file, a test log) compacted the session between two steps, and the agent worked on from
+    # its summary (#774). Prompts, not contexts: a thinking model's long think is in its step's
+    # output and never sent back, so the next step's context was under half of it with the
+    # history kept, and a false compaction and an inflated floor followed (#1219, 2026-11-24).
+    last_step: tuple = (None, 0, 0)
     # The tool output since that step, in tokens (bytes / CHARS_PER_TOKEN, OpenCode's own
     # estimate): OpenCode counts it in before the next request, and six parallel 50 KB results
     # from a step at 40K compacted the session with no step near the point (#1086, 2026-11-23)
@@ -1761,6 +1764,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 out["tok_in"] += row["in"]
                 out["tok_out"] += row["out"]
                 used = row["in"] + row.get("cache", 0) + row["out"] + row.get("reasoning", 0)  # #644
+                # what the step read (the history it was sent): what a successor re-reads, never
+                # the step's output, which is a long think on a thinking model (#1219)
+                prompt = row["in"] + row.get("cache", 0)
                 st = task.status
                 task.set_status(tok_in=st.get("tok_in", 0) + row["in"], tok_out=st.get("tok_out", 0) + row["out"],
                                 live_used={"session": st.get("session"), "used": used},  # #262
@@ -1776,10 +1782,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 changed = None
                 sid = raw.get("sessionID") or task.status.get("session")
                 before = last_step[1] + pending  # what OpenCode had when it compacted
-                if window and compacted_between(last_step, sid, used, fresh_at * window, window, pending):
+                if window and compacted_between(last_step, sid, prompt, fresh_at * window, window, pending):
                     changed = marks != {gitops.mark(task.worktree)}
                     if changed and floor is None:  # it changed nothing by the step before
-                        floor = last_step[1]
+                        floor = last_step[2]
                         task.set_status(session_floor=floor)
                     # and not on its turn's last step (#1151): the agent is done, so the event,
                     # and fresh_reason (the export counts the compaction) starts any next round fresh
@@ -1793,11 +1799,11 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                                             + ("its turn ended there" if turn_over else
                                                "it works on from its own summary")})
                 if used:
-                    last_step, pending = (sid, used), 0
+                    last_step, pending = (sid, used, prompt), 0
                 if floor is None and window:
                     changed = marks != {gitops.mark(task.worktree)}
                     if changed:
-                        floor = used
+                        floor = prompt
                         task.set_status(session_floor=floor)
                 if window and not keep and used >= fresh_at * window and not out["full"]:
                     if changed is None:
@@ -4722,14 +4728,18 @@ def round_asks(task: store.Task, n: int) -> list[str]:
 HANDOVER_ROOM = 0.25
 
 
-def compacted_between(last: tuple, sid, used: int, point: float, window: int, pending: int = 0) -> bool:
-    """Whether OpenCode compacted the session between the last step (`last`: its session and
-    context) and this one: in the same session, this step carries under half of what the last
-    did, and the last, with the tool output since (``pending``, tokens: OpenCode compacts with
-    it counted in, #1086), was within one step's growth (fresh_ceiling's margin) of the handover
-    point, where only OpenCode's compaction shrinks a context (#774)."""
+def compacted_between(last: tuple, sid, prompt: int, point: float, window: int, pending: int = 0) -> bool:
+    """Whether OpenCode compacted the session between the last step (`last`: its session,
+    context and prompt) and this one: in the same session, this step's prompt (input and cache)
+    is under half of the last one's, and the last's context (its output in, as OpenCode counts
+    it, #644), with the tool output since (``pending``, tokens: OpenCode compacts with it
+    counted in, #1086), was within one step's growth (fresh_ceiling's margin) of the handover
+    point, where only OpenCode's compaction shrinks a prompt (#774). Prompts, never contexts:
+    a long think counted in the last step's output is not sent back, so with the history kept
+    the next context was under half of it (#1219: 13393, then 5414)."""
     margin = max(STEP_GROWTH, tuning.CEILING_MARGIN * window)
-    return bool(sid) and last[0] == sid and 0 < used < last[1] / 2 and last[1] + pending >= point - margin
+    return (bool(sid) and last[0] == sid and 0 < prompt < last[2] / 2
+            and last[1] + pending >= point - margin)
 
 
 def _reading_full(task: store.Task, n: int, used: int, window: int,
