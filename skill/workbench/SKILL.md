@@ -88,12 +88,18 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
      dialog's Don't): say which roles it left on the GPU (after an earlier Allow in the OpenRouter
      routes, `wb route` shows what is set) and that their tasks need a GPU model; ask again only if
      they bring it up. Ask nothing before it: no server install, no `wb scout`.
-  3. **No GPU model and no key**: lay out both ways in two lines, a local server
-     (reference/models.md, which names no server for them) or an API provider's key: one they
-     export in their shell (the variable OpenCode names) works as it is, else `opencode auth login
-     <provider>` in their own terminal (it asks for the key there: never from your Bash or `!`)
-     or `/connect` in OpenCode; let the user pick, and install nothing unasked. A server: `wb scout`, recommend
-     what fits the machine, `wb model add <provider/model> [--pull]`.
+  3. **No GPU model and no key**: lay out the three ways in three lines, a local server
+     (reference/models.md, which names no server for them), an API provider's key (one they
+     export in their shell, the variable OpenCode names, works as it is, else `opencode auth login
+     <provider>` in their own terminal, which asks for the key there: never from your Bash or `!`,
+     or `/connect` in OpenCode), or try it now on OpenCode's free models, no account (their
+     provider may keep or train on the code); let the user pick, and install nothing unasked. A
+     server: `wb scout`, recommend what fits the machine, `wb model add <provider/model> [--pull]`.
+     The free try: `wb models --api opencode`, pick one marked `free`, not `no tool calls`, with a
+     window of 128K or more, preferring one Zen's page (opencode.ai/docs/zen, checked today) says
+     keeps no data (the free line-up changes: never from memory); route **trivial only**, `wb
+     route trivial <id>` (the dialog shows the free line; no cap is asked), then `wb try` (its
+     sample is workbench's own code, so none of theirs goes out). Real work then needs a GPU or a key.
   4. **A GPU model already** (keys or not): as before; mention once, in a line, that a provider
      they connected could take a role if they want. Never push it.
   5. Ollama models only: `wb optimize estimate`, then `wb optimize start` (a minute or two,
@@ -249,7 +255,8 @@ user's `~/.config/workbench/AGENTS.md` to its provider (never their `~/.claude` 
 (the provider, as `wb route --dry-run`'s line names it; its data-policy page comes in the note
 of the repo's first task there). Never remove a `local_only`
 from commands.json (a repo the user keeps off API models: `wb start` exits 3 with the choices,
-and a task already on API stops before its next round: wb takeover or wb discard; ask the user). Never name a free model first (the provider may keep or train on the code), and
+and a task already on API stops before its next round: wb takeover or wb discard; ask the user). Never name a free model first (the provider may keep or train on the code;
+only First run step 3's free try offers one, as one choice of three), and
 never pick an OpenRouter backend (`--order`) for the user: ask which. An API task's lane hides
 each registry config that holds a credential (a token, password, key; one without stays readable
 and its tool works; with no lane, as on macOS, none is hidden and there's no note); when

@@ -1902,15 +1902,30 @@ def unspoken(pid: str, package: str) -> bool:
     return keyhole.protocol_of(package) is None and not keyhole._signs(pid, package)
 
 
+ZEN = "opencode"  # OpenCode's own provider (Zen): its free models run keyless (#1193)
+
+
+def keyless_free(m) -> bool:
+    """One of OpenCode Zen's free models with no key stored (#1193): OpenCode 2.3.2 serves those
+    with the apiKey "public" (plugin/provider/opencode.ts), so a task runs it through the keyhole
+    with that in place of a key (keyhole.PUBLIC), for its rate-limit and quota hold, the meter
+    and the pin to the task's model. Only Zen's: another provider's $0 model with no key ("none")
+    has no key a task could send, and stays refused (cli._runs_held)."""
+    return (getattr(m, "kind", "gpu") == "api" and not getattr(m, "cloud", False)
+            and m.provider == ZEN and m.key == "none" and bool(m.free))
+
+
 def keyhole_refusal(m: Model) -> str:
     """Why ``m`` can't run through the keyhole for its package, or "". Only keyhole.start checked
     it, so a Gemini, Azure or Cohere model was listed, offered, approved in the dialog and started,
     then failed every time (#1066, 2026-11-23). A model needing no keyhole (an Ollama cloud one,
-    a keyless free one: runner.needs_keyhole) is never refused here. Copilot's Auto model is
+    a keyless free one other than Zen's: runner.needs_keyhole) is never refused here; Zen's goes
+    through the keyhole (#1193), so its package is checked as any. Copilot's Auto model is
     (#1191): its router picks another model each session, which the keyhole can't hold to one."""
     if m.provider == COPILOT and m.name == COPILOT_AUTO:
         return COPILOT_AUTO_WHY
-    if m.cloud or m.key == "none" or (m.free and not m.key) or not unspoken(m.provider, m.package):
+    if m.cloud or ((m.key == "none" or (m.free and not m.key)) and not keyless_free(m)) \
+            or not unspoken(m.provider, m.package):
         return ""
     return unspoken_why(provider_name(m), m.package)
 

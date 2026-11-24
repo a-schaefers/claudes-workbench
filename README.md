@@ -51,7 +51,8 @@ agents typically costs Claude about half the tokens of writing the code itself.
 - A model: one you connected in OpenCode (`/connect`), or a local one. **Already run a server**
   that speaks the OpenAI API? Claude uses it (tool calls and a 32K context window recommended,
   16K at the least). **None yet?** Claude suggests one that fits your hardware and asks before
-  installing or downloading anything.
+  installing or downloading anything. **No GPU and no key?** Claude can let you try it first on
+  OpenCode's free models, with no account (their provider may keep or train on the code).
 - (optional) An image or audio model, for pictures and sound. The first time a project needs one,
   Claude proposes a model that fits your machine and your use's licence, and asks before
   downloading it. Small speech models run on the CPU; music wants a GPU.

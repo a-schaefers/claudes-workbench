@@ -53,6 +53,10 @@ agent's OpenCode: its Copilot plugin adds Copilot's headers (X-Initiator, Openai
 X-Interaction-Type, X-GitHub-Api-Version) by provider, whatever the credential (checked on 2.3.2,
 RealOpenCodeAPI), and without one it never asks GitHub, nor `/models` or Copilot's Auto router.
 
+OpenCode Zen's free models with no key stored (models.keyless_free, #1193) go through it too, with
+Zen's own `public` as the key (PUBLIC): no secret, so none is loaded and nothing is redacted for
+it, but the hold, the health record, the meter and the pin to the task's model are the same.
+
 Standard library only: it runs in the runner.
 """
 from __future__ import annotations
@@ -194,14 +198,19 @@ class Key:
     """A provider's static API key, held in the runner's memory only. Its repr and str name the
     provider, never the key. ``source``: "" for a stored key, else the variable it was read from
     (`$DEEPSEEK_API_KEY`, #1189): a name, never the value. ``meta``: what a sign-in's credential
-    says besides its token, never a secret (Copilot's `enterpriseUrl` and `apiEndpoint`, #1191)."""
-    __slots__ = ("provider", "_value", "source", "meta")
+    says besides its token, never a secret (Copilot's `enterpriseUrl` and `apiEndpoint`, #1191).
+    ``secret`` False: a value that is no secret (PUBLIC, OpenCode Zen's keyless free tier, #1193),
+    which nothing redacts: "public" replaced in every answer turned a model's `public class` into
+    `[key redacted] class`."""
+    __slots__ = ("provider", "_value", "source", "meta", "secret")
 
-    def __init__(self, provider: str, value: str, source: str = "", meta: dict | None = None):
+    def __init__(self, provider: str, value: str, source: str = "", meta: dict | None = None,
+                 secret: bool = True):
         self.provider = provider
         self._value = value
         self.source = source
         self.meta = dict(meta or {})
+        self.secret = secret
 
     @property
     def value(self) -> str:
@@ -230,7 +239,7 @@ def redact(text: str, key: str | Key = "") -> str:
     """``text`` with the key, its first 8 and last 4 characters, anything key-shaped (KEYLIKE)
     and any bearer credential replaced with [key redacted]. One pass, so a replacement is never
     matched again."""
-    key = key.value if isinstance(key, Key) else (key or "")
+    key = (key.value if key.secret else "") if isinstance(key, Key) else (key or "")
     parts = [re.escape(key)] if key else []
     if len(key) >= 12:  # shorter, its fragments would be most of it, and match everywhere
         parts += [re.escape(key[:8]), re.escape(key[-4:])]
@@ -459,6 +468,12 @@ def _from_env(provider: str, var: str) -> Key:
     if why := env_refusal(provider, var):
         raise KeyholeError(f"{NEEDS}: {why}")
     return Key(provider, os.environ[var].strip(), source=f"${var}")
+
+
+# The key OpenCode 2.3.2 itself sends for Zen's free models when none is stored (packages/core/
+# src/plugin/provider/opencode.ts: `apiKey: "public"`, the priced models turned off). A keyless
+# free task's keyhole sends it upstream in place of a key (#1193): nothing to load, nothing secret.
+PUBLIC = "public"
 
 
 def load_key(provider: str, package: str = "") -> Key:
@@ -768,6 +783,11 @@ class Keyhole:
 
     def redact(self, text: str) -> str:
         return redact(text, self._key)
+
+    def secret_bytes(self) -> bytes:
+        """The key as the answers are scrubbed of it: b"" for one that is no secret (PUBLIC), which
+        is never replaced (bytes.replace(b"", …) would put the mark between every byte)."""
+        return self._key.value.encode() if self._key.secret else b""
 
     def saw(self, model, by) -> None:
         """A response named the model that served it (and OpenRouter its provider): status
@@ -1388,7 +1408,7 @@ def _handler(kh: Keyhole):
             sse = "event-stream" in ctype and "amazon.eventstream" not in ctype
             frames = bytearray() if "amazon.eventstream" in ctype else None  # Bedrock's (#1192)
             self.used = {}  # this response's usage, merged: kh.usage once, before its end (#1114)
-            key = kh._key.value.encode()
+            key = kh.secret_bytes()
             hold = bytearray()  # SSE: a partial line; else the last len(key) - 1 bytes
             whole = bytearray()
             started, marked = False, time.monotonic()  # the first data; the queue's last mark
@@ -1426,14 +1446,14 @@ def _handler(kh: Keyhole):
                             frames = None if rest is None else bytearray(rest)
                         elif len(whole) < SNIFF_CAP and "eventstream" not in ctype:
                             whole += piece
-                        out = bytes(hold).replace(key, REDACTED.encode())
-                        cut = max(0, len(out) - (len(key) - 1))
+                        out = bytes(hold).replace(key, REDACTED.encode()) if key else bytes(hold)
+                        cut = max(0, len(out) - max(len(key) - 1, 0))
                         send(out[:cut])
                         hold = bytearray(out[cut:])
                 if sse and hold:
                     send(self.data_line(bytes(hold)))
                 elif hold:
-                    send(bytes(hold).replace(key, REDACTED.encode()))
+                    send(bytes(hold).replace(key, REDACTED.encode()) if key else bytes(hold))
                 hold = bytearray()
                 if not sse and whole:
                     try:
@@ -1478,7 +1498,8 @@ def _handler(kh: Keyhole):
             """One SSE line read for the model and usage, and as it goes on: with the key out,
             and through redact when it carries an `error` (a mid-stream error arrives inside a
             200: Anthropic's `event: error`, OpenRouter's `data: {"error": …}`)."""
-            safe = ln.replace(kh._key.value.encode(), REDACTED.encode())
+            key = kh.secret_bytes()
+            safe = ln.replace(key, REDACTED.encode()) if key else ln
             s = ln.strip()
             if not s.startswith(b"data:"):
                 return safe
@@ -1592,7 +1613,9 @@ def start(task, m, *, log=None, on_usage=None, on_health=None, room=None) -> Key
     if copilot and m.name == "auto":  # models.COPILOT_AUTO: its router picks another model
         raise KeyholeError(f"{NEEDS}: Copilot's Auto model picks another model each session, and "
                            "a task keeps to one: pick a Copilot model by name")
-    key = load_key(m.provider, package)
+    from . import models
+    # Zen's free tier with no key stored (#1193): OpenCode's own "public", never `auth export`
+    key = Key(m.provider, PUBLIC, secret=False) if models.keyless_free(m) else load_key(m.provider, package)
     upstream, via = mirror_path(package, m.base_url), ""
     if copilot:  # the account's own endpoint, asked once per task; Bearer on every route (#1191)
         root = copilot_endpoint(key)
