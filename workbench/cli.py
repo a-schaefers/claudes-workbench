@@ -1877,7 +1877,8 @@ def cmd_next(a):
             with _settle_proposals(task, a.take_claude_md):
                 # a step that changed nothing advances with no commit: it died on "nothing to
                 # commit" and the task stayed on the step (#507, Claude's audit of 1.90)
-                wrote = runner.agent_wrote(task) + runner.hand_wrote(task)  # Claude's too (#1179)
+                # Claude's too (#1179), and the agent's shell's (#1210)
+                wrote = runner.agent_wrote(task) + runner.hand_wrote(task) + runner.shell_wrote(task)
                 left = _left_out(task, wrote, a.include)
                 if gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote):
                     commit = gitops.commit_all(
@@ -2702,12 +2703,13 @@ def _resume(task: store.Task) -> None:
 
 
 def _left_out(task: store.Task, wrote: list[str], include: bool) -> list[str]:
-    """The ignored files changed since the agent stopped that a commit of the worktree leaves out
-    (runner.hand_left; with ``include``, less the ignored ones of ``wrote`` it adds); [] when git
-    can't say. A .csv Claude wrote beside its module under lib/ was dropped without a word, and
-    deleted with the worktree (#1179's review, 2026-11-24)."""
+    """The ignored files changed in the worktree that a commit of it leaves out (runner.hand_left,
+    since the agent stopped, and runner.shell_left, since its first round, #1210; with
+    ``include``, less the ignored ones of ``wrote`` it adds); [] when git can't say. A .csv Claude
+    wrote beside its module under lib/ was dropped without a word, and deleted with the worktree
+    (#1179's review, 2026-11-24)."""
     try:
-        left = gitops.ignored_files(task.worktree, runner.hand_left(task))
+        left = gitops.ignored_files(task.worktree, runner.hand_left(task) + runner.shell_left(task))
         return sorted(set(left) - set(gitops.ignored_files(task.worktree, wrote) if include else ()))
     except (gitops.GitError, OSError):
         return []
@@ -3782,8 +3784,9 @@ def cmd_accept(a):
             if not commit:
                 head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
                 with _settle_proposals(task, a.take_claude_md):  # kept if the commit fails (#507)
-                    # Claude's ignored files too: a takeover's lib/ module was lost (#1179)
-                    wrote = runner.agent_wrote(task) + runner.hand_wrote(task)
+                    # Claude's ignored files too: a takeover's lib/ module was lost (#1179); and
+                    # the agent's shell's: its `cat > lib/util.py` was (#1210)
+                    wrote = runner.agent_wrote(task) + runner.hand_wrote(task) + runner.shell_wrote(task)
                     left = _left_out(task, wrote, a.include)
                     if (gitops.changed(task.worktree) or head == spec["base"]
                             or gitops.ignored_files(task.worktree, wrote)):

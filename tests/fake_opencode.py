@@ -4,6 +4,8 @@
   ok     write answer.txt = "42", say so
   patch  as ok, and lib/helper.py too, in one `patch` call (a GPT model's in 2.3.2: no edit or
          write): input `patchText` only, the files in `state.metadata.files[].file` (#1148)
+  shellwrite  lib/util.py with a `bash` row (cat > … <<EOF), then main.py importing it and
+         answer.txt = "42" with write (#1210)
   stay   as ok, then stays open for an hour, its output open and silent: the agent's turn over
          (reason stop) and OpenCode not exiting (#1160)
   fix    first round writes "41" (wrong); a continued session (--session) writes "42"
@@ -675,6 +677,18 @@ elif scenario == "patch":  # #1148: a GPT model's one `patch` call, as OpenCode 
                              {"file": "answer.txt", "status": "added", "additions": 1,
                               "deletions": 0, "patch": "@@ -0,0 +1 @@\n+42"}]})
     emit("text", text="Wrote lib/helper.py and answer.txt = 42.")
+    finish()
+elif scenario == "shellwrite":  # #1210: a module written with the shell, the rest with write
+    os.makedirs("lib", exist_ok=True)
+    with open(os.path.join("lib", "util.py"), "w") as fh:
+        fh.write("def answer():\n    return 42\n")
+    tool("bash", {"command": "mkdir -p lib && cat > lib/util.py <<'X'\ndef answer():\n    return 42\nX",
+                  "description": "Write lib/util.py"}, output="")
+    for name, text in (("main.py", "from lib.util import answer\nprint(answer())\n"), ("answer.txt", "42\n")):
+        with open(name, "w") as fh:
+            fh.write(text)
+        tool("write", {"filePath": os.path.abspath(name), "content": text})
+    emit("text", text="Wrote lib/util.py, main.py and answer.txt = 42.")
     finish()
 elif scenario == "loop":
     for _ in range(10):

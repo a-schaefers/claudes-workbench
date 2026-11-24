@@ -2524,7 +2524,7 @@ class Lifecycle(Base):
         with self.assertRaises(SystemExit), redirect_stderr(err):
             run_wb("accept", "t-csv", "-m", "feat: one", "--merge")
         self.assertIn("not committed: git ignores files written in the worktree (lib/helper.py)", err.getvalue())
-        self.assertIn("note: git ignores 1 more file changed since the agent stopped, which the commit "
+        self.assertIn("note: git ignores 1 more file changed in the worktree, which the commit "
                       "leaves out as build or test output (lib/answers.csv): git -C ", err.getvalue())
         out = run_wb("accept", "t-csv", "-m", "feat: one", "--merge", "--include")
         self.assertIn("accepted t-csv", out)
@@ -2697,6 +2697,54 @@ class Lifecycle(Base):
         (t.worktree / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
         (t.worktree / "main.py").write_text("from lib.helper import answer\nprint(answer())\n")
         self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
+
+    def test_a_file_the_agent_writes_with_its_shell_under_an_ignored_path_is_named_and_refused_at_accept(self):
+        # #1210 (the 2.0 bar loop, 2026-11-24): the agent wrote lib/util.py with
+        # `cat > lib/util.py <<EOF` under Python.gitignore's lib/; only edit rows were read, so the
+        # report had no NOTE and accept --merge landed main.py importing a module it deleted
+        self.ignore_lib()
+        self.start("t-sh", "shellwrite", "--test", TEST_CMD)
+        wait_phase("t-sh", {"review"})
+        t = store.Task("t-sh")
+        self.assertEqual(runner.agent_wrote(t), ["answer.txt", "main.py"])
+        self.assertEqual(runner.shell_wrote(t), ["lib/util.py"])
+        self.assertIn("NOTE: git ignores files the agent wrote (lib/util.py)", run_wb("report", "t-sh"))
+        for cmd in (("next", "t-sh", "--spec", "-", "-m", "feat: one"),
+                    ("accept", "t-sh", "-m", "feat: one", "--merge")):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err), \
+                    mock.patch("sys.stdin", io.StringIO("Step two.")):
+                run_wb(*cmd)
+            self.assertIn("not committed: git ignores files written in the worktree (lib/util.py)",
+                          err.getvalue())
+            self.assertEqual(self.branch("delegate/t-sh"), t.spec["base"])     # nothing committed
+            self.assertTrue((t.worktree / "lib" / "util.py").is_file())        # and the work kept
+        self.assertIn("accepted t-sh", run_wb("accept", "t-sh", "-m", "feat: one", "--merge", "--include"))
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("lib/util.py", tree)
+        self.assertIn("main.py", tree)
+
+    def test_what_the_runners_test_run_writes_under_an_ignored_path_is_not_taken_for_the_agents(self):
+        # #1210 (2026-11-24): read since the agent's first round, a Maven run's surefire report
+        # (.xml, a kind pom.xml makes the repo's) would refuse every accept of such a task
+        (self.repo / ".gitignore").write_text("target/\n")
+        (self.repo / "pom.xml").write_text("<project/>\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "maven"], check=True)
+        test = (f"{TEST_CMD} && mkdir -p target/surefire-reports && "
+                "echo '<testsuite/>' > target/surefire-reports/TEST-app.AppTest.xml")
+        self.start("t-mvn", "ok", "--test", test)
+        st = wait_phase("t-mvn", {"review"})
+        self.assertTrue(st["tests"]["ok"], st.get("tests"))
+        t = store.Task("t-mvn")
+        self.assertEqual(t.status.get("test_wrote"), ["target/surefire-reports/TEST-app.AppTest.xml"])
+        self.assertEqual(runner.shell_wrote(t), [])
+        self.assertEqual(runner.shell_left(t), [])
+        self.assertNotIn("git ignores", run_wb("report", "t-mvn"))
+        out = run_wb("accept", "t-mvn", "-m", "feat: one")
+        self.assertIn("accepted t-mvn", out)
+        self.assertNotIn("note: git ignores", out)
 
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
         # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,

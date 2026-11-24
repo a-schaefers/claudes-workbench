@@ -2352,7 +2352,9 @@ def run_tests(task: store.Task, n: int):
         return None
     task.set_status(phase="testing", last=f"tests: {cmd}")
     limit = int(task.spec.get("test_timeout") or 900)
+    began = store.now()
     code, output = run_in_lane(task, cmd, limit)
+    _tests_wrote(task, began)
     task.round_dir(n).joinpath("tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     result = {"ok": code == 0, "exit": code, "tail": clip_tail(output, 40), "round": n}
@@ -2726,11 +2728,58 @@ def _hands_on(task: store.Task) -> None:
     task.set_status(hand_wrote=wrote, hand_left=left, hands_off_at=None)
 
 
-def ignored_writes(task: store.Task) -> list[str]:
-    """The files the agent wrote that git ignores, so no diff or commit holds them; [] when git
-    can't say."""
+def shell_wrote(task: store.Task) -> list[str]:
+    """The ignored files changed in the worktree since the agent's first round (status
+    `agent_from`) that look written by hand (gitops.hand_written), less what the runner's test
+    runs wrote (status `test_wrote`): the agent's shell's, which no edit row shows. An agent's
+    `mkdir -p lib && cat > lib/util.py <<EOF` under Python.gitignore's lib/ was in no diff (the
+    review's "all of it"), no NOTE and no commit: wb accept --merge exited 0, main imported a
+    module that was deleted with the worktree (#1210, 2026-11-24). Claude's writes since are in
+    it too, as they are in hand_wrote."""
+    return _by_shell(task)[0]
+
+
+def shell_left(task: store.Task) -> list[str]:
+    """The rest of the ignored files changed since the agent's first round that hand_written
+    took for a build's or a test run's, less the runner's test runs': the commit leaves them out,
+    said, as hand_left's (#1210)."""
+    return _by_shell(task)[1]
+
+
+def _by_shell(task: store.Task) -> tuple[list[str], list[str]]:
+    if not (since := task.status.get("agent_from")):
+        return [], []
+    rest: list[str] = []
+    wrote = gitops.hand_written(task.worktree, since, rest)
+    tests = set(task.status.get("test_wrote") or [])
+    return [p for p in wrote if p not in tests], [p for p in rest if p not in tests]
+
+
+def _tests_wrote(task: store.Task, began: float) -> None:
+    """Keep in status `test_wrote` the ignored files a test run of the runner's changed (what
+    hand_written would keep, and its rest): build or test output, never the agent's work. Without
+    it, shell_wrote took a Maven run's target/surefire-reports/*.xml for the agent's, and every
+    accept of such a task was refused (#1210, 2026-11-24). The agent's own runs in its rounds
+    write the same files, which the runner's run after them writes again."""
+    if not task.status.get("agent_from"):
+        return
     try:
-        return gitops.ignored_files(task.worktree, agent_wrote(task))
+        rest: list[str] = []
+        made = gitops.hand_written(task.worktree, began, rest) + rest
+    except (gitops.GitError, OSError):
+        return
+    if made:
+        task.set_status(test_wrote=sorted(set(task.status.get("test_wrote") or []) | set(made)))
+
+
+def ignored_writes(task: store.Task) -> list[str]:
+    """The files the agent wrote that git ignores, so no diff or commit holds them: its edit
+    tools' and its shell's (shell_wrote, #1210), less what Claude wrote while no runner ran (status
+    `hand_wrote`); [] when git can't say."""
+    try:
+        mine = set(task.status.get("hand_wrote") or [])
+        return gitops.ignored_files(task.worktree, agent_wrote(task)
+                                    + [p for p in shell_wrote(task) if p not in mine])
     except (gitops.GitError, OSError):
         return []
 
@@ -4453,6 +4502,9 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
         # before the lease: it needs no GPU, and a probe that hangs (20 s a file) held it from the
         # other tasks, the model already loaded (review, 2026-11-21)
         add_outline(task)
+    # after the checkout, setup, --copy and base check: what changes under an ignored path from
+    # here on may be the agent's work, its shell's too (shell_wrote, #1210)
+    task.set_status_if(lambda st: not st.get("agent_from"), agent_from=store.now())
     # beside the running tasks' models when all fit the GPU, else alone once they finish; an API
     # model takes one of its provider's slots instead, and nothing of the GPU (#1015)
     with models.lease_for(m, task.name, say) as lease:

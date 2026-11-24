@@ -1607,13 +1607,14 @@ def hand_written(worktree: Path, since: float, left: list[str] | None = None) ->
 
 
 def left_out_line(paths: list[str], worktree: Path, kept: Path | None = None, gone: bool = False) -> str:
-    """The note for the ignored files changed since the agent stopped that the commit leaves out,
-    as hand_written took them for a build's or a test run's: a .csv beside Claude's module under
-    lib/ was dropped without a word, --include or not (#1179's review, 2026-11-24). ``kept``: the
+    """The note for the ignored files changed in the worktree that the commit leaves out, as
+    hand_written took them for a build's or a test run's: a .csv beside Claude's module under
+    lib/ was dropped without a word, --include or not (#1179's review, 2026-11-24); the agent's
+    shell's since its first round too, so not "since the agent stopped" (#1210). ``kept``: the
     copy wb accept keeps of them before the worktree goes; ``gone``: too many to copy; else where
     `git add -f` stages one."""
     head = (f"note: git ignores {len(paths)} more file{'s' if len(paths) != 1 else ''} changed "
-            f"since the agent stopped, which the commit leaves out as build or test output "
+            f"in the worktree, which the commit leaves out as build or test output "
             f"({', '.join(brief(paths))})")
     if kept is not None:
         return f"{head}: a copy is in {kept}"
