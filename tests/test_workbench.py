@@ -3194,8 +3194,11 @@ class Lifecycle(Base):
     def test_a_file_claude_writes_by_hand_beside_a_build_it_runs_is_still_refused(self):
         # #1211 (2026-11-24): telling a build's output from Claude's own files must never drop a
         # module Claude wrote (#1179): one its edit tools wrote while the build ran, one a command
-        # of its names (a heredoc, a cp into lib/), and one written while no call of its ran
-        (self.repo / ".gitignore").write_text("lib/\ntarget/\n")
+        # of its names (a heredoc, $WB_HOME spelled), one in an ignored folder a command names (a
+        # cp into vendor/), and one written while no call of its ran. The cp names vendor/, never
+        # lib/: every row is within CALL_SLACK of the others, so a cp into lib/ kept the heredoc's
+        # files by itself and a break of the name check passed (#1211's review, 2026-11-24)
+        (self.repo / ".gitignore").write_text("lib/\ntarget/\nvendor/\n")
         (self.repo / "pom.xml").write_text("<project/>\n")
         (self.repo / "main.py").write_text("from lib import helper\n")
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
@@ -3214,13 +3217,14 @@ class Lifecycle(Base):
         self.claude_ran(t, "mvn -q test", mvn_and_write, edits=["lib/helper.py"])
         self.claude_ran(t, f"cd {t.worktree} && cat > lib/util.py <<'X'\nz = 3\nX",
                         lambda wt: (wt / "lib" / "util.py").write_text("z = 3\n"))
-        self.claude_ran(t, f"cp -r {drafts}/* lib/",
-                        lambda wt: shutil.copy(drafts / "copied.py", wt / "lib" / "copied.py"))
+        self.claude_ran(t, f"mkdir -p vendor && cp -r {drafts}/* vendor/",
+                        lambda wt: ((wt / "vendor").mkdir(),
+                                    shutil.copy(drafts / "copied.py", wt / "vendor" / "copied.py")))
         self.claude_ran(t, 'cd "$WB_HOME/tasks/t-hand/worktree" && cat > lib/spelled.py',
                         lambda wt: (wt / "lib" / "spelled.py").write_text("t = 4\n"), cwd="/")
         time.sleep(0.1)
         (t.worktree / "lib" / "later.py").write_text("w = 5\n")         # while no call of Claude's ran
-        mine = ["lib/copied.py", "lib/helper.py", "lib/later.py", "lib/spelled.py", "lib/util.py"]
+        mine = ["lib/helper.py", "lib/later.py", "lib/spelled.py", "lib/util.py", "vendor/copied.py"]
         self.assertEqual(runner.hand_wrote(t), mine)
         self.assertIn("target/surefire-reports/TEST-app.AppTest.xml", runner.hand_left(t))
         err = io.StringIO()
@@ -3229,7 +3233,7 @@ class Lifecycle(Base):
         self.assertIn(f"not committed: git ignores files written in the worktree ({', '.join(mine)})",
                       err.getvalue())
         # an edit tool's file is Claude's even where the runner's own run wrote (ran_wrote)
-        t.set_status(ran_wrote=["lib", "target"])
+        t.set_status(ran_wrote=["lib", "target", "vendor"])
         self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
 
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
