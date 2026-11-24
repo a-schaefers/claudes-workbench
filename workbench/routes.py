@@ -686,7 +686,7 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
             raise Refused(f"{AGENTS_GPU}: {m.id} is an API model. {AGENTS_BACK}, or a GPU model")
         if gate is not None:  # API_RUNS: the dialog's yes is wb start's own, last (#1104)
             gate(m)
-        if why := meter.refusal(m, tokens=first):  # before the dialog: never ask for a start that is refused
+        if why := meter.refusal(m, tokens=first, asked=True):  # before the dialog: never ask for a start that is refused
             raise Refused(why)
         approved = os.environ.get("CLAUDECODE") == "1"
         return m, models.status(m), "asked for", {

@@ -3212,7 +3212,7 @@ def _route_start(a) -> None:
     except OSError:
         spec_text = ""
     # no price, no cap, or today at the cap (#1019, #1089): wb start's too
-    if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text)):
+    if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text), asked=True):
         die(why, 3)
     # wb start's cheap refusals too, in place of a dialog for a start that then exits 1, 3 or 4
     # (#1104, 2026-11-23): the model can't run, a --base naming no commit, the provider's slots
