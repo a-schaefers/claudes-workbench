@@ -306,7 +306,8 @@ def notice(task: store.Task, qid: str, q: dict) -> str:
         from . import context  # the runner's side: the ask server never builds a notice
         path = shlex.quote(q["path"])
         body = f"PERMISSION to use the directory {path} (outside its lane)\nWhy: {question}\n"
-        if why := context.kept_out(q["path"]):  # no grant reaches it: don't suggest one (#912)
+        # no grant reaches it: don't suggest one (#912; a file an API lane hides, #1093)
+        if why := context.kept_out(q["path"]) or context.api_hidden_refusal(task, q["path"]):
             body += f"No grant reaches it: {why}, or answer with another way."
         else:
             body += (f"Allow it with `wb allow {task.name} --path {path}` (--always to keep it), "

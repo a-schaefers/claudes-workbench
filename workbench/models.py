@@ -771,6 +771,13 @@ def _cloud_name(name: str) -> bool:
     return name.endswith((":cloud", "-cloud"))
 
 
+def _ollama_ish(pid: str, url: str, engine: str) -> bool:
+    """A provider on this machine that is Ollama, or may be: probed as Ollama, on Ollama's port, or
+    named for it. A proxy that hides /api/version, or models.json `engine: server`, makes Ollama
+    probe as a server, and its cloud models then fell out of hosted() (#1074, 2026-11-23)."""
+    return engine == "ollama" or urlparse(url).port == OLLAMA_PORT or "ollama" in pid.lower()
+
+
 def _cloud_row(row: dict) -> bool:
     """An /api/tags row Ollama forwards to its cloud: a stub of a few hundred bytes."""
     return bool(row.get("remote_host") or row.get("remote_model")) or _cloud_name(row.get("name") or "")
@@ -787,8 +794,8 @@ def ollama_cloud_ids() -> list[str]:
     this machine: API models now, left out of discover() (#1013). From the config alone: no
     catalog read."""
     extra, dirs = _overrides(), _provider_dirs()
-    return [f"{pid}/{name}" for pid, prov, _, engine, _ in _local_providers(read_config(), extra, dirs)
-            if engine == "ollama" for name in prov.get("models") or {}
+    return [f"{pid}/{name}" for pid, prov, url, engine, _ in _local_providers(read_config(), extra, dirs)
+            if _ollama_ish(pid, url, engine) for name in prov.get("models") or {}
             if _cloud_name(name) and not (extra.get(f"{pid}/{name}") or {}).get("skip")]
 
 
@@ -899,8 +906,10 @@ def discover() -> dict[str, Model]:
             over = {**extra.get(pid, {}), **extra.get(mid, {})}
             # an Ollama cloud model was routed trivial work as "the smallest" (the 2026-11-16
             # audit); opted in with "local": true it was a remote GPU candidate the router could
-            # explore to, sending a task's code to ollama.com unchosen. An API model now (#1013)
-            if over.get("skip") or (engine == "ollama" and _cloud_name(name)):
+            # explore to, sending a task's code to ollama.com unchosen. An API model now (#1013).
+            # By name whatever the engine: an Ollama probed as a server (a proxy hiding /api, or
+            # `engine: server`) made one the largest GPU candidate, picked unchosen (#1074)
+            if over.get("skip") or _cloud_name(name):
                 continue
             found[mid] = Model(id=mid, provider=pid, name=str(spec.get("id") or name),
                                base_url=url, engine=engine,
@@ -927,10 +936,14 @@ def resolve(wanted: str) -> Model:
         return hits[0]
     if hits:
         raise KeyError(f"{wanted!r} matches {', '.join(m.id for m in hits)}; be more specific")
-    if "/" in wanted and not gpu_side(wanted) and (api := _hosted_exact(wanted)):
+    api_id = "/" in wanted and not gpu_side(wanted)
+    if api_id and (api := _hosted_exact(wanted)):
         return api
     known = ", ".join(models) or f"none ({why_none()})"
-    raise KeyError(f"unknown model {wanted!r}; known: {known}; {EXACT_ONLY}")
+    # a failed catalog read read as a wrong id, and Claude went hunting for the "right" one
+    # instead of fixing OpenCode (#1108, 2026-11-23): the role path said it, --model didn't
+    failed = f" (OpenCode's catalog read failed: {err})" if api_id and (err := hosted_error()) else ""
+    raise KeyError(f"unknown model {wanted!r}{failed}; known: {known}; {EXACT_ONLY}")
 
 
 def lookup(model_id: str, cached: bool = False) -> Model | None:
@@ -944,7 +957,9 @@ def lookup(model_id: str, cached: bool = False) -> Model | None:
         return found
     if cached:
         return _models_of(_read_hosted(), only=model_id).get(model_id)
-    return hosted().get(model_id)
+    # read again once on a miss, as resolve does: plain hosted() kept a just-connected provider's
+    # ids "not in OpenCode's catalog" for wb route and every other lookup (#1076, 2026-11-23)
+    return _hosted_exact(model_id)
 
 
 def gpu_side(model_id: str) -> bool:
@@ -964,11 +979,16 @@ def _hosted_exact(mid: str) -> Model | None:
     unknown for HOSTED_TTL (#1013's review). A failed read stays cached for DOWN_SECS."""
     if found := hosted().get(mid):
         return found
+    return hosted(fresh=True).get(mid) if miss_rereads() else None
+
+
+def miss_rereads() -> bool:
+    """Whether a catalog miss may read OpenCode's catalog again (_hosted_exact, `wb models
+    --api`'s empty match, #1076): the cache is older than AUTH_FRESH_SECS and its read didn't
+    fail (a failed one stays cached for DOWN_SECS)."""
     doc = _read_hosted()
     ts = doc.get("ts")
-    if doc.get("error") or not isinstance(ts, (int, float)) or 0 <= time.time() - ts < AUTH_FRESH_SECS:
-        return None
-    return hosted(fresh=True).get(mid)
+    return not doc.get("error") and isinstance(ts, (int, float)) and not 0 <= time.time() - ts < AUTH_FRESH_SECS
 
 
 # API models (#1013): OpenCode's catalog, read through OpenCode itself and cached in hosted.json
@@ -979,6 +999,11 @@ OLLAMA_CLOUD = "Ollama cloud (ollama.com)"
 SIGNING = frozenset({"amazon-bedrock", "google-vertex", "google-vertex-anthropic"})
 API_STATES = ("no_credit", "rate_limited", "unreachable")
 RATE_LIMIT_SECS = 60     # a 429 without Retry-After: how long its provider reads rate-limited
+# A 402 or a plan limit with no `until` held forever: only a 2xx cleared it, and wb start refused
+# the task that could get one, so a top-up or the plan's reset never let the role run again
+# (#1068, 2026-11-23). Past this the next start asks once (a 402 isn't billed) and the keyhole
+# records it again if it still holds.
+CREDIT_RECHECK_SECS = 900
 _HOSTED: dict = {}       # the last hosted.json read in this process: {"at": (mtime_ns, size), "doc"}
 _AUTH_FRESH: dict = {}   # state dir -> (monotonic, auth rows): status's no-key check, briefly kept
 AUTH_FRESH_SECS = 5
@@ -1072,8 +1097,12 @@ def _config_key(prov: dict) -> str:
 
 
 def _key_source(pid: str, auth: dict, prov: dict | None) -> str:
-    """Where an API provider's key comes from (Model.key): a config apiKey first (OpenCode's
-    layer wins over a stored one), then what `auth list` says, a stored key before a login or an
+    """Where an API provider's key comes from (Model.key): a config apiKey first (a literal or
+    `{file:}` one is in a file the agent can read), except a lone `{env:NAME}` in `options` beside
+    a stored key, which is "stored" (#1075: OpenCode 2.3.2 sends the stored key over any config
+    apiKey, checked 2026-11-23, the layer replaces the reference with the token, and it names no
+    secret; read as the environment's, it refused and said to /connect again, which changed
+    nothing); then what `auth list` says, a stored key before a login or an
     environment variable; else "". A signing provider is "signing" whatever it holds. A provider's,
     never a model's: a keyless free model's "none" is its own (_api_model), as one provider holds
     free and paid models alike, and the first model seen made every sibling "none" (#1013's
@@ -1082,7 +1111,10 @@ def _key_source(pid: str, auth: dict, prov: dict | None) -> str:
     (runner.SECRET_ENV)."""
     conns = (auth.get(pid) or {}).get("connections") or []
     source = _config_key(prov or {})
-    if not source and any(c.get("type") == "credential" and c.get("method") == "key" for c in conns):
+    stored = any(c.get("type") == "credential" and c.get("method") == "key" for c in conns)
+    if source.startswith("env:") and stored and _config_key({"options": (prov or {}).get("options")}) == source:
+        source = ""  # the keyhole's _lone_env: only V1 options, as checked
+    if not source and stored:
         source = "stored"
     if not source and any(c.get("type") == "credential" for c in conns):
         source = "oauth"
@@ -1219,7 +1251,7 @@ def _build_hosted() -> dict:
                 continue
             found[mid] = {**spec, "name": str(spec.get("id") or name), "free": False}
     for pid, prov, url, engine, _ in _local_providers(cfg, extra, dirs):
-        if engine != "ollama":
+        if not _ollama_ish(pid, url, engine):  # #1074: not the probe alone
             continue
         for name, spec in (prov.get("models") or {}).items():
             mid = f"{pid}/{name}"
@@ -1280,7 +1312,8 @@ def _count(v) -> int | None:
 def api_limits(cfg: dict) -> dict:
     """An API model's entry with its window and output capped (#1017): `limit.context` at most
     API_WINDOW, `limit.input` at most that, and `limit.output` and `options.max_tokens` both the
-    smallest of the entry's own two and API_OUTPUT (API_OUTPUT when it gives neither). Written
+    smallest of the entry's own two and API_OUTPUT (API_OUTPUT when it gives neither), and at
+    most _api_output_fit of the window (#1073). Written
     once here, so the layer's pins (runner.model_pins), OpenCode's compaction
     (runner.compaction_buffer), the slice, status `window`, the steps and the tuning keys all read
     one window. A catalog's 1M window let a session that only reads carry up to 1M tokens a
@@ -1294,10 +1327,24 @@ def api_limits(cfg: dict) -> dict:
     opts = cfg.get("options") if isinstance(cfg.get("options"), dict) else {}
     context = min(context, API_WINDOW)
     cap = min(v for v in (_count(lim.get("output")), _count(opts.get("max_tokens")), API_OUTPUT) if v)
+    # and at most what keeps the latest handover at or past the earliest fresh_at: a 32K window
+    # with a 32K output put OpenCode's compaction below zero, and the note told the user to
+    # lower a catalog's limits, which they can't (#1073, 2026-11-23)
+    cap = max(min(cap, _api_output_fit(context)), 1)
     out = {**lim, "context": context, "output": cap}
     if inp := _count(lim.get("input")):
         out["input"] = min(inp, context)
     return {**cfg, "limit": out, "options": {**opts, "max_tokens": cap}}
+
+
+def _api_output_fit(context: int) -> int:
+    """The largest output cap whose compaction buffer (runner.compaction_buffer: the reply plus
+    STEP_GROWTH) leaves runner.fresh_ceiling at or above the lowest fresh_at for this window:
+    1 - lo - max(STEP_GROWTH / window, CEILING_MARGIN) of the window, less STEP_GROWTH."""
+    from . import runner, tuning  # both import this module
+    lo = min(tuning.KNOBS["fresh_at"].values)
+    margin = max(runner.STEP_GROWTH / context, tuning.CEILING_MARGIN)
+    return int(context * (1 - lo - margin)) - runner.STEP_GROWTH
 
 
 def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
@@ -1417,6 +1464,16 @@ def catalog_variants(m: Model) -> dict:
             if isinstance(v, dict) and v.get("id")}
 
 
+def task_label(m: Model) -> str:
+    """task.json's `model_label`, the name the reports, wakes, wb watch and the commit trailer
+    give the task's model. An API model's own label names only its provider ("DeepSeek (API)"),
+    so two roles on one provider read alike and git history couldn't say which model wrote the
+    code (#1078, 2026-11-23): its exact id goes first. A label the user set stays theirs."""
+    if m.kind != "api" or m.extra.get("label"):
+        return m.label
+    return f"{m.id} ({provider_name(m)}" + (")" if m.cloud else ", API)")
+
+
 def provider_name(m: Model) -> str:
     """How a provider is named to the user: its name in OpenCode's auth list or config."""
     if m.cloud:
@@ -1441,7 +1498,7 @@ def _redact(text: str) -> str:
 
 def note_api(pid: str, state: str, why: str = "", until: float | None = None) -> None:
     """Record what a provider's last answer said (api-health.json, under its lock): `no_credit`
-    (402, a quota or plan limit), `rate_limited` (until Retry-After, else RATE_LIMIT_SECS),
+    (402, a quota or plan limit; for CREDIT_RECHECK_SECS), `rate_limited` (until Retry-After, else RATE_LIMIT_SECS),
     `unreachable` (connect, DNS, TLS, a 5xx; for DOWN_SECS), or `ok` (a 2xx), which clears it.
     ``why`` is kept redacted. status() reads it; an entry past its `until` reads as ok."""
     if state not in ("ok", *API_STATES):
@@ -1449,7 +1506,8 @@ def note_api(pid: str, state: str, why: str = "", until: float | None = None) ->
     now = time.time()
     if until is None:
         until = now + RATE_LIMIT_SECS if state == "rate_limited" else \
-            now + DOWN_SECS if state == "unreachable" else None
+            now + DOWN_SECS if state == "unreachable" else \
+            now + CREDIT_RECHECK_SECS if state == "no_credit" else None
     path = api_health_path()
     with store.locked(path.with_name(path.name + ".lock")):
         doc = store.read_json(path, {})
@@ -1470,6 +1528,11 @@ def api_health(pid: str) -> dict | None:
     if not isinstance(row, dict) or row.get("state") not in API_STATES:
         return None
     until = row.get("until")
+    if row["state"] == "no_credit" and not isinstance(until, (int, float)):
+        # written before #1068 with no `until`: it held forever; re-checked from its time
+        ts = row.get("ts")
+        until = ts + CREDIT_RECHECK_SECS if isinstance(ts, (int, float)) else 0
+        row = {**row, "until": until}
     if isinstance(until, (int, float)) and until <= time.time():
         return None
     return row
@@ -1511,6 +1574,43 @@ def _key_file(pid: str) -> str:
     return where[-1] if where else "OpenCode's config"
 
 
+def unspoken(pid: str, package: str) -> bool:
+    """Whether the keyhole can't carry a provider's requests (keyhole.protocol_of: Google's
+    x-goog-api-key, Azure's api-key, Cohere's native API, no package at all). A signing provider
+    isn't one: its key source says "signing"."""
+    from . import keyhole  # keyhole imports this module lazily too
+    return keyhole.protocol_of(package) is None and not keyhole._signs(pid, package)
+
+
+def keyhole_refusal(m: Model) -> str:
+    """Why ``m`` can't run through the keyhole for its package, or "". Only keyhole.start checked
+    it, so a Gemini, Azure or Cohere model was listed, offered, approved in the dialog and started,
+    then failed every time (#1066, 2026-11-23). A model needing no keyhole (an Ollama cloud one,
+    a keyless free one: runner.needs_keyhole) is never refused here."""
+    if m.cloud or m.key == "none" or (m.free and not m.key) or not unspoken(m.provider, m.package):
+        return ""
+    return unspoken_why(provider_name(m), m.package)
+
+
+def unspoken_why(who: str, package: str) -> str:
+    """keyhole_refusal's line, which the Settings tab's provider list says too (#1066)."""
+    return (f"can't run: the keyhole doesn't speak {who}'s API ({package or 'no provider package'}), "
+            "so wb can't hold its key outside the lane: a model of another provider can run")
+
+
+def unspoken_providers(pids) -> dict[str, str]:
+    """{provider: its package} of those of ``pids`` whose package the catalog says the keyhole
+    can't carry (wb setup's `--` line, #1066); a provider the catalog doesn't list isn't one, nor
+    any when the catalog can't be built: a config that doesn't parse stopped wb setup's checklist
+    (#1067's guard, which this read came after, 2026-11-23), and wb doctor names the config."""
+    try:
+        provs = _dict(hosted_doc().get("providers")) if pids else {}
+    except (RuntimeError, OSError):
+        return {}
+    return {p: str(provs[p].get("package") or "") for p in pids
+            if isinstance(provs.get(p), dict) and unspoken(p, str(provs[p].get("package") or ""))}
+
+
 def _api_status(m: Model, down=frozenset()) -> dict:
     """status() for an API model, from the config, the key source and api-health.json only: no
     network probe (no completion, no /models). wb models, scout, doctor and top call status for
@@ -1527,6 +1627,8 @@ def _api_status(m: Model, down=frozenset()) -> dict:
             return _no("ollama is not answering")
         if _tag_row(m.name, tags) is None:
             return _no(f"{m.name} is not pulled")
+    if why := keyhole_refusal(m):  # before the key: /connect can't fix it
+        return _no(why)
     key = m.key
     if not key:
         key, who = _fresh_key(m)
@@ -1537,12 +1639,17 @@ def _api_status(m: Model, down=frozenset()) -> dict:
                 "a cloud login that signs each request" if key == "signing" else
                 f"written in {_key_file(m.provider)}" if key == "config" else
                 f"from the environment, {key[4:]}")
-        return _no(f"can't run: needs a key wb can hold outside the lane ({who}'s is {held}): "
-                   "store an API key with /connect")
+        # a key written in a file: /connect alone changed nothing while the apiKey stayed (#1075)
+        fix = "remove its apiKey there, and store the key with /connect" if key == "config" else \
+            "store an API key with /connect"
+        return _no(f"can't run: needs a key wb can hold outside the lane ({who}'s is {held}): {fix}")
     health = api_health(m.provider)
     if health and health["state"] == "no_credit":
+        until = health.get("until")
+        again = f" (wb asks again from {datetime.fromtimestamp(until).strftime('%H:%M')})" \
+            if isinstance(until, (int, float)) else ""
         return _no(f"out of credit or quota at {who} ({health.get('why') or 'no detail'}): top it "
-                   "up, or wait for the plan's reset; wb never switches models")
+                   f"up, or wait for the plan's reset{again}; wb never switches models")
     if health and health["state"] == "rate_limited":
         until = health.get("until")
         at = datetime.fromtimestamp(until).strftime("%H:%M") if isinstance(until, (int, float)) else "it lifts"
@@ -1796,6 +1903,8 @@ def remedy(m: Model, state: dict) -> str:
         who = provider_name(m)
         if why.startswith("no key for "):
             return f"run /connect in OpenCode and add an API key for {who}"
+        if why.startswith("can't run: needs a key") and "remove its apiKey there" in why:
+            return f"remove options.apiKey for {who} from {_key_file(m.provider)}, and store the key with /connect in OpenCode"
         if why.startswith("can't run: needs a key"):
             return f"store an API key for {who} with /connect in OpenCode"
         if why.startswith("out of credit"):

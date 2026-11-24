@@ -487,6 +487,35 @@ async function run(engine, device) {
     wb('chat', 'reply', '--text', 'Done with fix-auth.')
     await until(async () => await page.locator('#tasks').isHidden())
   })
+  await check('a backlog on the strip names three, counts the queued apart and leaves the thread the screen (#1097)', async () => {
+    // 25 open tasks were 22 lines of "Running: …" on an iPhone, the queued read as running, and
+    // the thread a 36 px sliver; a task wb stop --all parked stays off it (chat.open_tasks); one
+    // asking waits on Claude, never counted running (the #1097 review)
+    const made = []
+    const task = (name, phase, i, status = {}) => {
+      const t = join(home, 'state/tasks', name)
+      mkdirSync(t, { recursive: true }); made.push(t)
+      writeFileSync(join(t, 'task.json'), JSON.stringify({ name, created_at: Date.now() / 1000 + i,
+        ...(i % 2 ? { model: 'deepinfra/deepseek-ai/DeepSeek-V4.1-Flash', via: 'api', provider_name: 'DeepInfra' }
+          : { model: 'qwen3-coder-30b' }) }))
+      writeFileSync(join(t, 'status.json'), JSON.stringify({ phase, round: 1, updated_at: Date.now() / 1000, ...status }))
+    }
+    for (let i = 0; i < 25; i++) task(`backlog-step-${String(i).padStart(2, '0')}`, i < 3 ? 'queued' : i < 5 ? 'running' : i === 5 ? 'asking' : 'queued', i)
+    task('old-parked', 'review', -1, { parked: Date.now() / 1000 })
+    try {
+      wb('chat', 'reply', '--text', 'Started the backlog.')
+      await until(async () => (await page.textContent('#tasks')).startsWith('2 running, 1 waiting on Claude, 22 queued: backlog-step-03 · '))
+      const text = await page.textContent('#tasks')
+      if (!text.endsWith('; +22 more') || text.includes('old-parked') || !text.includes('; backlog-step-05 (asking) · '))
+        throw new Error('the strip says: ' + text)
+      const got = await page.evaluate(() => ({ strip: document.getElementById('tasks').getBoundingClientRect().height,
+        thread: document.getElementById('scroll').getBoundingClientRect().height, height: innerHeight, line: parseFloat(getComputedStyle(document.getElementById('tasks')).lineHeight) || 18 }))
+      if (got.strip > got.line * 3 + 16) throw new Error(`the strip is ${got.strip} px tall`)
+      if (got.thread < got.height * 0.4) throw new Error(`the thread has ${got.thread} of ${got.height} px`)
+    } finally { for (const t of made) rmSync(t, { recursive: true, force: true }) }
+    wb('chat', 'reply', '--text', 'Backlog done.')
+    await until(async () => await page.locator('#tasks').isHidden())
+  })
   await check("wb shot's pair: both images labelled, one above the other on a phone, a reply tied to their step", async () => {
     const d = join(home, 'state/tasks/fix-nav/shots/1')
     mkdirSync(d, { recursive: true })
@@ -1027,7 +1056,7 @@ async function run(engine, device) {
       await until(async () => await page.locator('#tray').isHidden())
     } finally { await page.unroute('**/api/upload/*') }
   })
-  await check("another agent's message shows with its name, and Claude's reply to it comes back through /api/wait (#1042)", async () => {
+  await check("another agent's message shows with its name, and Claude's reply to it, named and never counted unread, comes back through /api/wait (#1042, #1128)", async () => {
     const agent = wb('chat', 'token', 'add', `e2e-${engine}`).trim()
     const api = (path, body) => fetch(base + path.slice(1), { method: body ? 'POST' : 'GET',
       headers: { Authorization: `Bearer ${agent}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
@@ -1046,6 +1075,24 @@ async function run(engine, device) {
     const [, st] = await api('/api/state')
     if (st.asks || st.prefs || st.push || st.savings) throw new Error('an agent read the user\'s state: ' + Object.keys(st))
     if (st.messages.some(m => m.from === 'user')) throw new Error('an agent read the user\'s messages')
+    // #1128: Claude's reply to the agent alone read as one to the user, and counted in the tab's
+    // unread while the page was hidden; it names the agent, and only a reply to the user counts
+    const reply = page.locator('.row.claude').last()
+    await until(async () => (await reply.locator('.bubble').textContent()).includes('Reviewed: two nits.'))
+    if ((await reply.locator('.meta').textContent()).indexOf(`Claude to e2e-${engine} · `) !== 0
+        || !(await reply.getAttribute('class')).includes('to-agent')) throw new Error(await reply.locator('.meta').textContent())
+    await page.evaluate(() => Object.defineProperty(document, 'hidden', { value: true, configurable: true }))
+    try {
+      wb('chat', 'reply', '--to', sent.message.id, '--text', 'One more nit.')
+      await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('One more nit.'))
+      if (await page.title() !== 'Workbench') throw new Error('counted unread: ' + await page.title())
+      wb('chat', 'reply', '--to', 'user', '--text', 'The agent has its review.')
+      await until(async () => await page.title() === '(1) Workbench')
+      if ((await page.locator('.row.claude .meta').last().textContent()).includes(' to ')) throw new Error('the user\'s reply named an addressee')
+    } finally {
+      await page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')) })
+    }
+    await until(async () => await page.title() === 'Workbench')
   })
   await check("a dialog while Claude works on an agent's request says whose it is, on the page and in the push (#1042)", async () => {
     const id = wb('chat', 'ask', '--tool', 'Bash', '--text', 'git push origin fix', '--for', `e2e-${engine}`, '--here').split(' ')[0]

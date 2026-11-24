@@ -480,12 +480,15 @@ def summary(doc: dict) -> str:
     out = []
     for r in ROLES:
         row = doc["roles"][r]
+        # an OpenRouter role's backends (`order`, #1021) are where its code goes: left out, a
+        # change of them alone reached the conversation as nothing (#1126, 2026-11-23)
+        backends = f", backends {', '.join(row['order'])}" if row.get("api") and row.get("order") else ""
         if row["via"] == "api":
-            out.append(f"{r} API {row['api']}, thinking {row['thinking']}")
+            out.append(f"{r} API {row['api']}{backends}, thinking {row['thinking']}")
             continue
         text = f"{r} GPU " + ("(the router picks)" if row["gpu"] == AUTO else row["gpu"])
         if row.get("api"):
-            text += f", API kept: {row['api']}"
+            text += f", API kept: {row['api']}{backends}"
         if row["thinking"] == "on":
             text += ", thinking on"
         out.append(text)
@@ -579,7 +582,8 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
     """wb start's model: (model, state, why, routed), `routed` the task.json keys (`via`, `role`;
     for API `provider`, `provider_name`, `thinking`, `said`, `said_ts`). Refused, with the one
     line, for what can't run as asked. In order: routes.json must read (never as all GPU); a
-    `--model` is taken as asked (an API one through ``gate``, the user's yes); the role's side
+    `--model` is taken as asked (an API one through ``gate``; the user's yes is wb start's, last,
+    #1104); the role's side
     (effective_via): the GPU, its pin or the router's pick (router.choose as before roles), or
     the role's API model by its exact id. No fallback in either direction: a GPU role with no
     GPU model never tries its stored API model, and an API role that can't run never the GPU.
@@ -597,10 +601,10 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
             raise Refused(str(e).strip('"'), 1) from None
         if m.kind != "api":
             return m, models.status(m), "asked for", {"via": "gpu", "role": role}
+        if gate is not None:  # API_RUNS: the dialog's yes is wb start's own, last (#1104)
+            gate(m)
         if why := meter.refusal(m):  # before the dialog: never ask for a start that is refused
             raise Refused(why)
-        if gate is not None:
-            gate(m)
         approved = os.environ.get("CLAUDECODE") == "1"
         return m, models.status(m), "asked for", {
             "via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),

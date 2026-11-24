@@ -68,16 +68,22 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   order, each install or download on the user's yes. Once a role runs (on the GPU or on API),
   `/workbench` goes straight to work: this never runs again on its own.
   1. `wb setup`: its `first run:` lines say what is missing, and which API keys OpenCode holds.
-  2. **No GPU model, a provider with a stored key** (`ok  API keys: …`): `wb models` lists that
-     provider's models. Pick two as the weekly check would: reliable tool calls, a priced model
+  2. **No GPU model, a provider with a stored key** (`ok  API keys: …`): `wb models --api
+     <provider>` lists that provider's ids, each with its window and price. Pick two as the weekly check would: reliable tool calls, a priced model
      (never a free one), a window of 128K or more, the cheaper for trivial, the stronger for
-     significant; check them against the provider's own pages today. Then ask **one** question,
+     significant and writing (prose slices like significant; left on the GPU, the first docs task
+     exits 3); check them against the provider's own pages today. Then ask **one** question,
      filled from what you found: "Use `<trivial id>` for trivial and `<significant id>` for
-     significant? Your code goes to `<provider>`. Day cap $5?" On a yes, the one command `wb route
-     trivial <id> significant <id> --day-usd 5` (their cap if they named one): the dialog shows
-     it, and its Allow is the consent. Another answer: do what they said. A "not changed" (the
-     dialog's Don't): say it wasn't set, every role stays on the GPU; ask again only if they bring
-     it up. Ask nothing before it: no server install, no `wb scout`.
+     significant and writing? Your code goes to `<provider>`. Day cap $5?" On a yes, the one
+     command `wb route trivial <id> significant <id> writing <significant id> --day-usd 5` (their
+     cap if they named one): the dialog shows it, and its Allow is the consent. **OpenRouter** (an
+     `openrouter/…` id) serves one id from many backends, and which is the user's choice: the same
+     question asks which (the model's Providers tab on openrouter.ai), and each OpenRouter role is a
+     `wb route <role> <id> --order <name>[,<name>]` of its own, `--day-usd` on the first (in a
+     several-role `wb route` it exits 3); any others still go in one. Another answer: do what they said. A "not changed" (the
+     dialog's Don't): say which roles it left on the GPU (after an earlier Allow in the OpenRouter
+     routes, `wb route` shows what is set) and that their tasks need a GPU model; ask again only if
+     they bring it up. Ask nothing before it: no server install, no `wb scout`.
   3. **No GPU model and no key**: lay out both ways in two lines, a local server
      (reference/models.md, which names no server for them) or `/connect` in OpenCode for an API
      provider; let the user pick, and install nothing unasked. A server: `wb scout`, recommend
@@ -206,8 +212,9 @@ the record left out on fewer than three tasks ("exploring: …"): review it as a
 models` shows the ranking per size. Pass
 `--model <id or fragment>` (a GPU model) only if the user names one, or when the record argues
 against the guess, and say the model you passed in your reply. An API model is the user's choice,
-never yours: never pass `--model <api id>`, never run `wb route` without the user's words in this
-conversation, and never move a role between GPU and API because one can't run (`wb start` exits 3:
+never yours: never pass `--model <api id>` unless the user named that id for this task (the mod's
+dialog then asks them, and a "not changed" means no), never run `wb route` without the user's words
+in this conversation, and never move a role between GPU and API because one can't run (`wb start` exits 3:
 tell the user the choices it printed). Recommend; the user sets it, in the dialog or the pane's
 Settings tab.
 
@@ -488,17 +495,28 @@ coding choice is the user's (`wb coding`), never changed by a check.
     call over your whole context: five of them cost more than the agent's round (2026-11-17).
   Accept only what you would have written.
 - **question** — answer it briefly and decisively: `wb answer <name> --text "…"`. The agent is
-  blocked until you do.
+  blocked until you do. It reads only its worktree (and what `wb allow --path` adds), never a
+  path you name elsewhere (a plan under ~/.claude, another repo): paste the text, or use
+  `wb answer <name> --file <path>`, which sends the file's contents.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
   the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`.
-  A `rate_limited`, `outage`, `quota` or `auth` stop is the API provider's, not the agent's
-  (the report says "the provider's stop"): tell the user so, and its remedy (wait, top up, or
-  /connect the key again), then `wb feedback <name> --text "carry on"` once it allows. Never
-  switch the task's model or role yourself: a route change takes the user's yes.
+  A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
+  agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
+  up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows. A
+  `refused` one (the provider turned the request down: a moderation flag, a schema, a model gone)
+  quotes what it said: fix that, then `wb feedback`; on an HTTP 404 the model is gone, so `wb
+  takeover` or `wb discard`. Never switch the task's model or role yourself: a route change
+  takes the user's yes.
+  A `setup` stop ("this machine's stop") is neither the agent's nor the provider's: this machine
+  can't reach the provider (a certificate that doesn't verify, or a proxy refusing the tunnel).
+  Tell the user what the STOPPED line names (on macOS Python's Install Certificates command, else
+  the system's CA certificates, `SSL_CERT_FILE` or the proxy), then `wb feedback <name> --text
+  "carry on"` once it's mended; never change the route for it.
   A `spend` stop (cause `spend`: the day's API spend cap is reached) is the user's call, never a
-  retry: ask them for a higher cap, the role on the GPU, or tomorrow, as the notice says; resume
-  only after they decide. Nothing but the user raises the cap.
+  retry: ask them, as the notice says. A higher cap or tomorrow: `wb resume <name>` once it allows.
+  The role on the GPU is for the next tasks; this one keeps its API model (resume never
+  re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
 
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
   corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).
@@ -617,4 +635,5 @@ figure while it runs is `api.usd` in its `status.json`, under `$WB_HOME/tasks/<n
 Call the estimate an estimate. `wb savings` gives the
 week's total and its score out of 100 when the user asks what it's saving; `wb savings --card
 <file>.svg` makes the badge as an image for them to keep or post (made here, nothing sent). The
-score is the GPU's alone; `wb savings --api` gives what API tasks cost, by provider and day.
+score is the GPU's alone; `wb savings --api` gives what API tasks cost: the closed ones by
+provider, and what was spent (open tasks too) by day, as the day cap counts it.

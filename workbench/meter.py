@@ -171,7 +171,10 @@ def usage_tokens(u: dict) -> dict:
     - Responses: `input_tokens` with `input_tokens_details.cached_tokens`, `output_tokens` with
       `output_tokens_details.reasoning_tokens`;
     - Anthropic: `input_tokens` without the cache, `cache_read_input_tokens` and
-      `cache_creation_input_tokens` beside it.
+      `cache_creation_input_tokens` beside it, `output_tokens` with
+      `output_tokens_details.thinking_tokens`. Told by its cache fields before the Responses
+      API's details: its message_delta now carries `output_tokens_details` too, which read it as
+      the Responses API and booked every cache read and write as 0 (#1081, 2026-11-23).
     A cache read it doesn't name is priced as input: never under."""
     d = lambda k: u.get(k) if isinstance(u.get(k), dict) else {}  # noqa: E731
     if "prompt_tokens" in u or "completion_tokens" in u:
@@ -183,15 +186,18 @@ def usage_tokens(u: dict) -> dict:
         think = min(done, _n(cd.get("reasoning_tokens")))
         return {"in": prompt - read - write, "cache_read": read, "cache_write": write,
                 "out": done - think, "reasoning": think}
-    if "input_tokens_details" in u or "output_tokens_details" in u:
+    anthropic = "cache_read_input_tokens" in u or "cache_creation_input_tokens" in u
+    if not anthropic and ("input_tokens_details" in u or "output_tokens_details" in u):
         inp, outp = _n(u.get("input_tokens")), _n(u.get("output_tokens"))
         read = min(inp, _n(d("input_tokens_details").get("cached_tokens")))
         think = min(outp, _n(d("output_tokens_details").get("reasoning_tokens")))
         return {"in": inp - read, "cache_read": read, "cache_write": 0, "out": outp - think,
                 "reasoning": think}
+    outp = _n(u.get("output_tokens"))
+    think = min(outp, _n(d("output_tokens_details").get("thinking_tokens")))
     return {"in": _n(u.get("input_tokens")), "cache_read": _n(u.get("cache_read_input_tokens")),
             "cache_write": _n(u.get("cache_creation_input_tokens")),
-            "out": _n(u.get("output_tokens")), "reasoning": 0}
+            "out": outp - think, "reasoning": think}
 
 
 def _total(tok: dict) -> int:
@@ -273,13 +279,17 @@ def refusal(m, role: str | None = None, advice: bool = True) -> str | None:
     """Why an API model can't start now, or None: no price (and not a plan), or today's spend
     at the cap. ``role`` names the line's subject ("trivial"), else the model. ``advice``: the
     cap line's "Ask the user: …"; the busy opt-in's note goes without, its role being on the GPU
-    already and its start only waiting for it (wave 2's merge). No cap at all is #1014's to
-    refuse (a role) and the guard's to stop (NO_CAP)."""
+    already and its start only waiting for it (wave 2's merge). No cap at all (NO_CAP, or
+    UNREADABLE) is refused too: a `--model` start without one passed the dialog and wb start,
+    then the guard stopped it in round 1, after the checkout, setup and base check (#1089,
+    2026-11-23)."""
     if getattr(m, "kind", "gpu") != "api" or is_plan(m) or is_free(m):
         return None
     who = f"{role} role" if role else m.id
     if price(m) is None:
         return f"{m.id}: {NO_PRICE}"
+    if cap() is None:
+        return f"{who}: {no_cap()}"
     if (c := cap()) is not None and (t := today()["usd"]) >= c:
         return (f"{who}: API spend today is {usd(t)} of the {usd(c)} day cap (it resets at local "
                 f"midnight)" + (f". Ask the user: a higher cap (wb route cap <usd>), the role on the GPU "
@@ -345,9 +355,14 @@ def stop_text(task) -> str:
     if c is None:
         return (f"{task.name} stopped: {no_cap()}. Its work so far is in the worktree; then wb resume "
                 f"{task.name}.")
-    return (f"{task.name} stopped: {STOP} ({usd(t)} of {usd(c)} today). Its work so far is in the "
-            f"worktree. Ask the user: a higher cap (wb route cap <usd>), the role on the GPU, or "
-            f"tomorrow; then wb resume {task.name}.")
+    # "the role on the GPU" went with "then wb resume", but resume keeps the task's API model
+    # (fixed per task): the resumed round stopped at the cap again at once (#1095, 2026-11-23).
+    # A route change is for the next tasks; this one is taken over or discarded.
+    n, role = task.name, task.spec.get("role") or "<role>"
+    return (f"{n} stopped: {STOP} ({usd(t)} of {usd(c)} today). Its work so far is in the "
+            f"worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb resume "
+            f"{n}; or the role on the GPU (wb route {role} gpu) for the next tasks, with wb takeover "
+            f"{n} or wb discard {n} for this one (resume keeps its API model).")
 
 
 class Meter:

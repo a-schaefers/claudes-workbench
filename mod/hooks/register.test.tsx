@@ -1120,9 +1120,60 @@ test('a stop at the day\'s API spend cap wakes Claude to ask the user, never to 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(3000)
   expect(woken).toHaveLength(1)
-  expect(woken[0]).toContain('Ask the user: a higher cap (`wb route cap <usd>`), the role on the GPU, or tomorrow; then `wb resume a`.')
+  // no routes.json here, so no cap: a cap is what lets it go on, never tomorrow (#1095)
+  expect(woken[0]).toContain('Ask the user for a day cap (`wb route cap <usd>`), then `wb resume a`; or the role on the GPU')
+  expect(woken[0]).not.toContain('tomorrow')
   expect(woken[0]).not.toContain('Steer it')
   expect(woken[0]).not.toContain('wb feedback')
+})
+
+test('#1095: a spend stop\'s wake under a cap never pairs the role on the GPU with wb resume', async ($, on) => {
+  // the audit of 2.0 (2026-11-23): "the role on the GPU … then wb resume" resumed the task on its
+  // API model (fixed per task) into the same stop; with no cap set, tomorrow changes nothing
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const at = '/home/u/.config/workbench/routes.json'
+  files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: { trivial: { via: 'api', api: 'deepseek/deepseek-flash' } } })
+  task(files, 'a', 'stuck')
+  notice(files, { ts: ts0, task: 'a', kind: 'stuck', round: 1, cause: 'spend',
+    text: "a stopped: the day's API spend cap is reached ($5.02 of $5 today)." })
+  fakeTasks(on, files, ['a'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('Ask the user: a higher cap (`wb route cap <usd>`) or tomorrow, then `wb resume a`; ' +
+    'or the role on the GPU for the next tasks (`wb route <role> gpu`, on their yes), with `wb takeover a` or ' +
+    '`wb discard a` for this one: resume keeps its API model.')
+  expect(woken[0]).not.toMatch(/GPU[^.;]*then `wb resume/)
+})
+
+test('#1124: a stop by the task\'s API provider wakes Claude to pass on its remedy, never to steer or discard it', async ($, on) => {
+  // the audit of 2.0 (2026-11-23): cause `provider` woke as "was stopped: it got stuck" ending
+  // "Steer it with wb feedback …, or wb discard", against the notice's own "top up, then carry on"
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'a', 'stuck')
+  notice(files, { ts: ts0, task: 'a', kind: 'stuck', round: 1, cause: 'provider',
+    text: 'a: STOPPED: the provider\'s stop, not the agent\'s: top up your deepseek account; then wb feedback a --text "carry on" resumes it' })
+  fakeTasks(on, files, ['a'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('[workbench] Task `a` was stopped by its API provider.')
+  expect(woken[0]).toContain('once they say it is fixed (or the rate limit has passed), `wb feedback a --text "carry on"`')
+  expect(woken[0]).not.toContain('Steer it')
+  expect(woken[0]).not.toContain('got stuck')
+  expect(woken[0]).not.toContain('wb discard')
+  expect(toasts.join('\n')).toContain('workbench: a was stopped by its API provider')
 })
 
 test('two wakes due in one turn both arrive, the second after the first one\'s turn', async ($, on) => {
@@ -2111,6 +2162,90 @@ test('a web message wb holds open is delivered past the files tails, and one wb 
   expect([named(), claims.filter(c => c === 'm0').length, asked.length]).toEqual([1, 1, 1])  // and not asked again
 })
 
+test('#1096: the user\'s answer to a session\'s row in the web chat goes to that session, listening or not', async ($, on) => {
+  // the audit of 2.0 (2026-11-23): one session listens for all, and the user's answer to session
+  // B's report reached A, which leaves B's tasks alone; B's task waited for its terminal
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  files['/proc/self/stat'] = '1 (x) S 1'                           // /proc: a gone pid reads as gone
+  files['/wb/chat/listener.json'] = JSON.stringify({ session: 'key-a', pid: 777, start: '1' }) // A listens
+  files['/proc/777/stat'] = `777 (wb) S 1 ${'0 '.repeat(17)}1 0 0`
+  files['/proc/778/stat'] = `778 (claude) S 1 ${'0 '.repeat(17)}1 0 0`                        // A's Claude Code
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/b' }))
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  const claims: string[] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'chat' && e.argv[2] === 'claim') claims.push(e.argv[3])
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  const row = (r: any) => { files['/wb/chat/messages.jsonl'] = (files['/wb/chat/messages.jsonl'] ?? '') + JSON.stringify(r) + '\n' }
+  const open = (...ms: any[]) => { files['/wb/chat/open.json'] = JSON.stringify({ asks: {}, messages: Object.fromEntries(ms.map(m => [m.id, m])) }) }
+  // this session (sess-new, B) reported its task there; the user answers it
+  row({ id: 'r1', ts: 1_800_000_000, from: 'claude', text: 'fix-b is ready: accept it?', to: ['user'], session: 'sess-new', claude_pid: 999 })
+  const yes = { id: 'm1', ts: 1_800_000_001, from: 'user', text: 'yes, accept it' }
+  row(yes)
+  open(yes)
+  await $.session.start({ cwd: '/home/u/b', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(asked).toEqual(['[web chat] yes, accept it'])            // B took it, though A listens
+  expect(JSON.parse(files['/wb/chat/listener.json']).session).toBe('key-a')  // and A still listens
+  // A's row next, and the answer to it: A's to take, never B's
+  row({ id: 'r2', ts: 1_800_000_010, from: 'claude', text: 'fix-a failed its tests', to: ['user'], session: 'sess-a', claude_pid: 778 })
+  const theirs = { id: 'm2', ts: 1_800_000_011, from: 'user', text: 'try X instead' }
+  row(theirs)
+  open(theirs)
+  await clock.advance(3000)
+  await clock.advance(40_000)
+  expect(claims).not.toContain('m2')
+  expect(asked).toHaveLength(1)
+})
+
+test('#1096: the listener leaves an answer to another live session\'s row to it, takes it saying whose once it isn\'t taken, and an ended session\'s at once and plain', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  files['/proc/self/stat'] = '1 (x) S 1'                           // /proc: a gone pid reads as gone
+  files['/proc/778/stat'] = `778 (claude) S 1 ${'0 '.repeat(17)}1 0 0`                        // B's Claude Code lives
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/a' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  const claims: string[] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'chat' && e.argv[2] === 'claim') claims.push(e.argv[3])
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  const row = (r: any) => { files['/wb/chat/messages.jsonl'] = (files['/wb/chat/messages.jsonl'] ?? '') + JSON.stringify(r) + '\n' }
+  row({ id: 'r1', ts: 1_800_000_000, from: 'claude', text: 'fix-b is ready: accept it?', to: ['user'], session: 'sess-b', claude_pid: 778 })
+  const m = { id: 'm1', ts: 1_800_000_000, from: 'user', text: 'yes, accept it' }
+  row({ ...m, ts: 1_800_000_001 })
+  files['/wb/chat/open.json'] = JSON.stringify({ asks: {}, messages: { m1: { ...m, ts: 1_800_000_001 } } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(JSON.parse(files['/wb/chat/listener.json']).cwd).toBe('/home/u/a')  // this session listens
+  expect([claims, asked]).toEqual([[], []])                                    // B's to take
+  await clock.advance(30_000)                                                  // B never did
+  expect(asked).toHaveLength(1)
+  expect(asked[0]).toMatch(/^\[web chat\] \(This follows another Claude Code session's message in the chat, one that session didn't take: .*\) yes, accept it$/)
+  // a session whose process is gone: taken at once, and plain (the review of #1096, 2026-11-23:
+  // the note sent the user to a terminal that no longer exists, after any fresh `claude` start)
+  delete files['/proc/778/stat']
+  row({ id: 'r2', ts: 1_800_000_040, from: 'claude', text: 'fix-c: which name?', to: ['user'], session: 'sess-c', claude_pid: 780 })
+  files['/wb/chat/open.json'] = JSON.stringify({ asks: {}, messages: { m2: { id: 'm2', ts: 1_800_000_041, from: 'user', text: 'parse_all' } } })
+  await clock.advance(31_000)                                                  // the next turn's poll: 23 s after m2, inside HANDOFF_MS
+  expect(asked.at(-1)).toBe('[web chat] parse_all')
+})
+
 test('a web message another session claimed first is not submitted here', async ($, on) => {
   // #84: two sessions starting together both took the chat and both submitted the message
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
@@ -2864,6 +2999,54 @@ test('a follow-up the engine dropped is not sent again once Claude answered in t
   await turn('t2', 'wb chat reply --text "All quiet."')          // then answered there after all
   await clock.advance(61_000)                                    // past the retry
   expect(followUps()).toHaveLength(1)
+})
+
+test('another session\'s report in the chat leaves a web message owed, and this Claude Code\'s own reply settles it (#1129)', async ($, on) => {
+  // #1129: any `from: claude` row since the message counted as its answer, so a report another
+  // delegating session posted meanwhile kept the #767 follow-up from ever going; the listener's
+  // claim names this Claude Code (`parent`), which `wb chat reply` stamps as `claude_pid`
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [], true, [], false)
+  on('process.spawn', async function* () {     // `wb events`: its parent is this Claude Code, pid 9000
+    yield { stream: 'stdout', text: '{"hello": 4242, "parent": 9000, "parent_start": "77"}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const posted: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[0] === 'wb' && e.argv[1] === 'chat' && e.argv[2] === 'reply') posted.push(e.argv)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  const row = (r: Record<string, any>) => {
+    files['/wb/chat/messages.jsonl'] += JSON.stringify({ from: 'claude', ts: 1_800_000_100, ...r }) + '\n'
+  }
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, during?: () => void) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (id === 't0') await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })
+    during?.()
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0')                                               // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'Status' }) + '\n'
+  await clock.advance(31_000)
+  expect(asked.some(a => a.includes('[web chat] Status'))).toBe(true)
+  expect(JSON.parse(files['/wb/chat/listener.json']).parent).toBe(9000)
+  await turn('t1', () => row({ id: 'r1', text: 'Task sb1 is ready for review.', claude_pid: 5151 }))  // another session's
+  expect(followUps()).toHaveLength(1)                            // still owed: asked for once
+  await turn('t2', () => row({ id: 'r2', text: 'All quiet.', claude_pid: 9000 }))                    // this one's
+  await turn('t3')
+  expect(followUps()).toHaveLength(1)
+  expect(posted.filter(a => a.some(x => x.includes('answered in the terminal')))).toHaveLength(0)
 })
 
 test('a /loop firing, another plugin\'s prompt or a channel message leaves the user away and the follow-up owed; the user\'s Enter ends it (#835)', async ($, on) => {
@@ -5192,7 +5375,7 @@ const ROUTE_LINE = 'trivial: GPU → API deepseek/deepseek-flash · your code go
 const ROUTE_ARGV = ['route', 'trivial', 'deepseek/deepseek-flash', '--day-usd', '5']
 function routeWorld(on: any, files: Record<string, string>) {
   const w = {
-    asked: [] as string[], options: [] as string[][], answer: "Don't" as string | null, dry: [] as string[][], code: 0,
+    asked: [] as string[], options: [] as string[][], answer: "Don't" as string | null, dry: [] as string[][], dryAt: [] as string[], code: 0,
     reply: { change: ROUTE_LINE, gate: true, approval: { argv: ROUTE_ARGV, change: ROUTE_LINE } } as Record<string, unknown>,
   }
   on('session.cwd', () => ({ value: '/home/u/project' }))
@@ -5202,6 +5385,7 @@ function routeWorld(on: any, files: Record<string, string>) {
   on('process.run', (_: any, e: any) => {
     if (e.argv[1] === 'route' && e.argv[2] === '--dry-run') {
       w.dry.push(e.argv.slice(1))
+      w.dryAt.push(e.init?.cwd || '/home/u/project') // absent: the session's
       return { value: { exitCode: w.code, stdout: w.code ? '' : JSON.stringify(w.reply), stderr: w.code ? 'wb: no day cap yet' : '' } }
     }
     return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
@@ -5257,6 +5441,40 @@ test('#1014: a role change asks the user with wb\'s own change line; Allow write
     await $.tool.call(input as any)
     return { asked: w.asked.length - n }
   }
+  await clock.advance(1000)
+})
+
+test('#1125: an API --model start\'s dry run runs where the start runs, cd and pushd followed from the session\'s directory', async ($, on) => {
+  // the audit of 2.0 (2026-11-23): it ran in the session's directory, so `cd other && wb start …
+  // --model <API id>` (--repo defaults to `.`) was judged local-only, or not, by the wrong repo
+  const dirs = ['/b/sub/x', '/home/u/other/x', '/home/u/c/x', '/home/u/project/x']
+  const { clock, bash, w } = await routeProbe($, on, Object.fromEntries(dirs.map(d => [d, ''])))
+  const start = 'wb start t --spec s.md --model deepseek/deepseek-flash'
+  for (const [line, where] of [
+    [start, '/home/u/project'],
+    [`cd /b && ${start}`, '/b'],
+    [`cd ../other && ${start}`, '/home/u/other'],
+    [`cd /b && pushd sub && ${start}`, '/b/sub'],
+    [`cd ~/c && ${start}`, '/home/u/c'],
+    // the review of #1125 (2026-11-23): a cd the mod can't resolve, or to a directory that isn't
+    // there yet, ran the dry run nowhere, and the call skipped the dialog: the session's instead
+    [`cd "$REPO" && ${start}`, '/home/u/project'],
+    [`cd $(git rev-parse --show-toplevel) && ${start}`, '/home/u/project'],
+    [`cd "$X" && cd sub && ${start}`, '/home/u/project'],
+    [`cd "$X" && cd /b && ${start}`, '/b'],
+    [`mkdir new && cd new && ${start}`, '/home/u/project'],
+    [`cd $HOME/x && ${start}`, '/home/u/project'],
+  ] as const) {
+    const n = w.dryAt.length, k = w.asked.length
+    await bash(line)
+    expect([line, w.dryAt.slice(n), w.asked.length - k]).toEqual([line, [where], 1]) // and the dialog asked
+  }
+  // a route's dry run runs in the session's directory, wherever the line cds: it reads none
+  const n = w.dryAt.length
+  await bash('cd /b && wb route trivial deepseek/deepseek-flash --day-usd 5')       // /b is there
+  expect(w.dryAt.slice(n)).toEqual(['/home/u/project'])
+  expect(routeCalls('cd /b && wb route trivial api', '/a', '/home/u')).toEqual({ calls: [['trivial', 'api']], hidden: false, at: ['/b'] })
+  expect(routeCalls('cd "$R" && wb route trivial api', '/a', '/home/u').at).toEqual([''])
   await clock.advance(1000)
 })
 
@@ -5542,6 +5760,38 @@ test('#1014: the mod\'s summary of the roles reads as routes.summary does', () =
     writing: { via: 'gpu', gpu: 'ollama/x', api: 'anthropic/claude-haiku-5-5', thinking: 'on' } } }))
     .toBe('significant GPU (the router picks); trivial API deepseek/deepseek-flash, thinking off; writing GPU ollama/x, ' +
       'API kept: anthropic/claude-haiku-5-5, thinking on')
+})
+
+test('#1126: an OpenRouter role\'s backends are in the roles\' summary, so a change of them alone reaches the conversation', async ($, on) => {
+  // the audit of 2.0 (2026-11-23): `wb route significant --order …` from a terminal changed where
+  // the code goes with no row; tests.test_workbench.Routes checks routes.summary on the same fixture
+  const role = (order?: string[]) => ({ significant: { via: 'api', api: 'openrouter/x/y', thinking: 'off', ...(order ? { order } : {}) },
+    trivial: { via: 'gpu', api: 'openrouter/x/z', order: ['together'] } })
+  expect(routesSummary({ roles: role(['deepinfra', 'together']) })).toBe('significant API openrouter/x/y, backends deepinfra, together, ' +
+    'thinking off; trivial GPU (the router picks), API kept: openrouter/x/z, backends together; writing GPU (the router picks)')
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const at = '/home/u/.config/workbench/routes.json'
+  const files: Record<string, string> = { [at]: JSON.stringify({ v: 1, day_usd: 5, roles: role(['deepinfra']) }) }
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(31_000)
+  const before = rows.filter(r => r.includes('The roles changed')).length
+  files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: role(['together']) })          // the order alone
+  await clock.advance(31_000)
+  const changed = rows.filter(r => r.includes('The roles changed'))
+  expect(changed).toHaveLength(before + 1)
+  expect(changed.at(-1)).toContain('significant API openrouter/x/y, backends together, thinking off')
+  files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: { significant: { via: 'api', api: 'openrouter/x/y', order: 'together' } } })
+  await clock.advance(31_000)
+  expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')  // as wb refuses it
 })
 
 test('an API task\'s dollars sit beside the saving, never in it, and an API-only week says there was no GPU task (#1022)', () => {
@@ -5919,6 +6169,21 @@ test('#1023: with no provider connected and no API role the API group is one lin
   expect((await texts()).filter(t => t === 'wb is older than the mod: wb update').length).toBeGreaterThan(0)
   for (const key of ['agents', 'busy', 'role-trivial', 'api-trivial', 'cap']) expect(await ui.find({ key })).toBeUndefined()
   expect(await ui.find({ key: 'coding' })).toBeDefined()                   // the rest as always
+  await ui.unmount()
+})
+
+test('#1077: an Ollama cloud login alone counts as connected: its models are offered, never only /connect', { timeoutMs: 20_000 }, async ($, on) => {
+  const { ui, w, texts, clock } = await settingsTab($, on)
+  w.routes.providers = { ollama: { name: 'Ollama Cloud', key: 'ollama', why: 'signed in through Ollama: its cloud models need no key here' } }
+  delete w.routes.roles.trivial.api
+  w.models.api = [{ id: 'ollama/glm-5:cloud', name: 'glm-5:cloud', provider: 'ollama', provider_name: 'Ollama Cloud', window: 131072, price: null as any, free: false }]
+  await clock.advance(11_000)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  const all = await texts()
+  expect(all).not.toContain('No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.')
+  expect(all).toContain('Connected: Ollama Cloud (signed in through Ollama: its cloud models need no key here)')
+  expect(await ui.find({ key: 'api-trivial' })).toBeDefined()
   await ui.unmount()
 })
 

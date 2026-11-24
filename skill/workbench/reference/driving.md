@@ -76,7 +76,8 @@ paste diffs. While a `web-chat` context block says they are away, also tell them
 something they asked for finishes or needs them. `wb chat log` shows the thread. Sounds for them
 to pick by ear go there with `wb chat listen` (reference/audio.md). The web thread is
 all they see: each reply must stand on its own, and a yes there answers only a question asked
-there, never one asked in the terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. They are away
+there, never one asked in the terminal. A message noted as following another session's message is
+that session's: leave its task alone and tell the user to answer at that session's terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. They are away
 once they use the chat (open it or write there) after they last used the terminal, so a
 `web-chat` block can come with no message from them; a message they type in the terminal, or a
 prompt they answer there, means they are back. While they're at the terminal, a prompt of yours
@@ -139,7 +140,8 @@ run it as a backlog. Each task still gets the same review it would by day.
   view`) and spec from it.
 - Start each with `wb start … --queue --backlog <name>`, a fresh, dated name for each batch
   (`overnight-2026-11-21`: `wb start` refuses an earlier batch's). They take the GPU in the order you
-  started them, and a task you send back goes ahead of the rest. Their setups and base checks
+  started them, and a task you send back goes ahead of the rest; an API provider's slot (3 tasks at
+  once) goes to whichever waiting task looks first, in no set order. Their setups and base checks
   run one at a time, in the same order.
 - Review each wake as usual: accept, feedback, or discard. Accept without `--merge`: nothing
   reaches the user's branches unattended. Leave a hard call for the morning (`wb note`) rather
@@ -147,7 +149,8 @@ run it as a backlog. Each task still gets the same review it would by day.
 - The user stays away while a backlog task of this session's is open, so permission prompts
   keep going to the web chat (*The web chat*).
 - Each task keeps the machine from idle-sleeping while it runs (macOS, Linux, WSL2 through
-  Windows' powershell.exe). A closed lid still sleeps it; on WSL2 without interop nothing can:
+  Windows' powershell.exe), and for half an hour after it stops for your review. A closed lid
+  still sleeps it; on WSL2 without interop nothing can:
   when `wb start` says so, tell the user to set Windows' sleep to Never for the night.
 - When the batch is done, run `wb backlog <name>` and post it with `wb chat reply`: each task's
   outcome and branch, and the batch's saving. That is the morning summary.

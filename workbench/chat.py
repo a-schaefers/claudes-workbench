@@ -432,6 +432,13 @@ def send(text: str, frm: str, cid: str | None = None, **extra) -> dict:
                 # retry found the id and said sent, and the listener never had it (#446)
                 _open_update(lambda w: _reopen(w, r))
             return r
+        if frm == "claude" and (pid := os.environ.get("CLAUDE_PID", "")).isdigit():
+            # whose Claude Code wrote it, on every row of Claude's (a reply, `wb shot --chat`, a
+            # listen batch): the mod's owed reply (#767) counts only its own session's rows and
+            # those answering the message, as another session's report settled it (#1129); a
+            # screenshot another session posted still did, stamped in reply() alone (the #1129
+            # review, 2026-11-23)
+            extra.setdefault("claude_pid", int(pid))
         row = {"id": f"{int(time.time() * 1000)}-{secrets.token_hex(3)}", "ts": store.now(),
                "from": frm, "text": text, **({"cid": cid} if cid else {}),
                **{k: v for k, v in extra.items() if v}}
@@ -693,8 +700,25 @@ def taken() -> list[str]:
             and now - r.get("ts", 0) <= MESSAGE_EXPIRE]
 
 
+def caller_listens() -> bool:
+    """Whether this process runs under the listening session's Claude Code: its CLAUDE_PID is the
+    listener's `parent` (the mod's claim, from `wb events`'s hello). Another delegating session,
+    told to report through `wb chat reply` while the user is away, threaded its report onto the
+    listener's in-flight message: sent to that agent alone, pushed to no phone (#1129,
+    2026-11-23). Either unknown (an older mod's claim, a caller outside Claude Code): yes, as
+    before; a claim of another machine's is never this process's."""
+    lst = listener() or {}
+    parent, me = lst.get("parent"), os.environ.get("CLAUDE_PID", "")
+    if not isinstance(parent, int) or isinstance(parent, bool) or not parent or not me.isdigit():
+        return True
+    if isinstance(lst.get("machine"), str) and lst["machine"] and lst["machine"] != store.machine():
+        return False
+    return int(me) == parent
+
+
 def reply(text: str, to: list[str] | None = None, **extra) -> dict:
-    """Claude's reply (`wb chat reply`), with `re` (``to``, else `taken`) and `to` (whose those
+    """Claude's reply (`wb chat reply`), with `re` (``to``, else `taken`, for the listening
+    session's own calls: `caller_listens`; another's goes to the user) and `to` (whose those
     messages are). ValueError for a ``to`` that is no message to Claude in the thread."""
     rows = {r.get("id"): r for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)
             if isinstance(r, dict) and _inbound(r)}
@@ -705,7 +729,7 @@ def reply(text: str, to: list[str] | None = None, **extra) -> dict:
         if missing := [i for i in ids if i not in rows]:
             raise ValueError(f"no message {missing[0][:64]} to Claude in the thread")
     else:
-        ids = [i for i in taken() if i in rows]
+        ids = [i for i in taken() if i in rows] if caller_listens() else []
         # a turn that took the user's message answers the user alone: an agent's message delivered
         # into the user's running turn read every plain `wb chat reply` to them (the #1042 review)
         if any(rows[i].get("from") == "user" for i in ids):
@@ -830,11 +854,13 @@ def snapshot() -> dict:
 def open_tasks() -> list[dict]:
     """The open tasks for the page's strip over the thread (#1016): while away, the chat is all
     the user sees, and it named no model (robustness minor 8). From task.json and status.json:
-    `{name, phase, model, via, provider_name}`; a bench replay is no one's task."""
+    `{name, phase, model, via, provider_name}`; a bench replay is no one's task, and a parked one
+    (`wb stop --all`) is left out as `wb status` leaves it: the quit's tasks filled the strip for
+    good (#1097, 2026-11-23)."""
     out = []
     for t in store.all_tasks():
         sp, phase = t.spec, t.status.get("phase")
-        if not sp.get("name") or sp.get("bench") or phase in store.CLOSED:
+        if not sp.get("name") or sp.get("bench") or phase in store.CLOSED or store.parked(t.status):
             continue
         out.append({"name": t.name, "phase": phase or "queued", "model": sp.get("model") or "",
                     "via": sp.get("via") or "gpu", "provider_name": sp.get("provider_name") or ""})

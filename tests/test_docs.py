@@ -135,6 +135,39 @@ class DocsMatchTheCode(unittest.TestCase):
         choosing = section(skill, "## 1. Pick the role; the user's roles pick the model")
         self.assertIn("never pass `--model <api id>`", " ".join(choosing.split()))
 
+    def test_the_skill_lets_a_user_named_api_model_through_wb_starts_dialog(self):
+        # #1132 (2026-11-23): "never pass `--model <api id>`" read as a ban even on the user's own
+        # `/workbench … --model <id>` (the skill's argument-hint), the start cli.start_gate and the
+        # mod's dialog were built for
+        skill = (ROOT / "skill/workbench/SKILL.md").read_text()
+        self.assertIn("[--model <id>]", skill[:skill.index("\n---", 4)])
+        choosing = " ".join(section(skill, "## 1. Pick the role; the user's roles pick the model").split())
+        self.assertIn("never pass `--model <api id>` unless the user named that id for this task (the mod's "
+                      'dialog then asks them, and a "not changed" means no)', choosing)
+        self.assertTrue(callable(cli.start_gate))
+        self.assertIn("calls.push(['--start'", (ROOT / "mod/hooks/register.tsx").read_text())
+
+    def test_the_skills_question_bullet_sends_a_files_text_never_a_path_outside_the_lane(self):
+        # #1133 (2026-11-23): an answer naming ~/.claude/plans/x.md (hidden from the lane whole)
+        # or another repo got the agent a denied read and another question, another wake
+        skill = (ROOT / "skill/workbench/SKILL.md").read_text()
+        bullet = skill[skill.index("- **question** —"):skill.index("- **stuck / failed** —")]
+        bullet = " ".join(bullet.split())
+        self.assertIn("never a path you name elsewhere (a plan under ~/.claude, another repo)", bullet)
+        self.assertIn("`wb answer <name> --file <path>`, which sends the file's contents", bullet)
+        self.assertIn("Path(a.file).read_text(", (ROOT / "workbench/cli.py").read_text())   # cmd_answer's
+
+    def test_the_backlog_promises_start_order_for_the_gpu_only_not_for_api_slots(self):
+        # #1130 (2026-11-23): driving.md promised start order and sent-back-first, which only
+        # GpuLease's `since` keeps; NoLease's waiters take a free slot in no set order
+        from workbench import models
+        driving = " ".join((ROOT / "skill/workbench/reference/driving.md").read_text().split())
+        self.assertIn(f"an API provider's slot ({models.API_PARALLEL} tasks at once) goes to whichever "
+                      "waiting task looks first, in no set order", driving)
+        self.assertNotIn("since", models.NoLease.__init__.__code__.co_names)   # still no queue order
+        self.assertIn("since", models.GpuLease.__init__.__code__.co_names)
+        self.assertIn("Waiters take a slot in no set order", " ".join(ARCH.split()))
+
     def test_every_web_chat_api_path_is_in_the_api_reference(self):
         # #1042: docs/chat-api.md is the page another agent is handed; a path the server answers
         # that it doesn't name is one nobody can find
@@ -143,6 +176,24 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertGreater(len(paths), 10)
         missing = sorted(p for p in paths if p not in doc)
         self.assertEqual(missing, [], "add these to docs/chat-api.md")
+
+    def test_every_key_of_the_users_chat_state_is_in_the_api_reference(self):
+        # #1127 (2026-11-23): snapshot() gained `tasks` (#1016) and week_saved `api` (#1022), and
+        # docs/chat-api.md's /api/state list named neither; read from the source, no state needed
+        import ast
+        tree = ast.parse((ROOT / "workbench/chat.py").read_text())
+        keys = {}
+        for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("snapshot", "week_saved")):
+            ret = next(n.value for n in ast.walk(fn) if isinstance(n, ast.Return))
+            keys[fn.name] = {k.value for k in ret.keys if isinstance(k, ast.Constant)}
+        self.assertGreater(len(keys["snapshot"]), 8)
+        doc = (ROOT / "docs/chat-api.md").read_text()
+        state = doc.split("### `GET /api/state`", 1)[1].split("\n### ", 1)[0]
+        listed = set(re.findall(r"^- `([a-z_]+)`:", state, re.M))
+        self.assertEqual(sorted(keys["snapshot"] - listed), [], "add these to docs/chat-api.md's /api/state")
+        saving = " ".join(next(b for b in state.split("\n- ") if b.startswith("`savings`")).split())
+        self.assertEqual(sorted(k for k in keys["week_saved"] if f"`{k}`" not in saving), [],
+                         "name these in /api/state's `savings`")
 
     def test_claude_md_stays_under_claude_codes_size_warning(self):
         # Claude Code warns past 40,000 characters, and every session that changes the code
