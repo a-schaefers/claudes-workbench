@@ -488,20 +488,42 @@ class Lifecycle(Base):
         self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
         checkins = [r["text"] for r in store.notices() if r["task"] == "t-nf" and r["kind"] == "checkin"]
         self.assertEqual(len(checkins), 1)
-        self.assertIn("warning: the acceptance command can't run in the agent's environment: ", checkins[0])
-        self.assertIn("nosuch-tool-1152: command not found (exit 127 on the base)", checkins[0])
+        # wb's words, not the shell's: dash's `/bin/sh: 1: nosuch-tool-1152: not found` failed the
+        # bash-worded check here in WSL's Debian (nightly run 45362198509, 2026-11-24)
+        self.assertIn("warning: the acceptance command can't run in the agent's environment: "
+                      "nosuch-tool-1152: command not found (exit 127 on the base)", checkins[0])
         summary = (task.round_dir(1) / "summary.md").read_text()
         self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
                                            "the agent's environment: "), summary)
         self.assertIn("(exit 127, as on the base); no round can fix that", summary)
         self.assertEqual(st["last"], "the acceptance command can't run in the agent's environment: "
                                      "Claude reviews next")
-        # a script the step was to make (No such file or directory) still goes back to the agent
+        # a script the step was to make (No such file or directory; dash: not found) still goes back
         self.start("t-nf2", "ok", "--test", "./made-by-the-step.sh", "--auto-fix", "1",
                    "--no-self-review")
         st = wait_phase("t-nf2", {"review"})
         self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 2))
         self.assertFalse([r for r in store.notices() if r["task"] == "t-nf2" and r["kind"] == "checkin"])
+
+    def test_a_command_not_found_reads_the_same_in_every_shell_and_a_path_is_never_a_missing_tool(self):
+        # nightly run 45362198509 (2026-11-24): under WSL's Debian $SHELL is /bin/sh, dash, which
+        # says `/bin/sh: 1: x: not found`, so the check-in read differently from bash's; and dash
+        # says `./made-by-the-step.sh: not found` for a script the step makes, where bash and zsh
+        # say No such file or directory, so that --test checked in at once as a tool the agent lacks
+        said = lambda last, code=127: runner.missing_command({"exit": code, "tail": f"x\n{last}\n"})  # noqa: E731
+        for last in ("bash: line 1: nosuch-tool-1152: command not found",
+                     "/bin/sh: line 1: nosuch-tool-1152: command not found",   # bash as sh
+                     "zsh:1: command not found: nosuch-tool-1152",
+                     "/bin/sh: 1: nosuch-tool-1152: not found",                # dash
+                     "sh: nosuch-tool-1152: not found"):                       # ksh, busybox
+            self.assertEqual(said(last), "nosuch-tool-1152: command not found", last)
+        self.assertEqual(said("./run.sh: line 3: pytest: command not found"), "pytest: command not found")
+        for last in ("/bin/sh: 1: ./made-by-the-step.sh: not found",           # dash
+                     "bash: line 1: ./made-by-the-step.sh: No such file or directory",
+                     "zsh:1: no such file or directory: ./made-by-the-step.sh",
+                     "/bin/sh: 1: /opt/tool/bin/check: not found"):
+            self.assertIsNone(said(last), last)
+        self.assertIsNone(said("/bin/sh: 1: nosuch-tool-1152: not found", code=1))  # 127 or nothing
 
     def test_what_the_base_check_writes_never_reaches_the_agents_worktree(self):
         # #192 (the 2026-11-19 audit): the base check ran in the task's worktree, and a stamp it
@@ -17155,6 +17177,7 @@ class Verify(Base):
             self.assertTrue(verify.assertion(out), runner_name)
         # the same runners when what failed is missing, not wrong: still no proof
         for out in ("1..1\nnot ok 1 slugifies\n# test/slug.bats: line 3: slugify: command not found\n",
+                    "FAIL slugifies\ntest/slug.sh: 3: slugify: not found\nexit 1\n",   # dash's (2026-11-24)
                     "1) SlugTest::testSlug\nError: Call to undefined function slugify()\n\nERRORS!\n",
                     "1) SlugTest::testSlug\nError: Call to undefined method Slug::slugify()\n"):
             self.assertEqual(verify.verdict(1, out, 0), "inconclusive", out)
@@ -31036,6 +31059,11 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.drive_here("t-explore")
         st = store.Task("t-explore").status
         self.assertEqual((st["window"], st["phase"]), (131072, "review"), st.get("last"))
+        # the GPU tasks are stopped at the 40th read, so the fake waits as long as it takes: its
+        # 2 s were too short for a loaded macOS runner, which read the 40th read after the write
+        # and lifted the guard for the edit (as it should, for an edit made through the shell),
+        # so t-explore-gpu64 went to review (nightly run 45362198509, 2026-11-24)
+        os.environ["FAKE_EXPLORE_PAUSE"] = "20"
         self.start("t-explore-gpu", "explore")
         st = wait_phase("t-explore-gpu", {"stuck"})
         self.assertEqual(st["window"], 32768)
@@ -33273,7 +33301,10 @@ class Privacy(_KeyholeTest):
         typed = self.repo.with_name(self.repo.name.swapcase())       # ext4 keeps the two apart
         self.local_only(key=typed)
         self.role(via="api", api=FLASH)
-        self.assertIsNone(cli.privacy.local_only(self.repo))         # case counts where the FS keeps it
+        # case counts where the FS keeps it; on a real APFS (the macOS runners) the key holds
+        # unpatched: the test assumed ext4 (nightly run 45362198509, 2026-11-24)
+        folds = store.folds_case(self.repo)
+        self.assertEqual(cli.privacy.local_only(self.repo), str(typed) if folds else None)
         with mock.patch.object(store, "folds_case", lambda p: True):  # as on APFS
             self.assertEqual(cli.privacy.local_only(self.repo), str(typed))
             code, err = self.fails("start", "t-lo-case", "--spec", str(self.spec), "--repo", str(self.repo))
@@ -33296,9 +33327,11 @@ class Privacy(_KeyholeTest):
         def as_on_apfs(p):  # the key exists as typed: git finds the repo, its `.git` joined to `p`
             c = common(on_disk(p))
             return typed / c.relative_to(real) if c and Path(p).is_relative_to(typed) else c
+        folds = store.folds_case(wt)                                  # a real APFS: held as is
         with mock.patch.object(context.gitops, "common_dir", as_on_apfs), \
                 mock.patch.object(context.gitops, "toplevel", lambda p: top(on_disk(p))):
-            self.assertIsNone(cli.privacy.local_only(wt))            # case counts where the FS keeps it
+            # case counts where the FS keeps it (nightly run 45362198509, 2026-11-24: not on macOS)
+            self.assertEqual(cli.privacy.local_only(wt), str(typed) if folds else None)
             with mock.patch.object(store, "folds_case", lambda p: True):
                 self.assertEqual(cli.privacy.local_only(wt), str(typed))
 
@@ -33990,15 +34023,18 @@ class Writing(Base):
 
     def test_a_writing_task_with_a_check_runs_it_on_the_base_and_sends_a_failure_back(self):
         from workbench import bench
-        (self.repo / "Makefile").write_text("docs:\n\tgrep -qx 42 answer.txt\n")
-        subprocess.run(["git", "-C", str(self.repo), "add", "Makefile"], check=True)
+        # a script in the repo, not `make docs`: WSL's Debian has no make, and its base check's
+        # `make: not found` (exit 127) rightly skipped the auto-fix this test is about (nightly
+        # run 45362198509, 2026-11-24)
+        (self.repo / "check-docs.sh").write_text("grep -qx 42 answer.txt\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "check-docs.sh"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "docs check"], check=True)
-        self.start("t-check", "fix", "--role", "writing", "--test", "make docs")
+        self.start("t-check", "fix", "--role", "writing", "--test", "sh check-docs.sh")
         st = wait_phase("t-check", {"review"})
         task = store.Task("t-check")
         prompt = task.round_dir(1).joinpath("prompt.md").read_text()
-        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL, "make docs")))
-        self.assertEqual(bench.TEST_LINE.search(prompt).group(1), "make docs")
+        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL, "sh check-docs.sh")))
+        self.assertEqual(bench.TEST_LINE.search(prompt).group(1), "sh check-docs.sh")
         self.assertIs(st["base_check"]["ok"], False)                     # run on the base
         self.assertEqual((st["round"], st["auto_fixes"]), (2, 1))         # 41 sent back as auto-fix
         self.assertTrue(st["tests"]["ok"])

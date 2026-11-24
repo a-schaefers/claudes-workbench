@@ -2934,10 +2934,13 @@ def hang(task: store.Task, limit: int) -> dict | None:
     return None
 
 
-# The shell's own line for a command it can't find on PATH: bash's and zsh's `command not found`,
-# dash's and ksh's `: not found` (exit 127). Not `No such file or directory`, which a script the
-# step creates (`./check.sh`) says on the base too.
-NOT_FOUND = re.compile(r"command not found|: not found$")
+# The shell's own line for a command it can't find on PATH, and the command it names: bash's
+# `<name>: command not found`, zsh's `command not found: <name>`, dash's and ksh's `<name>: not
+# found` (exit 127). Not `No such file or directory`, which a script the step creates
+# (`./check.sh`) says on the base too in bash and zsh; dash says `./check.sh: not found` for it,
+# so a name with a `/` is never a missing tool (nightly run 45362198509, 2026-11-24: under a
+# dash $SHELL a --test the step was to make checked in at once as a tool the agent lacks).
+NOT_FOUND = re.compile(r"command not found: (?P<z>.+)$|(?P<n>[^:]+): (?:command )?not found$")
 # What gives the agent's environment that command, for the check-in and the skipped auto-fix
 GIVE_TOOL = ("no round can fix that: put the tool in the worktree (a .venv there comes first on "
              "the agent's PATH), then wb feedback; or wb discard and start again with a --setup "
@@ -2945,13 +2948,17 @@ GIVE_TOOL = ("no round can fix that: put the tool in the worktree (a .venv there
 
 
 def missing_command(r: dict | None) -> str | None:
-    """The shell's not-found line, when run ``r`` (the base check's, or a round's tests) exited
-    127 with it last: a tool the agent's environment lacks (one outside the agent's PATH, which
-    python_env and agent_path trim), which no edit in a round can give it (#1152); else None."""
+    """`<name>: command not found`, when run ``r`` (the base check's, or a round's tests) exited
+    127 with the shell's not-found line last: a tool the agent's environment lacks (one outside
+    the agent's PATH, which python_env and agent_path trim), which no edit in a round can give it
+    (#1152); else None. Worded by wb, not the shell, so the check-in and the base's line compared
+    with a round's read the same under bash, zsh or dash (nightly run 45362198509, 2026-11-24)."""
     if not r or r.get("exit") != 127:
         return None
     last = (r.get("tail") or "").strip().splitlines()[-1:]
-    return last[0].strip() if last and NOT_FOUND.search(last[0].strip()) else None
+    m = NOT_FOUND.search(last[0].strip()) if last else None
+    name = (m.group("z") or m.group("n")).strip() if m else ""
+    return f"{name}: command not found" if name and "/" not in name else None
 
 
 def base_check_line(r: dict, task: store.Task) -> str:
