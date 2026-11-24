@@ -7,6 +7,7 @@ import argparse
 import fnmatch
 import functools
 import io
+import ipaddress
 import json
 import math
 import os
@@ -2859,6 +2860,36 @@ def _skipped() -> list[tuple[str, str]]:
         return []
 
 
+# Tailscale's addresses (CGNAT's 100.64/10), which ipaddress counts neither private nor global
+TAILNET = ipaddress.ip_network("100.64.0.0/10")
+LAN_SUFFIXES = (".local", ".lan", ".home.arpa", ".internal", ".localdomain", ".ts.net")
+CONNECT_TOO = "a hosted provider's key: /connect in OpenCode adds it"
+
+
+def _on_lan(host: str) -> bool:
+    """Whether a host another machine answers is a private one (RFC 1918, link-local, ULA, a
+    tailnet, a bare or .local name): a server of the user's, never a hosted cloud provider."""
+    try:
+        ip = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        name = host.lower().rstrip(".")
+        return "." not in name or name.endswith(LAN_SUFFIXES)
+    return ip.is_private or ip.is_link_local or ip in TAILNET
+
+
+def _off_lan() -> dict[str, str]:
+    """{provider: discovery's `local: true` hint} for each configured provider on another host of
+    the LAN, not opted in. A public host (Together, Groq added by hand) is left out: its fix is a
+    key, which the hint alone hid (#1109's review, 2026-11-23)."""
+    try:
+        rows = models.configured_providers()
+    except (RuntimeError, OSError, ValueError):
+        return {}
+    # "isn't this machine": _scan's why for exactly this case (disabled ones are remote too)
+    return {pid: why for pid, _, url, why, remote in rows
+            if remote and "isn't this machine" in why and _on_lan(urlparse(url).hostname or "")}
+
+
 def _runs_held(m: models.Model) -> bool:
     """Whether an API model's key is one a task can run with: stored by /connect (the keyhole
     holds it outside the lane), or an Ollama cloud model's, which this machine's Ollama holds and
@@ -2877,10 +2908,11 @@ def _route_api(mid: str, role: str) -> models.Model:
     if m.kind != "api":
         die(f"{mid} is a GPU model: wb route {role} --gpu {mid} pins it", 3)
     st = models.status(m)
-    # a server of the user's on another host, not opted in, reads as an API provider with no key:
-    # its own fix, never /connect, which a LAN server has no use for (#1109, 2026-11-23)
+    # a server of the user's on another host of the LAN, not opted in, reads as an API provider
+    # with no key: its own fix, never /connect, which a LAN server has no use for (#1109,
+    # 2026-11-23); a public host keeps /connect, a hosted provider's fix (#1109's review)
     if not st["available"] and st["why"].startswith("no key for ") and \
-            (off := dict(_skipped()).get(m.provider)):
+            (off := _off_lan().get(m.provider)):
         die(f"{mid} can't be a role's model: provider {m.provider}: {off}", 3)
     if not _runs_held(m) or (not st["available"] and not st["why"].startswith(HEALTH)):
         why = st["why"] if not st["available"] else (
@@ -6125,9 +6157,13 @@ def first_run() -> list[str]:
                "--  no local model registered yet: run /workbench in Claude Code, and Claude picks one "
                "for this machine (wb scout)")
     # a provider of the user's that discovery passed over (another host, not opted in): its fix
-    # here too, as wb doctor and wb models say it; wb setup said nothing of it (#1109, 2026-11-23)
+    # here too, as wb doctor and wb models say it; wb setup said nothing of it (#1109, 2026-11-23).
+    # One on a public host may be a hosted one added by hand: /connect too (#1109's review)
     if not found and (skipped := _skipped()):
-        out.append("--  " + "; ".join(f"provider {pid}: {why}" for pid, why in skipped))
+        lan = _off_lan()
+        out.append("--  " + "; ".join(
+            f"provider {pid}: {why}" + (f"; {CONNECT_TOO}" if "isn't this machine" in why and pid not in lan else "")
+            for pid, why in skipped))
     out += api_key_lines(keys)
     v = lane.abi()
     out.append(f"ok  Landlock ABI {v}: each agent writes only inside its task" if v else

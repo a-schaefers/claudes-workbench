@@ -28350,6 +28350,40 @@ class ApiDiscovery(Base):
             cli.main(["route", "trivial", "lan/coder", "--day-usd", "1"])
         self.assertEqual((code.exception.code, err.getvalue()), (3, f"wb: lan/coder can't be a role's model: {hint}\n"))
 
+    def test_a_hosted_provider_added_by_hand_keeps_connect_and_a_tailnet_box_gets_the_hint(self):
+        # #1109's review (2026-11-23): the hint replaced /connect for any host off this machine,
+        # so a cloud provider configured by hand (api.together.xyz) lost the key it needed, and
+        # following the hint would make a cloud host count as a local model
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"] = {"together": {"npm": "@ai-sdk/openai-compatible",
+                                        "options": {"baseURL": "https://api.together.xyz/v1"},
+                                        "models": {"qwen-coder": {"limit": {"context": 65536}}}},
+                           "tail": {"npm": "@ai-sdk/openai-compatible",
+                                    "options": {"baseURL": "http://100.101.7.9:8000/v1"},
+                                    "models": {"coder": {"limit": {"context": 65536}}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as code, redirect_stderr(err):
+            cli.main(["route", "trivial", "together/qwen-coder", "--day-usd", "1"])
+        self.assertEqual(code.exception.code, 3)
+        self.assertIn("/connect", err.getvalue())
+        self.assertNotIn("local", err.getvalue())
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as code, redirect_stderr(err):
+            cli.main(["route", "trivial", "tail/coder", "--day-usd", "1"])
+        self.assertEqual(code.exception.code, 3)
+        self.assertIn("100.101.7.9 isn't this machine", err.getvalue())
+        self.assertNotIn("/connect", err.getvalue())
+        line = next(x for x in cli.first_run() if "provider together" in x)
+        self.assertIn(f"provider together: api.together.xyz isn't this machine", line)
+        self.assertIn(f"api.together.xyz isn't this machine; if it's your own model server (WSL2's Windows host, a box "
+                      f"on the LAN), add {{\"together\": {{\"local\": true}}}} to {self.models.overrides_path()}; "
+                      f"{cli.CONNECT_TOO}; provider tail", line)
+        self.assertFalse(line.endswith(cli.CONNECT_TOO))            # the tailnet box: its hint alone
+        self.assertEqual([cli._on_lan(h) for h in ("192.168.1.9", "fd00::7", "fe80::1%eth0", "nas", "box.local",
+                                                    "gpu.tail1234.ts.net", "api.together.xyz", "8.8.8.8")],
+                         [True] * 6 + [False] * 2)
+
     def test_with_api_runs_off_wb_start_refuses_an_api_model_by_model_flag(self):
         # cli.API_RUNS is on since #1016 (wb start --role): the off path, kept
         err = io.StringIO()

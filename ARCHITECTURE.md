@@ -3473,8 +3473,11 @@ The changes (each one exit 3 with one line when refused, writing nothing):
   login this machine's Ollama holds, which needs no keyhole, #1077), else refused with discovery's why (`cli._route_api`): `not in
   OpenCode's catalog: wb models lists the API models`, a GPU id (`… is a GPU model: wb route <role>
   --gpu <id> pins it`), no key (`… can't be a role's model: no key for <p>: run /connect in OpenCode
-  and add it`, said once; a configured provider on another host, not opted in, gets its
-  `local: true` hint instead, `provider <p>: <host> isn't this machine; …`, #1109), an OAuth, environment, config or signing key, or a keyless free model
+  and add it`, said once; a configured provider on another host of the LAN, not opted in, gets its
+  `local: true` hint instead, `provider <p>: <host> isn't this machine; …`, #1109: `cli._off_lan`,
+  a private, link-local or tailnet address or a bare, `.local`, `.lan`, `.home.arpa`, `.internal`
+  or `.ts.net` name, `cli._on_lan`; a public host, a hosted provider added by hand, keeps the
+  /connect line), an OAuth, environment, config or signing key, or a keyless free model
   (`can't run: needs a key wb can hold outside the lane (…)`). A provider out of credit, rate-limited
   or unreachable is no refusal (`cli.HEALTH`): that passes. The kept API model of a role flipped to
   API is checked the same way.
@@ -5743,7 +5746,9 @@ wb can't hold it outside the lane yet; /connect stores one it can`, `anthropic i
 OAuth: …`), `NO_KEY` for none. With a stored key and no local model the GPU lines read as optional
 (`NO_SERVER_OPTIONAL`, `NO_LOCAL_OPTIONAL`). With no local model, a provider discovery passed over
 (`models.skipped_providers`: another host not opted in, disabled) adds its `--  provider <id>: <why>`
-line, the `local: true` hint as doctor gives it (#1109). No GPU is needed for a role on API (*Roles*). The plugin install copies only `mod/` into the plugin
+line, the `local: true` hint as doctor gives it (#1109), and for a public host (not `cli._on_lan`:
+a hosted provider added by hand may be one) `cli.CONNECT_TOO` after it, `a hosted provider's key:
+/connect in OpenCode adds it`. No GPU is needed for a role on API (*Roles*). The plugin install copies only `mod/` into the plugin
 cache; `marketplace add` keeps a full clone (`installLocation` in `known_marketplaces.json`, or under
 `CLAUDE_CODE_PLUGIN_CACHE_DIR`), from which `wb setup` links `wb` and the skill. `wb update` (`/workbench-update` also
 reloads plugins) runs `claude plugin marketplace update workbench` and `claude plugin update workbench@workbench`; the
