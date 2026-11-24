@@ -1056,6 +1056,21 @@ class Lifecycle(Base):
             self.assertIsNone(said(tail), tail)
         self.assertIsNone(said(f"/bin/sh: 1: x: not found\n{err.format(127)}", code=0))  # a passing run
 
+    def test_macos_make_381s_own_command_not_found_line_is_read_as_a_missing_tool(self):
+        # #1262 (bar round 6 of 2.0): GNU Make 3.81, macOS's /usr/bin/make, says `Command not
+        # found` for a recipe it execs itself, and its Error line has no `Makefile:N:`: nothing
+        # read it, so round 1 and both auto-fix rounds ran on correct code (the tails a real 3.81 printed)
+        said = lambda tail, code=2: runner.missing_command({"exit": code, "tail": tail})  # noqa: E731
+        self.assertEqual(said("pytest -q\nmake: pytest: Command not found\nmake: *** [test] Error 127"),
+                         "pytest: command not found")
+        self.assertEqual(said("make: .venv/bin/pytest: Command not found\nmake: *** [test] Error 127"),
+                         ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+        self.assertEqual(said("make[1]: pytest: Command not found\nmake[1]: *** [test] Error 127\n"
+                              "make[1]: Leaving directory '/r/sub'\nmake: *** [all] Error 2"),
+                         "pytest: command not found")
+        # a recipe's own failure, not make's exec, still goes back
+        self.assertIsNone(said("make: pytest: Command not found\nmake: *** [test] Error 1"))
+
     def test_a_package_managers_run_wrapper_lines_are_read_past_to_the_scripts(self):
         # #1243 (bar round 5 of 2.0): `pnpm test` and `yarn test` with jest not installed ended on
         # their own lines, so #1229's check never saw the shell's not-found line: no check-in, and

@@ -3410,8 +3410,11 @@ RUNNER_LINES = (
 )
 RUNNER_TAIL = re.compile("|".join(RUNNER_LINES))
 # make's own line for a recipe it runs without a shell (no shell syntax in it) that execvp can't
-# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229)
-MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
+# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229). GNU
+# Make 3.81 (macOS's /usr/bin/make, Xcode's) says `Command not found`, which none of the
+# patterns read: a Mac's plain `make test` recipe ran round 1 and both auto-fix rounds on correct
+# code, each told the bug was the change's (#1262, bar round 6, 2026-11-24).
+MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): (?:No such file or directory|Command not found)")
 # wb's words for a tool not checked out (missing_command), the same in every shell, and its path
 NOT_CHECKED_OUT = re.compile(r"(?P<p>[^:]+): not in the worktree \(")
 # The words of a skipped auto-fix whose remedy is a wb feedback once Claude gives the agent's
