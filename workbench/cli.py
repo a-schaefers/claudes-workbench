@@ -1770,7 +1770,13 @@ def cmd_feedback(a):
         mark.unlink(missing_ok=True)
     reviews = st.get("reviews", 0) + (0 if resumed or unsent else 1)
     handled = store.now()  # everything before the new round; what its runner raises stays news
-    task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
+    # An unsent round keeps its own `context` unless a flag says otherwise: the runner clears it
+    # only once the round starts, so wb resume's or wb next --fresh's "fresh" (or a handover's
+    # "full") still stands. Cleared here, the "carry on" a failed notice advises ran the resume
+    # in the old stuck session, its RESUME prompt claiming a fresh one, and the day cap priced a
+    # fresh first request for a continued one (#1230, 2026-11-24).
+    if not unsent or a.fresh or a.keep_context:
+        task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
                     # an unsent round keeps its own (`next`: the pane's `step 2`)
