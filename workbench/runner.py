@@ -344,11 +344,13 @@ def write_config_layer(task: store.Task) -> Path:
                                                  "keep": {"tokens": compaction_keep(cfg)}} if buffer else {})},
         # with probe on, one tool call's output sized to the window (output_cap)
         **({"tool_output": output_cap(cfg)} if context.experiment(task, "probe") else {}),
-        "mcp": {"servers": {**users_servers_off(), "workbench": {  # 2.x shape: mcp.servers.<name>
+        "mcp": {"servers": {**users_servers_off(task), "workbench": {  # 2.x shape: mcp.servers.<name>
             "type": "local",
             "command": [sys.executable, str(PKG_ROOT / "bin" / "wb-ask-mcp")],
             "environment": {"WB_TASK": task.name, "WB_HOME": str(store.home())},
-            "codemode": False,  # a plain tool the model sees, not one behind code mode
+            # a direct tool even if `execute` were ever allowed: denied, as now, OpenCode 2.3.2
+            # sends every tool direct whatever its codemode (context.mcp_servers)
+            "codemode": False,
             # the tool blocks until Claude answers; OpenCode must not give up on it first
             "timeout": {"startup": 15000, "execution": wait_ms},
         }}},
@@ -416,18 +418,22 @@ def output_cap(cfg: dict) -> dict:
     return {"max_bytes": cap, "max_lines": cap // OUTPUT_CAP_LINE}
 
 
-def users_servers_off() -> dict:
+def users_servers_off(task: store.Task | None = None) -> dict:
     """The user's own MCP servers (their global OpenCode config), each replaced by one that
     can't run: OpenCode would start them for the agent and connect to a remote one with the
     user's token (the 2026-11-16 audit). OpenCode 2.3 starts a server whose entry says
     `"enabled": false` all the same, so the command itself goes. Their tools are denied besides
-    (context.MCP_RULES)."""
-    try:
-        servers = (models.read_config().get("mcp") or {}).get("servers") or {}
-    except (OSError, ValueError, AttributeError):
-        return {}
-    return {name: {"type": "local", "command": ["false"], "enabled": False}
-            for name in servers if name != "workbench"}
+    (context.MCP_RULES). But the ones commands.json names for ``task`` that hold no credential
+    (context.task_mcp, #1202): those go as the user wrote them, run by the agent's OpenCode in
+    its lane, environment and home, and stop with the round (sweep)."""
+    servers = context.users_mcp_servers()
+    mine = context.task_mcp(task) if task is not None else {}
+    if task is not None and task.spec.get("mcp"):  # one given a credential since wb start: said, not run
+        gone = [n for n in task.spec.get("mcp") or () if n not in mine]
+        task.set_status(mcp_left_out={"round": task.status.get("round", 1),
+                                      "why": context.mcp_servers(gone)[1]} if gone else None)
+    return {**{name: {"type": "local", "command": ["false"], "enabled": False}
+               for name in servers if name != "workbench" and name not in mine}, **mine}
 
 
 # The project's own OpenCode config stays out of the agent's OpenCode: a project's opencode.json
@@ -1673,6 +1679,74 @@ def attached_line(task: store.Task, files: list[Path]) -> str:
                            it="them" if len(files) > 1 else "it", dir=images_dir(task))
 
 
+# OpenCode's own log, in the task's home: OpenCode 2.3.2 writes a line for each MCP server it
+# connects, `message="mcp connected" server=<name> tools=<n>`, or fails to, `message="mcp connect
+# failed" server=<name> status.error="<why>"` (read 2026-11-24). A server the user named that died
+# at its start in the lane (its venv or node_modules unread) left the agent without its tools,
+# while wb start had said `MCP: docs` and the report said nothing (#1202's review)
+MCP_LOG_LINE = re.compile(r'message="mcp (connected|connect failed)" server=([A-Za-z0-9-]+)')
+MCP_LOG_ERROR = re.compile(r'status\.error="((?:[^"\\]|\\.)*)"')
+MCP_LOG_READ = 4 << 20  # of the round's part, from its start: the servers connect first
+MCP_WHY_MAX = 200
+
+
+def opencode_log(task: store.Task) -> Path:
+    """OpenCode's own log in the task's home (XDG_DATA_HOME/opencode/log)."""
+    return Path(context.opencode_home_env(task)["XDG_DATA_HOME"]) / "opencode" / "log" / "opencode.log"
+
+
+def opencode_log_size(task: store.Task) -> int:
+    try:
+        return opencode_log(task).stat().st_size
+    except OSError:
+        return 0
+
+
+def mcp_unreached(task: store.Task, since: int) -> dict[str, str]:
+    """The user's servers this round's layer ran (task.json `mcp`, less one left out) that its
+    OpenCode never connected, each with the last line of why when its log says: {name: why}.
+    None when the round's log has no line for workbench's own server, which every round
+    connects: a log this code can't read says nothing. The log is in the agent's lane, so this
+    is a note for the report alone, read from a plain file only (never a link, nor a FIFO left to
+    hang the runner)."""
+    names = task.spec.get("mcp") or []
+    if not names:
+        return {}
+    try:
+        servers = json.loads((context.rules_dir(task) / "opencode.json").read_text())["mcp"]["servers"]
+        ran = [n for n in names if (servers.get(n) or {}).get("command") != ["false"]]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+    path = opencode_log(task)
+    home = os.path.realpath(context.opencode_home(task))
+    if os.path.realpath(path) != os.path.join(home, os.path.relpath(path, context.opencode_home(task))):
+        return {}  # a link on the way, the agent's: not followed out of its home
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return {}
+    with os.fdopen(fd, "rb") as fh:
+        info = os.fstat(fh.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            return {}
+        size = info.st_size
+        fh.seek(since if since <= size else 0)  # one cut short since: read it whole
+        text = fh.read(MCP_LOG_READ).decode("utf-8", "replace")
+    connected, why = set(), {}
+    for line in text.splitlines():
+        if not (m := MCP_LOG_LINE.search(line)):
+            continue
+        if m.group(1) == "connected":
+            connected.add(m.group(2))
+        elif e := MCP_LOG_ERROR.search(line):
+            err = e.group(1).replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+            last = [x.strip() for x in err.splitlines() if x.strip()]
+            why[m.group(2)] = last[-1][:MCP_WHY_MAX] if last else ""
+    if "workbench" not in connected:
+        return {}
+    return {n: why.get(n, "") for n in ran if n not in connected}
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -1711,6 +1785,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     except OSError:
         pass
     log = open(task.dir / "runner.log", "a")
+    log_from = opencode_log_size(task)  # where this round's lines in OpenCode's own log begin
     proc = subprocess.Popen(cmd, cwd=task.workdir, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=log, encoding="utf-8",
                             # a byte that isn't UTF-8 (a plugin's Latin-1 print) is U+FFFD, not
@@ -2072,6 +2147,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         out["lingered"] = True  # our stop's exit, not a crash: the round is what its events say
     log.close()
     provider.end(out, time.time())
+    if unreached := mcp_unreached(task, log_from):  # #1202's review
+        out["mcp_unreached"] = unreached
     ask_mcp.close(task, opened)  # its server is gone: closed, so nothing takes them for open
     if task.status.get("asking") or task.status.get("phase") == "asking":  # it ended
         task.set_status(asking=None, phase="running")  # mid-question: nothing reads that answer now
@@ -3737,6 +3814,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         lines.append(f"fallback: {when} ({mv.get('why')}), so "
                      f"the task moved to the {spec.get('role')} role's fallback {mv.get('to')} (the user's, wb "
                      "route)" + ("" if mv.get("before") and not mv.get("fresh") else ", in a fresh session"))
+    if (left := st.get("mcp_left_out") or {}).get("round") == n:  # #1202
+        lines += [f"note: {w}: this round's agent ran without it" for w in left.get("why") or ()]
     if st.get("claude_rules_gone") == n:  # #1119
         lines.append(RULES_GONE.format(claude=privacy.home_path(context.claude_home()),
                                        mine=privacy.home_path(context.user_agents_md())))
@@ -3769,6 +3848,10 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         lines.append("NOTE: the agent's OpenCode never listed workbench_ask_reviewer, so it can't "
                      f"ask you anything; PWD={task.workdir} OPENCODE_CONFIG="
                      f"{context.rules_dir(task) / 'opencode.json'} opencode mcp list --print-logs says why")
+    if rnd["exit"] == 0 and (unreached := rnd.get("mcp_unreached")):  # #1202's review
+        lines += [f"NOTE: the agent's OpenCode never connected to MCP server '{name}', so the agent "
+                  "had none of its tools" + (f": {why}" if why else "") for name, why in unreached.items()]
+        lines.append(f"(OpenCode's log: {opencode_log(task)}, \"mcp connect failed\")")
     if tests is not None:
         lines.append(f"tests: {'PASS' if tests['ok'] else 'FAIL'} (`{spec['test_cmd']}`, "
                      f"exit {tests['exit']})")

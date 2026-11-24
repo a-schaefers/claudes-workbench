@@ -8623,6 +8623,318 @@ class ConfigLayer(Base):
         self.assertEqual(json.loads(out.stdout)["result"]["serverInfo"]["name"], "workbench")
 
 
+class UsersMcpServers(Base):
+    """#1202 (2026-11-24): an MCP server of the user's own that commands.json names reaches the
+    agent, run by its OpenCode in the lane; every other server stays stubbed and denied (the
+    2026-11-16 audit), and one that holds a credential is refused by name, never shown."""
+
+    def setUp(self):
+        super().setUp()
+        self.server = [sys.executable, str(ROOT / "tests" / "fake_mcp.py"), "lookup", "schema"]
+        self.servers({"docs": {"type": "local", "command": self.server},
+                      "other": {"type": "local", "command": self.server}})
+        self.mcp_log = Path(self.tmp.name) / "mcp.jsonl"
+        os.environ["FAKE_MCP_LOG"] = str(self.mcp_log)
+
+    def servers(self, servers: dict) -> None:
+        """The user's OpenCode config with these MCP servers beside the test's providers."""
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(
+            json.dumps({**OPENCODE_CONFIG, "mcp": {"servers": servers}}))
+
+    def commands(self, conf: dict) -> None:
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps(conf))
+
+    def refused(self, name: str) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err), redirect_stdout(io.StringIO()):
+            self.start(name, "ok")
+        self.assertEqual(e.exception.code, 3)
+        self.assertFalse(store.Task(name).exists)
+        return err.getvalue()
+
+    def test_a_listed_server_reaches_the_agent_with_its_allow_rule_and_the_rest_stay_stubbed(self):
+        from workbench import runner
+        self.commands({"mcp": ["docs"]})
+        out = self.start("t-mcp", "ok")
+        self.assertIn('MCP: docs (commands.json "mcp")', out)
+        wait_phase("t-mcp", {"review"})
+        task = store.Task("t-mcp")
+        self.assertEqual(task.spec["mcp"], ["docs"])
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        servers = layer["mcp"]["servers"]
+        self.assertEqual(servers["docs"], {"type": "local", "command": self.server})  # as written
+        self.assertEqual(servers["other"], {"type": "local", "command": ["false"], "enabled": False})
+        rules = layer["permissions"]
+        actions = [(r["action"], r["effect"]) for r in rules]
+        allow = actions.index(("docs_*", "allow"))
+        self.assertLess(actions.index(("*_*", "deny")), allow)          # after MCP_RULES' deny
+        self.assertGreater(actions.index(("opencode_*", "deny")), allow)  # the last match: denied
+        self.assertGreater(actions.index(("execute", "deny")), allow)
+        self.assertNotIn(("other_*", "allow"), actions)
+        # the agent's OpenCode started the listed server and listed its tools, and not the other
+        ran = [json.loads(line) for line in self.mcp_log.read_text().splitlines()]
+        self.assertEqual(ran[0]["docs"], ["lookup", "schema"])
+        self.assertNotIn("other", ran[0])
+        self.assertNotIn("never connected", (task.round_dir(1) / "summary.md").read_text())
+
+    def test_a_named_server_that_dies_at_its_start_is_noted_in_the_round_report(self):
+        # #1202's review (2026-11-24): a server whose venv the lane didn't read died at its start,
+        # wb start had said `MCP: docs`, and the report said nothing of the tools the agent lacked
+        self.servers({"docs": {"type": "local", "command": [
+            sys.executable, "-c", "import sys; sys.exit(\"ModuleNotFoundError: No module named 'schema_mcp'\")"]}})
+        self.commands({"mcp": ["docs"]})
+        self.start("t-dead", "ok")
+        wait_phase("t-dead", {"review"})
+        summary = (store.Task("t-dead").round_dir(1) / "summary.md").read_text()
+        self.assertIn("NOTE: the agent's OpenCode never connected to MCP server 'docs', so the agent "
+                      "had none of its tools: ModuleNotFoundError: No module named 'schema_mcp'", summary)
+        self.assertIn("opencode.log", summary)
+        from workbench import runner
+        task = store.Task("t-dead")
+        self.assertEqual(set(runner.mcp_unreached(task, 0)), {"docs"})
+        # the log is in the agent's lane: a link it leaves on the way is never followed
+        log_dir = runner.opencode_log(task).parent
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        shutil.copytree(log_dir, elsewhere)
+        shutil.rmtree(log_dir)
+        log_dir.symlink_to(elsewhere)
+        self.assertEqual(runner.mcp_unreached(task, 0), {})
+        log_dir.unlink()
+        # a round whose part of the log has no line for workbench's own server says nothing: the
+        # log is back, round 1's lines before where round 2 reads from, so only the guard keeps a
+        # false "never connected" out (with the log gone it said nothing for its absence alone:
+        # #1202's review, 2026-11-24)
+        shutil.copytree(elsewhere, log_dir)
+        self.assertEqual(set(runner.mcp_unreached(task, 0)), {"docs"})
+        os.environ["FAKE_NO_MCP"] = "1"
+        run_wb("feedback", "t-dead", "--text", "Again.")
+        wait_phase("t-dead", {"review"})
+        self.assertNotIn("never connected", (store.Task("t-dead").round_dir(2) / "summary.md").read_text())
+
+    def test_a_servers_venv_and_its_projects_node_modules_are_read_not_only_the_resolved_program(self):
+        # #1202's review (2026-11-24): the realpath'd program alone left out the venv
+        # (`srv/.venv/bin/python` resolves to the base interpreter) and srv/node_modules (`node
+        # srv/dist/index.js` read dist/), so either server died at its start in the lane
+        root = Path(os.path.realpath(self.tmp.name))
+        home = root / "home"
+        py = home / "src" / "py-srv"
+        (py / ".venv" / "bin").mkdir(parents=True)
+        (py / "pyproject.toml").write_text("[project]\nname = 'schema-mcp'\n")
+        (py / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        (py / ".venv" / "bin" / "python").symlink_to(os.path.realpath(sys.executable))
+        js = home / "src" / "js-srv"
+        (js / "dist").mkdir(parents=True)
+        (js / "node_modules").mkdir()
+        (js / "package.json").write_text("{}")
+        (js / "dist" / "index.js").write_text("")
+        bare = home / "tools"           # no project of its own: its directory, never the home
+        bare.mkdir()
+        (bare / "mcp.js").write_text("")
+        (home / ".git").mkdir()         # the home a dotfiles repo
+        base = os.path.realpath(sys.executable)
+        base_dir = os.path.dirname(os.path.dirname(base)) if \
+            os.path.basename(os.path.dirname(base)) == "bin" else os.path.dirname(base)
+        task = types.SimpleNamespace(spec={"mcp": ["docs"]})
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for command, want in (([str(py / ".venv" / "bin" / "python"), "-m", "schema_mcp"], str(py)),
+                                  (["node", str(js / "dist" / "index.js")], str(js)),
+                                  (["node", str(bare / "mcp.js")], str(bare))):
+                self.servers({"docs": {"type": "local", "command": command}})
+                roots = context.mcp_roots(task)
+                self.assertIn(want, roots, command)
+                self.assertNotIn(str(home), roots)
+                self.assertFalse([r for r in roots if r != want and context._under(r, want)], roots)
+            self.servers({"docs": {"type": "local", "command": [
+                str(py / ".venv" / "bin" / "python"), "-m", "schema_mcp"]}})
+            self.assertIn(base_dir, context.mcp_roots(task))   # the base interpreter's install too
+            # on an API task never the checkout, which its lane hides (#1091), nor a directory in it
+            (py / ".venv" / "bin" / "mcp").write_text("")
+            api = types.SimpleNamespace(spec={"mcp": ["docs"], "via": "api", "repo": str(py)})
+            self.servers({"docs": {"type": "local", "command": [str(py / ".venv" / "bin" / "mcp")]}})
+            self.assertEqual(context.mcp_roots(api), set())
+
+    def test_on_an_api_task_no_root_is_the_checkout_lies_in_it_or_holds_it(self):
+        # #1202's review (2026-11-24): only the widening to a project was kept off the checkout,
+        # so a server in the repo gave its directory (tools/mcp, with its .env) and the repo named
+        # as an argument gave the whole checkout, which #1091 hides from an API task's provider
+        home = Path(os.path.realpath(self.tmp.name)) / "home"
+        app = home / "repos" / "app"
+        (app / "tools" / "mcp").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(app)], check=True)
+        (app / "package.json").write_text("{}")
+        (app / "tools" / "mcp" / "server.js").write_text("")
+        (app / "tools" / "mcp" / ".env").write_text("DB_PASSWORD=CANARY-VALUE\n")
+        servers = {"schema": ["node", str(app / "tools" / "mcp" / "server.js")],
+                   "fs": ["mcp-fs", str(app)], "up": ["mcp-fs", str(home / "repos")]}
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            self.servers({n: {"type": "local", "command": c} for n, c in servers.items()})
+            gpu = types.SimpleNamespace(spec={"mcp": list(servers), "repo": str(app)})
+            self.assertEqual(context.mcp_roots(gpu), {str(app), str(home / "repos")})  # its own lane reads it
+            for name in servers:
+                api = types.SimpleNamespace(spec={"mcp": [name], "via": "api", "repo": str(app)})
+                self.assertEqual(context.mcp_roots(api), set(), name)
+            notes = context.mcp_checkout_notes(list(servers), [app])
+        self.assertEqual(len(notes), 3, notes)
+        self.assertIn("MCP server 'schema' names", notes[0])
+        self.assertIn("name it relative to the repo: `tools/mcp/server.js`", notes[0])
+        self.assertIn("name it relative to the repo: `.`", notes[1])
+        self.assertIn("which holds the repo", notes[2])
+
+    def servers_in_the_repo(self, **conf) -> None:
+        """Two servers whose commands name the repo: 'schema' for every task, 'fs' for the repo's;
+        an API model with a key, for wb start."""
+        srv = self.repo / "tools" / "mcp" / "server.js"
+        srv.parent.mkdir(parents=True)
+        srv.write_text("")
+        self.servers({"schema": {"type": "local", "command": ["node", str(srv)]},
+                      "fs": {"type": "local", "command": ["mcp-fs", str(self.repo)]}})
+        self.commands({"mcp": ["schema"], "repos": {str(self.repo): {"mcp": ["fs"]}}, **conf})
+        ApiHarness.catalog(self, API_CATALOG)
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": "cred_deepinfra", "integrationID": "deepinfra", "label": "main", "active": True,
+             "value": {"type": "key", "key": _ApiTask.CANARY}}])
+
+    def doctor(self) -> str:
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        return buf.getvalue()
+
+    def test_wb_start_and_doctor_say_a_server_named_in_the_repo_goes_by_a_path_relative_to_it(self):
+        # #1202's review (2026-11-24): an API task's lane hides the checkout, so the server died
+        # at its start; OpenCode starts a local server in the task's worktree, where a path
+        # relative to the repo finds the worktree's copy. Landlock on, so it holds on a Mac too
+        self.servers_in_the_repo()
+        with mock.patch.object(lane, "abi", return_value=4):
+            out = _ApiTask.start_api(self, "t-mcp-api", "ok", spawn=False)
+            self.assertIn("note: MCP server 'schema' names", out)
+            self.assertIn("relative to the repo: `tools/mcp/server.js`", out)
+            self.assertIn("note: MCP server 'fs' names", out)
+            with mock.patch.object(cli, "spawn_runner"):   # a GPU task's lane reads the repo
+                self.assertNotIn("MCP server 'schema' names", self.start("t-mcp-gpu", "ok"))
+            out = self.doctor()
+        self.assertIn("--  MCP server 'schema' names", out)
+        self.assertIn("--  MCP server 'fs' names", out)
+
+    def test_with_no_lane_to_hide_the_checkout_neither_says_a_server_in_it_wont_be_reached(self):
+        # #1202's review (2026-11-24): with no Landlock (every Mac) or the lane off the server
+        # reads the checkout, yet both said it wouldn't, and Claude, as the skill says, told the
+        # user to change a config that works (api_hidden_note's gate, #1156)
+        self.servers_in_the_repo()
+        with mock.patch.object(lane, "abi", return_value=0):
+            out = _ApiTask.start_api(self, "t-no-landlock", "ok", spawn=False)
+            self.assertIn("MCP: ", out)
+            self.assertNotIn("note: MCP server", out)
+            self.assertNotIn("MCP server 'schema' names", self.doctor())
+        self.commands({"mcp": ["schema"], "repos": {str(self.repo): {"mcp": ["fs"]}}, "paths": ["*"]})
+        with mock.patch.object(lane, "abi", return_value=4):
+            out = _ApiTask.start_api(self, "t-lane-off", "ok", spawn=False)
+            self.assertIn("MCP: ", out)
+            self.assertNotIn("note: MCP server", out)
+            out = self.doctor()
+        self.assertNotIn("MCP server 'schema' names", out)
+        self.assertNotIn("MCP server 'fs' names", out)
+
+    def test_a_server_in_opencodes_1x_shape_is_stubbed_and_can_be_named_too(self):
+        from workbench import runner
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({**OPENCODE_CONFIG, "mcp": {
+            "legacy": {"type": "remote", "url": "https://mcp.example.com/",
+                       "headers": {"Authorization": "Bearer CANARY-VALUE"}},
+            "old-docs": {"type": "local", "command": self.server}}}))
+        self.commands({"mcp": ["old-docs"]})
+        self.start("t-v1", "ok")
+        wait_phase("t-v1", {"review"})
+        servers = json.loads(runner.write_config_layer(store.Task("t-v1")).read_text())["mcp"]["servers"]
+        self.assertEqual(servers["legacy"], {"type": "local", "command": ["false"], "enabled": False})
+        self.assertEqual(servers["old-docs"]["command"], self.server)
+
+    def test_a_repos_server_reaches_that_repos_tasks_alone(self):
+        other = Path(self.tmp.name) / "other-repo"
+        shutil.copytree(self.repo, other)
+        self.commands({"repos": {str(self.repo): {"mcp": ["docs"]}}})
+        self.start("t-mine", "ok")
+        wait_phase("t-mine", {"review"})
+        out = run_wb("start", "t-theirs", "--spec", str(self.spec), "--repo", str(other), "--model", "mimo")
+        self.assertNotIn("MCP:", out)
+        wait_phase("t-theirs", {"review"})
+        self.assertEqual(store.Task("t-mine").spec["mcp"], ["docs"])
+        self.assertNotIn("mcp", store.Task("t-theirs").spec)
+        ran = [json.loads(line) for line in self.mcp_log.read_text().splitlines()]
+        self.assertEqual([sorted(r) for r in ran], [["docs", "workbench"], ["workbench"]])
+
+    def test_a_listed_server_holding_a_credential_is_refused_by_name_never_its_value(self):
+        self.commands({"mcp": ["docs"]})
+        cases = {"environment": {"type": "local", "command": self.server,
+                                 "environment": {"DB_TOKEN": "CANARY-VALUE"}},
+                 "headers": {"type": "remote", "url": "https://mcp.example.com/",
+                             "headers": {"Authorization": "Bearer CANARY-VALUE"}},
+                 "oauth": {"type": "remote", "url": "https://mcp.example.com/",
+                           "oauth": {"clientSecret": "CANARY-VALUE"}},
+                 "a password": {"type": "local",
+                                "command": ["db-mcp", "postgres://me:CANARY-VALUE@db/app"]},
+                 "--api-key": {"type": "local", "command": ["mcp", "--api-key=CANARY-VALUE"]},
+                 "query": {"type": "remote", "url": "https://mcp.example.com/?api_key=CANARY-VALUE"},
+                 "{env:}": {"type": "local", "command": ["mcp", "{env:CANARY_VALUE}"]}}
+        for i, (key, entry) in enumerate(cases.items()):
+            self.servers({"docs": entry})
+            err = self.refused(f"t-cred-{i}")
+            self.assertIn("MCP server 'docs'", err)
+            self.assertIn(key, err)
+            self.assertNotIn("CANARY", err)
+        self.servers({})
+        self.assertIn("isn't in your OpenCode config", self.refused("t-missing"))
+        # none of it is a credential: a remote server without one starts
+        self.servers({"docs": {"type": "remote", "url": "https://mcp.example.com/mcp?page=1",
+                               "oauth": False, "headers": {}}})
+        self.start("t-clean-remote", "ok")
+        wait_phase("t-clean-remote", {"review"})
+
+    def test_commands_json_mcp_takes_a_list_of_server_names_and_never_workbenchs_own(self):
+        for bad in ("docs", ["docs", 3], ["my_docs"], ["workbench"], ["opencode"], ["a worktree"],
+                    ["my-worktree"]):
+            for conf in ({"mcp": bad}, {"repos": {str(self.repo): {"mcp": bad}}}):
+                self.commands(conf)
+                with self.assertRaises(RuntimeError) as e:
+                    context.commands_conf()
+                self.assertIn('"mcp"', str(e.exception))
+        self.commands({"mcp": ["docs", "Schema-2"]})
+        self.assertEqual(context.commands_conf()["mcp"], ["docs", "Schema-2"])
+        context.allow_always("allow", ["make *"])  # wb allow --always: allow and paths, never mcp
+        self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["mcp"], ["docs", "Schema-2"])
+
+    def test_a_credential_added_after_wb_start_leaves_the_server_out_and_the_report_says_so(self):
+        from workbench import runner
+        self.commands({"mcp": ["docs"]})
+        self.start("t-later", "ok")
+        wait_phase("t-later", {"review"})
+        self.servers({"docs": {"type": "local", "command": self.server,
+                               "environment": {"DB_TOKEN": "CANARY-VALUE"}}})
+        run_wb("feedback", "t-later", "--text", "Again.")
+        wait_phase("t-later", {"review"})
+        task = store.Task("t-later")
+        summary = (task.round_dir(2) / "summary.md").read_text()
+        self.assertIn("note: MCP server 'docs'", summary)
+        self.assertIn("ran without it", summary)
+        self.assertNotIn("CANARY", summary)
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["mcp"]["servers"]["docs"]["command"], ["false"])
+        self.assertNotIn("docs_*", [r["action"] for r in layer["permissions"]])
+
+    def test_wb_doctor_lists_the_named_servers_and_flags_one_it_would_refuse(self):
+        self.commands({"mcp": ["docs"], "repos": {str(self.repo): {"mcp": ["vault"]}}})
+        self.servers({"docs": {"type": "local", "command": self.server},
+                      "vault": {"type": "remote", "url": "https://v.example.com/",
+                                "headers": {"X-Key": "CANARY-VALUE"}}})
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        out = buf.getvalue()
+        self.assertIn("ok  MCP server docs (commands.json): the agents of every task", out)
+        self.assertIn("BAD MCP server 'vault' (commands.json \"mcp\") sets `headers`", out)
+        self.assertNotIn("CANARY", out)
+
+
 class SlowFirstToken(Base):
     """#491 (the audit of 1.90): OpenCode's 300 s header timeout cut every request a slow reader
     hadn't answered in 5 minutes, its retry lines reset the silence clock, and no read speed was
@@ -9456,11 +9768,11 @@ class RealOpenCode(Base):
             self.assertTrue("CANARY-PROJ-SKILL" in text, flag)  # (not assertIn: a prompt per failure)
 
 
-    def run_calls(self, name, calls, *extra, before=None, in_lane=True):
+    def run_calls(self, name, calls, *extra, before=None, in_lane=True, reads=False):
         """Run real opencode in a task's worktree, in its lane (unless not ``in_lane``: a machine
         without Landlock), against a fake model that makes these tool calls; returns the tool
         results it got back, in order. `before(task)` runs once the task is set up, before
-        OpenCode starts."""
+        OpenCode starts. ``reads``: the lane keeps its reads too, as the runner's does."""
         self.start(name, "ok", *extra)
         wait_phase(name, {"review"})
         task = store.Task(name)
@@ -9485,7 +9797,8 @@ class RealOpenCode(Base):
         time.sleep(0.5)
         cmd = ["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format", "json", "go"]
         if in_lane:
-            cmd = lane.wrap(context.writable(task), cmd)
+            cmd = lane.wrap(context.writable(task), cmd,
+                            *((context.readable(task), context.unix_paths(task)) if reads else ()))
         subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
         reqs = [json.loads(line) for line in out.read_text().splitlines()]
         last = max(reqs, key=lambda r: len(r.get("messages", [])))
@@ -9718,6 +10031,67 @@ class RealOpenCode(Base):
         self.assertFalse(marker.exists())                     # never started either
         self.assertEqual(runner.claude_files_changed("?? opencode.json\n?? .opencode/x.json\n"),
                          ["opencode.json", ".opencode/x.json"])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_server_commands_json_names_reaches_the_agent_in_its_lane_and_no_other_does(self):
+        # #1202 (2026-11-24): the user's own MCP server, named in commands.json, is passed through
+        # as written, here in code mode (`codemode: true`): with `execute` denied, OpenCode 2.3.2
+        # sends its tools direct all the same. It is run by the agent's OpenCode in the lane: its
+        # program under a non-dot home directory read, its writes there refused, SECRET_ENV not in
+        # its environment; the unlisted one stubbed
+        home = Path(tempfile.mkdtemp(dir=Path.home(), prefix="wb-mcp-test-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        shutil.copy(ROOT / "tests" / "fake_mcp.py", home / "fake_mcp.py")
+        planted = home / "planted"
+        command = [sys.executable, str(home / "fake_mcp.py"), "lookup"]
+        # and in a project's own venv, run as a module (#1202's review): the venv's python
+        # resolves to the base interpreter, so the lane read neither the venv nor the module,
+        # the server died at its start, and nothing said so; `broken` dies at its start anyway
+        srv = Path(tempfile.mkdtemp(dir=Path.home(), prefix="wb-mcp-venv-"))  # beside, not in, home
+        self.addCleanup(shutil.rmtree, srv, True)
+        (srv / "pyproject.toml").write_text("[project]\nname = 'fake-mcp-srv'\n")
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(srv / ".venv")], check=True)
+        site = srv / ".venv" / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages"
+        shutil.copy(ROOT / "tests" / "fake_mcp.py", site / "fake_mcp_srv.py")
+        in_venv = [str(srv / ".venv" / "bin" / "python"), "-m", "fake_mcp_srv", "schema"]
+        # `other` in OpenCode's 1.x shape, mcp.<name>, which 2.3.2 still starts: read in the 2.x
+        # shape alone, it was never stubbed and ran in every agent's OpenCode (found here)
+        # where the agent's OpenCode reads it too, as the user's global config
+        xdg = Path(self.tmp.name) / "xdg"
+        (xdg / "opencode").mkdir(parents=True)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).unlink()
+        os.environ.update(WB_OPENCODE_CONFIG=str(xdg / "opencode" / "opencode.json"),
+                          XDG_CONFIG_HOME=str(xdg))
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({**OPENCODE_CONFIG, "mcp": {
+            "servers": {"docs": {"type": "local", "command": command, "codemode": True},
+                        "venv-docs": {"type": "local", "command": in_venv},
+                        "broken": {"type": "local", "command": [
+                            sys.executable, "-c", "import wb_no_such_module"]}},
+            "other": {"type": "local", "command": [*command[:2], "leak"]}}}))
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"mcp": ["docs", "venv-docs", "broken"]}))
+        started = Path(self.tmp.name) / "mcp-started"
+        os.environ.update(WB_TEST_SECRET_TOKEN="CANARY-SECRET", FAKE_MCP_OUTSIDE=str(planted),
+                          FAKE_MCP_STARTED=str(started))
+        task, answers = self.run_calls("t-mcp-real", [{"name": "docs_lookup", "arguments": {}}],
+                                       reads=True)
+        self.assertIn("CANARY-MCP lookup secret=- write=refused", answers[0])
+        self.assertIn(str(home), context.readable(task))
+        self.assertFalse(planted.exists())
+        reqs = [json.loads(line) for line in
+                (Path(self.tmp.name) / "t-mcp-real-requests.jsonl").read_text().splitlines()]
+        tools = {t["function"]["name"] for r in reqs for t in r.get("tools", [])}
+        self.assertIn("docs_lookup", tools)
+        self.assertIn("venv-docs_schema", tools)
+        self.assertIn(str(srv), context.mcp_roots(task))
+        self.assertIn("workbench_ask_reviewer", tools)
+        self.assertFalse([t for t in tools if t.startswith("other_")], tools)
+        # OpenCode's own log names the one that never connected, and why (the round's note)
+        self.assertEqual(runner.mcp_unreached(task, 0),
+                         {"broken": "ModuleNotFoundError: No module named 'wb_no_such_module'"})
+        self.assertFalse({"execute", "question", "subagent"} & tools)
+        self.assertNotIn("leak", started.read_text().split())   # never started either
+        self.assertIn("lookup", started.read_text().split())
 
     def test_a_projects_agents_md_and_skills_reach_the_agent_and_its_config_lifts_nothing(self):
         # #994 (2026-11-22): the rules went again in OPENCODE_CONFIG_CONTENT, whose 120,000 bytes

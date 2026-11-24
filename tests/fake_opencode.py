@@ -93,8 +93,12 @@ does when another service holds the managed port, and so does `auth list` or `au
 (#1070). `auth export <provider>` prints the rows of
 FAKE_AUTH_EXPORT (a JSON list, as OpenCode 2.3.2 prints them) for that provider, or `[]`, and
 appends the provider to FAKE_AUTH_LOG when set. `--version` says
-`FAKE_VERSION` (2.3.0). A `run` starts the config's workbench MCP server and lists its tools,
-as OpenCode does, unless FAKE_NO_MCP.
+`FAKE_VERSION` (2.3.0). A `run` starts the config's local MCP servers (the workbench one, and
+a user's the layer passes through: tests/fake_mcp.py) and lists their tools, as OpenCode does,
+unless FAKE_NO_MCP; FAKE_MCP_LOG gets one line a run, {server: [tool, ...]}. Each server's
+connection goes in OpenCode's own log, $XDG_DATA_HOME/opencode/log/opencode.log (with that set
+alone), as 2.3.2 writes it: `message="mcp connected" server=<name> tools=<n>`, or `message="mcp connect failed"
+server=<name> status.error="<its stderr>"` for one that listed no tools.
 
 API models (#1011), as the spike for #1009 saw OpenCode 2.3.2 print them:
   ratelimit  a 429: `retry` events (attempts 2 to FAKE_RETRIES+1, 10 by default, FAKE_RETRY_EVERY
@@ -681,20 +685,55 @@ if scenario == "crash":
     sys.exit(1)
 if args and args[0] == "run" and not os.environ.get("FAKE_NO_MCP"):
     # as OpenCode does when a session starts: each local MCP server in the config is started and
-    # its tools listed (the workbench one here; the user's are commands that do nothing)
+    # its tools listed: the workbench one, and a user's the layer passes through (#1202); the
+    # user's others are commands that do nothing. FAKE_MCP_LOG gets {server: [tool, ...]}
     import subprocess
     try:
         with open(os.environ["OPENCODE_CONFIG"]) as fh:
-            server = json.load(fh)["mcp"]["servers"]["workbench"]
+            servers = json.load(fh)["mcp"]["servers"]
     except (KeyError, OSError, ValueError, TypeError):
-        server = None
-    if server and server.get("type") == "local":
+        servers = {}
+    listed = {}
+    for name, server in (servers.items() if isinstance(servers, dict) else ()):
+        if not isinstance(server, dict) or server.get("type") != "local" or \
+                server.get("command") == ["false"]:
+            continue
         hello = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
                  {"jsonrpc": "2.0", "method": "notifications/initialized"},
                  {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
-        subprocess.run(server["command"], input="".join(json.dumps(m) + "\n" for m in hello),
-                       env={**os.environ, **(server.get("environment") or {})},
-                       capture_output=True, text=True, timeout=30)
+        try:
+            ran = subprocess.run(server["command"], input="".join(json.dumps(m) + "\n" for m in hello),
+                                 env={**os.environ, **(server.get("environment") or {})},
+                                 capture_output=True, text=True, timeout=30)
+            out, err = ran.stdout, ran.stderr or f"MCP server process exited with code {ran.returncode}"
+        except (OSError, subprocess.TimeoutExpired) as e:
+            out, err = "", str(e)
+        for row in out.splitlines():
+            try:
+                reply = json.loads(row)
+            except ValueError:
+                continue
+            if isinstance(reply, dict) and reply.get("id") == 2:
+                listed[name] = [t.get("name") for t in (reply.get("result") or {}).get("tools") or ()]
+        # only in a data home given (the task's): never the user's own OpenCode's
+        oclog = os.path.join(os.environ.get("XDG_DATA_HOME") or "", "opencode", "log")
+        try:
+            if not os.environ.get("XDG_DATA_HOME"):
+                raise OSError
+            os.makedirs(oclog, exist_ok=True)
+            with open(os.path.join(oclog, "opencode.log"), "a") as fh:
+                if name in listed:
+                    fh.write(f'level=INFO message="mcp connected" server={name} '
+                             f'tools={len(listed[name])} role=server server={name}\n')
+                else:
+                    fh.write(f'level=WARN message="mcp connect failed" server={name} '
+                             f'status.status=failed status.error={json.dumps(err.strip())} '
+                             f'role=server server={name}\n')
+        except OSError:
+            pass
+    if os.environ.get("FAKE_MCP_LOG"):
+        with open(os.environ["FAKE_MCP_LOG"], "a") as fh:
+            fh.write(json.dumps(listed) + "\n")
 if os.environ.get("FAKE_STRAY"):
     for stray in ("42", "[1, 2]", "null", '{"type": "step_finish", "part": {"tokens": 5}}',
                   '{"type": "tool_use", "part": "x"}', '{"type": "text", "part": {"text": 7}}',
