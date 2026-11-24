@@ -32730,6 +32730,26 @@ class SettingsRoles(Base):
         ledger.unlink()
         self.assertEqual(json.loads(self.wb("route", "--json")[1])["spend_today"], {"usd": 0, "by_provider": {}})
 
+    def test_with_keys_stored_and_no_catalog_read_yet_the_panes_settings_still_list_the_providers(self):
+        # #1069 (audit 1 of 2.0): the pane reads only hosted.json, which only other commands
+        # built, so with keys stored it said "No API provider connected" and offered no API row
+        hosted = runner.models.hosted_path()
+        self.assertFalse(hosted.exists())
+        first = json.loads(self.wb("route", "--json")[1])           # this poll: the cache as it is
+        self.assertEqual(first["providers"], {})
+        deadline = time.time() + 20                                  # read in the background
+        while not hosted.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(hosted.exists())
+        self.assertTrue((store.home() / cli.CATALOG_LATER).exists())
+        shown = json.loads(self.wb("route", "--json")[1])
+        self.assertEqual(shown["providers"]["deepseek"], {"name": "DeepSeek", "key": "stored"})
+        hosted.unlink()                                              # one read at a time
+        with mock.patch.object(cli.subprocess, "Popen", side_effect=AssertionError("a second read")):
+            self.wb("route", "--json")
+        cli.first_run()                                              # wb setup reads it, a key stored
+        self.assertTrue(hosted.exists())
+
     def test_wb_models_json_lists_gpu_models_with_sizes_and_the_runnable_api_models_asking_no_server(self):
         runner.models.hosted(fresh=True)
         gpu_ids = list(runner.models.discover())

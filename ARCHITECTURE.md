@@ -2739,7 +2739,12 @@ chose).
 - `lookup(model_id, cached=False)`: `discover().get(id)`, else `hosted().get(id)`. Only where an API
   task's model must be found: `transcript.model_line` (which reads the catalog's variant list too),
   `tuning._rows`, `router.expected`. The pane's two (`model_line`, `expected`) pass `cached=True`:
-  hosted.json as it is, never rebuilt, so a 5 s poll never waits on OpenCode. `transcript._server_live` keeps `discover()`: an API model is
+  hosted.json as it is, never rebuilt, so a 5 s poll never waits on OpenCode. With no hosted.json at
+  all, `wb route --json` (the pane's Settings and Tasks tabs) starts one read in the background
+  (`cli._read_catalog_later`, at most one per `CATALOG_TIMEOUT` + 10 s, its mark `hosted.reading` in
+  the state dir) and the next poll lists the providers: with keys stored and no cache yet, the pane
+  said `NO_PROVIDER` until another command built one (#1069). `wb setup` reads it inline when a key is
+  stored and none exists; a stale cache stays the pane's as it is. `transcript._server_live` keeps `discover()`: an API model is
   never probed for `/metrics`; `identity` and `weights` say None and 0 for one, and `keep_warm` skips it.
 - *Status* (`_api_status`): no network probe (no completion, no `/models`): `wb models`, scout,
   doctor and top call `status` for every model, and one request each would cost money or
@@ -5411,6 +5416,7 @@ $WB_HOME (~/.local/state/workbench)
   machines/<machine>/            on a network FS, one machine's own (store.machine_dir): GPU lease, optimize.json/.log, boxes.json, wsl-gpus.json, speed.json
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
   scout.json  watch.json         the weekly model check; the watch list
+  hosted.reading                 the mtime of the last background catalog read `wb route --json` started (cli._read_catalog_later, #1069)
   hosted.json                    API models (models.hosted, #1013): {v: 1, ts, stamp: {opencode: [[path, size, mtime_ns]…],
                                  configs: [[path, mtime_ns]…], content: crc32}, error ("" or the failed read's first line),
                                  providers: {<pid>: {name, key (its source: stored|oauth|env:<NAME>|config|signing|ollama|""),

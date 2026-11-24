@@ -2959,10 +2959,37 @@ KEY_HELD = {"oauth": "an OAuth login", "signing": "a cloud login that signs each
             "config": "written in OpenCode's config", "ollama": "Ollama's own login", "": "none stored"}
 
 
+CATALOG_LATER = "hosted.reading"  # in the state dir: when _route_pane last started a catalog read
+
+
+def _read_catalog_later() -> None:
+    """With no hosted.json at all, a catalog read in the background, at most one per
+    CATALOG_TIMEOUT: the pane reads only the cache (never inline: #1013's review), and with keys
+    stored but no cache yet, it said 'No API provider connected' until some other command built
+    one, sending the user to /connect again for nothing (#1069, 2026-11-23). A stale cache stays
+    as it is: any API start, route or wb models refreshes it."""
+    mark = store.home() / CATALOG_LATER
+    try:
+        if time.time() - mark.stat().st_mtime < models.CATALOG_TIMEOUT + 10:
+            return
+    except OSError:
+        pass
+    try:
+        mark.touch()
+        subprocess.Popen([sys.executable, "-X", "utf8", "-c", "from workbench import models; models.hosted_doc()"],
+                         cwd=PKG_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:  # the next poll tries again once the mark is old
+        pass
+
+
 def _route_pane() -> dict:
     """`wb route --json`'s keys for the pane's Settings tab (#1023): `spend_today` (the day
     ledger's, spend-api.jsonl: {usd, by_provider}) and `providers` ({id: {name, key, why}}, key
-    stored, env, oauth or none, from the cached catalog: never a network probe or OpenCode run)."""
+    stored, env, oauth or none, from the cached catalog: never a network probe or OpenCode run
+    inline; with no cache at all, one read in the background, _read_catalog_later)."""
+    if not models.hosted_path().is_file():
+        _read_catalog_later()
     provs = {}
     for pid, p in (models._read_hosted().get("providers") or {}).items():
         raw = str(p.get("key") or "")
@@ -6038,6 +6065,8 @@ def first_run() -> list[str]:
     except routes.RoutesError:
         api_only = False
     stored = not found and (api_only or any(k["key"] == "stored" for k in (keys or {}).values()))
+    if any(k["key"] == "stored" for k in (keys or {}).values()) and not models.hosted_path().is_file():
+        models.hosted_doc()  # a key stored: the pane's API settings read this cache (#1069)
     if not answering and on_windows:  # WSL2: answering at the Windows host only (#663)
         out.append(f"--  a model server answers on Windows at {on_windows[0]['root']} (usually "
                    f"{on_windows[0]['usually']}): it needs local: true (wb remote "
