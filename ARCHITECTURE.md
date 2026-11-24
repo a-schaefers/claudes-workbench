@@ -3297,7 +3297,8 @@ earlier `reasoning_content` sent back: OpenCode 2.3.2 does (checked), so thinkin
 
 `runner.with_thinking(m, spec)` fixes it in task.json at `wb start` (`opencode_model` `<id>#<variant>`,
 `thinking`, `thinking_shown`, `thinking_off` for `wb-off`), for an API model only: a GPU task thinks
-as its OpenCode entry says, exactly as before, whatever its role's `thinking`. Nothing after the
+as its OpenCode entry says, exactly as before, whatever its role's `thinking` (a new Ollama entry
+`wb model add` writes is off, *Managing the set*, #1187). Nothing after the
 start recomputes it (feedback, next, resume, a handover keep `opencode_model`): a role's thinking
 changed mid-task applies to the next task, since a change mid-task would drop the cache. The layer
 carries it (*What the agent knows*, *The task's thinking variant*); `transcript.model_line` shows
@@ -3649,10 +3650,18 @@ a task, the fullest session under a third of the 128K window, so the slice's gue
 compaction came inside a single step: six shell calls at once, each with pages of compiler errors,
 added 93K tokens, past `fresh_ceiling`'s one-step margin.
 
-**Managing the set.** `wb model add <provider/model> [--pull] [--context N]`: pulls, reads
+**Managing the set.** `wb model add <provider/model> [--pull] [--context N] [--thinking]`: pulls, reads
 `/api/show`, writes `{name, tool_call, reasoning, limit: {context, input: ctx − ctx/8, output:
 ctx/8}}` plus `options.max_tokens` = 2 × output (`ollama_cap`: Ollama ignores
-`max_completion_tokens`; uncapped, a degenerate generation filled the context, 2026-11-16). Context:
+`max_completion_tokens`; uncapped, a degenerate generation filled the context, 2026-11-16). A new
+Ollama entry whose `/api/show` lists `thinking` gets `options.reasoningEffort: "none"`, which
+OpenCode sends as the request's `reasoning_effort` (checked on the real one), and the line says
+`thinking off (--thinking for on)`; `--thinking` writes none, and on a re-add takes back a `none`
+(`write_entry` drops an option given as None). A re-add otherwise keeps the entry's thinking, a
+hand-set effort included; other servers get no effort (they may ignore or reject `none`). Decided
+under the owner's no-more-thinking-tests instruction, not measured (#1187, 2026-11-24): the records
+can't separate thinking from the 64K entry's memory spill, so it rests on the 2026-11-18 stall,
+`thinking_stall`'s advice and API roles' own default (#1018). `wb remote` registers the same way. Context:
 `--context`, else what Ollama serves (`ollama_served_context`: loaded `context_length`, Modelfile
 `num_ctx`, `OLLAMA_CONTEXT_LENGTH`), never a sibling's (#464) or the trained length (only a cap);
 with none, refused (the 2026-11-16 audit: a 256K entry on a stock Ollama cut prompts). Another
@@ -5949,7 +5958,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, prices (catalog\|yours, #1135), free}] (stored keys on a package the keyhole speaks, #1066, and Ollama cloud only, `cli._runs_held`), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
-| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider at the same baseURL left as it is, only marked `wsl_url` when at WSL2's Windows host; one marked `wsl_url` at Windows' old address moved to the new one; one for another baseURL refuses; off this machine needs `local: true`; at WSL2's Windows host marked `wsl_url`, followed after a reboot, #1167); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
+| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD`, `--thinking` (a new Ollama entry that thinks keeps thinking on; default `options.reasoningEffort: "none"`, #1187; refused on another action, #602) | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider at the same baseURL left as it is, only marked `wsl_url` when at WSL2's Windows host; one marked `wsl_url` at Windows' old address moved to the new one; one for another baseURL refuses; off this machine needs `local: true`; at WSL2's Windows host marked `wsl_url`, followed after a reboot, #1167); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | *Optimize*; `start` detached, refused while a task holds the GPU, stopped by a task that wants it; `--bench` then runs `wb bench run`; `apply` adds the measured window as its own entry (`optimize.entry_name`; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>` (WSL2's Windows host: `ollama-windows`, followed to its next address, #1159), `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
 | `wb model retire <id>` | `--delete` | Not OpenCode's `model` or `small_model` (#708); keeps `variant_of`, `replaces` (#723); `--delete` drops Ollama's weights; an API id refused (`cli.API_SIZES`, #1013). |
@@ -6707,6 +6716,7 @@ block) that long first. `ApiHarness` checks the fake and the server, and on the 
 Bearer`, Anthropic `/v1/messages?beta=true` with `x-api-key` and `anthropic-version`, no GET; the body's `model` is
 the id after the first `/`; a step's cost is the catalog price of its tokens; a layer variant `#wb-off`
 (`reasoningEffort: "none"`) sends `reasoning_effort: "none"`, no variant no field, an unknown one `provider.no-route`;
+the Ollama entry `wb model add` writes (`options.reasoningEffort: "none"`) sends it too, its `--thinking` one no field (#1187);
 a pinned `small_model` keeps the title request on the task's model (unpinned, it goes to the provider's small model);
 a 429 prints `retry` events (`retryAfterMs` only with `Retry-After`), a 401 or 402 one error at once, the body
 verbatim. It takes the spike's models from the bundled catalog, else another of the provider's. The first two cover the MCP shape, skills, denials, compound

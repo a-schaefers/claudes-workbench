@@ -18918,6 +18918,9 @@ class LoneFlags(Base):
         for argv, says in ((["retire", "ollama/m", "--label", "x"], "go with wb model add"),
                            (["retire", "ollama/m", "--context", "8192"], "go with wb model add"),
                            (["retire", "ollama/m", "--pull"], "go with wb model add"),
+                           # #1187's --thinking: ignored with exit 0 on the other actions
+                           (["retire", "ollama/m", "--thinking"], "go with wb model add"),
+                           (["sizes", "ollama/m", "trivial", "--thinking"], "go with wb model add"),
                            (["sizes", "ollama/m", "--url", "http://127.0.0.1:1/v1"], "go with wb model add"),
                            (["add", "ollama/m", "--delete"], "--delete goes with wb model retire"),
                            (["retire", "ollama/m", "trivial"], "go with wb model sizes")):
@@ -22224,6 +22227,31 @@ class ModelSet(Base):
         self.assertNotIn("new-coder:14b", self.config()["provider"]["ollama"]["models"])
         with self.assertRaises(SystemExit):
             run_wb("model", "add", "cloud/big")                    # not a local provider
+
+    def test_a_new_ollama_entry_that_thinks_is_written_with_thinking_off_unless_thinking_is_asked(self):
+        # #1187 (2026-11-24): entries were written thinking, the 2026-11-18 stall's kind, while
+        # doctor advised reasoningEffort "none". A re-add keeps the entry's own thinking; only
+        # --thinking takes back the "none"; a server other than Ollama is left as it was
+        models_of = lambda p: self.config()["provider"][p]["models"]  # noqa: E731
+        out = run_wb("model", "add", "ollama/thinker:8b", "--context", "32768")
+        self.assertIn("thinking off (--thinking for on)", out)
+        self.assertEqual(models_of("ollama")["thinker:8b"]["options"]["reasoningEffort"], "none")
+        self.assertIn("thinking on", run_wb("model", "add", "ollama/thinker:8b", "--context", "32768",
+                                             "--thinking"))
+        self.assertNotIn("reasoningEffort", models_of("ollama")["thinker:8b"]["options"])
+        run_wb("model", "add", "ollama/thinker:8b", "--context", "65536")  # a re-add: still on
+        self.assertNotIn("reasoningEffort", models_of("ollama")["thinker:8b"]["options"])
+        out = run_wb("model", "add", "ollama/on:8b", "--context", "32768", "--thinking")
+        self.assertIn("thinking on", out)
+        self.assertNotIn("reasoningEffort", models_of("ollama")["on:8b"]["options"])
+        cfg = self.config()
+        cfg["provider"]["ollama"]["models"]["mine:8b"] = {"options": {"reasoningEffort": "low"}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        for extra in ((), ("--thinking",)):                                  # the user's effort stays
+            run_wb("model", "add", "ollama/mine:8b", "--context", "32768", *extra)
+            self.assertEqual(models_of("ollama")["mine:8b"]["options"]["reasoningEffort"], "low")
+        self.assertIn("reasoning", run_wb("model", "add", "strata/coder", "--context", "32768"))
+        self.assertNotIn("options", models_of("strata")["coder"])
 
     def test_add_never_guesses_the_context_ollama_serves(self):
         # the 2026-11-16 audit: with nothing set, the trained 256K was written while a stock
@@ -30236,6 +30264,26 @@ class ApiHarness(Base):
         self.assertEqual(rows[-1]["error"], {"type": "provider.no-route",
                                              "message": f"Variant unavailable for {model}: nosuch"})
         self.assertEqual(len(out.read_text().splitlines()), before + len(bodies))
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_sends_reasoning_effort_none_for_the_ollama_entry_wb_model_add_writes(self):
+        # #1187 (2026-11-24): wb model add turns an Ollama entry's thinking off with OpenCode's
+        # own model option, which reaches the agent's request as reasoning_effort; --thinking
+        # writes none, so the request has no field
+        def entry_run(*extra):
+            run_wb("model", "add", "ollama/thinker:8b", "--context", "32768", *extra)
+            entry = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())[
+                "provider"]["ollama"]["models"]["thinker:8b"]
+            port, out, _ = self.capture(f"real-gpu{len(extra)}")
+            layer = self.layer(port, "ollama")
+            layer["provider"]["ollama"].update(npm="@ai-sdk/openai-compatible",
+                                               models={"thinker:8b": entry})
+            code, rows = self.real_run("ollama/thinker:8b", layer)
+            self.assertEqual(code, 0, rows)
+            bodies = [json.loads(x) for x in out.read_text().splitlines()]
+            return [b.get("reasoning_effort", "unset") for b in bodies if b.get("tools")]
+        self.assertEqual(entry_run(), ["none"])
+        self.assertEqual(entry_run("--thinking"), ["unset"])
 
     @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
     def test_real_opencode_lists_an_alias_by_its_model_id_and_a_layer_key_in_settings(self):
