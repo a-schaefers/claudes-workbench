@@ -560,7 +560,7 @@ still has room (how handovers work: `reference/driving.md`).
 Check a directory flagged as possible build output before you accept a step. Remove or gitignore
 generated files. When the bulk additions or large binaries belong in the commit, pass
 `--include` to `wb next` or `wb accept` after reviewing them. `NOTE: git ignores files the agent
-wrote` (with its edit tools, or a shell command that names them) names files no diff shows and no commit takes: read them, then `--include` lands them. A
+wrote` (with its edit tools, or a shell command that names them) names files the diff shows but no commit takes: read them, then `--include` lands them. A
 file you write under an ignored path (a takeover, a fix) is refused the same way: `--include`;
 not what your rerun of the task's `--test` or setup writes, nor another build you run there
 (`tsc` when the test is jest's): that is left out as below. So write your own files there with

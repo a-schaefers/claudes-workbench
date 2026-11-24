@@ -3080,6 +3080,23 @@ def ignored_writes(task: store.Task) -> list[str]:
         return []
 
 
+def accept_writes(task: store.Task) -> list[str]:
+    """The files wb accept and wb next check for git ignoring them (commit_all's ``written``): the
+    agent's edit tools' and shell's, and Claude's (#1179, #1210)."""
+    return agent_wrote(task) + hand_wrote(task) + shell_wrote(task)
+
+
+def ignored_to_commit(task: store.Task) -> list[str]:
+    """Of accept_writes, the ones git ignores, which --include commits: what the review diff and
+    wb diff show beside git's own view (gitops.diff's ``force``), so an agent's feedback-round
+    change to its lib/util.py is in "the diff since your last review", not "(no changes)" (#1259,
+    2026-11-24); [] when git can't say."""
+    try:
+        return gitops.ignored_files(task.worktree, accept_writes(task))
+    except (gitops.GitError, OSError):
+        return []
+
+
 def _ignored_paths(wt: Path) -> list[str]:
     """The worktree's ignored files and directories (a directory once, not its files)."""
     out = gitops.git(wt, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
@@ -3803,8 +3820,9 @@ def review_diff(task: store.Task) -> str:
     # all the same (#79, the 2026-11-18 audit).
     props = [str(p.relative_to(task.worktree)) for _, p in proposals(task.worktree)]
     code = (".", *(f":(exclude,literal){p}" for p in props))
+    force = ignored_to_commit(task)  # what --include commits, in the snapshot and the diffs (#1259)
     try:
-        tree, left = gitops.snapshot_left(task.worktree)  # bulky new files left out (#431)
+        tree, left = gitops.snapshot_left(task.worktree, force=force)  # bulky new files left out (#431)
         task.set_status(reviewed={"step": steps, "tree": tree})
         left = gitops.left_line(left)
         if since and not gitops.has_tree(task.worktree, since):
@@ -3814,7 +3832,7 @@ def review_diff(task: store.Task) -> str:
             since, gone = None, "\n\nthe last review's snapshot is gone (git gc pruned it): all of it again"
         if since:
             # bounded: a big diff is never read whole only to show its stat (#348, the audit of 1.4)
-            full = gitops.diff(task.worktree, since, paths=code, limit=REVIEW_DIFF_MAX)
+            full = gitops.diff(task.worktree, since, paths=code, limit=REVIEW_DIFF_MAX, force=force)
             same = not props or not gitops.diff(task.worktree, since,
                                                  paths=tuple(f":(literal){p}" for p in props))
             prop = ("\n\nthe agent's proposed instruction files: unchanged since your last review"
@@ -3825,7 +3843,7 @@ def review_diff(task: store.Task) -> str:
                 return (f"\n\nthe diff since your last review (wb diff {task.name} for all of "
                         f"it):\n{full}" + prop)
             base = since
-        full = gitops.diff(task.worktree, base, paths=code, limit=REVIEW_DIFF_MAX)
+        full = gitops.diff(task.worktree, base, paths=code, limit=REVIEW_DIFF_MAX, force=force)
         prop = proposal_diff(task) + left
         if full == "":
             return gone + "\n\nthe diff: (no changes)" + prop
@@ -3833,7 +3851,7 @@ def review_diff(task: store.Task) -> str:
             return (f"{gone}\n\nthe diff (all of it; wb diff {task.name} again only after a change):"
                     f"\n{full}" + prop)
         return (f"{gone}\n\nthe diff is over {REVIEW_DIFF_MAX} characters, too big to include: "
-                f"its stat:\n{gitops.diff(task.worktree, base, stat=True, stat_count=gitops.CHANGED_SHOWN)}" + prop)
+                f"its stat:\n{gitops.diff(task.worktree, base, stat=True, stat_count=gitops.CHANGED_SHOWN, force=force)}" + prop)
     except (gitops.GitError, OSError):
         return ""
 

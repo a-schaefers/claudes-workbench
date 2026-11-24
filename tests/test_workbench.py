@@ -3337,6 +3337,31 @@ class Lifecycle(Base):
         self.assertIn("lib/util.py", tree)
         self.assertIn("main.py", tree)
 
+    def test_a_feedback_rounds_change_to_an_ignored_file_the_agent_wrote_is_in_the_diff_since_the_last_review(self):
+        # #1259 (the 2.0 bar loop, 2026-11-24): in a feedback round the agent changed lib/util.py,
+        # under Python.gitignore's lib/; the review notice said "the diff since your last review:
+        # (no changes)" beside round 1's NOTE word for word, and --include committed code Claude
+        # never saw. The snapshot and the diffs held only what git doesn't ignore
+        self.ignore_lib()
+        self.start("t-fb", "shellwrite", "--test", TEST_CMD)
+        wait_phase("t-fb", {"review"})
+        t = store.Task("t-fb")
+        review = lambda: [r["text"] for r in store.notices()  # noqa: E731
+                          if r["task"] == "t-fb" and r["kind"] == "review"]
+        first = review()[-1]
+        self.assertIn("+++ b/lib/util.py", first)                 # round 1's whole diff holds it
+        self.assertIn("NOTE: git ignores files the agent wrote (lib/util.py): the diff shows them", first)
+        run_wb("feedback", "t-fb", "--text", "1. main.py: add a docstring.")
+        wait_phase("t-fb", {"review"})
+        second = review()
+        self.assertEqual(len(second), 2)
+        self.assertIn("the diff since your last review", second[-1])
+        self.assertNotIn("(no changes)", second[-1])
+        self.assertIn("+# changed in round 2", second[-1])
+        self.assertNotIn("+from lib.util import answer", second[-1])  # main.py: seen already
+        self.assertIn("+# changed in round 2", run_wb("diff", "t-fb"))  # wb diff's "all of it" too
+        self.assertIn("since your last review: (no changes)", runner.review_diff(t))
+
     def test_what_the_runners_test_run_writes_under_an_ignored_path_is_not_taken_for_the_agents(self):
         # #1210 (2026-11-24): read since the agent's first round, a Maven run's surefire report
         # (.xml, a kind pom.xml makes the repo's) would refuse every accept of such a task

@@ -1903,7 +1903,7 @@ def cmd_next(a):
                 # a step that changed nothing advances with no commit: it died on "nothing to
                 # commit" and the task stayed on the step (#507, Claude's audit of 1.90)
                 # Claude's too (#1179), and the agent's shell's (#1210)
-                wrote = runner.agent_wrote(task) + runner.hand_wrote(task) + runner.shell_wrote(task)
+                wrote = runner.accept_writes(task)
                 left = _left_out(task, wrote, a.include)
                 if gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote):
                     commit = gitops.commit_all(
@@ -2476,7 +2476,9 @@ def cmd_diff(a):
             f"git -C {repo} diff {task.spec['base'][:12]} {tip}")
     base = "HEAD" if task.status.get("steps", 1) > 1 and not a.all else task.spec["base"]
     try:
-        print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths) or "(no changes)")
+        # the ignored files --include commits too, as the review diff shows them (#1259)
+        print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths,
+                          force=runner.ignored_to_commit(task)) or "(no changes)")
     except gitops.GitError as e:
         die(f"{e}\nthe branch's commits: git -C {repo} diff {task.spec['base'][:12]} {tip}")
 
@@ -3833,7 +3835,7 @@ def cmd_accept(a):
                 with _settle_proposals(task, a.take_claude_md):  # kept if the commit fails (#507)
                     # Claude's ignored files too: a takeover's lib/ module was lost (#1179); and
                     # the agent's shell's: its `cat > lib/util.py` was (#1210)
-                    wrote = runner.agent_wrote(task) + runner.hand_wrote(task) + runner.shell_wrote(task)
+                    wrote = runner.accept_writes(task)
                     left = _left_out(task, wrote, a.include)
                     if (gitops.changed(task.worktree) or head == spec["base"]
                             or gitops.ignored_files(task.worktree, wrote)):

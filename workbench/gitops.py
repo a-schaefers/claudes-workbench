@@ -1084,7 +1084,7 @@ def mark(worktree: Path) -> str:
 
 
 def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None = None,
-                   new: list[bytes] | None = None) -> str | None:
+                   new: list[bytes] | None = None, force=()) -> str | None:
     """`git <args>` with new files counted as changes (intent-to-add), in a scratch index: the
     worktree's own index, and anything a concurrent git command holds, are left alone. The
     scratch index starts as a copy of the worktree's, so sparse-checkout's skip-worktree entries
@@ -1092,7 +1092,10 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
     deleted: the 2026-11-16 audit). Nested repositories are left out (nested_repos). ``whole``
     adds new files' contents too, not just their intent (for write-tree: snapshot). ``limit``:
     at most that many characters of output, else None (_bounded). ``new``: only these new files
-    are added, beside the tracked files' changes (snapshot_left)."""
+    are added, beside the tracked files' changes (snapshot_left). ``force``: files git ignores
+    added too (`add -f`), the ones wb accept commits with --include (runner.ignored_to_commit):
+    left out, an agent's feedback-round edit of its lib/util.py read "the diff since your last
+    review: (no changes)" and --include committed code Claude never saw (#1259, 2026-11-24)."""
     # in a private directory of the state dir, not the temp dir: /tmp is in the agent's lane, and
     # an agent process still running could rewrite the index between `add -N` and the diff, so
     # files dropped out of the diff Claude reviews (the 2026-11-16 audit)
@@ -1117,6 +1120,9 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
             skip = [f":(exclude){p}" for p in nested_repos(worktree)]
             add_all(worktree, *([] if whole else ["-N"]), *(["--", ".", *skip] if skip else []),
                     env=env)
+        if force := [p for p in force if os.path.lexists(os.path.join(worktree, p))]:
+            add_all(worktree, "-f", *([] if whole else ["-N"]), "--",
+                    *(":(literal)" + p for p in force), env=env)
         return _bounded(worktree, args, env, limit) if limit else git(worktree, *args, env=env)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
@@ -1173,7 +1179,7 @@ def has_tree(cwd: Path, rev: str) -> bool:
     return not _run(cwd, ("cat-file", "-e", f"{rev}^{{tree}}"), check=False).returncode
 
 
-def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]]:
+def snapshot_left(worktree: Path, landing: bool = False, force=()) -> tuple[str, list[str]]:
     """snapshot's tree, and what it left out ("build/ (400 new files)", "data.bin (3 MB)"; []
     when nothing): a new file of BINARY_MAX or more, the top-level directories with the most new
     files while there are more than NEW_FILES_MAX, then the biggest new files while the rest
@@ -1184,7 +1190,8 @@ def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]
     verify's candidate): only what accept refuses without --include is left out, a new binary
     of BINARY_MAX or more and the directories past NEW_FILES_MAX, and a big text file, which
     accept commits, is kept: verify ran without a 1.1 MB text file its test read, said proven,
-    and the test failed on main once accept had landed it (#642, Codex's audit of 1.90.6)."""
+    and the test failed on main once accept had landed it (#642, Codex's audit of 1.90.6).
+    ``force``: ignored files it holds too (with_new_files, #1259)."""
     files = _new_files(worktree)
     if landing:
         big = [(p, n) for p, n in files if n >= BINARY_MAX and _binary(worktree, p)]
@@ -1202,8 +1209,9 @@ def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]
     while not landing and rest and sum(n for _, n in rest) > SNAPSHOT_MAX:
         big.append(rest.pop())
     if len(rest) == len(files):
-        return with_new_files(worktree, "write-tree", whole=True).strip(), []
-    tree = with_new_files(worktree, "write-tree", whole=True, new=[p for p, _ in rest]).strip()
+        return with_new_files(worktree, "write-tree", whole=True, force=force).strip(), []
+    tree = with_new_files(worktree, "write-tree", whole=True, new=[p for p, _ in rest],
+                          force=force).strip()
     return tree, dirs + brief([f"{shown(p)} ({n / (1 << 20):.0f} MB)" if n >= 1 << 20
                                else f"{shown(p)} ({n >> 10:,} KB)" for p, n in sorted(big)])
 
@@ -1215,12 +1223,13 @@ def left_line(left: list[str]) -> str:
 
 
 def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False, stat_count=None,
-         limit: int | None = None) -> str | None:
+         limit: int | None = None, force=()) -> str | None:
     """The diff since ``base``, new files included. ``limit``: None when it is longer than that
-    many characters, never held whole in memory (#348, the audit of 1.4)."""
+    many characters, never held whole in memory (#348, the audit of 1.4). ``force``: ignored
+    files it shows too (with_new_files, #1259)."""
     args = (["diff", "--no-ext-diff", "--no-color", base] + (["--stat"] if stat else []) + (["--numstat"] if numstat else [])
             + ([f"--stat-count={stat_count}"] if stat_count else []) + (["--", *paths] if paths else []))
-    out = with_new_files(worktree, *args, limit=limit)
+    out = with_new_files(worktree, *args, limit=limit, force=force)
     return None if out is None else out.rstrip()
 
 
@@ -1720,10 +1729,11 @@ def left_out_line(paths: list[str], worktree: Path, kept: Path | None = None, go
 
 def ignored_line(paths: list[str], who: str = "the agent wrote") -> str:
     """What the review and a refused commit say of the files written in the worktree that git
-    ignores: the agent's in the review, the agent's or Claude's in a refused commit (#1179)."""
-    return (f"git ignores files {who} ({', '.join(brief(paths))}), so the diff leaves them "
-            "out and a commit would too, and they'd go with the worktree: read them, then --include "
-            "commits them, or have them moved or deleted")
+    ignores: the agent's in the review, the agent's or Claude's in a refused commit (#1179). The
+    review diff and wb diff show them (force=, #1259), so it no longer says the diff leaves them out."""
+    return (f"git ignores files {who} ({', '.join(brief(paths))}): the diff shows them, "
+            "but a commit leaves them out and they'd go with the worktree: read them, then "
+            "--include commits them, or have them moved or deleted")
 
 
 def commit_all(worktree: Path, message: str, include: bool = False, sign: bool = True,
