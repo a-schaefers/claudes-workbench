@@ -1372,6 +1372,7 @@ class _ProviderWait:
         self.held = False               # any wait this round (measure_speed skips the round)
         self.queued_since = None        # a queue no answer has ended yet (#1083)
         self.cut = ""                   # OpenCode's provider.invalid-output: answers that never ended
+        self.worst = None               # the room's refused request at its worst, for stop_text (#1150)
         st = task.status
         if self.api and (st.get("ratelimit_until") or st.get("ratelimit")):
             # a runner killed mid-hold left them: the new round starts with none (edge cases)
@@ -1471,6 +1472,9 @@ class _ProviderWait:
             # cause `spend`, not `provider` (stopped_by). Before `fatal`: the keyhole answers its
             # own quota and spend stops with a 400, which on_error would call `refused` (#1082)
             self.task.set_status(api_stop=None)
+            # its `worst` goes on with the round (out["worst"], in end): stop_text, after the
+            # round, would find no api_stop and say "the cap is reached" under it (#1150, 2026-11-24)
+            self.worst = stop.get("worst")
             return str(stop["guard"]), str(stop.get("text") or f"{self.provider} stopped the round")
         if self.fatal:
             return self.fatal
@@ -1520,6 +1524,8 @@ class _ProviderWait:
                                  **({"by": by} if (by := stopped_by(why[0])) else {})})
         self._ended(now)
         out["held"] = self.held
+        if self.worst is not None:
+            out["worst"] = self.worst
         st = self.task.status
         if st.get("ratelimit_until") or st.get("ratelimit"):
             self.task.set_status(ratelimit_until=None, ratelimit=None)
@@ -4035,6 +4041,8 @@ def _spend_guard(task: store.Task, out: dict) -> None:
     stop = task.status.get("api_stop")
     if isinstance(stop, dict) and stop.get("text"):
         why, guard = str(stop["text"]), str(stop.get("guard") or "spend")
+        if stop.get("worst") is not None:  # for stop_text, as _ProviderWait.stop keeps it (#1150)
+            out["worst"] = stop["worst"]
     elif why := meter.stop_reason(task):
         guard = "spend"
     else:
@@ -4063,7 +4071,7 @@ def _spend_end(task: store.Task) -> None:
 
 def _spend_lead(task: store.Task, rnd: dict) -> str:
     """The stuck notice's first line for a spend stop: what to ask the user."""
-    return meter.stop_text(task) + "\n" if rnd.get("guard") == "spend" else ""
+    return meter.stop_text(task, rnd.get("worst")) + "\n" if rnd.get("guard") == "spend" else ""
 
 
 def _go_on(task: store.Task, n: int, what: str) -> bool:

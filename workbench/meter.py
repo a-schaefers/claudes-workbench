@@ -429,8 +429,9 @@ def stop_reason(task, ahead: bool = False) -> str | None:
     return None
 
 
-def stop_text(task) -> str:
-    """The `stuck` notice's lead for a spend stop."""
+def stop_text(task, worst: float | None = None) -> str:
+    """The `stuck` notice's lead for a spend stop; ``worst``: the room's refused request at its
+    worst, which the round's stop carries (`_spend_lead`: `api_stop` is consumed by then)."""
     c, t, b = cap(), today()["usd"], today()["basis"]
     if c is None:
         return (f"{task.name} stopped: {no_cap()}. Its work so far is in the worktree; then wb resume "
@@ -440,7 +441,7 @@ def stop_text(task) -> str:
     # A route change is for the next tasks; this one is taken over or discarded.
     n, role = task.name, task.spec.get("role") or "<role>"
     note = f"; {NOTE[b].strip(' ()')}" if t and NOTE[b] else ""
-    if w := _near(task, c, t):  # under the cap: "the cap is reached" had Claude resume into it (#1150)
+    if w := _near(task, c, t, worst):  # under the cap: "the cap is reached" had Claude resume into it (#1150)
         return (f"{n} stopped: {NEAR} (up to {usd(w)}; {money(t, b)} of {usd(c)} today{note}). Its work "
                 f"so far is in the worktree. Ask the user: a cap of at least {usd(_enough(t, w))} (wb route "
                 f"cap <usd>) or tomorrow, then wb resume {n}; or the role on the GPU (wb route {role} gpu) "
@@ -452,13 +453,20 @@ def stop_text(task) -> str:
             f"{n} or wb discard {n} for this one (resume keeps its API model).")
 
 
-def _near(task, c: float, t: float) -> float | None:
+def _near(task, c: float, t: float, worst: float | None = None) -> float | None:
     """The next request's worst when today ``t`` is under the cap ``c`` but not by that much: the
-    room's own figure (status `api_stop` `worst`), else request_floor's; None otherwise."""
+    room's own figure (``worst``, else status `api_stop` `worst`), else request_floor's; None
+    otherwise."""
     if t >= c or (mt := for_task(task)) is None or not mt.prices:
         return None
+    # The round's stop consumes `api_stop` (`_ProviderWait.stop`) before the notice is written:
+    # read from status alone, the room's worst was never seen, request_floor (no input) fell
+    # short of the cap, and the notice said "the cap is reached" with a cap too low (#1150,
+    # 2026-11-24). The round carries it instead.
     stop = task.status.get("api_stop")
-    w = stop.get("worst") if isinstance(stop, dict) and _num(stop.get("worst")) else request_floor(mt.m)
+    if not _num(worst):
+        worst = stop.get("worst") if isinstance(stop, dict) and _num(stop.get("worst")) else None
+    w = worst if worst is not None else request_floor(mt.m)
     return w if w and t + w > c else None
 
 

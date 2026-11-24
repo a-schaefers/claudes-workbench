@@ -32306,6 +32306,30 @@ class ApiSpend(Base):
         self.cap(5.13)
         self.assertTrue(runner._go_on(task, 2, "auto-fix"))
 
+    def test_a_round_the_room_stopped_under_the_cap_says_too_near_with_the_rooms_worst(self):
+        # #1150's review (2026-11-24): the round's stop (_ProviderWait.stop) consumed `api_stop` at
+        # its tick, before stop_text wrote the notice, so the room's `worst` was never read: with
+        # request_floor (no input) short of the cap, the notice said "the cap is reached" under it,
+        # and resume ran into the same refusal. Here the floor is 0 (no output price): only the
+        # request's input tips it over
+        self.cap(5)
+        self.spent(4.8)
+        self.assertEqual(self.meter.request_floor(runner.models.lookup(SPEND_M)), 0)
+        task = self.api_task("t-near-drive", SPEND_M, "http")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "stuck")
+        self.assertIsNone(task.status.get("api_stop"))           # consumed by the round's stop
+        (notice,) = self.notices("t-near-drive", "stuck")
+        self.assertEqual(notice["cause"], "spend")
+        text = notice["text"].splitlines()[0]                    # stop_text's lead
+        self.assertTrue(text.startswith("t-near-drive stopped: too near the day's API spend cap for its "
+                                        "next request (up to $"), text)
+        self.assertNotIn("cap is reached", text)
+        worst = float(re.search(r"\(up to \$([\d.]+);", text)[1])
+        need = float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])
+        self.assertGreater(worst, 0)
+        self.assertGreaterEqual(need, 4.8 + worst - 0.005)       # the cap it names lets the request by
+
     def test_the_room_prices_a_request_at_the_dearest_tier(self):
         self.cap(5)
         self.spent(1.0)

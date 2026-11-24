@@ -706,7 +706,11 @@ or wb discard <task> for this one (resume keeps its API model).` (with no cap: `
 cap is reached, which had Claude resume into the same stop (#1150): `<task> stopped: too near the day's API
 spend cap for its next request (up to $0.33; ≈$4.80 of $5 today; catalog prices). Its work so far is in the
 worktree. Ask the user: a cap of at least $5.13 (wb route cap <usd>) or tomorrow, then wb resume <task>; …`
-(`meter._near`: the room's `worst`, else `request_floor`). Each remedy has its own next step: resume never re-routes, so "the role on
+(`meter._near`: the room's `worst`, else `request_floor`, which leaves the input out). The round's stop
+(`_ProviderWait.stop`) consumes `api_stop` before the notice is written, so the round carries the room's
+`worst` on (`_ProviderWait.worst`, the round's `out["worst"]`; `_spend_guard` sets it too) and
+`runner._spend_lead` hands it to `stop_text(task, worst)`: read from status alone it was never seen, and
+the notice said the cap was reached with a cap that would not do (#1150's review). Each remedy has its own next step: resume never re-routes, so "the role on
 the GPU … then wb resume" resumed into the same stop (#1095); `wb resume` at the cap is now refused
 before any round (`cli._model_still_listed`, #1118). The mod's `GUARD_WORDS.spend` names it,
 and its wake for a `cause` `spend` notice ends with `SPEND_NEXT` (the same choices, asked of the user;
@@ -6002,7 +6006,7 @@ off), not `wb start`'s.
 | `served` | `{model, by}`: the model an API task's responses named and OpenRouter's provider (or null), from the keyhole when it first appears or changes |
 | `ratelimit_until`, `ratelimit` | the keyhole's hold or queue (#1020): epoch seconds, at least 60 s ahead; `{kind: rate_limited\|outage\|queued, provider, code, since, retry_after, why?}`; cleared at the first data, at each round's start and end |
 | `api` | an API task's spend (#1019, *Spend*): `{usd (the task's ledger total; null for a plan), metered, source (the last row's), tok {in, out, cache_read, cache_write, reasoning}, plan?}`, per ledger row |
-| `api_stop` | `{guard, text}` (`spend`'s with `worst`, the refused request's at its worst, #1150): stop the round now: the keyhole's `quota` (#1020) or `setup` (a certificate or proxy of this machine's, #1080), or `spend` (`Meter.room` refused a request, #1019); consumed by the runner's stop (`_ProviderWait.stop`, whose `stopped_by` makes `spend` its own cause), and cleared, whatever its guard, as each round begins (`Meter.begin`) |
+| `api_stop` | `{guard, text}` (`spend`'s with `worst`, the refused request's at its worst, which the round's stop carries on to `meter.stop_text`, #1150): stop the round now: the keyhole's `quota` (#1020) or `setup` (a certificate or proxy of this machine's, #1080), or `spend` (`Meter.room` refused a request, #1019); consumed by the runner's stop (`_ProviderWait.stop`, whose `stopped_by` makes `spend` its own cause), and cleared, whatever its guard, as each round begins (`Meter.begin`) |
 | `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap, or within one worst request of it, #1150), with `infra` `spend` |
 | `updated_at` | every write |
 
@@ -6369,7 +6373,9 @@ naming its role and model (the runners are the test's: the leases taken as a run
 `spawn_runner` patched, task.json then naming the API model) and runs `runner.drive` in the test's process, the keyhole `drive`
 starts (#1015) recording each `close` told a reason (`record_closes`); `ApiSpendKeyhole` drives the keyhole's `close(reason)`, `room` and one usage per
 response against `_KeyholeTest`'s upstream, and its `test_real_opencode_*` runs the real OpenCode through a closed
-keyhole (the 400, not retried).
+keyhole (the 400, not retried). The room's stop under the cap is driven whole too: the fake's `http` scenario's request
+through the keyhole, refused for its input alone (a model with no output price, `request_floor` 0), and the notice's
+lead says too near with the room's `worst` (#1150's review).
 
 **The Tasks view's data** (#1048): status `round_for` for each kind of round (`start` and `feedback` in
 `Lifecycle`, `fix` in `AutoFix`, `steer` in `Steering`, `fresh` in `Context`, `self_review`, `next` and `resume`, both its paths, in `Lifecycle`); `typical`
@@ -6795,4 +6801,4 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.
 - **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → the mod's `GUARD_WORDS`, *Stats recording*'s list.
-- **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`.
+- **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, keeping its `worst` for `runner._spend_lead` ↔ `meter.stop_text(task, worst)`, #1150, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`.
