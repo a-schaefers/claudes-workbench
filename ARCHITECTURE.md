@@ -4834,7 +4834,7 @@ client; the server needs no browser.
   `chat-agents.json` beside the token file (`chat.agents_path`, 0600, under `chat-agents.lock`);
   `list`, `revoke` (`chat.agent_revoke`). `Handler._authed` returns `"user"` or `"agent <name>"`
   (`chat.agent_for`, constant time, the file read per request so a revoke is at once) and sets
-  `Handler.agent`; a held wait or open stream checks again at every wake (`Handler._revoked`:
+  `Handler.agent`; an agent token from a peer that isn't loopback (`Handler._from_loopback`: `127.*`, `::1`) is 403 `agent tokens work only from this machine (localhost)` whatever the bind, as agents are this machine's own (owner, 2026-11-23), while the user's token still works from the tailnet or LAN; a held wait or open stream checks again at every wake (`Handler._revoked`:
   both went on reading its replies after a revoke, the #1042 review). An agent gets 403 `agent tokens can't …` on `AGENT_DENIED` (`/api/answer`,
   `/api/prefs`, `/api/push`, `/api/active`, `/api/seen`), and 429 `{error, retry_after}` past
   `AGENT_SENDS_PER_MIN` 30 sends in any 60 s (`chat.RateLimit`, per agent, in the server's memory).
@@ -5114,7 +5114,7 @@ printed once to serve.log (`web chat: a push to <host> failed: <reason>`); `webp
 Python). A test's `chat.push_hint` (`cert`, `clock` for a 403, `unreached`, `refused`) tells the
 page what to say (#539).
 
-A change to `chat.py` or `chat_static/` also needs the browser test (*The tests*).
+A change to `chat.py` or `chat_static/` also gets the browser test, in CI (*The tests*).
 
 ## Stopping everything
 
@@ -6206,6 +6206,10 @@ approve; outside it the user typing it is the yes. CONTRIBUTING.md is the contri
 - The GitHub plugin for Claude Code is not needed for any of it; its tools that write to upstream pass the same gate.
 
 ## The tests
+
+Where they run (owner, 2026-11-23): the whole suite, the mod's tests and the browser test run in CI
+(`check.yml`, `chat.yml`), never locally as a routine check; a change runs only the tests it adds
+or edits, by name, before `scripts/ship.sh` hands the rest to CI (CLAUDE.md, *Commands*).
 
 From the repo root: `python3 -m unittest` (`tests/__init__.py` makes `tests` a package), `tests.test_workbench.Context
 [.test_…]`, `-k handover`; the mod: `claude plugin validate mod && claude plugin test mod`; the chat:

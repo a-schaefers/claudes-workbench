@@ -19,25 +19,30 @@ months behind: the 2026-11-16 audit). Before every commit:
 
 ## Commands
 ```sh
-python3 -m unittest                                   # the whole suite, about 25 minutes
+python3 -m unittest                                   # the whole suite: CI's, never run here
 python3 -m unittest tests.test_workbench.Context      # one class (.Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod
 PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat
 wb doctor
 ```
-A skip is not a pass: the real-OpenCode tests skip without `opencode` on PATH, the lane tests
-without Landlock, so a change to `context.py`, the config layer, `gitguard.py` or `lane.py` needs
-them run where they don't skip.
+**The tests run in CI, not here** (owner, 2026-11-23: two local runs of the whole suite cost an
+hour a batch, the same suite CI's six shards run in about 6 minutes, with Landlock and real
+OpenCode, so its lane and OpenCode tests don't skip). Locally run only the tests the change adds
+or edits, by name (`-k`, or `Class.test_…`), and a mutation check of each new one; never the whole
+suite, another class, the mod's tests or the browser test unless the change edits one of them.
+Then ship: `scripts/ship.sh` in the background waits on CI and the merge while other work goes
+on, and a failure there is fixed on the same branch and shipped again. Agents you start are told
+this in their prompt.
 
 ## Checks before committing
 main takes no direct push: commit on a branch or worktree. `scripts/ship.sh` pushes, opens the
 PR and arms auto-merge as you, so run it only when the user has said to ship, in the background
 (it waits for the merge: ARCHITECTURE.md, *Shipping to main*). Never push, open a PR or an issue,
 or comment without the user's yes for it.
-- The docs match the change; `python3 -m unittest`; the mod's two commands.
+- The docs match the change; the tests the change adds or edits, alone; CI runs the rest.
 - Versions are cut by hand: the last number runs .1, .2, .3 at most, then the next minor (1.91,
   1.91.1, 1.91.2, 1.91.3, then 1.92, never 1.91.4); 2.0 only for a change big enough.
-- `chat.py`, `webpush.py`, `chat_static/`: the browser test too (Playwright isn't a dependency).
+- `chat.py`, `webpush.py`, `chat_static/`: CI's `chat.yml` runs the browser test (Playwright isn't a dependency).
 - How OpenCode is invoked or read (argv, event or export fields): `tests/fake_opencode.py` in the
   same commit, and one real run, `wb start --trial` (steps: ARCHITECTURE.md, *The tests*).
 
