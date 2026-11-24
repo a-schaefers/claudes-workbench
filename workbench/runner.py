@@ -3071,8 +3071,8 @@ def own_module(task: store.Task, module: str, python: str = "python3") -> bool:
     in before round 1 with a false "no round can fix that" (and its pip install advice), and
     skipped the agent's one auto-fix round, where a script the step makes was already left out
     for saying `No such file or directory` on the base too (#1152) (#1181's review, 2026-11-24).
-    A src layout's `src/<top>` counts the same, and a top-level name the spec names counts when
-    the user's own environment can't import it either (user_imports; #1209)."""
+    A src layout's `src/<top>` counts the same, and a top-level name the spec makes (spec_makes)
+    when the user's own environment can't import it either (user_imports; #1209)."""
     top, sub = module.split(".")[0], task.spec.get("subdir", "")
     # src/: the src layout a real agent may well pick for a new package (#1209, 2026-11-24)
     names = [f"{d}{top}{ext}" for d in ("", "src/") for ext in ("", ".py")]
@@ -3097,13 +3097,35 @@ def own_module(task: store.Task, module: str, python: str = "python3") -> bool:
     if any(f"/{p}".endswith(f"/{path}.py") or f"/{path}/" in f"/{p}"
            for p in context.spec_paths(spec)):  # pkg/newcli.py, pkg/newcli/__main__.py
         return True
-    if re.search(rf"(?<![\w.]){re.escape(module)}(?!\w)", spec) is None:
-        return False
-    # a dotted name in the spec is the module's own; a top-level one is a tool the spec may well
-    # name (`pytest`) only when the user's own environment has it: else `python3 -m answerpkg`
-    # for a spec making answerpkg checked in before round 1 with a false "no round can fix
-    # that", and its auto-fix was skipped (#1209, 2026-11-24)
-    return "." in module or not user_imports(top, python)
+    if "." in module:  # a dotted name in the spec is the module's own
+        return re.search(rf"(?<![\w.]){re.escape(module)}(?!\w)", spec) is not None
+    # a top-level one only when the spec makes it, and the user's own environment can't import
+    # it either: counted only dotted, `python3 -m answerpkg` for a spec making answerpkg checked
+    # in before round 1 with a false "no round can fix that", and its auto-fix was skipped; and
+    # counted whenever the spec named it, "with pytest tests" on a machine without pytest ran
+    # round 1 and both auto-fix rounds on correct code again, #1181's incident (#1209, 2026-11-24)
+    return spec_makes(spec, top) and not user_imports(top, python)
+
+
+# Words that say a sentence makes something, for spec_makes.
+MAKING = (r"\b(?:new|make|makes|making|create|creates|creating|add|adds|adding|write|writes|"
+          r"writing|build|builds|building|implement|implements|implementing|scaffold)\b")
+
+
+def spec_makes(spec: str, name: str) -> bool:
+    """Whether the spec presents top-level module ``name`` as one the step makes: its directory
+    as a path (`answerpkg/`, `src/answerpkg/`), or the name as a package or module in a sentence
+    that makes something ("Make a new Python package answerpkg", "add the `slug` module"). Not
+    merely named ("with pytest tests in test_slug.py", "run `python3 -m pytest -q`"), nor beside
+    `-m`, which a spec quoting its acceptance command gives a tool too (#1209, 2026-11-24)."""
+    n = re.escape(name)
+    if re.search(rf"(?<![\w./-])(?:src/)?{n}/", spec):  # not a URL's (github.com/x/pytest/)
+        return True
+    q = r"[`'\"]?"
+    named = re.compile(rf"\b(?:package|module)\s+(?:(?:called|named)\s+)?{q}{n}{q}(?!\w|\.\w)|"
+                       rf"(?<![\w.]){q}{n}{q}\s+(?:package|module)\b", re.I)
+    return any(named.search(s) and re.search(MAKING, s, re.I)
+               for s in re.split(r"(?<=[.!?])\s+|\n", spec))
 
 
 def user_imports(top: str, python: str = "python3") -> bool:
