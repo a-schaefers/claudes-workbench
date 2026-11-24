@@ -5788,16 +5788,32 @@ def cmd_model(a):
         if ctx:
             out = ctx // 8  # 4K on a 32K window; a bigger window writes bigger files in one call
             entry["limit"] = {"context": ctx, "input": ctx - out, "output": out}
+        had = (prov["models"].get(name) or {}).get("options") or {}
         if prov["engine"] == "ollama":
             entry["options"] = {"max_tokens": models.ollama_cap(entry)}
+            # Thinking off unless --thinking (#1187, 2026-11-24): the 2026-11-18 stall was a
+            # thinking entry silent 14 minutes at a time, doctor already advised "none", and API
+            # roles are off by default (#1018). Ollama alone: other servers may ignore or reject
+            # reasoning_effort "none". A new entry only: a re-add (a new --context) keeps the
+            # thinking the entry has, the user's own effort included, but --thinking takes back
+            # a "none" (None drops the key in write_entry).
+            if entry["reasoning"] and not a.thinking and name not in prov["models"]:
+                entry["options"]["reasoningEffort"] = "none"
+            elif a.thinking and had.get("reasoningEffort") == "none":
+                entry["options"]["reasoningEffort"] = None
         try:
             models.write_entry(provider, name, entry)
         except RuntimeError as e:
             die(str(e))
         ctx = ctx or prov["models"][name]["limit"]["context"]  # kept from the entry as it was
+        now = {**had, **entry.get("options", {})}
+        think = "no reasoning" if not entry["reasoning"] else \
+            "thinking off (--thinking for on)" if "none" in (now.get("reasoningEffort"),
+                                                             now.get("reasoning_effort")) else \
+            "thinking on" if prov["engine"] == "ollama" else "reasoning"
         print(f"registered {a.id}: "
               f"{'tools' if entry['tool_call'] else 'NO tool calls, so wb will not route tasks to it'}, "
-              f"{'reasoning' if entry['reasoning'] else 'no reasoning'}, "
+              f"{think}, "
               f"{ctx // 1024}K context\nnext: wb model sizes {a.id} … if it should only "
               "take some task sizes; the router guesses from its size until real tasks show more")
         return
@@ -6653,7 +6669,7 @@ def cmd_remote(a):
                                              url=None, start=None, stop=None, label=None,
                                              context=a.context, delete=False, price_in=None,
                                              price_out=None, cache_read=None, cache_write=None,
-                                             clear=False))
+                                             clear=False, thinking=False))
             print(out.getvalue().splitlines()[0])
         except SystemExit:  # die: why this one wasn't registered, and the rest go on
             print(f"--  {pid}/{name}: {err.getvalue().strip().removeprefix('wb: ')}")
@@ -7828,6 +7844,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--label", help="add: the name OpenCode shows")
     s.add_argument("--context", type=int, help="add: context tokens (default: what Ollama serves "
                    "it, else what the provider's other models use; another server needs it)")
+    s.add_argument("--thinking", action="store_true", help="add: an Ollama model that thinks keeps "
+                   "thinking on (default: a new entry's is off, options.reasoningEffort \"none\")")
     s.add_argument("--delete", action="store_true", help="retire: also delete its weights")
     s.add_argument("--input", dest="price_in", type=float, metavar="X", help="price: an API model's "
                    "input price, dollars per 1M tokens, as your provider bills it (models.json cost)")
