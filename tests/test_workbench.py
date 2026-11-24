@@ -37716,8 +37716,8 @@ class FirstRunApi(Base):
         self.keys(key_row("deepseek", "DeepSeek", STORED), key_row("anthropic", "Anthropic", STORED))
         code, out, err = self.wb("route", "--dry-run", "writing", "anthropic/claude-haiku-5-5", "trivial", "gpu")
         self.assertEqual(out, "writing: GPU → API anthropic/claude-haiku-5-5 · trivial: API deepseek/deepseek-flash → "
-                              "GPU · API kept: deepseek/deepseek-flash · your code goes to Anthropic · thinking off · "
-                              "cap $5/day\n", err)
+                              "GPU · API kept: deepseek/deepseek-flash · its tasks already started keep their model · "
+                              "your code goes to Anthropic · thinking off · cap $5/day\n", err)
 
     def test_several_roles_are_all_or_nothing_and_a_refusal_names_the_pair(self):
         code, _, err = self.wb("route", "trivial", "deepseek/deepseek-flash", "significant", "deepseek/nope",
