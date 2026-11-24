@@ -17436,6 +17436,14 @@ class ScheduledRuns(Base):
         (self.bin / "claude").write_text(textwrap.dedent(f"""\
             #!{sys.executable}
             import json, os, sys
+            if os.environ.get("FAKE_CLAUDE_TASK"):  # a task headless Claude starts in its batch
+                import re, time
+                sys.path.insert(0, {str(ROOT)!r})
+                from workbench import store
+                batch = re.search(r"--backlog ([a-z0-9-]+)", sys.argv[-1])[1]
+                t = store.Task(os.environ["FAKE_CLAUDE_TASK"])
+                store.write_json(t.dir / "task.json", {{"name": t.name, "backlog": batch, "created_at": time.time()}})
+                t.set_status(phase="review")
             with open(os.environ["FAKE_CLAUDE_LOG"], "w") as f:
                 json.dump({{"argv": sys.argv[1:], "cwd": os.getcwd(),
                            "env": {{k: os.environ.get(k) for k in ("WB_SCHEDULE", "CLAUDECODE",
@@ -17522,6 +17530,29 @@ class ScheduledRuns(Base):
                 self.assertRaises(schedule.ScheduleError):
             schedule.parse_at("weekly")
 
+    def test_an_oncalendar_that_ends_in_a_time_goes_to_systemd_analyze_not_the_days_parser(self):
+        # the review of #1204: `*-*-* 02:00` was read as [DAYS] HH:MM, its front refused as days,
+        # and systemd's own forms the help names never reached systemd-analyze
+        from workbench import schedule
+        asked = []
+
+        def analyze(argv, **kw):
+            asked.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        with mock.patch.object(schedule.shutil, "which", lambda name, **kw: f"/usr/bin/{name}"), \
+                mock.patch.object(schedule.subprocess, "run", analyze):
+            for text in ("*-*-* 02:00", "*-*-01 03:00", "Mon *-*-* 02:00", "Mon..Fri *-*-* 01:30"):
+                self.assertEqual(schedule.parse_at(text), {"said": text, "calendar": text, "launchd": None})
+            self.assertEqual(schedule.parse_at("Mon..Fri 01:30")["calendar"], "Mon,Tue,Wed,Thu,Fri *-*-* 01:30:00")
+        self.assertEqual([a[2] for a in asked], ["*-*-* 02:00", "*-*-01 03:00", "Mon *-*-* 02:00",
+                                                 "Mon..Fri *-*-* 01:30"])
+        # on macOS there is no OnCalendar to fall to: the days' own reason
+        with mock.patch.object(schedule, "_macos", return_value=True), \
+                self.assertRaisesRegex(schedule.ScheduleError, "is not a day"):
+            schedule.parse_at("*-*-* 02:00")
+        if shutil.which("systemd-analyze"):  # the real one, where there is one
+            self.assertEqual(schedule.parse_at("*-*-* 02:00")["calendar"], "*-*-* 02:00")
+
     def test_add_writes_a_persistent_user_timer_and_rm_takes_it_away(self):
         from workbench import schedule
         out = self.add("night", "Sun 02:00", "--max-turns", "50")
@@ -17580,9 +17611,7 @@ class ScheduledRuns(Base):
         self.add()
         os.environ.update(CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="ses-day")  # fired from a session
         batch = f"night-{time.strftime('%Y-%m-%d')}"
-        old = store.Task("t-tonight")  # a task headless Claude started in the batch
-        store.write_json(old.dir / "task.json", {"name": "t-tonight", "backlog": batch, "created_at": time.time()})
-        old.set_status(phase="review")
+        os.environ["FAKE_CLAUDE_TASK"] = "t-tonight"  # a task headless Claude starts in the batch
         self.assertEqual(self.fire(), 0)
         call = json.loads(Path(os.environ["FAKE_CLAUDE_LOG"]).read_text())
         argv = call["argv"]
@@ -17631,6 +17660,42 @@ class ScheduledRuns(Base):
         self.assertIn("significant role", row["why"])
         self.assertIn("skipped: significant role", run_wb("schedule", "list"))
         self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
+    def test_two_fires_on_one_day_each_get_a_batch_of_their_own(self):
+        # the review of #1204: every fire on a date was batch night-<date>, so a second one took
+        # the first's tasks (its row counted them again, its Claude was handed them to review),
+        # or, with them closed 6 h, had every wb start --backlog refused
+        from workbench import schedule
+        self.add()
+        day = f"night-{time.strftime('%Y-%m-%d')}"
+        os.environ["FAKE_CLAUDE_TASK"] = "t-first"
+        self.assertEqual(self.fire(), 0)
+        os.environ["FAKE_CLAUDE_TASK"] = "t-second"   # the first's task still open
+        self.assertEqual(self.fire(), 0)
+        first, second = schedule.runs("night")
+        self.assertEqual((first["batch"], first["tasks"]), (day, [{"task": "t-first", "phase": "review"}]))
+        self.assertEqual((second["batch"], second["tasks"]), (f"{day}-2", [{"task": "t-second", "phase": "review"}]))
+        prompt = json.loads(Path(os.environ["FAKE_CLAUDE_LOG"]).read_text())["argv"][-1]
+        self.assertIn(f"--backlog {day}-2.", prompt)
+        # both closed and 7 h old: the day's name is refused now, the next fire's is new
+        for n in ("t-first", "t-second"):
+            t = store.Task(n)
+            store.write_json(t.dir / "task.json", {**t.spec, "created_at": time.time() - 7 * 3600})
+            t.set_status(phase="accepted")
+        self.assertIsNotNone(cli._backlog_done(day))
+        os.environ.pop("FAKE_CLAUDE_TASK")
+        self.assertEqual(self.fire(), 0)
+        third = schedule.runs("night")[-1]
+        self.assertEqual((third["batch"], third["tasks"]), (f"{day}-3", []))
+        self.assertIsNone(cli._backlog_done(third["batch"]))
+        # a skip starts nothing, so its name is still free; the longest name's batch is a backlog name
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"roles": {"significant": {
+            "via": "api", "api": "deepseek/x"}}}))
+        self.assertEqual(self.fire(), 0)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "skipped")
+        self.assertEqual(schedule.batch_name("night", time.time()), f"{day}-4")
+        self.assertTrue(store.NAME_RE.match(schedule.batch_name("n" * 34, time.time()) + "-99"))
+        self.assertFalse(schedule.NAME_RE.match("n" * 35))
 
     def test_run_fires_now_in_the_background(self):
         from workbench import schedule
@@ -36569,6 +36634,23 @@ class RoleResolution(Base):
             self.assertEqual(code, 0, err)
             self.assertNotIn("waits as queued for a slot", out)
 
+    def test_a_task_held_by_after_takes_no_slot_of_its_provider_until_its_time(self):
+        # #1204: a start --after holds nothing until then, so a start now may take the slot
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        code, _, err = self.begin("t-held", "--role", "trivial", "--after", at)
+        self.assertEqual(code, 0, err)
+        task = store.Task("t-held")
+        task.set_status(pid=4242)                              # its runner alive, waiting for its time
+        m = runner.models.lookup("deepseek/deepseek-flash")
+        with mock.patch.object(cli, "runner_alive", lambda t: t.name == "t-held"):
+            self.assertEqual(cli._api_pending(m), [])
+            self.assertEqual(cli._api_slots_free(m), runner.models.API_PARALLEL)
+            # its time come: on its way to a slot as any start
+            store.write_json(task.dir / "task.json", {**task.spec, "not_before": round(time.time()) - 1})
+            self.assertEqual(cli._api_pending(m), ["t-held"])
+            self.assertEqual(cli._api_slots_free(m), runner.models.API_PARALLEL - 1)
+
     def test_an_api_role_that_cant_run_exits_3_with_one_line_and_never_the_gpu(self):
         self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.no_key_for("deepseek")
@@ -37431,6 +37513,29 @@ class BusyGpu(Base):
                          ("off", "deepseek/deepseek-flash", cli.AUTO_FIX["api"]))
         self.assertIn("thinking_shown", sp)
         self.assertEqual(store.Task("t-busy").status["phase"], "queued")
+
+    def test_a_start_after_a_time_while_the_gpu_is_held_is_queued_not_refused(self):
+        # #1204: --after is "run it once I'm off the GPU": the GPU's holders now say nothing of
+        # then, so it queues (implied) rather than exit 4
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        code, out, err = self.begin("t-later", "--after", at)
+        self.assertEqual(code, 0, err)
+        task = store.Task("t-later")
+        self.assertEqual((task.status["phase"], task.spec["via"]), ("queued", "gpu"))
+        self.assertIn("note: held until ", out)
+        self.assertEqual(self.begin("t-now")[0], 4)            # without it, exit 4 as before
+
+    def test_a_start_after_a_time_stays_on_its_gpu_role_with_busy_api(self):
+        # #1204: the busy opt-in reads the GPU now, which says nothing of the --after time
+        self.opt_in()
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        code, out, err = self.begin("t-later", "--role", "trivial", "--after", at)
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-later").spec
+        self.assertEqual((sp["via"], sp.get("busy")), ("gpu", None))
+        self.assertNotIn(routes.BUSY_LINE, out)
+        self.assertEqual(self.begin("t-now", "--role", "trivial")[0], 0)   # without it, the move
+        self.assertEqual(store.Task("t-now").spec["via"], "api")
 
     def test_with_busy_wait_the_default_a_busy_gpu_exits_4_as_before(self):
         code, _, err = self.wb("route", "trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")

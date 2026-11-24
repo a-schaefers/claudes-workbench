@@ -28,8 +28,10 @@ from pathlib import Path
 from . import meter, models, routes, store
 from .runner import PKG_ROOT
 
-# a schedule's name, short enough that its batch, `<name>-YYYY-MM-DD`, is a backlog name (store.NAME_RE)
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,36}\Z")
+# a schedule's name, short enough that its batch, `<name>-YYYY-MM-DD` or a second fire's that day
+# `<name>-YYYY-MM-DD-2` (up to -99: batch_name), is a backlog name (store.NAME_RE)
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,33}\Z")
+SAME_DAY = 99         # fires on one date, each its own batch
 TURNS = 300           # claude -p's --max-turns for one fire, unless `wb schedule add --max-turns`
 FIRE_HOURS = 12       # a fire's Claude is stopped past this, whatever its turns
 UNIT = "wb-schedule-"             # systemd: wb-schedule-<name>.timer / .service
@@ -113,8 +115,10 @@ def running(name: str) -> dict | None:
 # --- When: "Sun 02:00", or systemd's own OnCalendar ------------------------------------------------
 
 def _day(word: str) -> str:
-    for d in DAYS:
-        if word.lower().startswith(d.lower()) and len(word) >= 3:
+    # the day's name or a start of it (`Sun`, `Sunday`, `thurs`): not any text that starts with
+    # one, or `Mon *` read as Monday and systemd's OnCalendar after it never seen
+    for d, full in zip(DAYS, ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")):
+        if len(word) >= 3 and full.startswith(word.lower()):
             return d
     raise ScheduleError(f"{word!r} is not a day (Mon … Sun)")
 
@@ -143,8 +147,18 @@ def parse_at(text: str) -> dict:
     no launchd form. ScheduleError when neither."""
     text = " ".join(text.split())
     m = re.fullmatch(r"(?:(.+?)\s+)?([01]?\d|2[0-3]):([0-5]\d)", text)
-    if m:
-        days, hh, mm = _days(m[1] or ""), int(m[2]), int(m[3])
+    try:
+        days = _days(m[1] or "") if m else None
+    except ScheduleError as e:
+        # systemd's own forms end in HH:MM too (`*-*-* 02:00`, `*-*-01 03:00`, `Mon *-*-* 02:00`):
+        # read as [DAYS] they were turned away before systemd-analyze saw them (the review of #1204)
+        if _macos():
+            raise
+        days, not_days = None, e
+    else:
+        not_days = None
+    if days is not None:
+        hh, mm = int(m[2]), int(m[3])
         cal = (",".join(days) + " " if days else "") + f"*-*-* {hh:02d}:{mm:02d}:00"
         when = [{"Hour": hh, "Minute": mm, **({"Weekday": LAUNCHD_DAY[d]} if days else {})}
                 for d in (days or [None])]
@@ -153,11 +167,12 @@ def parse_at(text: str) -> dict:
     if _macos():
         raise ScheduleError(f"{text!r}: on macOS --at is [DAYS] HH:MM (Sun 02:00, Mon..Fri 01:30, daily 03:00)")
     if not shutil.which("systemd-analyze"):
-        raise ScheduleError(f"{text!r} is not [DAYS] HH:MM, and no systemd-analyze here checks it as OnCalendar")
+        raise ScheduleError(f"{text!r} is not [DAYS] HH:MM{f' ({not_days})' if not_days else ''}, and no "
+                            "systemd-analyze here checks it as OnCalendar")
     r = subprocess.run(["systemd-analyze", "calendar", text], capture_output=True, text=True, timeout=10)
     if r.returncode != 0:
-        raise ScheduleError(f"{text!r} is neither [DAYS] HH:MM nor an OnCalendar systemd takes: "
-                            f"{(r.stderr or r.stdout).strip()[:200]}")
+        raise ScheduleError(f"{text!r} is neither [DAYS] HH:MM{f' ({not_days})' if not_days else ''} nor "
+                            f"an OnCalendar systemd takes: {(r.stderr or r.stdout).strip()[:200]}")
     return {"said": text, "calendar": text, "launchd": None}
 
 
@@ -307,8 +322,8 @@ def add(name: str, file: str, repo: str, at: str, turns: int | None = None) -> l
     """`wb schedule add`: schedule.json and the unit. Returns the lines to print."""
     from . import gitops
     if not NAME_RE.match(name):
-        raise ScheduleError("a schedule name is lowercase letters, digits and hyphens, at most 37 "
-                            "(its batch, <name>-YYYY-MM-DD, is a backlog name)")
+        raise ScheduleError("a schedule name is lowercase letters, digits and hyphens, at most 34 "
+                            "(its batch, <name>-YYYY-MM-DD[-N], is a backlog name)")
     if read(name) is not None:
         raise ScheduleError(f"schedule {name!r} exists: wb schedule rm {name} first")
     path = Path(file).expanduser().resolve()
@@ -333,7 +348,8 @@ def add(name: str, file: str, repo: str, at: str, turns: int | None = None) -> l
         raise
     store.write_json(d / "schedule.json", s)
     out = [f"scheduled {name}: {s['at']['said']} · {top} · {path}",
-           f"each fire: claude -p on the backlog as batch {name}-YYYY-MM-DD, wb commands and reading "
+           f"each fire: claude -p on the backlog as batch {name}-YYYY-MM-DD (-2 for a second that day), "
+           f"wb commands and reading "
            f"only, at most {s['max_turns']} turns; wb schedule list shows its runs"]
     missing = [p for p in ("claude", "opencode") if not shutil.which(p, path=s["env"]["PATH"])]
     if missing:
@@ -446,6 +462,21 @@ def _row(name: str, row: dict) -> dict:
     return store.append_jsonl(sched_dir(name) / "runs.jsonl", row)
 
 
+def batch_name(name: str, started: float) -> str:
+    """This fire's batch: `<name>-YYYY-MM-DD`, or `-2`, `-3` … after it when an earlier fire that
+    day had the name (a task in it, or a runs.jsonl row that wasn't a skip). One name for every
+    fire on a date gave the second the first's tasks to review and count again in its row, or,
+    with those closed 6 h, every `wb start --backlog` refused (cli._backlog_done; the review of
+    #1204). Called under the fire's lock: two fires never pick one name."""
+    base = f"{name}-{time.strftime('%Y-%m-%d', time.localtime(started))}"
+    used = {r.get("batch") for r in runs(name) if r.get("outcome") != "skipped"}
+    used |= {t.spec.get("backlog") for t in store.all_tasks(archived=True)}
+    for n in range(1, SAME_DAY + 1):
+        if (batch := base if n == 1 else f"{base}-{n}") not in used:
+            return batch
+    raise ScheduleError(f"{name}: {SAME_DAY} fires on one date already")
+
+
 def _tasks_of(batch: str) -> tuple[list[dict], float | None]:
     """The batch's tasks and their phases, and the API dollars of the closed ones (savings.api_totals)."""
     from . import savings
@@ -464,16 +495,21 @@ def fire(name: str) -> int:
         print(f"wb schedule fire: no schedule {name!r}", file=sys.stderr)
         return 1
     started = store.now()
-    batch = f"{name}-{time.strftime('%Y-%m-%d', time.localtime(started))}"
     lock = lock_path(name)
     lock.parent.mkdir(parents=True, exist_ok=True)
     with open(lock, "a") as fh:
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            _row(name, {"ts": started, "outcome": "skipped", "batch": batch,
-                        "why": "the last fire is still running"})
+        except BlockingIOError:  # no batch of its own: it starts nothing
+            _row(name, {"ts": started, "outcome": "skipped", "why": "the last fire is still running"})
             print(f"{name}: skipped, the last fire is still running")
+            return 0
+        try:
+            batch = batch_name(name, started)
+        except ScheduleError as e:
+            _row(name, {"ts": started, "outcome": "skipped", "why": str(e).split(": ", 1)[-1]})
+            print(f"{e}: skipped")
+            fcntl.flock(fh, fcntl.LOCK_UN)
             return 0
         try:
             return _fire(name, s, started, batch)

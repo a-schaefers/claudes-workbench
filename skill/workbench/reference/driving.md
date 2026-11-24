@@ -162,7 +162,7 @@ run it as a backlog. Each task still gets the same review it would by day.
   offer `wb schedule add <name> --file <backlog.md> --repo <dir> --at "Sun 02:00"` (the user's
   yes first: it writes their own systemd timer or launchd agent, and each run spends Claude's
   turns and, on an API role, money under the day cap). Each fire runs you headless on the file's
-  text as batch `<name>-YYYY-MM-DD`; `wb schedule list` shows each run's tasks, API dollars and
+  text as batch `<name>-YYYY-MM-DD` (`-2` after it for a second run that day); `wb schedule list` shows each run's tasks, API dollars and
   your tokens, `wb schedule run <name>` fires one now, `wb schedule rm <name>` removes it. The
   backlog file is what you would be told: the issues or the work, the tests, what may wait.
 

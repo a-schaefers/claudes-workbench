@@ -863,15 +863,21 @@ spec or review, outside the runner and so outside the lane and the keyhole.
   own timer (`schedule.install`): a systemd user `.timer` (`OnCalendar`, `Persistent=true`: a
   fire missed asleep or off runs once when the machine is back) and a `Type=oneshot` `.service`
   on Linux and WSL2 with systemd, a launchd agent (`StartCalendarInterval`) on macOS. `--at` is
-  `[DAYS] HH:MM` for both (`schedule.parse_at`: `Mon..Fri`, `Sat,Sun`, `daily`), or on Linux any
-  OnCalendar `systemd-analyze calendar` takes. The unit runs this Python and this clone's
+  `[DAYS] HH:MM` for both (`schedule.parse_at`: `Mon..Fri`, `Sat,Sun`, `daily`; a day is its
+  name or a start of it, three letters or more), or on Linux any OnCalendar `systemd-analyze
+  calendar` takes: text whose front isn't days (`*-*-* 02:00`, `*-*-01 03:00`, `Mon *-*-* 02:00`)
+  goes there, though it ends in HH:MM (on macOS it is refused). The unit runs this Python and this clone's
   `bin/wb` by full path, with the PATH and the `store.PATH_VARS` set where `add` ran (Claude
   Code's: where claude, opencode and git are; a user manager's own PATH has none of
   `~/.local/bin`), never a key. Without linger a user manager stops at logout, its timers too
   (`schedule.linger_note`). No systemd user manager (WSL2 without `systemd=true`, a container):
   refused, `wb schedule fire <name>` named for the user's own cron.
 - **`wb schedule fire <name>`**, the unit's command (`schedule.fire`): under
-  `locks/schedule-<name>.fire.lock` (a fire while the last lives is a `skipped` row), then
+  `locks/schedule-<name>.fire.lock` (a fire while the last lives is a `skipped` row, with no
+  batch), names its batch (`schedule.batch_name`: `<name>-YYYY-MM-DD`, or `-2`, `-3` … up to
+  `SAME_DAY` (99) when a task or an unskipped runs.jsonl row of an earlier fire that day has it:
+  one name a day gave a second fire the first's tasks to review and count again, or, with them
+  closed 6 h, every `wb start --backlog` refused by `cli._backlog_done`), then
   `schedule.spend_skip`: any role on API (`routes.effective_via`) that `meter.refusal` refuses
   (no day cap, `meter.no_cap`; today at it; no price) skips the night, as an unreadable routes.json
   does: headless, nobody can be asked for a cap or a role change. Else it holds an inhibitor on
@@ -883,7 +889,7 @@ spec or review, outside the runner and so outside the lane and the keyhole.
   goes on stdin, `wb start --spec -`); the user's own allow rules still add to the list, so the
   two that reach off the machine are denied by name. The prompt (`schedule.PROMPT`) names the
   skill's SKILL.md by path rather than `/workbench`, which can't be checked to expand under `-p`
-  here, the batch `<name>-YYYY-MM-DD`, the repo and the backlog's text. Its environment drops
+  here, the batch (`<name>-YYYY-MM-DD[-N]`), the repo and the backlog's text. Its environment drops
   Claude Code's marks (`schedule.CLAUDE_MARKS`: under `CLAUDECODE` claude refuses to nest, and a
   session id would make the night's tasks the firing session's) and sets `WB_SCHEDULE`, under
   which `wb accept --merge` is refused. One runs.jsonl row per fire: its tasks (task.json
@@ -6015,7 +6021,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb bench self <case>` | `--yes` (required), `--turns N` (40) | `claude -p` on the case; a row `arm: claude` and the cost ratio. |
 | `wb bench run` | `--model ID…` (default: every GPU model that can run and takes the case's size), `--case NAME…`, `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | A detached driver, one replay at a time behind real tasks, preempted by one; refused while another run runs; trims runs past `RUNS_KEPT` 20 (`bench.prune_runs`), `bench.sweep`s; skips what the label already passed or failed (an `error` runs again); an API `--model` refused (#1013). |
 | `wb backlog [NAME]` | `--json` | A `--backlog` batch, archived included: per task, then `savings.summary`, then the batch's `api:` line when it has API tasks (`api_summary`, trials in, #1121); `--json` `{backlog, tasks, totals}` (`totals.api`: api_totals), unnamed `[{backlog, tasks, open}]`. Unknown: exit 1. |
-| `wb schedule add <name>` | `--file <backlog.md>` (required), `--repo DIR` (.), `--at "<[DAYS] HH:MM, or on Linux an OnCalendar>"` (required), `--max-turns N` (`schedule.TURNS` 300) | A name of at most 37 (`schedule.NAME_RE`: its batch `<name>-YYYY-MM-DD` is a backlog name), a file with text, a git repo, an `--at` `schedule.parse_at` takes; writes `schedules/<name>/schedule.json` and the user's timer (`schedule.install`: systemd `wb-schedule-<name>.timer`/`.service` under `$XDG_CONFIG_HOME/systemd/user`, `daemon-reload`, `enable --now`; macOS `~/Library/LaunchAgents/workbench.schedule.<name>.plist`, `launchctl bootstrap`). Refused, nothing is left (no systemctl or a manager that won't take it: `schedule.NO_SYSTEMD`, with `wb schedule fire <name>` for the user's own cron). Notes: claude or opencode missing on the unit's PATH, no linger (`schedule.linger_note`). *Scheduled runs*. |
+| `wb schedule add <name>` | `--file <backlog.md>` (required), `--repo DIR` (.), `--at "<[DAYS] HH:MM, or on Linux an OnCalendar>"` (required), `--max-turns N` (`schedule.TURNS` 300) | A name of at most 34 (`schedule.NAME_RE`: its batch `<name>-YYYY-MM-DD`, `-N` after it for a second fire that day, is a backlog name), a file with text, a git repo, an `--at` `schedule.parse_at` takes; writes `schedules/<name>/schedule.json` and the user's timer (`schedule.install`: systemd `wb-schedule-<name>.timer`/`.service` under `$XDG_CONFIG_HOME/systemd/user`, `daemon-reload`, `enable --now`; macOS `~/Library/LaunchAgents/workbench.schedule.<name>.plist`, `launchctl bootstrap`). Refused, nothing is left (no systemctl or a manager that won't take it: `schedule.NO_SYSTEMD`, with `wb schedule fire <name>` for the user's own cron). Notes: claude or opencode missing on the unit's PATH, no linger (`schedule.linger_note`). *Scheduled runs*. |
 | `wb schedule list` | | Each schedule (`when · repo · file`), `running since …` while a fire holds its lock, and its last runs.jsonl row (`schedule.summary`: outcome, batch, tasks by phase, API dollars, Claude's turns and tokens), or `never fired yet`. |
 | `wb schedule rm <name>` | | Refused while its fire runs; else the timer disabled and its files, `schedules/<name>/` and its lock removed. The tasks it started stay. |
 | `wb schedule run <name>` | | A fire now, detached (`cli.detach`; its output to `schedules/<name>/fire.log`), refused while one runs. |
@@ -6095,7 +6101,7 @@ $WB_HOME (~/.local/state/workbench)
   schedules/<name>/              wb schedule (#1204): schedule.json {name, file, repo, at {said, calendar (OnCalendar), launchd
                                  (StartCalendarInterval dicts, or null for an OnCalendar-only --at)}, max_turns, env (the unit's PATH and the
                                  store.PATH_VARS set at add: paths, never a key), created_at}; runs.jsonl, one row per fire {ts, batch
-                                 (<name>-YYYY-MM-DD), outcome ran|error|skipped, why?, end?, exit?, tasks [{task, phase}] (task.json
+                                 (<name>-YYYY-MM-DD[-N]: schedule.batch_name; none on a lock skip), outcome ran|error|skipped, why?, end?, exit?, tasks [{task, phase}] (task.json
                                  backlog == batch), api_usd? (savings.api_totals of the closed ones' results rows), claude? (bench._self_usage:
                                  turns, calls, input, cache_write_5m, cache_write_1h, cache_read, output)}; fire.json {pid, started, batch}
                                  while a fire runs; last.json (the last claude -p output); fire.log (wb schedule run's, launchd's)
@@ -6899,7 +6905,7 @@ doc needs its own `!/` line).
 
 ## Couplings: change one, change the other
 
-- **What a scheduled fire lets headless Claude use** (`schedule.TOOLS`, `ALLOWED`, `DENIED`, the permission mode) and `schedule.PROMPT`'s section names → driving.md's *Headless: a scheduled run* (a spec on stdin, `wb wait --backlog <batch> --timeout 100` loops), and `tests.test_workbench.ScheduledRuns`. The fire's batch name (`<name>-YYYY-MM-DD`) → `schedule.NAME_RE`'s 37 against `store.NAME_RE`'s 48 (#1204).
+- **What a scheduled fire lets headless Claude use** (`schedule.TOOLS`, `ALLOWED`, `DENIED`, the permission mode) and `schedule.PROMPT`'s section names → driving.md's *Headless: a scheduled run* (a spec on stdin, `wb wait --backlog <batch> --timeout 100` loops), and `tests.test_workbench.ScheduledRuns`. The fire's batch name (`<name>-YYYY-MM-DD[-N]`, `schedule.batch_name`, N up to `SAME_DAY` 99) → `schedule.NAME_RE`'s 34 against `store.NAME_RE`'s 48 (#1204).
 - **A file a round's children load** (lane, git shim, ask server, their imports) → `runner.CHILD_CODE`, so an update under a running task is caught.
 - **An `ALLOWED_COMMANDS` entry spelled with its opt-out** (`REDOCLY_TELEMETRY=off redocly lint`) → the skill's
   `reference/checks.md` (*Spell it the way the agent's shell allows*) and the shell rules' step 2, so Claude's `--test` uses a spelling the agent may run. A tool listed by
