@@ -11583,6 +11583,91 @@ class Lane(Base):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))
         self.assertIsNone(context.read_rules(task))
 
+    # #1194's review (2026-11-24): with Library readable, each of these tools' macOS logins was
+    # read while its Linux twin was hidden: each row is (macOS, Linux)
+    MAC_TWINS = [("Library/Application Support/sops/age/keys.txt", ".config/sops/age/keys.txt"),
+                 ("Library/Application Support/com.vercel.cli/auth.json",
+                  ".local/share/com.vercel.cli/auth.json"),
+                 ("Library/Preferences/.wrangler/config/default.toml",
+                  ".config/.wrangler/config/default.toml"),
+                 ("Library/Application Support/Bitwarden CLI/data.json", ".config/Bitwarden CLI/data.json"),
+                 ("Library/Preferences/helm/registry/config.json", ".config/helm/registry/config.json"),
+                 ("Library/Preferences/netlify/config.json", ".config/netlify/config.json"),
+                 ("Library/Application Support/dart/pub-credentials.json",
+                  ".config/dart/pub-credentials.json"),
+                 ("Library/Application Support/loadimpact/k6/config.json",
+                  ".config/loadimpact/k6/config.json"),
+                 ("Library/Application Support/doctl/config.yaml", ".config/doctl/config.yaml"),
+                 ("Library/Thunderbird/Profiles/p.default/logins.json",
+                  ".thunderbird/p.default/logins.json"),
+                 ("Library/Application Support/Chromium/Default/Login Data",
+                  ".config/chromium/Default/Login Data")]
+
+    @home_outside_the_lane
+    def test_on_macos_each_tools_login_is_hidden_where_its_linux_twin_is(self):
+        home = self.fake_home()
+        files = [f for pair in self.MAC_TWINS for f in pair] + ["Library/Application Support/tool/conf"]
+        for f in files:
+            (home / f).parent.mkdir(parents=True, exist_ok=True)
+            (home / f).write_text("x")
+        task = self.bare_task("t-1194-twins", self.repo)
+        rules, writable = context.read_rules(task), context.writable(task)
+        said = {f: self.seatbelt_reads(rules, writable, home / f) for f in files}
+        self.assertEqual(said, {**{f: False for f in files[:-1]}, files[-1]: True})
+        # and pip's macOS config in an API task's lane when it holds a credential, as its XDG one
+        pip = home / "Library/Application Support/pip/pip.conf"
+        pip.parent.mkdir(parents=True)
+        pip.write_text("[global]\nindex-url = https://u:tok@pypi.example/simple\n")
+        self.assertIn(os.path.realpath(pip), context.api_hidden_paths())
+        self.assertEqual(context._api_hidden_tools()[os.path.realpath(pip)], "pip")
+
+    def test_macos_volumes_are_read_only_where_something_is_kept_and_its_system_disk_link_reads_root(self):
+        # #1194's review: /Volumes holds the external disks and network shares, as /media and
+        # /mnt do; `Macintosh HD` there is a link to /, which must not deny the system
+        self.assertIn("/Volumes", context.ONLY_KEPT)
+        root = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-volumes-"))  # not in the lane
+        self.addCleanup(shutil.rmtree, root, True)
+        self.fake_home()
+        (root / "Macintosh HD").symlink_to("/")
+        (root / "Backup").mkdir()
+        (root / "Backup" / "photos.jpg").write_text("x")
+        task = self.bare_task("t-1194-volumes", self.repo)
+        # in its place, and /home read (as / is) so that its one deny shows
+        kept = tuple(str(root) if p == "/Volumes" else p for p in context.ONLY_KEPT if p != "/home")
+        with mock.patch.object(context, "ONLY_KEPT", kept):
+            rules, readable = context.read_rules(task), context.readable(task)
+        writable = context.writable(task)
+        real = os.path.realpath(root)
+        self.assertIn(("deny", real), rules)
+        self.assertFalse([p for _, p in rules if context._under(p, real)])    # one rule, no descent
+        for f in (root / "Backup" / "photos.jpg", root / "Macintosh HD" / "etc" / "hosts"):
+            self.assertEqual(self.seatbelt_reads(rules, writable, f),
+                             self.landlock_reads(readable, writable, f), f)
+        self.assertFalse(self.seatbelt_reads(rules, writable, root / "Backup" / "photos.jpg"))
+        self.assertTrue(self.seatbelt_reads(rules, writable, root / "Macintosh HD" / "etc" / "hosts"))
+
+    @home_outside_the_lane
+    def test_apples_python_bytecode_cache_is_split_out_of_library_caches_before_python_makes_it(self):
+        # #1194's review: Library/Caches was writable whole, and the Command Line Tools'
+        # /usr/bin/python3 loads its stdlib's .pyc from Library/Caches/com.apple.python: one the
+        # agent planted ran as the user, outside the lane, at the next python3 anywhere
+        home = self.fake_home()
+        caches = home / "Library" / "Caches"
+        (caches / "com.example.app").mkdir(parents=True)
+        task = self.bare_task("t-1194-pyc", self.repo)
+        w = context.writable(task)
+        bytecode = caches / "com.apple.python"
+        self.assertTrue(bytecode.is_dir())                             # made first, so split out
+        self.assertFalse([p for p in w if os.path.realpath(p) == os.path.realpath(bytecode)
+                          or context._under(os.path.realpath(bytecode), os.path.realpath(p))
+                          or context._under(os.path.realpath(p), os.path.realpath(bytecode))])
+        for n in ("com.example.app", "go-build", "pip", "Yarn", "node-gyp", "ms-playwright"):
+            self.assertIn(str(caches / n), w)                          # the rest, and the tools' first
+        self.assertIsNotNone(context.kept_out(str(bytecode / "Library")))   # no grant reaches it
+        self.assertIn(os.path.realpath(bytecode), context.read_only(task, w))  # read, as the toolchains
+        text, params = lane.profile(w, context.read_rules(task), [])
+        self.assertNotIn(f"={os.path.realpath(bytecode)}", " ".join(params))
+
     def test_a_read_rule_isnt_drawn_through_a_link_but_a_grant_by_one_is(self):
         # a link's way to a place says nothing of the place (Landlock rules sit on the files):
         # ~/sys-etc, a home folder the lane doesn't read, mustn't deny /etc, and ~/.tools

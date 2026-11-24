@@ -1301,7 +1301,8 @@ TOOL_HOMES = (".cache", ".cargo", ".rustup", "go/pkg", ".npm", ".bun/install/cac
               ".xmake/packages", ".xmake/cache", ".zef/store", ".cpanm", ".foundry/cache",
               ".tflint.d", ".bicep",
               # macOS's ~/.cache (#1194): Go's build cache, pip's, Yarn's, node-gyp's and
-              # Playwright's browsers are there, and Seatbelt would refuse every build's write
+              # Playwright's browsers are there, and Seatbelt would refuse every build's write;
+              # split around Apple's Python bytecode (NOT_WRITABLE, SPLIT_MADE)
               "Library/Caches")
 # where the user moved them: a toolchain follows its variable, not the default path; GOPATH and
 # BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches. The second
@@ -1328,7 +1329,13 @@ VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
 # CARGO_HOME and RUSTUP_HOME for theirs); no grant reaches them (kept_out, #912), so `cargo
 # install` or a toolchain a rust-toolchain.toml names that isn't installed yet is Claude's to do
 NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghcup/bin",
-                ".rustup/toolchains", ".nimble/bin")
+                ".rustup/toolchains", ".nimble/bin",
+                # #1194's review (2026-11-24): Apple's /usr/bin/python3 (the Command Line
+                # Tools') keeps its bytecode here (sys.pycache_prefix, its stdlib on a read-only
+                # volume) and loads a .pyc whose recorded mtime and size match the source's, so
+                # one planted in the writable Library/Caches ran as the user, outside the lane,
+                # at the next node-gyp, Xcode build script or shell's python3
+                "Library/Caches/com.apple.python")
 # and the same places in the homes TOOL_HOME_VARS moved: nimble and cabal install programs into
 # their bin/ (#911)
 VAR_NOT_WRITABLE = {"CARGO_HOME": ("bin", "env"), "RUSTUP_HOME": ("toolchains",),
@@ -1336,7 +1343,7 @@ VAR_NOT_WRITABLE = {"CARGO_HOME": ("bin", "env"), "RUSTUP_HOME": ("toolchains",)
 # a home holding one is made with it first, so the split keeps it out before the tool makes it
 # (else the agent could make it and plant a program there)
 MADE_FIRST = {".rustup": "toolchains", ".nimble": "bin", "RUSTUP_HOME": "toolchains",
-              "NIMBLE_DIR": "bin"}
+              "NIMBLE_DIR": "bin", "Library/Caches": "com.apple.python"}
 # and what cargo makes at the top of its split home, made first so the split grants it: a split
 # home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
 # every build with a dependency, and a git dependency failed wherever git/ didn't exist yet)
@@ -1376,7 +1383,14 @@ SPLIT_MADE = {".m2": ("repository/", "wrapper/"),
               # under ".cache" a GPU task made ~/.cache/huggingface/* on machines that never used
               # it (#1092's review, 2026-11-23). Another tool's first new entry is refused, the
               # report naming its grant
-              ".cache": tuple(f"{n}/" for n in CACHE_MADE), ".cache/huggingface": HF_MADE}
+              ".cache": tuple(f"{n}/" for n in CACHE_MADE), ".cache/huggingface": HF_MADE,
+              # and macOS's Library/Caches, split around Python's bytecode on every Mac
+              # (NOT_WRITABLE, #1194's review): the caches its common tools make there (Go's,
+              # pip's, Yarn's, node-gyp's, Playwright's browsers, poetry's, deno's, pnpm's,
+              # CocoaPods', SwiftPM's, ccache's, Cypress', Electron's)
+              "Library/Caches": ("go-build/", "pip/", "Yarn/", "node-gyp/", "ms-playwright/",
+                                 "pypoetry/", "deno/", "pnpm/", "CocoaPods/", "org.swift.swiftpm/",
+                                 "ccache/", "Cypress/", "electron/")}
 # and the same homes where the user moved them, (variable, below it, SPLIT_MADE's key):
 # API_HIDDEN_VARS hides the file inside those too
 SPLIT_MADE_VARS = (("GRADLE_USER_HOME", "", ".gradle"), ("HEX_HOME", "", ".hex"),
@@ -1733,9 +1747,10 @@ def writable(task: store.Task) -> list[str] | None:
         if os.path.isdir(c):  # split around bin/ whenever it exists (MADE_FIRST, below)
             _make_first(c, NIMBLE_MADE)
     hidden = _hidden() | {h for h in api_hidden(task) if os.path.lexists(h)}  # #1021
-    for d, names in SPLIT_MADE.items():  # only a home a secret splits: else it is granted whole
+    splits = hidden | not_writable(made_only=False)  # Library/Caches' com.apple.python (#1194)
+    for d, names in SPLIT_MADE.items():  # only a home split (a secret, a NOT_WRITABLE place): else whole
         c = os.path.realpath(home / d)
-        if os.path.isdir(c) and any(_under(h, c) for h in hidden):
+        if os.path.isdir(c) and any(_under(h, c) for h in splits):
             _make_first(c, names)
     for v, sub, d in SPLIT_MADE_VARS:  # GRADLE_USER_HOME's, HEX_HOME's (#1021's review)
         c = os.environ.get(v) or ""
@@ -2167,7 +2182,18 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            "Library/Safari", "Library/Application Support/Google/Chrome",
            "Library/Application Support/BraveSoftware", "Library/Application Support/Firefox",
            "Library/Application Support/Microsoft Edge", "Library/Application Support/Vivaldi",
-           "Library/Application Support/com.operasoftware.Opera", "Library/Application Support/Claude")
+           "Library/Application Support/com.operasoftware.Opera", "Library/Application Support/Claude",
+           # and the macOS homes of the tools above, where each keeps its login there (#1194's
+           # review, 2026-11-24): Go's os.UserConfigDir (sops' age keys, doctl, k6, which keeps
+           # its token under loadimpact/k6 on Linux too), env-paths' and the CLIs' own (Vercel,
+           # wrangler, Netlify, helm, Bitwarden's, pub's), Thunderbird's and Chromium's profiles
+           "Library/Application Support/sops", "Library/Application Support/com.vercel.cli",
+           "Library/Preferences/.wrangler", "Library/Application Support/Bitwarden CLI",
+           "Library/Preferences/helm/registry", "Library/Preferences/netlify",
+           "Library/Application Support/dart/pub-credentials.json",
+           "Library/Application Support/loadimpact/k6", ".config/loadimpact/k6",
+           "Library/Application Support/doctl", "Library/Thunderbird",
+           "Library/Application Support/Chromium")
 # The sockets inside a secret that a grant may still reach, to connect only (unix_paths): Docker
 # Desktop's, under ~/.docker beside the registry logins in config.json, so `wb allow --path` was
 # refused and only turning the lane off let a Testcontainers suite run (#441, the audit of 1.8)
@@ -2195,7 +2221,8 @@ SECRET_VARS = ("GNUPGHOME", "PASSWORD_STORE_DIR", "GH_CONFIG_DIR", "DOCKER_CONFI
 # poetry's config dir (XDG on Linux, Library/Application Support on macOS), composer's home
 # (XDG, else ~/.composer, as on macOS), pub's tokens (cli_util's applicationConfigHome: XDG,
 # Library/Application Support on macOS), Hex's home and its MIX_XDG config, pip's user config
-# (pip's configuration.py: the XDG one and the legacy ~/.pip), Bundler's global config
+# (pip's configuration.py: the XDG one, macOS's Library/Application Support and the legacy
+# ~/.pip), Bundler's global config
 # (Settings#global_config_file) and bun's global bunfig (bunfig's get_home_config_path).
 # And Hugging Face's login (#1092, 2026-11-23: huggingface_hub's constants.py, HF_HOME's `token`
 # and `stored_tokens`): SECRET_ENV drops HF_TOKEN, but the library reads the same token from the
@@ -2207,7 +2234,8 @@ API_HIDDEN = (".npmrc", ".yarnrc.yml", ".m2/settings.xml", ".gradle/gradle.prope
               "Library/Application Support/pypoetry/auth.toml", ".config/composer/auth.json",
               ".composer/auth.json", ".config/dart/pub-tokens.json",
               "Library/Application Support/dart/pub-tokens.json", ".hex/hex.config",
-              ".config/hex/hex.config", ".config/pip/pip.conf", ".pip/pip.conf", ".bundle/config",
+              ".config/hex/hex.config", ".config/pip/pip.conf", ".pip/pip.conf",
+              "Library/Application Support/pip/pip.conf", ".bundle/config",
               ".bunfig.toml", ".cache/huggingface/token", ".cache/huggingface/stored_tokens")
 # the ones that are a token and nothing else, by name or by the variable that moves it, which
 # holds_credential's key and value matcher can't see: one there holds one unless empty (#1092)
@@ -2260,8 +2288,9 @@ HOME_READABLE = ("bin", "go", "R", "perl5", "Library")
 # Outside the home directory, these hold the user's data, not the system: like the home's own
 # entries, only what is kept (the repo, the lane, a grant) is readable beneath them. /mnt holds
 # the Windows drives on WSL2, /home the other users' homes (the 2026-11-16 audit), and /Users
-# theirs on macOS (#1194).
-ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home", "/Users")
+# theirs on macOS (#1194), /Volumes its external disks and network shares, as /media and /mnt
+# (#1194's review: its `Macintosh HD` is a link to /, which Seatbelt matches resolved)
+ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home", "/Users", "/Volumes")
 # WSL2's Windows drives (DrvFs, /mnt/<letter> unless wsl.conf moved them): a Windows program there
 # runs through interop as a Windows process, as the user, outside Landlock and no-new-privileges.
 # The read lane let the agent start one: python3 running cmd.exe, or the allowed `npm` resolving to

@@ -1680,7 +1680,9 @@ deliberately hostile process.
   by their shell, and the toolchains those run: `~/.local/lib` (user site-packages, whose `.pth`
   every python runs); `.local/share/uv` (uv's tools and Pythons; its cache is `~/.cache/uv`);
   `NOT_WRITABLE` (`.cargo/bin`, `.cargo/env`, `.dotnet/tools`, `.cabal/bin`, `.ghcup/bin`,
-  `.rustup/toolchains`, `.nimble/bin`, and `VAR_NOT_WRITABLE` under the variables), made or not
+  `.rustup/toolchains`, `.nimble/bin`, macOS's `Library/Caches/com.apple.python`, where Apple's
+  `/usr/bin/python3` keeps its stdlib's bytecode, `sys.pycache_prefix`, and loads a planted `.pyc`
+  at every later python3, #1194's review; and `VAR_NOT_WRITABLE` under the variables), made or not
   (`not_writable_paths`); the user's active Python environments (`context.python_envs`:
   `VIRTUAL_ENV`, `CONDA_PREFIX`, each PATH `bin` beside `pyvenv.cfg` or `conda-meta`, #490). So
   `cargo install`, a new rustup toolchain, a pip install into the user's env are Claude's: no grant
@@ -1692,7 +1694,9 @@ deliberately hostile process.
   env (#825), `MADE_FIRST` (so the split holds before the tool makes them), `CARGO_MADE` (a fresh
   rustup install refused every build with a dependency, the 0.90 review), `NIMBLE_MADE` with
   `MADE_TEXT` (nimble parses its data file, #911; its first `nimble refresh` is Claude's),
-  `SPLIT_MADE` (`~/.m2`). The agent's poetry and pipenv make their venv in the worktree.
+  `SPLIT_MADE` (`~/.m2`; macOS's `Library/Caches`, split around `com.apple.python` on every Mac:
+  Go's, pip's, Yarn's, node-gyp's, Playwright's, poetry's, deno's, pnpm's, CocoaPods', SwiftPM's,
+  ccache's, Cypress' and Electron's caches). The agent's poetry and pipenv make their venv in the worktree.
   A home kept whole is a documented trade, like `/tmp`: it can hold a program the user's tools run
   later outside the lane (`.dotnet`, `.ghcup`, `.julia`, `~/.cache`'s pre-commit hooks, cargo's
   registry sources, `.tflint.d`'s plugins); splitting would refuse a build's first new entry.
@@ -1747,10 +1751,15 @@ deliberately hostile process.
   keeps the agent's OpenCode off the user's credentials and sessions. A literal `apiKey` in the
   user's global `opencode.json` stays readable too: the agent's OpenCode loads that file itself.
   On macOS `SECRETS` also holds `Library`'s keychains, cookies, mail, messages, Safari, the
-  browsers' profiles and Claude's desktop app's (#1194).
+  browsers' profiles (Chromium's too) and Claude's desktop app's (#1194), and the macOS homes of
+  the tools above that keep a login there (#1194's review): sops' age keys, Vercel's, wrangler's,
+  Bitwarden CLI's, helm's registry logins, Netlify's, pub's credentials, k6's (`loadimpact/k6`,
+  on Linux too), doctl's and Thunderbird's profiles, under `Library/Application Support` or
+  `Library/Preferences`.
   Of the home directory's own entries only dotfiles and `HOME_READABLE` (`bin`, `go`, `R`, `perl5`,
   macOS's `Library`) are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`, `/media`, `/run/media`,
-  `/run/user`, `/home`, macOS's `/Users`, WSL's drives) nothing, beyond: OpenCode's global directory (`OPENCODE_CONFIG_DIR`, #370), the
+  `/run/user`, `/home`, macOS's `/Users` and `/Volumes`, its disks and shares, whose `Macintosh
+  HD` link to `/` reads the system as `/` does; WSL's drives) nothing, beyond: OpenCode's global directory (`OPENCODE_CONFIG_DIR`, #370), the
   config home where `XDG_CONFIG_HOME` moves it (`~/conf`: OpenCode's global config, git's, every
   tool's; its secrets still out, #1103), the
   task's repo (its secrets still out; an API task's lane reads its git directory alone, `read_repo_dirs`:
@@ -1795,7 +1804,8 @@ deliberately hostile process.
   with their `config/` folders, poetry's `auth.toml` (`.config/pypoetry`, macOS `Library/Application
   Support/pypoetry`), composer's `auth.json` (`.config/composer`, `.composer`), pub's
   `pub-tokens.json` (`.config/dart`, macOS `Library/Application Support/dart`), Hex's `hex.config`
-  (`.hex`, `MIX_XDG`'s `.config/hex`), pip's `pip.conf` (`.config/pip`, the legacy `.pip`),
+  (`.hex`, `MIX_XDG`'s `.config/hex`), pip's `pip.conf` (`.config/pip`, macOS `Library/Application
+  Support/pip`, the legacy `.pip`),
   Bundler's `.bundle/config`, bun's `.bunfig.toml`, Hugging Face's login (`.cache/huggingface/token`
   and `stored_tokens`, #1092: `SECRET_ENV` drops `HF_TOKEN`, but huggingface_hub reads the file by
   itself; the `token` file is the token alone, so it holds one when not empty, `API_HIDDEN_BARE`,
@@ -1892,7 +1902,8 @@ deliberately hostile process.
   can't tell one the agent made from the user's, so `socket_places` adds only the task's own
   places (the worktree, `ask/`, its OpenCode home, its runtime directory), never a temp directory
   (tmux's, the SSH agent's); one refused there is named with its grant like ABI 9's. The write
-  lane gains `Library/Caches` (`TOOL_HOMES`: macOS's `~/.cache`) and the per-user cache beside the
+  lane gains `Library/Caches` (`TOOL_HOMES`: macOS's `~/.cache`; split around Apple's Python
+  bytecode, `NOT_WRITABLE`, its tools' caches made first, `SPLIT_MADE`) and the per-user cache beside the
   temp directory (`context.darwin_cache`, `/var/folders/…/C`: clang's module cache, xcrun's).
   Fails closed: a profile sandbox-exec refuses prints `workbench lane: macOS refused the lane
   (<stderr>); not running <cmd>` and exits 126; a command not on PATH is `can't run <cmd>`, 127.
