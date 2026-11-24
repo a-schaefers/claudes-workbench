@@ -4338,6 +4338,19 @@ class Context(Base):
         self.assertIn("reached 51% of its window (17.0K of 32K), then OpenCode compacted it",
                       run_wb("watch", "t-774", "--once", "--no-color"))
 
+    def test_a_compaction_a_burst_of_tool_output_caused_mid_round_hands_over_too(self):
+        # #1086: three 16 KB results after a step at 30% of 32K took the session past the point,
+        # and OpenCode compacted it before the next request; the last step was under the margin,
+        # so nothing saw it and the agent worked on from its summary. The output counts now
+        os.environ["FAKE_COMPACT_BURST"] = "1"
+        self.start("t-1086", "compact", "--test", TEST_CMD, "--silence-timeout", "20")
+        st = wait_phase("t-1086", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["handovers"]), ("review", 1), st.get("last"))
+        self.assertTrue(self.runs()[1]["prompt"].startswith(
+            "You are picking this task up in a fresh session (OpenCode had to compact the last session"))
+        self.assertTrue(runner.compacted_between(("s", 9900), "s", 4900, 0.5 * 32768, 32768, pending=12000))
+        self.assertFalse(runner.compacted_between(("s", 9900), "s", 4900, 0.5 * 32768, 32768))
+
     def test_a_session_compacted_mid_round_with_no_room_for_a_successor_is_said_and_carries_on(self):
         # #774: with its reading near the handover point, a successor would have no room: it
         # carries on, and an event says it was compacted
@@ -8312,6 +8325,21 @@ class RealOpenCodeRun(Base):
         text = json.dumps(agent["messages"])
         self.assertIn("Write the answer to answer.txt", text)
         self.assertIn("Now say done.", text)
+
+    def test_a_real_tool_use_event_carries_the_output_the_compaction_check_counts(self):
+        # #1086: run_round counts each tool result's `part.state.output` (bytes / 4) toward the
+        # context OpenCode compacts at; the fake imitates the field, this checks OpenCode prints it
+        (self.repo / "big.txt").write_text("CANARY-1086\n" + ("x" * 40 + "\n") * 200)  # ~8 KB
+        self.serve([{"name": "read", "arguments": {"path": "big.txt"}}])
+        r = subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format",
+                            "json", "--", "read big.txt"], cwd=self.repo, env={**os.environ, "PWD": str(self.repo)},
+                           capture_output=True, text=True, timeout=180)
+        rows = [json.loads(x) for x in r.stdout.splitlines() if x.startswith("{")]
+        outs = [((e.get("part") or {}).get("state") or {}).get("output") for e in rows if e.get("type") == "tool_use"]
+        self.assertTrue(outs, r.stdout[-2000:] + r.stderr[-2000:])
+        self.assertIsInstance(outs[0], str)
+        self.assertIn("CANARY-1086", outs[0])
+        self.assertGreater(len(outs[0]) // context.CHARS_PER_TOKEN, 1000)
 
     def test_a_round_runs_in_its_own_opencode_home(self):
         # #1010 (checked on OpenCode 2.3.2, 2026-11-22): OpenCode V2 keeps every /connect

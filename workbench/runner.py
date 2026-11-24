@@ -1637,6 +1637,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # One tool result bigger than the margin before it (a long file, a test log) compacted the
     # session between two steps, and the agent worked on from its summary (#774).
     last_step: tuple = (None, 0)
+    # The tool output since that step, in tokens (bytes / CHARS_PER_TOKEN, OpenCode's own
+    # estimate): OpenCode counts it in before the next request, and six parallel 50 KB results
+    # from a step at 40K compacted the session with no step near the point (#1086, 2026-11-23)
+    pending = 0
     opened: dict = {}  # the questions open this round (ask_mcp.relay)
     spend = _spend_round(task, n)  # an API task's meter (#1019), else None
     warmed = time.monotonic()  # the model's keep-alive, renewed while the round waits (#864)
@@ -1691,6 +1695,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 waiting_bg = False  # the session moved on
             sig = row.pop("sig", None)
             if row["kind"] == "tool":
+                state = (raw.get("part") or {}).get("state") if isinstance(raw.get("part"), dict) else None
+                if isinstance(state, dict) and isinstance(state.get("output"), str):
+                    pending += len(state["output"]) // context.CHARS_PER_TOKEN
                 out["tools"][row["tool"]] = out["tools"].get(row["tool"], 0) + 1
                 if not row["ok"]:
                     out["errors"].append(f"{row['tool']}: {row.get('error', '')}")
@@ -1727,21 +1734,22 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 # four minutes, each fresh session getting 3K of work. It carries on instead.
                 changed = None
                 sid = raw.get("sessionID") or task.status.get("session")
-                if window and compacted_between(last_step, sid, used, fresh_at * window, window):
+                before = last_step[1] + pending  # what OpenCode had when it compacted
+                if window and compacted_between(last_step, sid, used, fresh_at * window, window, pending):
                     changed = marks != {gitops.mark(task.worktree)}
                     if changed and floor is None:  # it changed nothing by the step before
                         floor = last_step[1]
                         task.set_status(session_floor=floor)
                     if changed and not keep and not out["full"] \
                             and fresh_at * window - floor >= HANDOVER_ROOM * window:
-                        out["full"], out["compacted"] = last_step[1], True
+                        out["full"], out["compacted"] = min(before, window), True
                     else:
                         task.event({"ts": store.now(), "round": n, "kind": "compacted",
                                     "text": f"OpenCode compacted the agent's session mid-round at "
-                                            f"{100 * last_step[1] // window}% of its window: it "
+                                            f"{min(100, 100 * before // window)}% of its window: it "
                                             f"works on from its own summary"})
                 if used:
-                    last_step = (sid, used)
+                    last_step, pending = (sid, used), 0
                 if floor is None and window:
                     changed = marks != {gitops.mark(task.worktree)}
                     if changed:
@@ -4338,13 +4346,14 @@ def round_asks(task: store.Task, n: int) -> list[str]:
 HANDOVER_ROOM = 0.25
 
 
-def compacted_between(last: tuple, sid, used: int, point: float, window: int) -> bool:
+def compacted_between(last: tuple, sid, used: int, point: float, window: int, pending: int = 0) -> bool:
     """Whether OpenCode compacted the session between the last step (`last`: its session and
     context) and this one: in the same session, this step carries under half of what the last
-    did, and the last was within one step's growth (fresh_ceiling's margin) of the handover
+    did, and the last, with the tool output since (``pending``, tokens: OpenCode compacts with
+    it counted in, #1086), was within one step's growth (fresh_ceiling's margin) of the handover
     point, where only OpenCode's compaction shrinks a context (#774)."""
     margin = max(STEP_GROWTH, tuning.CEILING_MARGIN * window)
-    return bool(sid) and last[0] == sid and 0 < used < last[1] / 2 and last[1] >= point - margin
+    return bool(sid) and last[0] == sid and 0 < used < last[1] / 2 and last[1] + pending >= point - margin
 
 
 def _reading_full(task: store.Task, n: int, used: int, window: int,

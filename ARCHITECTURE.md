@@ -853,7 +853,9 @@ Claude read the diff.
   no one. At most `HANDOVER_MAX` a runner, then stuck (2026-11-16 audit: hours of handovers, Claude
   told nothing); only the handover before the last raises a `checkin`. A compaction between steps
   (`compacted_between`, #774: `run --format json` prints none, so a step under half the last
-  one's, which was within `fresh_ceiling`'s margin) hands over given a change and room (the floor,
+  one's, which was within `fresh_ceiling`'s margin with the tool output since counted in, each
+  tool row's `part.state.output` at `context.CHARS_PER_TOKEN` a token, as OpenCode compacts with
+  it in: parallel reads from a step well under the point went unseen, #1086) hands over given a change and room (the floor,
   or the last step's context when nothing changed before it; status `full_compacted`, reason
   `COMPACTED`), else a `compacted` event. A *failed* compaction (`error` type `compaction.failed`, or a message
   opening "Compaction ", `events.compaction_failed`) hands over at once whatever the exit, change,
@@ -5950,7 +5952,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
-`read`, `explore` (`FAKE_READS` small reads, then an edit: #1087), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`), `compactfail` (OpenCode
+`read`, `explore` (`FAKE_READS` small reads, then an edit: #1087), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
 `retry` (`FAKE_RETRY_EVERY`), `say`, `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of
@@ -6058,7 +6060,7 @@ with it shut out (#994), and the instructions: the user's `~/.config/workbench/A
 `~/.claude/CLAUDE.md` and rules out, in the lane and (OpenCode's own read, `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`) without
 it (#513, #1061). `run_calls(name, calls, *start_flags)` runs `opencode run --auto` through `agent_env` and
 `lane.wrap`; refusals read `permission.rejected`, `external_directory` or `Permission denied`. `RealOpenCodeRun` is the
-runner on real OpenCode (`wb start --model cap`): argv, `run --format json` events, `session export`
+runner on real OpenCode (`wb start --model cap`): argv, `run --format json` events (a `tool_use`'s `state.output`, #1086), `session export`
 (`context_state`), `session list` (`find_session`), `--session`, a real compaction, the task's own OpenCode home
 (no credentials in it, the user's store given no session, its commands seeing the user's `XDG_DATA_HOME`, #1010)
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
@@ -6253,7 +6255,7 @@ doc needs its own `!/` line).
 - **`next_step`'s `ts` or the row's `steps` count** → `spend.usage_by_step`, `results.record`, `bench.handoff_cost`.
 - **`cli.PROTOCOL`** → the fold marker `\n---\nHow to work`, the `Lesson:` parser, the handbook, every prefill; `cli.WRITING_PROTOCOL` shares its fold, first bullet, `{test_line}`, ask, lane and `.proposed` bullets and `Lesson:` line (change them together; the Writing tests); `agent/WRITING.md`: every writing prompt, under 3,000 bytes (`tests/test_docs.py`).
 - **`agent/HANDBOOK.md`** → every agent prompt; each token costs prefill.
-- **How OpenCode is invoked or read** (`run_round`'s argv, `normalize`'s fields, the export fields `context_state`,
+- **How OpenCode is invoked or read** (`run_round`'s argv, `normalize`'s fields and `run_round`'s `state.output`, the export fields `context_state`,
   `measure_speed`, `transcript` read) → `tests/fake_opencode.py` in the same commit, `RealOpenCodeRun` for a new field,
   one real run (*The tests*).
 - **`Model.kind`** (#1013) → `pool()` (None for an API model, #1015: `models.holders(pool=None)` is empty,

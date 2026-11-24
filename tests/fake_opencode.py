@@ -17,7 +17,8 @@
   compact  writes "41", a step at 52% of a 32K window, then one at 15%: OpenCode compacted it
          between them, which `run --format json` doesn't print (#774); then works on for an
          hour; a fresh session handed the task behaves like ok. FAKE_COMPACT_READ: it reads
-         before writing, its first step at 50%
+         before writing, its first step at 50%. FAKE_COMPACT_BURST: its step before is at 30%,
+         then three reads whose 16 KB outputs (`state.output`) take it past the point (#1086)
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
   refill every session changes a file, then fills 76% and works on for an hour
   explore  FAKE_READS (41) reads of different files, each a small step, then 2 s (the runner
@@ -385,10 +386,12 @@ def api_request() -> None:
     fail("provider.rate-limit", "too many retries", 429)
 
 
-def tool(name, inp, status="completed", error=None):
+def tool(name, inp, status="completed", error=None, output=None):
     state = {"status": status, "input": inp}
     if error:
         state["error"] = error
+    if output is not None:  # `part.state.output`, the result as the model gets it (2.3.2)
+        state["output"] = output
     emit("tool_use", tool=name, state=state)
 
 
@@ -712,8 +715,14 @@ elif scenario == "compact":  # #774: a tool result past the margin compacted it 
                                                       "cache": {"read": 900 if not os.environ.get(
                                                           "FAKE_COMPACT_READ") else 14400}})
     emit("text", text="Wrote 41 so far; reading the test log next.")
-    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
-                                                      "cache": {"read": 14900}})  # 17000: 52%
+    if os.environ.get("FAKE_COMPACT_BURST"):  # parallel reads from a step under the margin
+        emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                          "cache": {"read": 7800}})  # 9900: 30%
+        for i in range(3):
+            tool("read", {"filePath": os.path.abspath(f"log{i}.txt")}, output="x" * 16000)
+    else:
+        emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                          "cache": {"read": 14900}})  # 17000: 52%
     tool("read", {"filePath": os.path.abspath("answer.txt")})
     emit("step_finish", reason="tool-calls", tokens={"input": 4000, "output": 900,
                                                       "cache": {"read": 0}})  # 4900: 15%
