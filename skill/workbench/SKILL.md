@@ -378,7 +378,8 @@ narrow the command; a run past it isn't sent back to the agent (nor one the lane
 device, nor a command or Python module (`python3 -m pytest`, not one of the repo's own, nor one whose file or dotted name the spec gives; a bare name such as `greet` still counts as a tool) not found as on the base, which checks in before round 1, or a command a `wb next --test` command itself names), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
 command in a quarter of the limit: then it's the change's hang, and auto-fix gets it.
 Once the tests pass, the agent checks its own change against your review checks in one more
-round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
+round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it);
+one that only reads on is stopped as its finish, not stuck (`self-review: … stopped as its finish`).
 On API it's off unless you pass `--self-review` (each round you don't see is paid).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
 the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck,

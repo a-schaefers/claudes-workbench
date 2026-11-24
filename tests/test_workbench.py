@@ -5626,8 +5626,8 @@ class Context(Base):
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-srr"]
         self.assertEqual([r["kind"] for r in rows], ["review"])
         self.assertIn("tests: PASS", rows[0]["text"])
-        self.assertIn("the tree as the round began; stopped as its finish", rows[0]["text"])
-        self.assertIn("the tree as the round began: stopped as its finish",
+        self.assertIn("the tree its tests passed on; stopped as its finish", rows[0]["text"])
+        self.assertIn("the tree its tests passed on: stopped as its finish",
                       run_wb("watch", "t-srr", "--once", "--no-color"))
 
     def test_a_self_review_that_changed_the_tree_is_still_stopped_by_the_explore_guard(self):
@@ -5640,6 +5640,48 @@ class Context(Base):
         self.start("t-srk", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srk", {"review", "stuck", "failed"}, timeout=60)
         self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
+        self.assertIn("tool calls without changing a file", st["last"])
+
+    def test_a_self_review_begun_in_a_fresh_session_that_reads_past_the_explore_guard_goes_to_review(self):
+        # #1188 (2026-11-24): the five recorded trips (bench-big-compaction, big-logout,
+        # big-this-host) each had round 1's session compacted, so the self-review began in a
+        # fresh session, re-read, and was stopped by the explore guard on round 1's green tree
+        os.environ["FAKE_COMPACTED"] = "1"
+        self.start("t-srf", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srf", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 2, "self_review"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertNotIn("no_edit", st.get("guards") or {})
+        events = store.read_jsonl(store.Task("t-srf").dir / "events.jsonl")[0]
+        self.assertIn(runner.FRESH_SAID + runner.COMPACTED,
+                      [e["text"] for e in events if e.get("kind") == "fresh" and e.get("round") == 2])
+        self.assertEqual([e["kind"] for e in events if e.get("kind") in ("settled", "stopped")], ["settled"])
+
+    def test_a_self_review_handed_to_a_fresh_session_that_restores_the_green_tree_goes_to_review(self):
+        # #1188: the self-review's session filled with a check broken, a fresh one carried on
+        # (status round_for `fresh`), copied the file back and read on: #1168's finish was only
+        # for round_for `self_review`, so the explore guard stopped a green change as stuck. The
+        # tree is held to the one round 1's tests passed on, not the round's start (90 reads:
+        # its copy back is a change, so the guard counts again from it)
+        os.environ.update(FAKE_SELF_FILL="1", FAKE_READS="90")
+        self.start("t-srh", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srh", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"], st["handovers"]),
+                         ("review", 3, "fresh", 1), st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertNotIn("no_edit", st.get("guards") or {})
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-srh"]
+        self.assertEqual([r["kind"] for r in rows], ["review"])
+        self.assertIn("the tree its tests passed on; stopped as its finish", rows[0]["text"])
+
+    def test_a_self_review_handed_over_with_a_check_still_broken_is_stopped_by_the_explore_guard(self):
+        # #1188's other half: the fresh session's tree is the one the round began with, but a
+        # check is still commented out (the issue's "stop mid-mutation-check"): not the tree the
+        # tests passed on, so it is stopped as before
+        os.environ.update(FAKE_SELF_FILL="1", FAKE_SELF_KEEP="1")
+        self.start("t-srb2", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srb2", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("stuck", 3, "fresh"))
         self.assertIn("tool calls without changing a file", st["last"])
 
     def test_without_self_review_claude_is_woken_after_the_first_clean_round(self):
