@@ -33871,17 +33871,19 @@ class ApiSpend(Base):
         task = self.api_task("t-cap-rs", SPEND_TIER, "ok")
         runner.drive(task)
         self.assertEqual(task.status["phase"], "review")
-        text = "1. take each of these cases too:\n" + "- a case of the parser's, one line\n" * 2300
+        # half the cases in the feedback, half in a note: either left out, the cap named is short
+        text = "1. take each of these cases too:\n" + "- a case of the parser's, one line\n" * 1150
+        note = "Also these cases, kept sorted:\n" + "- a case of the lexer's, one line\n" * 1150
         self.cap(50)
         with mock.patch.object(cli, "spawn_runner"):
             run_wb("feedback", "t-cap-rs", "--text", text)
         runner.drive(task)
         task.set_status(phase="stuck")
         store.append_jsonl(task.dir / "steer.jsonl",                # sent as the round ended
-                           {"ts": store.now(), "text": "Also keep the cases sorted.", "now": False})
+                           {"ts": store.now(), "text": note, "now": False})
         taken = task.status.get("steer_taken", 0)
         rnd = task.status["round"]
-        self.assertLess(runner.first_tokens(task, runner.RESUME, fresh=True) * 4, len(text))
+        self.assertLess(runner.first_tokens(task, runner.RESUME, fresh=True) * 4, len(text) + len(note))
         self.cap(5)
         self.spent(4.8 - self.meter.today()["usd"])              # today $4.80
         err = io.StringIO()
@@ -33897,11 +33899,47 @@ class ApiSpend(Base):
         spawned.assert_called_once()
         raw = task.round_dir(rnd + 1).joinpath("prompt.md").read_text()
         self.assertIn("- a case of the parser's, one line", raw)
-        self.assertIn("Also keep the cases sorted.", raw)
+        self.assertIn("- a case of the lexer's, one line", raw)
         sent = runner.handoff_prompt(task, "resumed by the reviewer", raw.strip())
         self.assertGreater(len(sent.encode()), 80_000)
         mt = self.meter.for_task(task, m)
         mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 65_000 + len(sent.encode())), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+
+    def test_a_resume_after_a_round_that_never_made_a_session_counts_its_handoff_in_the_look_ahead(self):
+        # #1173's review (2026-11-24): first_tokens judged the handoff from the status, a session
+        # or step_round < round, but round 1 crashed before its session began: wb resume counted
+        # the bare prompt (16,435 tokens), while the runner wraps round 2 in the handoff, the
+        # spec in it (36,940): at the cap it named, the room refused the first request
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        m = runner.models.lookup(SPEND_TIER)
+        self.spec.write_text("- a case of the parser's, one line\n" * 2300)
+        task = self.api_task("t-cap-r1", SPEND_TIER, "crash")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "failed")
+        self.assertEqual(task.status["round"], 1)
+        self.assertIsNone(task.status.get("session"))
+        self.assertTrue(task.status.get("round_started_at"))
+        os.environ["FAKE_SCENARIO"] = "ok"
+        self.cap(5)
+        self.spent(4.8 - self.meter.today()["usd"])              # today $4.80
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("resume", "t-cap-r1")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("resume", "t-cap-r1")
+        spawned.assert_called_once()
+        self.assertEqual(task.status["round"], 2)
+        sent = runner.handoff_prompt(task, "resumed by the reviewer",
+                                     task.round_dir(2).joinpath("prompt.md").read_text())
+        self.assertIn("- a case of the parser's, one line", sent)  # the spec, in the handoff
+        mt = self.meter.for_task(task, m)
+        mt.begin(2)
         self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 65_000 + len(sent.encode())), 0)
         self.assertIsNone(task.status.get("api_stop"))
 

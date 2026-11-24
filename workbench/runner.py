@@ -4336,20 +4336,25 @@ def first_tokens(task: store.Task | None = None, prompt: str | None = None,
     after an earlier one inside its handoff (handoff_prompt), never past PROMPT_ARG_MAX, past
     which it goes as a file the agent reads. ``task`` None: wb start's, round 1's prompt.
     ``fresh``: as the caller knows it (wb resume's, --fresh), else from the status alone, not
-    fresh_reason's export: a full session carried on counts its context, more than a handoff."""
+    fresh_reason's export: a full session carried on counts its context, more than a handoff.
+    True is a later round begun fresh (status `context` "fresh"), which the runner always hands
+    over (fresh_reason, _start_fresh), session or not: judged from the status, a resume after a
+    round that never made a session counted its bare prompt, under half the first request, and
+    the room refused it at the cap named (#1173's review, 2026-11-24)."""
     st = task.status if task is not None else {}
     if prompt is None:
         path = store.round_prompt(task, st.get("round", 1)) if task is not None else None
         prompt = path.read_text() if path is not None and path.is_file() else ""
+    handoff = fresh is True
     if fresh is None:
         fresh = st.get("context") in ("fresh", "full") or not st.get("session") or old_store(st)
+        handoff = fresh and bool(st.get("session") or (st.get("step_round") or 1) < st.get("round", 1))
     live = st.get("live_used") or {}
     carried = live.get("used") if st.get("session") and live.get("session") == st.get("session") else 0
     carried = int(carried) if isinstance(carried, (int, float)) and carried > 0 else 0
     base = meter.FIRST_TOKENS if fresh else max(carried, meter.FIRST_TOKENS)
     size = len(prompt.encode())
-    if fresh and task is not None and (st.get("session")
-                                       or (st.get("step_round") or 1) < st.get("round", 1)):
+    if handoff and task is not None:
         try:  # what _start_fresh will send: the task, the work so far, then the prompt
             size = len(handoff_prompt(task, "", prompt).encode())
         except Exception:  # an estimate: never a reason to refuse, so the most argv can carry

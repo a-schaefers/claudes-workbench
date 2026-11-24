@@ -2663,8 +2663,12 @@ def _resume(task: store.Task) -> None:
     # out, and the cap named was too low for its first request (#1173's review, 2026-11-24).
     # The notes peeked, not taken: a refusal here leaves them for the next runner
     peek = [r for r in runner.pending_steer(task) if r.get("by") != "workbench"]
-    _model_still_listed(task, None if _first_round(st) else _resume_prompt(
-        runner.round_asks(task, n), runner.steer_prompt(peek, False) if peek else ""), fresh=True)
+    # round n + 1 begins fresh, in a handoff even when round n never made a session; round 1
+    # again begins as wb start's did, its own prompt alone (#1173's review)
+    first = _first_round(st)
+    _model_still_listed(task, None if first else _resume_prompt(
+        runner.round_asks(task, n), runner.steer_prompt(peek, False) if peek else ""),
+        fresh=None if first else True)
     if _first_round(st):
         # it never ran a round (queued behind the GPU, its model or the base check): round 1
         # again, its prompt as wb start wrote it, not "Claude stopped your last session…"

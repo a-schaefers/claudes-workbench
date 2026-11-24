@@ -726,7 +726,9 @@ at the input price and the model's pinned output (`options.max_tokens`, else `li
 room's tokens (bytes / 4): a continued session's context (status `live_used`, its last step's), else a fresh
 session's least, `meter.FIRST_TOKENS` (16,384: OpenCode's system prompt and tools, the handbook, the protocol;
 a real task's first step read 16,161), then the round's prompt (a fresh session after an earlier one: its
-`handoff_prompt`), at most `PROMPT_ARG_MAX`. Left out (#1150's floor), a day within that input's cost of the
+`handoff_prompt`; `fresh=True`, a later round begun fresh as resume and `--fresh` write it, always in its handoff,
+as the runner sends it, session or not: a resume after a round that never made a session counted the bare prompt,
+#1173's review), at most `PROMPT_ARG_MAX`. Left out (#1150's floor), a day within that input's cost of the
 cap passed every check, the room refused the first request, and the cap the refusal named was refused again
 at it (#1173). Today + it over the cap is refused: `trivial role: API spend today is ≈$4.80 of the $5 day
 cap, and one request on it can cost up to $0.36 (it resets at local midnight). Ask the user: a cap of at least
@@ -736,7 +738,7 @@ to the cent). wb start's input is round 1's (`first_tokens(prompt=spec)`, throug
 task's role in the line, before any round is written, a review counted or a step committed
 (`cli._model_still_listed(task, prompt, fresh)`, #1118: the round they wrote stopped at once as a spend `stuck`, a wake
 for nothing; feedback's with its text, `--fresh` or `--keep-context`, next's with the step's spec and the
-protocol, after reading it and before the commit, resume's fresh with the round it writes, `cli._resume_prompt`: the
+protocol, after reading it and before the commit, resume's fresh (`fresh=True`; round 1 again, from the status) with the round it writes, `cli._resume_prompt`: the
 step's feedback back to its review (`round_asks`) and Claude's undelivered notes, peeked and not taken, #1173's review: the
 bare RESUME named a cap the room refused at); with no cap set too (#1089's refusal). Their advice is a running task's
 (`meter.refusal(m, role, tokens=…, task=task)`, `meter._ask`): `… (it resets at local midnight). Ask the user: a higher
