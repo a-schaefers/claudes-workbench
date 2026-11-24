@@ -27193,6 +27193,39 @@ class Keyhole(_KeyholeTest):
                               ("@opencode/ai/providers/deepinfra", "bearer")):
             self.assertEqual(self.kh_mod.protocol_of(package), want)
 
+    def test_an_ai_sdk_npm_runs_through_the_keyhole_as_its_opencode_package(self):
+        # #1137 (2026-11-23): a config provider's npm `@ai-sdk/openai-compatible` read as its
+        # scope, `@ai-sdk`, so a custom provider set up as OpenCode's docs say was refused
+        for package, want in (("@ai-sdk/openai-compatible", "bearer"), ("@ai-sdk/anthropic", "anthropic"),
+                              ("@ai-sdk/openai", "bearer"), ("@ai-sdk/deepinfra", "bearer"),
+                              ("@ai-sdk/foo", None), ("@ai-sdk/google", None), ("@acme/openai", None),
+                              ("aisdk:@ai-sdk/openai", None), ("@ai-sdk", None)):
+            self.assertEqual(self.kh_mod.protocol_of(package), want, package)
+        # as OpenCode runs `@ai-sdk/deepinfra`: its own package, which appends /openai
+        self.assertEqual(self.kh_mod.mirror_path("@ai-sdk/deepinfra", "https://a/v1"), "https://a/v1/openai")
+        self.assertEqual(self.kh_mod.mirror_path("@ai-sdk/openai-compatible", "https://a/v1"), "https://a/v1")
+        self.fake_auth({p: {"export": [self.key_row(p, {"type": "key", "key": self.CANARY})]}
+                        for p in ("gw", "antgw")})
+        for provider, package, path, header, want in (
+                ("gw", "@ai-sdk/openai-compatible", "/chat/completions", "authorization",
+                 f"Bearer {self.CANARY}"),
+                ("antgw", "@ai-sdk/anthropic", "/messages", "x-api-key", self.CANARY)):
+            self.up.seen.clear()
+            with redirect_stdout(io.StringIO()):
+                kh = self.kh_mod.start(self.task, self.model(provider, "coder", "/v1", package))
+            self.addCleanup(kh.close)
+            auth = {"Authorization": f"Bearer {kh.token}"} if header == "authorization" else \
+                {"Authorization": None, "x-api-key": kh.token}
+            code, _, body = self.post(kh, path, headers=auth)
+            self.assertEqual(code, 200, body)
+            [req] = self.up.seen
+            heads = {k.lower(): v for k, v in req["headers"].items()}
+            self.assertEqual((req["path"], heads[header]), (f"/v1{path}", want), provider)
+            self.assertNotIn(kh.token, json.dumps(req))
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.start(self.task, self.model("odd", "coder", "/v1", "@ai-sdk/foo"))
+        self.assertIn("odd takes its key in a way the keyhole doesn't speak (@ai-sdk/foo)", str(e.exception))
+
     def test_deepinfras_appended_path_is_mirrored_so_no_segment_is_needed(self):
         # a base without /openai: DeepInfra's package appends it, and the keyhole's base must
         # mirror that, now that no segment may sit between the base and a model path
@@ -27403,6 +27436,40 @@ class RealOpenCodeAPI(_KeyholeTest):
             [sent] = asked
             self.assertIn(kh.token, sent[header])                          # OpenCode had the token
             self.assert_no_canary(json.dumps(sent))                        # and never the key
+
+    def test_a_custom_provider_on_an_ai_sdk_npm_posts_through_the_keyhole(self):
+        # #1137 (2026-11-23): the documented form of a custom provider, V1 npm `@ai-sdk/...`,
+        # was refused as a package the keyhole can't speak; OpenCode 2.3.2 runs it as its own
+        # `@opencode/ai/providers/<name>`, posting the base plus a model path with the token
+        from workbench import keyhole
+        tmp = Path(self.tmp.name)
+        for provider, package, header, want, path in (
+                ("gw", "@ai-sdk/openai-compatible", "authorization", f"Bearer {self.CANARY}",
+                 "/v1/chat/completions"),
+                ("antgw", "@ai-sdk/anthropic", "x-api-key", self.CANARY, "/v1/messages")):
+            self.up.seen.clear()
+            m = self.model(provider, "coder", "/v1", package)
+            kh = keyhole.Keyhole(self.task, m, keyhole.Key(provider, self.CANARY),
+                                 keyhole.mirror_path(package, m.base_url), keyhole.protocol_of(package),
+                                 log=self.lines.append)
+            self.addCleanup(kh.close)
+            layer = tmp / f"layer-{provider}.json"
+            layer.write_text(json.dumps({"provider": {provider: {
+                "npm": package, "name": provider, "options": keyhole.layer_options(kh),
+                "models": {"coder": {"name": "coder", "limit": {"context": 65536, "output": 4096}}}}}}))
+            env = {"PATH": os.environ["PATH"], "HOME": str(tmp / "home"), "PWD": str(self.repo),
+                   "OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_CONFIG": str(layer),
+                   **{f"XDG_{d.upper()}_HOME": str(tmp / f"xdg-{provider}" / d)
+                      for d in ("config", "data", "state", "cache")}}
+            r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", m.id,
+                                "--format", "json", "say ok"], cwd=self.repo, env=env,
+                               capture_output=True, text=True, timeout=180)
+            self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
+            [req] = self.up.seen
+            heads = {k.lower(): v for k, v in req["headers"].items()}
+            self.assertEqual((req["path"], heads[header]), (path, want), provider)
+            self.assertNotIn(kh.token, json.dumps(req))
+            self.assert_no_canary(layer.read_text(), json.dumps(env))
 
     def test_reading_a_key_starts_no_background_service(self):
         # #1070 (2026-11-23): `opencode auth export` without --standalone started `opencode serve
@@ -29378,8 +29445,8 @@ class ApiDiscovery(Base):
         # so a cloud provider configured by hand (api.together.xyz) lost the key it needed, and
         # following the hint would make a cloud host count as a local model
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
-        # a package the keyhole speaks: on @ai-sdk/openai-compatible no key would run it, and the
-        # keyhole's refusal (#1066) comes before any key line
+        # a package the keyhole speaks: on one it can't, its refusal (#1066) comes before any
+        # key line
         cfg["provider"] = {"together": {"npm": "@opencode/ai/providers/togetherai",
                                         "options": {"baseURL": "https://api.together.xyz/v1"},
                                         "models": {"qwen-coder": {"limit": {"context": 65536}}}},
@@ -29628,9 +29695,32 @@ class ApiDiscovery(Base):
         self.assertIn("add it by its cloud name", err.getvalue())
         self.assertNotIn("local", err.getvalue())                 # local: true is no way in
 
+    def test_a_provider_configured_with_an_ai_sdk_npm_and_a_stored_key_can_run(self):
+        # #1137 (2026-11-23): `@ai-sdk/openai-compatible`, the npm OpenCode's docs give a custom
+        # provider, read as `@ai-sdk`, so status said "can't run: the keyhole doesn't speak" it
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        for pid, npm in (("gw", "@ai-sdk/openai-compatible"), ("antgw", "@ai-sdk/anthropic"),
+                         ("odd", "@ai-sdk/foo"), ("aisdk", "aisdk:@ai-sdk/foo")):
+            cfg["provider"][pid] = {"npm": npm, "options": {"baseURL": "https://203.0.113.7/v1"},
+                                    "models": {"coder": {"limit": {"context": 65536}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        self.catalog(DISCOVERY_CATALOG, [*DISCOVERY_AUTH, *(key_row(p, p, STORED)
+                                                             for p in ("gw", "antgw", "odd", "aisdk"))])
+        found = self.models.hosted(fresh=True)
+        for pid in ("gw", "antgw"):
+            m = found[f"{pid}/coder"]
+            self.assertEqual((m.kind, m.key), ("api", "stored"))
+            self.assertEqual(self.models.keyhole_refusal(m), "", pid)
+            self.assertEqual(self.models.status(m)["available"], True, pid)
+        for pid, npm in (("odd", "@ai-sdk/foo"), ("aisdk", "aisdk:@ai-sdk/foo")):  # unknown: still refused
+            st = self.models.status(found[f"{pid}/coder"])
+            self.assertFalse(st["available"])
+            self.assertIn(f"can't run: the keyhole doesn't speak {pid}'s API ({npm})", st["why"])
+        self.assertEqual(self.models.unspoken_providers(["gw", "antgw", "odd"]), {"odd": "@ai-sdk/foo"})
 
 
-ROUTES_CATALOG = [*DISCOVERY_CATALOG, api_entry("deepseek", "deepseek-flash"),
+
+ROUTES_CATALOG =[*DISCOVERY_CATALOG, api_entry("deepseek", "deepseek-flash"),
                   api_entry("deepseek", "deepseek-v4-pro"), API_CATALOG[1]]
 ROUTES_AUTH = [*DISCOVERY_AUTH, key_row("deepseek", "DeepSeek", STORED), key_row("anthropic", "Anthropic", STORED)]
 DEEPSEEK_LINE = ("trivial: GPU → API deepseek/deepseek-flash · your code goes to DeepSeek · thinking off · "

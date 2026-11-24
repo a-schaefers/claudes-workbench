@@ -82,6 +82,7 @@ PACKAGES = {"anthropic": "anthropic", "anthropic-compatible": "anthropic",
                              "openai-compatible-responses", "openrouter", "togetherai", "venice",
                              "xai", "zai", "zai-coding-plan"), "bearer")}
 PACKAGE_PREFIX = "@opencode/ai/providers/"
+AI_SDK_PREFIX = "@ai-sdk/"  # a config provider's V1 npm (#1137): read as PACKAGE_PREFIX
 BODY_CAP = 32 << 20     # a 131K-token prompt is a few MB of JSON
 ERROR_CAP = 64 << 10    # an upstream error body, read whole to redact it
 SNIFF_CAP = 4 << 20     # a non-streamed JSON answer kept to read its model and usage
@@ -175,10 +176,19 @@ def redact(text: str, key: str | Key = "") -> str:
 
 
 def _package_name(package: str) -> str:
-    """``@opencode/ai/providers/meta/messages`` → ``meta``; a bare name stays as it is."""
+    """``@opencode/ai/providers/meta/messages`` → ``meta``, ``@ai-sdk/openai-compatible`` →
+    ``openai-compatible``; a bare name stays as it is, and any other scoped package reads as its
+    scope (``@acme``), which PACKAGES never holds."""
     name = package or ""
-    if name.startswith(PACKAGE_PREFIX):
-        name = name[len(PACKAGE_PREFIX):]
+    # a config provider's V1 npm, the form OpenCode's docs give a custom provider: read as its
+    # scope, `@ai-sdk`, every such provider was refused as one the keyhole can't speak (#1137,
+    # 2026-11-23). OpenCode 2.3.2 runs `@ai-sdk/<name>` as its own `@opencode/ai/providers/<name>`
+    # where it has one (`api model.list` prints that); an unknown `@ai-sdk/foo` still reads as
+    # None through PACKAGES, and its `aisdk:@ai-sdk/foo` (an npm package OpenCode loads) too.
+    for prefix in (PACKAGE_PREFIX, AI_SDK_PREFIX):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
     return name.split("/")[0]
 
 
