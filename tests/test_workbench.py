@@ -1098,18 +1098,12 @@ class Lifecycle(Base):
             {"exit": code, "tail": tail, **({"cmd": cmd} if cmd else {})})
         nf = "nosuch-tool-1256: command not found"
         venv = ".venv/bin/{}: not in the worktree (.venv/ is an install's, never checked out)"
-        # Poetry 2.5, uv, cargo, bundler (its hint after its line)
+        # Poetry 2.5, uv, bundler (its hint after its line)
         for tail, code, cmd in (
                 ("Creating virtualenv p in /r/.venv\nCommand not found: nosuch-tool-1256", 1,
                  "poetry run nosuch-tool-1256 -q"),
                 ("error: Failed to spawn: `nosuch-tool-1256`\n  Caused by: No such file or directory "
                  "(os error 2)", 2, "uv run nosuch-tool-1256"),
-                # cargo 1.90's, verbatim, its similar-name hint too: four lines, which counted put
-                # its own line out of reach (#1262's review, 2026-11-24)
-                ("error: no such command: `nosuch-tool-1256`\n\nhelp: a command with a similar name "
-                 "exists: `test`\n\nhelp: view all installed commands with `cargo --list`\nhelp: find "
-                 "a package to install `nosuch-tool-1256` with `cargo search cargo-nosuch-tool-1256`",
-                 101, "cargo +nightly nosuch-tool-1256 run"),
                 ("bundler: command not found: nosuch-tool-1256\nInstall missing gem executables with "
                  "`bundle install`", 127, "bundle exec nosuch-tool-1256")):
             self.assertEqual(said(tail, code, cmd), nf, tail)
@@ -1142,12 +1136,22 @@ class Lifecycle(Base):
             self.assertIsNone(said(tail, code, cmd), tail)
         # a subcommand the step adds is an argument, never a program: Click 8.5.1's own lines
         # (Typer's the same) checked in as a missing tool and skipped auto-fix (#1262's review,
-        # 2026-11-24); nor is a name a wrapper's program is given, past its run verb's program
+        # 2026-11-24), even where an option before the program makes the word after it count
+        # (`uv run --frozen mycli frobnicate`); nor is a name a wrapper's program is given, past
+        # its run verb's program
         click = ("Usage: cli.py [OPTIONS] COMMAND [ARGS]...\nTry 'cli.py --help' for help.\n\n"
                  "Error: No such command 'frobnicate'.")
         for cmd in ("python3 cli.py frobnicate", "python3 -m mycli frobnicate",
-                    "poetry run mycli frobnicate"):
+                    "poetry run mycli frobnicate", "uv run --frozen mycli frobnicate",
+                    "poetry run -q mycli frobnicate"):
             self.assertIsNone(said(click, 2, cmd), cmd)
+        # nor cargo's subcommand, which may be an alias the step adds to .cargo/config.toml:
+        # cargo 1.90's lines, verbatim, at its 101 (#1262's review, 2026-11-24)
+        cargo = ("error: no such command: `xtask`\n\nhelp: a command with a similar name exists: "
+                 "`test`\n\nhelp: view all installed commands with `cargo --list`\nhelp: find a "
+                 "package to install `xtask` with `cargo search cargo-xtask`")
+        for cmd in ("cargo xtask codegen", "cargo +nightly xtask codegen"):
+            self.assertIsNone(said(cargo, 101, cmd), cmd)
         self.assertIsNone(said("Command not found: nosuch-tool-1256", 1, "poetry run pytest nosuch-tool-1256"))
         self.assertEqual(runner.command_programs("FOO=1 timeout 60 uv run --with x pytest -q && cd a"),
                          {"timeout", "uv", "x", "pytest", "cd"})
