@@ -5211,7 +5211,7 @@ client; the server needs no browser.
   unknown counting as yes; another session's plain reply is the user's: its report went to the
   agent the listener was answering, pushed to no phone, #1129; the user's alone
   when it holds one of theirs: an agent's message delivered into the user's turn read every plain
-  reply to them, the #1042 review; `taken`: the messages whose newest receipt is `now` by the listening session (never `into`: an agent's message the mod delivered into a wake turn took that turn's plain report to the away user, sent to the agent alone, pushed to no phone, #1175), under `MESSAGE_EXPIRE` old, that no
+  reply to them, the #1042 review; `taken`: the messages whose newest receipt is `now` by the listening session (never `into`: an agent's message the mod delivered into a wake turn, or queued or submitted behind a wake, took that turn's plain report to the away user, sent to the agent alone, pushed to no phone, #1175, #1212), under `MESSAGE_EXPIRE` old, that no
   `turns.jsonl` row lists: a session that died mid-turn left its agent's message taken, and the
   next session's replies went to that agent alone, the #1042 review) and `to`
   (whose: `"user"` or agent names; `chat.reply`; an unknown `--to` exits 1). `GET /api/wait?after=
@@ -5280,7 +5280,7 @@ client; the server needs no browser.
 - `audio/<batch>/`: `<n>.<ext>` copies and `audio.json` `{batch, ts, clips: [{n, name, path, file,
   type, line, engine?, seed?, voice?}]}`; the newest `LISTEN_KEPT` 20 kept.
 - `receipts.jsonl`: `{id, ts, by, how: "now"|"into"|"queued"}` from `wb chat ack` (newest per id stands;
-  `into`: an agent's message delivered into a running turn, #1175; `queued` is acked `now` when its turn ends); `{by: "wb", how: "expired"}` (retired unread);
+  `into`: an agent's message that may not have opened its turn: delivered into a running one, #1175, queued, or submitted behind another prompt, #1212; `queued` is acked `now`, an agent's `into`, when its turn ends); `{by: "wb", how: "expired"}` (retired unread);
   `{by: "terminal", how: "answered"}` (`chat.notice_done`, which also marks it seen).
 - `open.json`: `{messages, asks, answered}`: the unreceipted user messages and unanswered asks
   (`chat.open_work`), under `open.lock`, kept by send/ack/ask/answer, rebuilt once when missing
@@ -5707,8 +5707,8 @@ it). Standing by, it still takes the user's messages that answer its own rows (b
 writes `chat/listener.json` on a change (with `parent`, `mem.claudePid`, #1129) and delivers each
 unreceipted message from `open.json` once `wb chat claim <id> --by <key>` grants it (refused:
 retried a minute later; two sessions both submitted one, #84): idle → `prompt.submit('[web chat]
-<words>', asUser)`, receipt `now`; busy → `session.send` with WEB_NOTE (an agent's: AGENT_NOTE, receipt `into`, so the turn's plain `wb chat reply` is never its answer, #1175), else a queued prompt
-(`queued`, acked `now` when that turn ends: `mem.chatQueued`, `readQueued`); `wb chat ack <id> --by
+<words>', asUser)`, receipt `now` (an agent's behind a prompt submitted this poll, `mem.submitted`: `into`, #1212); busy → `session.send` with WEB_NOTE (an agent's: AGENT_NOTE, receipt `into`, so the turn's plain `wb chat reply` is never its answer, #1175), else a queued prompt
+(`queued`, acked `now`, an agent's `into`, when that turn ends: `mem.chatQueued`, `readQueued`; acked `now`, the next wake turn's report went to the agent, #1212); `wb chat ack <id> --by
 <key> --how …` once it entered (a dropped prompt is retried a minute later); `chat/away.json` `{at:
 now, by: <key>}`. Away is read by every session (`away()`); a typed prompt writes `{at: 0}`
 (`back`), as does a terminal dialog answered there after that use (`termDialogDone`). Typed is

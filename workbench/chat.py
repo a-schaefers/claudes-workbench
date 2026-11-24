@@ -507,8 +507,9 @@ def claim(msg_id: str, by: str) -> bool:
 
 def ack(msg_id: str, by: str, how: str = "now") -> None:
     """Claude has the message: read at once ("now", opening its turn or the user's into a running
-    one), an agent's read into a running turn it didn't open ("into", #1175), or queued until its
-    current step ends."""
+    one), an agent's read into a turn it may not have opened ("into": delivered into a running
+    one, #1175, or queued or submitted behind another prompt, #1212), or queued until its current
+    step ends."""
     store.append_jsonl(chat_dir() / "receipts.jsonl",
                        {"id": msg_id, "ts": store.now(), "by": by, "how": how})
     _open_update(lambda w: w["messages"].pop(msg_id, None))
@@ -687,8 +688,9 @@ def taken() -> list[str]:
     Only the listener's: a session that died mid-turn never recorded its end, and every reply of
     the next session's for six hours went `to` that agent alone, pushed to no phone (the #1042
     review). Only those that opened their turn (`now`): an agent's message delivered into a wake
-    turn (`into`) took that turn's plain report to the away user, sent to the agent alone and
-    pushed to no phone (#1175, 2026-11-24); its note tells Claude to answer it with `--to`."""
+    turn (`into`; queued or behind a wake too, #1212) took that turn's plain report to the away
+    user, sent to the agent alone and pushed to no phone (#1175, 2026-11-24); the skill tells
+    Claude to answer an agent with `--to`."""
     lst = listener()
     if not lst or not lst.get("session"):
         return []
