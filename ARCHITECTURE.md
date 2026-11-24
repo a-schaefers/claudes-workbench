@@ -4900,7 +4900,10 @@ client; the server needs no browser.
   message is recorded (`chat.idem_record`). An upload needs none: its id is stored once.
   `ask_claude.py` sends one fresh UUID as both the key and the `cid`, and sends again after a cut
   (a reset, 502 to 504) for up to `OUTAGE_MOST`: it ended at once, exit 1, and a rerun asked
-  Claude twice.
+  Claude twice. Still cut then, it exits 2 naming the key (`Unreachable`: it may have landed,
+  and exit 1 named nothing to follow, the #1138 review); `--key` reruns the request under it
+  (`KEY`: at most 64, as it is the `cid` too), its uploads' ids a `uuid5` of the key and each
+  file's sha256, so the rerun's body is the first one's (a random id was a new body: 422).
 - **Kept apart.** A `cid` another sender used is 409 (`chat.send`: an agent's send could get the
   user's message back); an agent's stream never makes the oldest give way (503 at once); the mod
   indents an agent's later lines, so none starts as `[web chat]` or `[message …]` (`chatPrompt`).
@@ -6428,9 +6431,11 @@ never counted unread (#1128), its state without the user's, a dialog for it sayi
 card and in the push (#1042), a 25-task backlog's strip at most three lines on a phone, the queued counted apart
 (#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text.
 `WebChat` runs the agents' client, `skill/agents/claude-workbench/scripts/ask_claude.py`, against its server with a
-listener played in the test (#1042), and against a stub that cuts a send (one Idempotency-Key every try) and answers
-a wait `410 expired` (#1138); it checks every `/api/v1/` path against its `/api/` twin, each error `code` against
-docs/chat-api.md's table, and four racers under one key landing one message (#1138).
+listener played in the test (#1042), and against a stub that cuts a send (one Idempotency-Key every try; cut for good,
+exit 2 naming the key, and `--key` sending the same body, upload ids included) and answers a wait `410 expired`
+(#1138); it checks every `/api/v1/` path against its `/api/` twin, each error `code` against docs/chat-api.md's table
+(and a wait on a message Claude read 6 hours ago held, never `410`), and four racers under one key landing one
+message (#1138).
 
 **Rate limits** (`RateLimits`, #1020): the runner in-process (`runner.drive`) on a task written as `wb start --role`
 writes it (`via: api`, `provider`, `role`), the keyhole started in the test as `drive` will start it (#1015,

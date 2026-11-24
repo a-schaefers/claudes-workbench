@@ -44,6 +44,9 @@ Do small, local edits yourself: a round trip costs more than they do.
    - `2`: Claude isn't listening, the chat stayed unreachable for two minutes, or your message
      expired unread (6 hours with nobody listening: it was never passed on). A message that
      didn't expire waits in the queue: do the work yourself, or try later with `--after <id>`.
+     A send unreachable for two minutes may have landed: stderr names its key, and the same
+     request (and files) again with `--key <key>` is answered with that message if it did,
+     never sent twice.
    - `3`: your token was refused (revoked: ask the user for a new one).
 3. **Read the report.** Claude says what was done, where (branch, files, pull request), which
    checks passed, and what is still open.

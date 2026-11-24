@@ -24358,6 +24358,15 @@ class WebChat(Base):
         with mock.patch.object(store, "now", lambda: now + self.chat.MESSAGE_EXPIRE + 60):
             refused(self.call(f"/api/wait?after={mid}&timeout=4", token=tok), 410, "expired")
         self.assertLess(time.monotonic() - began, 3)                       # said at once, not held
+        # one Claude read, still at work 6 hours on with no reply yet, is no expired message:
+        # told "never passed on, send it again", the agent would ask Claude twice (the review)
+        code, r = self.call("/api/send", {"text": "the long one"}, token=tok)
+        self.assertEqual(code, 200)
+        read = r["message"]["id"]
+        self.chat.ack(read, "sess-1")
+        with mock.patch.object(store, "now", lambda: now + self.chat.MESSAGE_EXPIRE + 60):
+            code, r = self.call(f"/api/wait?after={read}&timeout=1", token=tok)
+        self.assertEqual((code, r.get("code"), r.get("replies")), (200, None, []))  # held as before
         code, r, got = self._raw("DELETE", "/api/state", token=tok)         # http.server's own refusal
         refused((code, got), 501, "not_implemented")
         run_wb("chat", "token", "revoke", "my-agent")
@@ -24409,13 +24418,15 @@ class WebChat(Base):
 
     def test_ask_claude_sends_again_after_a_cut_with_one_key_and_exits_2_on_an_expired_message(self):
         # #1138: a send cut by the chat restarting ended the client with exit 1, and its rerun
-        # asked Claude twice; one Idempotency-Key and cid for every try makes the retry safe
+        # asked Claude twice; one Idempotency-Key and cid for every try makes the retry safe. A
+        # send cut for good exited 1 naming nothing (the review): exit 2 with its key, and the
+        # rerun with --key sends the same body, its files' upload ids included
         import importlib.util
         script = ROOT / "skill/agents/claude-workbench/scripts/ask_claude.py"
         spec = importlib.util.spec_from_file_location("ask_claude_1138", script)
         ac = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(ac)
-        posts, answers = [], []
+        posts, answers, puts, bodies = [], [], [], []
 
         class Stub(http.server.BaseHTTPRequestHandler):
             def log_message(self, *a):
@@ -24431,14 +24442,22 @@ class WebChat(Base):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 posts.append((self.headers.get("Idempotency-Key"), body.get("cid")))
-                what = answers.pop(0)
+                bodies.append(body)
+                what = answers.pop(0) if answers else "drop"
                 if what == "drop":                       # the server going away mid-send
                     return
                 if what == "502":
                     return self._answer(502, {"error": "bad gateway"})
                 self._answer(200, {"message": {"id": "m1"}, "listener": {}})
 
+            def do_PUT(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                puts.append(self.path)
+                self._answer(200, {"upload": {}})
+
             def do_GET(self):
+                if self.path.startswith("/api/health"):
+                    return self._answer(200, {"api": 1, "listening": True})
                 self._answer(410, {"error": "that message expired unread", "code": "expired"})
 
         srv = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
@@ -24448,15 +24467,35 @@ class WebChat(Base):
         env = {"CLAUDE_WB_URL": f"http://127.0.0.1:{srv.server_address[1]}", "CLAUDE_WB_TOKEN": "wba-x"}
         with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05):
             answers[:] = ["drop", "502", "ok"]
-            self.assertEqual(ac.send("refactor the parser", [])["message"]["id"], "m1")
+            self.assertEqual(ac.send("refactor the parser", [], "k-1138")["message"]["id"], "m1")
             err = io.StringIO()
             with redirect_stdout(io.StringIO()), redirect_stderr(err):
                 rc = ac.follow("m1", "done", time.monotonic() + 20)
         self.assertEqual(len(posts), 3)
         self.assertEqual(len(set(posts)), 1)                    # one key and cid, every try
-        self.assertEqual(posts[0][0], posts[0][1])
+        self.assertEqual(posts[0], ("k-1138", "k-1138"))
         self.assertEqual(rc, 2, err.getvalue())
         self.assertIn("expired unread: message m1", err.getvalue())
+        notes = Path(self.tmp.name) / "notes.md"
+        notes.write_text("the parser's notes")
+        del posts[:], bodies[:]
+        with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05), \
+                mock.patch.object(ac, "OUTAGE_MOST", 0.3):
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = ac.main(["refactor the parser", "--file", str(notes)])     # cut every try
+            self.assertEqual(rc, 2, err.getvalue())
+            key = posts[0][0]
+            self.assertEqual(set(posts), {(key, key)})
+            self.assertIn(f"--key {key}", err.getvalue())                       # what to rerun with
+            self.assertIn("may have landed", err.getvalue())
+            first = bodies[0]
+            answers[:] = ["ok"]
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                rc = ac.main(["refactor the parser", "--file", str(notes), "--key", key])
+        self.assertEqual(rc, 2)                                                  # sent; the wait: 410
+        self.assertEqual((posts[-1], bodies[-1]), ((key, key), first))           # the same request
+        self.assertEqual(len(set(puts)), 1, puts)                                # its file, one id
 
 
 FAKE_SMI = """import os, sys, time

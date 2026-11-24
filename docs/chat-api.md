@@ -117,7 +117,10 @@ landed. Send it again with the same key and Claude is never asked twice:
   refused one sent nothing, so its retry is checked afresh. A replay costs none of an agent's
   sends a minute.
 - **`cid`** in the body does the same within the thread (*`POST /api/send`*); `ask_claude.py`
-  sends both, the same value, and tries a cut send again for up to two minutes.
+  sends both, the same value, and tries a cut send again for up to two minutes. Still cut, it
+  exits 2 naming the key, and `--key <key>` sends the same request again under it; its files'
+  upload ids come from the key and their bytes, so the body matches (keep a key's body the same:
+  a new upload id is a new body, `422`).
 - **An upload** needs no key: `PUT /api/upload/<id>` stores an id once, and the same id again
   answers with the first upload.
 
