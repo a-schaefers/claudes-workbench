@@ -275,9 +275,9 @@ class ApiSizing(Base):
     (#1011), the spike's DeepInfra model: a 1M window and 384K output."""
     catalog = tw.ApiHarness.catalog
     # the real-OpenCode helpers, borrowed (an ApiHarness subclass would run its tests again)
-    real_env, oc_cwd, real_model, real_run, capture = (
+    real_env, oc_cwd, real_model, real_run, capture, real_list = (
         tw.ApiHarness.real_env, tw.ApiHarness.oc_cwd, tw.ApiHarness.real_model,
-        tw.ApiHarness.real_run, tw.ApiHarness.capture)
+        tw.ApiHarness.real_run, tw.ApiHarness.capture, tw.ApiHarness.real_list)
     layer = staticmethod(tw.ApiHarness.layer)
 
     def setUp(self):

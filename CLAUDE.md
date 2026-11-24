@@ -189,12 +189,14 @@ sends and `wb route` changes the API side only on the mod's dialog's yes: `send-
   shape tag (*Couplings*); a slash command never starts a turn: it pushes onto `mem.queued`.
 
 ## OpenCode quirks this code relies on
-Checked against OpenCode 2.3 by the real-OpenCode tests (`tests/capture_llm.py`; which covers
+Checked against OpenCode 2.3 and 2.4.1 by the real-OpenCode tests (`tests/capture_llm.py`; which covers
 what: ARCHITECTURE.md, *The tests*; the detail: *The runner, inside*, *What the agent knows*).
 - The project comes from `$PWD`, not the cwd. The prompt goes after `--` (one starting with `-`
   is read as a flag).
-- An API model's limits, cost and variants come from the catalog (`opencode api model.list`);
+- An API model's limits, cost and variants come from the catalog (model.list);
   `OPENCODE_MODELS_PATH` replaces it: the agent's is the task's `catalog.json`, the fetch off.
+  From 2.4 a server lists only what its plugins have loaded, and `api model.list` asks before
+  they have (none listed): `models.model_list` asks its own `serve --stdio` after plugin.list.
 - Cost is OpenCode's estimate from the catalog's prices, not the bill: `step_finish.part.cost`
   live, `info.cost` in the export (the title request included).
 - A project's config loads after the layer and could lift every deny, so
