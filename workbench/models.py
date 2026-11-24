@@ -30,6 +30,7 @@ is not the one it runs on, so it frees nothing here, and nothing here unloads or
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import fcntl
 import ipaddress
@@ -37,6 +38,8 @@ import json
 import os
 import pwd
 import re
+import secrets
+import select
 import shlex
 import shutil
 import socket
@@ -44,6 +47,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1038,18 +1042,24 @@ def _stamp() -> dict:
             "content": zlib.crc32((os.environ.get("OPENCODE_CONFIG_CONTENT") or "").encode())}
 
 
-def _opencode_json(*args: str):
-    """(parsed JSON stdout, "") of an OpenCode command, or (None, why: its first stderr line).
-    `--standalone`: wb's own environment, never the background service's (whose env keys and
-    config may differ), as every workbench call to OpenCode runs. The project config is shut out
-    as the agent's is (OPENCODE_DISABLE_PROJECT_CONFIG), and it runs in the state directory: a
-    repo's opencode.json under the caller's cwd must not add providers to the list."""
-    from . import runner  # runner imports this module
+def _opencode_env() -> tuple[Path, dict]:
+    """(where, environment) of wb's own calls to OpenCode: the state directory, with the project
+    config shut out as the agent's is (OPENCODE_DISABLE_PROJECT_CONFIG): a repo's opencode.json
+    under the caller's cwd must not add providers to the list."""
     where = store.home()
     where.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "PWD": str(where), "OPENCODE_DISABLE_PROJECT_CONFIG": "1"}
     if os.environ.get("WB_OPENCODE_CONFIG"):
         env["OPENCODE_CONFIG"] = os.environ["WB_OPENCODE_CONFIG"]
+    return where, env
+
+
+def _opencode_json(*args: str):
+    """(parsed JSON stdout, "") of an OpenCode command, or (None, why: its first stderr line).
+    `--standalone`: wb's own environment, never the background service's (whose env keys and
+    config may differ), as every workbench call to OpenCode runs (_opencode_env)."""
+    from . import runner  # runner imports this module
+    where, env = _opencode_env()
     from .media import run_group  # media imports this module
     cmd = [*runner.opencode_bin(), *args, "--standalone"]
     try:
@@ -1070,6 +1080,122 @@ def _opencode_json(*args: str):
         return json.loads(r.stdout or "null"), ""
     except ValueError:
         return None, f"opencode {' '.join(args)} printed no JSON"
+
+
+# OpenCode's catalog is read from a server of its own, asked once its plugins have loaded. 2.4.0
+# stopped model.list waiting for them (anomalyco/opencode #63814: the handler in
+# packages/server/src/handlers/model.ts answers with what has loaded so far), and the models.dev
+# catalog and every provider are plugins that load after the server starts. `api model.list
+# --standalone` starts a server, asks at once and exits: 2.4.1 printed no model at all, or 14 of
+# 93, so wb saw no API model and the opencode workflow failed (2026-11-23). OpenCode's own one-shot
+# commands (`models`, `auth`) first wait until plugin.list lists any, as model_list does; 2.3's
+# model.list waited by itself (5 s at most), so the wait costs it nothing (2026-11-24).
+PLUGIN_POLL = 0.025      # seconds between plugin.list reads, as OpenCode's waitForPlugins
+
+
+def _list_catalog() -> tuple[dict | None, str]:
+    """model.list's document in wb's own environment (_opencode_env), or (None, why)."""
+    where, env = _opencode_env()
+    return model_list(env, where)
+
+
+def model_list(env: dict, cwd, timeout: float | None = None,
+               cmd: list[str] | None = None) -> tuple[dict | None, str]:
+    """(model.list's document, {location, data}; "") or (None, why), read from a private
+    `opencode serve --stdio` (the server `--standalone` starts) once its plugins have loaded. The
+    server gets a password of its own (OPENCODE_PASSWORD, which it takes out of the environment
+    its tools inherit), ends when its stdin closes, and its group is killed after, as run_group's.
+    ``env`` and ``cwd`` are OpenCode's (the location asked about is ``cwd``); ``cmd`` the OpenCode
+    command, runner.opencode_bin() by default; ``timeout`` CATALOG_TIMEOUT by default."""
+    from . import runner  # runner imports this module
+    from .media import _kill_group  # media imports this module
+    timeout = CATALOG_TIMEOUT if timeout is None else timeout
+    argv = [*(cmd or runner.opencode_bin()), "serve", "--stdio", "--port", "0", "--hostname", "127.0.0.1"]
+    password = secrets.token_urlsafe(24)
+    deadline = time.monotonic() + timeout
+    late = f"opencode model.list took over {timeout:g} s"
+    with tempfile.TemporaryFile() as err:
+        try:
+            p = subprocess.Popen(argv, cwd=cwd, env={**env, "OPENCODE_PASSWORD": password},
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
+                                 start_new_session=True)
+        except FileNotFoundError:
+            return None, f"{argv[0]} not found (OpenCode isn't installed)"
+        except OSError as e:
+            return None, f"opencode serve: {e.strerror or e}"
+        url, doc, why = None, None, ""
+        try:
+            url = _served_url(p, deadline)
+            if url is None and p.poll() is None:
+                why = late
+            elif url == "":
+                why = "opencode serve listened off this machine"
+            elif url:
+                doc, why = _ask_catalog(url, password, str(cwd), deadline, late)
+        finally:
+            with contextlib.suppress(OSError):
+                p.stdin.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                p.wait(timeout=5)
+            _kill_group(p)
+            p.wait()
+            p.stdout.close()
+        if url is None and not why:
+            err.seek(0)
+            first = next((x.strip() for x in err.read().decode(errors="replace").splitlines()
+                          if x.strip()), "")
+            why = _redact(first or f"opencode serve exited {p.returncode} before it listened")
+    return doc, why
+
+
+def _served_url(p: subprocess.Popen, deadline: float) -> str | None:
+    """The URL `serve --stdio` prints (`{"url": ...}`) when it listens; "" when it printed another
+    one (not this machine's), None when it exited or the deadline came first."""
+    fd, buf = p.stdout.fileno(), b""
+    while (left := deadline - time.monotonic()) > 0:
+        if not select.select([fd], [], [], left)[0]:
+            continue
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            return None
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            try:
+                url = json.loads(line).get("url")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(url, str):
+                return url if _this_host(urlparse(url).hostname, dns=False) else ""
+    return None
+
+
+def _ask_catalog(url: str, password: str, where: str, deadline: float,
+                 late: str) -> tuple[dict | None, str]:
+    """model.list from the server at ``url``, once plugin.list lists any plugin (PLUGIN_POLL)."""
+    auth = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
+    query = urllib.parse.urlencode({"location[directory]": where})
+
+    def get(path):
+        req = urllib.request.Request(f"{url.rstrip('/')}{path}?{query}", headers={"Authorization": auth})
+        # no proxy, as _open's requests to this machine, but never its stored keys: this is
+        # OpenCode's own server, asked with the password wb gave it
+        with _DIRECT.open(req, timeout=max(0.5, deadline - time.monotonic())) as r:
+            return json.load(r)
+    try:
+        while not (get("/api/plugin") or {}).get("data"):
+            if time.monotonic() + PLUGIN_POLL > deadline:
+                return None, late
+            time.sleep(PLUGIN_POLL)
+        return get("/api/model"), ""
+    except urllib.error.HTTPError as e:
+        body = e.read(2000).decode(errors="replace")
+        e.close()
+        return None, _redact(f"opencode model.list: HTTP {e.code} {body}")
+    except (OSError, ValueError, AttributeError) as e:
+        if time.monotonic() >= deadline:
+            return None, late
+        return None, _redact(f"opencode model.list: {getattr(e, 'reason', None) or e}")
 
 
 def _auth_rows() -> tuple[dict | None, str]:
@@ -1181,13 +1307,13 @@ def _off_machine(pid: str, url: str, extra: dict) -> bool:
 
 
 def _build_hosted() -> dict:
-    """hosted.json's document, read fresh: OpenCode's catalog (`api model.list`, only providers
+    """hosted.json's document, read fresh: OpenCode's catalog (model_list: only providers
     that can authenticate, plus OpenCode's free models) less the providers configured on this
     machine, the models of a configured provider off this machine, and each Ollama cloud model
     of a provider on this machine; providers OpenCode wouldn't load left out, as _scan leaves
     them. A failed read gives no models and its first stderr line."""
     doc = {"v": 1, "ts": time.time(), "stamp": _stamp(), "error": "", "providers": {}, "models": {}}
-    listed, why = _opencode_json("api", "model.list")
+    listed, why = _list_catalog()
     auth, auth_why = _auth_rows() if listed is not None else (None, "")
     if listed is None or auth is None:
         doc["error"] = why or auth_why
@@ -1417,7 +1543,7 @@ def catalog_doc(m: Model) -> dict | None:
     the user's OpenCode lists (#1015). `reasoning` is left unsupported, so the file makes no
     variants of its own: the entry's variants go in the layer (catalog_variants), as V1
     `provider.<p>.models.<m>.variants`, which OpenCode 2.3.0 and 2.3.2 read back into exactly
-    what `api model.list` printed (RealOpenCodeAPI). A V2 `providers.<p>` beside the layer's V1
+    what model.list printed (RealOpenCodeAPI). A V2 `providers.<p>` beside the layer's V1
     `provider.<p>` would replace it whole, the keyhole's options with it (normalize.ts
     `mergeMaps`), and a request went out with no key. None for a model that isn't the
     catalog's (a config entry, an Ollama cloud model) or can't be rebuilt: headers or a body of
@@ -1465,7 +1591,7 @@ def catalog_doc(m: Model) -> dict | None:
 
 
 def _source_cost(cost) -> dict | None:
-    """`api model.list`'s prices (a base row, then one per context tier) in models.dev v2's
+    """model.list's prices (a base row, then one per context tier) in models.dev v2's
     shape, which OpenCode turns back into the same rows (models-dev.ts `cost`)."""
     rows = [r for r in cost if isinstance(r, dict)] if isinstance(cost, list) else []
     base = next((r for r in rows if not r.get("tier")), None)
@@ -1488,7 +1614,7 @@ def _source_cost(cost) -> dict | None:
 
 
 def catalog_variants(m: Model) -> dict:
-    """The catalog entry's variants (`api model.list`'s `[{id, settings}]`) as the layer's V1
+    """The catalog entry's variants (model.list's `[{id, settings}]`) as the layer's V1
     `provider.<p>.models.<m>.variants` ({id: settings}), beside catalog_doc's file."""
     return {str(v["id"]): dict(v.get("settings") or {}) for v in m.config.get("variants") or []
             if isinstance(v, dict) and v.get("id")}

@@ -2887,13 +2887,23 @@ says so after the id: `unknown model '<id>' (OpenCode's catalog read failed: <er
 read as a wrong id, Claude hunted for the "right" one).
 
 **API models** (`hosted`, `lookup`, #1013). `models.hosted() -> {id: Model}` with `kind == "api"`:
-- *Where from.* `opencode api model.list --standalone` (JSON `{location, data}`: only providers that
-  can authenticate, plus OpenCode's free models; the spike's facts, *API models through OpenCode*)
-  and `opencode auth list --format json --standalone` for each provider's key source (it never
-  prints a secret; `auth export` is never run: only the keyhole reads keys, for a task). Both run in
+- *Where from.* OpenCode's model.list (JSON `{location, data}`: only providers that
+  can authenticate, plus OpenCode's free models; the spike's facts, *API models through OpenCode*),
+  read by `models.model_list` from a private `opencode serve --stdio --port 0 --hostname 127.0.0.1`
+  (the server `--standalone` starts; it prints `{"url"}`, takes a password of wb's from
+  `OPENCODE_PASSWORD` as HTTP Basic `opencode:<password>`, and ends when its stdin closes; its group is
+  killed after): `GET /api/plugin` every `PLUGIN_POLL` (25 ms) until it lists a plugin, then `GET
+  /api/model`, both with `location[directory]`, through `_DIRECT` (no proxy; never `_open`'s stored keys), within `CATALOG_TIMEOUT` (past it,
+  `opencode model.list took over 30 s`: never a partial list). Not `opencode api model.list
+  --standalone`: from OpenCode 2.4.0 the server answers model.list with what has loaded so far, and
+  the catalog and every provider are plugins that load after it starts (#63814 upstream), so 2.4.1
+  printed no model, or 14 of 93, and wb saw no API model (the opencode workflow, 2026-11-23);
+  OpenCode's own `models` waits on plugin.list the same way. And `opencode auth list --format json
+  --standalone` for each provider's key source (it never
+  prints a secret, and waits for the plugins itself; `auth export` is never run: only the keyhole reads keys, for a task). Both run in
   the state directory with `OPENCODE_DISABLE_PROJECT_CONFIG=1` (a repo's opencode.json under the
   caller's cwd must not add providers) and `OPENCODE_CONFIG=$WB_OPENCODE_CONFIG` when set
-  (`_opencode_json`). OpenCode's own catalog fetch is left alone. Ids split at the first `/` only
+  (`_opencode_env`). OpenCode's own catalog fetch is left alone. Ids split at the first `/` only
   (`deepinfra/deepseek-ai/DeepSeek-V4.1-Flash-1017`: provider `deepinfra`, name the rest).
 - *Which.* Every catalog model whose provider has no configured entry on this machine (one that
   `_scan` lists and isn't off it: those are `discover()`'s); the models of a configured provider
@@ -3528,7 +3538,8 @@ weren't needed. CI pins 2.3.0: not checked there.
   `kv`, key `models-dev:v2:catalog` (13.7 MB here; key checked, not read), with a bundled snapshot when
   there's neither (`core/src/models-dev.ts`). A failed fetch doesn't slow a start (0.86 s). No file
   under `~/.cache/opencode` (only `bin/`).
-- **Reading it.** `opencode api model.list` prints JSON `{location, data: [...]}`, each entry with
+- **Reading it.** `opencode api model.list` prints JSON `{location, data: [...]}` (on 2.3; 2.4 asks
+  before its plugins load and prints none: `model_list` reads it from a server of its own), each entry with
   `providerID`, `id`, `family`, `package`, `settings.baseURL` and `settings.apiKey` (a layer's or a free model's key: never copied, #1013), `capabilities{tools,
   input, output, temperature}`, `variants[{id, settings | body}]`, `cost[{input, output,
   cache{read, write}, tier?}]` (USD per million tokens; `tier: {type: "context", size}` prices past a
@@ -6301,7 +6312,11 @@ them, then `ok`'s answer). A new fake behaviour is a new scenario.
 
 **API models in the fake** (#1011, from the spike for #1009 on OpenCode 2.3.2; the real-OpenCode checks below hold on
 2.3.0 too). `WB_FAKE_CATALOG` names a JSON file of `api model.list` entries (a list, or `{"data", "auth"}` to give
-`auth list` its own rows; unset, empty). The fake prints `api model.list` as `{location, data}`; `models` as
+`auth list` its own rows; unset, empty). The fake prints `api model.list` as `{location, data}`; `serve --stdio`
+(`models.model_list`'s) prints `{"url"}` and serves `GET /api/plugin` and `GET /api/model` (the same `{location,
+data}`) on 127.0.0.1 behind Basic `opencode:<OPENCODE_PASSWORD>` until its stdin closes; `FAKE_COLD=<n>` plays 2.4's
+cold server (its first n plugin.list reads list none, model.list until then only the first entry), `FAKE_SERVE_PID`
+records its pid; `models` as
 `<provider>/<id>` lines, refusing a provider argument as 2.3.2 does; `auth list --format json` as `[{id, name,
 connections: [{type: "credential", id, label, method: "key"}]}]` per catalog provider. `run -m <provider>/<id>#<variant>`
 splits at the first `/` and the first `#` after it: a catalog provider's unknown model is `{"type": "error", "error":
@@ -6329,8 +6344,8 @@ in `FAKE_HTTP_LOG`; a 2xx plays `ok`, an HTTP error the matching error event wit
 unreachable base `provider.transport`. With `OPENCODE_MODELS_PATH` the fake lists that file's models in place of
 `WB_FAKE_CATALOG`'s (as 2.3.2 does), their variants the config's only. `WB_FAKE_API=<provider>[/<id>]=<state>,…` gives a model (its own entry first; a config model too) or a provider one
 of those states (or `ok`): its runs play that scenario, and a `nokey` provider drops out of `api model.list`, `models`
-and `auth list`, as one OpenCode can't authenticate does. `FAKE_CALLS` (a file) logs each `api`, `models` and `auth`
-call's argv (`ApiDiscovery` counts catalog reads); `FAKE_CATALOG_FAIL` makes `api model.list` and `models` fail (stderr,
+and `auth list`, as one OpenCode can't authenticate does. `FAKE_CALLS` (a file) logs each `api`, `models`, `serve` and `auth`
+call's argv (`ApiDiscovery` counts catalog reads, a `serve` each); `FAKE_CATALOG_FAIL` makes `api model.list`, `models` and `serve` fail (stderr,
 exit 1). Only the fake reads `WB_FAKE_API` and `WB_FAKE_CATALOG`: discovery is driven through it, with no product-side
 fake (`ApiDiscovery`, #1013); `Real`'s fixture (`test_portable.py`) runs it too, so a lookup a test misses never reaches
 the user's own OpenCode. `ApiStats` (#1022) writes an API task's task.json as `wb start --role` will (`via`, `provider`,
@@ -6445,7 +6460,7 @@ a key with a newline, bad queries and chunk sizes (`raw_request`, for what http.
 an error body cut across the key, errors inside a 200 stream (`_Upstream`'s "raw" mode), packages
 the keyhole can't speak, `@ai-sdk/<name>` npm names (#1137), DeepInfra's appended `/openai`, a key written as a header, a key in a
 model's own entry or the V2 form (#1015's review). Its
-`test_the_tasks_own_catalog_*` (#1015) takes real `api model.list` entries through `hosted()`,
+`test_the_tasks_own_catalog_*` (#1015) takes real model.list entries (`models.model_list`, as every real test reads the catalog: `ApiHarness.real_list`) through `hosted()`,
 `catalog_doc` and the runner's overlay: real OpenCode reads them back field for field (the `limit` capped), and a model
 the binary lacks fails without the file and runs through the keyhole with it.
 
@@ -6621,7 +6636,7 @@ doc needs its own `!/` line).
 - **What the keyhole can hold** (`keyhole.load_key`'s refusals: an OAuth login, an external credential, request
   signing, a key only in the environment or written in a config) → `Model.key`'s states, `models.status`'s and
   `cli._route_api`'s `can't run: needs a key wb can hold outside the lane`, never "available".
-- **An OpenCode fact the API harness copies** (`api model.list`, `auth list`, `-m` ids and variants, `part.cost`,
+- **An OpenCode fact the API harness copies** (model.list through `serve --stdio`, `auth list`, `-m` ids and variants, `part.cost`,
   the `retry`/`error` shapes, each protocol's path and key header) → `tests/fake_opencode.py`, `tests/capture_llm.py`
   and `ApiHarness`'s `test_real_opencode_*` together (*The tests*); its `max_tokens` cap and compaction point, `ApiSizing`'s.
 - **The provider's wait** (#1020): `keyhole.RATE_HOLD_S` (300) stays under the layer's header guard (600 s, #1017),

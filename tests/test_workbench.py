@@ -27607,11 +27607,13 @@ class RealOpenCodeAPI(_KeyholeTest):
                    for d in ("config", "data", "state", "cache")}}
 
     def listed(self, layer, name, models_path=None):
-        r = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.repo,
-                           env=self.scratch_env(layer, name, models_path), capture_output=True,
-                           text=True, timeout=120)
-        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-        rows = json.loads(r.stdout)["data"]
+        """model.list's rows, read as wb reads them (models.model_list): OpenCode 2.4 answers a
+        server's first read before its plugins load, with no model (2026-11-24)."""
+        from workbench import models
+        doc, why = models.model_list(self.scratch_env(layer, name, models_path), self.repo,
+                                     timeout=120, cmd=["opencode"])
+        self.assertIsNotNone(doc, why)
+        rows = doc["data"]
         for row in rows:
             (row.get("settings") or {}).pop("apiKey", None)        # the layer's dummy, given back
         return rows
@@ -27652,13 +27654,13 @@ class RealOpenCodeAPI(_KeyholeTest):
             return kh, runner.rules_env(layer, over)["OPENCODE_CONFIG_CONTENT"]
         for want in [*picked, new]:
             kh, content = config(found[f"{want['providerID']}/{want['id']}"])
+            from workbench import models
             env = self.scratch_env(tmp / "layer.json", f"file-{len(want['id'])}",
                                    runner.catalog_path(self.task))
-            r = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.repo,
-                               env={**env, "OPENCODE_CONFIG_CONTENT": content}, capture_output=True,
-                               text=True, timeout=120)
-            self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-            [got] = json.loads(r.stdout)["data"]
+            doc, why = models.model_list({**env, "OPENCODE_CONFIG_CONTENT": content}, self.repo,
+                                         timeout=120, cmd=["opencode"])
+            self.assertIsNotNone(doc, why)
+            [got] = doc["data"]
             self.assertEqual(got["settings"].pop("baseURL"), kh.base)       # the keyhole's
             self.assertEqual(got["settings"].pop("apiKey"), kh.token)
             want = json.loads(json.dumps(want))
@@ -28988,12 +28990,18 @@ class ApiHarness(Base):
         return {**extra, "provider": {p: {"options": {"baseURL": f"http://127.0.0.1:{port}/v1",
                                                       "apiKey": "dummy-key"}} for p in providers}}
 
+    def real_list(self, layer: dict) -> dict:
+        """model.list's document from the real OpenCode with ``layer``, read as wb reads it
+        (models.model_list): `api model.list` on OpenCode 2.4 asks before its plugins load and
+        lists no model (the opencode workflow, 2026-11-23)."""
+        from workbench import models
+        doc, why = models.model_list(self.real_env(layer), self.oc_cwd(), timeout=60, cmd=["opencode"])
+        self.assertIsNotNone(doc, why)
+        return doc
+
     def real_model(self, provider, ok=lambda e: True) -> dict:
         """The spike's model of this provider from this OpenCode's bundled catalog, else another."""
-        out = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
-                             env=self.real_env(self.layer(1, provider)), capture_output=True,
-                             text=True, timeout=60).stdout
-        listed = [e for e in json.loads(out)["data"] if e["providerID"] == provider
+        listed = [e for e in self.real_list(self.layer(1, provider))["data"] if e["providerID"] == provider
                   and e.get("capabilities", {}).get("tools") and ok(e)]
         self.assertTrue(listed, f"no {provider} model in this OpenCode's catalog")
         return next((e for e in listed if e["id"] == SPIKE_IDS[provider]), listed[0])
@@ -29063,14 +29071,13 @@ class ApiHarness(Base):
         layer = {"provider": {"deepinfra": {"options": {"baseURL": "https://deepinfra.invalid/v1",
                                                         "apiKey": "dummy-key"},  # off this machine
                                             "models": {"wb-alias": {"id": entry["id"]}}}}}
-        out = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
-                             env=self.real_env(layer), capture_output=True, text=True, timeout=60)
-        listed = {e["id"]: e for e in json.loads(out.stdout)["data"] if e["providerID"] == "deepinfra"}
+        out = self.real_list(layer)
+        listed = {e["id"]: e for e in out["data"] if e["providerID"] == "deepinfra"}
         self.assertEqual((listed["wb-alias"]["modelID"], listed[entry["id"]]["modelID"]), (entry["id"], entry["id"]))
         self.assertEqual(listed["wb-alias"]["settings"]["apiKey"], "dummy-key")
         from workbench import models
-        with mock.patch.object(models, "_opencode_json", lambda *a: (json.loads(out.stdout), "")
-                               if a[:2] == ("api", "model.list") else ([], "")):
+        with mock.patch.object(models, "_list_catalog", lambda: (out, "")), \
+                mock.patch.object(models, "_opencode_json", lambda *a: ([], "")):
             doc = models.hosted_doc(fresh=True)
         self.assertEqual(doc["models"]["deepinfra/wb-alias"]["name"], entry["id"])
         self.assertNotIn("dummy-key", json.dumps(doc))
@@ -29194,7 +29201,7 @@ class ApiDiscovery(Base):
 
     def reads(self) -> int:
         """How many times wb read OpenCode's catalog."""
-        return sum(json.loads(x)[:2] == ["api", "model.list"]
+        return sum(json.loads(x)[:1] == ["serve"]   # models.model_list's server, one per read
                    for x in (self.calls.read_text().splitlines() if self.calls.exists() else []))
 
     def state(self, mid):
@@ -29365,6 +29372,24 @@ class ApiDiscovery(Base):
         path.write_text("{not json")                              # a corrupt cache: rebuilt
         self.assertIn("acme/coder-flash", self.models.hosted())
         self.assertEqual(self.reads(), 4)
+
+    def test_the_catalog_is_read_once_opencodes_plugins_have_loaded_not_from_a_cold_server(self):
+        # the opencode workflow, 2026-11-23: OpenCode 2.4's model.list answers before its plugins
+        # load (anomalyco/opencode #63814), so `api model.list` printed no model on 2.4.1, or the
+        # first few, and wb found no API model at all
+        os.environ["FAKE_COLD"] = "3"
+        found = self.models.hosted(fresh=True)
+        self.assertIn("acme/coder-flash", found)
+        self.assertIn("acme/coder-pro", found)                    # not only the first entry
+        self.assertEqual(self.reads(), 1)
+        self.assertEqual(self.models.hosted_error(), "")
+        # plugins that never load: a failed read, never the partial list
+        os.environ.update(FAKE_COLD="100000", FAKE_SERVE_PID=str(Path(self.tmp.name) / "serve.pid"))
+        where, env = self.models._opencode_env()
+        doc, why = self.models.model_list(env, where, timeout=1)
+        self.assertEqual((doc, why), (None, "opencode model.list took over 1 s"))
+        with self.assertRaises(ProcessLookupError):                         # its server ended
+            os.kill(int(Path(os.environ["FAKE_SERVE_PID"]).read_text()), 0)
 
     def test_a_failed_catalog_read_leaves_gpu_starts_alone(self):
         os.environ["FAKE_CATALOG_FAIL"] = "1"
@@ -30919,6 +30944,7 @@ class ApiThinking(Base):
     catalog = ApiHarness.catalog
     capture = ApiHarness.capture
     real_env = ApiHarness.real_env
+    real_list = ApiHarness.real_list
     oc_cwd = ApiHarness.oc_cwd
     layer = staticmethod(ApiHarness.layer)
     real_run = ApiHarness.real_run
@@ -31185,9 +31211,7 @@ class ApiThinking(Base):
         layer = lambda: {"provider": {"deepseek": {"options": {  # noqa: E731
             "baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "dummy-key",
             "headerTimeout": False, "chunkTimeout": 960000}}}}
-        listed = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
-                                env=self.real_env(layer()), capture_output=True, text=True, timeout=60)
-        rows = [e for e in json.loads(listed.stdout)["data"] if e["providerID"] == "deepseek"
+        rows = [e for e in self.real_list(layer())["data"] if e["providerID"] == "deepseek"
                 and e.get("capabilities", {}).get("tools")]
         self.assertTrue(rows, "no DeepSeek model in this OpenCode's catalog")
         entry = rows[0]
@@ -31256,9 +31280,7 @@ class ApiThinking(Base):
         # `thinking`; and 18 of the catalog's 20 Anthropic models list no `none`
         port, out, _ = self.capture("real-anthropic")
         layer = self.layer(port, "anthropic")
-        listed = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
-                                env=self.real_env(layer), capture_output=True, text=True, timeout=60)
-        rows = [e for e in json.loads(listed.stdout)["data"] if e["providerID"] == "anthropic"
+        rows = [e for e in self.real_list(layer)["data"] if e["providerID"] == "anthropic"
                 and e.get("capabilities", {}).get("tools") and e.get("variants")]
         self.assertTrue(rows, "no Anthropic model with variants in this OpenCode's catalog")
         kinds = lambda e: {((v.get("settings") or {}).get("thinking") or {}).get("type")  # noqa: E731
