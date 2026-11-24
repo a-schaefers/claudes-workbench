@@ -1185,6 +1185,285 @@ class Lifecycle(Base):
                            (npm_w.replace(nf, "x").replace("code 127", "code 1"), 1)):
             self.assertIsNone(said(tail, code), tail)
 
+    def test_a_wrappers_own_not_found_line_checks_in_at_once_and_skips_auto_fix(self):
+        # #1256 (bar round 6 of 2.0): `poetry run pytest` with the in-project venv wb asks for
+        # still empty says Poetry's `Command not found: pytest` and exits 1, which no pattern read:
+        # no check-in, and round 1 and both auto-fix rounds ran on correct code. The fake poetry
+        # prints Poetry 2.5's lines and exit, verbatim.
+        bin_dir = Path(self.tmp.name) / "fakebin"
+        bin_dir.mkdir()
+        (bin_dir / "poetry").write_text('#!/bin/sh\n[ "$1" = run ] || exit 2\n'
+                                        'echo "Creating virtualenv repo in $PWD/.venv"\n'
+                                        'echo "Command not found: $2"\nexit 1\n')
+        (bin_dir / "poetry").chmod(0o755)
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+        self.start("t-po", "ok", "--test", "poetry run nosuch-tool-1256 -q", "--auto-fix", "2",
+                   "--no-self-review")
+        st = wait_phase("t-po", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 1))
+        task = store.Task("t-po")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-po" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertIn("can't run in the agent's environment: nosuch-tool-1256: command not found "
+                      "(exit 1 on the base)", checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: nosuch-tool-1256: "), summary)
+
+    def test_a_sourced_venv_the_worktree_lacks_checks_in_at_once_and_skips_auto_fix(self):
+        # #1258 (bar round 6 of 2.0): `source .venv/bin/activate && …`, a form #196 cites, with
+        # the venv ignored and no --setup: bash exits 1 (dash 2), not 127, so #1206's check never
+        # read its No such file line, and round 1 and both auto-fix rounds ran on correct code
+        (self.repo / ".gitignore").write_text(".venv/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        cmd = ". .venv/bin/activate && python3 -c \"assert open('answer.txt').read().strip() == '42'\""
+        self.start("t-act", "ok", "--test", cmd, "--auto-fix", "2", "--no-self-review")
+        st = wait_phase("t-act", {"review"})
+        self.assertIn(st["base_check"]["exit"], (1, 2))  # bash's, or dash's
+        self.assertEqual(st["round"], 1)
+        task = store.Task("t-act")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-act" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertIn("can't run in the agent's environment: .venv/bin/activate: not in the worktree "
+                      "(.venv/ is an install's, never checked out)", checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: .venv/bin/activate: "), summary)
+
+    def test_a_name_any_wrapper_could_not_start_is_missing_when_it_resolves_nowhere(self):
+        # #1256, #1258, #1262 (bar round 6 of 2.0): each wrapper's wording was a pattern of its
+        # own, and each round found one more missed; now any wrapper's line at its own exit counts
+        # when the name it gives is a word of the command that doesn't resolve on the agent's PATH
+        said = lambda tail, code, cmd=None: runner.missing_command(  # noqa: E731
+            {"exit": code, "tail": tail, **({"cmd": cmd} if cmd else {})})
+        nf = "nosuch-tool-1256: command not found"
+        venv = ".venv/bin/{}: not in the worktree (.venv/ is an install's, never checked out)"
+        # Poetry 2.5, uv, bundler (its hint after its line)
+        for tail, code, cmd in (
+                ("Creating virtualenv p in /r/.venv\nCommand not found: nosuch-tool-1256", 1,
+                 "poetry run nosuch-tool-1256 -q"),
+                ("error: Failed to spawn: `nosuch-tool-1256`\n  Caused by: No such file or directory "
+                 "(os error 2)", 2, "uv run --no-sync nosuch-tool-1256"),
+                ("bundler: command not found: nosuch-tool-1256\nInstall missing gem executables with "
+                 "`bundle install`", 127, "bundle exec nosuch-tool-1256")):
+            self.assertEqual(said(tail, code, cmd), nf, tail)
+        # a sourced venv in bash (exit 1), zsh, dash (exit 2), and behind make, whose recipe the
+        # command doesn't name (#1258)
+        for tail, code in (("/usr/bin/bash: line 1: .venv/bin/activate: No such file or directory", 1),
+                           ("zsh:source:1: no such file or directory: .venv/bin/activate", 1),
+                           ("/bin/sh: 1: .: cannot open .venv/bin/activate: No such file", 2)):
+            self.assertEqual(said(tail, code, "source .venv/bin/activate && pytest"),
+                             venv.format("activate"), tail)
+        self.assertEqual(said("/bin/sh: 1: .: cannot open .venv/bin/activate: No such file\n"
+                              "make: *** [Makefile:2: test] Error 2", 2, "make test"), venv.format("activate"))
+        # macOS's make 3.81 execs a one-word recipe itself: `Command not found`, capitalized (#1262)
+        err = "make: *** [test] Error 127"
+        self.assertEqual(said(f"pytest -q\nmake: nosuch-tool-1262: Command not found\n{err}", 2),
+                         "nosuch-tool-1262: command not found")
+        self.assertEqual(said(f"make: .venv/bin/pytest: Command not found\n{err}", 2), venv.format("pytest"))
+        self.assertEqual(said("make[1]: nosuch-tool-1262: Command not found\nmake[1]: *** [test] Error 127\n"
+                              "make[1]: Leaving directory '/r/sub'\nmake: *** [all] Error 2", 2),
+                         "nosuch-tool-1262: command not found")
+        # what isn't a missing tool still goes back: a name that resolves (wrappers search the
+        # agent's PATH too), one the command doesn't name, a file the test reads or the step
+        # makes, a path outside TOOL_DIRS, and no command to check the name against
+        for tail, code, cmd in (("Command not found: python3", 1, "poetry run python3 x.py"),
+                                ("Command not found: nosuch-tool-1256", 1, "poetry run pytest"),
+                                ("cat: answer.txt: No such file or directory", 1, "cat answer.txt"),
+                                ("ERROR: file or directory not found: test_new.py", 4, "pytest test_new.py"),
+                                ("bash: line 1: ./check.sh: No such file or directory", 1, "./check.sh"),
+                                ("Command not found: nosuch-tool-1256", 1, None)):
+            self.assertIsNone(said(tail, code, cmd), tail)
+        # a subcommand the step adds is an argument, never a program: Click 8.5.1's own lines
+        # (Typer's the same) checked in as a missing tool and skipped auto-fix (#1262's review,
+        # 2026-11-24), even where an option before the program makes the word after it count
+        # (`uv run --frozen mycli frobnicate`); nor is a name a wrapper's program is given, past
+        # its run verb's program
+        click = ("Usage: cli.py [OPTIONS] COMMAND [ARGS]...\nTry 'cli.py --help' for help.\n\n"
+                 "Error: No such command 'frobnicate'.")
+        for cmd in ("python3 cli.py frobnicate", "python3 -m mycli frobnicate",
+                    "poetry run mycli frobnicate", "uv run --frozen mycli frobnicate",
+                    "poetry run -q mycli frobnicate"):
+            self.assertIsNone(said(click, 2, cmd), cmd)
+        # nor cargo's subcommand, which may be an alias the step adds to .cargo/config.toml:
+        # cargo 1.90's lines, verbatim, at its 101 (#1262's review, 2026-11-24)
+        cargo = ("error: no such command: `xtask`\n\nhelp: a command with a similar name exists: "
+                 "`test`\n\nhelp: view all installed commands with `cargo --list`\nhelp: find a "
+                 "package to install `xtask` with `cargo search cargo-xtask`")
+        for cmd in ("cargo xtask codegen", "cargo +nightly xtask codegen"):
+            self.assertIsNone(said(cargo, 101, cmd), cmd)
+        self.assertIsNone(said("Command not found: nosuch-tool-1256", 1, "poetry run pytest nosuch-tool-1256"))
+        self.assertEqual(runner.command_programs("FOO=1 timeout 60 uv run --with x pytest -q && cd a"),
+                         {"timeout", "uv", "x", "pytest", "cd"})
+        self.assertEqual(runner.command_programs("FOO=1 timeout 60 uv run --with x pytest -q && cd a",
+                                                 run_only=True), {"x", "pytest"})
+
+    def test_a_console_script_the_step_adds_under_poetry_run_goes_back_to_the_agent(self):
+        # #1256's review (2026-11-24): Poetry 2.5.2's `poetry run` reads [tool.poetry.scripts]
+        # before PATH, so a step adding `mycli` there needs no install; on the base, with no venv
+        # in the worktree yet, its `Command not found: mycli` at exit 1 checked in with a false "no
+        # round can fix that", and when round 1 left the script out its auto-fix round was skipped.
+        # Poetry's base lines, verbatim. The fake poetry runs a script the pyproject declares.
+        self.spec.write_text("Write the answer to answer.txt, and add the `mycli1256` console "
+                             "script to [tool.poetry.scripts].\n")
+        bin_dir = Path(self.tmp.name) / "fakebin"
+        bin_dir.mkdir()
+        (bin_dir / "poetry").write_text(
+            '#!/bin/sh\n[ "$1" = run ] || exit 2\n'
+            'echo "Creating virtualenv pkg in $PWD/.venv"\n'
+            'grep -q "^$2 = " pyproject.toml 2>/dev/null && exit 0\n'
+            'echo "Command not found: $2"\nexit 1\n')
+        (bin_dir / "poetry").chmod(0o755)
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+        self.start("t-pos", "ok", "--test", "poetry run mycli1256", "--auto-fix", "1",
+                   "--no-self-review")
+        st = wait_phase("t-pos", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"], st.get("auto_fixes", 0)), (1, 2, 1))
+        self.assertFalse([r for r in store.notices() if r["task"] == "t-pos" and r["kind"] == "checkin"])
+        task = store.Task("t-pos")
+        self.assertNotIn("auto-fix skipped", (task.round_dir(1) / "summary.md").read_text())
+        said = lambda: runner.missing_command({"exit": 1, "cmd": "poetry run mycli1256", "tail": (  # noqa: E731
+            f"Creating virtualenv pkg in {task.workdir}/.venv\nCommand not found: mycli1256")}, task)
+        self.assertFalse(context.own_venv(task))
+        self.assertIsNone(said())
+        # a tool nobody makes is still one the agent lacks, under Poetry as #1256 found
+        prompt = store.round_prompt(task, 1)
+        prompt.write_text("Write the answer to answer.txt.\n")
+        self.assertEqual(said(), "mycli1256: command not found")
+        # the round added it: Poetry would have run it, and the project declares it
+        (task.workdir / "pyproject.toml").write_text('[tool.poetry.scripts]\nmycli1256 = "pkg.cli:main"\n')
+        self.assertIsNone(said())
+
+    def test_a_console_script_the_step_adds_under_uv_run_goes_back_to_the_agent(self):
+        # #1256's review (2026-11-24): `uv run` syncs the project, installing the
+        # [project.scripts] entry the step adds, so uv's `Failed to spawn` for it on the base (no
+        # venv yet) is no missing tool, nor when the round left the script out; with the sync
+        # off (`--no-sync`) only a script of the step's own still goes back
+        self.spec.write_text("Fix the answer.\n")
+        self.start("t-uvs", "ok", "--no-base-check", "--no-self-review")
+        wait_phase("t-uvs", {"review"})
+        task = store.Task("t-uvs")
+        said = lambda: runner.missing_command({"exit": 2, "cmd": "uv run --no-sync mycli1256 check", "tail": (  # noqa: E731
+            "error: Failed to spawn: `mycli1256`\n  Caused by: No such file or directory (os error 2)")}, task)
+        self.assertFalse(context.own_venv(task))
+        self.assertEqual(said(), "mycli1256: command not found")
+        prompt = store.round_prompt(task, 1)
+        for spec in ('Add [project.scripts] mycli1256 = "pkg.cli:main".\n',
+                     "Add the `mycli1256` console script.\n"):
+            prompt.write_text(spec)
+            self.assertIsNone(said(), spec)
+        prompt.write_text("Fix the answer.\n")
+        (task.workdir / "pyproject.toml").write_text('[project]\nname = "x"\n[project.scripts]\n'
+                                                     'mycli1256 = "pkg.cli:main"\n')
+        self.assertIsNone(said())
+        # by its bare name, not after a run verb, a script needs the worktree's venv still (#1244)
+        self.assertEqual(runner.missing_command({"exit": 1, "cmd": "mycli1256 check",
+                                                 "tail": "Command not found: mycli1256"}, task),
+                         "mycli1256: command not found")
+
+    def test_a_tool_a_dependency_brings_under_uv_run_goes_back_to_the_agent_unless_the_sync_is_off(self):
+        # #1256's second review (2026-11-24): `uv run` syncs the project, dev group included,
+        # before it spawns, so a step adding ruff to [dependency-groups] dev runs it once it
+        # declares it; uv 0.13.10's base lines (with `dependencies = []` and no ruff on PATH;
+        # verbatim but the name, one on no PATH) at its exit 2 checked in before round 1 with a
+        # false "no round can fix that ... or wb discard", and skipped the auto-fix round when
+        # round 1 left the dependency out
+        self.spec.write_text("Add ruff as a dev dependency ([dependency-groups] dev) and fix "
+                             "every lint error it reports.\n")
+        self.start("t-uvd", "ok", "--no-base-check", "--no-self-review")
+        wait_phase("t-uvd", {"review"})
+        task = store.Task("t-uvd")
+        tail = ("Using CPython 3.11.18 interpreter at: /usr/bin/python3.11\n"
+                "Creating virtual environment at: .venv\nerror: Failed to spawn: nosuch-ruff-1256\n"
+                "  cause: No such file or directory (os error 2)")
+        said = lambda cmd: runner.missing_command({"exit": 2, "cmd": cmd, "tail": tail}, task)  # noqa: E731
+        for cmd in ("uv run nosuch-ruff-1256 check .", "uv run --frozen nosuch-ruff-1256 check .",
+                    "uv run --with x nosuch-ruff-1256 check .", "timeout 60 uv run nosuch-ruff-1256",
+                    "uv run nosuch-ruff-1256 --no-sync"):
+            self.assertIsNone(said(cmd), cmd)
+        # with the sync off uv installs nothing first, so the tool is the environment's to give
+        for cmd in ("uv run --no-sync nosuch-ruff-1256 check .", "uv --no-project run nosuch-ruff-1256",
+                    "UV_NO_SYNC=1 uv run nosuch-ruff-1256", "env UV_NO_PROJECT=true uv run nosuch-ruff-1256"):
+            self.assertEqual(said(cmd), "nosuch-ruff-1256: command not found", cmd)
+        with mock.patch.dict(os.environ, {"UV_NO_SYNC": "1"}):
+            self.assertEqual(said("uv run nosuch-ruff-1256"), "nosuch-ruff-1256: command not found")
+        self.assertTrue(runner.installs_before("uv run --with x pytest -q", "pytest"))
+        self.assertFalse(runner.installs_before("uv run --no-sync pytest -q", "pytest"))
+
+    def test_nothing_is_a_missing_tool_after_the_commands_own_install_step_but_its_installer(self):
+        # #1256's third review (2026-11-24): the lane leaves the network open, so once a round
+        # declares the dependency the command's own `poetry install`, `uv sync` or `bundle
+        # install` installs it; each wrapper's line on the base checked in before round 1 with a
+        # false "no round can fix that", and skipped the auto-fix round when round 1 left it out
+        self.spec.write_text("Add ruff to the dev dependencies and fix every lint error it reports.\n")
+        self.start("t-ins", "ok", "--no-base-check", "--no-self-review")
+        wait_phase("t-ins", {"review"})
+        task = store.Task("t-ins")
+        self.assertFalse(runner.own_command(task, "nosuch-ruff-1256"))
+        runs = [{"exit": 1, "cmd": "poetry install && poetry run nosuch-ruff-1256 check .",
+                 "tail": "Installing dependencies from lock file\nCommand not found: nosuch-ruff-1256"},
+                {"exit": 2, "cmd": "uv sync && uv run --no-sync nosuch-ruff-1256 check .",
+                 "tail": "Resolved 1 package in 1ms\nerror: Failed to spawn: `nosuch-ruff-1256`\n"
+                         "  Caused by: No such file or directory (os error 2)"},
+                {"exit": 127, "cmd": "bundle install && bundle exec nosuch-ruff-1256",
+                 "tail": "bundler: command not found: nosuch-ruff-1256\n"
+                         "Install missing gem executables with `bundle install`"}]
+        for r in runs:
+            self.assertIsNone(runner.missing_command(r, task), r["cmd"])
+            # without the install step first the tool is the environment's to give
+            alone = dict(r, cmd=r["cmd"].split(" && ", 1)[1])
+            self.assertEqual(runner.missing_command(alone, task), "nosuch-ruff-1256: command not found",
+                             alone["cmd"])
+        # one rule after an install or sync step (#1256's review, 2026-11-24): no tool, path or
+        # module is missing, whatever line says it, and each line still checks in without the step
+        npm = ("> p@1.0.0 test\n> jest\n\nsh: 1: jest: not found\nnpm error Lifecycle script `test` "
+               "failed with error:\nnpm error code 127\nnpm error path /r\nnpm error command sh -c jest")
+        for cmd, code, tail, alone in (
+                # the shell's own 127 line after an install, by name and under npm's lines
+                ("npm ci && jest", 127, "sh: 1: jest: not found", "jest: command not found"),
+                ("npm ci && npm test", 127, npm, "jest: command not found"),
+                # a TOOL_DIRS path
+                ("poetry install && .venv/bin/pytest", 127,
+                 "bash: line 1: .venv/bin/pytest: No such file or directory",
+                 ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)"),
+                ("npm ci && node_modules/.bin/jest", 127,
+                 "bash: line 1: node_modules/.bin/jest: No such file or directory",
+                 "node_modules/.bin/jest: not in the worktree (node_modules/ is an install's, never "
+                 "checked out)"),
+                # Python's no-module line
+                ("pip install -e .[dev] && python3 -m pytest", 1,
+                 "/usr/bin/python3: No module named pytest", "/usr/bin/python3: No module named pytest"),
+                ("uv sync && uv run --no-sync python -m pytest", 1,
+                 "/r/.venv/bin/python: No module named pytest", "/r/.venv/bin/python: No module named pytest"),
+                # bare `yarn` and `bundle` install; pip's `--group`
+                ("yarn && yarn test", 127, "sh: 1: jest: not found", "jest: command not found"),
+                ("bundle && bundle exec rspec", 127, "bundler: command not found: rspec\n"
+                 "Install missing gem executables with `bundle install`", "rspec: command not found"),
+                ("pip install --group dev && pytest", 127, "bash: line 1: pytest: command not found",
+                 "pytest: command not found")):
+            r = {"exit": code, "cmd": cmd, "tail": tail}
+            self.assertIsNone(runner.missing_command(r, task), cmd)
+            alone_cmd = cmd.split(" && ", 1)[1]
+            self.assertEqual(runner.missing_command(dict(r, cmd=alone_cmd), task), alone, alone_cmd)
+        # never the install step's own program, which no round gives, nor an install after the
+        # failing part, nor pip's of a named package, nor a run that isn't an install
+        for cmd, code, tail in (("npm ci && npm test", 127, "sh: 1: npm: not found"),
+                                ("python3 -m pip install -e . && pytest", 1,
+                                 "/usr/bin/python3: No module named pip"),
+                                ("bundle install && bundle exec x", 127, "bash: bundle: command not found"),
+                                ("x && poetry install", 127, "bash: x: command not found"),
+                                ("pip install ruff && x", 127, "bash: x: command not found"),
+                                ("pip3 install ruff && x", 127, "bash: x: command not found"),
+                                ("npm run ci && x", 127, "bash: x: command not found")):
+            self.assertIsNotNone(runner.missing_command({"exit": code, "cmd": cmd, "tail": tail}, task), cmd)
+        for cmd in ("python3 -m pip install -r requirements.txt; x", "uv pip sync requirements.txt && x",
+                    "poetry -C app install --no-root && x", "go mod download && x", "cargo fetch && x",
+                    ".venv/bin/pip3 install -e . && x"):
+            self.assertTrue(runner.installs_before(cmd, "x"), cmd)
+
     def test_a_tool_in_the_checkouts_ignored_venv_checks_in_at_once_and_skips_auto_fix(self):
         # #1206 (bar round 3 of 2.0): `--test .venv/bin/python …`, as Claude runs it in the user's
         # checkout, said `No such file or directory` in the worktree, which has no ignored .venv;
@@ -1250,8 +1529,10 @@ class Lifecycle(Base):
 
     def test_a_file_sourced_from_an_install_dir_is_a_missing_tool_in_every_shell(self):
         # #1258: bash's and zsh's line at exit 1, dash's `.: cannot open` at exit 2, and under a
-        # make recipe; a file the step makes, or one outside an install dir, still goes back
-        said = lambda tail, code=1: runner.missing_command({"exit": code, "tail": tail})  # noqa: E731
+        # make recipe; a file the step makes, or one outside an install dir, still goes back, as
+        # does one the command never names (missing_tool: the tests' own `source`)
+        said = lambda tail, code=1, cmd=". .venv/bin/activate && pytest": runner.missing_command(  # noqa: E731
+            {"exit": code, "tail": tail, "cmd": cmd})
         gone = ".venv/bin/activate: not in the worktree (.venv/ is an install's, never checked out)"
         self.assertEqual(said("/usr/bin/bash: line 1: .venv/bin/activate: No such file or directory"), gone)
         self.assertEqual(said("zsh:source:1: no such file or directory: .venv/bin/activate"), gone)
@@ -1262,9 +1543,9 @@ class Lifecycle(Base):
                          "venv/bin/activate: not in the worktree (venv/ is an install's, never checked out)")
         for tail, code in (("bash: line 1: env.sh: No such file or directory", 1),
                            ("/bin/sh: 1: .: cannot open ./setup-env.sh: No such file", 2),
-                           ("cat: answer.txt: No such file or directory", 1),
-                           ("bash: line 1: .venv/bin/activate: No such file or directory", 3)):
+                           ("cat: answer.txt: No such file or directory", 1)):
             self.assertIsNone(said(tail, code), tail)
+        self.assertIsNone(said("bash: line 1: .venv/bin/activate: No such file or directory", 1, "pytest"))
 
     def test_a_console_script_the_step_adds_to_the_setups_venv_goes_back_to_the_agent(self):
         # #1244 (bar round 5 of 2.0): a console script the step adds, which the agent's reinstall

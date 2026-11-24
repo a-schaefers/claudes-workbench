@@ -3401,8 +3401,10 @@ def hang(task: store.Task, limit: int) -> dict | None:
 # (`./check.sh`) says on the base too in bash and zsh; dash says `./check.sh: not found` for it,
 # so a name with a `/` is never a missing tool (nightly run 45362198509, 2026-11-24: under a
 # dash $SHELL a --test the step was to make checked in at once as a tool the agent lacks), but
-# one in an install's TOOL_DIRS (#1206).
-NOT_FOUND = re.compile(r"command not found: (?P<z>.+)$|(?P<n>[^:]+): (?:command )?not found$")
+# one in an install's TOOL_DIRS (#1206). `Command` in any case: macOS's make 3.81 says `make:
+# <name>: Command not found` for a recipe it execs itself (#1262), Poetry `Command not found:
+# <name>` (#1256).
+NOT_FOUND = re.compile(r"(?i:command) not found: (?P<z>.+)$|(?P<n>[^:]+): (?:(?i:command) )?not found$")
 # Python's own line for `python -m <module>` it can't import (exit 1): a test runner missing from
 # the agent's Python (`python3 -m pytest` on a system Python without it, or with the user's venv
 # that python_env leaves out) ran round 1 and both auto-fix rounds on correct code, each told the
@@ -3421,8 +3423,6 @@ NO_MODULE = re.compile(r"(?P<py>\S*python[\w.]*): (No module named (?P<m>[\w.]+)
 TOOL_DIRS = (".venv/bin", "venv/bin", "node_modules/.bin", "vendor/bin")
 # bash's and zsh's line for a path that isn't there (dash's and ksh's is NOT_FOUND's)
 NO_SUCH = re.compile(r"no such file or directory: (?P<z>.+)$|(?P<n>[^:]+): No such file or directory$")
-# dash's line for a file `.` can't read (it exits 2; bash says NO_SUCH's, exit 1, zsh NO_SUCH's z)
-NO_SOURCE = re.compile(r"\.: cannot open (?P<p>[^:]+)(?::.*)?$")
 # A task runner's own lines after its recipe's output, each runner's in one entry, its group (if
 # any) the recipe's exit: GNU make's `make: *** [Makefile:2: test] Error 127` (it exits 2), a
 # sub-make's `Leaving directory`, -k's `Target … not remade`; just's `error: Recipe `test` failed
@@ -3447,11 +3447,26 @@ RUNNER_LINES = (
 )
 RUNNER_TAIL = re.compile("|".join(RUNNER_LINES))
 # make's own line for a recipe it runs without a shell (no shell syntax in it) that execvp can't
-# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229). GNU
-# Make 3.81 (macOS's /usr/bin/make, Xcode's) says `Command not found`, which none of the
-# patterns read: a Mac's plain `make test` recipe ran round 1 and both auto-fix rounds on correct
-# code, each told the bug was the change's (#1262, bar round 6, 2026-11-24).
-MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): (?:No such file or directory|Command not found)")
+# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229)
+MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
+# A wrapper's own words for a program it couldn't start, at its own exit, not the shell's 127
+# (missing_tool): Poetry's `Command not found: <name>` (exit 1, #1256), uv's `Failed to spawn:
+# <name>` (exit 2; only with its sync off, installs_before), bundler's `command not found:
+# <name>` above its hint; and for a path, a file the
+# shell couldn't open, `source .venv/bin/activate` at exit 1 in bash (dash's `.: cannot open
+# <path>`, exit 2, #1258). Each wrapper's wording was a pattern of its own, and each bar round
+# found one more missed (#1206, #1229, #1243, #1256, #1258, #1262): what decides is whether the
+# name the line gives resolves where the tests ran, and is where the command puts a program
+# (command_programs), not the wording. Never `no such command`: cargo's (`no such command:
+# `xtask``, exit 101) and Click's or Typer's (`Error: No such command 'frobnicate'.`, exit 2)
+# name a subcommand, which the step may be adding (a `.cargo/config.toml` alias, a Click
+# command), and each checked in as a missing tool and skipped auto-fix (#1262's review, 2026-11-24).
+TOOL_GONE = re.compile(r"(?i)command not found|failed to spawn")
+PATH_GONE = re.compile(r"(?i)no such file or directory|cannot open|can't open")
+GONE_WORD = re.compile(r"[^\s:`'\"()\[\],;]+")
+# the tail's last lines (not blank) missing_tool reads up through: a wrapper's hint or cause
+# comes after its line (bundler's `Install missing gem executables`, uv's `Caused by:`)
+GONE_LINES = 3
 # wb's words for a tool not checked out (missing_command), the same in every shell, and its path
 NOT_CHECKED_OUT = re.compile(r"(?P<p>[^:]+): not in the worktree \(")
 # The words of a skipped auto-fix whose remedy is a wb feedback once Claude gives the agent's
@@ -3480,9 +3495,26 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     (own_module) is none: the step may make it; nor is a console script of its own
     (own_command), by name with the worktree's venv there, or by its path in a TOOL_DIRS
     directory the worktree has (#1244). Under a task runner (`make test`, `pnpm test`,
-    RUNNER_TAIL), the recipe's exit and the line before the runner's own (#1229, #1243)."""
+    RUNNER_TAIL), the recipe's exit and the line before the runner's own (#1229, #1243). At any
+    other exit, a wrapper's own (`poetry run`, a sourced venv), missing_tool: the name its line
+    gives, which doesn't resolve where the tests run (#1256, #1258). Nothing at all after an
+    install or sync step of the command's own (installs_before)."""
     if not r:
         return None
+    cmd = r.get("cmd") or (task.spec.get("test_cmd") if task else None)
+    said = _missing(r, cmd, task)
+    # After the command's own install or sync step (`npm ci`, `poetry install`, `pip install -e
+    # .`, `uv sync`, a syncing `uv run`), no tool, path or module is missing: the lane leaves the
+    # network open, so the round that declares the dependency is what installs it. Each review of
+    # #1256 found one more install form read as a missing tool (a shell's 127 line, a TOOL_DIRS
+    # path, Python's no-module line, a recipe's tool), and each checked in before round 1 with a
+    # false "no round can fix that" and skipped the auto-fix round, which is worse than the
+    # missed check-in (#1256's review, 2026-11-24): one rule, not one case per form.
+    return None if said and installs_before(cmd, _missing_word(said)) else said
+
+
+def _missing(r: dict, cmd: str | None, task: store.Task | None) -> str | None:
+    """missing_command's line, before its install rule."""
     code, lines, inner = r.get("exit"), (r.get("tail") or "").strip().splitlines(), None
     wrapped = False
     while isinstance(code, int) and code and lines and (m := RUNNER_TAIL.fullmatch(lines[-1].strip())):
@@ -3492,35 +3524,97 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     code = int(inner) if inner else code
     if wrapped and not inner and lines and NOT_FOUND.search(lines[-1]):
         code = 127  # pnpm exits 1 and names no code: the shell's not-found line is its 127 (#1243)
-    if code not in (1, 2, 127):
+    if not isinstance(code, int) or not code:
         return None
     line = lines[-1].strip() if lines else ""
-    name = None
     if code == 127:
         name = missing_name(line) or ((m := MAKE_EXEC.fullmatch(line)) and m["n"].strip())
         if name and "/" not in name:
-            # one the step's reinstall puts in the worktree's venv, first on the agent's PATH (#1244)
-            return None if task and context.own_venv(task) and own_command(task, name) \
-                else f"{name}: command not found"
-    # a path: a script the step may make, but not a tool an install puts there (#1206); nor, at
-    # exit 1 or 2, a file the shell sourced from one: `source .venv/bin/activate && pytest` with
-    # no .venv in the worktree exits 1 under bash (dash's `.: cannot open`, 2), and round 1 and
-    # both auto-fix rounds ran on correct code, each told the bug was the change's (#1258, bar
-    # round 6, 2026-11-24)
-    path = name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip()) \
-        or ((m := NO_SOURCE.search(line)) and m["p"].strip())
-    if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
-        s = f"/{path}"
-        where, tool = s[1:s.find(f"/{top}/") + 1 + len(top)], path.rsplit("/", 1)[-1]
-        # an install dir the setup made in the worktree: never "never checked out", and a
-        # console script the step adds to it is the step's own (#1244, bar round 5, 2026-11-24)
-        if task and not os.path.isabs(path) and (task.workdir / where).is_dir():
-            return None if own_command(task, tool) else \
-                f"{path}: not in the worktree ({where}/ is there, without {tool})"
-        return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
+            return _missing_bare(name, task)
+        # a path: a script the step may make, but not a tool an install puts there (#1206)
+        if path := name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip()):
+            return _missing_path(path, task)
     if code == 1 and (m := NO_MODULE.fullmatch(line)):
         return None if task and own_module(task, m["m"] or m["d"], m["py"]) else line
+    return missing_tool(lines, cmd, task, wrapped)
+
+
+def _missing_bare(name: str, task: store.Task | None) -> str | None:
+    """wb's line for command ``name`` not found: none for one the step's reinstall puts in the
+    worktree's venv, first on the agent's PATH (#1244)."""
+    return None if task and context.own_venv(task) and own_command(task, name) \
+        else f"{name}: command not found"
+
+
+def _missing_path(path: str, task: store.Task | None) -> str | None:
+    """wb's line for ``path`` not there, when it is a tool an install puts in TOOL_DIRS (#1206);
+    else None, a script the step may make."""
+    if not (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
+        return None
+    s = f"/{path}"
+    where, tool = s[1:s.find(f"/{top}/") + 1 + len(top)], path.rsplit("/", 1)[-1]
+    # an install dir the setup made in the worktree: never "never checked out", and a
+    # console script the step adds to it is the step's own (#1244, bar round 5, 2026-11-24)
+    if task and not os.path.isabs(path) and (task.workdir / where).is_dir():
+        return None if own_command(task, tool) else \
+            f"{path}: not in the worktree ({where}/ is there, without {tool})"
+    return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
+
+
+def missing_tool(lines: list[str], cmd: str | None, task: store.Task | None = None,
+                 wrapped: bool = False) -> str | None:
+    """A tool missing at an exit that isn't the shell's 127, read the same for every wrapper
+    (`poetry run`, `uv run`, `bundle exec`, a sourced venv): one of the tail's
+    last GONE_LINES lines says it couldn't start or open a name (TOOL_GONE, PATH_GONE), and that
+    name doesn't resolve where the tests run. A bare name: a program of acceptance command
+    ``cmd`` (command_programs: what no round changes, where the command puts a program, never an
+    argument such as a subcommand the step adds) not on the agent's PATH (on_agent_path), where
+    every wrapper looks too (Poetry, uv and pipenv put their venv's `bin` ahead of it), and not a
+    console script of the step's own (own_command; after a wrapper's run verb with no venv
+    yet, as the wrapper looks the project's own scripts up itself); never one a runner's recipe
+    names, which the command doesn't (a code the runner names stays its own). A path: one in
+    TOOL_DIRS the worktree hasn't, named by the command or under a runner (`make test` sourcing
+    `.venv/bin/activate`). wb's own wording, as
+    missing_command's. Poetry's `Command not found: pytest` at exit 1 (#1256), `source
+    .venv/bin/activate && pytest` at bash's 1 or dash's 2 (#1258) each ran round 1 and every
+    auto-fix round on correct code, told the bug was the change's (bar round 6, 2026-11-24)."""
+    words, programs, run = command_words(cmd), command_programs(cmd), command_programs(cmd, True)
+    for line in reversed([ln for ln in map(str.strip, lines) if ln][-GONE_LINES:]):
+        tool, opened = TOOL_GONE.search(line), PATH_GONE.search(line)
+        if not (tool or opened):
+            continue
+        named = [missing_name(line), (m := NO_SUCH.search(line)) and (m["z"] or m["n"])]
+        named += GONE_WORD.findall(line[(tool or opened).end():])
+        for w in dict.fromkeys(n.strip().rstrip(".") for n in named if n):
+            if "/" in w:
+                there = task and not os.path.isabs(w) and (task.workdir / w).exists()
+                if (w in words or wrapped) and not there and (said := _missing_path(w, task)):
+                    return said
+            elif tool and w in programs and re.match(r"[A-Za-z_]", w) and not on_agent_path(w, task):
+                # a wrapper's program the project declares or the spec makes is the step's own,
+                # venv or not: Poetry's `poetry run` reads [tool.poetry.scripts] before PATH and
+                # `uv run` installs [project.scripts] as it syncs, so a step adding `mycli` said
+                # Poetry's `Command not found: mycli` on the base (no venv yet), checked in with a
+                # false "no round can fix that", and skipped the auto-fix round when round 1 left
+                # it out (#1256's review, 2026-11-24)
+                if w in run and task and own_command(task, w):
+                    continue
+                if said := _missing_bare(w, task):
+                    return said
     return None
+
+
+def on_agent_path(name: str, task: store.Task | None = None) -> bool:
+    """Whether command ``name`` resolves on the PATH the tests run with: the runner's, the
+    user's checkout's venvs off it and the worktree's own first (context.python_env), on WSL
+    without the Windows drives (context.agent_path)."""
+    env = dict(os.environ)
+    if task is not None:
+        try:
+            context.python_env(task, env)
+        except (KeyError, AttributeError, OSError):  # a stand-in task: the runner's PATH
+            pass
+    return shutil.which(name, path=context.agent_path(env.get("PATH") or os.defpath)) is not None
 
 
 def _missing_key(line: str | None) -> str | None:
@@ -3724,6 +3818,150 @@ def command_words(cmd: str | None) -> set[str]:
         return set(lex)
     except ValueError:  # an unbalanced quote: the shell's own error, not a missing tool
         return set()
+
+
+# Wrappers whose run verb puts a program next (`poetry run pytest`), and prefixes that do without
+# one (`env X=1 pytest`, `uvx ruff`). Not cargo: its subcommand may be an alias the step adds to
+# `.cargo/config.toml` (`cargo xtask codegen`), checked in as a missing tool (#1262's review, 2026-11-24)
+RUN_VERBS = {"poetry": "run", "uv": "run", "pipenv": "run", "pdm": "run", "hatch": "run",
+             "rye": "run", "pixi": "run", "bundle": "exec", "pnpm": "exec", "npm": "exec",
+             "yarn": "exec", "bun": "x"}
+PREFIXES = {"env", "exec", "command", "time", "nice", "nohup", "xvfb-run", "uvx", "npx", "bunx",
+            "timeout"}
+SHELL_OPS = {"&&", "||", ";", "|", "&", "(", ")", "|&", ";;", "!", "{", "}"}
+# a word before a simple command's program: an assignment, a prefix's option or its number (`env
+# -i`, `nice -n 10`, `timeout 60`)
+NOT_PROGRAM = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=|-|\d+(?:\.\d+)?[smhd]?$")
+
+
+def command_programs(cmd: str | None, run_only: bool = False) -> set[str]:
+    """The words of shell command ``cmd`` where a program goes: each simple command's first word
+    (past `X=1` assignments and PREFIXES), the word after a wrapper's run verb (RUN_VERBS:
+    `poetry run`, `uv run`, `bundle exec`), never cargo's subcommand. A word right after an option
+    counts too, as the option may take no value (`uv run --with x pytest` gives `x` and `pytest`).
+    Every word missing_tool counted, `python3 cli.py frobnicate` for a step adding Click's
+    `frobnicate` checked in as a missing tool and skipped auto-fix (#1262's review, 2026-11-24).
+    ``run_only``: only the words after a run verb, which the wrapper looks up in the project."""
+    out: set[str] = set()
+    for words in _simple_commands(cmd):
+        for i, w in enumerate(words):
+            if NOT_PROGRAM.match(w):
+                continue
+            name = w.rsplit("/", 1)[-1]
+            if not run_only:
+                out.add(w)
+            if name in PREFIXES:
+                continue
+            if name in RUN_VERBS:
+                out |= _wrapped_program(words[i + 1:], RUN_VERBS[name])
+            break
+    return out
+
+
+def _simple_commands(cmd: str | None) -> list[list[str]]:
+    """Shell command ``cmd``'s simple commands, each its words; none for an unbalanced quote."""
+    lex = shlex.shlex(cmd or "", posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        tokens = list(lex)
+    except ValueError:
+        return []
+    simple: list[list[str]] = [[]]
+    for t in tokens:
+        if t in SHELL_OPS or set(t) <= set("&|;()"):
+            simple.append([])
+        else:
+            simple[-1].append(t)
+    return simple
+
+
+# The steps that install or sync a project's dependencies, by program and verb ("" for the bare
+# program: `yarn`, `bundle`), for installs_before. pip's install counts only with the project or
+# a requirements file (PIP_PROJECT: `pip install -e .[dev]`, `-r requirements.txt`, `--group
+# dev`), never `pip install ruff`; `uv run` syncs the project before it spawns its program unless
+# its sync is off (UV_NO_SYNC_FLAGS, UV_NO_SYNC_VARS set in the command or the environment).
+INSTALLS = {"poetry": ("install", "sync"), "uv": ("sync", "run"), "pdm": ("install", "sync"),
+            "pipenv": ("install", "sync"), "rye": ("sync",), "pixi": ("install",),
+            "bundle": ("", "install"), "npm": ("install", "ci", "i"), "pnpm": ("install", "i"),
+            "yarn": ("", "install"), "bun": ("install", "i"), "pip": ("install", "sync"),
+            "go": ("mod download",), "cargo": ("fetch", "build")}
+PIP_PROJECT = re.compile(r"-e|--editable|-r|--requirement|--group|\.")
+PIP_NAME = re.compile(r"pip[\d.]*$")
+PYTHON_NAME = re.compile(r"python[\d.]*$")
+UV_NO_SYNC_FLAGS = ("--no-sync", "--no-project")
+UV_NO_SYNC_VARS = ("UV_NO_SYNC", "UV_NO_PROJECT")
+UV_TRUE = {"1", "true", "yes", "on", "y", "t"}
+
+
+def installs_before(cmd: str | None, word: str) -> bool:
+    """Whether acceptance command ``cmd`` runs an install or sync step (INSTALLS) before the
+    simple command that names ``word`` (the missing tool, path or module), or anywhere in it
+    when none names it (a task runner's recipe); the step's own program never (`npm ci` with no
+    npm, `python3 -m pip install` with no pip), which no round can give."""
+    simple = _simple_commands(cmd)
+    nosync = any(os.environ.get(v, "").strip().lower() in UV_TRUE for v in UV_NO_SYNC_VARS) or any(
+        w.split("=", 1)[0] in UV_NO_SYNC_VARS and w.split("=", 1)[1].strip().lower() in UV_TRUE
+        for words in simple for w in words if "=" in w)
+    seen = False
+    for words in simple:
+        own = _installer(words, nosync)
+        if word in words:
+            return seen or bool(own and word not in own)
+        seen = seen or bool(own)
+    return seen
+
+
+def _installer(words: list[str], nosync: bool) -> set[str]:
+    """When simple command ``words`` installs or syncs (INSTALLS), its own program's words (and
+    `pip` for `python3 -m pip`); else nothing."""
+    for i, w in enumerate(words):
+        if NOT_PROGRAM.match(w):
+            continue
+        name, rest, own = w.rsplit("/", 1)[-1], words[i + 1:], {w}
+        if name in PREFIXES:
+            continue
+        if PYTHON_NAME.match(name):  # `python3 -m pip install …`
+            if rest[:2] != ["-m", "pip"]:
+                return set()
+            name, rest, own = "pip", rest[2:], {w, "pip"}
+        if name == "uv" and rest[:1] == ["pip"]:  # `uv pip install …`, `uv pip sync …`
+            name, rest = "pip", rest[1:]
+        name = "pip" if PIP_NAME.match(name) else name  # pip3, pip3.11
+        said = [r for r in rest if not r.startswith("-")]
+        # an option first may take the next word as its value (`poetry -C app install`)
+        lead = 1 if rest[:1] and rest[0].startswith("-") else 0
+        for verb in INSTALLS.get(name, ()):
+            v = verb.split()
+            if not (any(said[j:j + len(v)] == v for j in range(lead + 1)) if v else not said):
+                continue
+            if name == "pip" and verb == "install" and not any(
+                    PIP_PROJECT.match(r) for r in rest[rest.index("install") + 1:]):
+                continue
+            if name == "uv" and verb == "run":  # uv's own options: those before its program
+                k = rest.index("run") + 1
+                k += next((j for j, x in enumerate(rest[k:]) if not x.startswith("-")), len(rest) - k)
+                if nosync or any(x.split("=", 1)[0] in UV_NO_SYNC_FLAGS for x in rest[:k]):
+                    continue
+            return own
+        return set()
+    return set()
+
+
+def _wrapped_program(rest: list[str], verb: str) -> set[str]:
+    """The program a wrapper's arguments ``rest`` name after its run ``verb``: the first word
+    not an option, and the one after it too when an option came first, which may have taken that
+    first word as its value (`uv run --with x pytest`)."""
+    rest = rest[rest.index(verb) + 1:] if verb in rest else []
+    found: list[str] = []
+    optioned = False
+    for r in rest:
+        if r.startswith("-"):
+            optioned = optioned or not found
+            continue
+        found.append(r)
+        if not optioned or len(found) == 2:
+            break
+    return set(found)
 
 
 def base_check_line(r: dict, task: store.Task) -> str:
