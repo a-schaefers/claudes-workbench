@@ -282,11 +282,12 @@ def _model_stats(model: str, rs: list[dict]) -> dict:
 
 def _kind_stats(rs: list[dict]) -> dict:
     """A model's `kind` and, for an API model, `paid`: the mean dollars a task over its rows with
-    a known cost (none known: left out, never 0) (#1022)."""
-    from .results import api_row, row_cost
+    a known cost (none known: left out, never 0) (#1022); a task that sent nothing is none
+    (results.task_cost, #1106)."""
+    from .results import api_row, task_cost
     if not any(map(api_row, rs)):
         return {"kind": "gpu"}
-    known = [c for r in rs if api_row(r) and (c := row_cost(r)) is not None]
+    known = [c for r in rs if api_row(r) and (c := task_cost(r)) is not None]
     return {"kind": "api", **({"paid": round(sum(known) / len(known), 6)} if known else {})}
 
 

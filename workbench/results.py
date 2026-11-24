@@ -383,18 +383,32 @@ def row_cost(row: dict) -> float | None:
     return None
 
 
+def _source(row: dict, source: str) -> bool:
+    return any(isinstance(row.get(k), dict) and row[k].get("source") == source
+               for k in ("api", "paid"))  # a bench row's is `paid`
+
+
+def task_cost(row: dict) -> float | None:
+    """A row's dollars for a mean a task (`paid`, the weekly check's ~$/task): row_cost, but None
+    for a task that sent nothing (source "none"). Its $0 is spent money in the totals, never a
+    price a task: a bad --setup or a first run with no key pulled a model's mean down (#1106,
+    2026-11-23)."""
+    return None if _source(row, "none") else row_cost(row)
+
+
 def paid_cell(rows: list[dict]) -> str:
-    """The tables' `paid`: the mean dollars a task over the rows with a known cost; `-` for GPU
-    rows, `plan` when every API row is plan usage, `?` when none is known, `~$0.12` when some are
-    unknown (plan rows aside: a quota is no unknown price, and they read `?`, #1106)."""
+    """The tables' `paid`: the mean dollars a task over the rows with a known cost (task_cost:
+    a task that sent nothing is none); `-` for GPU rows, `plan` when every API row is plan usage,
+    `?` when none is known, `~$0.12` when some are unknown (plan rows aside: a quota is no
+    unknown price, and they read `?`, #1106; nothing-sent rows too)."""
     api = [r for r in rows if api_row(r)]
     if not api:
         return "-"
-    priced = [r for r in api if not any(isinstance(r.get(k), dict) and r[k].get("source") == "plan"
-                                        for k in ("api", "paid"))]  # a bench row's is `paid`
+    priced = [r for r in api if not _source(r, "plan")]
     if not priced:
         return "plan"
-    known = [c for r in priced if (c := row_cost(r)) is not None]
+    priced = [r for r in priced if not _source(r, "none")]
+    known = [c for r in priced if (c := task_cost(r)) is not None]
     if not known:
         return "?"
     from .savings import usd

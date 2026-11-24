@@ -30741,6 +30741,23 @@ class ApiSpend(Base):
         a = savings.api_totals(store.results(trials=True))
         self.assertEqual((a["tasks"], a["unknown"], a["cost"]), (2, 0, 0.0))
         self.assertNotIn("no price", run_wb("savings", "--api"))
+        # #1106, the review: their $0 is spent money in the totals, never a price a task: three
+        # tasks at $0.50 and these two read $0.50 a task, not $0.30 (wb stats, the weekly check)
+        from workbench import cli, stats
+        nothing = store.results(trials=True)
+        self.assertEqual({r["api"]["source"] for r in nothing}, {"none"})
+        paid = [{"kind": "api", "model": SPEND_M, "provider": "meterco", "ts": store.now(),
+                 "outcome": "accepted", "task": f"p{i}", "api": {"cost": 0.5, "source": "meter"}}
+                for i in range(3)]
+        rows = paid + [{**r, "model": SPEND_M, "ts": store.now()} for r in nothing]
+        self.assertEqual(results.paid_cell(rows), "$0.50")                   # not ~$0.30
+        self.assertEqual(results.paid_cell(nothing), "?")
+        self.assertEqual(stats._kind_stats(rows)["paid"], 0.5)
+        self.assertNotIn("paid", stats._kind_stats(nothing))
+        with mock.patch.object(cli.store, "results", return_value=rows):
+            self.assertIn("~$0.50/task", cli._api_record(SPEND_M, 0))
+        self.assertEqual(savings.api_totals(rows)["cost"], 1.5)               # the totals keep them
+        self.assertEqual(savings.api_totals(rows)["tasks"], 5)
 
     def test_a_priced_model_whose_figure_never_came_back_says_so_not_no_price(self):
         # #1106: a response named its model (it may have been billed), yet no figure reached the

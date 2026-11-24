@@ -4673,14 +4673,14 @@ def _role_where(doc: dict, r: str) -> str:
 
 
 def _api_record(mid: str, since: float) -> str:
-    """An API model's real tasks since ``since``: tasks, accepted, paid a task (results.row_cost,
+    """An API model's real tasks since ``since``: tasks, accepted, paid a task (results.task_cost,
     #1019), rounds a provider rate-limited."""
     rows = [r for r in store.results() if r.get("model") == mid and (r.get("ts") or 0) >= since]
     if not rows:
         return "no real tasks yet"
     out = [f"{len(rows)} task(s)", f"{100 * sum(r.get('outcome') == 'accepted' for r in rows) // len(rows)}% accepted"]
-    if paid := [c for r in rows if (c := results.row_cost(r)) is not None]:
-        out.append(f"~{savings.usd(sum(paid) / len(paid))}/task")  # as wb stats' `paid` says it
+    if paid := [c for r in rows if (c := results.task_cost(r)) is not None]:
+        out.append(f"~{savings.usd(sum(paid) / len(paid))}/task")  # as wb stats' `paid` (#1106)
     limited = set()
     for r in rows:
         evs, _ = store.read_jsonl(store.home() / "tasks" / str(r.get("task")) / "events.jsonl")
