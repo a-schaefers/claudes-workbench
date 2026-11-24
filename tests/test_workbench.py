@@ -395,6 +395,30 @@ class Lifecycle(Base):
                 self.assertGreater(sent.index("carry on"), sent.index(want))
                 self.assertEqual(task.status["round"], 2)
 
+    def test_feedback_added_to_a_round_never_sent_is_gathered_as_lessons_apart_from_the_rounds_own(self):
+        # #1180 (its review, 2026-11-24): wb feedback's text after an unsent feedback round's own
+        # prompt was read as part of its body, and "Also write 7 to extra.txt Review feedback from
+        # the senior reviewer. Make exactly these changes, …: carry on" became a lesson of its own
+        from workbench import lessons
+        for name, then, want in (
+                ("t-lcarry", "carry on", ["Also write 7 to extra.txt"]),
+                ("t-lreal", "Keep the number on a line of its own.",
+                 ["Also write 7 to extra.txt", "Keep the number on a line of its own."])):
+            with self.subTest(name=name):
+                self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+                wait_phase(name, {"review"})
+                task = store.Task(name)
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb("feedback", name, "--text", "Also write 7 to extra.txt")
+                with mock.patch.object(runner, "_down", return_value=True), \
+                        mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+                    runner.drive(task)
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb("feedback", name, "--text", then)
+                runner.add_to_round(task, 2, runner.steer_prompt([{"text": "Mind the tabs."}], False))
+                self.assertEqual(task.status["round"], 2)
+                self.assertEqual([x["text"] for x in lessons.gather(task) if x["kind"] == "feedback"], want)
+
     def test_a_round_start_records_the_typical_length_and_how_many_tasks_back_it(self):
         # #1048: the pane sets a task's active work against its typical length (`~6m left`) with
         # no read of results.jsonl of its own, and only when enough timed tasks back it

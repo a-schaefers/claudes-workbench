@@ -1164,9 +1164,10 @@ failed (exit N)", "setting up the worktree failed (copy failed)" or "(timed out 
 `lane_grant`, #824), ending "fix it, then wb resume <task>: it sets the worktree up again (the
 agent never ran)"; status `failed_before` `setup`. A load failure before the agent ran
 (`_load_failed`) sets `load` and adds "the agent never ran: once the model can, wb resume <task>
-starts it"; one after the agent ran, whose round n never reached it (`runner.reached`: no `round`
-event for n), adds "round n never reached the agent: once the model can run, wb feedback <task>
---text "carry on" sends its prompt" (#1180). Either way the results row has `ran: false`, which router and tuning skip (#581).
+starts it". Either way the results row has `ran: false`, which router and tuning skip (#581). A
+load failure after the agent ran (its row has `ran: true`) whose round n never reached it
+(`runner.reached`: no `round` event for n) adds "round n never reached the agent: once the model
+can run, wb feedback <task> --text "carry on" sends its prompt" (#1180).
 
 Scratch checkouts (base check, `wb verify`, `wb shot`: `verify._run`) get the same links and a copy
 of the prepared paths, not the setup (#249: each rebuilt from nothing): `prepare(at, prepared)`,
@@ -4235,7 +4236,9 @@ with one `nudge` line: `lessons: N from this task[, M seen in other tasks too] (
 patch a skill now, while it's fresh)`. A `trial` task gathers nothing; `wb trial` closes its open
 lessons. Kinds: `feedback` (each numbered item, `N.` or `N)`, of a round prompt, or
 `instructions.md` after a handover, opening `FEEDBACK_HEAD`, "Review feedback from the senior
-reviewer.", ≤600 characters); `agent` (`Lesson: …` lines in `summary.md`, which PROTOCOL asks for;
+reviewer.", ≤600 characters; `lessons.feedback` reads each `FEEDBACK_HEAD` paragraph's body on its
+own, up to a folded `NOTE_HEAD` note, so wb feedback's text added to a round never sent,
+`runner.add_to_round`, is never joined to the round's own last item, #1180); `agent` (`Lesson: …` lines in `summary.md`, which PROTOCOL asks for;
 skipped for a discarded task, whose open ones close as dropped: dead ends, not a recipe); `stopped`
 ("the guard stopped the agent: …", not a stop with `by`); `question` (each answered ask, `wb allow`
 included); `spec` ("the spec missed: …", from `status.spec_gaps`, for Claude's spec checklist);
