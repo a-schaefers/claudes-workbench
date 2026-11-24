@@ -1657,9 +1657,10 @@ api key)`) and serves a `Keyhole` from a daemon thread of the runner, outside th
 it, on `127.0.0.1:0` (never `localhost`, which may be `::1` first). It refuses
 (`KeyholeError("needs a key wb can hold outside the lane: <why>")`, remedy `keyhole.REMEDY`, "store
 an API key with /connect in OpenCode") an OAuth login (its tokens rotate: a copy refreshed would log
-the user out), an external credential, either one active over an older key kept beside it
-("<provider>'s active credential is an OAuth login …: `opencode auth switch` to its API key, or
-store one with /connect": the inactive key was billed, #1110), request signing (SigV4, Vertex: a header swap can't work),
+the user out), an external credential, any credential that isn't a key (OAuth, external, or a
+type such as 1.x's `wellknown`) active over an older key kept beside it ("<provider>'s active
+credential is an OAuth login …: `opencode auth switch` to its API key, or store one with
+/connect": the inactive key was billed, #1110), request signing (SigV4, Vertex: a header swap can't work),
 a key only in the environment (`{env:VAR}`, or `auth list` naming a variable: `SECRET_ENV` drops it
 from the agent anyway), and a key written in the user's `opencode.json` or `OPENCODE_CONFIG_CONTENT`
 anywhere in the provider's entry, V1 `provider.<pid>` or V2 `providers.<pid>` (`_keys_in`: the

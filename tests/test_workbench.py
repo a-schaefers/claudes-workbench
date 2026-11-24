@@ -26305,6 +26305,23 @@ class Keyhole(_KeyholeTest):
         self.assert_no_canary(str(e.exception))
         self.assertEqual(self.kh_mod.load_key("keyfirst").value, self.CANARY)
 
+    def test_an_old_key_behind_any_active_credential_that_isnt_a_key_is_never_used(self):
+        # the review of #1110 (2026-11-23): the refusal named only oauth and external, so an
+        # active credential of another type (1.x's `wellknown`, or one OpenCode adds) fell
+        # through to the inactive key and billed it
+        self.fake_auth({p: {"export": [
+            self.key_row(p, {"type": "key", "key": self.CANARY}, active=False),
+            self.key_row(p, {"type": kind, "token": "t"})]}
+            for p, kind in (("wellco", "wellknown"), ("extco", "external"))})
+        for provider, why in (("wellco", "active credential is a wellknown credential, not an "
+                                         "API key"),
+                              ("extco", "active credential comes from an external source")):
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key(provider)
+            self.assertIn(why, str(e.exception))
+            self.assertIn("opencode auth switch", str(e.exception))
+            self.assert_no_canary(str(e.exception))
+
     def test_oauth_and_env_keys_cant_run(self):
         self.fake_auth({"oauthco": {"export": [self.key_row("oauthco", {
                             "type": "oauth", "methodID": "m", "refresh": self.CANARY,
