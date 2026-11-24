@@ -30423,8 +30423,35 @@ class ApiSpend(Base):
         self.assertNotIn(notice["cause"], results.THE_STEP)       # the slice isn't shrunk for it
         self.assertTrue(notice["text"].startswith(
             "t-guard stopped: the day's API spend cap is reached ($5.30 of $5 today). Its work so far is "
-            "in the worktree. Ask the user: a higher cap (wb route cap <usd>), the role on the GPU, or "
-            "tomorrow; then wb resume t-guard."))
+            "in the worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb resume "
+            "t-guard; or the role on the GPU (wb route significant gpu) for the next tasks, with wb takeover "
+            "t-guard or wb discard t-guard for this one (resume keeps its API model)."))
+
+    def test_a_spend_stop_resumed_once_its_role_is_on_the_gpu_stops_again_on_its_api_model(self):
+        # #1095 (2026-11-23): the notice and the mod's wake said "the role on the GPU … then wb
+        # resume", but resume keeps the task's model (fixed per task, #1018), so the round stopped
+        # at the cap again at once. This pins what the advice must match: the GPU is for the next
+        # tasks, and this one is taken over or discarded.
+        self.cap(5)
+        self.spent(3.80)
+        task = self.api_task("t-f33", SPEND_M, "spend", FAKE_STEP_IN="100", FAKE_STEPS="50")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "stuck")
+        (first,) = self.notices("t-f33", "stuck")
+        self.assertIn("or the role on the GPU (wb route significant gpu) for the next tasks, with wb takeover "
+                      "t-f33 or wb discard t-f33 for this one", first["text"])
+        self.assertNotIn("GPU, or tomorrow; then wb resume", first["text"])
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {
+            r: {"via": "gpu"} for r in ("significant", "trivial", "writing")}})  # the user chose the GPU
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("resume", "t-f33")
+        task = store.Task("t-f33")
+        self.assertEqual((task.spec["via"], task.spec["model"]), ("api", SPEND_M))  # resume never re-routes
+        self.meter._METERS.clear()                                                # a new runner process
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "stuck")
+        self.assertIn("spend cap is reached", task.status["last"])
+        self.assertEqual([r["cause"] for r in self.notices("t-f33", "stuck")], ["spend", "spend"])  # again at once
 
     def test_the_cap_is_checked_before_every_round_drive_goes_on_to(self):
         # #1017's _go_on: the in-round guard off, the cap reached in round 1 stops the auto-fix round

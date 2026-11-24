@@ -539,9 +539,24 @@ const batchOf = (row: Row): string[] | null =>
   Array.isArray(row.tasks) && row.tasks.length ? row.tasks.map(String) : null
 const RUNNING = new Set(['queued', 'running', 'testing'])
 // A stop at the day's API spend cap (#1019, cause `spend`) is the user's call: feedback would run
-// a round that stops again at once, so the wake asks for their decision, as the notice does.
-const SPEND_NEXT = (n: string) => 'Ask the user: a higher cap (`wb route cap <usd>`), the role on ' +
-  `the GPU, or tomorrow; then \`wb resume ${n}\`. Never retry it with feedback yourself.`
+// a round that stops again at once, so the wake asks for their decision, as the notice does. Each
+// remedy has its own next step: "the role on the GPU … then wb resume" resumed the task on its API
+// model (fixed per task) into the same stop, and with no cap set "tomorrow" changes nothing
+// (#1095, 2026-11-23). `capped`: routes.json has a day cap.
+const SPEND_NEXT = (n: string, capped: boolean) => (capped
+  ? `Ask the user: a higher cap (\`wb route cap <usd>\`) or tomorrow, then \`wb resume ${n}\`; `
+  : `Ask the user for a day cap (\`wb route cap <usd>\`), then \`wb resume ${n}\`; `) +
+  `or the role on the GPU for the next tasks (\`wb route <role> gpu\`, on their yes), with \`wb takeover ${n}\` ` +
+  `or \`wb discard ${n}\` for this one: resume keeps its API model. Never retry it with feedback yourself.`
+// A stop by the task's API provider (cause `provider`: runner.PROVIDER_GUARDS, a rate limit or an
+// outage held 10 minutes, a quota or a refused key) isn't the agent's, yet it woke as "was stopped:
+// it got stuck" ending "Steer it with wb feedback …, or wb discard": a feedback round a quota or
+// key stop fails again at once, or work that is fine thrown away, next to the notice's own remedy
+// (#1124, 2026-11-23). The headline is the toast's too.
+const PROVIDER_HEADLINE = 'was stopped by its API provider'
+const PROVIDER_NEXT = (n: string) => 'Tell the user it is the provider\'s stop and its remedy, as the ' +
+  `notice says; once they say it is fixed (or the rate limit has passed), \`wb feedback ${n} --text ` +
+  '"carry on"`. Never discard it for this, nor change its model or role yourself.'
 
 // A question delivered into a running turn (#542): the engine frames it as another session's
 // message, so one line says whose it is and that it can't wait for the turn to end.
@@ -3757,7 +3772,7 @@ async function deliver($: any, now: number) {
           : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
       const batch = batchOf(row)
       const headline = batch ? (batch.length > 1 ? `and ${batch.length - 1} more were interrupted`
-        : 'was interrupted') : HEADLINE[row.kind] ?? row.kind
+        : 'was interrupted') : row.cause === 'provider' ? PROVIDER_HEADLINE : HEADLINE[row.kind] ?? row.kind
       const key = `${name}:${row.ts}`
       if (current && !mem.toasted.has(key)) {
         mem.toasted.add(key)
@@ -3765,7 +3780,8 @@ async function deliver($: any, now: number) {
       }
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
       // a batch's wake ends with its resume, not the failure's next step (#544)
-      const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? SPEND_NEXT(name)
+      const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? SPEND_NEXT(name, (await readRoutes($)).cap !== null)
+        : row.cause === 'provider' ? PROVIDER_NEXT(name)
         : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`

@@ -603,10 +603,17 @@ report when it has one (`Round <n>'s report (wb report <task> --round <n>):`: au
 self-review have already moved status `round` on to n + 1, which never ran). Both notices
 have `cause` `spend`, not the step's own (`results.THE_STEP`), so the slice isn't shrunk, and lead
 with `meter.stop_text`: `<task> stopped: the day's API spend cap is reached ($5.02 of $5 today). Its
-work so far is in the worktree. Ask the user: a higher cap (wb route cap <usd>), the role on the
-GPU, or tomorrow; then wb resume <task>.` The mod's `GUARD_WORDS.spend` names it, and its wake for a
-`cause` `spend` notice ends with `SPEND_NEXT` (ask the user, then `wb resume`), not the stuck wake's
-feedback line: feedback would run a round the cap stops again at once.
+work so far is in the worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb
+resume <task>; or the role on the GPU (wb route <role> gpu) for the next tasks, with wb takeover <task>
+or wb discard <task> for this one (resume keeps its API model).` (with no cap: `meter.no_cap()`, then
+`wb resume`; never tomorrow). Each remedy has its own next step: resume never re-routes, so "the role on
+the GPU … then wb resume" resumed into the same stop (#1095). The mod's `GUARD_WORDS.spend` names it,
+and its wake for a `cause` `spend` notice ends with `SPEND_NEXT` (the same choices, asked of the user;
+`Ask the user for a day cap` when routes.json has none, `readRoutes`), not the stuck wake's
+feedback line: feedback would run a round the cap stops again at once. A `cause` `provider` notice (a quota, key, rate-limit
+or outage stop) wakes as `was stopped by its API provider` (`PROVIDER_HEADLINE`, the toast's too) and ends with
+`PROVIDER_NEXT`: pass the notice's remedy on, `wb feedback <task> --text "carry on"` once the user says it is fixed,
+never discard it; it once ended with the stuck wake's "Steer it … or wb discard" (#1124).
 
 **The check-in at half** (`CHECKIN_SHARE` 0.5): a priced row that leaves today at or past half the
 cap, with no `checkin` row today, appends one (under `spend-api.jsonl.checkin.lock`, so tasks in
@@ -6345,7 +6352,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   table and the round report's `agent tokens` (an API task's) together. `WbTop`'s type is unchanged (the API fields are optional keys of `running` rows): `top-1` stays.
 - **Which session a task is** → the mod's `mine` and `cli._scope`: the same rule, the home-or-`/` exception included;
   `scope()` passes every id.
-- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT`, both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
+- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `PROVIDER_NEXT`), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
 - **A task.json or status key** → *Files and formats*; a results key a reader uses → `results.record` and defaults for
   old rows.
 - **The GPU admission rule** (`models.admits`, `can_share`) → the lease, `wb start`'s refusal, `cli._gpu_holders`,

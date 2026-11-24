@@ -345,9 +345,14 @@ def stop_text(task) -> str:
     if c is None:
         return (f"{task.name} stopped: {no_cap()}. Its work so far is in the worktree; then wb resume "
                 f"{task.name}.")
-    return (f"{task.name} stopped: {STOP} ({usd(t)} of {usd(c)} today). Its work so far is in the "
-            f"worktree. Ask the user: a higher cap (wb route cap <usd>), the role on the GPU, or "
-            f"tomorrow; then wb resume {task.name}.")
+    # "the role on the GPU" went with "then wb resume", but resume keeps the task's API model
+    # (fixed per task): the resumed round stopped at the cap again at once (#1095, 2026-11-23).
+    # A route change is for the next tasks; this one is taken over or discarded.
+    n, role = task.name, task.spec.get("role") or "<role>"
+    return (f"{n} stopped: {STOP} ({usd(t)} of {usd(c)} today). Its work so far is in the "
+            f"worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb resume "
+            f"{n}; or the role on the GPU (wb route {role} gpu) for the next tasks, with wb takeover "
+            f"{n} or wb discard {n} for this one (resume keeps its API model).")
 
 
 class Meter:
