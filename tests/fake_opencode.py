@@ -4,6 +4,12 @@
   ok     write answer.txt = "42", say so
   patch  as ok, and lib/helper.py too, in one `patch` call (a GPT model's in 2.3.2: no edit or
          write): input `patchText` only, the files in `state.metadata.files[].file` (#1148)
+  shellwrite  lib/util.py with a `bash` row run in lib/ by its `workdir` (cat > util.py <<X),
+         then main.py importing it and answer.txt = "42" with write (#1210, its third review)
+  buildout  dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names
+         neither, then answer.txt = "42" with write (#1210's review)
+  pkgbuild  a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind
+         one `python -m build`, then answer.txt = "42" with write (#1210's second review)
   stay   as ok, then stays open for an hour, its output open and silent: the agent's turn over
          (reason stop) and OpenCode not exiting (#1160)
   fix    first round writes "41" (wrong); a continued session (--session) writes "42"
@@ -689,6 +695,45 @@ elif scenario == "patch":  # #1148: a GPT model's one `patch` call, as OpenCode 
                              {"file": "answer.txt", "status": "added", "additions": 1,
                               "deletions": 0, "patch": "@@ -0,0 +1 @@\n+42"}]})
     emit("text", text="Wrote lib/helper.py and answer.txt = 42.")
+    finish()
+elif scenario == "shellwrite":  # #1210: a module written with the shell, the rest with write
+    os.makedirs("lib", exist_ok=True)
+    with open(os.path.join("lib", "util.py"), "w") as fh:
+        fh.write("def answer():\n    return 42\n")
+    # in lib/ by the shell tool's `workdir`, not a cd, as OpenCode 2.3.2 tells the model to
+    # (#1210's third review)
+    tool("bash", {"command": "mkdir -p lib", "description": "Make lib"}, output="")
+    tool("bash", {"command": "cat > util.py <<'X'\ndef answer():\n    return 42\nX",
+                  "workdir": os.path.abspath("lib"), "description": "Write lib/util.py"}, output="")
+    for name, text in (("main.py", "from lib.util import answer\nprint(answer())\n"), ("answer.txt", "42\n")):
+        with open(name, "w") as fh:
+            fh.write(text)
+        tool("write", {"filePath": os.path.abspath(name), "content": text})
+    emit("text", text="Wrote lib/util.py, main.py and answer.txt = 42.")
+    finish()
+elif scenario == "buildout":  # #1210's review: the agent's own build, its output under dist/
+    os.makedirs("dist", exist_ok=True)
+    for name, text in (("index.js", "exports.answer = () => 42;\n"),
+                       ("index.d.ts", "export declare const answer: () => number;\n")):
+        with open(os.path.join("dist", name), "w") as fh:
+            fh.write(text)
+    tool("bash", {"command": "npm run build", "description": "Build"}, output="> tsc\n")
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42\n"})
+    emit("text", text="Built, and wrote answer.txt = 42.")
+    finish()
+elif scenario == "pkgbuild":  # #1210's second review: a read of pkg/a.py, then build/lib's copy
+    tool("bash", {"command": "grep -n answer pkg/a.py", "description": "Read"}, output="1:# a\n")
+    os.makedirs(os.path.join("build", "lib", "pkg"), exist_ok=True)
+    for m in ("__init__", "a", "b"):
+        with open(os.path.join("build", "lib", "pkg", m + ".py"), "w") as fh:
+            fh.write("# " + m + "\n")
+    tool("bash", {"command": "python -m build", "description": "Build"}, output="ok\n")
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42\n"})
+    emit("text", text="Built, and wrote answer.txt = 42.")
     finish()
 elif scenario == "loop":
     for _ in range(10):

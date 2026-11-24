@@ -36,7 +36,7 @@ from . import (ask_mcp, context, gitguard, gitops, hardware, keyhole, lane, less
                skills, stats, store, tuning)
 from . import meter
 from . import privacy
-from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize, written
+from .events import ANYWHERE, EDIT_TOOLS, StuckDetector, compaction_failed, normalize, shell_names, written
 from .watch import Watcher
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
@@ -2405,7 +2405,9 @@ def run_tests(task: store.Task, n: int):
         return None
     task.set_status(phase="testing", last=f"tests: {cmd}")
     limit = int(task.spec.get("test_timeout") or 900)
+    began = store.now()
     code, output = run_in_lane(task, cmd, limit)
+    _tests_wrote(task, began)
     task.round_dir(n).joinpath("tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     result = {"ok": code == 0, "exit": code, "tail": clip_tail(output, 40), "round": n}
@@ -2779,11 +2781,125 @@ def _hands_on(task: store.Task) -> None:
     task.set_status(hand_wrote=wrote, hand_left=left, hands_off_at=None)
 
 
-def ignored_writes(task: store.Task) -> list[str]:
-    """The files the agent wrote that git ignores, so no diff or commit holds them; [] when git
-    can't say."""
+def shell_wrote(task: store.Task) -> list[str]:
+    """The ignored files changed in the worktree since the agent's first round (status
+    `agent_from`) that look written by hand (gitops.hand_written), less what the runner's test
+    runs wrote (status `test_wrote`), and that one of the agent's shell rows names (its path, or
+    its name in a directory the row names: _shell_named): the agent's shell's, which no edit row
+    shows. An agent's `mkdir -p lib && cat > lib/util.py <<EOF` under Python.gitignore's lib/ was in no diff (the
+    review's "all of it"), no NOTE and no commit: wb accept --merge exited 0, main imported a
+    module that was deleted with the worktree (#1210, 2026-11-24). Named, not all of them: the
+    dist/index.js of the agent's own `npm run build` (or tsc's, `python -m build`'s build/lib, an
+    `mvn test` wider than --test) was taken for its work, named in the NOTE and refused at every
+    accept, and --include put build output on main (#1210's review, 2026-11-24)."""
+    return _by_shell(task)[0]
+
+
+def shell_left(task: store.Task) -> list[str]:
+    """The rest of the ignored files changed since the agent's first round that hand_written
+    keeps, or took for a build's or a test run's, less the runner's test runs', the agent's edit
+    rows' and Claude's (hand_wrote): build output no shell row names among them. The commit
+    leaves them out, said, and wb accept copies them to left-out/, as hand_left's (#1210's
+    review)."""
+    return _by_shell(task)[1]
+
+
+def _shell_named(task: store.Task):
+    """Whether one of the agent's shell rows names a worktree-relative path: a word of its
+    `names` resolved against the row's `workdir` (the shell tool's, which OpenCode 2.3.2 tells
+    the model to set instead of a cd: dropped, `cat > util.py` in lib/ named nothing and accept
+    --merge left lib/util.py out under a main.py importing it, #1210's third review), else the
+    task's workdir (an absolute one against the worktree; a word after a `cd` in the row already
+    joined to it, events.shell_names; one after a cd to where no word says, `*/<word>`, ending
+    it in any directory: naming over dropping) equal to it, or its name a word's
+    last part with the file in a directory the same row names (`mv util.py lib/`, `cp
+    src/a.py build/`). Row by row and exact: one set of every row's words, matched by suffix,
+    took `grep -n answer pkg/a.py` for a name of setuptools' build/lib/pkg/a.py, and `cat
+    package.json` for a library build's dist/package.json, refused at accept (#1210's review,
+    2026-11-24). Every shell row, a failed one too: `cat > lib/util.py <<EOF && pytest` that
+    fails still wrote the module, and dropping it is the loss #1210 was. A row from before
+    `names` was kept: its brief's words. Reading as writing: `node dist/index.js` after the
+    build names it too, and refuses it."""
+    rows = [r for r in store.read_jsonl(task.dir / "events.jsonl")[0]
+            if r.get("kind") == "tool" and r.get("tool") in ("shell", "bash")]
+    return _rows_name(rows, task.worktree, task.spec.get("subdir", ""))
+
+
+def _rows_name(rows: list[dict], worktree: Path, subdir: str = ""):
+    """_shell_named's test, on its rows: which worktree-relative paths they name."""
+    roots = list(dict.fromkeys(str(r) for r in (worktree, os.path.realpath(worktree))))
+    base = os.path.normpath(subdir or ".")
+
+    def inside(w: str, workdir: str = "") -> str | None:
+        if workdir and not w.startswith("/"):
+            w = os.path.join(workdir, w)                   # the row's, itself absolute or the task's
+        if w.startswith("/"):
+            w = os.path.normpath(w)
+            rel = next((w[len(r):].lstrip("/") or "." for r in roots
+                        if w == r or w.startswith(r.rstrip("/") + "/")), None)
+            return rel and os.path.normpath(rel)
+        rel = os.path.normpath(os.path.join(base, w))
+        return None if rel == ".." or rel.startswith("../") else rel
+
+    named_rows: list[tuple[set[str], set[str]]] = []
+    for r in rows:
+        names = r.get("names")
+        if not isinstance(names, list):
+            names = shell_names(str(r.get("brief") or ""))
+        words = [str(w) for w in names if w]
+        wd = r.get("workdir") if isinstance(r.get("workdir"), str) else ""
+        anywhere = {w[len(ANYWHERE):] for w in words if w.startswith(ANYWHERE)}
+        words = [w for w in words if not w.startswith(ANYWHERE)]
+        paths = {p for p in (inside(w, wd) for w in words) if p}
+        named_rows.append((paths, {w.rstrip("/").rsplit("/", 1)[-1] for w in words}, anywhere))
+
+    def named(p: str) -> bool:
+        p = os.path.normpath(p)
+        where, name = os.path.split(p)
+        return any(p in paths or (name in names and (where or ".") in paths)
+                   or any(p == a or p.endswith("/" + a) for a in anywhere)
+                   for paths, names, anywhere in named_rows)
+    return named
+
+
+def _by_shell(task: store.Task) -> tuple[list[str], list[str]]:
+    if not (since := task.status.get("agent_from")):
+        return [], []
+    rest: list[str] = []
+    kept = gitops.hand_written(task.worktree, since, rest)
+    not_shell = set(task.status.get("test_wrote") or [])
+    kept = [p for p in kept if p not in not_shell]
+    named = _shell_named(task) if kept else (lambda p: False)
+    wrote = [p for p in kept if named(p)]
+    not_shell |= set(wrote) | set(agent_wrote(task)) | set(hand_wrote(task))
+    return wrote, sorted({p for p in kept + rest if p not in not_shell})
+
+
+def _tests_wrote(task: store.Task, began: float) -> None:
+    """Keep in status `test_wrote` the ignored files a test run of the runner's changed (what
+    hand_written would keep, and its rest): build or test output, never the agent's work. Without
+    it, shell_wrote took a Maven run's target/surefire-reports/*.xml for the agent's, and every
+    accept of such a task was refused (#1210, 2026-11-24). The agent's own runs in its rounds
+    write the same files, which the runner's run after them writes again."""
+    if not task.status.get("agent_from"):
+        return
     try:
-        return gitops.ignored_files(task.worktree, agent_wrote(task))
+        rest: list[str] = []
+        made = gitops.hand_written(task.worktree, began, rest) + rest
+    except (gitops.GitError, OSError):
+        return
+    if made:
+        task.set_status(test_wrote=sorted(set(task.status.get("test_wrote") or []) | set(made)))
+
+
+def ignored_writes(task: store.Task) -> list[str]:
+    """The files the agent wrote that git ignores, so no diff or commit holds them: its edit
+    tools' and its shell's (shell_wrote, #1210), less what Claude wrote while no runner ran (status
+    `hand_wrote`); [] when git can't say."""
+    try:
+        mine = set(task.status.get("hand_wrote") or [])
+        return gitops.ignored_files(task.worktree, agent_wrote(task)
+                                    + [p for p in shell_wrote(task) if p not in mine])
     except (gitops.GitError, OSError):
         return []
 
@@ -4622,6 +4738,9 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
         # before the lease: it needs no GPU, and a probe that hangs (20 s a file) held it from the
         # other tasks, the model already loaded (review, 2026-11-21)
         add_outline(task)
+    # after the checkout, setup, --copy and base check: what changes under an ignored path from
+    # here on may be the agent's work, its shell's too (shell_wrote, #1210)
+    task.set_status_if(lambda st: not st.get("agent_from"), agent_from=store.now())
     # beside the running tasks' models when all fit the GPU, else alone once they finish; an API
     # model takes one of its provider's slots instead, and nothing of the GPU (#1015)
     with models.lease_for(m, task.name, say) as lease:

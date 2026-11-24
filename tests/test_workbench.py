@@ -2646,7 +2646,7 @@ class Lifecycle(Base):
         with self.assertRaises(SystemExit), redirect_stderr(err):
             run_wb("accept", "t-csv", "-m", "feat: one", "--merge")
         self.assertIn("not committed: git ignores files written in the worktree (lib/helper.py)", err.getvalue())
-        self.assertIn("note: git ignores 1 more file changed since the agent stopped, which the commit "
+        self.assertIn("note: git ignores 1 more file changed in the worktree, which the commit "
                       "leaves out as build or test output (lib/answers.csv): git -C ", err.getvalue())
         out = run_wb("accept", "t-csv", "-m", "feat: one", "--merge", "--include")
         self.assertIn("accepted t-csv", out)
@@ -2819,6 +2819,206 @@ class Lifecycle(Base):
         (t.worktree / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
         (t.worktree / "main.py").write_text("from lib.helper import answer\nprint(answer())\n")
         self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
+
+    def test_a_file_the_agent_writes_with_its_shell_under_an_ignored_path_is_named_and_refused_at_accept(self):
+        # #1210 (the 2.0 bar loop, 2026-11-24): the agent wrote lib/util.py with
+        # `cat > lib/util.py <<EOF` under Python.gitignore's lib/; only edit rows were read, so the
+        # report had no NOTE and accept --merge landed main.py importing a module it deleted. The
+        # fake's row is `cat > util.py` with `workdir` lib/, as 2.3.2 has the model write it: its
+        # workdir dropped, the file was named nowhere and left out again (#1210's third review)
+        self.ignore_lib()
+        self.start("t-sh", "shellwrite", "--test", TEST_CMD)
+        wait_phase("t-sh", {"review"})
+        t = store.Task("t-sh")
+        self.assertEqual(runner.agent_wrote(t), ["answer.txt", "main.py"])
+        self.assertEqual(runner.shell_wrote(t), ["lib/util.py"])
+        self.assertIn("NOTE: git ignores files the agent wrote (lib/util.py)", run_wb("report", "t-sh"))
+        for cmd in (("next", "t-sh", "--spec", "-", "-m", "feat: one"),
+                    ("accept", "t-sh", "-m", "feat: one", "--merge")):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err), \
+                    mock.patch("sys.stdin", io.StringIO("Step two.")):
+                run_wb(*cmd)
+            self.assertIn("not committed: git ignores files written in the worktree (lib/util.py)",
+                          err.getvalue())
+            self.assertEqual(self.branch("delegate/t-sh"), t.spec["base"])     # nothing committed
+            self.assertTrue((t.worktree / "lib" / "util.py").is_file())        # and the work kept
+        self.assertIn("accepted t-sh", run_wb("accept", "t-sh", "-m", "feat: one", "--merge", "--include"))
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("lib/util.py", tree)
+        self.assertIn("main.py", tree)
+
+    def test_what_the_runners_test_run_writes_under_an_ignored_path_is_not_taken_for_the_agents(self):
+        # #1210 (2026-11-24): read since the agent's first round, a Maven run's surefire report
+        # (.xml, a kind pom.xml makes the repo's) would refuse every accept of such a task
+        (self.repo / ".gitignore").write_text("target/\n")
+        (self.repo / "pom.xml").write_text("<project/>\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "maven"], check=True)
+        test = (f"{TEST_CMD} && mkdir -p target/surefire-reports && "
+                "echo '<testsuite/>' > target/surefire-reports/TEST-app.AppTest.xml")
+        self.start("t-mvn", "ok", "--test", test)
+        st = wait_phase("t-mvn", {"review"})
+        self.assertTrue(st["tests"]["ok"], st.get("tests"))
+        t = store.Task("t-mvn")
+        self.assertEqual(t.status.get("test_wrote"), ["target/surefire-reports/TEST-app.AppTest.xml"])
+        self.assertEqual(runner.shell_wrote(t), [])
+        self.assertEqual(runner.shell_left(t), [])
+        self.assertNotIn("git ignores", run_wb("report", "t-mvn"))
+        out = run_wb("accept", "t-mvn", "-m", "feat: one")
+        self.assertIn("accepted t-mvn", out)
+        self.assertNotIn("note: git ignores", out)
+
+    def test_build_output_no_shell_row_names_is_left_out_at_accept_while_a_module_one_writes_is_refused(self):
+        # #1210's review (2026-11-24): every ignored file changed since the agent's first round
+        # counted as its shell's, so the dist/ of its own `npm run build` was named in the NOTE
+        # as "files the agent wrote" and refused at accept; --include put build output on main
+        (self.repo / ".gitignore").write_text("dist/\nlib/\n")
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "index.ts").write_text("export const answer = () => 42;\n")
+        (self.repo / "jest.config.js").write_text("module.exports = {};\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ts"], check=True)
+        self.start("t-b", "buildout", "--test", TEST_CMD)
+        wait_phase("t-b", {"review"})
+        t = store.Task("t-b")
+        self.assertEqual(runner.shell_wrote(t), [])
+        self.assertEqual(runner.shell_left(t), ["dist/index.d.ts", "dist/index.js"])
+        self.assertNotIn("git ignores files the agent wrote", run_wb("report", "t-b"))
+        out = run_wb("accept", "t-b", "-m", "feat: one", "--merge")
+        self.assertIn("accepted t-b", out)
+        self.assertIn("merged into main", out)
+        self.assertIn("leaves out as build or test output (dist/index.d.ts, dist/index.js): a copy is in", out)
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertNotIn("dist/index.js", tree)
+        self.assertTrue((t.dir / "left-out" / "dist" / "index.js").is_file())
+        # a module a shell row names is still the agent's: refused until --include
+        self.start("t-sh", "shellwrite", "--test", TEST_CMD)
+        wait_phase("t-sh", {"review"})
+        t = store.Task("t-sh")
+        self.assertEqual(runner.shell_wrote(t), ["lib/util.py"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-sh", "-m", "feat: one", "--merge")
+        self.assertIn("not committed: git ignores files written in the worktree (lib/util.py)", err.getvalue())
+
+    def test_a_source_file_a_shell_row_reads_does_not_name_the_copy_a_build_makes_of_it(self):
+        # #1210's second review (2026-11-24): every row's words in one set, matched by suffix, so
+        # `grep -n answer pkg/a.py` named setuptools' build/lib/pkg/a.py: the NOTE said the agent
+        # wrote it, accept --merge was refused, and --include put a third of build/lib on main
+        (self.repo / ".gitignore").write_text("build/\n")
+        (self.repo / "pkg").mkdir()
+        for m in ("__init__", "a", "b"):
+            (self.repo / "pkg" / f"{m}.py").write_text(f"# {m}\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "pkg"], check=True)
+        self.start("t-p", "pkgbuild", "--test", TEST_CMD)
+        wait_phase("t-p", {"review"})
+        t = store.Task("t-p")
+        built = ["build/lib/pkg/__init__.py", "build/lib/pkg/a.py", "build/lib/pkg/b.py"]
+        self.assertEqual(runner.shell_wrote(t), [])
+        self.assertEqual(runner.shell_left(t), built)
+        self.assertNotIn("git ignores files the agent wrote", run_wb("report", "t-p"))
+        out = run_wb("accept", "t-p", "-m", "feat: one", "--merge")
+        self.assertIn("merged into main", out)
+        self.assertIn(f"leaves out as build or test output ({', '.join(built)})", out)
+
+    def test_a_shell_row_names_a_file_by_its_path_from_the_workdir_or_its_name_in_a_directory_it_names(self):
+        # #1210's second review (2026-11-24): row by row and exact, not a suffix of any word, so
+        # `cat package.json` names no library build's dist/package.json
+        wt = Path("/w/t")
+
+        def named(cmds, path, subdir=""):
+            rows = [{"kind": "tool", "tool": "bash", "names": events.shell_names(c)} for c in cmds]
+            return runner._rows_name(rows, wt, subdir)(path)
+        self.assertFalse(named(["grep -n answer pkg/a.py", "python -m build"], "build/lib/pkg/a.py"))
+        self.assertFalse(named(["cat package.json", "npm run build"], "dist/package.json"))
+        self.assertFalse(named(["cat > util.py"], "lib/util.py"))
+        self.assertFalse(named(["cat lib/x.py", "cat > util.py"], "lib/util.py"))   # another row's dir
+        self.assertTrue(named(["mkdir -p lib && cat > lib/util.py <<X\nx\nX"], "lib/util.py"))
+        self.assertTrue(named(["mv util.py lib/"], "lib/util.py"))
+        self.assertTrue(named(["cp pkg/a.py build/"], "build/a.py"))
+        self.assertTrue(named(["cd lib && cat > util.py <<X\nx\nX"], "lib/util.py"))
+        self.assertTrue(named(["cd lib && mv x/util.py sub/"], "lib/sub/util.py"))
+        self.assertTrue(named(["cat > /w/t/lib/util.py"], "lib/util.py"))         # absolute: the worktree's
+        self.assertFalse(named(["cat > /elsewhere/lib/util.py"], "lib/util.py"))
+        self.assertTrue(named(["cat > src/x.ts"], "pkgs/a/src/x.ts", "pkgs/a"))    # a monorepo's workdir
+        self.assertTrue(named(["cat > ../b/x.ts"], "pkgs/b/x.ts", "pkgs/a"))
+        self.assertTrue(named(["node dist/index.js"], "dist/index.js"))           # reading as writing
+        old = {"kind": "tool", "tool": "bash", "brief": "cat > lib/util.py <<X"}  # a row without names
+        self.assertTrue(runner._rows_name([old], wt)("lib/util.py"))
+
+    def test_a_shell_row_names_a_file_by_the_workdir_it_ran_in(self):
+        # #1210's third review (2026-11-24): OpenCode 2.3.2's shell tool tells the model to set
+        # `workdir`, not to cd; dropped, `cat > util.py` run in lib/ named nothing, and accept
+        # --merge left lib/util.py out under a main.py importing it
+        wt = Path("/w/t")
+        row = events.normalize({"type": "tool_use", "part": {"tool": "shell", "state": {
+            "status": "completed", "input": {"command": "cat > util.py <<'X'\nx = 1\nX",
+                                             "workdir": "/w/t/lib"}}}}, 1)
+        self.assertEqual(row["workdir"], "/w/t/lib")
+        self.assertTrue(runner._rows_name([row], wt)("lib/util.py"))
+        self.assertFalse(runner._rows_name([row], wt)("util.py"))
+        rel = {**row, "workdir": "lib"}                                       # relative: the workdir's
+        self.assertTrue(runner._rows_name([rel], wt)("lib/util.py"))
+        self.assertTrue(runner._rows_name([rel], wt, "pkgs/a")("pkgs/a/lib/util.py"))
+        away = {**row, "workdir": "/elsewhere/lib"}                           # outside the worktree
+        self.assertFalse(runner._rows_name([away], wt)("lib/util.py"))
+        moved = {**row, "names": events.shell_names("cd sub && cat > x.py")}  # a cd in it, too
+        self.assertTrue(runner._rows_name([moved], wt)("lib/sub/x.py"))
+        no_dir = events.normalize({"type": "tool_use", "part": {"tool": "shell", "state": {
+            "status": "completed", "input": {"command": "ls"}}}}, 1)
+        self.assertNotIn("workdir", no_dir)
+
+    def test_a_cd_in_a_shell_line_ends_with_its_subshell_or_its_popd(self):
+        # #1210's third review (2026-11-24): carried past the `)` or the popd, `(cd lib && make)
+        # && cat > top.py` named lib/top.py, and an ignored top.py the agent wrote was left out
+        wt = Path("/w/t")
+
+        def named(cmd, path):
+            return runner._rows_name([{"kind": "tool", "tool": "bash", "names": events.shell_names(cmd)}],
+                                     wt)(path)
+        self.assertTrue(named("(cd lib && make) && cat > top.py", "top.py"))
+        self.assertIn("top.py", events.shell_names("(cd lib && make) && cat > top.py"))
+        self.assertNotIn("lib/top.py", events.shell_names("pushd lib && make && popd && cat > top.py"))
+        self.assertTrue(named("pushd lib && make && popd && cat > top.py", "top.py"))
+        self.assertTrue(named("pushd lib && cat > util.py && popd", "lib/util.py"))
+        self.assertTrue(named("pushd lib >/dev/null && make && popd >/dev/null && cat > top.py", "top.py"))
+        self.assertTrue(named("cd a && pushd b && popd && cat > x.py", "a/x.py"))
+        self.assertTrue(named("echo $(cd lib && pwd) > top.py", "top.py"))
+        self.assertTrue(named("echo `cd lib && pwd` && cat > top.py", "top.py"))
+        self.assertTrue(named("cd lib && (cd sub && make) && cat > util.py", "lib/util.py"))
+        self.assertTrue(named("cd lib; cat > util.py", "lib/util.py"))  # no subshell: it carries
+        # where no word says (a popd with no pushd in the line, `cd "$D"`, `cd -`): the file by
+        # that name in any directory, as a false name costs a look and a false drop the work
+        self.assertTrue(named("popd && cat > x.py", "x.py"))
+        self.assertTrue(named("popd && cat > x.py", "lib/x.py"))
+        self.assertTrue(named('cd "$D" && cat > util.py', "lib/util.py"))
+        self.assertTrue(named('cd "$D" && cat > sub/util.py', "lib/sub/util.py"))
+        self.assertFalse(named('cd "$D" && cat > sub/util.py', "lib/util.py"))
+        self.assertTrue(named("cd - && cat > ../x.py", "a/x.py"))
+        self.assertTrue(named('(cd "$D" && cat > a.py) && cat > b.py', "lib/a.py"))
+        self.assertFalse(named('(cd "$D" && cat > a.py) && cat > b.py', "lib/b.py"))  # known again
+
+    def test_a_shell_line_names_the_files_it_may_write_paths_first(self):
+        # #1210's review (2026-11-24): `npm run build` names none of its dist/, and the agent's
+        # redirect, mv or heredoc'd script names the module it wrote
+        self.assertEqual(events.shell_names("npm run build"), ["npm", "run", "build"])
+        self.assertEqual(events.shell_names("mkdir -p lib && cat > lib/util.py <<'X'\nx = 1\nX")[0],
+                         "lib/util.py")
+        self.assertEqual(events.shell_names("python - <<EOF\nopen('lib/util.py', 'w')\nEOF")[0],
+                         "lib/util.py")
+        self.assertEqual(events.shell_names("mv util.py lib/util.py; tsc --outDir=build/lib")[:3],
+                         ["lib/util.py", "build/lib", "util.py"])
+        # a word after a cd is joined to it; after one to where no word says, `*/<word>`: any
+        # directory's (#1210's third review)
+        self.assertEqual(events.shell_names("cd lib && cat > util.py")[:2], ["lib/cat", "lib/util.py"])
+        self.assertIn("../x.py", events.shell_names("cd .. && cat > x.py"))
+        self.assertEqual(events.shell_names('cd "$D" && cat > util.py')[0], "*/util.py")
+        self.assertLessEqual(len(events.shell_names(" ".join(f"w{i}" for i in range(5000)))),
+                             events.NAMES_MAX)
 
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
         # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,
@@ -9591,6 +9791,27 @@ class RealOpenCodeRun(Base):
         self.assertIsInstance(outs[0], str)
         self.assertIn("CANARY-1086", outs[0])
         self.assertGreater(len(outs[0]) // context.CHARS_PER_TOKEN, 1000)
+
+    def test_a_real_shell_tool_use_event_carries_its_workdir_and_the_row_resolves_names_by_it(self):
+        # #1210's third review (2026-11-24): OpenCode 2.3.2's shell tool tells the model to set
+        # `workdir` instead of a cd; events.normalize dropped it, so `cat > util.py` in lib/ was
+        # named nowhere and accept --merge left lib/util.py out under a main.py importing it
+        (self.repo / "lib").mkdir()
+        lib = str(self.repo / "lib")
+        self.serve([{"name": "shell", "arguments": {"command": "printf 'X = 1\\n' > util.py",
+                                                    "workdir": lib, "description": "Write util.py"}}])
+        r = subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format",
+                            "json", "--", "write lib/util.py"], cwd=self.repo,
+                           env={**os.environ, "PWD": str(self.repo)}, capture_output=True, text=True,
+                           timeout=180)
+        raw = [json.loads(x) for x in r.stdout.splitlines() if x.startswith("{")]
+        uses = [e for e in raw if e.get("type") == "tool_use"]
+        self.assertTrue(uses, r.stdout[-2000:] + r.stderr[-2000:])
+        self.assertEqual(uses[0]["part"]["state"]["input"].get("workdir"), lib)
+        self.assertEqual((self.repo / "lib" / "util.py").read_text(), "X = 1\n")  # it ran there
+        row = events.normalize(uses[0], 1)
+        self.assertEqual(row["workdir"], lib)
+        self.assertTrue(runner._rows_name([row], self.repo)("lib/util.py"))
 
     def test_a_round_runs_in_its_own_opencode_home(self):
         # #1010 (checked on OpenCode 2.3.2, 2026-11-22): OpenCode V2 keeps every /connect
