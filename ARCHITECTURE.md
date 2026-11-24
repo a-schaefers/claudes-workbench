@@ -1974,7 +1974,7 @@ sets `OTEL_RESOURCE_ATTRIBUTES` to the user's entries then `wb.task`, `wb.run` (
 `wb.round`, `wb.role` (task.json `role`, when set) and `wb.side` (`gpu` or `api`, `api_task`),
 each percent-encoded (`otel_resource`): OpenCode decodes each `key=value` with
 `decodeURIComponent` and drops the whole variable on one entry it can't read, so a user's entry
-it couldn't read (no key, a lone `%`, bytes that aren't UTF-8) is left out rather than every tag
+it couldn't read (no key, a lone `%`, bytes that aren't UTF-8, raw or escaped) is left out rather than every tag
 lost; wb's come last and win a key both name. No endpoint, nothing is added. OpenCode's
 `cli starting` log record carries its argv, the round's prompt in it: a collector is a place the
 spec reaches, as it was before #1205 for anyone with an endpoint set.

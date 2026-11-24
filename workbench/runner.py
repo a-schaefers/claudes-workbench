@@ -1583,7 +1583,9 @@ def _otel_readable(entry: str) -> bool:
         return False
     try:
         urllib.parse.unquote_to_bytes(entry).decode("utf-8")
-    except UnicodeDecodeError:
+    except ValueError:
+        # both Unicode errors: an escaped byte that isn't UTF-8 fails the decode, a raw one
+        # (os.environ's surrogate, '\udce9') the encode first; that one failed the round (#1205)
         return False
     return True
 

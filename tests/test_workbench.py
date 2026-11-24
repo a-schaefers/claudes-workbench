@@ -9276,6 +9276,9 @@ class OpenTelemetry(Base):
         got = runner.otel_resource("team=a%2Cb,,bad,=v,pct=50%,raw=%FF,wb.task=theirs",
                                    {"wb.task": "t 1", "wb.round": 2, "wb.role": None, "wb.run": ""})
         self.assertEqual(got, "team=a%2Cb,wb.task=theirs,wb.task=t%201,wb.round=2")
+        # a raw byte that isn't UTF-8 reaches os.environ as a surrogate: it failed the round (#1205)
+        user = os.fsdecode(b"lang=caf\xc3\xa9,team=caf\xe9,a=\xff")
+        self.assertEqual(runner.otel_resource(user, {"wb.task": "t"}), "lang=caf\u00e9,wb.task=t")
         self.assertEqual(runner.otel_resource("", {"wb.side": "gpu"}), "wb.side=gpu")
 
     def test_opencode_gets_the_rounds_tags_only_when_a_collector_is_named(self):
