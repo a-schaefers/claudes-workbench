@@ -1657,7 +1657,8 @@ overlay replaces the reference, so `auth export` is read and only with no key st
 anywhere in the provider's entry, V1 `provider.<pid>` or V2 `providers.<pid>` (`_keys_in`: the
 provider's, a model's own, a V2 `settings`, a variant's), as an `apiKey` or as a header (any
 `headers`: a name with `auth`, `key` or `token` in it, or a value shaped like a key or `Bearer …`)
-("its key is written in <file>, which agents can read: store it with /connect instead"). A model's
+("its key is written in <file>, which agents can read: remove it there, and store the key with /connect":
+/connect alone changed nothing while the written key stayed, #1075). A model's
 own key counts because OpenCode 2.3.2 sends a model's settings over its provider's (the review of
 #1015: one in the content went unseen, in the agent's environment). A stored key is trimmed (a paste's newline: OpenCode trims only on
 `/connect`) and must then be printable ASCII (`KEY_CHARS`), else "can't use <provider>'s stored key:
@@ -5748,7 +5749,9 @@ model server, a registered model, the API keys, Landlock). Its API keys line (#1
 lane, never a secret): `ok  API keys: deepseek (stored via /connect); no role uses one yet` (or
 `trivial and significant use it`), a `--` line for a key wb can't hold (`xai's key is in XAI_API_KEY:
 wb can't hold it outside the lane yet; /connect stores one it can`, `anthropic is signed in with
-OAuth: …`), a `--` line for a stored key on a package the keyhole can't carry (`google
+OAuth: …`), one for each key written in a config file (`literal's key is written in <file>: remove its
+apiKey there, and store the key with /connect`, as status says it: "/connect stores a key it can" told a
+user who had, #1075), a `--` line for a stored key on a package the keyhole can't carry (`google
 (@opencode/ai/providers/google): the keyhole doesn't speak its API, so wb can't run its models;
 another provider's key works`, `models.unspoken_providers`, #1066), `NO_KEY` for none. With a stored key and no local model the GPU lines read as optional
 (`NO_SERVER_OPTIONAL`, `NO_LOCAL_OPTIONAL`). No GPU is needed for a role on API (*Roles*). The plugin install copies only `mod/` into the plugin

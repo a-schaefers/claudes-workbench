@@ -298,8 +298,9 @@ def load_key(provider: str, package: str = "") -> Key:
         if where.startswith("env:"):
             raise KeyholeError(f"{NEEDS}: {provider}'s key is only in the environment "
                                f"(${where[4:]}), which agents don't get")
+        # /connect alone changed nothing while the written key stayed (#1075, 2026-11-23)
         raise KeyholeError(f"{NEEDS}: its key is written in {where}, which agents can read: "
-                           "store it with /connect instead")
+                           "remove it there, and store the key with /connect")
     r = _opencode("auth", "export", provider)
     if r.returncode != 0 and env_var:  # no stored key beside it (OpenCode's "not found"): say why
         raise KeyholeError(f"{NEEDS}: {provider}'s key is only in the environment (${env_var}), "

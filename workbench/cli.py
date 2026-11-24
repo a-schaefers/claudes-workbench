@@ -5949,14 +5949,14 @@ def _held_elsewhere(pid: str, key: str) -> str:
     if key.startswith("env:"):
         return f"{pid}'s key is in {key[4:]}"
     return {"oauth": f"{pid} is signed in with OAuth", "signing": f"{pid} signs with a cloud login",
-            "config": f"{pid}'s key is written in OpenCode's config"}.get(key, f"{pid}'s key is {key}")
+            "config": f"{pid}'s key is written in {models._key_file(pid)}"}.get(key, f"{pid}'s key is {key}")
 
 
 def api_key_lines(keys: dict | None) -> list[str]:
     """wb setup's API keys (#1024), from models.connected(): one `ok` line for the providers with
     a stored key and which roles use them, one `--` line for those whose key wb can't hold
-    outside the lane (an environment variable, OAuth, a cloud login, a config file) with the
-    fix, and one for a stored key on a package the keyhole can't carry (models.unspoken_providers,
+    outside the lane (an environment variable, OAuth, a cloud login) with the fix, one for each
+    key written in a config file (remove it there, #1075), and one for a stored key on a package the keyhole can't carry (models.unspoken_providers,
     #1066); NO_KEY for none; nothing when `auth list` can't be read."""
     if keys is None:
         return []
@@ -5978,7 +5978,11 @@ def api_key_lines(keys: dict | None) -> list[str]:
                 f"; {' and '.join(used)} use{'s' if len(used) == 1 else ''} it" if len(stored) == 1 else
                 "; " + ", ".join(f"{r} uses {uses[r]}" for r in used))
         out.append(f"ok  API keys: {', '.join(f'{p} (stored via /connect)' for p in stored)}{said}")
-    if other := [(p, k["key"]) for p, k in keys.items() if k["key"] != "stored"]:
+    other = [(p, k["key"]) for p, k in keys.items() if k["key"] != "stored"]
+    # a key written in a config file: /connect alone changed nothing while the apiKey stayed, so
+    # the line said "/connect stores a key it can" to a user who had (#1075, 2026-11-23)
+    written, other = [p for p, k in other if k == "config"], [x for x in other if x[1] != "config"]
+    if other:
         if len(other) == 1 and other[0][1] == "oauth":
             out.append(f"--  {other[0][0]} is signed in with OAuth: wb can't hold that outside the lane; an API "
                        "key through /connect works")
@@ -5988,6 +5992,8 @@ def api_key_lines(keys: dict | None) -> list[str]:
         else:
             out.append(f"--  {', '.join(_held_elsewhere(p, k) for p, k in other)}: wb can't hold "
                        f"{'that' if len(other) == 1 else 'those'} outside the lane; /connect stores a key it can")
+    out += [f"--  {_held_elsewhere(p, 'config')}: remove its apiKey there, and store the key with /connect"
+            for p in written]
     if odd:
         one, nopkg = len(odd) == 1, "no provider package"
         names = ", ".join(f"{p} ({pkg or nopkg})" for p, pkg in odd.items())

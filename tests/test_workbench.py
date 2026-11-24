@@ -26160,7 +26160,7 @@ class Keyhole(_KeyholeTest):
         os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps(
             {"provider": {"incontent": {"options": {"apiKey": self.CANARY}}}})
         for provider, why in (("literal", f"written in {os.environ['WB_OPENCODE_CONFIG']}, which "
-                                          "agents can read: store it with /connect instead"),
+                                          "agents can read: remove it there, and store the key with /connect"),
                               ("viaenv", "$VIAENV_KEY"),
                               ("incontent", "written in OPENCODE_CONFIG_CONTENT")):
             with self.assertRaises(self.kh_mod.KeyholeError) as e:
@@ -28299,6 +28299,9 @@ class ApiDiscovery(Base):
                                            "its apiKey there, and store the key with /connect"), st["why"])
         self.assertEqual(self.models.remedy(m, st), f"remove options.apiKey for Literal from "
                          f"{os.environ['WB_OPENCODE_CONFIG']}, and store the key with /connect in OpenCode")
+        # and wb setup's API keys line, the one the skill's first run reads, says the same
+        self.assertIn(f"--  literal's key is written in {os.environ['WB_OPENCODE_CONFIG']}: remove its apiKey "
+                      "there, and store the key with /connect", cli.api_key_lines(self.models.connected()))
 
     def test_the_catalog_is_read_once_per_ttl(self):
         self.models.hosted()
