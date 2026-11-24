@@ -463,8 +463,10 @@ class Base(unittest.TestCase):
 
     def leaves_behind(self, argv: str) -> None:
         """A helper process this test leaves running by design, its argv exactly: remove_tmp kills
-        it unnamed instead of waiting it out. A gpg.program git starts is git's child, not wb's:
-        wb ends a git that waits on it past COMMIT_SECS and the signer lapses (#420's tests)."""
+        it unnamed instead of waiting it out. Only where the test killed what would end it (a
+        signer's sleep orphaned by a SIGKILL of its shell and git): a signing git wb times out or
+        a retry ends goes with its session, signer and all (gitops.end_session), so a fake signer
+        left there is a leak to fix, not to mark (#1225's CI, 2026-11-24)."""
         self.left_by_design.append(argv)
 
     def start(self, name, scenario, *extra):
@@ -4586,9 +4588,8 @@ class Lifecycle(Base):
         # #420 (the audit of 1.8, reproduced): the merge and the squash's commit in the user's
         # checkout ran with a terminal and no time limit, and signed after --no-sign
         slow = Path(self.tmp.name) / "slowgpg"
-        slow.write_text("#!/bin/sh\nexec sleep 30\n")  # git is killed; this one lapses
+        slow.write_text("#!/bin/sh\nexec sleep 30\n")  # ended with its git (end_session), not left
         slow.chmod(0o755)
-        self.leaves_behind("sleep 30")
         for how in ("merge", "squash"):
             repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
                                        task={b"b.txt": b"b\n"}, ignore={})
@@ -4618,7 +4619,6 @@ class Lifecycle(Base):
                                       capture_output=True, text=True).stdout
         g("config", "commit.gpgsign", "true")
         g("config", "gpg.program", str(self._signer(hang_on_merge=True)))
-        self.leaves_behind("sleep 30")  # the signer of the git the timeout left
         out = self.start("t-kill", "ok")
         self.assertNotIn("needs unlocking", out)                       # the signer works
         wait_phase("t-kill", {"review"})
@@ -4643,8 +4643,6 @@ class Lifecycle(Base):
         the squash's commit, not the task's) waiting ``wait`` s: (wb, its git, the signer), once
         the signer is running and closing's merge_git names that git. ``fails_while``: while that file exists, the signer fails at once
         (a retry's signature while the first prompt is still open)."""
-        # its sleep outlives a SIGKILLed signer (an orphan init reaps): left by design (#1225's CI)
-        self.leaves_behind(f"sleep {wait}")
         pidfile = Path(self.tmp.name) / f"{name}.signer"
         prog = Path(self.tmp.name) / f"{name}-gpg"
         here = shlex.quote(os.path.realpath(self.repo))  # not wb start's dry run there
@@ -4684,6 +4682,9 @@ class Lifecycle(Base):
         # changes, printed a hand-merge line git refused, and closed the task unmerged (exit 5)
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
                                       capture_output=True, text=True).stdout
+        # the signer's sleep outlives its SIGKILLed shell and git, out of the reach of the retry's
+        # end_session (no git left to end): an orphan, left by design (#1225's CI, 2026-11-24)
+        self.leaves_behind("sleep 30")
         for how in ("merge", "squash"):
             name = f"t-k{how[0]}"
             wb, git, signer = self._killed_accept(name, how, 30)
