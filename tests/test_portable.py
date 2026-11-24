@@ -1437,6 +1437,11 @@ class Real(unittest.TestCase):
                     self.assertEqual(posts, [("/api/v1/models/unload", {"instance_id": "a"})])
                 else:
                     self.assertEqual((loaded, posts), ({"a": 32768, "b": 32768}, []))
+                    # free_gpu itself (a local task's, an image's) leaves another machine's LM
+                    # Studio be: make_resident above never reaches it on a server away from this
+                    # GPU, so dropping _shared_servers' same_gpu filter passed every test (#1248)
+                    models.free_gpu(say=said.append)
+                    self.assertEqual((loaded, posts), ({"a": 32768, "b": 32768}, []))
                 # a, a task's beside it (keep), is ours too: nothing to free, nothing unloaded
                 loaded.update(a=32768, b=32768)
                 posts.clear()
