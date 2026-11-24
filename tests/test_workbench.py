@@ -779,10 +779,17 @@ class Lifecycle(Base):
     def test_feedback_after_wb_update_stop_or_wb_stop_all_counts_no_review_round(self):
         # #1260 (2026-11-24): `resumed` read only `infra`, which neither stop set: the "carry on"
         # printed "feedback round 1 sent" and counted a review, where after a provider's stop the
-        # same command counts none
+        # same command counts none. The "-old" ones set the status the old code's stop wrote
+        # (no `infra`, the stop read from `last`): the wb update --stop that installs #1260 runs
+        # the old code, so it is the first stop users meet, and without it here a cmd_feedback
+        # reading `infra` alone again passed every test (#1260's review, 2026-11-24)
+        def old(last):
+            return lambda t: t.set_status(phase="stuck", last=last, infra=None)
         for name, stop, why in (("t-updfb", lambda t: cli._stop_for_update([t]), "update"),
-                                ("t-quitfb", lambda t: cli.stop_everything([t]), "stopped")):
-            with self.subTest(stop=why):
+                                ("t-quitfb", lambda t: cli.stop_everything([t]), "stopped"),
+                                ("t-updfb-old", old(cli.UPDATE_STOP), "update"),
+                                ("t-quitfb-old", old(cli.BAIL_OUT), "stopped")):
+            with self.subTest(stop=why, task=name):
                 self.start(name, "ok")
                 wait_phase(name, {"review"})
                 task = store.Task(name)
