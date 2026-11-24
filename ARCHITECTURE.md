@@ -363,7 +363,7 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 | no output (not while waiting on Claude; a background job gets the test timeout if longer) | 15 min | `--silence-timeout` |
 | one round, waits on Claude excluded | 40 min | `--round-timeout` |
 | mid-round handovers in one review round | more than `HANDOVER_MAX` (5) | `runner.drive` |
-| an API task's spend: today at the day cap, before a round within one worst request of it, its input too (#1150, #1173), or the keyhole refused a request that could pass it (`spend`, *Spend*) | routes.json `day_usd` | `runner._spend_guard`, `runner._go_on` |
+| an API task's spend: today at the day cap, before a round within one worst request of it, its input too (#1150, #1173), or the keyhole refused a request that could pass it (`spend`, *Spend*) | routes.json `day_usd` | `runner._spend_guard`, `runner._go_on`; before round 1 behind a told stop, a wait: `runner._cap_wait` |
 | OpenCode alive after closing its output (#83): SIGTERM, then SIGKILL | the silence limit, at most `EXIT_GRACE` (30 s) | `runner.run_round` |
 | OpenCode open after the agent's turn ended (#1160): the round ends as its finish, not stuck | the round, silence or think limit | `runner.run_round` |
 
@@ -817,8 +817,20 @@ handover, Claude's notes, the revive, auto-fix, self-review; Agents on GPU first
 request: ≈$4.80 of $5 today, and it could cost up to $0.36`, #1150), phase `stuck`, status
 `guard` `spend`, the keyhole closed, and a `stuck` notice ("… <what> didn't run"), with round n's
 report when it has one (`Round <n>'s report (wb report <task> --round <n>):`: auto-fix and
-self-review have already moved status `round` on to n + 1, which never ran). Both notices
-have `cause` `spend`, not the step's own (`results.THE_STEP`), so the slice isn't shrunk, and lead
+self-review have already moved status `round` on to n + 1, which never ran). **Before the first
+round a runner sends** (`runner._cap_wait`, after the lease's load and `_agents_gpu`, #1249): an
+API task that `stop_reason(task, ahead=True, tokens)` stops (at the cap or within that request of it,
+`STOP` or `NEAR`; never no cap or no price) while another task's spend stop has told Claude so
+(`runner._cap_told`: phase `stuck`, `infra` `spend`, not `guard` `agents`, its `noticed` since local
+midnight and since routes.json's mtime: a cap changed since is a new question) waits as `phase:
+queued`, `last: waiting: <why>; <task>'s stop has asked the user: it goes on once the cap is raised
+(wb route cap <usd>) or at local midnight (wb stop gives up)`, its provider slot let go and taken
+again after (then the lease's load once more, the credit wait, and `_agents_gpu` again), on a watch
+of routes.json's directory, looking again at most every `API_WAIT`'s 30 s and at midnight. That stop
+gone (resumed, taken over, discarded), it goes on, and round 1's own stop is the notice: never a
+wait untold. A backlog queued behind the cap each took its slot, ran round 1 into the guard and
+woke Claude with the same stop, one ask of the user per task, as #1178's 402 did. Both notices
+(in a round, between rounds) have `cause` `spend`, not the step's own (`results.THE_STEP`), so the slice isn't shrunk, and lead
 with `meter.stop_text`: `<task> stopped: the day's API spend cap is reached (≈$5.02 of $5 today; catalog prices). Its
 work so far is in the worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb
 resume <task>; or the role on the GPU (wb route <role> gpu) for the next tasks, with wb takeover <task>

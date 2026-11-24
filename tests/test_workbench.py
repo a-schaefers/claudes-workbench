@@ -35288,6 +35288,60 @@ class ApiSpend(Base):
         self.cap(100)                                           # the user raised it: a GPU-like go on
         self.assertTrue(runner._go_on(task, 2, "auto-fix"))
 
+    def drive_until_waiting(self, task, then):
+        """drive(task), calling ``then`` once its runner waits at the cap as queued (#1249), with
+        its provider's free slots then; the slots, or None when it never waited."""
+        seen, done = [], threading.Event()
+
+        def meanwhile():
+            while not done.wait(0.05):
+                if str(task.status.get("last") or "").startswith("waiting: the day's API spend cap"):
+                    seen.append(runner.models.api_slots_free("meterco"))
+                    then()
+                    return
+        threading.Thread(target=meanwhile, daemon=True).start()
+        try:
+            runner.drive(task)
+        finally:
+            done.set()
+        return seen[0] if seen else None
+
+    def test_a_backlog_queued_behind_a_told_cap_stop_waits_as_queued_and_goes_on_once_the_cap_is_raised(self):
+        # #1249 (the bar loop, 2026-11-24): at the cap each queued API task took its slot, ran
+        # round 1 into the guard and woke Claude with the same spend stop, one ask of the user
+        # per task, as #1178's 402 did
+        self.cap(5, api=("significant",))
+        self.spent(5.0)
+        first, *queued = [self.api_task(f"t-q{i}", SPEND_M, "ok") for i in range(3)]
+        runner.drive(first)                                     # the stop Claude is told of
+        self.assertEqual((first.status["phase"], first.status["infra"]), ("stuck", "spend"))
+        for i, task in enumerate(queued):
+            free = self.drive_until_waiting(task, lambda: self.cap(100 + i, api=("significant",)))
+            self.assertEqual(free, runner.models.API_PARALLEL)  # its slot let go meanwhile
+            self.assertEqual(task.status["phase"], "review")    # the raised cap let round 1 run
+            self.cap(5, api=("significant",))                   # the cap met again, and told:
+            (first.dir / "noticed").write_text(str(store.now() + 0.01))  # the next one waits again
+        stops = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["kind"] == "stuck"]
+        self.assertEqual([r["task"] for r in stops], ["t-q0"])  # one wake, one ask of the user
+
+    def test_a_task_waiting_at_the_cap_goes_on_to_its_own_stop_once_the_told_one_no_longer_stands(self):
+        # #1249: the wait is only behind a stop Claude was told of; taken over (or resumed, or
+        # discarded) it no longer stands, and the waiter's own stop is the notice: never untold
+        self.cap(5, api=("significant",))
+        self.spent(5.0)
+        first, task = self.api_task("t-told", SPEND_M, "ok"), self.api_task("t-behind", SPEND_M, "ok")
+        runner.drive(first)
+        self.assertIsNotNone(self.drive_until_waiting(task, lambda: first.set_status(phase="review", taken_over=True)))
+        self.assertEqual((task.status["phase"], task.status["infra"]), ("stuck", "spend"))
+        (notice,) = self.notices("t-behind", "stuck")
+        self.assertEqual(notice["cause"], "spend")
+        # a stop told before the cap last changed is a new question too: no wait behind it
+        first.set_status(phase="stuck")
+        self.assertEqual(runner._cap_told(task), "t-told")
+        time.sleep(0.01)
+        self.cap(5, api=("significant",))
+        self.assertEqual(runner._cap_told(task), "")
+
     def local_only(self):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"local_only": True}}}))
 
@@ -36065,6 +36119,8 @@ class ApiSpend(Base):
                 rnd.update(full=900000, stuck=None, guard=None)
             return rnd
 
+        # taken over: with its stop standing, the next task would wait before round 1 (#1249)
+        task.set_status(phase="review", taken_over=True)
         task = self.api_task("t-goon-full", SPEND_M, "ok", FAKE_STEP_IN="100")
         with mock.patch.object(runner, "_spend_guard"), mock.patch.object(runner, "run_round", full):
             runner.drive(task)
